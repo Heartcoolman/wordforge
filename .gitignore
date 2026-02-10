@@ -1,0 +1,29 @@
+# Rust
+/target
+
+# Data
+/data
+
+# Environment
+.env
+
+# Editor
+*.swp
+*.swo
+
+# Frontend
+frontend/node_modules
+frontend/coverage
+frontend/dist
+
+# OS
+.DS_Store
+*Zone.Identifier
+
+# IDE
+.cursor/
+.vscode/
+.idea/
+
+# Temp
+*.npmrc_temp

@@ -1,0 +1,1 @@
+import{q as o}from"./index-6s_4JTtF.js";const a={list:t=>o.get("/api/words",t),get:t=>o.get(`/api/words/${t}`),create:t=>o.post("/api/words",t),update:(t,p)=>o.put(`/api/words/${t}`,p),delete:t=>o.delete(`/api/words/${t}`),batchCreate:t=>o.post("/api/words/batch",{words:t}),count:()=>o.get("/api/words/count"),importUrl:t=>o.post("/api/words/import-url",{url:t})};export{a as w};
