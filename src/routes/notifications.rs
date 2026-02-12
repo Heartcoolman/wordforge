@@ -1,10 +1,12 @@
 use axum::extract::{Path, Query, State};
 use axum::routing::{get, post, put};
-use axum::{Json, Router};
+use axum::Router;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::auth::AuthUser;
+use crate::constants::{DEFAULT_LANGUAGE, DEFAULT_THEME};
+use crate::extractors::JsonBody;
 use crate::response::{ok, AppError};
 use crate::state::AppState;
 use crate::store::keys;
@@ -12,6 +14,7 @@ use crate::store::keys;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(list_notifications))
+        .route("/unread-count", get(get_unread_count))
         .route("/:id/read", put(mark_read))
         .route("/read-all", post(mark_all_read))
         .route("/badges", get(list_badges))
@@ -19,20 +22,8 @@ pub fn router() -> Router<AppState> {
 }
 
 // B57: Notification CRUD
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Notification {
-    pub id: String,
-    pub user_id: String,
-    #[serde(rename = "type")]
-    pub notification_type: String,
-    pub title: String,
-    pub message: String,
-    pub read: bool,
-    pub created_at: chrono::DateTime<Utc>,
-}
-
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct NotificationQuery {
     limit: Option<usize>,
     unread_only: Option<bool>,
@@ -43,29 +34,22 @@ async fn list_notifications(
     Query(q): Query<NotificationQuery>,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let prefix = keys::notification_prefix(&auth.user_id);
     let limit = q.limit.unwrap_or(50).clamp(1, 200);
     let unread_only = q.unread_only.unwrap_or(false);
 
-    let mut notifications = Vec::new();
-    for item in state.store().notifications.scan_prefix(prefix.as_bytes()) {
-        let (_, v) = match item {
-            Ok(kv) => kv,
-            Err(_) => continue,
-        };
-        if let Ok(n) = serde_json::from_slice::<Notification>(&v) {
-            if unread_only && n.read {
-                continue;
-            }
-            notifications.push(n);
-        }
-        if notifications.len() >= limit {
-            break;
-        }
-    }
+    let notifications = state
+        .store()
+        .list_notifications(&auth.user_id, limit, unread_only)?;
 
-    notifications.sort_by(|a, b| b.created_at.cmp(&a.created_at));
     Ok(ok(notifications))
+}
+
+async fn get_unread_count(
+    auth: AuthUser,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let unread_count = state.store().count_unread_notifications(&auth.user_id)?;
+    Ok(ok(serde_json::json!({"unreadCount": unread_count})))
 }
 
 async fn mark_read(
@@ -73,49 +57,21 @@ async fn mark_read(
     Path(id): Path<String>,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let key = keys::notification_key(&auth.user_id, &id);
-    if let Some(raw) = state.store().notifications.get(key.as_bytes())
-        .map_err(|e| AppError::internal(&e.to_string()))?
-    {
-        let mut n: Notification = serde_json::from_slice(&raw)
-            .map_err(|e| AppError::internal(&e.to_string()))?;
-        n.read = true;
-        state.store().notifications.insert(
-            key.as_bytes(),
-            serde_json::to_vec(&n).map_err(|e| AppError::internal(&e.to_string()))?,
-        ).map_err(|e| AppError::internal(&e.to_string()))?;
-        return Ok(ok(n));
+    let notification = state
+        .store()
+        .mark_notification_read(&auth.user_id, &id)?;
+
+    match notification {
+        Some(notification) => Ok(ok(notification)),
+        None => Err(AppError::not_found("Notification not found")),
     }
-    Err(AppError::not_found("Notification not found"))
 }
 
 async fn mark_all_read(
     auth: AuthUser,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let prefix = keys::notification_prefix(&auth.user_id);
-    let mut count = 0u32;
-
-    let mut updates = Vec::new();
-    for item in state.store().notifications.scan_prefix(prefix.as_bytes()) {
-        let (k, v) = match item {
-            Ok(kv) => kv,
-            Err(_) => continue,
-        };
-        if let Ok(mut n) = serde_json::from_slice::<Notification>(&v) {
-            if !n.read {
-                n.read = true;
-                if let Ok(bytes) = serde_json::to_vec(&n) {
-                    updates.push((k.to_vec(), bytes));
-                    count += 1;
-                }
-            }
-        }
-    }
-
-    for (k, v) in updates {
-        let _ = state.store().notifications.insert(k, v);
-    }
+    let count = state.store().mark_all_notifications_read(&auth.user_id)?;
 
     Ok(ok(serde_json::json!({"markedRead": count})))
 }
@@ -132,11 +88,40 @@ struct Badge {
     unlocked_at: Option<chrono::DateTime<Utc>>,
 }
 
+fn default_badges() -> Vec<Badge> {
+    vec![
+        Badge {
+            id: "first_word".to_string(),
+            name: "First Word".to_string(),
+            description: "Learn your first word".to_string(),
+            unlocked: false,
+            progress: 0.0,
+            unlocked_at: None,
+        },
+        Badge {
+            id: "streak_7".to_string(),
+            name: "Week Streak".to_string(),
+            description: "Study for 7 consecutive days".to_string(),
+            unlocked: false,
+            progress: 0.0,
+            unlocked_at: None,
+        },
+        Badge {
+            id: "mastered_100".to_string(),
+            name: "Century Club".to_string(),
+            description: "Master 100 words".to_string(),
+            unlocked: false,
+            progress: 0.0,
+            unlocked_at: None,
+        },
+    ]
+}
+
 async fn list_badges(
     auth: AuthUser,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let prefix = keys::badge_prefix(&auth.user_id);
+    let prefix = keys::badge_prefix(&auth.user_id)?;
     let mut badges = Vec::new();
 
     for item in state.store().badges.scan_prefix(prefix.as_bytes()) {
@@ -149,34 +134,8 @@ async fn list_badges(
         }
     }
 
-    // If no badges exist, return badge definitions with default state
     if badges.is_empty() {
-        badges = vec![
-            Badge {
-                id: "first_word".to_string(),
-                name: "First Word".to_string(),
-                description: "Learn your first word".to_string(),
-                unlocked: false,
-                progress: 0.0,
-                unlocked_at: None,
-            },
-            Badge {
-                id: "streak_7".to_string(),
-                name: "Week Streak".to_string(),
-                description: "Study for 7 consecutive days".to_string(),
-                unlocked: false,
-                progress: 0.0,
-                unlocked_at: None,
-            },
-            Badge {
-                id: "mastered_100".to_string(),
-                name: "Century Club".to_string(),
-                description: "Master 100 words".to_string(),
-                unlocked: false,
-                progress: 0.0,
-                unlocked_at: None,
-            },
-        ];
+        badges = default_badges();
     }
 
     Ok(ok(badges))
@@ -195,24 +154,35 @@ struct UserPreferences {
 impl Default for UserPreferences {
     fn default() -> Self {
         Self {
-            theme: "light".to_string(),
-            language: "en".to_string(),
+            theme: DEFAULT_THEME.to_string(),
+            language: DEFAULT_LANGUAGE.to_string(),
             notification_enabled: true,
             sound_enabled: true,
         }
     }
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateUserPreferences {
+    theme: Option<String>,
+    language: Option<String>,
+    notification_enabled: Option<bool>,
+    sound_enabled: Option<bool>,
+}
+
 async fn get_preferences(
     auth: AuthUser,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let key = keys::user_preferences_key(&auth.user_id);
-    let prefs = match state.store().user_preferences.get(key.as_bytes())
+    let key = keys::user_preferences_key(&auth.user_id)?;
+    let prefs = match state
+        .store()
+        .user_preferences
+        .get(key.as_bytes())
         .map_err(|e| AppError::internal(&e.to_string()))?
     {
-        Some(raw) => serde_json::from_slice::<UserPreferences>(&raw)
-            .unwrap_or_default(),
+        Some(raw) => serde_json::from_slice::<UserPreferences>(&raw).unwrap_or_default(),
         None => UserPreferences::default(),
     };
     Ok(ok(prefs))
@@ -221,12 +191,53 @@ async fn get_preferences(
 async fn set_preferences(
     auth: AuthUser,
     State(state): State<AppState>,
-    Json(req): Json<UserPreferences>,
+    JsonBody(req): JsonBody<UpdateUserPreferences>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let key = keys::user_preferences_key(&auth.user_id);
-    state.store().user_preferences.insert(
-        key.as_bytes(),
-        serde_json::to_vec(&req).map_err(|e| AppError::internal(&e.to_string()))?,
-    ).map_err(|e| AppError::internal(&e.to_string()))?;
-    Ok(ok(req))
+    let key = keys::user_preferences_key(&auth.user_id)?;
+    let mut prefs = match state
+        .store()
+        .user_preferences
+        .get(key.as_bytes())
+        .map_err(|e| AppError::internal(&e.to_string()))?
+    {
+        Some(raw) => serde_json::from_slice::<UserPreferences>(&raw).unwrap_or_default(),
+        None => UserPreferences::default(),
+    };
+
+    if let Some(ref v) = req.theme {
+        const VALID_THEMES: &[&str] = &["light", "dark", "system"];
+        if !VALID_THEMES.contains(&v.as_str()) {
+            return Err(AppError::bad_request(
+                "INVALID_THEME",
+                "theme must be one of: light, dark, system",
+            ));
+        }
+        prefs.theme = v.clone();
+    }
+    if let Some(ref v) = req.language {
+        const VALID_LANGUAGES: &[&str] = &["en", "zh", "ja", "ko", "fr", "de", "es"];
+        if !VALID_LANGUAGES.contains(&v.as_str()) {
+            return Err(AppError::bad_request(
+                "INVALID_LANGUAGE",
+                "language must be one of: en, zh, ja, ko, fr, de, es",
+            ));
+        }
+        prefs.language = v.clone();
+    }
+    if let Some(v) = req.notification_enabled {
+        prefs.notification_enabled = v;
+    }
+    if let Some(v) = req.sound_enabled {
+        prefs.sound_enabled = v;
+    }
+
+    state
+        .store()
+        .user_preferences
+        .insert(
+            key.as_bytes(),
+            serde_json::to_vec(&prefs).map_err(|e| AppError::internal(&e.to_string()))?,
+        )
+        .map_err(|e| AppError::internal(&e.to_string()))?;
+    Ok(ok(prefs))
 }

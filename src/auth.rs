@@ -28,6 +28,13 @@ pub fn verify_password(password: &str, hash: &str) -> Result<bool, AppError> {
         .is_ok())
 }
 
+/// Pre-computed argon2 hash for timing-attack prevention.
+/// Used when the requested account doesn't exist so that the response time
+/// is indistinguishable from a real password verification.
+pub fn generate_dummy_argon2_hash() -> String {
+    "$argon2id$v=19$m=19456,t=2,p=1$ZHVtbXlzYWx0ZHVtbXk$YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY".to_string()
+}
+
 pub fn hash_token(token: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(token.as_bytes());
@@ -52,15 +59,14 @@ pub fn sign_jwt_for_user(
     sign_jwt(user_id, "user", secret, expires_in_hours)
 }
 
-/// Refresh tokens use the same secret but a longer expiry (7x access token)
-/// and a distinct `token_type` so they cannot be used as access tokens.
+/// Refresh tokens use a dedicated secret and independent expiry
+/// with a distinct `token_type` so they cannot be used as access tokens.
 pub fn sign_refresh_token_for_user(
     user_id: &str,
     secret: &str,
-    access_expires_in_hours: u64,
+    refresh_expires_in_hours: u64,
 ) -> Result<String, AppError> {
-    let refresh_hours = access_expires_in_hours.saturating_mul(7).max(168); // at least 7 days
-    sign_jwt(user_id, "refresh", secret, refresh_hours)
+    sign_jwt(user_id, "refresh", secret, refresh_expires_in_hours)
 }
 
 pub fn sign_jwt_for_admin(
@@ -109,29 +115,53 @@ pub fn verify_jwt(token: &str, secret: &str) -> Result<Claims, AppError> {
     .map_err(|_| AppError::unauthorized("Invalid or expired token"))
 }
 
-pub fn extract_token_from_headers(headers: &HeaderMap) -> Result<String, AppError> {
-    if let Some(auth_header) = headers
+fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
+    headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-    {
-        if let Some(token) = auth_header.strip_prefix("Bearer ") {
-            return Ok(token.trim().to_string());
-        }
-    }
+        .and_then(|auth_header| auth_header.strip_prefix("Bearer "))
+        .map(|token| token.trim().to_string())
+}
 
-    if let Some(cookie) = headers
+fn extract_cookie_token(headers: &HeaderMap, cookie_name: &str) -> Option<String> {
+    headers
         .get(axum::http::header::COOKIE)
         .and_then(|v| v.to_str().ok())
-    {
-        for part in cookie.split(';') {
-            let p = part.trim();
-            if let Some(token) = p.strip_prefix("token=") {
-                return Ok(token.to_string());
-            }
-        }
+        .and_then(|cookie| {
+            cookie.split(';').find_map(|part| {
+                let p = part.trim();
+                p.strip_prefix(&format!("{cookie_name}="))
+                    .map(str::to_string)
+            })
+        })
+}
+
+pub fn extract_token_from_headers(headers: &HeaderMap) -> Result<String, AppError> {
+    if let Some(token) = extract_bearer_token(headers) {
+        return Ok(token);
+    }
+
+    if let Some(token) = extract_cookie_token(headers, "token") {
+        return Ok(token);
     }
 
     Err(AppError::unauthorized("Missing bearer token"))
+}
+
+pub fn extract_refresh_token_from_headers(headers: &HeaderMap) -> Result<String, AppError> {
+    if let Some(token) = extract_bearer_token(headers) {
+        return Ok(token);
+    }
+
+    if let Some(token) = extract_cookie_token(headers, "refresh_token") {
+        return Ok(token);
+    }
+
+    if let Some(token) = extract_cookie_token(headers, "token") {
+        return Ok(token);
+    }
+
+    Err(AppError::unauthorized("Missing refresh token"))
 }
 
 #[derive(Debug, Clone)]

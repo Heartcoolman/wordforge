@@ -26,7 +26,7 @@ pub struct MonitoringEvent {
     pub strategy: serde_json::Value,
     pub reward: serde_json::Value,
     pub cold_start_phase: Option<String>,
-    pub constraints_satisfied: bool,
+    pub selection_constraints_met: bool,
     pub objective_score: f64,
 }
 
@@ -140,7 +140,7 @@ pub fn record_event(
         return;
     }
 
-    let constraints_satisfied = result.strategy == *pre_constraint_strategy;
+    let selection_constraints_met = result.strategy == *pre_constraint_strategy;
 
     let event = MonitoringEvent {
         id: uuid::Uuid::new_v4().to_string(),
@@ -155,7 +155,7 @@ pub fn record_event(
         strategy: serde_json::to_value(&result.strategy).unwrap_or_default(),
         reward: serde_json::to_value(&result.reward).unwrap_or_default(),
         cold_start_phase: result.cold_start_phase.as_ref().map(|p| format!("{p:?}")),
-        constraints_satisfied,
+        selection_constraints_met,
         objective_score: result.reward.value,
     };
 

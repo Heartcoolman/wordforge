@@ -16,7 +16,7 @@ export const wordbooksApi = {
     return api.post<Wordbook>('/api/wordbooks', data);
   },
 
-  getWords(id: string, params?: { limit?: number; offset?: number }) {
+  getWords(id: string, params?: { page?: number; perPage?: number }) {
     return api.get<PaginatedResponse<Word>>(`/api/wordbooks/${id}/words`, params);
   },
 

@@ -1,4 +1,4 @@
-export type StudyMode = 'MASTERY' | 'REVIEW' | 'MIXED';
+export type StudyMode = 'normal' | 'intensive' | 'review' | 'casual';
 
 export interface StudyConfig {
   userId: string;

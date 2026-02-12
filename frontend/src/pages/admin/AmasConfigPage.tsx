@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/Button';
 import { Spinner } from '@/components/ui/Spinner';
 import { uiStore } from '@/stores/ui';
 import { amasApi } from '@/api/amas';
+import type { AmasConfig } from '@/types/amas';
 
 export default function AmasConfigPage() {
   const [config, setConfig] = createSignal('');
@@ -12,22 +13,33 @@ export default function AmasConfigPage() {
   const [saving, setSaving] = createSignal(false);
 
   onMount(async () => {
-    try {
-      const [c, m] = await Promise.allSettled([amasApi.getConfig(), amasApi.getMetrics()]);
-      if (c.status === 'fulfilled') setConfig(JSON.stringify(c.value, null, 2));
-      if (m.status === 'fulfilled') setMetrics(m.value);
-    } catch { /* ignore */ }
+    const [c, m] = await Promise.allSettled([amasApi.getConfig(), amasApi.getMetrics()]);
+    if (c.status === 'fulfilled') setConfig(JSON.stringify(c.value, null, 2));
+    if (m.status === 'fulfilled') setMetrics(m.value);
     setLoading(false);
   });
 
   async function saveConfig() {
+    let parsed: unknown;
     try {
-      const parsed = JSON.parse(config());
+      parsed = JSON.parse(config());
+    } catch {
+      uiStore.toast.error('保存失败', 'JSON 格式错误，请检查语法');
+      return;
+    }
+
+    // 基本 schema 校验：配置必须是一个非空对象
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      uiStore.toast.error('保存失败', '配置必须是一个 JSON 对象');
+      return;
+    }
+
+    try {
       setSaving(true);
-      await amasApi.updateConfig(parsed);
+      await amasApi.updateConfig(parsed as AmasConfig);
       uiStore.toast.success('AMAS 配置已更新');
     } catch (err: unknown) {
-      uiStore.toast.error('保存失败', err instanceof Error ? err.message : 'JSON 格式错误');
+      uiStore.toast.error('保存失败', err instanceof Error ? err.message : '未知错误');
     } finally {
       setSaving(false);
     }
@@ -44,7 +56,9 @@ export default function AmasConfigPage() {
             class="w-full h-80 px-4 py-3 rounded-lg text-sm font-mono bg-surface border border-border text-content focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent resize-y"
             value={config()}
             onInput={(e) => setConfig(e.currentTarget.value)}
+            spellcheck={false}
           />
+          <p class="text-xs text-content-tertiary mt-1">请输入合法的 JSON 对象，例如 {"{"} "key": "value" {"}"}</p>
           <div class="flex justify-end mt-3">
             <Button onClick={saveConfig} loading={saving()}>保存配置</Button>
           </div>

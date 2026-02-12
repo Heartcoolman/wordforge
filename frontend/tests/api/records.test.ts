@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeAll, afterAll, afterEach } from 'vitest
 import { setupServer } from 'msw/node';
 import { http, HttpResponse } from 'msw';
 
-const BASE = 'http://localhost:3000';
+import { TEST_BASE_URL as BASE } from '../helpers/constants';
 
 vi.mock('@/lib/token', () => ({
   tokenManager: {
@@ -27,12 +27,13 @@ afterAll(() => server.close());
 describe('recordsApi', () => {
   it('list fetches records with params', async () => {
     const records = [{ id: 'r1', wordId: 'w1', isCorrect: true, responseTimeMs: 500, createdAt: '2025-01-01' }];
+    const paginatedResponse = { data: records, total: 1, page: 1, perPage: 10, totalPages: 1 };
     server.use(
       http.get(`${BASE}/api/records`, () =>
-        HttpResponse.json({ success: true, data: records })),
+        HttpResponse.json({ success: true, data: paginatedResponse })),
     );
-    const result = await recordsApi.list({ limit: 10, offset: 0 });
-    expect(result).toEqual(records);
+    const result = await recordsApi.list({ page: 1, perPage: 10 });
+    expect(result).toEqual(paginatedResponse);
   });
 
   it('create posts a new record', async () => {

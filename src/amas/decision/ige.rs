@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use crate::amas::config::AMASConfig;
 use crate::amas::types::*;
 
+const UNEXPLORED_BIN_SCORE: f64 = 1e6;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IgeState {
     pub difficulty_bins: Vec<BinStats>,
@@ -60,8 +62,11 @@ pub fn generate(
     _user_state: &UserState,
     _feature: &FeatureVector,
     ige_state: &IgeState,
-    _config: &AMASConfig,
+    config: &AMASConfig,
 ) -> DecisionCandidate {
+    let ige = &config.ige;
+    let ucb_coeff = ige.ucb_confidence_coeff;
+
     let diff_total = ige_state
         .difficulty_bins
         .iter()
@@ -79,8 +84,8 @@ pub fn generate(
         .difficulty_bins
         .iter()
         .max_by(|a, b| {
-            ucb(a, diff_total)
-                .partial_cmp(&ucb(b, diff_total))
+            ucb(a, diff_total, ucb_coeff)
+                .partial_cmp(&ucb(b, diff_total, ucb_coeff))
                 .unwrap_or(std::cmp::Ordering::Equal)
         })
         .cloned()
@@ -90,8 +95,8 @@ pub fn generate(
         .ratio_bins
         .iter()
         .max_by(|a, b| {
-            ucb(a, ratio_total)
-                .partial_cmp(&ucb(b, ratio_total))
+            ucb(a, ratio_total, ucb_coeff)
+                .partial_cmp(&ucb(b, ratio_total, ucb_coeff))
                 .unwrap_or(std::cmp::Ordering::Equal)
         })
         .cloned()
@@ -101,22 +106,23 @@ pub fn generate(
         algorithm_id: AlgorithmId::Ige,
         strategy: StrategyParams {
             difficulty: best_diff.midpoint().clamp(0.0, 1.0),
-            batch_size: 10,
+            batch_size: ige.batch_size,
             new_ratio: best_ratio.midpoint().clamp(0.0, 1.0),
-            interval_scale: 1.0,
+            interval_scale: ige.interval_scale,
             review_mode: false,
         },
-        confidence: 0.6,
+        confidence: ige.default_confidence,
         explanation: "IGE exploration strategy".to_string(),
     }
 }
 
-fn ucb(bin: &BinStats, total: f64) -> f64 {
+fn ucb(bin: &BinStats, total: f64, ucb_coeff: f64) -> f64 {
     if bin.count == 0 {
-        return f64::INFINITY;
+        // 为未探索 bin 添加微小随机扰动，打破对称性
+        return UNEXPLORED_BIN_SCORE + rand::random::<f64>() * 0.01;
     }
     let count = bin.count as f64;
-    bin.avg_reward + (2.0 * total.ln() / count).sqrt()
+    bin.avg_reward + (ucb_coeff * total.ln() / count).sqrt()
 }
 
 pub fn update(ige_state: &mut IgeState, strategy: &StrategyParams, reward: f64) {
@@ -147,5 +153,5 @@ fn update_bin(bin: &mut BinStats, reward: f64) {
     // Welford's online variance: reconstruct M2 from old count, then update
     let m2 = bin.variance * old_count;
     let new_m2 = m2 + (reward - old_avg) * (reward - bin.avg_reward);
-    bin.variance = if n > 1.0 { new_m2 / n } else { 0.0 };
+    bin.variance = if n > 1.0 { new_m2 / (n - 1.0) } else { 0.0 };
 }

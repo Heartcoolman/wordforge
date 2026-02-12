@@ -18,6 +18,7 @@ const LearningPage = lazy(() => import('@/pages/LearningPage'));
 const FlashcardPage = lazy(() => import('@/pages/FlashcardPage'));
 const VocabularyPage = lazy(() => import('@/pages/VocabularyPage'));
 const WordbookPage = lazy(() => import('@/pages/WordbookPage'));
+const WordbookCenterPage = lazy(() => import('@/pages/WordbookCenterPage'));
 const StatisticsPage = lazy(() => import('@/pages/StatisticsPage'));
 const HistoryPage = lazy(() => import('@/pages/HistoryPage'));
 const ProfilePage = lazy(() => import('@/pages/ProfilePage'));
@@ -32,6 +33,7 @@ const AmasConfigPage = lazy(() => import('@/pages/admin/AmasConfigPage'));
 const MonitoringPage = lazy(() => import('@/pages/admin/MonitoringPage'));
 const AnalyticsPage = lazy(() => import('@/pages/admin/AnalyticsPage'));
 const SettingsPage = lazy(() => import('@/pages/admin/SettingsPage'));
+const AdminWordbookCenterPage = lazy(() => import('@/pages/admin/AdminWordbookCenterPage'));
 
 function PageSpinner() {
   return (
@@ -106,6 +108,16 @@ export default function App() {
               <ProtectedRoute>
                 <Suspense fallback={<PageSpinner />}>
                   <WordbookPage />
+                </Suspense>
+              </ProtectedRoute>
+            )}
+          />
+          <Route
+            path="/wordbook-center"
+            component={() => (
+              <ProtectedRoute>
+                <Suspense fallback={<PageSpinner />}>
+                  <WordbookCenterPage />
                 </Suspense>
               </ProtectedRoute>
             )}
@@ -235,6 +247,16 @@ export default function App() {
                 <AdminProtectedRoute>
                   <Suspense fallback={<PageSpinner />}>
                     <SettingsPage />
+                  </Suspense>
+                </AdminProtectedRoute>
+              )}
+            />
+            <Route
+              path="/wordbook-center"
+              component={() => (
+                <AdminProtectedRoute>
+                  <Suspense fallback={<PageSpinner />}>
+                    <AdminWordbookCenterPage />
                   </Suspense>
                 </AdminProtectedRoute>
               )}

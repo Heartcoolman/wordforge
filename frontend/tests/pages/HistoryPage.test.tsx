@@ -22,7 +22,7 @@ vi.mock('@/stores/ui', () => ({
 }));
 
 vi.mock('@/utils/formatters', () => ({
-  formatDateTime: vi.fn((iso: string) => '2026-01-15 10:30'),
+  formatDateTime: vi.fn((_iso: string) => '2026-01-15 10:30'),
   formatResponseTime: vi.fn((ms: number) => `${ms}ms`),
 }));
 
@@ -65,7 +65,7 @@ describe('HistoryPage', () => {
   });
 
   it('shows empty state when no records', async () => {
-    mockRecordsApi.list.mockResolvedValue([]);
+    mockRecordsApi.list.mockResolvedValue({ data: [], page: 1, totalPages: 1 });
 
     renderWithProviders(() => <HistoryPage />);
 
@@ -82,7 +82,7 @@ describe('HistoryPage', () => {
       createFakeRecord({ wordId: 'w2', isCorrect: false }),
     ];
 
-    mockRecordsApi.list.mockResolvedValue(records);
+    mockRecordsApi.list.mockResolvedValue({ data: records, page: 1, totalPages: 1 });
     mockWordsApi.get.mockImplementation((id: string) => {
       if (id === 'w1') return Promise.resolve(word1);
       if (id === 'w2') return Promise.resolve(word2);
@@ -98,11 +98,11 @@ describe('HistoryPage', () => {
   });
 
   it('shows "加载更多" button when hasMore is true', async () => {
-    // hasMore = items.length === limit (30)
-    const records = Array.from({ length: 30 }, (_, i) =>
+    const records = Array.from({ length: 5 }, (_, i) =>
       createFakeRecord({ wordId: `w-${i}` }),
     );
-    mockRecordsApi.list.mockResolvedValue(records);
+    // page=1, totalPages=3 => hasMore = true (1 < 3)
+    mockRecordsApi.list.mockResolvedValue({ data: records, page: 1, totalPages: 3 });
     mockWordsApi.get.mockResolvedValue(createFakeWord());
 
     renderWithProviders(() => <HistoryPage />);

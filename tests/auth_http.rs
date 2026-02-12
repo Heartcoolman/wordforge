@@ -5,6 +5,7 @@ use axum::http::{Method, StatusCode};
 use common::app::spawn_test_server;
 use common::auth::{auth_header, login_and_get_token, login_and_get_tokens};
 use common::http::{assert_json_error, request, response_json};
+use learning_backend::store::operations::system_settings::SystemSettings;
 
 #[tokio::test]
 async fn it_auth_register_success() {
@@ -26,7 +27,7 @@ async fn it_auth_register_success() {
     let (status, _, body) = response_json(response).await;
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(body["success"], true);
-    assert!(body["data"]["token"].is_string());
+    assert!(body["data"]["accessToken"].is_string());
 }
 
 #[tokio::test]
@@ -172,4 +173,122 @@ async fn it_auth_logout_revokes_session() {
     .await;
     let (me_status, _, _) = response_json(me).await;
     assert_eq!(me_status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn it_auth_register_respects_registration_disabled_setting() {
+    let app = spawn_test_server().await;
+
+    let settings = SystemSettings {
+        registration_enabled: false,
+        ..SystemSettings::default()
+    };
+    app.state
+        .store()
+        .save_system_settings(&settings)
+        .expect("save settings");
+
+    let response = request(
+        &app.app,
+        Method::POST,
+        "/api/auth/register",
+        Some(serde_json::json!({
+            "email": "blocked-register@test.com",
+            "username": "blocked_register",
+            "password": "Passw0rd!"
+        })),
+        &[],
+    )
+    .await;
+
+    let (status, _, body) = response_json(response).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["code"], "FORBIDDEN");
+}
+
+#[tokio::test]
+async fn it_auth_login_blocked_in_maintenance_mode() {
+    let app = spawn_test_server().await;
+    let _ = request(
+        &app.app,
+        Method::POST,
+        "/api/auth/register",
+        Some(serde_json::json!({
+            "email": "maint-login@test.com",
+            "username": "maint_login",
+            "password": "Passw0rd!"
+        })),
+        &[],
+    )
+    .await;
+
+    let settings = SystemSettings {
+        maintenance_mode: true,
+        ..SystemSettings::default()
+    };
+    app.state
+        .store()
+        .save_system_settings(&settings)
+        .expect("save settings");
+
+    let response = request(
+        &app.app,
+        Method::POST,
+        "/api/auth/login",
+        Some(serde_json::json!({
+            "email": "maint-login@test.com",
+            "password": "Passw0rd!"
+        })),
+        &[],
+    )
+    .await;
+
+    let (status, _, body) = response_json(response).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["code"], "FORBIDDEN");
+}
+
+#[tokio::test]
+async fn it_auth_register_respects_max_users_limit() {
+    let app = spawn_test_server().await;
+
+    let settings = SystemSettings {
+        max_users: 1,
+        ..SystemSettings::default()
+    };
+    app.state
+        .store()
+        .save_system_settings(&settings)
+        .expect("save settings");
+
+    let first = request(
+        &app.app,
+        Method::POST,
+        "/api/auth/register",
+        Some(serde_json::json!({
+            "email": "limit-1@test.com",
+            "username": "limit_1",
+            "password": "Passw0rd!"
+        })),
+        &[],
+    )
+    .await;
+    let (first_status, _, _) = response_json(first).await;
+    assert_eq!(first_status, StatusCode::CREATED);
+
+    let second = request(
+        &app.app,
+        Method::POST,
+        "/api/auth/register",
+        Some(serde_json::json!({
+            "email": "limit-2@test.com",
+            "username": "limit_2",
+            "password": "Passw0rd!"
+        })),
+        &[],
+    )
+    .await;
+    let (second_status, _, second_body) = response_json(second).await;
+    assert_eq!(second_status, StatusCode::FORBIDDEN);
+    assert_eq!(second_body["code"], "FORBIDDEN");
 }

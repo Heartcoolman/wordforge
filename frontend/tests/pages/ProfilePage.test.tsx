@@ -4,8 +4,8 @@ import { renderWithProviders } from '../helpers/render';
 import { createFakeUser } from '../helpers/factories';
 
 // Mock dependencies
-vi.mock('@/stores/auth', () => {
-  const { createSignal } = require('solid-js');
+vi.mock('@/stores/auth', async () => {
+  const { createSignal } = await import('solid-js');
   const [user, setUser] = createSignal(null);
   return {
     authStore: {

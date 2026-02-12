@@ -10,6 +10,7 @@ interface SkeletonProps {
 export function Skeleton(props: SkeletonProps) {
   return (
     <div
+      aria-hidden="true"
       class={cn(
         'animate-pulse bg-surface-tertiary',
         props.rounded ? 'rounded-full' : 'rounded-lg',
@@ -25,7 +26,7 @@ export function Skeleton(props: SkeletonProps) {
 
 export function CardSkeleton() {
   return (
-    <div class="p-5 rounded-xl bg-surface-elevated shadow-md space-y-3">
+    <div aria-hidden="true" class="p-5 rounded-xl bg-surface-elevated shadow-md space-y-3">
       <Skeleton width="40%" height="1.25rem" />
       <Skeleton width="70%" />
       <Skeleton width="55%" />

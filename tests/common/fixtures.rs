@@ -16,6 +16,8 @@ pub fn seed_user(store: &Store, email: &str, username: &str, password: &str) -> 
         is_banned: false,
         created_at: now,
         updated_at: now,
+        failed_login_count: 0,
+        locked_until: None,
     };
     store.create_user(&user).expect("create seed user");
     user

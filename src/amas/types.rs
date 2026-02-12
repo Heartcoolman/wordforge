@@ -1,6 +1,12 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+const DEFAULT_ATTENTION: f64 = 0.7;
+const DEFAULT_CONFIDENCE: f64 = 0.1;
+const DEFAULT_ACTIVE_HOURS: [u8; 3] = [9, 14, 20];
+const DEFAULT_SESSION_MINUTES: f64 = 15.0;
+const DEFAULT_BREAKS_PER_SESSION: f64 = 1.0;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RawEvent {
@@ -17,6 +23,8 @@ pub struct RawEvent {
     pub interaction_density: Option<f64>,
     pub paused_time_ms: Option<i64>,
     pub hint_used: bool,
+    #[serde(default)]
+    pub confused_with: Option<String>,
 }
 
 impl Default for RawEvent {
@@ -35,6 +43,7 @@ impl Default for RawEvent {
             interaction_density: None,
             paused_time_ms: None,
             hint_used: false,
+            confused_with: None,
         }
     }
 }
@@ -77,15 +86,17 @@ pub struct UserState {
     pub trend_state: TrendState,
     #[serde(default)]
     pub habit_profile: HabitProfile,
+    #[serde(default)]
+    pub last_session_id: Option<String>,
 }
 
 impl Default for UserState {
     fn default() -> Self {
         Self {
-            attention: 0.7,
+            attention: DEFAULT_ATTENTION,
             fatigue: 0.0,
             motivation: 0.0,
-            confidence: 0.1,
+            confidence: DEFAULT_CONFIDENCE,
             last_active_at: None,
             session_event_count: 0,
             total_event_count: 0,
@@ -93,6 +104,7 @@ impl Default for UserState {
             cognitive_profile: CognitiveProfile::default(),
             trend_state: TrendState::default(),
             habit_profile: HabitProfile::default(),
+            last_session_id: None,
         }
     }
 }
@@ -142,14 +154,53 @@ pub struct HabitProfile {
     pub preferred_hours: Vec<u8>,
     pub median_session_length_mins: f64,
     pub sessions_per_day: f64,
+    #[serde(default)]
+    pub temporal_performance: TemporalPerformance,
 }
 
 impl Default for HabitProfile {
     fn default() -> Self {
         Self {
-            preferred_hours: vec![9, 14, 20],
-            median_session_length_mins: 15.0,
-            sessions_per_day: 1.0,
+            preferred_hours: DEFAULT_ACTIVE_HOURS.to_vec(),
+            median_session_length_mins: DEFAULT_SESSION_MINUTES,
+            sessions_per_day: DEFAULT_BREAKS_PER_SESSION,
+            temporal_performance: TemporalPerformance::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TemporalPerformance {
+    pub hourly_stats: Vec<HourlyStats>,
+    pub total_sessions: u32,
+}
+
+impl Default for TemporalPerformance {
+    fn default() -> Self {
+        Self {
+            hourly_stats: (0..24).map(|_| HourlyStats::default()).collect(),
+            total_sessions: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HourlyStats {
+    pub session_count: u32,
+    pub avg_accuracy: f64,
+    pub avg_response_time_ms: f64,
+    pub mastery_efficiency: f64,
+}
+
+impl Default for HourlyStats {
+    fn default() -> Self {
+        Self {
+            session_count: 0,
+            avg_accuracy: 0.0,
+            avg_response_time_ms: 0.0,
+            mastery_efficiency: 0.0,
         }
     }
 }
@@ -237,11 +288,13 @@ pub struct WordMasteryDecision {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum MasteryLevel {
     New,
     Learning,
     Reviewing,
     Mastered,
+    Forgotten,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -260,6 +313,8 @@ pub struct ProcessResult {
 pub enum ColdStartPhase {
     Classify,
     Explore,
+    /// 预留：冷启动结束后进入利用阶段，当前由 None 表示
+    #[allow(dead_code)]
     Exploit,
 }
 

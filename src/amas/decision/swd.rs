@@ -3,6 +3,12 @@ use serde::{Deserialize, Serialize};
 use crate::amas::config::AMASConfig;
 use crate::amas::types::*;
 
+const DECAY_HALF_LIFE_DAYS: f64 = 7.0;
+const LN2: f64 = 0.693;
+const CONFIDENCE_MIN: f64 = 0.2;
+const CONFIDENCE_MAX: f64 = 0.9;
+const NORMALIZATION_REF: f64 = 1_000_000.0;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SwdState {
     pub strategy_history: Vec<StrategyRewardEntry>,
@@ -11,9 +17,10 @@ pub struct SwdState {
 
 impl Default for SwdState {
     fn default() -> Self {
+        let config = crate::amas::config::SwdConfig::default();
         Self {
             strategy_history: Vec::new(),
-            max_history_size: 200,
+            max_history_size: config.max_history_size,
         }
     }
 }
@@ -37,10 +44,12 @@ pub struct UserStateSnapshot {
 pub fn generate(
     user_state: &UserState,
     swd_state: &SwdState,
-    _config: &AMASConfig,
+    config: &AMASConfig,
 ) -> DecisionCandidate {
+    let swd = &config.swd;
+
     if swd_state.strategy_history.is_empty() {
-        return fallback_candidate();
+        return fallback_candidate(swd.fallback_confidence);
     }
 
     let mut difficulty_sum = 0.0;
@@ -51,28 +60,34 @@ pub fn generate(
     let mut review_votes_for = 0.0;
     let mut review_votes_against = 0.0;
 
+    let now_ms = chrono::Utc::now().timestamp_millis();
     for entry in &swd_state.strategy_history {
-        if entry.reward <= -0.5 {
+        if entry.reward <= swd.history_filter_threshold {
             continue;
         }
 
         let sim = similarity(user_state, &entry.user_state_snapshot);
-        total_weight += sim;
+        // 时间衰减：旧记录降权，半衰期为 7 天
+        let age_ms = (now_ms - entry.timestamp).max(0) as f64;
+        let half_life_ms = DECAY_HALF_LIFE_DAYS * 24.0 * 3600.0 * 1000.0;
+        let time_decay = (-age_ms * LN2 / half_life_ms).exp();
+        let weight = sim * time_decay;
+        total_weight += weight;
 
-        difficulty_sum += entry.strategy.difficulty * sim;
-        batch_size_sum += entry.strategy.batch_size as f64 * sim;
-        new_ratio_sum += entry.strategy.new_ratio * sim;
-        interval_scale_sum += entry.strategy.interval_scale * sim;
+        difficulty_sum += entry.strategy.difficulty * weight;
+        batch_size_sum += entry.strategy.batch_size as f64 * weight;
+        new_ratio_sum += entry.strategy.new_ratio * weight;
+        interval_scale_sum += entry.strategy.interval_scale * weight;
 
         if entry.strategy.review_mode {
-            review_votes_for += sim;
+            review_votes_for += weight;
         } else {
-            review_votes_against += sim;
+            review_votes_against += weight;
         }
     }
 
     if total_weight <= 0.0 {
-        return fallback_candidate();
+        return fallback_candidate(swd.fallback_confidence);
     }
 
     let strategy = StrategyParams {
@@ -86,7 +101,7 @@ pub fn generate(
     DecisionCandidate {
         algorithm_id: AlgorithmId::Swd,
         strategy,
-        confidence: (total_weight / swd_state.strategy_history.len() as f64).clamp(0.2, 0.9),
+        confidence: (total_weight / swd_state.strategy_history.len() as f64).clamp(CONFIDENCE_MIN, CONFIDENCE_MAX),
         explanation: "Similarity-weighted strategy".to_string(),
     }
 }
@@ -96,6 +111,7 @@ pub fn update(
     user_state: &UserState,
     strategy: &StrategyParams,
     reward: f64,
+    config: &AMASConfig,
 ) {
     swd_state.strategy_history.push(StrategyRewardEntry {
         user_state_snapshot: UserStateSnapshot {
@@ -109,28 +125,31 @@ pub fn update(
         timestamp: chrono::Utc::now().timestamp_millis(),
     });
 
-    if swd_state.strategy_history.len() > swd_state.max_history_size {
-        let remove_count = swd_state.strategy_history.len() - swd_state.max_history_size;
+    let max_size = config.swd.max_history_size;
+    if swd_state.strategy_history.len() > max_size {
+        let remove_count = swd_state.strategy_history.len() - max_size;
         swd_state.strategy_history.drain(0..remove_count);
     }
 }
 
 fn similarity(current: &UserState, history: &UserStateSnapshot) -> f64 {
+    // 对 total_event_count 的 ln_1p 值做归一化，使其与 [0,1] 范围内的其他维度可比
+    let max_ln = NORMALIZATION_REF.ln_1p();
+    let current_events_norm = (current.total_event_count as f64).ln_1p() / max_ln;
+    let history_events_norm = (history.total_event_count as f64).ln_1p() / max_ln;
     let distance = ((current.attention - history.attention).powi(2)
         + (current.fatigue - history.fatigue).powi(2)
         + (current.motivation - history.motivation).powi(2)
-        + ((current.total_event_count as f64).ln_1p()
-            - (history.total_event_count as f64).ln_1p())
-        .powi(2))
+        + (current_events_norm - history_events_norm).powi(2))
     .sqrt();
     1.0 / (1.0 + distance)
 }
 
-fn fallback_candidate() -> DecisionCandidate {
+fn fallback_candidate(confidence: f64) -> DecisionCandidate {
     DecisionCandidate {
         algorithm_id: AlgorithmId::Swd,
         strategy: StrategyParams::default(),
-        confidence: 0.2,
+        confidence,
         explanation: "SWD fallback".to_string(),
     }
 }

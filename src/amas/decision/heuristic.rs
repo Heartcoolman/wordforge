@@ -1,17 +1,24 @@
 use crate::amas::config::AMASConfig;
 use crate::amas::types::*;
 
+const FATIGUE_DIFFICULTY_CAP: f64 = 0.4;
+const FATIGUE_BATCH_SIZE_CAP: u32 = 5;
+const FATIGUE_NEW_RATIO_CAP: f64 = 0.1;
+const LOW_ACCURACY_DIFFICULTY_FLOOR: f64 = 0.1;
+const LOW_MOTIVATION_DIFFICULTY_FLOOR: f64 = 0.2;
+
 pub fn generate(
     user_state: &UserState,
     feature: &FeatureVector,
     config: &AMASConfig,
 ) -> DecisionCandidate {
+    let h = &config.heuristic;
     let mut strategy = StrategyParams::default();
 
     if user_state.fatigue > config.constraints.high_fatigue_threshold {
-        strategy.difficulty = strategy.difficulty.min(0.4);
-        strategy.batch_size = strategy.batch_size.min(5);
-        strategy.new_ratio = strategy.new_ratio.min(0.1);
+        strategy.difficulty = strategy.difficulty.min(FATIGUE_DIFFICULTY_CAP);
+        strategy.batch_size = strategy.batch_size.min(FATIGUE_BATCH_SIZE_CAP);
+        strategy.new_ratio = strategy.new_ratio.min(FATIGUE_NEW_RATIO_CAP);
     }
 
     if user_state.attention < config.constraints.low_attention_threshold {
@@ -20,37 +27,37 @@ pub fn generate(
     }
 
     if feature.accuracy > 0.5 && feature.response_speed > 0.7 {
-        strategy.difficulty = (strategy.difficulty + 0.1).min(1.0);
+        strategy.difficulty = (strategy.difficulty + h.accuracy_speed_difficulty_boost).min(1.0);
     }
 
     if feature.accuracy < 0.5 {
-        strategy.difficulty = (strategy.difficulty - 0.15).max(0.1);
-        strategy.new_ratio = (strategy.new_ratio - 0.1).max(0.0);
+        strategy.difficulty = (strategy.difficulty - h.low_accuracy_difficulty_drop).max(LOW_ACCURACY_DIFFICULTY_FLOOR);
+        strategy.new_ratio = (strategy.new_ratio - h.low_accuracy_ratio_drop).max(0.0);
     }
 
     if user_state.motivation < config.constraints.low_motivation_threshold {
-        strategy.difficulty = (strategy.difficulty - 0.1).max(0.2);
-        strategy.batch_size = strategy.batch_size.min(8);
+        strategy.difficulty = (strategy.difficulty - h.low_motivation_difficulty_drop).max(LOW_MOTIVATION_DIFFICULTY_FLOOR);
+        strategy.batch_size = strategy.batch_size.min(h.low_motivation_max_batch);
     }
 
-    if user_state.total_event_count < 10 {
-        strategy.difficulty = 0.3;
-        strategy.batch_size = 5;
-        strategy.new_ratio = 0.5;
+    if user_state.total_event_count < h.cold_start_event_threshold {
+        strategy.difficulty = h.cold_start_difficulty;
+        strategy.batch_size = h.cold_start_batch_size;
+        strategy.new_ratio = h.cold_start_new_ratio;
     }
 
     DecisionCandidate {
         algorithm_id: AlgorithmId::Heuristic,
         strategy,
-        confidence: compute_confidence(user_state),
+        confidence: compute_confidence(user_state, h),
         explanation: "Rule-based strategy".to_string(),
     }
 }
 
-fn compute_confidence(state: &UserState) -> f64 {
-    let base = 0.7;
-    let decay = (state.total_event_count as f64 / 200.0).min(0.5);
-    (base - decay).max(0.2)
+fn compute_confidence(state: &UserState, h: &crate::amas::config::HeuristicConfig) -> f64 {
+    let decay =
+        (state.total_event_count as f64 / h.confidence_decay_scale).min(h.confidence_decay_cap);
+    (h.confidence_base - decay).max(h.confidence_min)
 }
 
 #[cfg(test)]

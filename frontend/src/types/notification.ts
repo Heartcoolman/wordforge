@@ -3,7 +3,7 @@ export interface Notification {
   userId: string;
   title: string;
   message: string;
-  type: 'system' | 'achievement' | 'reminder' | 'info';
+  type: 'system' | 'achievement' | 'reminder' | 'info' | 'broadcast';
   read: boolean;
   createdAt: string;
 }
@@ -12,6 +12,7 @@ export interface Badge {
   id: string;
   name: string;
   description: string;
-  icon: string;
-  earnedAt?: string;
+  unlocked: boolean;
+  progress: number;
+  unlockedAt?: string;
 }

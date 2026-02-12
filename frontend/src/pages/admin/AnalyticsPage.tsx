@@ -2,6 +2,7 @@ import { createSignal, Show, onMount } from 'solid-js';
 import { Card } from '@/components/ui/Card';
 import { Spinner } from '@/components/ui/Spinner';
 import { adminApi } from '@/api/admin';
+import { uiStore } from '@/stores/ui';
 import { formatNumber, formatPercent } from '@/utils/formatters';
 
 export default function AnalyticsPage() {
@@ -10,14 +11,18 @@ export default function AnalyticsPage() {
   const [loading, setLoading] = createSignal(true);
 
   onMount(async () => {
-    try {
-      const [e, l] = await Promise.allSettled([
-        adminApi.getEngagement(),
-        adminApi.getLearningAnalytics(),
-      ]);
-      if (e.status === 'fulfilled') setEngagement(e.value);
-      if (l.status === 'fulfilled') setLearning(l.value);
-    } catch { /* ignore */ }
+    const [e, l] = await Promise.allSettled([
+      adminApi.getEngagement(),
+      adminApi.getLearningAnalytics(),
+    ]);
+    if (e.status === 'fulfilled') setEngagement(e.value);
+    if (l.status === 'fulfilled') setLearning(l.value);
+    // 部分失败时显示 toast 提示
+    if (e.status === 'rejected' && l.status === 'fulfilled') {
+      uiStore.toast.warning('活跃度数据加载失败', e.reason instanceof Error ? e.reason.message : '');
+    } else if (l.status === 'rejected' && e.status === 'fulfilled') {
+      uiStore.toast.warning('学习数据加载失败', l.reason instanceof Error ? l.reason.message : '');
+    }
     setLoading(false);
   });
 
@@ -30,7 +35,7 @@ export default function AnalyticsPage() {
           {(e) => (
             <Card variant="elevated">
               <h2 class="text-lg font-semibold text-content mb-4">用户活跃度</h2>
-              <div class="grid grid-cols-3 gap-4">
+              <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <div class="text-center">
                   <p class="text-2xl font-bold text-accent">{formatNumber(e().totalUsers)}</p>
                   <p class="text-xs text-content-secondary">总用户</p>

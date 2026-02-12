@@ -31,7 +31,8 @@ function NavIcon(props: { d: string }) {
 export function Navigation() {
   const location = useLocation();
   const [mobileOpen, setMobileOpen] = createSignal(false);
-  const isActive = (href: string) => location.pathname === href;
+  const isActive = (href: string) =>
+    href === '/' ? location.pathname === '/' : location.pathname.startsWith(href);
 
   const visibleLinks = () => navLinks.filter((l) => !l.auth || authStore.isAuthenticated());
 
@@ -63,7 +64,7 @@ export function Navigation() {
         </div>
 
         <div class="flex items-center gap-2">
-          <button onClick={() => themeStore.toggle()} class="p-2 rounded-lg text-content-secondary hover:text-content hover:bg-surface-secondary transition-colors cursor-pointer" title={`Theme: ${themeStore.mode()}`}>
+          <button onClick={() => themeStore.toggle()} class="p-2 rounded-lg text-content-secondary hover:text-content hover:bg-surface-secondary transition-colors cursor-pointer" aria-label={themeStore.effective() === 'dark' ? '切换为浅色模式' : '切换为深色模式'} title={`Theme: ${themeStore.mode()}`}>
             <Show when={themeStore.effective() === 'dark'} fallback={
               <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" /></svg>
             }>
@@ -82,7 +83,12 @@ export function Navigation() {
             </A>
           </Show>
 
-          <button class="md:hidden p-2 rounded-lg text-content-secondary hover:bg-surface-secondary cursor-pointer" onClick={() => setMobileOpen(!mobileOpen())}>
+          <button
+            class="md:hidden p-2 rounded-lg text-content-secondary hover:bg-surface-secondary cursor-pointer"
+            onClick={() => setMobileOpen(!mobileOpen())}
+            aria-label="菜单"
+            aria-expanded={mobileOpen()}
+          >
             <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
               <path stroke-linecap="round" stroke-linejoin="round" d={mobileOpen() ? 'M6 18L18 6M6 6l12 12' : 'M4 6h16M4 12h16M4 18h16'} />
             </svg>

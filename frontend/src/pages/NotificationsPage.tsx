@@ -11,13 +11,18 @@ import { formatRelativeTime } from '@/utils/formatters';
 
 export default function NotificationsPage() {
   const [items, setItems] = createSignal<Notification[]>([]);
+  const [serverUnreadCount, setServerUnreadCount] = createSignal<number | null>(null);
   const [loading, setLoading] = createSignal(true);
 
   async function load() {
     setLoading(true);
     try {
-      const res = await notificationsApi.list({ limit: 50 });
+      const [res, unread] = await Promise.all([
+        notificationsApi.list({ limit: 50 }),
+        notificationsApi.getUnreadCount().catch(() => null),
+      ]);
       setItems(res ?? []);
+      setServerUnreadCount(unread?.unreadCount ?? null);
     } catch (err: unknown) {
       uiStore.toast.error('加载失败', err instanceof Error ? err.message : '');
     } finally {
@@ -31,6 +36,7 @@ export default function NotificationsPage() {
     try {
       await notificationsApi.markAllRead();
       setItems((prev) => prev.map((n) => ({ ...n, read: true })));
+      setServerUnreadCount(0);
       uiStore.toast.success('已全部标记已读');
     } catch {
       uiStore.toast.error('操作失败');
@@ -41,10 +47,12 @@ export default function NotificationsPage() {
     try {
       await notificationsApi.markRead(id);
       setItems((prev) => prev.map((n) => (n.id === id ? { ...n, read: true } : n)));
+      setServerUnreadCount((prev) => (prev == null ? prev : Math.max(0, prev - 1)));
     } catch { /* ignore */ }
   }
 
-  const unreadCount = () => items().filter((n) => !n.read).length;
+  const localUnreadCount = () => items().filter((n) => !n.read).length;
+  const unreadCount = () => serverUnreadCount() ?? localUnreadCount();
 
   return (
     <div class="max-w-2xl mx-auto space-y-6 animate-fade-in-up">
@@ -71,6 +79,14 @@ export default function NotificationsPage() {
                   hover
                   onClick={() => !n.read && markRead(n.id)}
                   class={!n.read ? 'border-l-4 border-l-accent' : ''}
+                  role={!n.read ? 'button' : undefined}
+                  tabIndex={!n.read ? 0 : undefined}
+                  onKeyDown={(e: KeyboardEvent) => {
+                    if (!n.read && (e.key === 'Enter' || e.key === ' ')) {
+                      e.preventDefault();
+                      markRead(n.id);
+                    }
+                  }}
                 >
                   <div class="flex justify-between">
                     <div>

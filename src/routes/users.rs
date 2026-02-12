@@ -2,7 +2,9 @@ use std::collections::BTreeSet;
 
 use axum::extract::State;
 use axum::routing::{get, put};
-use axum::{Json, Router};
+use axum::Router;
+
+use crate::extractors::JsonBody;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
@@ -11,6 +13,7 @@ use crate::response::{ok, AppError};
 use crate::routes::auth::UserProfile;
 use crate::state::AppState;
 use crate::store::operations::records::LearningRecord;
+use crate::validation::{validate_password, validate_username};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -31,6 +34,7 @@ async fn get_profile(
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct UpdateProfileRequest {
     username: Option<String>,
 }
@@ -38,7 +42,7 @@ struct UpdateProfileRequest {
 async fn update_profile(
     auth: AuthUser,
     State(state): State<AppState>,
-    Json(req): Json<UpdateProfileRequest>,
+    JsonBody(req): JsonBody<UpdateProfileRequest>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     let mut user = state
         .store()
@@ -47,11 +51,8 @@ async fn update_profile(
 
     if let Some(username) = req.username {
         let trimmed = username.trim();
-        if trimmed.is_empty() {
-            return Err(AppError::bad_request(
-                "USER_INVALID_USERNAME",
-                "Username cannot be empty",
-            ));
+        if let Err(msg) = validate_username(trimmed) {
+            return Err(AppError::bad_request("USER_INVALID_USERNAME", msg));
         }
         user.username = trimmed.to_string();
     }
@@ -63,6 +64,7 @@ async fn update_profile(
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ChangePasswordRequest {
     current_password: String,
     new_password: String,
@@ -71,13 +73,10 @@ struct ChangePasswordRequest {
 async fn change_password(
     auth: AuthUser,
     State(state): State<AppState>,
-    Json(req): Json<ChangePasswordRequest>,
+    JsonBody(req): JsonBody<ChangePasswordRequest>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    if req.new_password.len() < 8 {
-        return Err(AppError::bad_request(
-            "AUTH_WEAK_PASSWORD",
-            "Password must be at least 8 characters",
-        ));
+    if let Err(msg) = validate_password(&req.new_password) {
+        return Err(AppError::bad_request("AUTH_WEAK_PASSWORD", msg));
     }
 
     let mut user = state
@@ -111,7 +110,8 @@ async fn get_stats(
     auth: AuthUser,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let records = state.store().get_user_records(&auth.user_id, 50_000)?;
+    // 限制单次查询量，后续应改为增量聚合以支持更大数据量
+    let records = state.store().get_user_records(&auth.user_id, state.config().limits.max_records_fetch)?;
     let total_records = records.len() as u64;
     let correct = records.iter().filter(|r| r.is_correct).count() as u64;
 
@@ -144,7 +144,8 @@ fn compute_streak_days(records: &[LearningRecord]) -> u32 {
     }
 
     let today = Utc::now().date_naive();
-    let dates: BTreeSet<chrono::NaiveDate> = records.iter().map(|r| r.created_at.date_naive()).collect();
+    let dates: BTreeSet<chrono::NaiveDate> =
+        records.iter().map(|r| r.created_at.date_naive()).collect();
 
     let mut streak = 0u32;
     let mut current = today;

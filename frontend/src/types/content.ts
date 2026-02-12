@@ -1,3 +1,5 @@
+import type { Word } from './word';
+
 export interface Etymology {
   wordId: string;
   word: string;
@@ -6,9 +8,11 @@ export interface Etymology {
   generated: boolean;
 }
 
+export type MorphemeType = 'prefix' | 'root' | 'suffix';
+
 export interface Morpheme {
   text: string;
-  type: string;
+  type: MorphemeType;
   meaning: string;
 }
 
@@ -19,12 +23,8 @@ export interface WordContexts {
   contexts: string[];
 }
 
-export interface SemanticSearchItem {
-  wordId: string;
-  word: string;
-  score: number;
-  meaning: string;
-}
+// SemanticSearchItem 与 Word 字段完全相同，直接复用
+export type SemanticSearchItem = Word;
 
 export interface ConfusionPair {
   wordId: string;

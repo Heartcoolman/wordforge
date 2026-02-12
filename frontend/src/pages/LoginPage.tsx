@@ -1,26 +1,38 @@
-import { createSignal } from 'solid-js';
+import { createSignal, createEffect } from 'solid-js';
 import { A, useNavigate } from '@solidjs/router';
 import { Input } from '@/components/ui/Input';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { authStore } from '@/stores/auth';
 import { uiStore } from '@/stores/ui';
+import { LOGIN_THROTTLE_THRESHOLD, LOGIN_MAX_COOLDOWN_MS } from '@/lib/constants';
 
 export default function LoginPage() {
   const navigate = useNavigate();
 
-  // Redirect if already logged in
-  if (authStore.isAuthenticated()) {
-    navigate('/', { replace: true });
-  }
+  // Redirect if already logged in (reactive)
+  createEffect(() => {
+    if (!authStore.loading() && authStore.isAuthenticated()) {
+      navigate('/', { replace: true });
+    }
+  });
 
   const [email, setEmail] = createSignal('');
   const [password, setPassword] = createSignal('');
   const [loading, setLoading] = createSignal(false);
   const [error, setError] = createSignal('');
+  const [failCount, setFailCount] = createSignal(0);
+  const [cooldown, setCooldown] = createSignal(0);
+
+  // 连续失败后增加提交间隔
+  function getCooldownMs(failures: number): number {
+    if (failures < LOGIN_THROTTLE_THRESHOLD) return 0;
+    return Math.min(2 ** (failures - 2) * 1000, LOGIN_MAX_COOLDOWN_MS); // 3次失败=2s, 4次=4s, 5次=8s, 上限30s
+  }
 
   async function handleSubmit(e: Event) {
     e.preventDefault();
+    if (cooldown() > 0) return;
     if (!email() || !password()) {
       setError('请填写邮箱和密码');
       return;
@@ -29,11 +41,25 @@ export default function LoginPage() {
     setError('');
     try {
       await authStore.login(email(), password());
+      setPassword('');
+      setFailCount(0);
       uiStore.toast.success('登录成功');
       navigate('/', { replace: true });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : '登录失败';
       setError(msg);
+      const newCount = failCount() + 1;
+      setFailCount(newCount);
+      const cd = getCooldownMs(newCount);
+      if (cd > 0) {
+        setCooldown(Math.ceil(cd / 1000));
+        const timer = setInterval(() => {
+          setCooldown((v) => {
+            if (v <= 1) { clearInterval(timer); return 0; }
+            return v - 1;
+          });
+        }, 1000);
+      }
     } finally {
       setLoading(false);
     }
@@ -59,9 +85,9 @@ export default function LoginPage() {
             value={password()}
             onInput={(e) => setPassword(e.currentTarget.value)}
           />
-          {error() && <p class="text-sm text-error text-center">{error()}</p>}
-          <Button type="submit" fullWidth loading={loading()}>
-            登录
+          {error() && <p class="text-sm text-error text-center" role="alert">{error()}</p>}
+          <Button type="submit" fullWidth loading={loading()} disabled={cooldown() > 0}>
+            {cooldown() > 0 ? `请等待 ${cooldown()} 秒` : '登录'}
           </Button>
         </form>
         <p class="mt-4 text-center text-sm text-content-secondary">

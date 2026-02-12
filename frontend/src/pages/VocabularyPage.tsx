@@ -9,6 +9,7 @@ import { Empty } from '@/components/ui/Empty';
 import { Spinner } from '@/components/ui/Spinner';
 import { uiStore } from '@/stores/ui';
 import { wordsApi } from '@/api/words';
+import { IMPORT_BATCH_SIZE } from '@/lib/constants';
 import type { Word, CreateWordRequest } from '@/types/word';
 
 export default function VocabularyPage() {
@@ -17,16 +18,18 @@ export default function VocabularyPage() {
   const [page, setPage] = createSignal(1);
   const [search, setSearch] = createSignal('');
   const [loading, setLoading] = createSignal(true);
+  const [searchLoading, setSearchLoading] = createSignal(false);
   const [showForm, setShowForm] = createSignal(false);
   const [showImport, setShowImport] = createSignal(false);
   const [editing, setEditing] = createSignal<Word | null>(null);
+  const [deleteTarget, setDeleteTarget] = createSignal<string | null>(null);
   const pageSize = 20;
 
   async function load() {
     setLoading(true);
     try {
-      const res = await wordsApi.list({ limit: pageSize, offset: (page() - 1) * pageSize, search: search() || undefined });
-      setWords(res.items);
+      const res = await wordsApi.list({ perPage: pageSize, page: page(), search: search() || undefined });
+      setWords(res.data);
       setTotal(res.total);
     } catch (err: unknown) {
       uiStore.toast.error('加载失败', err instanceof Error ? err.message : '');
@@ -39,8 +42,10 @@ export default function VocabularyPage() {
 
   function handleSearch(e: Event) {
     e.preventDefault();
+    if (searchLoading()) return;
+    setSearchLoading(true);
     setPage(1);
-    load();
+    load().finally(() => setSearchLoading(false));
   }
 
   function handlePageChange(p: number) {
@@ -49,14 +54,19 @@ export default function VocabularyPage() {
   }
 
   async function deleteWord(id: string) {
-    if (!confirm('确定删除该单词？')) return;
     try {
       await wordsApi.delete(id);
       uiStore.toast.success('已删除');
       load();
     } catch (err: unknown) {
       uiStore.toast.error('删除失败', err instanceof Error ? err.message : '');
+    } finally {
+      setDeleteTarget(null);
     }
+  }
+
+  function confirmDelete(id: string) {
+    setDeleteTarget(id);
   }
 
   return (
@@ -71,7 +81,7 @@ export default function VocabularyPage() {
 
       <form onSubmit={handleSearch} class="flex gap-2">
         <Input placeholder="搜索单词..." value={search()} onInput={(e) => setSearch(e.currentTarget.value)} class="flex-1" />
-        <Button type="submit" variant="secondary">搜索</Button>
+        <Button type="submit" variant="secondary" loading={searchLoading()}>搜索</Button>
       </form>
 
       <Show when={!loading()} fallback={<div class="flex justify-center py-12"><Spinner size="lg" /></div>}>
@@ -105,7 +115,7 @@ export default function VocabularyPage() {
                       <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" /></svg>
                     </button>
                     <button
-                      onClick={() => deleteWord(word.id)}
+                      onClick={() => confirmDelete(word.id)}
                       class="p-1.5 rounded text-content-tertiary hover:text-error transition-colors cursor-pointer"
                     >
                       <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
@@ -127,6 +137,15 @@ export default function VocabularyPage() {
 
       {/* Import Modal */}
       <ImportModal open={showImport()} onClose={() => setShowImport(false)} onDone={load} />
+
+      {/* Delete Confirm Modal */}
+      <Modal open={deleteTarget() !== null} onClose={() => setDeleteTarget(null)} title="确认删除" size="sm">
+        <p class="text-sm text-content-secondary mt-2">确定要删除该单词吗？此操作无法撤销。</p>
+        <div class="flex justify-end gap-2 mt-4">
+          <Button variant="ghost" onClick={() => setDeleteTarget(null)}>取消</Button>
+          <Button variant="danger" onClick={() => { const id = deleteTarget(); if (id) deleteWord(id); }}>删除</Button>
+        </div>
+      </Modal>
     </div>
   );
 }
@@ -212,8 +231,14 @@ function ImportModal(props: { open: boolean; onClose: () => void; onDone: () => 
     setImporting(true);
     try {
       if (mode() === 'url') {
-        if (!url().trim()) { uiStore.toast.warning('请输入 URL'); setImporting(false); return; }
-        const res = await wordsApi.importUrl(url().trim());
+        const trimmedUrl = url().trim();
+        if (!trimmedUrl) { uiStore.toast.warning('请输入 URL'); setImporting(false); return; }
+        if (!trimmedUrl.startsWith('https://')) {
+          uiStore.toast.warning('仅支持 https:// 开头的 URL');
+          setImporting(false);
+          return;
+        }
+        const res = await wordsApi.importUrl(trimmedUrl);
         uiStore.toast.success(`成功导入 ${res.imported} 个单词`);
       } else {
         const lines = textContent().trim().split('\n').filter(Boolean);
@@ -231,8 +256,8 @@ function ImportModal(props: { open: boolean; onClose: () => void; onDone: () => 
         if (wordsList.length === 0) { uiStore.toast.warning('未解析到有效数据'); setImporting(false); return; }
         // Batch in chunks of 50
         let total = 0;
-        for (let i = 0; i < wordsList.length; i += 50) {
-          const chunk = wordsList.slice(i, i + 50);
+        for (let i = 0; i < wordsList.length; i += IMPORT_BATCH_SIZE) {
+          const chunk = wordsList.slice(i, i + IMPORT_BATCH_SIZE);
           const res = await wordsApi.batchCreate(chunk);
           total += res.count;
         }

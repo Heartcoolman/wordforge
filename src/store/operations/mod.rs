@@ -1,10 +1,14 @@
 pub mod admins;
+pub mod elo;
 pub mod engine;
 pub mod learning_sessions;
+pub mod notifications;
 pub mod records;
 pub mod sessions;
 pub mod study_configs;
+pub mod system_settings;
 pub mod users;
+pub mod wb_center;
 pub mod word_states;
 pub mod wordbooks;
 pub mod words;

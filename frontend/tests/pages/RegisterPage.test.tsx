@@ -7,6 +7,7 @@ import RegisterPage from '@/pages/RegisterPage';
 vi.mock('@/stores/auth', () => ({
   authStore: {
     isAuthenticated: vi.fn(() => false),
+    loading: vi.fn(() => false),
     register: vi.fn(),
     user: vi.fn(() => null),
   },
@@ -35,7 +36,7 @@ describe('RegisterPage', () => {
     renderWithProviders(() => <RegisterPage />);
     expect(screen.getByPlaceholderText('your@email.com')).toBeInTheDocument();
     expect(screen.getByPlaceholderText('昵称')).toBeInTheDocument();
-    expect(screen.getByPlaceholderText('至少 6 位')).toBeInTheDocument();
+    expect(screen.getByPlaceholderText('至少 8 位')).toBeInTheDocument();
     expect(screen.getByPlaceholderText('再次输入密码')).toBeInTheDocument();
   });
 
@@ -48,18 +49,18 @@ describe('RegisterPage', () => {
     });
   });
 
-  it('shows error when password < 6 chars', async () => {
+  it('shows error when password < 8 chars', async () => {
     renderWithProviders(() => <RegisterPage />);
     fireEvent.input(screen.getByPlaceholderText('your@email.com'), { target: { value: 'a@b.com' } });
     fireEvent.input(screen.getByPlaceholderText('昵称'), { target: { value: 'user' } });
-    fireEvent.input(screen.getByPlaceholderText('至少 6 位'), { target: { value: '123' } });
+    fireEvent.input(screen.getByPlaceholderText('至少 8 位'), { target: { value: '123' } });
     fireEvent.input(screen.getByPlaceholderText('再次输入密码'), { target: { value: '123' } });
 
     const form = screen.getByRole('button', { name: '注册' }).closest('form')!;
     fireEvent.submit(form);
 
     await waitFor(() => {
-      expect(screen.getByText('密码至少 6 位')).toBeInTheDocument();
+      expect(screen.getByText('密码至少 8 位')).toBeInTheDocument();
     });
   });
 
@@ -67,8 +68,8 @@ describe('RegisterPage', () => {
     renderWithProviders(() => <RegisterPage />);
     fireEvent.input(screen.getByPlaceholderText('your@email.com'), { target: { value: 'a@b.com' } });
     fireEvent.input(screen.getByPlaceholderText('昵称'), { target: { value: 'user' } });
-    fireEvent.input(screen.getByPlaceholderText('至少 6 位'), { target: { value: '123456' } });
-    fireEvent.input(screen.getByPlaceholderText('再次输入密码'), { target: { value: '654321' } });
+    fireEvent.input(screen.getByPlaceholderText('至少 8 位'), { target: { value: '12345678' } });
+    fireEvent.input(screen.getByPlaceholderText('再次输入密码'), { target: { value: '87654321' } });
 
     const form = screen.getByRole('button', { name: '注册' }).closest('form')!;
     fireEvent.submit(form);

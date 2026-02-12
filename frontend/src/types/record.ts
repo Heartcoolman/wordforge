@@ -11,6 +11,7 @@ export interface LearningRecord {
 }
 
 export interface CreateRecordRequest {
+  clientRecordId?: string;
   wordId: string;
   isCorrect: boolean;
   responseTimeMs: number;
@@ -28,7 +29,8 @@ export interface CreateRecordRequest {
 
 export interface RecordResponse {
   record: LearningRecord;
-  amasResult: ProcessResult;
+  amasResult: ProcessResult | null;
+  duplicate: boolean;
 }
 
 export interface RecordStatistics {

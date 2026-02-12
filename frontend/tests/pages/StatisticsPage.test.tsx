@@ -27,6 +27,7 @@ vi.mock('@/api/amas', () => ({
     getStrategy: vi.fn(),
     getPhase: vi.fn(),
     reset: vi.fn(),
+    subscribeStateEvents: vi.fn(() => () => {}),
   },
 }));
 
@@ -68,10 +69,11 @@ const fakeStats = {
 };
 
 const fakeWordOverview = {
-  new: 10,
+  newCount: 10,
   learning: 20,
   reviewing: 15,
   mastered: 55,
+  forgotten: 0,
 };
 
 const fakeAmasState = {

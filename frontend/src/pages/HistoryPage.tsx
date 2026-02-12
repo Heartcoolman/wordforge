@@ -15,34 +15,30 @@ export default function HistoryPage() {
   const [records, setRecords] = createSignal<LearningRecord[]>([]);
   const [wordMap, setWordMap] = createSignal<Record<string, Word>>({});
   const [loading, setLoading] = createSignal(true);
-  const [offset, setOffset] = createSignal(0);
+  const [page, setPage] = createSignal(1);
   const [hasMore, setHasMore] = createSignal(true);
-  const limit = 30;
+  const [loadingMore, setLoadingMore] = createSignal(false);
+  const perPage = 30;
 
   async function load(append = false) {
     if (!append) setLoading(true);
     try {
-      const res = await recordsApi.list({ limit, offset: offset() });
-      const items = res ?? [];
+      const res = await recordsApi.list({ perPage, page: page() });
+      const items = res.data ?? [];
       if (!append) setRecords(items); else setRecords((prev) => [...prev, ...items]);
-      setHasMore(items.length === limit);
+      setHasMore(res.page < res.totalPages);
 
       // Batch-load word info for new records (avoid N+1)
       const existingMap = wordMap();
       const newIds = [...new Set(items.map((r) => r.wordId).filter((id) => !existingMap[id]))];
       if (newIds.length > 0) {
-        try {
-          const results = await Promise.allSettled(
-            // Fetch in parallel batches of up to 10
-            newIds.map((id) => wordsApi.get(id)),
-          );
-          const newMap = { ...existingMap };
-          for (let idx = 0; idx < results.length; idx++) {
-            const r = results[idx];
-            if (r.status === 'fulfilled') newMap[newIds[idx]] = r.value;
-          }
-          setWordMap(newMap);
-        } catch { /* ignore */ }
+        const newMap = { ...existingMap };
+        const results = await Promise.allSettled(newIds.map((id) => wordsApi.get(id)));
+        for (let idx = 0; idx < results.length; idx++) {
+          const r = results[idx];
+          if (r.status === 'fulfilled') newMap[newIds[idx]] = r.value;
+        }
+        setWordMap(newMap);
       }
     } catch (err: unknown) {
       uiStore.toast.error('加载失败', err instanceof Error ? err.message : '');
@@ -53,9 +49,12 @@ export default function HistoryPage() {
 
   onMount(() => load());
 
-  function loadMore() {
-    setOffset((o) => o + limit);
-    load(true);
+  async function loadMore() {
+    if (loadingMore()) return;
+    setLoadingMore(true);
+    setPage((p) => p + 1);
+    await load(true);
+    setLoadingMore(false);
   }
 
   return (
@@ -89,7 +88,7 @@ export default function HistoryPage() {
             </For>
           </div>
           <Show when={hasMore()}>
-            <div class="text-center"><Button variant="ghost" onClick={loadMore}>加载更多</Button></div>
+            <div class="text-center"><Button variant="ghost" onClick={loadMore} loading={loadingMore()}>加载更多</Button></div>
           </Show>
         </Show>
       </Show>

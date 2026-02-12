@@ -1,3 +1,5 @@
+// TODO: 实现词向量嵌入生成 worker。需要集成外部 embedding 服务（如 OpenAI embeddings），
+// 为缺少嵌入的单词生成向量表示，存储到 Word.embedding 字段，用于语义搜索。
 use crate::store::Store;
 
 pub async fn run(store: &Store) {

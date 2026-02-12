@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/Button';
 import { authStore } from '@/stores/auth';
 import { uiStore } from '@/stores/ui';
 import { usersApi } from '@/api/users';
+import { MIN_PASSWORD_LENGTH } from '@/lib/constants';
 
 export default function ProfilePage() {
   const navigate = useNavigate();
@@ -37,11 +38,11 @@ export default function ProfilePage() {
 
   async function changePassword() {
     if (!currentPw() || !newPw()) return;
-    if (newPw().length < 6) { uiStore.toast.error('新密码至少 6 位'); return; }
+    if (newPw().length < MIN_PASSWORD_LENGTH) { uiStore.toast.error(`新密码至少 ${MIN_PASSWORD_LENGTH} 位`); return; }
     if (newPw() !== confirmPw()) { uiStore.toast.error('两次密码不一致'); return; }
     setChangingPw(true);
     try {
-      await usersApi.changePassword({ current_password: currentPw(), new_password: newPw() });
+      await usersApi.changePassword({ currentPassword: currentPw(), newPassword: newPw() });
       uiStore.toast.success('密码已修改');
       setCurrentPw(''); setNewPw(''); setConfirmPw('');
     } catch (err: unknown) {
@@ -60,7 +61,11 @@ export default function ProfilePage() {
     <div class="max-w-lg mx-auto space-y-6 animate-fade-in-up">
       <h1 class="text-2xl font-bold text-content">个人中心</h1>
 
-      <Show when={authStore.user()}>
+      <Show when={authStore.user()} fallback={
+        <Card variant="elevated">
+          <p class="text-center text-content-secondary py-4">加载中...</p>
+        </Card>
+      }>
         {(user) => (
           <Card variant="elevated">
             <div class="space-y-4">
@@ -79,7 +84,7 @@ export default function ProfilePage() {
         <h2 class="text-lg font-semibold text-content mb-4">修改密码</h2>
         <div class="space-y-3">
           <Input label="当前密码" type="password" value={currentPw()} onInput={(e) => setCurrentPw(e.currentTarget.value)} />
-          <Input label="新密码" type="password" placeholder="至少 6 位" value={newPw()} onInput={(e) => setNewPw(e.currentTarget.value)} />
+          <Input label="新密码" type="password" placeholder={`至少 ${MIN_PASSWORD_LENGTH} 位`} value={newPw()} onInput={(e) => setNewPw(e.currentTarget.value)} />
           <Input label="确认新密码" type="password" placeholder="再次输入新密码" value={confirmPw()} onInput={(e) => setConfirmPw(e.currentTarget.value)} />
           <Button onClick={changePassword} loading={changingPw()} size="sm" variant="secondary">修改密码</Button>
         </div>

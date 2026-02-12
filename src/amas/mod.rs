@@ -7,3 +7,4 @@ pub mod metrics;
 pub mod metrics_persistence;
 pub mod monitoring;
 pub mod types;
+pub mod word_selector;

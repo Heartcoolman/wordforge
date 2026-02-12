@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeAll, afterAll, afterEach } from 'vitest
 import { setupServer } from 'msw/node';
 import { http, HttpResponse } from 'msw';
 
-const BASE = 'http://localhost:3000';
+import { TEST_BASE_URL as BASE } from '../helpers/constants';
 
 vi.mock('@/lib/token', () => ({
   tokenManager: {

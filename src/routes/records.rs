@@ -1,13 +1,18 @@
 use axum::extract::{Query, State};
+use axum::response::IntoResponse;
 use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::Router;
+
+use crate::extractors::JsonBody;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
-use crate::amas::types::{MasteryLevel, RawEvent};
+use crate::amas::types::{MasteryLevel, ProcessResult, RawEvent};
 use crate::auth::AuthUser;
-use crate::response::{created, ok, AppError};
+use crate::constants::{DEFAULT_HALF_LIFE_HOURS, DEFAULT_PAGE_SIZE_RECORDS, MAX_PAGE_SIZE};
+use crate::response::{created, ok, paginated, AppError};
 use crate::state::AppState;
+use crate::store::operations::learning_sessions::LearningSession;
 use crate::store::operations::records::LearningRecord;
 use crate::store::operations::word_states::{WordLearningState, WordState};
 
@@ -20,17 +25,18 @@ pub fn router() -> Router<AppState> {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ListRecordsQuery {
-    limit: Option<usize>,
-    offset: Option<usize>,
+    page: Option<u64>,
+    per_page: Option<u64>,
 }
 
 impl ListRecordsQuery {
-    fn limit(&self) -> usize {
-        self.limit.unwrap_or(50)
+    fn page(&self) -> u64 {
+        self.page.unwrap_or(1).clamp(1, u64::MAX)
     }
-    fn offset(&self) -> usize {
-        self.offset.unwrap_or(0)
+    fn per_page(&self) -> u64 {
+        self.per_page.unwrap_or(DEFAULT_PAGE_SIZE_RECORDS).clamp(1, MAX_PAGE_SIZE)
     }
 }
 
@@ -39,17 +45,21 @@ async fn list_records(
     Query(q): Query<ListRecordsQuery>,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let limit = q.limit().clamp(1, 200);
-    let offset = q.offset();
+    let page = q.page();
+    let per_page = q.per_page();
+    let limit = per_page as usize;
+    let offset = ((page - 1) * per_page) as usize;
     let records = state
         .store()
         .get_user_records_with_offset(&auth.user_id, limit, offset)?;
-    Ok(ok(records))
+    let total = state.store().count_user_records(&auth.user_id)? as u64;
+    Ok(paginated(records, total, page, per_page))
 }
 
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct CreateRecordRequest {
+    client_record_id: Option<String>,
     word_id: String,
     is_correct: bool,
     response_time_ms: i64,
@@ -65,13 +75,117 @@ struct CreateRecordRequest {
     hint_used: Option<bool>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateRecordResponse {
+    record: LearningRecord,
+    amas_result: Option<ProcessResult>,
+    duplicate: bool,
+}
+
+#[derive(Debug, Clone)]
+struct EngineStateSnapshot {
+    user_state: Option<serde_json::Value>,
+    ige: Option<serde_json::Value>,
+    swd: Option<serde_json::Value>,
+    trust: Option<serde_json::Value>,
+    mastery: Option<serde_json::Value>,
+    mastery_key: String,
+    user_elo: crate::amas::elo::EloRating,
+    word_elo: crate::amas::elo::EloRating,
+}
+
+fn capture_engine_state_snapshot(
+    store: &crate::store::Store,
+    user_id: &str,
+    word_id: &str,
+) -> Result<EngineStateSnapshot, AppError> {
+    let mastery_key = format!("mastery:{word_id}");
+
+    Ok(EngineStateSnapshot {
+        user_state: store.get_engine_user_state(user_id)?,
+        ige: store.get_engine_algo_state(user_id, "ige")?,
+        swd: store.get_engine_algo_state(user_id, "swd")?,
+        trust: store.get_engine_algo_state(user_id, "trust")?,
+        mastery: store.get_engine_algo_state(user_id, &mastery_key)?,
+        mastery_key,
+        user_elo: store.get_user_elo(user_id)?,
+        word_elo: store.get_word_elo(word_id)?,
+    })
+}
+
+fn restore_engine_state_snapshot(
+    store: &crate::store::Store,
+    user_id: &str,
+    word_id: &str,
+    snapshot: &EngineStateSnapshot,
+) {
+    match &snapshot.user_state {
+        Some(previous) => {
+            if let Err(error) = store.set_engine_user_state(user_id, previous) {
+                tracing::warn!(user_id, error = %error, "Failed to rollback AMAS user state");
+            }
+        }
+        None => {
+            if let Err(error) = store.delete_engine_user_state(user_id) {
+                tracing::warn!(user_id, error = %error, "Failed to delete AMAS user state during rollback");
+            }
+        }
+    }
+
+    restore_engine_algo_state(store, user_id, "ige", &snapshot.ige);
+    restore_engine_algo_state(store, user_id, "swd", &snapshot.swd);
+    restore_engine_algo_state(store, user_id, "trust", &snapshot.trust);
+    restore_engine_algo_state(store, user_id, &snapshot.mastery_key, &snapshot.mastery);
+
+    // 回滚 ELO 评分
+    if let Err(error) = store.set_user_elo(user_id, &snapshot.user_elo) {
+        tracing::warn!(user_id, error = %error, "Failed to rollback user ELO");
+    }
+    if let Err(error) = store.set_word_elo(word_id, &snapshot.word_elo) {
+        tracing::warn!(word_id, error = %error, "Failed to rollback word ELO");
+    }
+}
+
+fn restore_engine_algo_state(
+    store: &crate::store::Store,
+    user_id: &str,
+    algo_id: &str,
+    previous: &Option<serde_json::Value>,
+) {
+    let result = match previous {
+        Some(value) => store.set_engine_algo_state(user_id, algo_id, value),
+        None => store.delete_engine_algo_state(user_id, algo_id),
+    };
+
+    if let Err(error) = result {
+        tracing::warn!(user_id, algo_id, error = %error, "Failed to rollback AMAS algorithm state");
+    }
+}
+
 async fn process_single_record(
     user_id: &str,
     req: &CreateRecordRequest,
     state: &AppState,
-) -> Result<(LearningRecord, serde_json::Value), AppError> {
+) -> Result<CreateRecordResponse, AppError> {
+    let record_id = req
+        .client_record_id
+        .as_ref()
+        .map(|id| id.trim())
+        .filter(|id| !id.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+    if let Some(existing) = state.store().get_user_record_by_id(user_id, &record_id)? {
+        return Ok(CreateRecordResponse {
+            record: existing,
+            amas_result: None,
+            duplicate: true,
+        });
+    }
+
     let record = LearningRecord {
-        id: uuid::Uuid::new_v4().to_string(),
+        id: record_id,
         user_id: user_id.to_string(),
         word_id: req.word_id.clone(),
         is_correct: req.is_correct,
@@ -80,7 +194,7 @@ async fn process_single_record(
         created_at: Utc::now(),
     };
 
-    state.store().create_record(&record)?;
+    let engine_snapshot = capture_engine_state_snapshot(state.store(), user_id, &req.word_id)?;
 
     let amas_result = state
         .amas()
@@ -100,17 +214,34 @@ async fn process_single_record(
                 interaction_density: req.interaction_density,
                 paused_time_ms: req.paused_time_ms,
                 hint_used: req.hint_used.unwrap_or(false),
+                confused_with: None,
             },
         )
         .await?;
 
-    // B11: Update word_learning_states from AMAS result
+    // 更新 ELO 评分
+    {
+        let amas_config = state.amas().get_config().await;
+        let mut user_elo = state.store().get_user_elo(user_id)?;
+        let mut word_elo = state.store().get_word_elo(&req.word_id)?;
+        crate::amas::elo::update_elo(
+            &mut user_elo,
+            &mut word_elo,
+            req.is_correct,
+            &amas_config.elo,
+        );
+        state.store().set_user_elo(user_id, &user_elo)?;
+        state.store().set_word_elo(&req.word_id, &word_elo)?;
+    }
+
+    let mut next_word_state: Option<WordLearningState> = None;
     if let Some(ref wm) = amas_result.word_mastery {
         let new_state = match wm.mastery_level {
             MasteryLevel::New => WordState::New,
             MasteryLevel::Learning => WordState::Learning,
             MasteryLevel::Reviewing => WordState::Reviewing,
             MasteryLevel::Mastered => WordState::Mastered,
+            MasteryLevel::Forgotten => WordState::Forgotten,
         };
 
         let mut wls = state
@@ -122,7 +253,7 @@ async fn process_single_record(
                 state: WordState::New,
                 mastery_level: 0.0,
                 next_review_date: None,
-                half_life: 24.0,
+                half_life: DEFAULT_HALF_LIFE_HOURS,
                 correct_streak: 0,
                 total_attempts: 0,
                 updated_at: Utc::now(),
@@ -137,16 +268,14 @@ async fn process_single_record(
             wls.correct_streak = 0;
         }
         if wm.next_review_interval_secs > 0 {
-            wls.next_review_date = Some(
-                Utc::now()
-                    + chrono::Duration::seconds(wm.next_review_interval_secs),
-            );
+            wls.next_review_date =
+                Some(Utc::now() + chrono::Duration::seconds(wm.next_review_interval_secs));
         }
         wls.updated_at = Utc::now();
-        state.store().set_word_learning_state(&wls)?;
+        next_word_state = Some(wls);
     }
 
-    // B11: Update learning session counters
+    let mut next_session: Option<LearningSession> = None;
     if let Some(ref sid) = req.session_id {
         if let Some(mut session) = state.store().get_learning_session(sid)? {
             session.total_questions += 1;
@@ -156,31 +285,41 @@ async fn process_single_record(
                 }
             }
             session.updated_at = Utc::now();
-            state.store().update_learning_session(&session)?;
+            next_session = Some(session);
         }
     }
 
-    let amas_json = serde_json::to_value(&amas_result)
-        .map_err(|e| AppError::internal(&e.to_string()))?;
+    state
+        .store()
+        .create_record_with_updates(&record, next_word_state.as_ref(), next_session.as_ref())
+        .map_err(|error| {
+            restore_engine_state_snapshot(state.store(), user_id, &req.word_id, &engine_snapshot);
+            AppError::internal(&error.to_string())
+        })?;
 
-    Ok((record, amas_json))
+    Ok(CreateRecordResponse {
+        record,
+        amas_result: Some(amas_result),
+        duplicate: false,
+    })
 }
 
 async fn create_record(
     auth: AuthUser,
     State(state): State<AppState>,
-    Json(req): Json<CreateRecordRequest>,
-) -> Result<impl axum::response::IntoResponse, AppError> {
-    let (record, amas_result) = process_single_record(&auth.user_id, &req, &state).await?;
-
-    Ok(created(serde_json::json!({
-        "record": record,
-        "amasResult": amas_result,
-    })))
+    JsonBody(req): JsonBody<CreateRecordRequest>,
+) -> Result<axum::response::Response, AppError> {
+    let result = process_single_record(&auth.user_id, &req, &state).await?;
+    if result.duplicate {
+        Ok(ok(result).into_response())
+    } else {
+        Ok(created(result).into_response())
+    }
 }
 
 // B33: Batch submit records
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct BatchCreateRecordsRequest {
     records: Vec<CreateRecordRequest>,
 }
@@ -188,28 +327,45 @@ struct BatchCreateRecordsRequest {
 async fn batch_create_records(
     auth: AuthUser,
     State(state): State<AppState>,
-    Json(req): Json<BatchCreateRecordsRequest>,
-) -> Result<impl axum::response::IntoResponse, AppError> {
-    if req.records.len() > 500 {
+    JsonBody(req): JsonBody<BatchCreateRecordsRequest>,
+) -> Result<axum::response::Response, AppError> {
+    if req.records.len() > state.config().limits.max_batch_size {
         return Err(AppError::bad_request(
             "BATCH_TOO_LARGE",
-            "batch_create_records accepts at most 500 records",
+            &format!(
+                "batch_create_records accepts at most {} records",
+                state.config().limits.max_batch_size
+            ),
         ));
     }
-    let mut results = Vec::new();
-    for item in &req.records {
-        let (record, amas_result) =
-            process_single_record(&auth.user_id, item, &state).await?;
-        results.push(serde_json::json!({
-            "record": record,
-            "amasResult": amas_result,
-        }));
+    let mut results: Vec<CreateRecordResponse> = Vec::new();
+    let mut errors = Vec::new();
+    for (index, item) in req.records.iter().enumerate() {
+        match process_single_record(&auth.user_id, item, &state).await {
+            Ok(result) => results.push(result),
+            Err(error) => {
+                errors.push(serde_json::json!({
+                    "index": index,
+                    "code": error.code,
+                    "message": error.message,
+                }));
+            }
+        }
     }
 
-    Ok(created(serde_json::json!({
+    let payload = serde_json::json!({
         "count": results.len(),
+        "failed": errors.len(),
+        "partial": !errors.is_empty(),
         "items": results,
-    })))
+        "errors": errors,
+    });
+
+    if payload["partial"].as_bool() == Some(true) {
+        Ok(ok(payload).into_response())
+    } else {
+        Ok(created(payload).into_response())
+    }
 }
 
 // B32: Statistics
@@ -243,7 +399,8 @@ async fn get_enhanced_statistics(
     auth: AuthUser,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let records = state.store().get_user_records(&auth.user_id, 10_000)?;
+    // 限制单次查询量，后续应改为增量聚合以支持更大数据量
+    let records = state.store().get_user_records(&auth.user_id, state.config().limits.max_stats_records)?;
     let total = records.len();
     let correct = records.iter().filter(|r| r.is_correct).count();
     let accuracy = if total > 0 {

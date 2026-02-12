@@ -1,5 +1,6 @@
 import { api } from './client';
 import type { WordLearningState, WordStateOverview, BatchUpdateRequest } from '@/types/wordState';
+import { WORD_STATES_DUE_DEFAULT_LIMIT } from '@/lib/constants';
 
 export const wordStatesApi = {
   get(wordId: string) {
@@ -10,7 +11,7 @@ export const wordStatesApi = {
     return api.post<WordLearningState[]>('/api/word-states/batch', { wordIds });
   },
 
-  getDueList(limit = 50) {
+  getDueList(limit = WORD_STATES_DUE_DEFAULT_LIMIT) {
     return api.get<WordLearningState[]>('/api/word-states/due/list', { limit });
   },
 

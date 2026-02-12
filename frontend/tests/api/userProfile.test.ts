@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeAll, afterAll, afterEach } from 'vitest
 import { setupServer } from 'msw/node';
 import { http, HttpResponse } from 'msw';
 
-const BASE = 'http://localhost:3000';
+import { TEST_BASE_URL as BASE } from '../helpers/constants';
 
 vi.mock('@/lib/token', () => ({
   tokenManager: {
@@ -28,25 +28,25 @@ describe('userProfileApi', () => {
   it('getReward fetches reward preference', async () => {
     server.use(
       http.get(`${BASE}/api/user-profile/reward`, () =>
-        HttpResponse.json({ success: true, data: { preference: 'explorer' } })),
+        HttpResponse.json({ success: true, data: { rewardType: 'explorer' } })),
     );
     const result = await userProfileApi.getReward();
-    expect(result).toEqual({ preference: 'explorer' });
+    expect(result).toEqual({ rewardType: 'explorer' });
   });
 
-  it('updateReward sends PUT with preference', async () => {
+  it('updateReward sends PUT with rewardType', async () => {
     server.use(
       http.put(`${BASE}/api/user-profile/reward`, async ({ request }) => {
         const body = await request.json() as Record<string, string>;
-        return HttpResponse.json({ success: true, data: { preference: body.preference } });
+        return HttpResponse.json({ success: true, data: { rewardType: body.rewardType } });
       }),
     );
     const result = await userProfileApi.updateReward('achiever');
-    expect(result).toEqual({ preference: 'achiever' });
+    expect(result).toEqual({ rewardType: 'achiever' });
   });
 
   it('getCognitive returns cognitive profile', async () => {
-    const data = { attention: 0.8, fatigue: 0.3, motivation: 0.9, confidence: 0.7 };
+    const data = { memoryCapacity: 0.5, processingSpeed: 0.5, stability: 0.5 };
     server.use(
       http.get(`${BASE}/api/user-profile/cognitive`, () =>
         HttpResponse.json({ success: true, data })),
@@ -55,8 +55,8 @@ describe('userProfileApi', () => {
     expect(result).toEqual(data);
   });
 
-  it('getLearningStyle returns learning style', async () => {
-    const data = { style: 'visual', visual: 0.8, auditory: 0.2, reading: 0.5, kinesthetic: 0.3 };
+  it('getLearningStyle returns learning style with nested scores', async () => {
+    const data = { style: 'visual', scores: { visual: 0.8, auditory: 0.2, reading: 0.5, kinesthetic: 0.3 } };
     server.use(
       http.get(`${BASE}/api/user-profile/learning-style`, () =>
         HttpResponse.json({ success: true, data })),
@@ -66,7 +66,7 @@ describe('userProfileApi', () => {
   });
 
   it('getChronotype returns chronotype', async () => {
-    const data = { type: 'morning', preferredHours: [8, 9, 10] };
+    const data = { chronotype: 'morning', preferredHours: [8, 9, 10] };
     server.use(
       http.get(`${BASE}/api/user-profile/chronotype`, () =>
         HttpResponse.json({ success: true, data })),
@@ -76,7 +76,7 @@ describe('userProfileApi', () => {
   });
 
   it('getHabit returns habit profile', async () => {
-    const data = { preferredTimeSlot: 'morning', medianSessionMinutes: 30, dailyFrequency: 2 };
+    const data = { preferredHours: [9, 14, 20], medianSessionLengthMins: 15, sessionsPerDay: 1 };
     server.use(
       http.get(`${BASE}/api/user-profile/habit`, () =>
         HttpResponse.json({ success: true, data })),
@@ -86,12 +86,12 @@ describe('userProfileApi', () => {
   });
 
   it('updateHabit sends POST with partial data', async () => {
-    const updated = { preferredTimeSlot: 'evening', medianSessionMinutes: 45, dailyFrequency: 3 };
+    const updated = { preferredHours: [18, 19, 20], medianSessionLengthMins: 30, sessionsPerDay: 2 };
     server.use(
       http.post(`${BASE}/api/user-profile/habit`, () =>
         HttpResponse.json({ success: true, data: updated })),
     );
-    const result = await userProfileApi.updateHabit({ preferredTimeSlot: 'evening' });
+    const result = await userProfileApi.updateHabit({ preferredHours: [18, 19, 20] });
     expect(result).toEqual(updated);
   });
 });

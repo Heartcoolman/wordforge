@@ -7,7 +7,6 @@ export interface Word {
   difficulty: number;
   examples: string[];
   tags: string[];
-  embedding?: number[];
   createdAt: string;
 }
 
@@ -28,7 +27,7 @@ export interface BatchCreateRequest {
 
 export interface BatchCreateResponse {
   count: number;
-  skipped: number;
+  skipped: number[];
   items: Word[];
 }
 

@@ -24,7 +24,12 @@ export function ProgressBar(props: ProgressBarProps) {
 
   return (
     <div class={cn('w-full', props.class)}>
-      <div class={cn('w-full bg-surface-tertiary rounded-full overflow-hidden', heightMap[props.size ?? 'md'])}>
+      <div class={cn('w-full bg-surface-tertiary rounded-full overflow-hidden', heightMap[props.size ?? 'md'])}
+        role="progressbar"
+        aria-valuenow={props.value}
+        aria-valuemin={0}
+        aria-valuemax={props.max ?? 100}
+      >
         <div
           class={cn(
             'h-full rounded-full transition-all duration-500 ease-out',
@@ -61,7 +66,12 @@ export function CircularProgress(props: CircularProgressProps) {
   const offset = () => circumference() - (percent() / 100) * circumference();
 
   return (
-    <div class={cn('relative inline-flex items-center justify-center', props.class)}>
+    <div class={cn('relative inline-flex items-center justify-center', props.class)}
+      role="progressbar"
+      aria-valuenow={props.value}
+      aria-valuemin={0}
+      aria-valuemax={props.max ?? 100}
+    >
       <svg width={size()} height={size()} class="-rotate-90">
         <circle
           cx={size() / 2}

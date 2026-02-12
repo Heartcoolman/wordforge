@@ -11,6 +11,7 @@ pub mod llm_advisor;
 pub mod log_export;
 pub mod metrics_flush;
 pub mod monitoring_aggregate;
+pub mod password_reset_cleanup;
 pub mod session_cleanup;
 pub mod weekly_report;
 pub mod word_clustering;
@@ -30,12 +31,62 @@ use crate::store::Store;
 const WORKER_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Drain period before scheduler shutdown to let in-flight tasks complete.
+#[cfg(test)]
+const DRAIN_TIMEOUT: Duration = Duration::from_millis(10);
+#[cfg(not(test))]
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// 所有 worker 的枚举，消除字符串匹配，编译期保证完整性
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum WorkerName {
+    MetricsFlush,
+    SessionCleanup,
+    PasswordResetCleanup,
+    MonitoringAggregate,
+    LlmAdvisor,
+    DelayedReward,
+    ForgettingAlert,
+    AlgorithmOptimization,
+    CacheCleanup,
+    DailyAggregation,
+    HealthAnalysis,
+    EtymologyGeneration,
+    EmbeddingGeneration,
+    WordClustering,
+    ConfusionPairCache,
+    WeeklyReport,
+    LogExport,
+}
+
+impl WorkerName {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::MetricsFlush => "metrics_flush",
+            Self::SessionCleanup => "session_cleanup",
+            Self::PasswordResetCleanup => "password_reset_cleanup",
+            Self::MonitoringAggregate => "monitoring_aggregate",
+            Self::LlmAdvisor => "llm_advisor",
+            Self::DelayedReward => "delayed_reward",
+            Self::ForgettingAlert => "forgetting_alert",
+            Self::AlgorithmOptimization => "algorithm_optimization",
+            Self::CacheCleanup => "cache_cleanup",
+            Self::DailyAggregation => "daily_aggregation",
+            Self::HealthAnalysis => "health_analysis",
+            Self::EtymologyGeneration => "etymology_generation",
+            Self::EmbeddingGeneration => "embedding_generation",
+            Self::WordClustering => "word_clustering",
+            Self::ConfusionPairCache => "confusion_pair_cache",
+            Self::WeeklyReport => "weekly_report",
+            Self::LogExport => "log_export",
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobSpec {
-    pub name: &'static str,
+    pub name: WorkerName,
     pub cron: &'static str,
+    pub enabled: bool,
 }
 
 pub struct WorkerManager {
@@ -66,113 +117,104 @@ impl WorkerManager {
             return Vec::new();
         }
 
-        let mut jobs = Vec::new();
-
-        if self.config.enable_monitoring {
-            jobs.push(JobSpec {
-                name: "metrics_flush",
+        vec![
+            // 核心 worker —— 始终启用
+            JobSpec {
+                name: WorkerName::SessionCleanup,
+                cron: "0 0 * * * *",
+                enabled: true,
+            },
+            JobSpec {
+                name: WorkerName::PasswordResetCleanup,
+                cron: "0 30 * * * *",
+                enabled: true,
+            },
+            JobSpec {
+                name: WorkerName::DelayedReward,
+                cron: "0 */5 * * * *", // 降频: 每分钟 -> 每5分钟
+                enabled: true,
+            },
+            JobSpec {
+                name: WorkerName::ForgettingAlert,
+                cron: "0 30 6 * * *",
+                enabled: true,
+            },
+            JobSpec {
+                name: WorkerName::AlgorithmOptimization,
+                cron: "0 0 0 * * *",
+                enabled: true,
+            },
+            JobSpec {
+                name: WorkerName::CacheCleanup,
+                cron: "0 */10 * * * *",
+                enabled: true,
+            },
+            JobSpec {
+                name: WorkerName::DailyAggregation,
+                cron: "0 0 1 * * *",
+                enabled: true,
+            },
+            JobSpec {
+                name: WorkerName::HealthAnalysis,
+                cron: "0 0 5 * * 1",
+                enabled: true,
+            },
+            JobSpec {
+                name: WorkerName::ConfusionPairCache,
+                cron: "0 0 5 * * 0",
+                enabled: true,
+            },
+            JobSpec {
+                name: WorkerName::WeeklyReport,
+                cron: "0 30 6 * * 1",
+                enabled: true,
+            },
+            JobSpec {
+                name: WorkerName::LogExport,
+                cron: "0 0 * * * *",
+                enabled: true,
+            },
+            // 条件启用 worker
+            JobSpec {
+                name: WorkerName::MetricsFlush,
                 cron: "0 */5 * * * *",
-            });
-        }
-
-        jobs.push(JobSpec {
-            name: "session_cleanup",
-            cron: "0 0 * * * *",
-        });
-
-        if self.config.enable_monitoring {
-            jobs.push(JobSpec {
-                name: "monitoring_aggregate",
+                enabled: self.config.enable_monitoring,
+            },
+            JobSpec {
+                name: WorkerName::MonitoringAggregate,
                 cron: "0 */15 * * * *",
-            });
-        }
-
-        if self.config.enable_llm_advisor {
-            jobs.push(JobSpec {
-                name: "llm_advisor",
+                // WIP: 待监控聚合实现完成后启用
+                enabled: false,
+            },
+            JobSpec {
+                name: WorkerName::LlmAdvisor,
                 cron: "0 */20 * * * *",
-            });
-        }
-
-        // B43: Delayed reward (every minute)
-        jobs.push(JobSpec {
-            name: "delayed_reward",
-            cron: "0 * * * * *",
-        });
-
-        // B44: Forgetting alert (daily at 06:30, staggered)
-        jobs.push(JobSpec {
-            name: "forgetting_alert",
-            cron: "0 30 6 * * *",
-        });
-
-        // B45: Algorithm optimization (daily at 0:00)
-        jobs.push(JobSpec {
-            name: "algorithm_optimization",
-            cron: "0 0 0 * * *",
-        });
-
-        // B68: Cache cleanup (every 10 min)
-        jobs.push(JobSpec {
-            name: "cache_cleanup",
-            cron: "0 */10 * * * *",
-        });
-
-        // B69: Daily aggregation (1:00)
-        jobs.push(JobSpec {
-            name: "daily_aggregation",
-            cron: "0 0 1 * * *",
-        });
-
-        // B70: Health analysis (weekly Mon 5:00)
-        jobs.push(JobSpec {
-            name: "health_analysis",
-            cron: "0 0 5 * * 1",
-        });
-
-        // B71: Etymology generation (daily 3:30)
-        jobs.push(JobSpec {
-            name: "etymology_generation",
-            cron: "0 30 3 * * *",
-        });
-
-        // B72: Embedding generation (5min)
-        jobs.push(JobSpec {
-            name: "embedding_generation",
-            cron: "0 */5 * * * *",
-        });
-
-        // B73: Word clustering (weekly Sun 4:00)
-        jobs.push(JobSpec {
-            name: "word_clustering",
-            cron: "0 0 4 * * 0",
-        });
-
-        // B74: Confusion pair cache (weekly Sun 5:00)
-        jobs.push(JobSpec {
-            name: "confusion_pair_cache",
-            cron: "0 0 5 * * 0",
-        });
-
-        // B75: Weekly report (Mon 06:30, staggered from health_analysis)
-        jobs.push(JobSpec {
-            name: "weekly_report",
-            cron: "0 30 6 * * 1",
-        });
-
-        // B76: Log export (hourly)
-        jobs.push(JobSpec {
-            name: "log_export",
-            cron: "0 0 * * * *",
-        });
-
-        jobs
+                enabled: self.config.enable_llm_advisor,
+            },
+            // Stub workers —— 默认禁用
+            JobSpec {
+                name: WorkerName::EtymologyGeneration,
+                cron: "0 30 3 * * *",
+                // WIP: 待 LLM provider 就绪后启用
+                enabled: false,
+            },
+            JobSpec {
+                name: WorkerName::EmbeddingGeneration,
+                cron: "0 */5 * * * *",
+                // WIP: 待 LLM provider 就绪后启用
+                enabled: false,
+            },
+            JobSpec {
+                name: WorkerName::WordClustering,
+                cron: "0 0 4 * * 0",
+                // WIP: 待 LLM provider 就绪后启用
+                enabled: false,
+            },
+        ]
     }
 
     /// Start the worker scheduler. Returns an error if the scheduler cannot be created or started.
-    pub async fn start(
-        mut self,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn start(mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         if !self.config.is_leader {
             tracing::info!("Worker leader disabled; skipping worker startup");
             return Ok(());
@@ -187,7 +229,10 @@ impl WorkerManager {
         tracing::info!("Worker manager started");
         let _ = self.shutdown_rx.recv().await;
 
-        tracing::info!("Worker manager shutting down, draining for {}s", DRAIN_TIMEOUT.as_secs());
+        tracing::info!(
+            "Worker manager shutting down, draining for {}s",
+            DRAIN_TIMEOUT.as_secs()
+        );
         tokio::time::sleep(DRAIN_TIMEOUT).await;
         let _ = scheduler.shutdown().await;
         Ok(())
@@ -198,115 +243,174 @@ impl WorkerManager {
         let specs = self.planned_jobs();
 
         for spec in &specs {
+            if !spec.enabled {
+                tracing::info!(name = spec.name.as_str(), "Skipping disabled worker");
+                continue;
+            }
+
             let store = self.store.clone();
             let engine = self.amas_engine.clone();
-            let name = spec.name;
+            let name_str = spec.name.as_str();
 
-            match name {
-                "metrics_flush" => {
+            match spec.name {
+                WorkerName::MetricsFlush => {
                     let registry = engine.metrics_registry().clone();
-                    add_job(scheduler, spec.cron, name, move || {
+                    add_job(scheduler, spec.cron, name_str, move || {
                         let store = store.clone();
                         let registry = registry.clone();
-                        async move { metrics_flush::run(&registry, &store).await; }
-                    }).await;
+                        async move {
+                            metrics_flush::run(&registry, &store).await;
+                        }
+                    })
+                    .await;
                 }
-                "session_cleanup" => {
-                    add_job(scheduler, spec.cron, name, move || {
+                WorkerName::SessionCleanup => {
+                    add_job(scheduler, spec.cron, name_str, move || {
                         let store = store.clone();
-                        async move { session_cleanup::run(&store).await; }
-                    }).await;
+                        async move {
+                            session_cleanup::run(&store).await;
+                        }
+                    })
+                    .await;
                 }
-                "monitoring_aggregate" => {
-                    add_job(scheduler, spec.cron, name, move || {
+                WorkerName::PasswordResetCleanup => {
+                    add_job(scheduler, spec.cron, name_str, move || {
                         let store = store.clone();
-                        async move { monitoring_aggregate::run(&store).await; }
-                    }).await;
+                        async move {
+                            password_reset_cleanup::run(&store).await;
+                        }
+                    })
+                    .await;
                 }
-                "llm_advisor" => {
-                    add_job(scheduler, spec.cron, name, move || {
+                WorkerName::MonitoringAggregate => {
+                    add_job(scheduler, spec.cron, name_str, move || {
                         let store = store.clone();
-                        async move { llm_advisor::run(&store).await; }
-                    }).await;
+                        async move {
+                            monitoring_aggregate::run(&store).await;
+                        }
+                    })
+                    .await;
                 }
-                "delayed_reward" => {
-                    add_job(scheduler, spec.cron, name, move || {
+                WorkerName::LlmAdvisor => {
+                    add_job(scheduler, spec.cron, name_str, move || {
                         let store = store.clone();
-                        async move { delayed_reward::run(&store).await; }
-                    }).await;
+                        async move {
+                            llm_advisor::run(&store).await;
+                        }
+                    })
+                    .await;
                 }
-                "forgetting_alert" => {
-                    add_job(scheduler, spec.cron, name, move || {
+                WorkerName::DelayedReward => {
+                    add_job(scheduler, spec.cron, name_str, move || {
                         let store = store.clone();
-                        async move { forgetting_alert::run(&store).await; }
-                    }).await;
+                        async move {
+                            delayed_reward::run(&store).await;
+                        }
+                    })
+                    .await;
                 }
-                "algorithm_optimization" => {
-                    add_job(scheduler, spec.cron, name, move || {
+                WorkerName::ForgettingAlert => {
+                    add_job(scheduler, spec.cron, name_str, move || {
+                        let store = store.clone();
+                        async move {
+                            forgetting_alert::run(&store).await;
+                        }
+                    })
+                    .await;
+                }
+                WorkerName::AlgorithmOptimization => {
+                    add_job(scheduler, spec.cron, name_str, move || {
                         let store = store.clone();
                         let engine = engine.clone();
-                        async move { algorithm_optimization::run(&store, &engine).await; }
-                    }).await;
+                        async move {
+                            algorithm_optimization::run(&store, &engine).await;
+                        }
+                    })
+                    .await;
                 }
-                "cache_cleanup" => {
-                    add_job(scheduler, spec.cron, name, move || {
+                WorkerName::CacheCleanup => {
+                    add_job(scheduler, spec.cron, name_str, move || {
                         let store = store.clone();
-                        async move { cache_cleanup::run(&store).await; }
-                    }).await;
+                        async move {
+                            cache_cleanup::run(&store).await;
+                        }
+                    })
+                    .await;
                 }
-                "daily_aggregation" => {
-                    add_job(scheduler, spec.cron, name, move || {
+                WorkerName::DailyAggregation => {
+                    add_job(scheduler, spec.cron, name_str, move || {
                         let store = store.clone();
-                        async move { daily_aggregation::run(&store).await; }
-                    }).await;
+                        async move {
+                            daily_aggregation::run(&store).await;
+                        }
+                    })
+                    .await;
                 }
-                "health_analysis" => {
-                    add_job(scheduler, spec.cron, name, move || {
+                WorkerName::HealthAnalysis => {
+                    add_job(scheduler, spec.cron, name_str, move || {
                         let store = store.clone();
-                        async move { health_analysis::run(&store).await; }
-                    }).await;
+                        async move {
+                            health_analysis::run(&store).await;
+                        }
+                    })
+                    .await;
                 }
-                "etymology_generation" => {
-                    add_job(scheduler, spec.cron, name, move || {
+                WorkerName::EtymologyGeneration => {
+                    add_job(scheduler, spec.cron, name_str, move || {
                         let store = store.clone();
-                        async move { etymology_generation::run(&store).await; }
-                    }).await;
+                        async move {
+                            etymology_generation::run(&store).await;
+                        }
+                    })
+                    .await;
                 }
-                "embedding_generation" => {
-                    add_job(scheduler, spec.cron, name, move || {
+                WorkerName::EmbeddingGeneration => {
+                    add_job(scheduler, spec.cron, name_str, move || {
                         let store = store.clone();
-                        async move { embedding_generation::run(&store).await; }
-                    }).await;
+                        async move {
+                            embedding_generation::run(&store).await;
+                        }
+                    })
+                    .await;
                 }
-                "word_clustering" => {
-                    add_job(scheduler, spec.cron, name, move || {
+                WorkerName::WordClustering => {
+                    add_job(scheduler, spec.cron, name_str, move || {
                         let store = store.clone();
-                        async move { word_clustering::run(&store).await; }
-                    }).await;
+                        async move {
+                            word_clustering::run(&store).await;
+                        }
+                    })
+                    .await;
                 }
-                "confusion_pair_cache" => {
-                    add_job(scheduler, spec.cron, name, move || {
+                WorkerName::ConfusionPairCache => {
+                    add_job(scheduler, spec.cron, name_str, move || {
                         let store = store.clone();
-                        async move { confusion_pair_cache::run(&store).await; }
-                    }).await;
+                        async move {
+                            confusion_pair_cache::run(&store).await;
+                        }
+                    })
+                    .await;
                 }
-                "weekly_report" => {
-                    add_job(scheduler, spec.cron, name, move || {
+                WorkerName::WeeklyReport => {
+                    add_job(scheduler, spec.cron, name_str, move || {
                         let store = store.clone();
-                        async move { weekly_report::run(&store).await; }
-                    }).await;
+                        async move {
+                            weekly_report::run(&store).await;
+                        }
+                    })
+                    .await;
                 }
-                "log_export" => {
-                    add_job(scheduler, spec.cron, name, move || {
+                WorkerName::LogExport => {
+                    add_job(scheduler, spec.cron, name_str, move || {
                         let store = store.clone();
-                        async move { log_export::run(&store).await; }
-                    }).await;
-                }
-                unknown => {
-                    tracing::error!(name = unknown, "Unknown job name in planned_jobs");
+                        async move {
+                            log_export::run(&store).await;
+                        }
+                    })
+                    .await;
                 }
             }
-            tracing::info!(name, cron = spec.cron, "Registered worker");
+            tracing::info!(name = name_str, cron = spec.cron, "Registered worker");
         }
     }
 }
@@ -322,8 +426,14 @@ where
     let job = Job::new_async(cron, move |_uuid, _lock| {
         let guard = running.clone();
 
-        if guard.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
-            tracing::warn!(worker = name, "Skipping worker invocation: previous run still in progress");
+        if guard
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            tracing::warn!(
+                worker = name,
+                "Skipping worker invocation: previous run still in progress"
+            );
             return Box::pin(async {});
         }
 
@@ -332,7 +442,11 @@ where
             match tokio::time::timeout(WORKER_TIMEOUT, fut).await {
                 Ok(()) => {}
                 Err(_) => {
-                    tracing::warn!(worker = name, timeout_secs = WORKER_TIMEOUT.as_secs(), "Worker timed out");
+                    tracing::error!(
+                        worker = name,
+                        timeout_secs = WORKER_TIMEOUT.as_secs(),
+                        "Worker timed out"
+                    );
                 }
             }
             guard.store(false, Ordering::SeqCst);
@@ -367,7 +481,8 @@ mod tests {
     async fn leader_switch_controls_job_registration() {
         let cfg = Config::from_env();
         let tmp = tempfile::tempdir().expect("tempdir");
-        let store = Arc::new(Store::open(tmp.path().join("worker_test.sled").to_str().unwrap()).unwrap());
+        let store =
+            Arc::new(Store::open(tmp.path().join("worker_test.sled").to_str().unwrap()).unwrap());
         let amas = Arc::new(AMASEngine::new(AMASConfig::default(), store.clone()));
         let (tx, _) = broadcast::channel(2);
 
@@ -382,7 +497,8 @@ mod tests {
     async fn shutdown_path_is_non_panicking() {
         let cfg = Config::from_env();
         let tmp = tempfile::tempdir().expect("tempdir");
-        let store = Arc::new(Store::open(tmp.path().join("worker_test_2.sled").to_str().unwrap()).unwrap());
+        let store =
+            Arc::new(Store::open(tmp.path().join("worker_test_2.sled").to_str().unwrap()).unwrap());
         let amas = Arc::new(AMASEngine::new(AMASConfig::default(), store.clone()));
         let (tx, _) = broadcast::channel(2);
 
@@ -391,8 +507,74 @@ mod tests {
 
         let manager = WorkerManager::new(store, amas, tx.subscribe(), &worker_cfg);
         // start() now returns Result; non-leader returns Ok(())
-        manager.start().await.expect("non-leader start should succeed");
+        manager
+            .start()
+            .await
+            .expect("non-leader start should succeed");
 
         let _ = Utc::now();
+    }
+
+    #[tokio::test]
+    async fn stub_workers_disabled_by_default() {
+        let cfg = Config::from_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store =
+            Arc::new(Store::open(tmp.path().join("worker_test_3.sled").to_str().unwrap()).unwrap());
+        let amas = Arc::new(AMASEngine::new(AMASConfig::default(), store.clone()));
+        let (tx, _) = broadcast::channel(2);
+
+        let mut worker_cfg = cfg.worker.clone();
+        worker_cfg.is_leader = true;
+        worker_cfg.enable_monitoring = false;
+        worker_cfg.enable_llm_advisor = false;
+
+        let manager = WorkerManager::new(store, amas, tx.subscribe(), &worker_cfg);
+        let jobs = manager.planned_jobs();
+
+        let stub_names = [
+            WorkerName::EtymologyGeneration,
+            WorkerName::EmbeddingGeneration,
+            WorkerName::WordClustering,
+            WorkerName::MonitoringAggregate,
+            WorkerName::LlmAdvisor,
+        ];
+
+        for stub in &stub_names {
+            let spec = jobs.iter().find(|j| j.name == *stub);
+            assert!(
+                spec.map_or(true, |s| !s.enabled),
+                "{:?} should be disabled",
+                stub
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn all_worker_names_have_str() {
+        // 确保 WorkerName 枚举的每个变体都有对应的 as_str 映射
+        let names = [
+            WorkerName::MetricsFlush,
+            WorkerName::SessionCleanup,
+            WorkerName::PasswordResetCleanup,
+            WorkerName::MonitoringAggregate,
+            WorkerName::LlmAdvisor,
+            WorkerName::DelayedReward,
+            WorkerName::ForgettingAlert,
+            WorkerName::AlgorithmOptimization,
+            WorkerName::CacheCleanup,
+            WorkerName::DailyAggregation,
+            WorkerName::HealthAnalysis,
+            WorkerName::EtymologyGeneration,
+            WorkerName::EmbeddingGeneration,
+            WorkerName::WordClustering,
+            WorkerName::ConfusionPairCache,
+            WorkerName::WeeklyReport,
+            WorkerName::LogExport,
+        ];
+
+        for name in &names {
+            assert!(!name.as_str().is_empty(), "{:?} has empty str", name);
+        }
     }
 }

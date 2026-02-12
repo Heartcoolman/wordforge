@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeAll, afterAll, afterEach } from 'vitest
 import { setupServer } from 'msw/node';
 import { http, HttpResponse } from 'msw';
 
-const BASE = 'http://localhost:3000';
+import { TEST_BASE_URL as BASE } from '../helpers/constants';
 
 const server = setupServer();
 beforeAll(() => server.listen({ onUnhandledRequest: 'bypass' }));
@@ -104,9 +104,17 @@ describe('amasApi', () => {
   });
 
   it('getConfig returns AMAS config (admin)', async () => {
-    const config = { learningRate: 0.01, batchSize: 32 };
+    const config = {
+      featureFlags: { ensembleEnabled: true, heuristicEnabled: true, igeEnabled: true, swdEnabled: true, mdmEnabled: true },
+      ensemble: { baseWeightHeuristic: 0.2, baseWeightIge: 0.4, baseWeightSwd: 0.4, warmupSamples: 20, blendScale: 100, blendMax: 0.5, minWeight: 0.15 },
+      modeling: { attentionSmoothing: 0.3, confidenceDecay: 0.99, minConfidence: 0.1, fatigueIncreaseRate: 0.02, fatigueRecoveryRate: 0.001, motivationMomentum: 0.1, visualFatigueWeight: 0.3 },
+      constraints: { highFatigueThreshold: 0.9, lowAttentionThreshold: 0.3, lowMotivationThreshold: -0.5, maxBatchSizeWhenFatigued: 5, maxNewRatioWhenFatigued: 0.2, maxDifficultyWhenFatigued: 0.55 },
+      monitoring: { sampleRate: 0.05, metricsFlushIntervalSecs: 300 },
+      coldStart: { classifyToExploreEvents: 20, classifyToExploreConfidence: 0.6, exploreToExploitEvents: 80 },
+      objectiveWeights: { retention: 0.35, accuracy: 0.25, speed: 0.15, fatigue: 0.15, frustration: 0.1 },
+    };
     server.use(
-      http.get(`${BASE}/api/amas/config`, () =>
+      http.get(`${BASE}/api/admin/amas/config`, () =>
         HttpResponse.json({ success: true, data: config })),
     );
     const result = await amasApi.getConfig();
@@ -114,9 +122,17 @@ describe('amasApi', () => {
   });
 
   it('updateConfig sends config and returns updated status', async () => {
-    const config = { learningRate: 0.02, batchSize: 64 };
+    const config = {
+      featureFlags: { ensembleEnabled: true, heuristicEnabled: true, igeEnabled: true, swdEnabled: true, mdmEnabled: true },
+      ensemble: { baseWeightHeuristic: 0.2, baseWeightIge: 0.4, baseWeightSwd: 0.4, warmupSamples: 20, blendScale: 100, blendMax: 0.5, minWeight: 0.15 },
+      modeling: { attentionSmoothing: 0.3, confidenceDecay: 0.99, minConfidence: 0.1, fatigueIncreaseRate: 0.02, fatigueRecoveryRate: 0.001, motivationMomentum: 0.1, visualFatigueWeight: 0.3 },
+      constraints: { highFatigueThreshold: 0.9, lowAttentionThreshold: 0.3, lowMotivationThreshold: -0.5, maxBatchSizeWhenFatigued: 5, maxNewRatioWhenFatigued: 0.2, maxDifficultyWhenFatigued: 0.55 },
+      monitoring: { sampleRate: 0.05, metricsFlushIntervalSecs: 300 },
+      coldStart: { classifyToExploreEvents: 20, classifyToExploreConfidence: 0.6, exploreToExploitEvents: 80 },
+      objectiveWeights: { retention: 0.35, accuracy: 0.25, speed: 0.15, fatigue: 0.15, frustration: 0.1 },
+    };
     server.use(
-      http.put(`${BASE}/api/amas/config`, async ({ request }) => {
+      http.put(`${BASE}/api/admin/amas/config`, async ({ request }) => {
         const body = await request.json() as Record<string, unknown>;
         expect(body).toEqual(config);
         return HttpResponse.json({ success: true, data: { updated: true } });
@@ -127,9 +143,9 @@ describe('amasApi', () => {
   });
 
   it('getMetrics returns AMAS metrics (admin)', async () => {
-    const metrics = { totalUsers: 200, activeSessions: 15, avgAccuracy: 0.78, avgResponseTime: 1.2 };
+    const metrics = { heuristic: { callCount: 10, totalLatencyUs: 500, errorCount: 0 }, ige: { callCount: 5, totalLatencyUs: 300, errorCount: 1 } };
     server.use(
-      http.get(`${BASE}/api/amas/metrics`, () =>
+      http.get(`${BASE}/api/admin/amas/metrics`, () =>
         HttpResponse.json({ success: true, data: metrics })),
     );
     const result = await amasApi.getMetrics();
@@ -139,7 +155,7 @@ describe('amasApi', () => {
   it('getMonitoring sends limit as query param and returns events', async () => {
     const events = [{ timestamp: '2026-02-10T00:00:00Z', eventType: 'session_start', data: {} }];
     server.use(
-      http.get(`${BASE}/api/amas/monitoring`, ({ request }) => {
+      http.get(`${BASE}/api/admin/amas/monitoring`, ({ request }) => {
         const url = new URL(request.url);
         expect(url.searchParams.get('limit')).toBe('25');
         return HttpResponse.json({ success: true, data: events });
@@ -152,7 +168,7 @@ describe('amasApi', () => {
   it('getMonitoring uses default limit of 50', async () => {
     const events: any[] = [];
     server.use(
-      http.get(`${BASE}/api/amas/monitoring`, ({ request }) => {
+      http.get(`${BASE}/api/admin/amas/monitoring`, ({ request }) => {
         const url = new URL(request.url);
         expect(url.searchParams.get('limit')).toBe('50');
         return HttpResponse.json({ success: true, data: events });

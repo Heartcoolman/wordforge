@@ -1,10 +1,24 @@
+import type { PaginatedResponse } from './api';
+
 export interface AdminUser {
   id: string;
   email: string;
   username: string;
   isBanned: boolean;
+  failedLoginCount: number;
+  lockedUntil: string | null;
   createdAt: string;
+  updatedAt: string;
 }
+
+export interface AdminUsersQuery {
+  page?: number;
+  perPage?: number;
+  search?: string;
+  banned?: boolean;
+}
+
+export type AdminUsersPage = PaginatedResponse<AdminUser>;
 
 export interface AdminAuthResponse {
   token: string;
@@ -31,7 +45,7 @@ export interface LearningAnalytics {
 }
 
 export interface SystemHealth {
-  status: string;
+  status: 'healthy' | 'degraded' | 'down';
   dbSizeBytes: number;
   uptime: number;
   version: string;
@@ -40,7 +54,7 @@ export interface SystemHealth {
 export interface DatabaseInfo {
   sizeOnDisk: number;
   treeCount: number;
-  trees: Record<string, unknown>;
+  trees: string[];
 }
 
 export interface SystemSettings {
@@ -48,4 +62,5 @@ export interface SystemSettings {
   registrationEnabled: boolean;
   maintenanceMode: boolean;
   defaultDailyWords: number;
+  wordbookCenterUrl?: string;
 }

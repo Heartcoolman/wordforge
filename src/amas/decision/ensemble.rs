@@ -1,3 +1,8 @@
+// 集成模块硬编码为 3 个算法（Heuristic / IGE / SWD），因为：
+// 1. 权重归一化、TrustScores 和 get_weights 均假定恰好 3 个参与者
+// 2. min_weight 约束（3 * min_weight <= 1.0）同样依赖此数量
+// 若需新增算法，需同步修改 TrustScores、get_weights、config 验证及 update_trust。
+
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};

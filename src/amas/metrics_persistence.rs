@@ -1,5 +1,15 @@
 use crate::amas::metrics::{MetricsRegistry, MetricsSnapshot};
+use crate::amas::types::AlgorithmId;
 use crate::store::Store;
+
+const ALL_ALGORITHM_IDS: &[AlgorithmId] = &[
+    AlgorithmId::Heuristic,
+    AlgorithmId::Ige,
+    AlgorithmId::Swd,
+    AlgorithmId::Ensemble,
+    AlgorithmId::Mdm,
+    AlgorithmId::Mastery,
+];
 
 pub fn flush_metrics(
     registry: &MetricsRegistry,
@@ -25,8 +35,8 @@ pub fn flush_metrics(
             None => metrics.clone(),
         };
 
-        let value = serde_json::to_value(merged)
-            .map_err(|e| crate::store::StoreError::Serialization(e))?;
+        let value =
+            serde_json::to_value(merged).map_err(|e| crate::store::StoreError::Serialization(e))?;
         store.upsert_metrics_daily(&today, algo_id, &value)?;
     }
 
@@ -35,9 +45,20 @@ pub fn flush_metrics(
 }
 
 pub fn restore_from_store(
-    _registry: &MetricsRegistry,
-    _store: &Store,
+    registry: &MetricsRegistry,
+    store: &Store,
 ) -> Result<(), crate::store::StoreError> {
-    // TODO: restore today's metrics from store to registry on startup
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+
+    for algo in ALL_ALGORITHM_IDS {
+        let algo_id = algo.as_str();
+        if let Some(val) = store.get_metrics_daily(&today, algo_id)? {
+            if let Ok(snapshot) = serde_json::from_value::<MetricsSnapshot>(val) {
+                registry.restore(algo_id, &snapshot);
+            }
+        }
+    }
+
+    tracing::debug!("Metrics restored from store for {}", today);
     Ok(())
 }

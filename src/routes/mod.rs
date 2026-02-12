@@ -11,29 +11,46 @@ pub mod user_profile;
 pub mod users;
 pub mod v1;
 pub mod word_states;
+pub mod wordbook_center;
 pub mod wordbooks;
 pub mod words;
 
 use axum::extract::DefaultBodyLimit;
-use axum::http::StatusCode;
-use axum::response::IntoResponse;
-use axum::{Json, Router};
+use axum::Router;
 use tower_http::services::{ServeDir, ServeFile};
 
 use crate::middleware::{rate_limit, request_id};
-use crate::response::ErrorBody;
 use crate::state::AppState;
 
 /// Maximum request body size: 2 MiB.
 const MAX_BODY_SIZE: usize = 2 * 1024 * 1024;
 
 pub fn build_router(state: AppState) -> Router {
+    // 认证路由组添加专用速率限制
+    let auth_routes = auth::router().layer(axum::middleware::from_fn_with_state(
+        state.clone(),
+        rate_limit::auth_rate_limit_middleware,
+    ));
+
+    // admin 认证路由：写操作添加专用速率限制
+    let admin_auth_routes = admin::auth_router().layer(axum::middleware::from_fn_with_state(
+        state.clone(),
+        rate_limit::auth_rate_limit_middleware,
+    ));
+
+    // admin 认证公开路由（如 /status）不受 auth rate limit 约束
+    let admin_auth_public_routes = admin::auth_public_router();
+
     let api_routes = Router::new()
-        .nest("/auth", auth::router())
+        .nest("/auth", auth_routes)
         .nest("/users", users::router())
         .nest("/words", words::router())
         .nest("/records", records::router())
         .nest("/amas", admin::amas::router())
+        .nest(
+            "/admin/auth",
+            admin_auth_routes.merge(admin_auth_public_routes),
+        )
         .nest("/admin", admin::router())
         .nest("/realtime", realtime::router())
         .nest("/wordbooks", wordbooks::router())
@@ -43,6 +60,7 @@ pub fn build_router(state: AppState) -> Router {
         .nest("/user-profile", user_profile::router())
         .nest("/notifications", notifications::router())
         .nest("/content", content::router())
+        .nest("/wordbook-center", wordbook_center::user_router())
         .nest("/v1", v1::router())
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -51,7 +69,8 @@ pub fn build_router(state: AppState) -> Router {
         .layer(DefaultBodyLimit::max(MAX_BODY_SIZE));
 
     // B29: Static file serving with SPA fallback
-    let spa_fallback = ServeDir::new("static").not_found_service(ServeFile::new("static/index.html"));
+    let spa_fallback =
+        ServeDir::new("static").not_found_service(ServeFile::new("static/index.html"));
 
     Router::new()
         .nest("/api", api_routes)
@@ -59,18 +78,4 @@ pub fn build_router(state: AppState) -> Router {
         .fallback_service(spa_fallback)
         .layer(axum::middleware::from_fn(request_id::request_id_middleware))
         .with_state(state)
-}
-
-#[allow(dead_code)]
-async fn fallback_404() -> impl IntoResponse {
-    (
-        StatusCode::NOT_FOUND,
-        Json(ErrorBody {
-            success: false,
-            error: "Not found".to_string(),
-            code: "NOT_FOUND".to_string(),
-            message: "Not found".to_string(),
-            trace_id: None,
-        }),
-    )
 }
