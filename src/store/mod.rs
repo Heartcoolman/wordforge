@@ -39,6 +39,7 @@ pub struct Store {
     pub etymologies: sled::Tree,
     pub word_morphemes: sled::Tree,
     pub confusion_pairs: sled::Tree,
+    pub wb_center_imports: sled::Tree,
 }
 
 #[derive(Debug, Error)]
@@ -94,6 +95,7 @@ impl Store {
         let etymologies = db.open_tree(trees::ETYMOLOGIES)?;
         let word_morphemes = db.open_tree(trees::WORD_MORPHEMES)?;
         let confusion_pairs = db.open_tree(trees::CONFUSION_PAIRS)?;
+        let wb_center_imports = db.open_tree(trees::WB_CENTER_IMPORTS)?;
 
         Ok(Self {
             db,
@@ -123,6 +125,7 @@ impl Store {
             etymologies,
             word_morphemes,
             confusion_pairs,
+            wb_center_imports,
         })
     }
 

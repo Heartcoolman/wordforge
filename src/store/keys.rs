@@ -231,6 +231,19 @@ pub fn word_morpheme_key(word_id: &str) -> Result<String, StoreError> {
     Ok(validate_id(word_id)?.to_string())
 }
 
+// Wordbook center import keys
+pub fn wb_center_import_key(source_url_hash_prefix: &str, remote_id: &str) -> Result<String, StoreError> {
+    Ok(format!(
+        "{}:{}",
+        validate_id(source_url_hash_prefix)?,
+        validate_id(remote_id)?
+    ))
+}
+
+pub fn wb_center_import_prefix(source_url_hash_prefix: &str) -> Result<String, StoreError> {
+    Ok(format!("{}:", validate_id(source_url_hash_prefix)?))
+}
+
 // ELO rating keys
 pub fn user_elo_key(user_id: &str) -> Result<String, StoreError> {
     Ok(format!("user_elo:{}", validate_id(user_id)?))

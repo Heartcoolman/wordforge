@@ -51,6 +51,7 @@ pub fn router() -> Router<AppState> {
         .nest("/monitoring", monitoring::router())
         .nest("/broadcast", broadcast::router())
         .nest("/settings", settings::router())
+        .nest("/wordbook-center", super::wordbook_center::admin_router())
         .nest("/amas", amas::admin_router())
         .route("/users", get(list_users))
         .route("/users/:id/ban", post(ban_user))

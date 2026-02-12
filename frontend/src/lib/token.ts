@@ -92,11 +92,16 @@ export const tokenManager = {
     return this.getToken() !== null;
   },
 
-  // Admin token management (in-memory only, same as access token)
+  // Admin token management — persisted to localStorage for page refresh survival
   getAdminToken(): string | null {
+    if (!inMemoryAdminToken) {
+      const stored = storage.get<string | null>(STORAGE_KEYS.ADMIN_TOKEN, null);
+      if (stored) inMemoryAdminToken = stored;
+    }
     if (!inMemoryAdminToken) return null;
     if (isTokenExpired(inMemoryAdminToken)) {
       inMemoryAdminToken = null;
+      storage.remove(STORAGE_KEYS.ADMIN_TOKEN);
       return null;
     }
     return inMemoryAdminToken;
@@ -104,7 +109,7 @@ export const tokenManager = {
 
   setAdminToken(token: string): void {
     inMemoryAdminToken = token;
-    storage.remove(STORAGE_KEYS.ADMIN_TOKEN);
+    storage.set(STORAGE_KEYS.ADMIN_TOKEN, token);
   },
 
   clearAdminToken(): void {

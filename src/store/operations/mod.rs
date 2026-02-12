@@ -8,6 +8,7 @@ pub mod sessions;
 pub mod study_configs;
 pub mod system_settings;
 pub mod users;
+pub mod wb_center;
 pub mod word_states;
 pub mod wordbooks;
 pub mod words;

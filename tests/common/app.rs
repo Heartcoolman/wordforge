@@ -37,6 +37,7 @@ async fn spawn_with_limits(api_limit: u64) -> TestApp {
         jwt_secret: test_secret,
         refresh_jwt_secret: test_refresh_secret,
         jwt_expires_in_hours: 24,
+        refresh_token_expires_in_hours: 168,
         admin_jwt_secret: test_admin_secret,
         admin_jwt_expires_in_hours: 2,
         cors_origin: "http://localhost:5173".to_string(),
@@ -45,6 +46,7 @@ async fn spawn_with_limits(api_limit: u64) -> TestApp {
             window_secs: 60,
             max_requests: api_limit,
         },
+        auth_rate_limit: Default::default(),
         worker: learning_backend::config::WorkerConfig {
             is_leader: false,
             enable_llm_advisor: false,

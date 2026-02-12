@@ -14,6 +14,7 @@ export default function SettingsPage() {
     registrationEnabled: boolean;
     maintenanceMode: boolean;
     defaultDailyWords: number;
+    wordbookCenterUrl?: string;
   } | null>(null);
   const [loading, setLoading] = createSignal(true);
   const [saving, setSaving] = createSignal(false);
@@ -144,6 +145,12 @@ export default function SettingsPage() {
                   checked={s().maintenanceMode}
                   onChange={handleMaintenanceToggle}
                   label="维护模式"
+                />
+                <Input
+                  label="词书中心 URL"
+                  value={s().wordbookCenterUrl || ''}
+                  onInput={(e) => updateField('wordbookCenterUrl', e.currentTarget.value || undefined)}
+                  placeholder="https://cdn.example.com/wordbooks"
                 />
                 <div class="pt-2">
                   <Button onClick={saveSettings} loading={saving()}>保存设置</Button>

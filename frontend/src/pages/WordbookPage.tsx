@@ -1,4 +1,5 @@
 import { createSignal, Show, For, onMount } from 'solid-js';
+import { useNavigate } from '@solidjs/router';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Badge } from '@/components/ui/Badge';
@@ -12,6 +13,7 @@ import { studyConfigApi } from '@/api/studyConfig';
 import type { Wordbook } from '@/types/wordbook';
 
 export default function WordbookPage() {
+  const navigate = useNavigate();
   const [systemBooks, setSystemBooks] = createSignal<Wordbook[]>([]);
   const [userBooks, setUserBooks] = createSignal<Wordbook[]>([]);
   const [selectedIds, setSelectedIds] = createSignal<string[]>([]);
@@ -100,7 +102,10 @@ export default function WordbookPage() {
     <div class="space-y-6 animate-fade-in-up">
       <div class="flex items-center justify-between">
         <h1 class="text-2xl font-bold text-content">词书管理</h1>
-        <Button onClick={() => setShowCreate(true)} size="sm">创建词书</Button>
+        <div class="flex gap-2">
+          <Button onClick={() => navigate('/wordbook-center')} size="sm" variant="ghost">词书中心</Button>
+          <Button onClick={() => setShowCreate(true)} size="sm">创建词书</Button>
+        </div>
       </div>
 
       <Show when={!loading()} fallback={<div class="flex justify-center py-12"><Spinner size="lg" /></div>}>

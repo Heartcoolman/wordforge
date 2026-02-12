@@ -41,3 +41,4 @@ pub const USER_PREFERENCES: &str = "user_preferences";
 pub const ETYMOLOGIES: &str = "etymologies";
 pub const WORD_MORPHEMES: &str = "word_morphemes";
 pub const CONFUSION_PAIRS: &str = "confusion_pairs";
+pub const WB_CENTER_IMPORTS: &str = "wb_center_imports";

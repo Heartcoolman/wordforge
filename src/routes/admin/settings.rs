@@ -23,6 +23,7 @@ struct UpdateSystemSettings {
     registration_enabled: Option<bool>,
     maintenance_mode: Option<bool>,
     default_daily_words: Option<u32>,
+    wordbook_center_url: Option<String>,
 }
 
 impl UpdateSystemSettings {
@@ -75,6 +76,9 @@ async fn update_settings(
     }
     if let Some(v) = req.default_daily_words {
         settings.default_daily_words = v;
+    }
+    if let Some(ref v) = req.wordbook_center_url {
+        settings.wordbook_center_url = if v.is_empty() { None } else { Some(v.clone()) };
     }
 
     state.store().save_system_settings(&settings)?;

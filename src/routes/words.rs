@@ -391,7 +391,7 @@ async fn import_from_url(
     })))
 }
 
-fn validate_import_url(raw_url: &str) -> Result<reqwest::Url, AppError> {
+pub(crate) fn validate_import_url(raw_url: &str) -> Result<reqwest::Url, AppError> {
     let parsed = reqwest::Url::parse(raw_url)
         .map_err(|e| AppError::bad_request("IMPORT_INVALID_URL", &format!("Invalid URL: {e}")))?;
 
@@ -429,7 +429,7 @@ fn validate_import_url(raw_url: &str) -> Result<reqwest::Url, AppError> {
     Ok(parsed)
 }
 
-async fn resolve_import_url_addrs(
+pub(crate) async fn resolve_import_url_addrs(
     url: &reqwest::Url,
 ) -> Result<(String, Vec<SocketAddr>), AppError> {
     let host = url
@@ -471,7 +471,7 @@ fn ensure_public_import_addrs(addrs: Vec<SocketAddr>) -> Result<Vec<SocketAddr>,
     Ok(addrs)
 }
 
-fn is_private_ip(ip: IpAddr) -> bool {
+pub(crate) fn is_private_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
             v4.is_loopback()

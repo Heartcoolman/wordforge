@@ -62,4 +62,5 @@ export interface SystemSettings {
   registrationEnabled: boolean;
   maintenanceMode: boolean;
   defaultDailyWords: number;
+  wordbookCenterUrl?: string;
 }
