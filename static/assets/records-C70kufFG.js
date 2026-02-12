@@ -1,1 +1,0 @@
-import{q as s}from"./index-6s_4JTtF.js";const e={list:t=>s.get("/api/records",t),create:t=>s.post("/api/records",t),batchCreate:t=>s.post("/api/records/batch",{records:t}),statistics:()=>s.get("/api/records/statistics"),enhancedStatistics:()=>s.get("/api/records/statistics/enhanced")};export{e as r};

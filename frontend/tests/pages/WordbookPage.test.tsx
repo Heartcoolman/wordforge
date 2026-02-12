@@ -36,7 +36,7 @@ function createFakeWordbook(overrides?: Partial<Wordbook>): Wordbook {
     id: `wb-${Math.random().toString(36).slice(2)}`,
     name: 'Test Book',
     description: 'A test wordbook',
-    bookType: 'System' as const,
+    type: 'system' as const,
     wordCount: 100,
     userId: 'user-1',
     createdAt: new Date().toISOString(),
@@ -76,8 +76,8 @@ describe('WordbookPage', () => {
 
   it('shows system wordbooks section', async () => {
     const sysBooks = [
-      createFakeWordbook({ name: 'CET4 词汇', bookType: 'System', wordCount: 2000 }),
-      createFakeWordbook({ name: 'CET6 词汇', bookType: 'System', wordCount: 3000 }),
+      createFakeWordbook({ name: 'CET4 词汇', type: 'system', wordCount: 2000 }),
+      createFakeWordbook({ name: 'CET6 词汇', type: 'system', wordCount: 3000 }),
     ];
     mockWordbooksApi.getSystem.mockResolvedValue(sysBooks);
     mockWordbooksApi.getUser.mockResolvedValue([]);
@@ -118,7 +118,7 @@ describe('WordbookPage', () => {
 
   describe('Toggle select', () => {
     it('calls studyConfigApi.update when clicking a wordbook card', async () => {
-      const book = createFakeWordbook({ id: 'wb-1', name: 'CET4', bookType: 'System' });
+      const book = createFakeWordbook({ id: 'wb-1', name: 'CET4', type: 'system' });
       mockWordbooksApi.getSystem.mockResolvedValue([book]);
       mockWordbooksApi.getUser.mockResolvedValue([]);
       mockStudyConfigApi.get.mockResolvedValue({ selectedWordbookIds: [] });
@@ -140,7 +140,7 @@ describe('WordbookPage', () => {
     });
 
     it('deselects when clicking an already-selected book', async () => {
-      const book = createFakeWordbook({ id: 'wb-1', name: 'CET4', bookType: 'System' });
+      const book = createFakeWordbook({ id: 'wb-1', name: 'CET4', type: 'system' });
       mockWordbooksApi.getSystem.mockResolvedValue([book]);
       mockWordbooksApi.getUser.mockResolvedValue([]);
       mockStudyConfigApi.get.mockResolvedValue({ selectedWordbookIds: ['wb-1'] });
@@ -164,7 +164,7 @@ describe('WordbookPage', () => {
 
   describe('Selected count', () => {
     it('shows selected count when books are selected', async () => {
-      const book = createFakeWordbook({ id: 'wb-1', name: 'CET4', bookType: 'System' });
+      const book = createFakeWordbook({ id: 'wb-1', name: 'CET4', type: 'system' });
       mockWordbooksApi.getSystem.mockResolvedValue([book]);
       mockWordbooksApi.getUser.mockResolvedValue([]);
       mockStudyConfigApi.get.mockResolvedValue({ selectedWordbookIds: ['wb-1'] });
@@ -217,7 +217,7 @@ describe('WordbookPage', () => {
 
   describe('Optimistic rollback', () => {
     it('reverts selection and shows error on update failure', async () => {
-      const book = createFakeWordbook({ id: 'wb-1', name: 'CET4', bookType: 'System' });
+      const book = createFakeWordbook({ id: 'wb-1', name: 'CET4', type: 'system' });
       mockWordbooksApi.getSystem.mockResolvedValue([book]);
       mockWordbooksApi.getUser.mockResolvedValue([]);
       mockStudyConfigApi.get.mockResolvedValue({ selectedWordbookIds: [] });

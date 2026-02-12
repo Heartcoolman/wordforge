@@ -1,1 +1,0 @@
-import{q as t}from"./index-6s_4JTtF.js";const s={get(){return t.get("/api/study-config")},update(r){return t.put("/api/study-config",r)},getTodayWords(){return t.get("/api/study-config/today-words")},getProgress(){return t.get("/api/study-config/progress")}};export{s};

@@ -3,13 +3,14 @@ mod common;
 use axum::http::{Method, StatusCode};
 
 use common::app::spawn_test_server;
-use common::auth::{auth_header, login_and_get_token};
+use common::auth::{auth_header, login_and_get_token, setup_admin_and_get_token};
 use common::http::{request, response_json};
 
 #[tokio::test]
 async fn at_full_flow_smoke() {
     let app = spawn_test_server().await;
     let token = login_and_get_token(&app.app).await;
+    let admin_token = setup_admin_and_get_token(&app.app).await;
 
     let create_word = request(
         &app.app,
@@ -20,10 +21,16 @@ async fn at_full_flow_smoke() {
             "meaning": "流程词",
             "difficulty": 0.3
         })),
-        &[("authorization", auth_header(&token))],
+        &[("authorization", auth_header(&admin_token))],
     )
     .await;
     let (word_status, _, word_body) = response_json(create_word).await;
+    if word_status != StatusCode::CREATED {
+        eprintln!(
+            "DEBUG word create response: status={}, body={}",
+            word_status, word_body
+        );
+    }
     assert_eq!(word_status, StatusCode::CREATED);
     let word_id = word_body["data"]["id"].as_str().unwrap().to_string();
 

@@ -7,6 +7,14 @@ afterEach(() => {
   localStorage.clear();
 });
 
+// Mock navigator.sendBeacon (not available in jsdom)
+if (!navigator.sendBeacon) {
+  Object.defineProperty(navigator, 'sendBeacon', {
+    writable: true,
+    value: vi.fn(() => true),
+  });
+}
+
 // Mock matchMedia
 Object.defineProperty(window, 'matchMedia', {
   writable: true,

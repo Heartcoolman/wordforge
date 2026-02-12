@@ -18,20 +18,71 @@ const sizeMap = {
   xl: 'max-w-xl',
 };
 
+const FOCUSABLE_SELECTOR =
+  'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+// 嵌套 Modal 引用计数，确保只有最后一个 Modal 关闭时才恢复 body overflow
+let openModalCount = 0;
+
 export function Modal(props: ModalProps) {
+  let dialogRef: HTMLDivElement | undefined;
+  let previouslyFocused: HTMLElement | null = null;
+
   createEffect(() => {
     if (props.open) {
+      previouslyFocused = document.activeElement as HTMLElement | null;
+      openModalCount++;
       document.body.style.overflow = 'hidden';
+
+      // 焦点陷阱：聚焦第一个可交互元素
+      requestAnimationFrame(() => {
+        if (dialogRef) {
+          const first = dialogRef.querySelector<HTMLElement>(FOCUSABLE_SELECTOR);
+          first?.focus();
+        }
+      });
+
       const handler = (e: KeyboardEvent) => {
-        if (e.key === 'Escape') props.onClose();
+        if (e.key === 'Escape') {
+          props.onClose();
+          return;
+        }
+
+        // 焦点陷阱：Tab 键循环
+        if (e.key === 'Tab' && dialogRef) {
+          const focusable = Array.from(dialogRef.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR));
+          if (focusable.length === 0) return;
+          const first = focusable[0];
+          const last = focusable[focusable.length - 1];
+
+          if (e.shiftKey) {
+            if (document.activeElement === first) {
+              e.preventDefault();
+              last.focus();
+            }
+          } else {
+            if (document.activeElement === last) {
+              e.preventDefault();
+              first.focus();
+            }
+          }
+        }
       };
       document.addEventListener('keydown', handler);
       onCleanup(() => {
         document.removeEventListener('keydown', handler);
-        document.body.style.overflow = '';
+        openModalCount--;
+        if (openModalCount <= 0) {
+          openModalCount = 0;
+          document.body.style.overflow = '';
+        }
+        previouslyFocused?.focus();
       });
     } else {
-      document.body.style.overflow = '';
+      // 仅在没有其他打开的 Modal 时恢复 overflow
+      if (openModalCount <= 0) {
+        document.body.style.overflow = '';
+      }
     }
   });
 
@@ -46,6 +97,7 @@ export function Modal(props: ModalProps) {
           />
           {/* Content */}
           <div
+            ref={dialogRef}
             role="dialog"
             aria-modal="true"
             aria-label={props.title}
@@ -63,6 +115,7 @@ export function Modal(props: ModalProps) {
                 <Show when={!props.hideClose}>
                   <button
                     onClick={props.onClose}
+                    aria-label="关闭"
                     class="p-1.5 rounded-lg text-content-tertiary hover:text-content hover:bg-surface-secondary transition-colors cursor-pointer"
                   >
                     <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">

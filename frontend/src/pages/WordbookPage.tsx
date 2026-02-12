@@ -40,6 +40,7 @@ export default function WordbookPage() {
   onMount(load);
 
   async function toggleSelect(id: string) {
+    if (saving()) return; // 请求进行中禁用点击
     const current = selectedIds();
     const next = current.includes(id) ? current.filter((x) => x !== id) : [...current, id];
     setSelectedIds(next);
@@ -60,10 +61,19 @@ export default function WordbookPage() {
     return (
       <Card
         variant={isSelected() ? 'filled' : 'outlined'}
-        hover
+        hover={!saving()}
         padding="md"
         onClick={() => toggleSelect(props.book.id)}
-        class={isSelected() ? 'ring-2 ring-accent' : ''}
+        class={`${isSelected() ? 'ring-2 ring-accent' : ''} ${saving() ? 'opacity-60 pointer-events-none' : ''}`}
+        role="button"
+        tabIndex={0}
+        aria-label={`${props.book.name}${isSelected() ? '（已选）' : ''}`}
+        onKeyDown={(e: KeyboardEvent) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            toggleSelect(props.book.id);
+          }
+        }}
       >
         <div class="flex items-start justify-between">
           <div>
@@ -72,8 +82,8 @@ export default function WordbookPage() {
               <p class="text-sm text-content-secondary mt-1">{props.book.description}</p>
             </Show>
           </div>
-          <Badge variant={props.book.bookType === 'System' ? 'info' : 'accent'} size="sm">
-            {props.book.bookType === 'System' ? '系统' : '自定义'}
+          <Badge variant={props.book.type === 'system' ? 'info' : 'accent'} size="sm">
+            {props.book.type === 'system' ? '系统' : '自定义'}
           </Badge>
         </div>
         <div class="flex items-center gap-3 mt-3 text-xs text-content-tertiary">

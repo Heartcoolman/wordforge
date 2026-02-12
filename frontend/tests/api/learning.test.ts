@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeAll, afterAll, afterEach } from 'vitest
 import { setupServer } from 'msw/node';
 import { http, HttpResponse } from 'msw';
 
-const BASE = 'http://localhost:3000';
+import { TEST_BASE_URL as BASE } from '../helpers/constants';
 
 vi.mock('@/lib/token', () => ({
   tokenManager: {
@@ -10,9 +10,11 @@ vi.mock('@/lib/token', () => ({
     getAdminToken: () => null,
     setTokens: vi.fn(),
     clearTokens: vi.fn(),
+    clearAdminToken: vi.fn(),
     needsRefresh: () => false,
     isAuthenticated: () => false,
     setAdminToken: vi.fn(),
+    refreshAccessToken: vi.fn().mockResolvedValue(false),
   },
 }));
 vi.mock('@/api/auth', () => ({ authApi: { refresh: vi.fn() } }));
@@ -37,7 +39,7 @@ describe('learningApi', () => {
   it('getStudyWords fetches study words', async () => {
     const data = { words: [{ id: 'w1', text: 'test', meaning: '测试' }] };
     server.use(
-      http.post(`${BASE}/api/learning/study-words`, () =>
+      http.get(`${BASE}/api/learning/study-words`, () =>
         HttpResponse.json({ success: true, data })),
     );
     const result = await learningApi.getStudyWords();
@@ -50,7 +52,7 @@ describe('learningApi', () => {
       http.post(`${BASE}/api/learning/next-words`, () =>
         HttpResponse.json({ success: true, data })),
     );
-    const result = await learningApi.getNextWords({ sessionId: 'sess-1', count: 5 });
+    const result = await learningApi.getNextWords({ excludeWordIds: ['w1'], masteredWordIds: [] });
     expect(result).toEqual(data);
   });
 
@@ -70,7 +72,7 @@ describe('learningApi', () => {
       http.post(`${BASE}/api/learning/sync-progress`, () =>
         HttpResponse.json({ success: true, data: session })),
     );
-    const result = await learningApi.syncProgress({ sessionId: 'sess-1', results: [] });
+    const result = await learningApi.syncProgress({ sessionId: 'sess-1', totalQuestions: 10 });
     expect(result).toEqual(session);
   });
 });

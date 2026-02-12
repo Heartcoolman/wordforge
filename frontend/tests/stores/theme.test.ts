@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-const THEME_KEY = 'theme';
+const THEME_KEY = 'eng_theme';
 
 async function getFreshStore() {
   vi.resetModules();
@@ -63,7 +63,7 @@ describe('themeStore', () => {
     expect(document.documentElement.classList.contains('dark')).toBe(false);
   });
 
-  it('mode persists to localStorage with raw theme key', async () => {
+  it('mode persists to localStorage with eng_theme key', async () => {
     const store = await getFreshStore();
     store.setMode('dark');
     expect(localStorage.getItem(THEME_KEY)).toBe('dark');

@@ -1,8 +1,8 @@
-import { createSignal, Show, For, onMount } from 'solid-js';
+import { createSignal, Show, For, onMount, onCleanup } from 'solid-js';
 import { Card } from '@/components/ui/Card';
 import { Spinner } from '@/components/ui/Spinner';
 import { ProgressBar } from '@/components/ui/Progress';
-import { uiStore } from '@/stores/ui';
+import { Empty } from '@/components/ui/Empty';
 import { usersApi } from '@/api/users';
 import { recordsApi } from '@/api/records';
 import { amasApi } from '@/api/amas';
@@ -12,6 +12,7 @@ import type { EnhancedStatistics } from '@/types/record';
 import type { AmasUserState } from '@/types/amas';
 import type { WordStateOverview } from '@/types/wordState';
 import { formatPercent, formatNumber } from '@/utils/formatters';
+import { DAILY_CHART_DAYS, ACCURACY_HIGH_THRESHOLD, ACCURACY_MID_THRESHOLD } from '@/lib/constants';
 
 export default function StatisticsPage() {
   const [stats, setStats] = createSignal<UserStats | null>(null);
@@ -19,24 +20,36 @@ export default function StatisticsPage() {
   const [amasState, setAmasState] = createSignal<AmasUserState | null>(null);
   const [wordOverview, setWordOverview] = createSignal<WordStateOverview | null>(null);
   const [loading, setLoading] = createSignal(true);
+  const [sseConnected, setSseConnected] = createSignal(false);
+  let unsubscribeStateEvents: (() => void) | undefined;
 
   onMount(async () => {
-    try {
-      const [s, e, a, w] = await Promise.allSettled([
-        usersApi.getStats(),
-        recordsApi.enhancedStatistics(),
-        amasApi.getState(),
-        wordStatesApi.getOverview(),
-      ]);
-      if (s.status === 'fulfilled') setStats(s.value);
-      if (e.status === 'fulfilled') setEnhanced(e.value);
-      if (a.status === 'fulfilled') setAmasState(a.value);
-      if (w.status === 'fulfilled') setWordOverview(w.value);
-    } catch (err: unknown) {
-      uiStore.toast.error('加载统计失败', err instanceof Error ? err.message : '');
-    } finally {
-      setLoading(false);
-    }
+    const [s, e, a, w] = await Promise.allSettled([
+      usersApi.getStats(),
+      recordsApi.enhancedStatistics(),
+      amasApi.getState(),
+      wordStatesApi.getOverview(),
+    ]);
+    if (s.status === 'fulfilled') setStats(s.value);
+    if (e.status === 'fulfilled') setEnhanced(e.value);
+    if (a.status === 'fulfilled') setAmasState(a.value);
+    if (w.status === 'fulfilled') setWordOverview(w.value);
+    setLoading(false);
+
+    unsubscribeStateEvents = amasApi.subscribeStateEvents((event) => {
+      setSseConnected(true);
+      setAmasState((prev) => {
+        if (!prev) return { ...event, createdAt: new Date().toISOString() };
+        return {
+          ...prev,
+          ...event,
+        };
+      });
+    });
+  });
+
+  onCleanup(() => {
+    unsubscribeStateEvents?.();
   });
 
   return (
@@ -44,6 +57,9 @@ export default function StatisticsPage() {
       <h1 class="text-2xl font-bold text-content">学习统计</h1>
 
       <Show when={!loading()} fallback={<div class="flex justify-center py-12"><Spinner size="lg" /></div>}>
+        <Show when={stats() || enhanced() || amasState() || wordOverview()} fallback={
+          <Empty title="暂无统计数据" description="开始学习后，你的学习统计将显示在这里" />
+        }>
         {/* Overview Cards */}
         <Show when={stats()}>
           {(s) => (
@@ -59,13 +75,13 @@ export default function StatisticsPage() {
         {/* Word State Distribution */}
         <Show when={wordOverview()}>
           {(wo) => {
-            const total = () => wo().new + wo().learning + wo().reviewing + wo().mastered;
+            const total = () => wo().newCount + wo().learning + wo().reviewing + wo().mastered + wo().forgotten;
             return (
               <Card variant="elevated">
                 <h2 class="text-lg font-semibold text-content mb-4">单词状态分布</h2>
-                <div class="grid grid-cols-4 gap-4 mb-4">
+                <div class="grid grid-cols-2 md:grid-cols-5 gap-4 mb-4">
                   <div class="text-center">
-                    <p class="text-xl font-bold text-content-tertiary">{wo().new}</p>
+                    <p class="text-xl font-bold text-content-tertiary">{wo().newCount}</p>
                     <p class="text-xs text-content-secondary">新单词</p>
                   </div>
                   <div class="text-center">
@@ -80,13 +96,18 @@ export default function StatisticsPage() {
                     <p class="text-xl font-bold text-success">{wo().mastered}</p>
                     <p class="text-xs text-content-secondary">已掌握</p>
                   </div>
+                  <div class="text-center">
+                    <p class="text-xl font-bold text-error">{wo().forgotten}</p>
+                    <p class="text-xs text-content-secondary">已遗忘</p>
+                  </div>
                 </div>
                 <Show when={total() > 0}>
                   <div class="flex rounded-full overflow-hidden h-3">
-                    <div class="bg-surface-tertiary" style={{ width: `${(wo().new / total()) * 100}%` }} />
+                    <div class="bg-surface-tertiary" style={{ width: `${(wo().newCount / total()) * 100}%` }} />
                     <div class="bg-info" style={{ width: `${(wo().learning / total()) * 100}%` }} />
                     <div class="bg-warning" style={{ width: `${(wo().reviewing / total()) * 100}%` }} />
                     <div class="bg-success" style={{ width: `${(wo().mastered / total()) * 100}%` }} />
+                    <div class="bg-error" style={{ width: `${(wo().forgotten / total()) * 100}%` }} />
                   </div>
                 </Show>
               </Card>
@@ -98,7 +119,13 @@ export default function StatisticsPage() {
         <Show when={amasState()}>
           {(state) => (
             <Card variant="elevated">
-              <h2 class="text-lg font-semibold text-content mb-4">认知状态</h2>
+              <div class="flex items-center justify-between mb-4">
+                <h2 class="text-lg font-semibold text-content">认知状态</h2>
+                <span class={`inline-flex items-center gap-1.5 text-xs ${sseConnected() ? 'text-success' : 'text-content-tertiary'}`}>
+                  <span class={`w-2 h-2 rounded-full ${sseConnected() ? 'bg-success animate-pulse' : 'bg-content-tertiary'}`} />
+                  {sseConnected() ? '实时更新中' : '等待连接'}
+                </span>
+              </div>
               <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
                 <StateBar label="注意力" value={state().attention} color="accent" />
                 <StateBar label="疲劳度" value={state().fatigue} color="error" />
@@ -115,11 +142,11 @@ export default function StatisticsPage() {
           <Card variant="elevated">
             <h2 class="text-lg font-semibold text-content mb-4">每日学习</h2>
             <div class="space-y-2">
-              <For each={enhanced()!.daily.slice(-14)}>
+              <For each={enhanced()!.daily.slice(-DAILY_CHART_DAYS)}>
                 {(day) => (
                   <div class="flex items-center gap-3 text-sm">
                     <span class="w-20 text-content-secondary text-xs">{day.date}</span>
-                    <div class="flex-1"><ProgressBar value={day.total} max={Math.max(...enhanced()!.daily.map((d) => d.total), 1)} size="sm" color={day.accuracy > 0.8 ? 'success' : day.accuracy > 0.5 ? 'warning' : 'error'} /></div>
+                    <div class="flex-1"><ProgressBar value={day.total} max={Math.max(...enhanced()!.daily.map((d) => d.total), 1)} size="sm" color={day.accuracy > ACCURACY_HIGH_THRESHOLD ? 'success' : day.accuracy > ACCURACY_MID_THRESHOLD ? 'warning' : 'error'} /></div>
                     <span class="w-12 text-right text-xs text-content-tertiary">{day.total} 题</span>
                     <span class="w-12 text-right text-xs text-content-tertiary">{(day.accuracy * 100).toFixed(0)}%</span>
                   </div>
@@ -127,6 +154,7 @@ export default function StatisticsPage() {
               </For>
             </div>
           </Card>
+        </Show>
         </Show>
       </Show>
     </div>

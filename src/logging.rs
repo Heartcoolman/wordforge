@@ -1,4 +1,4 @@
-use tracing_appender::rolling;
+use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Registry};
 
 #[derive(Debug, Clone)]
@@ -27,16 +27,30 @@ pub fn init_tracing(config: &LogConfig) {
     let registry = Registry::default().with(env_filter).with(stdout_layer);
 
     if config.enable_file_logs {
-        let file_appender = rolling::daily(&config.log_dir, "learning-backend.log");
+        let file_appender = RollingFileAppender::builder()
+            .rotation(Rotation::DAILY)
+            .filename_prefix("learning-backend")
+            .filename_suffix("log")
+            .max_log_files(30)
+            .build(&config.log_dir)
+            .expect("Failed to create rolling file appender");
         let file_layer = fmt::layer()
             .with_writer(file_appender)
             .with_ansi(false)
             .json();
+        // try_init 在全局 subscriber 已设置时返回错误，属于正常情况（如测试环境）；
+        // 但在生产首次启动时失败则说明配置有误，应立即终止。
         if let Err(e) = registry.with(file_layer).try_init() {
-            eprintln!("Failed to initialize tracing with file logs: {e}");
+            let msg = e.to_string();
+            if !msg.contains("already been set") {
+                panic!("Failed to initialize tracing with file logs: {e}");
+            }
         }
     } else if let Err(e) = registry.try_init() {
-        eprintln!("Failed to initialize tracing: {e}");
+        let msg = e.to_string();
+        if !msg.contains("already been set") {
+            panic!("Failed to initialize tracing: {e}");
+        }
     }
 }
 

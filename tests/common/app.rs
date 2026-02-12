@@ -22,14 +22,48 @@ async fn spawn_with_limits(api_limit: u64) -> TestApp {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let sled_path = temp_dir.path().join("learning-test.sled");
 
-    let mut config = Config::from_env();
-    config.sled_path = sled_path.to_string_lossy().to_string();
-    config.jwt_secret = format!("jwt-secret-{}", uuid::Uuid::new_v4());
-    config.admin_jwt_secret = format!("admin-secret-{}", uuid::Uuid::new_v4());
-    config.rate_limit.max_requests = api_limit;
-    config.rate_limit.window_secs = 60;
-    config.worker.is_leader = false;
-    config.trust_proxy = false;
+    // 直接构造 Config，避免使用 set_var 造成多线程测试环境变量竞态
+    let test_secret = format!("integration-test-jwt-secret-{}", uuid::Uuid::new_v4());
+    let test_admin_secret = format!("integration-test-admin-secret-{}", uuid::Uuid::new_v4());
+    let test_refresh_secret = format!("integration-test-refresh-secret-{}", uuid::Uuid::new_v4());
+
+    let mut config = Config {
+        host: std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
+        port: 3000,
+        log_level: "info".to_string(),
+        enable_file_logs: false,
+        log_dir: "./logs".to_string(),
+        sled_path: sled_path.to_string_lossy().to_string(),
+        jwt_secret: test_secret,
+        refresh_jwt_secret: test_refresh_secret,
+        jwt_expires_in_hours: 24,
+        admin_jwt_secret: test_admin_secret,
+        admin_jwt_expires_in_hours: 2,
+        cors_origin: "http://localhost:5173".to_string(),
+        trust_proxy: false,
+        rate_limit: learning_backend::config::RateLimitConfig {
+            window_secs: 60,
+            max_requests: api_limit,
+        },
+        worker: learning_backend::config::WorkerConfig {
+            is_leader: false,
+            enable_llm_advisor: false,
+            enable_monitoring: false,
+        },
+        amas: learning_backend::config::AMASEnvConfig {
+            ensemble_enabled: true,
+            monitor_sample_rate: 0.05,
+        },
+        llm: learning_backend::config::LLMConfig {
+            enabled: false,
+            mock: true,
+            api_url: String::new(),
+            api_key: String::new(),
+            timeout_secs: 30,
+        },
+        pagination: Default::default(),
+        limits: Default::default(),
+    };
 
     let store = Arc::new(Store::open(&config.sled_path).expect("open store"));
     store.run_migrations().expect("run migrations");

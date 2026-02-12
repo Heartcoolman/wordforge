@@ -19,6 +19,7 @@ async function getFreshStore() {
 describe('authStore', () => {
   beforeEach(() => {
     localStorage.clear();
+    sessionStorage.clear();
   });
 
   it('user defaults to null when no token', async () => {
@@ -36,21 +37,31 @@ describe('authStore', () => {
     expect(store.isAuthenticated()).toBe(false);
   });
 
-  it('init sets loading to false when no token', async () => {
+  it('init sets loading to false when no token and refresh fails', async () => {
+    // refreshAccessToken 会尝试 /api/auth/refresh，让它失败
+    server.use(
+      http.post('/api/auth/refresh', () =>
+        HttpResponse.json({ success: false, code: 'NO_TOKEN', message: 'No refresh token' }, { status: 401 }),
+      ),
+    );
+
     const store = await getFreshStore();
     await store.init();
     expect(store.loading()).toBe(false);
     expect(store.user()).toBeNull();
   });
 
-  it('init with valid cached token verifies via API', async () => {
+  it('init with successful refresh verifies via API', async () => {
     const fakeUser = createFakeUser();
-    const token = createFakeJwt({ exp: Math.floor(Date.now() / 1000) + 3600 });
-    localStorage.setItem(PREFIX + STORAGE_KEYS.AUTH_TOKEN, token);
-    localStorage.setItem(PREFIX + STORAGE_KEYS.REFRESH_TOKEN, token);
-    localStorage.setItem(PREFIX + STORAGE_KEYS.USER, JSON.stringify(fakeUser));
+    const newToken = createFakeJwt({ exp: Math.floor(Date.now() / 1000) + 3600 });
 
     server.use(
+      http.post('/api/auth/refresh', () =>
+        HttpResponse.json({
+          success: true,
+          data: { accessToken: newToken, refreshToken: 'new-refresh' },
+        }),
+      ),
       http.get('/api/users/me', () =>
         HttpResponse.json({ success: true, data: fakeUser }),
       ),
@@ -62,24 +73,13 @@ describe('authStore', () => {
     expect(store.user()).toEqual(fakeUser);
   });
 
-  it('init with expired token clears and sets null', async () => {
-    const expired = createFakeJwt({ exp: Math.floor(Date.now() / 1000) - 100 });
-    localStorage.setItem(PREFIX + STORAGE_KEYS.AUTH_TOKEN, expired);
-    localStorage.setItem(PREFIX + STORAGE_KEYS.USER, JSON.stringify(createFakeUser()));
-
-    const store = await getFreshStore();
-    await store.init();
-    expect(store.loading()).toBe(false);
-    expect(store.user()).toBeNull();
-  });
-
   it('login stores tokens and user on success', async () => {
     const store = await getFreshStore();
     const user = await store.login('test@example.com', 'password');
     expect(user).toBeDefined();
     expect(store.user()).toEqual(user);
     expect(store.isAuthenticated()).toBe(true);
-    expect(localStorage.getItem(PREFIX + STORAGE_KEYS.AUTH_TOKEN)).toBeTruthy();
+    // token 存在内存中，不在 localStorage
   });
 
   it('login throws on invalid credentials', async () => {
@@ -105,7 +105,6 @@ describe('authStore', () => {
     await store.logout();
     expect(store.user()).toBeNull();
     expect(store.isAuthenticated()).toBe(false);
-    expect(localStorage.getItem(PREFIX + STORAGE_KEYS.AUTH_TOKEN)).toBeNull();
     expect(localStorage.getItem(PREFIX + STORAGE_KEYS.LEARNING_MODE)).toBeNull();
     expect(localStorage.getItem(PREFIX + STORAGE_KEYS.LEARNING_QUEUE)).toBeNull();
     expect(localStorage.getItem(PREFIX + STORAGE_KEYS.LEARNING_SESSION_ID)).toBeNull();
@@ -121,7 +120,6 @@ describe('authStore', () => {
 
     await store.logout();
     expect(store.user()).toBeNull();
-    expect(localStorage.getItem(PREFIX + STORAGE_KEYS.AUTH_TOKEN)).toBeNull();
   });
 
   it('updateUser updates user signal and storage', async () => {
@@ -131,18 +129,23 @@ describe('authStore', () => {
     const updated = createFakeUser({ username: 'updated-name' });
     store.updateUser(updated);
     expect(store.user()).toEqual(updated);
-    expect(JSON.parse(localStorage.getItem(PREFIX + STORAGE_KEYS.USER)!)).toEqual(updated);
+    // user 存在 localStorage 中（仅保留 id 和 username）
+    const storedUser = JSON.parse(localStorage.getItem(PREFIX + STORAGE_KEYS.USER)!);
+    expect(storedUser.username).toBe('updated-name');
   });
 
   it('initialized prevents double init', async () => {
+    const newToken = createFakeJwt({ exp: Math.floor(Date.now() / 1000) + 3600 });
     const fakeUser = createFakeUser();
-    const token = createFakeJwt({ exp: Math.floor(Date.now() / 1000) + 3600 });
-    localStorage.setItem(PREFIX + STORAGE_KEYS.AUTH_TOKEN, token);
-    localStorage.setItem(PREFIX + STORAGE_KEYS.REFRESH_TOKEN, token);
-    localStorage.setItem(PREFIX + STORAGE_KEYS.USER, JSON.stringify(fakeUser));
 
     let callCount = 0;
     server.use(
+      http.post('/api/auth/refresh', () =>
+        HttpResponse.json({
+          success: true,
+          data: { accessToken: newToken, refreshToken: 'new-refresh' },
+        }),
+      ),
       http.get('/api/users/me', () => {
         callCount++;
         return HttpResponse.json({ success: true, data: fakeUser });

@@ -4,6 +4,7 @@ use axum::Json;
 use serde::Serialize;
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ApiResponse<T: Serialize> {
     pub success: bool,
     pub data: T,
@@ -11,9 +12,18 @@ pub struct ApiResponse<T: Serialize> {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PaginatedResponse<T: Serialize> {
+    pub data: Vec<T>,
+    pub total: u64,
+    pub page: u64,
+    pub per_page: u64,
+    pub total_pages: u64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ErrorBody {
     pub success: bool,
-    pub error: String,
     pub code: String,
     pub message: String,
     pub trace_id: Option<String>,
@@ -82,6 +92,15 @@ impl AppError {
         }
     }
 
+    pub fn payload_too_large(message: &str) -> Self {
+        Self {
+            status: StatusCode::PAYLOAD_TOO_LARGE,
+            code: "PAYLOAD_TOO_LARGE".to_string(),
+            message: message.to_string(),
+            is_operational: true,
+        }
+    }
+
     pub fn internal(message: &str) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
@@ -110,7 +129,6 @@ impl IntoResponse for AppError {
             self.status,
             Json(ErrorBody {
                 success: false,
-                error: self.code.clone(),
                 code: self.code,
                 message: exposed_message,
                 trace_id: None,
@@ -120,9 +138,17 @@ impl IntoResponse for AppError {
     }
 }
 
+// 安全说明：StoreError 转换映射：
+// - Validation 错误 -> 400 Bad Request（用户输入问题，可安全暴露消息）
+// - 其他错误 -> 500 Internal（is_operational=false，IntoResponse 中会替换为通用消息）
 impl From<crate::store::StoreError> for AppError {
     fn from(value: crate::store::StoreError) -> Self {
-        AppError::internal(&value.to_string())
+        match &value {
+            crate::store::StoreError::Validation(msg) => {
+                AppError::bad_request("VALIDATION_ERROR", msg)
+            }
+            _ => AppError::internal(&value.to_string()),
+        }
     }
 }
 
@@ -142,6 +168,32 @@ pub fn created<T: Serialize>(data: T) -> impl IntoResponse {
         Json(ApiResponse {
             success: true,
             data,
+        }),
+    )
+}
+
+pub fn paginated<T: Serialize>(
+    data: Vec<T>,
+    total: u64,
+    page: u64,
+    per_page: u64,
+) -> impl IntoResponse {
+    let total_pages = if per_page > 0 {
+        (total + per_page - 1) / per_page
+    } else {
+        0
+    };
+    (
+        StatusCode::OK,
+        Json(ApiResponse {
+            success: true,
+            data: PaginatedResponse {
+                data,
+                total,
+                page,
+                per_page,
+                total_pages,
+            },
         }),
     )
 }
@@ -169,5 +221,23 @@ mod tests {
         let text = String::from_utf8(body.to_vec()).unwrap();
         assert!(text.contains("invalid email"));
         assert!(text.contains("BAD_INPUT"));
+    }
+
+    #[tokio::test]
+    async fn error_field_is_code() {
+        let resp = AppError::bad_request("BAD_INPUT", "invalid email").into_response();
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["code"], "BAD_INPUT");
+        assert!(json.get("error").is_none());
+    }
+
+    #[tokio::test]
+    async fn not_found_code_field() {
+        let resp = AppError::not_found("Resource not found").into_response();
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["code"], "NOT_FOUND");
+        assert!(json.get("error").is_none());
     }
 }

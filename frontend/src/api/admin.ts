@@ -1,6 +1,7 @@
 import { api } from './client';
 import type {
-  AdminUser, AdminAuthResponse, AdminStats,
+  AdminAuthResponse, AdminStats,
+  AdminUsersPage, AdminUsersQuery,
   EngagementAnalytics, LearningAnalytics,
   SystemHealth, DatabaseInfo, SystemSettings,
 } from '@/types/admin';
@@ -13,9 +14,11 @@ export const adminApi = {
   login: (data: { email: string; password: string }) =>
     api.post<AdminAuthResponse>('/api/admin/auth/login', data),
   logout: () => api.post<{ loggedOut: boolean }>('/api/admin/auth/logout', undefined, { useAdminToken: true }),
+  verifyToken: () => api.get<{ id: string; email: string }>('/api/admin/auth/verify', undefined, { useAdminToken: true }),
 
   // Users
-  getUsers: () => api.get<AdminUser[]>('/api/admin/users', undefined, { useAdminToken: true }),
+  getUsers: (params?: AdminUsersQuery) =>
+    api.get<AdminUsersPage>('/api/admin/users', params as Record<string, string | number | boolean | undefined>, { useAdminToken: true }),
   banUser: (id: string) => api.post<{ banned: boolean; userId: string }>(`/api/admin/users/${id}/ban`, undefined, { useAdminToken: true }),
   unbanUser: (id: string) => api.post<{ banned: boolean; userId: string }>(`/api/admin/users/${id}/unban`, undefined, { useAdminToken: true }),
   getStats: () => api.get<AdminStats>('/api/admin/stats', undefined, { useAdminToken: true }),

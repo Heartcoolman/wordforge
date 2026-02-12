@@ -1,6 +1,9 @@
 use axum::extract::State;
 use axum::routing::get;
-use axum::{Json, Router};
+use axum::Router;
+
+use crate::extractors::JsonBody;
+use chrono::Utc;
 use serde::Deserialize;
 
 use crate::auth::AuthUser;
@@ -35,11 +38,20 @@ struct UpdateStudyConfigRequest {
 async fn update_config(
     auth: AuthUser,
     State(state): State<AppState>,
-    Json(req): Json<UpdateStudyConfigRequest>,
+    JsonBody(req): JsonBody<UpdateStudyConfigRequest>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     let mut config = state.store().get_study_config(&auth.user_id)?;
 
     if let Some(ids) = req.selected_wordbook_ids {
+        // 验证所有 wordbook ID 是否存在
+        for id in &ids {
+            if state.store().get_wordbook(id)?.is_none() {
+                return Err(AppError::bad_request(
+                    "WORDBOOK_NOT_FOUND",
+                    &format!("Wordbook '{}' does not exist", id),
+                ));
+            }
+        }
         config.selected_wordbook_ids = ids;
     }
     if let Some(count) = req.daily_word_count {
@@ -64,9 +76,10 @@ async fn get_today_words(
     let mut all_word_ids = Vec::new();
 
     for book_id in &config.selected_wordbook_ids {
-        let word_ids = state
-            .store()
-            .list_wordbook_words(book_id, config.daily_word_count as usize, 0)?;
+        let word_ids =
+            state
+                .store()
+                .list_wordbook_words(book_id, config.daily_word_count as usize, 0)?;
         all_word_ids.extend(word_ids);
     }
 
@@ -83,6 +96,17 @@ async fn get_today_words(
     // Deduplicate and limit
     all_word_ids.sort();
     all_word_ids.dedup();
+
+    // Exclude words that have already been studied today
+    let today = Utc::now().date_naive();
+    let recent_records = state.store().get_user_records(&auth.user_id, 500)?;
+    let studied_today: std::collections::HashSet<&str> = recent_records
+        .iter()
+        .filter(|r| r.created_at.date_naive() == today)
+        .map(|r| r.word_id.as_str())
+        .collect();
+    all_word_ids.retain(|wid| !studied_today.contains(wid.as_str()));
+
     all_word_ids.truncate(config.daily_word_count as usize);
 
     let mut words = Vec::new();

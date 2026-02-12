@@ -1,1 +1,0 @@
-import{q as s}from"./index-6s_4JTtF.js";const e={createSession(){return s.post("/api/learning/session")},getStudyWords(){return s.post("/api/learning/study-words")},getNextWords(r){return s.post("/api/learning/next-words",r)},adjustWords(r){return s.post("/api/learning/adjust-words",r)},syncProgress(r){return s.post("/api/learning/sync-progress",r)}};export{e as l};

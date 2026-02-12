@@ -1,10 +1,13 @@
 use axum::extract::{Path, Query, State};
 use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::Router;
+
+use crate::extractors::JsonBody;
 use chrono::Utc;
 use serde::Deserialize;
 
 use crate::auth::AuthUser;
+use crate::constants::DEFAULT_HALF_LIFE_HOURS;
 use crate::response::{ok, AppError};
 use crate::state::AppState;
 use crate::store::operations::word_states::{WordLearningState, WordState};
@@ -31,17 +34,7 @@ async fn get_word_state(
 
     match wls {
         Some(s) => Ok(ok(s)),
-        None => Ok(ok(WordLearningState {
-            user_id: auth.user_id,
-            word_id,
-            state: WordState::New,
-            mastery_level: 0.0,
-            next_review_date: None,
-            half_life: 24.0,
-            correct_streak: 0,
-            total_attempts: 0,
-            updated_at: Utc::now(),
-        })),
+        None => Err(AppError::not_found("Word learning state not found")),
     }
 }
 
@@ -54,12 +47,15 @@ struct BatchQueryRequest {
 async fn batch_query(
     auth: AuthUser,
     State(state): State<AppState>,
-    Json(req): Json<BatchQueryRequest>,
+    JsonBody(req): JsonBody<BatchQueryRequest>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    if req.word_ids.len() > 200 {
+    if req.word_ids.len() > state.config().limits.max_batch_size {
         return Err(AppError::bad_request(
             "BATCH_TOO_LARGE",
-            "batch_query accepts at most 200 word_ids",
+            &format!(
+                "batch_query accepts at most {} word_ids",
+                state.config().limits.max_batch_size
+            ),
         ));
     }
     let states = state
@@ -69,6 +65,7 @@ async fn batch_query(
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct DueListQuery {
     limit: Option<usize>,
 }
@@ -96,6 +93,10 @@ async fn mark_mastered(
     Path(word_id): Path<String>,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
+    if state.store().get_word(&word_id)?.is_none() {
+        return Err(AppError::not_found("Word not found"));
+    }
+
     let mut wls = state
         .store()
         .get_word_learning_state(&auth.user_id, &word_id)?
@@ -105,7 +106,7 @@ async fn mark_mastered(
             state: WordState::New,
             mastery_level: 0.0,
             next_review_date: None,
-            half_life: 24.0,
+            half_life: DEFAULT_HALF_LIFE_HOURS,
             correct_streak: 0,
             total_attempts: 0,
             updated_at: Utc::now(),
@@ -124,6 +125,10 @@ async fn reset_word(
     Path(word_id): Path<String>,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
+    if state.store().get_word(&word_id)?.is_none() {
+        return Err(AppError::not_found("Word not found"));
+    }
+
     let wls = WordLearningState {
         user_id: auth.user_id,
         word_id,
@@ -157,14 +162,31 @@ struct BatchUpdateRequest {
 async fn batch_update(
     auth: AuthUser,
     State(state): State<AppState>,
-    Json(req): Json<BatchUpdateRequest>,
+    JsonBody(req): JsonBody<BatchUpdateRequest>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    if req.updates.len() > 500 {
+    if req.updates.len() > state.config().limits.max_batch_size {
         return Err(AppError::bad_request(
             "BATCH_TOO_LARGE",
-            "batch_update accepts at most 500 updates",
+            &format!(
+                "batch_update accepts at most {} updates",
+                state.config().limits.max_batch_size
+            ),
         ));
     }
+    let word_ids: Vec<String> = req.updates.iter().map(|u| u.word_id.clone()).collect();
+    let existing_words = state.store().get_words_by_ids(&word_ids)?;
+    let missing: Vec<&str> = word_ids
+        .iter()
+        .filter(|id| !existing_words.contains_key(id.as_str()))
+        .map(|id| id.as_str())
+        .collect();
+    if !missing.is_empty() {
+        return Err(AppError::bad_request(
+            "WORD_NOT_FOUND",
+            &format!("Words not found: {}", missing.join(", ")),
+        ));
+    }
+
     let mut updated = 0usize;
     for item in &req.updates {
         let mut wls = state
@@ -176,7 +198,7 @@ async fn batch_update(
                 state: WordState::New,
                 mastery_level: 0.0,
                 next_review_date: None,
-                half_life: 24.0,
+                half_life: DEFAULT_HALF_LIFE_HOURS,
                 correct_streak: 0,
                 total_attempts: 0,
                 updated_at: Utc::now(),

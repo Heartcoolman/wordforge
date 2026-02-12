@@ -3,7 +3,7 @@ import type { Word, CreateWordRequest, BatchCreateResponse, ImportUrlResponse } 
 import type { PaginatedResponse } from '@/types/api';
 
 export const wordsApi = {
-  list: (params?: { limit?: number; offset?: number; search?: string }) =>
+  list: (params?: { page?: number; perPage?: number; search?: string }) =>
     api.get<PaginatedResponse<Word>>('/api/words', params),
   get: (id: string) => api.get<Word>(`/api/words/${id}`),
   create: (data: CreateWordRequest) => api.post<Word>('/api/words', data),

@@ -1,7 +1,9 @@
 import { type ParentProps, Show, createSignal, For } from 'solid-js';
 import { A, useLocation, useNavigate } from '@solidjs/router';
 import { cn } from '@/utils/cn';
+import { adminApi } from '@/api/admin';
 import { tokenManager } from '@/lib/token';
+import { uiStore } from '@/stores/ui';
 
 const sidebarLinks = [
   { href: '/admin', label: '仪表盘', icon: 'M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zm10 0a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zm10 0a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z', exact: true },
@@ -33,6 +35,7 @@ export function AdminLayout(props: ParentProps) {
           </Show>
           <button
             onClick={() => setCollapsed(!collapsed())}
+            aria-label={collapsed() ? '展开侧边栏' : '折叠侧边栏'}
             class="p-1.5 rounded-lg text-content-tertiary hover:text-content hover:bg-surface-secondary transition-colors cursor-pointer"
           >
             <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
@@ -68,9 +71,15 @@ export function AdminLayout(props: ParentProps) {
 
         <div class="border-t border-border p-3">
           <button
-            onClick={() => {
-              tokenManager.clearAdminToken();
-              navigate('/admin/login', { replace: true });
+            onClick={async () => {
+              try {
+                await adminApi.logout();
+              } catch {
+                uiStore.toast.warning('退出请求失败，已清理本地登录状态');
+              } finally {
+                tokenManager.clearAdminToken();
+                navigate('/admin/login', { replace: true });
+              }
             }}
             class={cn(
               'flex items-center gap-2 w-full px-3 py-2 rounded-lg text-sm text-content-secondary hover:text-error hover:bg-error-light transition-colors cursor-pointer',

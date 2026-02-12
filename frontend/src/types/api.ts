@@ -14,8 +14,9 @@ export interface ApiErrorResponse {
 export type ApiResponse<T> = ApiSuccessResponse<T> | ApiErrorResponse;
 
 export interface PaginatedResponse<T> {
-  items: T[];
+  data: T[];
   total: number;
-  limit: number;
-  offset: number;
+  page: number;
+  perPage: number;
+  totalPages: number;
 }

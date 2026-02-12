@@ -1,38 +1,17 @@
-import { api } from './client';
-import type { AmasUserState, AmasStrategy, AmasIntervention, LearningCurvePoint } from '@/types/amas';
-
-export type ColdStartPhase = 'Classify' | 'Explore' | 'Exploit';
-
-export interface MasteryEvaluation {
-  wordId: string;
-  state: string;
-  masteryLevel: number;
-  correctStreak: number;
-  totalAttempts: number;
-  nextReviewDate: string;
-}
-
-export interface AmasConfig {
-  learningRate?: number;
-  batchSize?: number;
-  difficultyRange?: [number, number];
-  reviewInterval?: number;
-  [key: string]: unknown;
-}
-
-export interface AmasMetrics {
-  totalUsers?: number;
-  activeSessions?: number;
-  avgAccuracy?: number;
-  avgResponseTime?: number;
-  [key: string]: unknown;
-}
-
-export interface MonitoringEvent {
-  timestamp: string;
-  eventType: string;
-  data: Record<string, unknown>;
-}
+import { api, connectAmasStateStream } from './client';
+import type {
+  AmasStateStreamEvent,
+  AmasUserState,
+  AmasStrategy,
+  AmasIntervention,
+  LearningCurvePoint,
+  ColdStartPhase,
+  MasteryEvaluation,
+  AmasConfig,
+  AmasMetrics,
+  MonitoringEvent,
+} from '@/types/amas';
+import { AMAS_MONITORING_DEFAULT_LIMIT } from '@/lib/constants';
 
 export const amasApi = {
   getState() {
@@ -63,19 +42,27 @@ export const amasApi = {
     return api.get<MasteryEvaluation>('/api/amas/mastery/evaluate', { wordId });
   },
 
+  reportVisualFatigue(score: number) {
+    return api.post<AmasUserState>('/api/amas/visual-fatigue', { score });
+  },
+
   getConfig() {
-    return api.get<AmasConfig>('/api/amas/config', undefined, { useAdminToken: true });
+    return api.get<AmasConfig>('/api/admin/amas/config', undefined, { useAdminToken: true });
   },
 
   updateConfig(config: AmasConfig) {
-    return api.put<{ updated: boolean }>('/api/amas/config', config, { useAdminToken: true });
+    return api.put<{ updated: boolean }>('/api/admin/amas/config', config, { useAdminToken: true });
   },
 
   getMetrics() {
-    return api.get<AmasMetrics>('/api/amas/metrics', undefined, { useAdminToken: true });
+    return api.get<AmasMetrics>('/api/admin/amas/metrics', undefined, { useAdminToken: true });
   },
 
-  getMonitoring(limit = 50) {
-    return api.get<MonitoringEvent[]>('/api/amas/monitoring', { limit }, { useAdminToken: true });
+  getMonitoring(limit = AMAS_MONITORING_DEFAULT_LIMIT) {
+    return api.get<MonitoringEvent[]>('/api/admin/amas/monitoring', { limit }, { useAdminToken: true });
+  },
+
+  subscribeStateEvents(onState: (event: AmasStateStreamEvent) => void) {
+    return connectAmasStateStream(onState);
   },
 };

@@ -5,8 +5,10 @@ import type { UserPreferences } from '@/types/user';
 export const notificationsApi = {
   list: (params?: { limit?: number; unreadOnly?: boolean }) =>
     api.get<Notification[]>('/api/notifications', params),
+  getUnreadCount: () =>
+    api.get<{ unreadCount: number }>('/api/notifications/unread-count'),
   markRead: (id: string) =>
-    api.put<{ read: boolean }>(`/api/notifications/${id}/read`),
+    api.put<Notification>(`/api/notifications/${id}/read`),
   markAllRead: () =>
     api.post<{ markedRead: number }>('/api/notifications/read-all'),
   getBadges: () =>

@@ -12,15 +12,17 @@ interface TableProps<T> {
   columns: Column<T>[];
   data: T[];
   loading?: boolean;
+  loadingRows?: number;
   emptyText?: string;
   onRowClick?: (row: T) => void;
   class?: string;
+  'aria-label'?: string;
 }
 
 export function Table<T extends Record<string, unknown>>(props: TableProps<T>) {
   return (
     <div class={cn('overflow-x-auto rounded-xl border border-border', props.class)}>
-      <table class="w-full text-sm">
+      <table class="w-full text-sm" aria-label={props['aria-label']}>
         <thead>
           <tr class="border-b border-border bg-surface-secondary">
             <For each={props.columns}>
@@ -34,7 +36,7 @@ export function Table<T extends Record<string, unknown>>(props: TableProps<T>) {
         </thead>
         <tbody>
           <Show when={props.loading}>
-            <For each={Array(3)}>
+            <For each={Array(props.loadingRows ?? 3)}>
               {() => (
                 <tr class="border-b border-border last:border-b-0">
                   <For each={props.columns}>
@@ -55,25 +57,27 @@ export function Table<T extends Record<string, unknown>>(props: TableProps<T>) {
               </td>
             </tr>
           </Show>
-          <For each={props.data}>
-            {(row, index) => (
-              <tr
-                class={cn(
-                  'border-b border-border last:border-b-0 transition-colors',
-                  props.onRowClick && 'hover:bg-surface-secondary cursor-pointer',
-                )}
-                onClick={() => props.onRowClick?.(row)}
-              >
-                <For each={props.columns}>
-                  {(col) => (
-                    <td class={cn('px-4 py-3 text-content', col.class)}>
-                      {col.render ? col.render(row, index()) : String(row[col.key] ?? '')}
-                    </td>
+          <Show when={!props.loading}>
+            <For each={props.data}>
+              {(row, index) => (
+                <tr
+                  class={cn(
+                    'border-b border-border last:border-b-0 transition-colors',
+                    props.onRowClick && 'hover:bg-surface-secondary cursor-pointer',
                   )}
-                </For>
-              </tr>
-            )}
-          </For>
+                  onClick={() => props.onRowClick?.(row)}
+                >
+                  <For each={props.columns}>
+                    {(col) => (
+                      <td class={cn('px-4 py-3 text-content', col.class)}>
+                        {col.render ? col.render(row, index()) : String(row[col.key] ?? '')}
+                      </td>
+                    )}
+                  </For>
+                </tr>
+              )}
+            </For>
+          </Show>
         </tbody>
       </table>
     </div>

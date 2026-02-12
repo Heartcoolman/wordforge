@@ -6,7 +6,7 @@ import { createFakeWords, createFakeWord } from '../helpers/factories';
 
 vi.mock('@/api/words', () => ({
   wordsApi: {
-    list: vi.fn(),
+    list: vi.fn().mockResolvedValue({ items: [], total: 0 }),
     create: vi.fn(),
     update: vi.fn(),
     delete: vi.fn(),
@@ -26,7 +26,12 @@ import VocabularyPage from '@/pages/VocabularyPage';
 const mockWordsApi = wordsApi as unknown as Record<string, ReturnType<typeof vi.fn>>;
 
 beforeAll(() => server.listen({ onUnhandledRequest: 'error' }));
-afterEach(() => { server.resetHandlers(); vi.clearAllMocks(); });
+afterEach(() => {
+  server.resetHandlers();
+  // 恢复 list 的默认返回值，防止 SolidJS reactive 系统在 cleanup 时调用到 undefined
+  vi.clearAllMocks();
+  mockWordsApi.list.mockResolvedValue({ items: [], total: 0 });
+});
 afterAll(() => server.close());
 
 describe('VocabularyPage', () => {
@@ -144,11 +149,10 @@ describe('VocabularyPage', () => {
   });
 
   describe('Delete word', () => {
-    it('calls wordsApi.delete after confirm', async () => {
+    it('calls wordsApi.delete after confirm via Modal', async () => {
       const words = createFakeWords(1);
       mockWordsApi.list.mockResolvedValue({ items: words, total: 1 });
       mockWordsApi.delete.mockResolvedValue(undefined);
-      vi.spyOn(window, 'confirm').mockReturnValue(true);
 
       renderWithProviders(() => <VocabularyPage />);
 
@@ -163,17 +167,26 @@ describe('VocabularyPage', () => {
       expect(trashBtns.length).toBeGreaterThan(0);
       fireEvent.click(trashBtns[0]);
 
+      // 删除确认 Modal 应该出现
+      await waitFor(() => {
+        expect(screen.getByText('确认删除')).toBeInTheDocument();
+      });
+
+      // 点击 Modal 中的"删除"按钮确认
+      const dialog = screen.getByRole('dialog');
+      const confirmDeleteBtn = Array.from(dialog.querySelectorAll('button')).find(
+        (btn) => btn.textContent?.trim() === '删除',
+      )!;
+      fireEvent.click(confirmDeleteBtn);
+
       await waitFor(() => {
         expect(mockWordsApi.delete).toHaveBeenCalledWith(words[0].id);
       });
-
-      vi.restoreAllMocks();
     });
 
-    it('does not delete when confirm is cancelled', async () => {
+    it('does not delete when cancel is clicked in Modal', async () => {
       const words = createFakeWords(1);
       mockWordsApi.list.mockResolvedValue({ items: words, total: 1 });
-      vi.spyOn(window, 'confirm').mockReturnValue(false);
 
       renderWithProviders(() => <VocabularyPage />);
 
@@ -186,10 +199,20 @@ describe('VocabularyPage', () => {
       );
       fireEvent.click(trashBtns[0]);
 
+      // 等待 Modal 出现
+      await waitFor(() => {
+        expect(screen.getByText('确认删除')).toBeInTheDocument();
+      });
+
+      // 点击取消按钮
+      const dialog = screen.getByRole('dialog');
+      const cancelBtn = Array.from(dialog.querySelectorAll('button')).find(
+        (btn) => btn.textContent?.trim() === '取消',
+      )!;
+      fireEvent.click(cancelBtn);
+
       // Should not have called delete
       expect(mockWordsApi.delete).not.toHaveBeenCalled();
-
-      vi.restoreAllMocks();
     });
   });
 

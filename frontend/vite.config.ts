@@ -1,13 +1,16 @@
 import { defineConfig } from 'vite';
 import solid from 'vite-plugin-solid';
 import tailwindcss from '@tailwindcss/vite';
+import wasm from 'vite-plugin-wasm';
+import topLevelAwait from 'vite-plugin-top-level-await';
 import { fileURLToPath, URL } from 'node:url';
 
 export default defineConfig({
-  plugins: [solid(), tailwindcss()],
+  plugins: [solid(), tailwindcss(), wasm(), topLevelAwait()],
   resolve: {
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url)),
+      '@fatigue-wasm': fileURLToPath(new URL('../crates/visual-fatigue-wasm/pkg', import.meta.url)),
     },
   },
   server: {
@@ -20,5 +23,15 @@ export default defineConfig({
   build: {
     outDir: '../static',
     emptyOutDir: true,
+    target: 'esnext', // 确保支持 top-level await
+    sourcemap: 'hidden',
+  },
+  esbuild: {
+    drop: ['debugger'],
+    pure: ['console.log', 'console.debug', 'console.info'],
+  },
+  worker: {
+    format: 'es',
+    plugins: () => [wasm()],
   },
 });

@@ -1,11 +1,12 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use tokio::sync::broadcast;
 
 use crate::amas::engine::AMASEngine;
 use crate::config::Config;
-use crate::middleware::rate_limit::RateLimitState;
+use crate::middleware::rate_limit::{AuthRateLimitState, RateLimitState};
 use crate::store::Store;
 
 #[derive(Clone)]
@@ -14,8 +15,10 @@ pub struct AppState {
     amas_engine: Arc<AMASEngine>,
     runtime: Arc<RuntimeConfig>,
     rate_limit: Arc<RateLimitState>,
+    auth_rate_limit: Arc<AuthRateLimitState>,
     config: Arc<Config>,
     shutdown_tx: broadcast::Sender<()>,
+    started_at: Instant,
 }
 
 pub struct RuntimeConfig {
@@ -35,14 +38,20 @@ impl AppState {
             config.rate_limit.window_secs,
             config.rate_limit.max_requests,
         ));
+        let auth_rate_limit = Arc::new(AuthRateLimitState::new(
+            config.auth_rate_limit.window_secs,
+            config.auth_rate_limit.max_requests,
+        ));
 
         Self {
             store,
             amas_engine,
             runtime,
             rate_limit,
+            auth_rate_limit,
             config: Arc::new(config.clone()),
             shutdown_tx,
+            started_at: Instant::now(),
         }
     }
 
@@ -62,6 +71,10 @@ impl AppState {
         &self.rate_limit
     }
 
+    pub fn auth_rate_limit(&self) -> &Arc<AuthRateLimitState> {
+        &self.auth_rate_limit
+    }
+
     pub fn config(&self) -> &Config {
         &self.config
     }
@@ -72,6 +85,10 @@ impl AppState {
 
     pub fn shutdown_tx(&self) -> &broadcast::Sender<()> {
         &self.shutdown_tx
+    }
+
+    pub fn uptime_secs(&self) -> u64 {
+        self.started_at.elapsed().as_secs()
     }
 }
 
@@ -109,7 +126,8 @@ mod tests {
     async fn runtime_config_switch_is_atomic() {
         let cfg = Config::from_env();
         let tmp = tempfile::tempdir().expect("tempdir");
-        let store = Arc::new(Store::open(tmp.path().join("state_atomic.sled").to_str().unwrap()).unwrap());
+        let store =
+            Arc::new(Store::open(tmp.path().join("state_atomic.sled").to_str().unwrap()).unwrap());
         let amas = Arc::new(AMASEngine::new(AMASConfig::default(), store.clone()));
         let (tx, _) = broadcast::channel(4);
         let state = AppState::new(store, amas, &cfg, tx);
@@ -122,7 +140,9 @@ mod tests {
     async fn shutdown_receiver_can_clone() {
         let cfg = Config::from_env();
         let tmp = tempfile::tempdir().expect("tempdir");
-        let store = Arc::new(Store::open(tmp.path().join("state_shutdown.sled").to_str().unwrap()).unwrap());
+        let store = Arc::new(
+            Store::open(tmp.path().join("state_shutdown.sled").to_str().unwrap()).unwrap(),
+        );
         let amas = Arc::new(AMASEngine::new(AMASConfig::default(), store.clone()));
         let (tx, _) = broadcast::channel(4);
         let state = AppState::new(store, amas, &cfg, tx.clone());

@@ -1,4 +1,4 @@
-export type WordStateType = 'New' | 'Learning' | 'Reviewing' | 'Mastered';
+export type WordStateType = 'NEW' | 'LEARNING' | 'REVIEWING' | 'MASTERED' | 'FORGOTTEN';
 
 export interface WordLearningState {
   userId: string;
@@ -13,10 +13,11 @@ export interface WordLearningState {
 }
 
 export interface WordStateOverview {
-  new: number;
+  newCount: number;
   learning: number;
   reviewing: number;
   mastered: number;
+  forgotten: number;
 }
 
 export interface BatchUpdateRequest {

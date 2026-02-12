@@ -8,7 +8,7 @@ impl Store {
         &self,
         user_id: &str,
     ) -> Result<Option<serde_json::Value>, StoreError> {
-        let key = keys::engine_user_state_key(user_id);
+        let key = keys::engine_user_state_key(user_id)?;
         match self.engine_user_states.get(key.as_bytes())? {
             Some(raw) => Ok(Some(Self::deserialize(&raw)?)),
             None => Ok(None),
@@ -20,9 +20,15 @@ impl Store {
         user_id: &str,
         state: &serde_json::Value,
     ) -> Result<(), StoreError> {
-        let key = keys::engine_user_state_key(user_id);
+        let key = keys::engine_user_state_key(user_id)?;
         self.engine_user_states
             .insert(key.as_bytes(), Self::serialize(state)?)?;
+        Ok(())
+    }
+
+    pub fn delete_engine_user_state(&self, user_id: &str) -> Result<(), StoreError> {
+        let key = keys::engine_user_state_key(user_id)?;
+        self.engine_user_states.remove(key.as_bytes())?;
         Ok(())
     }
 
@@ -31,7 +37,7 @@ impl Store {
         user_id: &str,
         algo_id: &str,
     ) -> Result<Option<serde_json::Value>, StoreError> {
-        let key = keys::engine_algo_state_key(user_id, algo_id);
+        let key = keys::engine_algo_state_key(user_id, algo_id)?;
         match self.engine_algorithm_states.get(key.as_bytes())? {
             Some(raw) => Ok(Some(Self::deserialize(&raw)?)),
             None => Ok(None),
@@ -44,17 +50,23 @@ impl Store {
         algo_id: &str,
         state: &serde_json::Value,
     ) -> Result<(), StoreError> {
-        let key = keys::engine_algo_state_key(user_id, algo_id);
+        let key = keys::engine_algo_state_key(user_id, algo_id)?;
         self.engine_algorithm_states
             .insert(key.as_bytes(), Self::serialize(state)?)?;
         Ok(())
     }
 
+    pub fn delete_engine_algo_state(&self, user_id: &str, algo_id: &str) -> Result<(), StoreError> {
+        let key = keys::engine_algo_state_key(user_id, algo_id)?;
+        self.engine_algorithm_states.remove(key.as_bytes())?;
+        Ok(())
+    }
+
     pub fn insert_monitoring_event(&self, event: &serde_json::Value) -> Result<(), StoreError> {
-        let id = event
-            .get("id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown");
+        let id = match event.get("id").and_then(|v| v.as_str()) {
+            Some(id) => id.to_string(),
+            None => uuid::Uuid::new_v4().to_string(),
+        };
 
         let ts = event
             .get("timestamp")
@@ -63,7 +75,7 @@ impl Store {
             .map(|dt| dt.timestamp_millis())
             .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
 
-        let key = keys::monitoring_event_key(ts, id);
+        let key = keys::monitoring_event_key(ts, &id)?;
         self.engine_monitoring_events
             .insert(key.as_bytes(), Self::serialize(event)?)?;
         Ok(())
@@ -90,7 +102,7 @@ impl Store {
         algo_id: &str,
         metrics: &serde_json::Value,
     ) -> Result<(), StoreError> {
-        let key = keys::metrics_daily_key(date, algo_id);
+        let key = keys::metrics_daily_key(date, algo_id)?;
         self.algorithm_metrics_daily
             .insert(key.as_bytes(), Self::serialize(metrics)?)?;
         Ok(())
@@ -101,7 +113,7 @@ impl Store {
         date: &str,
         algo_id: &str,
     ) -> Result<Option<serde_json::Value>, StoreError> {
-        let key = keys::metrics_daily_key(date, algo_id);
+        let key = keys::metrics_daily_key(date, algo_id)?;
         match self.algorithm_metrics_daily.get(key.as_bytes())? {
             Some(raw) => Ok(Some(Self::deserialize(&raw)?)),
             None => Ok(None),
@@ -114,13 +126,13 @@ impl Store {
         user_state: &serde_json::Value,
         algo_states: &[(String, serde_json::Value)],
     ) -> Result<(), StoreError> {
-        let user_key = keys::engine_user_state_key(user_id);
+        let user_key = keys::engine_user_state_key(user_id)?;
         let user_bytes = Self::serialize(user_state)?;
 
         let algo_entries: Vec<(String, Vec<u8>)> = algo_states
             .iter()
             .map(|(algo_id, value)| {
-                let key = keys::engine_algo_state_key(user_id, algo_id);
+                let key = keys::engine_algo_state_key(user_id, algo_id)?;
                 let bytes = Self::serialize(value)?;
                 Ok((key, bytes))
             })
@@ -134,18 +146,12 @@ impl Store {
                 }
                 Ok(())
             })
-            .map_err(
-                |e: sled::transaction::TransactionError<()>| match e {
-                    sled::transaction::TransactionError::Abort(()) => {
-                        StoreError::Sled(sled::Error::Unsupported(
-                            "transaction aborted".into(),
-                        ))
-                    }
-                    sled::transaction::TransactionError::Storage(se) => {
-                        StoreError::Sled(se)
-                    }
-                },
-            )?;
+            .map_err(|e: sled::transaction::TransactionError<()>| match e {
+                sled::transaction::TransactionError::Abort(()) => {
+                    StoreError::Sled(sled::Error::Unsupported("transaction aborted".into()))
+                }
+                sled::transaction::TransactionError::Storage(se) => StoreError::Sled(se),
+            })?;
 
         Ok(())
     }

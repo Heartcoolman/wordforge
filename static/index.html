@@ -5,20 +5,20 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="description" content="智能英语词汇学习平台" />
   <title>英语词汇学习</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
   <script>
-    // FOUC prevention: apply theme synchronously before first paint
+    // 防止 FOUC：在首次渲染前同步应用主题
+    // "eng_" 前缀与 storage.ts 中的 STORAGE_PREFIX 保持一致，确保读取同一份存储
     (function() {
-      var t = localStorage.getItem('theme');
+      var raw = localStorage.getItem('eng_theme');
+      var t = null;
+      try { t = JSON.parse(raw); } catch(e) { t = raw; }
       if (t === 'dark' || (!t && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
         document.documentElement.classList.add('dark');
       }
     })();
   </script>
-  <script type="module" crossorigin src="/assets/index-6s_4JTtF.js"></script>
-  <link rel="stylesheet" crossorigin href="/assets/index-DQRmfuRD.css">
+  <script type="module" crossorigin src="/assets/index-DsoFfpxG.js"></script>
+  <link rel="stylesheet" crossorigin href="/assets/index-DjWkAGVV.css">
 </head>
 <body>
   <div id="root"></div>

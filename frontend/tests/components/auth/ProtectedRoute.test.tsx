@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { screen, waitFor } from '@solidjs/testing-library';
 import { renderWithProviders } from '../../helpers/render';
 
@@ -6,32 +6,62 @@ vi.mock('@/stores/auth', () => ({
   authStore: {
     loading: vi.fn(() => false),
     isAuthenticated: vi.fn(() => false),
+    initialized: vi.fn(() => true),
+    init: vi.fn().mockResolvedValue(undefined),
   },
 }));
 
 vi.mock('@/lib/token', () => ({
   tokenManager: {
     getAdminToken: vi.fn(() => null),
+    clearAdminToken: vi.fn(),
+    clearTokens: vi.fn(),
+    getToken: vi.fn(() => null),
+    isAuthenticated: vi.fn(() => false),
+    needsRefresh: vi.fn(() => false),
+    refreshAccessToken: vi.fn().mockResolvedValue(false),
   },
 }));
+
+vi.mock('@/api/admin', () => ({
+  adminApi: {
+    verifyToken: vi.fn().mockResolvedValue({ id: 'admin-1', email: 'admin@test.com' }),
+  },
+}));
+
+vi.mock('@/api/users', () => ({
+  usersApi: {
+    getMe: vi.fn().mockResolvedValue({ id: 'user-1', username: 'test' }),
+  },
+}));
+
+beforeEach(() => {
+  vi.clearAllMocks();
+});
 
 describe('ProtectedRoute', () => {
   it('shows spinner when loading', async () => {
     const { authStore } = await import('@/stores/auth');
     (authStore.loading as ReturnType<typeof vi.fn>).mockReturnValue(true);
+    (authStore.initialized as ReturnType<typeof vi.fn>).mockReturnValue(true);
     const { ProtectedRoute } = await import('@/components/auth/ProtectedRoute');
     renderWithProviders(() => <ProtectedRoute>Secret</ProtectedRoute>);
     expect(screen.getByRole('status')).toBeInTheDocument();
     (authStore.loading as ReturnType<typeof vi.fn>).mockReturnValue(false);
   });
 
-  it('shows children when authenticated', async () => {
+  it('shows children when authenticated and verified', async () => {
     const { authStore } = await import('@/stores/auth');
+    const { usersApi } = await import('@/api/users');
     (authStore.loading as ReturnType<typeof vi.fn>).mockReturnValue(false);
     (authStore.isAuthenticated as ReturnType<typeof vi.fn>).mockReturnValue(true);
+    (authStore.initialized as ReturnType<typeof vi.fn>).mockReturnValue(true);
+    (usersApi.getMe as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'user-1', username: 'test' });
     const { ProtectedRoute } = await import('@/components/auth/ProtectedRoute');
     renderWithProviders(() => <ProtectedRoute>Secret Content</ProtectedRoute>);
-    expect(screen.getByText('Secret Content')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByText('Secret Content')).toBeInTheDocument();
+    });
     (authStore.isAuthenticated as ReturnType<typeof vi.fn>).mockReturnValue(false);
   });
 
@@ -39,30 +69,31 @@ describe('ProtectedRoute', () => {
     const { authStore } = await import('@/stores/auth');
     (authStore.loading as ReturnType<typeof vi.fn>).mockReturnValue(false);
     (authStore.isAuthenticated as ReturnType<typeof vi.fn>).mockReturnValue(false);
+    (authStore.initialized as ReturnType<typeof vi.fn>).mockReturnValue(true);
     const { ProtectedRoute } = await import('@/components/auth/ProtectedRoute');
     renderWithProviders(() => <ProtectedRoute>Secret</ProtectedRoute>);
-    expect(screen.queryByText('Secret')).not.toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.queryByText('Secret')).not.toBeInTheDocument();
+    });
   });
 });
 
 describe('AdminProtectedRoute', () => {
   it('shows spinner initially', async () => {
     const { tokenManager } = await import('@/lib/token');
-    // Return value synchronously, but onMount hasn't run yet
-    let resolveMount: () => void;
-    const mountPromise = new Promise<void>((r) => { resolveMount = r; });
+    (tokenManager.getAdminToken as ReturnType<typeof vi.fn>).mockReturnValue(null);
     const { AdminProtectedRoute } = await import('@/components/auth/ProtectedRoute');
     renderWithProviders(() => <AdminProtectedRoute>Admin</AdminProtectedRoute>);
-    // After mount, it will resolve
     await waitFor(() => {
-      // Either shows spinner or content, test passes either way if mount works
       expect(document.body).toBeInTheDocument();
     });
   });
 
-  it('shows children when admin token exists', async () => {
+  it('shows children when admin token exists and verifyToken succeeds', async () => {
     const { tokenManager } = await import('@/lib/token');
+    const { adminApi } = await import('@/api/admin');
     (tokenManager.getAdminToken as ReturnType<typeof vi.fn>).mockReturnValue('admin-token');
+    (adminApi.verifyToken as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'admin-1', email: 'admin@test.com' });
     const { AdminProtectedRoute } = await import('@/components/auth/ProtectedRoute');
     renderWithProviders(() => <AdminProtectedRoute>Admin Panel</AdminProtectedRoute>);
     await waitFor(() => {
@@ -81,16 +112,19 @@ describe('AdminProtectedRoute', () => {
     });
   });
 
-  it('rechecks on window focus', async () => {
+  it('handles admin:unauthorized event by removing content', async () => {
     const { tokenManager } = await import('@/lib/token');
+    const { adminApi } = await import('@/api/admin');
     (tokenManager.getAdminToken as ReturnType<typeof vi.fn>).mockReturnValue('token');
+    (adminApi.verifyToken as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'admin-1', email: 'admin@test.com' });
     const { AdminProtectedRoute } = await import('@/components/auth/ProtectedRoute');
     renderWithProviders(() => <AdminProtectedRoute>Admin</AdminProtectedRoute>);
     await waitFor(() => {
       expect(screen.getByText('Admin')).toBeInTheDocument();
     });
+    // 模拟 admin:unauthorized 事件（例如后端返回 401 时触发）
     (tokenManager.getAdminToken as ReturnType<typeof vi.fn>).mockReturnValue(null);
-    window.dispatchEvent(new Event('focus'));
+    window.dispatchEvent(new Event('admin:unauthorized'));
     await waitFor(() => {
       expect(screen.queryByText('Admin')).not.toBeInTheDocument();
     });

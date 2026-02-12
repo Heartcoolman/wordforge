@@ -28,6 +28,7 @@ pub struct Store {
     pub wordbooks: sled::Tree,
     pub wordbook_words: sled::Tree,
     pub word_learning_states: sled::Tree,
+    pub word_due_index: sled::Tree,
     pub study_configs: sled::Tree,
     // P4 trees
     pub user_profiles: sled::Tree,
@@ -50,6 +51,14 @@ pub enum StoreError {
     NotFound { entity: String, key: String },
     #[error("conflict: entity={entity}, key={key}")]
     Conflict { entity: String, key: String },
+    #[error("CAS retry exhausted after {attempts} attempts: entity={entity}, key={key}")]
+    CasRetryExhausted {
+        entity: String,
+        key: String,
+        attempts: u32,
+    },
+    #[error("validation error: {0}")]
+    Validation(String),
     #[error("migration error at version {version}: {message}")]
     Migration { version: u32, message: String },
 }
@@ -74,6 +83,7 @@ impl Store {
         let wordbooks = db.open_tree(trees::WORDBOOKS)?;
         let wordbook_words = db.open_tree(trees::WORDBOOK_WORDS)?;
         let word_learning_states = db.open_tree(trees::WORD_LEARNING_STATES)?;
+        let word_due_index = db.open_tree(trees::WORD_DUE_INDEX)?;
         let study_configs = db.open_tree(trees::STUDY_CONFIGS)?;
         // P4 trees
         let user_profiles = db.open_tree(trees::USER_PROFILES)?;
@@ -103,6 +113,7 @@ impl Store {
             wordbooks,
             wordbook_words,
             word_learning_states,
+            word_due_index,
             study_configs,
             user_profiles,
             habit_profiles,

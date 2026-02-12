@@ -2,7 +2,7 @@ export interface Wordbook {
   id: string;
   name: string;
   description: string;
-  bookType: 'System' | 'User';
+  type: 'system' | 'user';
   userId?: string;
   wordCount: number;
   createdAt: string;

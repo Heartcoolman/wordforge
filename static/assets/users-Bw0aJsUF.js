@@ -1,1 +1,0 @@
-import{q as e}from"./index-6s_4JTtF.js";const t={getMe(){return e.get("/api/users/me")},updateMe(s){return e.put("/api/users/me",s)},changePassword(s){return e.put("/api/users/me/password",s)},getStats(){return e.get("/api/users/me/stats")}};export{t as usersApi};

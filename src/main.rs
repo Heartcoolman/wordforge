@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use axum::http::{header, HeaderName, HeaderValue};
 use learning_backend::amas::config::AMASConfig;
 use learning_backend::amas::engine::AMASEngine;
 use learning_backend::config::Config;
@@ -11,6 +12,13 @@ use learning_backend::state::AppState;
 use learning_backend::store::Store;
 use learning_backend::workers::WorkerManager;
 use tokio::sync::broadcast;
+use tower_http::catch_panic::CatchPanicLayer;
+use tower_http::cors::{Any, CorsLayer};
+use tower_http::set_header::SetResponseHeaderLayer;
+use tower_http::trace::TraceLayer;
+
+const CSP_HEADER: &str = "default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data: blob:; worker-src 'self' blob:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
+const HSTS_HEADER: &str = "max-age=31536000; includeSubDomains";
 
 #[tokio::main]
 async fn main() {
@@ -59,9 +67,32 @@ async fn main() {
         None
     };
 
+    let cors_layer = build_cors_layer(&config);
+
     let app = build_router(state)
-        .layer(tower_http::cors::CorsLayer::permissive())
-        .layer(tower_http::trace::TraceLayer::new_for_http());
+        .layer(cors_layer)
+        .layer(TraceLayer::new_for_http())
+        .layer(CatchPanicLayer::new())
+        .layer(SetResponseHeaderLayer::overriding(
+            header::X_CONTENT_TYPE_OPTIONS,
+            HeaderValue::from_static("nosniff"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            header::X_FRAME_OPTIONS,
+            HeaderValue::from_static("DENY"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::REFERRER_POLICY,
+            HeaderValue::from_static("strict-origin-when-cross-origin"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            HeaderName::from_static("content-security-policy"),
+            HeaderValue::from_static(CSP_HEADER),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            HeaderName::from_static("strict-transport-security"),
+            HeaderValue::from_static(HSTS_HEADER),
+        ));
 
     let addr = SocketAddr::new(config.host, config.port);
     tracing::info!(%addr, "Listening");
@@ -69,30 +100,58 @@ async fn main() {
         .await
         .expect("Failed to bind TCP listener");
 
-    let server_future = axum::serve(listener, app.into_make_service())
-        .with_graceful_shutdown(shutdown_signal(shutdown_tx.clone()));
+    let server_future = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal(shutdown_tx.clone()));
 
     if let Some(handle) = worker_handle {
-        tokio::select! {
-            result = server_future => {
-                if let Err(e) = result {
-                    tracing::error!(error = %e, "HTTP server crashed");
+        // Worker 作为独立后台任务运行，panic 仅记录错误，不终止 HTTP 服务器
+        tokio::spawn(async move {
+            match handle.await {
+                Err(e) => {
+                    tracing::error!(error = %e, "Worker task panicked, HTTP server continues")
                 }
+                Ok(()) => tracing::info!("Worker manager exited normally"),
             }
-            result = handle => {
-                match result {
-                    Err(e) => tracing::error!(error = %e, "Worker task panicked"),
-                    Ok(()) => tracing::info!("Worker manager exited"),
-                }
-            }
-        }
-    } else {
-        server_future.await.expect("HTTP server crashed");
+        });
+    }
+
+    if let Err(e) = server_future.await {
+        tracing::error!(error = %e, "HTTP server crashed");
     }
 
     tracing::info!("Flushing store before exit");
-    let _ = store.flush();
+    if let Err(e) = store.flush() {
+        tracing::error!(error = %e, "Failed to flush store before exit");
+    }
     tracing::info!("Shutdown complete");
+}
+
+fn build_cors_layer(config: &Config) -> CorsLayer {
+    if config.cors_origin.trim() == "*" {
+        // 通配符模式仅用于开发环境，通配符与 credentials 互斥
+        return CorsLayer::new()
+            .allow_origin(Any)
+            .allow_credentials(false)
+            .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE, header::ACCEPT])
+            .allow_methods(Any);
+    }
+
+    match config.cors_origin.parse::<axum::http::HeaderValue>() {
+        Ok(origin) => CorsLayer::new()
+            .allow_origin(origin)
+            .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE, header::ACCEPT])
+            .allow_methods(Any),
+        Err(e) => {
+            panic!(
+                "FATAL: Invalid CORS_ORIGIN '{}': {}. \
+                 Fix the CORS_ORIGIN environment variable.",
+                config.cors_origin, e
+            );
+        }
+    }
 }
 
 async fn shutdown_signal(shutdown_tx: broadcast::Sender<()>) {

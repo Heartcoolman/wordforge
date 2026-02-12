@@ -1,14 +1,16 @@
 use axum::extract::{Path, Query, State};
 use axum::routing::{delete, get, post};
-use axum::{Json, Router};
+use axum::Router;
+
+use crate::extractors::JsonBody;
 use chrono::Utc;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use crate::auth::AuthUser;
-use crate::response::{created, ok, AppError};
+use crate::response::{created, ok, paginated, AppError};
+use crate::routes::words::WordPublic;
 use crate::state::AppState;
 use crate::store::operations::wordbooks::{Wordbook, WordbookType};
-use crate::store::operations::words::Word;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -20,6 +22,7 @@ pub fn router() -> Router<AppState> {
 }
 
 async fn list_system_wordbooks(
+    _user: AuthUser,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     let books = state.store().list_system_wordbooks()?;
@@ -44,7 +47,7 @@ struct CreateWordbookRequest {
 async fn create_wordbook(
     auth: AuthUser,
     State(state): State<AppState>,
-    Json(req): Json<CreateWordbookRequest>,
+    JsonBody(req): JsonBody<CreateWordbookRequest>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     if req.name.trim().is_empty() {
         return Err(AppError::bad_request(
@@ -68,18 +71,10 @@ async fn create_wordbook(
 }
 
 #[derive(Debug, Deserialize)]
-struct ListWordbookWordsQuery {
-    limit: Option<usize>,
-    offset: Option<usize>,
-}
-
-#[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct WordbookWordsResponse {
-    items: Vec<Word>,
-    total: u64,
-    limit: usize,
-    offset: usize,
+struct ListWordbookWordsQuery {
+    page: Option<u64>,
+    per_page: Option<u64>,
 }
 
 async fn list_wordbook_words(
@@ -98,24 +93,23 @@ async fn list_wordbook_words(
         return Err(AppError::forbidden("You do not own this wordbook"));
     }
 
-    let limit = q.limit.unwrap_or(20).clamp(1, 100);
-    let offset = q.offset.unwrap_or(0);
+    let page = q.page.unwrap_or(1).clamp(1, u64::MAX);
+    let per_page = q
+        .per_page
+        .unwrap_or(state.config().pagination.default_page_size)
+        .clamp(1, state.config().pagination.max_page_size);
+    let limit = per_page as usize;
+    let offset = ((page - 1) * per_page) as usize;
     let total = state.store().count_wordbook_words(&id)?;
     let word_ids = state.store().list_wordbook_words(&id, limit, offset)?;
 
-    let mut items = Vec::new();
-    for wid in &word_ids {
-        if let Some(word) = state.store().get_word(wid)? {
-            items.push(word);
-        }
-    }
+    let words_by_id = state.store().get_words_by_ids(&word_ids)?;
+    let items: Vec<WordPublic> = word_ids
+        .iter()
+        .filter_map(|wid| words_by_id.get(wid).map(WordPublic::from))
+        .collect();
 
-    Ok(ok(WordbookWordsResponse {
-        items,
-        total,
-        limit,
-        offset,
-    }))
+    Ok(paginated(items, total, page, per_page))
 }
 
 #[derive(Debug, Deserialize)]
@@ -128,7 +122,7 @@ async fn add_words(
     auth: AuthUser,
     Path(id): Path<String>,
     State(state): State<AppState>,
-    Json(req): Json<AddWordsRequest>,
+    JsonBody(req): JsonBody<AddWordsRequest>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     let book = state
         .store()
@@ -143,10 +137,21 @@ async fn add_words(
         return Err(AppError::forbidden("You do not own this wordbook"));
     }
 
+    if req.word_ids.len() > state.config().limits.max_batch_size {
+        return Err(AppError::bad_request(
+            "WORDBOOK_TOO_MANY_WORDS",
+            &format!(
+                "Cannot add more than {} words at once",
+                state.config().limits.max_batch_size
+            ),
+        ));
+    }
+
     let mut added = 0usize;
     for word_id in &req.word_ids {
-        state.store().add_word_to_wordbook(&id, word_id)?;
-        added += 1;
+        if state.store().add_word_to_wordbook(&id, word_id)? {
+            added += 1;
+        }
     }
 
     Ok(ok(serde_json::json!({"added": added})))
@@ -170,6 +175,6 @@ async fn remove_word(
         return Err(AppError::forbidden("You do not own this wordbook"));
     }
 
-    state.store().remove_word_from_wordbook(&id, &word_id)?;
-    Ok(ok(serde_json::json!({"removed": true})))
+    let removed = state.store().remove_word_from_wordbook(&id, &word_id)?;
+    Ok(ok(serde_json::json!({"removed": removed})))
 }

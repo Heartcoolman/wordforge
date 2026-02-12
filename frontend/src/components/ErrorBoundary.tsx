@@ -17,7 +17,10 @@ export function AppErrorBoundary(props: ParentProps) {
             </div>
             <h2 class="text-lg font-semibold text-content mb-2">出错了</h2>
             <p class="text-sm text-content-secondary mb-4">
-              {err instanceof Error ? err.message : '发生了未知错误'}
+              {/* import.meta.env.DEV 由 Vite 在编译时注入，生产构建中会被静态替换为 false */}
+              {import.meta.env.DEV
+                ? (err instanceof Error ? err.message : String(err))
+                : '页面出现错误，请刷新重试'}
             </p>
             <div class="flex gap-3 justify-center">
               <Button variant="outline" onClick={() => window.location.href = '/'}>返回首页</Button>

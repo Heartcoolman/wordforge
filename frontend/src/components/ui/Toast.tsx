@@ -59,7 +59,7 @@ function SingleToast(props: { toast: ToastItemType }) {
 export function Toaster() {
   return (
     <Portal>
-      <div class="fixed top-4 right-4 z-[100] flex flex-col gap-2">
+      <div role="region" aria-live="polite" class="fixed top-4 right-4 z-[100] flex flex-col gap-2">
         <For each={uiStore.toasts()}>{(t) => <SingleToast toast={t} />}</For>
       </div>
     </Portal>

@@ -61,16 +61,20 @@ function Dashboard() {
   const [progress, setProgress] = createSignal<StudyProgress | null>(null);
   const [stats, setStats] = createSignal<UserStats | null>(null);
   const [loading, setLoading] = createSignal(true);
+  const [loadError, setLoadError] = createSignal(false);
 
   onMount(async () => {
-    try {
-      const [p, s] = await Promise.allSettled([
-        studyConfigApi.getProgress(),
-        usersApi.getStats(),
-      ]);
-      if (p.status === 'fulfilled') setProgress(p.value);
-      if (s.status === 'fulfilled') setStats(s.value);
-    } catch { /* ignore */ }
+    const [p, s] = await Promise.allSettled([
+      studyConfigApi.getProgress(),
+      usersApi.getStats(),
+    ]);
+    if (p.status === 'fulfilled') setProgress(p.value);
+    if (s.status === 'fulfilled') setStats(s.value);
+    // 所有 API 都失败时显示错误提示
+    if (p.status === 'rejected' && s.status === 'rejected') {
+      setLoadError(true);
+      uiStore.toast.error('数据加载失败', '请检查网络连接后刷新页面');
+    }
     setLoading(false);
   });
 
@@ -85,6 +89,12 @@ function Dashboard() {
       </div>
 
       <Show when={!loading()} fallback={<div class="flex justify-center py-8"><Spinner size="lg" /></div>}>
+        <Show when={loadError()}>
+          <Card variant="outlined" padding="md" class="text-center text-content-secondary">
+            <p>数据加载失败，请检查网络连接后刷新页面</p>
+            <Button variant="ghost" size="sm" class="mt-2" onClick={() => window.location.reload()}>重试</Button>
+          </Card>
+        </Show>
         {/* Today Progress */}
         <Show when={progress()}>
           {(p) => (

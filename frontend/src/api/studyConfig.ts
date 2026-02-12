@@ -8,7 +8,10 @@ export const studyConfigApi = {
   },
 
   update(data: UpdateStudyConfigRequest) {
-    return api.put<StudyConfig>('/api/study-config', data);
+    const sanitized = { ...data };
+    if (sanitized.dailyWordCount != null) sanitized.dailyWordCount = Math.round(sanitized.dailyWordCount);
+    if (sanitized.dailyMasteryTarget != null) sanitized.dailyMasteryTarget = Math.round(sanitized.dailyMasteryTarget);
+    return api.put<StudyConfig>('/api/study-config', sanitized);
   },
 
   getTodayWords() {

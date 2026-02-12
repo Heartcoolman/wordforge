@@ -9,6 +9,13 @@ import { learningApi } from '@/api/learning';
 import { recordsApi } from '@/api/records';
 import { uiStore } from '@/stores/ui';
 import type { Word } from '@/types/word';
+import { fatigueStore } from '@/stores/fatigue';
+import { useFatigueDetection } from '@/hooks/useFatigueDetection';
+import { FatigueToggle } from '@/components/fatigue/FatigueToggle';
+import { FatigueIndicator } from '@/components/fatigue/FatigueIndicator';
+import { FatigueWarningModal } from '@/components/fatigue/FatigueWarningModal';
+import { CameraPermission } from '@/components/fatigue/CameraPermission';
+import { checkFatigueWarningCooldown } from '@/lib/fatigueWarningCooldown';
 
 export default function FlashcardPage() {
   const navigate = useNavigate();
@@ -21,7 +28,22 @@ export default function FlashcardPage() {
   const [sessionId, setSessionId] = createSignal('');
   const [done, setDone] = createSignal(false);
 
+  // 疲劳检测相关状态
+  const [showCameraPermission, setShowCameraPermission] = createSignal(false);
+  const [showFatigueWarning, setShowFatigueWarning] = createSignal(false);
+  const { start: startDetection } = useFatigueDetection();
+
+  let cardShownTime = Date.now();
+
+  function handleKeyDown(e: KeyboardEvent) {
+    if (done()) return;
+    if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); setFlipped(!flipped()); }
+    if (e.key === 'ArrowRight' || e.key === '1') markKnown();
+    if (e.key === 'ArrowLeft' || e.key === '2') markUnknown();
+  }
+
   onMount(async () => {
+    document.addEventListener('keydown', handleKeyDown);
     try {
       const session = await learningApi.createSession();
       setSessionId(session.sessionId);
@@ -31,6 +53,7 @@ export default function FlashcardPage() {
         setDone(true);
       }
       setWords(study.words);
+      cardShownTime = Date.now();
     } catch (err: unknown) {
       uiStore.toast.error('加载失败', err instanceof Error ? err.message : '');
     } finally {
@@ -38,34 +61,39 @@ export default function FlashcardPage() {
     }
   });
 
-  function handleKeyDown(e: KeyboardEvent) {
-    if (done()) return;
-    if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); setFlipped(!flipped()); }
-    if (e.key === 'ArrowRight' || e.key === '1') markKnown();
-    if (e.key === 'ArrowLeft' || e.key === '2') markUnknown();
-  }
-
-  onMount(() => {
-    document.addEventListener('keydown', handleKeyDown);
-    onCleanup(() => document.removeEventListener('keydown', handleKeyDown));
+  onCleanup(() => {
+    document.removeEventListener('keydown', handleKeyDown);
   });
 
   function advance(correct: boolean) {
     const w = words()[index()];
+    const responseTime = Date.now() - cardShownTime;
     if (w) {
       recordsApi.create({
+        clientRecordId: crypto.randomUUID(),
         wordId: w.id,
         isCorrect: correct,
-        responseTimeMs: 0,
+        responseTimeMs: responseTime,
         sessionId: sessionId() || undefined,
-      }).catch(() => {});
+      }).catch((err: unknown) => {
+        uiStore.toast.warning('答题记录保存失败', err instanceof Error ? err.message : '');
+      });
     }
+
+    // 翻牌后检查疲劳等级
+    if (fatigueStore.detecting() && fatigueStore.fatigueLevel() === 'severe') {
+      if (checkFatigueWarningCooldown()) {
+        setShowFatigueWarning(true);
+      }
+    }
+
     if (index() + 1 >= words().length) {
       setDone(true);
       return;
     }
     setIndex((i) => i + 1);
     setFlipped(false);
+    cardShownTime = Date.now();
   }
 
   function markKnown() { setKnown((n) => n + 1); advance(true); }
@@ -75,7 +103,15 @@ export default function FlashcardPage() {
 
   return (
     <div class="max-w-lg mx-auto space-y-6 animate-fade-in-up">
-      <h1 class="text-2xl font-bold text-content">闪记模式</h1>
+      <div class="flex items-center justify-between">
+        <h1 class="text-2xl font-bold text-content">闪记模式</h1>
+        <div class="flex items-center gap-2">
+          <Show when={fatigueStore.detecting()}>
+            <FatigueIndicator />
+          </Show>
+          <FatigueToggle onFirstEnable={() => setShowCameraPermission(true)} />
+        </div>
+      </div>
 
       <Show when={!loading()} fallback={<div class="flex justify-center py-20"><Spinner size="lg" /></div>}>
         <Show when={!done()} fallback={
@@ -92,7 +128,19 @@ export default function FlashcardPage() {
             <ProgressBar value={index() + 1} max={words().length} showLabel size="sm" />
 
             {/* Flashcard */}
-            <div class="perspective cursor-pointer" onClick={() => setFlipped(!flipped())}>
+            <div
+              class="perspective cursor-pointer"
+              role="button"
+              tabIndex={0}
+              aria-label={flipped() ? '点击翻转到正面' : '点击翻转查看释义'}
+              onClick={() => setFlipped(!flipped())}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  setFlipped(!flipped());
+                }
+              }}
+            >
               <div class={cn(
                 'relative w-full h-64 transition-transform duration-500 preserve-3d',
                 flipped() && 'rotate-y-180',
@@ -114,8 +162,8 @@ export default function FlashcardPage() {
                     <Show when={current()?.partOfSpeech}>
                       <p class="text-sm text-content-tertiary mt-2">{current()?.partOfSpeech}</p>
                     </Show>
-                    <Show when={current()?.examples && current()!.examples.length > 0}>
-                      <p class="text-sm text-content-secondary mt-3 italic">"{current()!.examples[0]}"</p>
+                    <Show when={current()?.examples?.length}>
+                      <p class="text-sm text-content-secondary mt-3 italic">"{current()?.examples?.[0]}"</p>
                     </Show>
                   </Card>
                 </div>
@@ -136,6 +184,27 @@ export default function FlashcardPage() {
           </Show>
         </Show>
       </Show>
+
+      {/* 摄像头权限引导弹窗 */}
+      <CameraPermission
+        open={showCameraPermission()}
+        onClose={() => setShowCameraPermission(false)}
+        onConfirm={() => {
+          setShowCameraPermission(false);
+          fatigueStore.enable();
+          startDetection();
+        }}
+      />
+
+      {/* 疲劳警告弹窗 */}
+      <FatigueWarningModal
+        open={showFatigueWarning()}
+        onClose={() => setShowFatigueWarning(false)}
+        onRest={() => {
+          setShowFatigueWarning(false);
+          navigate('/');
+        }}
+      />
     </div>
   );
 }

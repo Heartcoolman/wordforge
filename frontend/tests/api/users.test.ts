@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeAll, afterAll, afterEach } from 'vitest
 import { setupServer } from 'msw/node';
 import { http, HttpResponse } from 'msw';
 
-const BASE = 'http://localhost:3000';
+import { TEST_BASE_URL as BASE } from '../helpers/constants';
 
 vi.mock('@/lib/token', () => ({
   tokenManager: {
@@ -50,7 +50,7 @@ describe('usersApi', () => {
       http.put(`${BASE}/api/users/me/password`, () =>
         HttpResponse.json({ success: true, data: { passwordChanged: true } })),
     );
-    const result = await usersApi.changePassword({ current_password: 'old', new_password: 'newpw123' });
+    const result = await usersApi.changePassword({ currentPassword: 'old', newPassword: 'newpw123' });
     expect(result).toEqual({ passwordChanged: true });
   });
 

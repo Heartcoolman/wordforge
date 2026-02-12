@@ -14,6 +14,7 @@ let inputIdCounter = 0;
 export function Input(props: InputProps) {
   const [local, rest] = splitProps(props, ['label', 'error', 'hint', 'icon', 'rightIcon', 'class', 'id']);
   const inputId = local.id ?? `input-${++inputIdCounter}`;
+  const errorId = `${inputId}-error`;
 
   return (
     <div class="flex flex-col gap-1.5">
@@ -28,6 +29,8 @@ export function Input(props: InputProps) {
         </Show>
         <input
           id={inputId}
+          aria-describedby={local.error ? errorId : undefined}
+          aria-invalid={local.error ? true : undefined}
           {...rest}
           class={cn(
             'w-full h-10 px-3 rounded-lg text-sm bg-surface text-content',
@@ -48,7 +51,7 @@ export function Input(props: InputProps) {
         </Show>
       </div>
       <Show when={local.error}>
-        <p class="text-xs text-error">{local.error}</p>
+        <p id={errorId} class="text-xs text-error" role="alert">{local.error}</p>
       </Show>
       <Show when={local.hint && !local.error}>
         <p class="text-xs text-content-tertiary">{local.hint}</p>

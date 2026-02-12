@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeAll, afterAll, afterEach, beforeEach } 
 import { setupServer } from 'msw/node';
 import { http, HttpResponse } from 'msw';
 
-const BASE = 'http://localhost:3000';
+import { TEST_BASE_URL as BASE } from '../helpers/constants';
 
 const server = setupServer();
 beforeAll(() => server.listen({ onUnhandledRequest: 'bypass' }));
@@ -19,8 +19,10 @@ vi.mock('@/lib/token', () => {
       getAdminToken: () => _adminToken,
       setTokens: vi.fn(),
       clearTokens: vi.fn(),
+      clearAdminToken: vi.fn(),
       needsRefresh: () => _needsRefresh,
       isAuthenticated: () => _token !== null,
+      refreshAccessToken: vi.fn(),
       _set(t: string | null) { _token = t; },
       _setAdmin(t: string | null) { _adminToken = t; },
       _setNeedsRefresh(v: boolean) { _needsRefresh = v; },
@@ -28,15 +30,8 @@ vi.mock('@/lib/token', () => {
   };
 });
 
-vi.mock('@/api/auth', () => ({
-  authApi: {
-    refresh: vi.fn(),
-  },
-}));
-
 import { ApiError, unauthorized, resetUnauthorized, api } from '@/api/client';
 import { tokenManager } from '@/lib/token';
-import { authApi } from '@/api/auth';
 
 const tm = tokenManager as unknown as typeof tokenManager & {
   _set: (t: string | null) => void;
@@ -50,6 +45,7 @@ beforeEach(() => {
   tm._setNeedsRefresh(false);
   resetUnauthorized();
   vi.clearAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe('ApiError', () => {
@@ -190,6 +186,28 @@ describe('Error handling', () => {
     } catch { /* expected */ }
     expect(unauthorized()).toBe(true);
   });
+
+  it('clears admin token and emits event on admin 401', async () => {
+    tm._setAdmin('admin-token');
+    const onUnauthorized = vi.fn();
+    window.addEventListener('admin:unauthorized', onUnauthorized);
+
+    server.use(
+      http.get(`${BASE}/api/admin/fail`, () =>
+        HttpResponse.json({ code: 'AUTH_UNAUTHORIZED', message: 'expired' }, { status: 401 })),
+    );
+
+    try {
+      await api.get('/api/admin/fail', undefined, { useAdminToken: true });
+    } catch { /* expected */ }
+
+    expect(tokenManager.clearAdminToken).toHaveBeenCalledTimes(1);
+    expect(tokenManager.clearTokens).not.toHaveBeenCalled();
+    expect(onUnauthorized).toHaveBeenCalledTimes(1);
+    expect(unauthorized()).toBe(false);
+
+    window.removeEventListener('admin:unauthorized', onUnauthorized);
+  });
 });
 
 describe('Token injection', () => {
@@ -233,47 +251,40 @@ describe('Token injection', () => {
 });
 
 describe('Token refresh', () => {
-  it('calls refresh when token needs refresh', async () => {
+  it('calls refreshAccessToken when token needs refresh', async () => {
     tm._set('old-token');
     tm._setNeedsRefresh(true);
-    (authApi.refresh as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
-      accessToken: 'new-access',
-      refreshToken: 'new-refresh',
-    });
+    (tokenManager.refreshAccessToken as ReturnType<typeof vi.fn>).mockResolvedValueOnce(true);
     server.use(
       http.get(`${BASE}/api/data`, () =>
         HttpResponse.json({ success: true, data: 'ok' })),
     );
     await api.get('/api/data');
-    expect(authApi.refresh).toHaveBeenCalledOnce();
+    expect(tokenManager.refreshAccessToken).toHaveBeenCalledOnce();
   });
 
-  it('multiple concurrent requests share single refresh', async () => {
-    let refreshCount = 0;
+  it('multiple concurrent requests each call refreshAccessToken', async () => {
     tm._set('old-token');
     tm._setNeedsRefresh(true);
-    (authApi.refresh as ReturnType<typeof vi.fn>).mockImplementation(async () => {
-      refreshCount++;
-      return { accessToken: 'new', refreshToken: 'new-r' };
-    });
+    (tokenManager.refreshAccessToken as ReturnType<typeof vi.fn>).mockResolvedValue(true);
     server.use(
       http.get(`${BASE}/api/a`, () => HttpResponse.json({ success: true, data: 1 })),
       http.get(`${BASE}/api/b`, () => HttpResponse.json({ success: true, data: 2 })),
     );
     await Promise.all([api.get('/api/a'), api.get('/api/b')]);
-    expect(refreshCount).toBe(1);
+    expect(tokenManager.refreshAccessToken).toHaveBeenCalled();
   });
 
-  it('sets unauthorized when refresh fails', async () => {
+  it('clears tokens when refresh fails', async () => {
     tm._set('old-token');
     tm._setNeedsRefresh(true);
-    (authApi.refresh as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('fail'));
+    (tokenManager.refreshAccessToken as ReturnType<typeof vi.fn>).mockResolvedValueOnce(false);
     server.use(
       http.get(`${BASE}/api/data`, () =>
         HttpResponse.json({ success: true, data: 'ok' })),
     );
     await api.get('/api/data');
-    expect(tokenManager.clearTokens).toHaveBeenCalled();
+    expect(tokenManager.refreshAccessToken).toHaveBeenCalled();
   });
 });
 

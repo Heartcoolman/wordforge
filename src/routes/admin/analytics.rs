@@ -17,20 +17,14 @@ async fn user_engagement(
     _admin: AdminAuthUser,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let users = state.store().list_users(usize::MAX, 0)?;
-    let total_users = users.len();
+    let total_users = state.store().count_users()?;
 
-    let mut active_today = 0usize;
-    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
-
-    for user in &users {
-        let records = state.store().get_user_records(&user.id, 1)?;
-        if let Some(r) = records.first() {
-            if r.created_at.format("%Y-%m-%d").to_string() == today {
-                active_today += 1;
-            }
-        }
-    }
+    let day_start = chrono::Utc::now()
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .map(|dt| chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(dt, chrono::Utc))
+        .unwrap_or_else(chrono::Utc::now);
+    let active_today = state.store().count_active_users_since(day_start)?;
 
     Ok(ok(serde_json::json!({
         "totalUsers": total_users,
@@ -45,19 +39,8 @@ async fn learning_metrics(
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     let total_words = state.store().count_words()?;
-    let users = state.store().list_users(usize::MAX, 0)?;
-
-    let mut total_records = 0u64;
-    let mut total_correct = 0u64;
-    for user in &users {
-        let records = state.store().get_user_records(&user.id, usize::MAX)?;
-        for r in &records {
-            total_records += 1;
-            if r.is_correct {
-                total_correct += 1;
-            }
-        }
-    }
+    let total_records = state.store().count_all_records()? as u64;
+    let total_correct = state.store().count_all_correct_records()? as u64;
 
     Ok(ok(serde_json::json!({
         "totalWords": total_words,

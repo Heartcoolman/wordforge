@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeAll, afterAll, afterEach } from 'vitest
 import { setupServer } from 'msw/node';
 import { http, HttpResponse } from 'msw';
 
-const BASE = 'http://localhost:3000';
+import { TEST_BASE_URL as BASE } from '../helpers/constants';
 
 const server = setupServer();
 beforeAll(() => server.listen({ onUnhandledRequest: 'bypass' }));
@@ -26,7 +26,7 @@ import { wordsApi } from '@/api/words';
 
 describe('wordsApi', () => {
   it('list returns paginated words', async () => {
-    const response = { items: [{ id: 'w1', word: 'test', definition: 'a trial' }], total: 1, limit: 20, offset: 0 };
+    const response = { data: [{ id: 'w1', word: 'test', definition: 'a trial' }], total: 1, page: 1, perPage: 20, totalPages: 1 };
     server.use(
       http.get(`${BASE}/api/words`, () =>
         HttpResponse.json({ success: true, data: response })),
@@ -36,17 +36,17 @@ describe('wordsApi', () => {
   });
 
   it('list sends query params', async () => {
-    const response = { items: [], total: 0, limit: 10, offset: 0 };
+    const response = { data: [], total: 0, page: 1, perPage: 10, totalPages: 0 };
     server.use(
       http.get(`${BASE}/api/words`, ({ request }) => {
         const url = new URL(request.url);
-        expect(url.searchParams.get('limit')).toBe('10');
-        expect(url.searchParams.get('offset')).toBe('5');
+        expect(url.searchParams.get('perPage')).toBe('10');
+        expect(url.searchParams.get('page')).toBe('2');
         expect(url.searchParams.get('search')).toBe('hello');
         return HttpResponse.json({ success: true, data: response });
       }),
     );
-    const result = await wordsApi.list({ limit: 10, offset: 5, search: 'hello' });
+    const result = await wordsApi.list({ perPage: 10, page: 2, search: 'hello' });
     expect(result).toEqual(response);
   });
 

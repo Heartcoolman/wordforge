@@ -1,6 +1,8 @@
 use axum::extract::{Query, State};
 use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::Router;
+
+use crate::extractors::JsonBody;
 use serde::Deserialize;
 
 use crate::amas::types::RawEvent;
@@ -12,9 +14,6 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/process-event", post(process_event))
         .route("/batch-process", post(batch_process))
-        .route("/config", get(get_config).put(update_config))
-        .route("/metrics", get(get_metrics))
-        .route("/monitoring", get(get_monitoring_events))
         // B18-B24: AMAS query endpoints
         .route("/state", get(get_amas_state))
         .route("/strategy", get(get_strategy))
@@ -23,6 +22,15 @@ pub fn router() -> Router<AppState> {
         .route("/intervention", get(get_intervention))
         .route("/reset", post(reset_state))
         .route("/mastery/evaluate", get(evaluate_mastery))
+        .route("/visual-fatigue", post(report_visual_fatigue))
+}
+
+/// Admin-only AMAS endpoints (config, metrics, monitoring)
+pub fn admin_router() -> Router<AppState> {
+    Router::new()
+        .route("/config", get(get_config).put(update_config))
+        .route("/metrics", get(get_metrics))
+        .route("/monitoring", get(get_monitoring_events))
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -60,6 +68,7 @@ impl From<ProcessEventRequest> for RawEvent {
             interaction_density: value.interaction_density,
             paused_time_ms: value.paused_time_ms,
             hint_used: value.hint_used.unwrap_or(false),
+            confused_with: None,
         }
     }
 }
@@ -67,7 +76,7 @@ impl From<ProcessEventRequest> for RawEvent {
 async fn process_event(
     auth: AuthUser,
     State(state): State<AppState>,
-    Json(req): Json<ProcessEventRequest>,
+    JsonBody(req): JsonBody<ProcessEventRequest>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     let result = state
         .amas()
@@ -77,6 +86,7 @@ async fn process_event(
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct BatchProcessRequest {
     events: Vec<ProcessEventRequest>,
 }
@@ -84,12 +94,15 @@ struct BatchProcessRequest {
 async fn batch_process(
     auth: AuthUser,
     State(state): State<AppState>,
-    Json(req): Json<BatchProcessRequest>,
+    JsonBody(req): JsonBody<BatchProcessRequest>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    if req.events.len() > 500 {
+    if req.events.len() > state.config().limits.max_batch_size {
         return Err(AppError::bad_request(
             "BATCH_TOO_LARGE",
-            "batch_process accepts at most 500 events",
+            &format!(
+                "batch_process accepts at most {} events",
+                state.config().limits.max_batch_size
+            ),
         ));
     }
     let mut outputs = Vec::new();
@@ -114,15 +127,26 @@ async fn get_config(
 }
 
 async fn update_config(
-    _admin: AdminAuthUser,
+    admin: AdminAuthUser,
     State(state): State<AppState>,
-    Json(cfg): Json<crate::amas::config::AMASConfig>,
+    JsonBody(cfg): JsonBody<crate::amas::config::AMASConfig>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
+    // 先进行配置验证
+    cfg.validate()
+        .map_err(|e| AppError::bad_request("AMAS_INVALID_CONFIG", &e))?;
+
     state
         .amas()
         .reload_config(cfg)
         .await
         .map_err(|e| AppError::bad_request("AMAS_INVALID_CONFIG", &e))?;
+
+    tracing::info!(
+        admin_id = %admin.admin_id,
+        action = "update_amas_config",
+        "管理员更新 AMAS 配置"
+    );
+
     Ok(ok(serde_json::json!({"updated": true})))
 }
 
@@ -134,6 +158,7 @@ async fn get_metrics(
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct MonitoringQuery {
     limit: Option<usize>,
 }
@@ -146,6 +171,30 @@ async fn get_monitoring_events(
     let limit = query.limit.unwrap_or(50).clamp(1, 500);
     let events = state.store().get_recent_monitoring_events(limit)?;
     Ok(ok(events))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VisualFatigueRequest {
+    score: f64,
+}
+
+async fn report_visual_fatigue(
+    auth: AuthUser,
+    State(state): State<AppState>,
+    JsonBody(req): JsonBody<VisualFatigueRequest>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    if !(0.0..=100.0).contains(&req.score) {
+        return Err(AppError::bad_request(
+            "INVALID_SCORE",
+            "score must be 0-100",
+        ));
+    }
+    let user_state = state
+        .amas()
+        .update_visual_fatigue(&auth.user_id, req.score)
+        .await?;
+    Ok(ok(user_state))
 }
 
 // B18: GET /api/amas/state
@@ -181,9 +230,7 @@ async fn get_learning_curve(
     auth: AuthUser,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let records = state
-        .store()
-        .get_user_records(&auth.user_id, 1000)?;
+    let records = state.store().get_user_records(&auth.user_id, 1000)?;
 
     // Aggregate by day
     let mut daily: std::collections::BTreeMap<String, (usize, usize)> =
@@ -218,23 +265,25 @@ async fn get_intervention(
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     let user_state = state.amas().get_user_state(&auth.user_id)?;
+    let amas_config = state.amas().get_config().await;
+    let iv = &amas_config.intervention;
     let mut suggestions = Vec::new();
 
-    if user_state.fatigue > 0.7 {
+    if user_state.fatigue > iv.fatigue_alert_threshold {
         suggestions.push(serde_json::json!({
             "type": "rest",
             "message": "You seem fatigued. Consider taking a break.",
             "severity": "warning",
         }));
     }
-    if user_state.motivation < -0.3 {
+    if user_state.motivation < iv.motivation_alert_threshold {
         suggestions.push(serde_json::json!({
             "type": "encouragement",
             "message": "Try easier words to rebuild confidence.",
             "severity": "info",
         }));
     }
-    if user_state.attention < 0.3 {
+    if user_state.attention < iv.attention_alert_threshold {
         suggestions.push(serde_json::json!({
             "type": "focus",
             "message": "Your attention seems low. Try a shorter study session.",

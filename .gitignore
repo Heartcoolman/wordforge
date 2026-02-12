@@ -11,10 +11,16 @@
 *.swp
 *.swo
 
+# Dependencies
+node_modules/
+
 # Frontend
-frontend/node_modules
 frontend/coverage
 frontend/dist
+
+# 前端构建产物（由 vite build 生成）
+static/assets/
+static/index.html
 
 # OS
 .DS_Store
@@ -25,5 +31,29 @@ frontend/dist
 .vscode/
 .idea/
 
+# Workspace crates
+crates/*/target/
+
+# WASM
+*.wasm
+pkg/
+
+# Source maps
+*.map
+
+# Logs
+/logs
+*.log
+
+# Environment files (keep example)
+.env.*
+!.env.example
+
 # Temp
 *.npmrc_temp
+
+# Coverage (backend)
+coverage/
+
+# Debug symbols
+*.pdb

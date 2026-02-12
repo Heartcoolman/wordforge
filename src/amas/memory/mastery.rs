@@ -1,8 +1,14 @@
 use serde::{Deserialize, Serialize};
 
+use crate::amas::config::MemoryModelConfig;
 use crate::amas::types::*;
 
 use super::mdm::MdmState;
+
+const ALPHA_SCALE: f64 = 0.3;
+const ALPHA_MIN: f64 = 0.1;
+const ALPHA_MAX: f64 = 0.5;
+const FORGETTING_THRESHOLD: f64 = 0.2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WordMasteryState {
@@ -32,9 +38,11 @@ pub fn update_mastery(
     is_correct: bool,
     quality: f64,
     interval_scale: f64,
+    desired_retention: f64,
+    config: &MemoryModelConfig,
 ) -> WordMasteryDecision {
-    let alpha = (interval_scale * 0.3).clamp(0.1, 0.5);
-    super::mdm::update_strength(&mut state.mdm, quality, alpha);
+    let alpha = (interval_scale * ALPHA_SCALE).clamp(ALPHA_MIN, ALPHA_MAX);
+    super::mdm::update_strength(&mut state.mdm, quality, alpha, config);
 
     state.total_attempts += 1;
     if is_correct {
@@ -44,11 +52,12 @@ pub fn update_mastery(
         state.correct_streak = 0;
     }
 
-    state.mastery_level = determine_level(state);
+    state.mastery_level = determine_level(state, config);
 
     let now = chrono::Utc::now().timestamp_millis();
-    let recall = super::mdm::recall_probability(&state.mdm, now);
-    let interval = super::mdm::compute_interval(&state.mdm, 0.85, interval_scale);
+    let recall = super::mdm::recall_probability(&state.mdm, now, config);
+    let interval =
+        super::mdm::compute_interval(&state.mdm, desired_retention, interval_scale, config);
 
     WordMasteryDecision {
         word_id: state.word_id.clone(),
@@ -59,22 +68,31 @@ pub fn update_mastery(
     }
 }
 
-fn determine_level(state: &WordMasteryState) -> MasteryLevel {
+fn determine_level(state: &WordMasteryState, config: &MemoryModelConfig) -> MasteryLevel {
     let accuracy = if state.total_attempts > 0 {
         state.total_correct as f64 / state.total_attempts as f64
     } else {
         0.0
     };
-    let composite = super::mdm::composite_strength(&state.mdm);
+    let composite = super::mdm::composite_strength(&state.mdm, config);
 
     if state.total_attempts == 0 {
         MasteryLevel::New
-    } else if composite > 0.8 && accuracy > 0.9 && state.correct_streak >= 3 {
+    } else if composite > config.mastery_composite_threshold
+        && accuracy > config.mastery_accuracy_threshold
+        && state.correct_streak >= config.mastery_streak_threshold
+    {
         MasteryLevel::Mastered
-    } else if composite > 0.4 {
-        MasteryLevel::Reviewing
     } else {
-        MasteryLevel::Learning
+        let now = chrono::Utc::now().timestamp_millis();
+        let recall = super::mdm::recall_probability(&state.mdm, now, config);
+        if recall < FORGETTING_THRESHOLD {
+            MasteryLevel::Forgotten
+        } else if composite > config.reviewing_threshold {
+            MasteryLevel::Reviewing
+        } else {
+            MasteryLevel::Learning
+        }
     }
 }
 
@@ -84,9 +102,10 @@ mod tests {
 
     #[test]
     fn level_up_after_correct_streak() {
+        let config = MemoryModelConfig::default();
         let mut state = WordMasteryState::new("w1");
         for _ in 0..5 {
-            let _ = update_mastery(&mut state, true, 0.95, 1.0);
+            let _ = update_mastery(&mut state, true, 0.95, 1.0, 0.9, &config);
         }
         assert!(matches!(
             state.mastery_level,

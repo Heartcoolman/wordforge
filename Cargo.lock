@@ -1027,6 +1027,7 @@ dependencies = [
  "futures",
  "hex",
  "hmac",
+ "http-body-util",
  "hyper",
  "jsonwebtoken",
  "once_cell",

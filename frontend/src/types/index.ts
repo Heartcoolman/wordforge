@@ -10,3 +10,4 @@ export type * from './learning';
 export type * from './notification';
 export type * from './content';
 export type * from './admin';
+export type * from './userProfile';

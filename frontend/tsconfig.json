@@ -13,7 +13,8 @@
     "isolatedModules": true,
     "types": ["vitest/globals", "@testing-library/jest-dom"],
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["./src/*"],
+      "@fatigue-wasm": ["../crates/visual-fatigue-wasm/pkg"]
     },
     "baseUrl": "."
   },

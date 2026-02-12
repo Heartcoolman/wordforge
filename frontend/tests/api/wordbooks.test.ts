@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeAll, afterAll, afterEach } from 'vitest
 import { setupServer } from 'msw/node';
 import { http, HttpResponse } from 'msw';
 
-const BASE = 'http://localhost:3000';
+import { TEST_BASE_URL as BASE } from '../helpers/constants';
 
 const server = setupServer();
 beforeAll(() => server.listen({ onUnhandledRequest: 'bypass' }));
@@ -59,7 +59,7 @@ describe('wordbooksApi', () => {
   });
 
   it('getWords returns paginated words for a wordbook', async () => {
-    const response = { items: [{ id: 'w1', word: 'test' }], total: 1, limit: 20, offset: 0 };
+    const response = { data: [{ id: 'w1', word: 'test' }], total: 1, page: 1, perPage: 20, totalPages: 1 };
     server.use(
       http.get(`${BASE}/api/wordbooks/b1/words`, () =>
         HttpResponse.json({ success: true, data: response })),
@@ -69,16 +69,16 @@ describe('wordbooksApi', () => {
   });
 
   it('getWords sends pagination params', async () => {
-    const response = { items: [], total: 100, limit: 10, offset: 20 };
+    const response = { data: [], total: 100, page: 3, perPage: 10, totalPages: 10 };
     server.use(
       http.get(`${BASE}/api/wordbooks/b1/words`, ({ request }) => {
         const url = new URL(request.url);
-        expect(url.searchParams.get('limit')).toBe('10');
-        expect(url.searchParams.get('offset')).toBe('20');
+        expect(url.searchParams.get('perPage')).toBe('10');
+        expect(url.searchParams.get('page')).toBe('3');
         return HttpResponse.json({ success: true, data: response });
       }),
     );
-    const result = await wordbooksApi.getWords('b1', { limit: 10, offset: 20 });
+    const result = await wordbooksApi.getWords('b1', { perPage: 10, page: 3 });
     expect(result).toEqual(response);
   });
 

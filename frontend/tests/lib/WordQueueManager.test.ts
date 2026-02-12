@@ -49,16 +49,27 @@ describe('createWordQueueManager', () => {
     expect(next?.word.id).toBe('b');
   });
 
-  it('pickNext returns least recently shown when no errors', () => {
+  it('pickNext respects backend priority order when no errors', () => {
     const mgr = createManager();
     const w1 = createFakeWord({ id: 'x' });
     const w2 = createFakeWord({ id: 'y' });
     mgr.loadWords([w1, w2]);
-    // Both have lastShown=0, so first in array wins after sort
-    mgr.recordAnswer('x', true);
-    // x was just shown, y still has lastShown=0
+    // w1 priority=0, w2 priority=1，按后端排序 w1 优先
     const next = mgr.pickNext();
-    expect(next?.word.id).toBe('y');
+    expect(next?.word.id).toBe('x');
+  });
+
+  it('pickNext uses lastShown as tiebreaker when priority is equal', () => {
+    const mgr = createManager();
+    const w1 = createFakeWord({ id: 'x' });
+    const w2 = createFakeWord({ id: 'y' });
+    mgr.loadWords([w1]);
+    mgr.addWords([w2]);
+    // 手动让两个词 priority 不同（0 vs 1），验证 priority 优先
+    mgr.recordAnswer('x', true);
+    // x.lastShown > 0, y.lastShown = 0，但 x.priority=0 < y.priority=1
+    const next = mgr.pickNext();
+    expect(next?.word.id).toBe('x');
   });
 
   it('recordAnswer correct increments correctCount', () => {

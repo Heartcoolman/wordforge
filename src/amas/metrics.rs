@@ -80,16 +80,49 @@ impl MetricsRegistry {
         self.metrics
             .iter()
             .map(|(id, metric)| {
+                // 使用 load + fetch_sub 模式而非 swap(0)，避免并发写入丢数据
+                let call_count = metric.call_count.load(Ordering::Relaxed);
+                let total_latency_us = metric.total_latency_us.load(Ordering::Relaxed);
+                let error_count = metric.error_count.load(Ordering::Relaxed);
+                metric.call_count.fetch_sub(call_count, Ordering::Relaxed);
+                metric
+                    .total_latency_us
+                    .fetch_sub(total_latency_us, Ordering::Relaxed);
+                metric.error_count.fetch_sub(error_count, Ordering::Relaxed);
                 (
                     id.as_str().to_string(),
                     MetricsSnapshot {
-                        call_count: metric.call_count.swap(0, Ordering::SeqCst),
-                        total_latency_us: metric.total_latency_us.swap(0, Ordering::SeqCst),
-                        error_count: metric.error_count.swap(0, Ordering::SeqCst),
+                        call_count,
+                        total_latency_us,
+                        error_count,
                     },
                 )
             })
             .collect()
+    }
+
+    /// 从持久化的快照恢复 metrics 数据（启动时调用）
+    pub fn restore(&self, algo_id_str: &str, snapshot: &MetricsSnapshot) {
+        let algo_id = match algo_id_str {
+            "heuristic" => AlgorithmId::Heuristic,
+            "ige" => AlgorithmId::Ige,
+            "swd" => AlgorithmId::Swd,
+            "ensemble" => AlgorithmId::Ensemble,
+            "mdm" => AlgorithmId::Mdm,
+            "mastery" => AlgorithmId::Mastery,
+            _ => return,
+        };
+        if let Some(metric) = self.metrics.get(&algo_id) {
+            metric
+                .call_count
+                .store(snapshot.call_count, Ordering::Relaxed);
+            metric
+                .total_latency_us
+                .store(snapshot.total_latency_us, Ordering::Relaxed);
+            metric
+                .error_count
+                .store(snapshot.error_count, Ordering::Relaxed);
+        }
     }
 
     pub fn reset(&self) {

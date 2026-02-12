@@ -52,12 +52,14 @@ export function formatPercent(value: number, decimals = 1): string {
 
 /** Format response time in ms to readable string */
 export function formatResponseTime(ms: number): string {
-  if (ms < 1000) return `${ms}ms`;
+  if (!isFinite(ms) || ms < 0) return '-';
+  if (ms < 1000) return `${Math.round(ms)}ms`;
   return `${(ms / 1000).toFixed(1)}s`;
 }
 
 /** Format a large number with commas */
 export function formatNumber(n: number): string {
+  if (!isFinite(n)) return '-';
   return n.toLocaleString('zh-CN');
 }
 

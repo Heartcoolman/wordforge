@@ -1,16 +1,23 @@
 use axum::extract::State;
 use axum::routing::{get, post};
-use axum::{Json, Router};
-use serde::{Deserialize, Serialize};
+use axum::Router;
+use std::path::PathBuf;
 
 use crate::auth::AuthUser;
+use crate::constants::DEFAULT_PREFERRED_HOURS;
+use crate::extractors::JsonBody;
+use serde::{Deserialize, Serialize};
+
 use crate::response::{ok, AppError};
 use crate::state::AppState;
 use crate::store::keys;
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/reward", get(get_reward_preference).put(set_reward_preference))
+        .route(
+            "/reward",
+            get(get_reward_preference).put(set_reward_preference),
+        )
         .route("/cognitive", get(get_cognitive_profile))
         .route("/learning-style", get(get_learning_style))
         .route("/chronotype", get(get_chronotype))
@@ -29,13 +36,19 @@ async fn get_reward_preference(
     auth: AuthUser,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let key = keys::user_profile_key(&auth.user_id);
-    let pref = match state.store().user_profiles.get(key.as_bytes())
+    let key = keys::user_profile_key(&auth.user_id)?;
+    let pref = match state
+        .store()
+        .user_profiles
+        .get(key.as_bytes())
         .map_err(|e| AppError::internal(&e.to_string()))?
     {
-        Some(raw) => serde_json::from_slice::<RewardPreference>(&raw)
-            .unwrap_or(RewardPreference { reward_type: "standard".to_string() }),
-        None => RewardPreference { reward_type: "standard".to_string() },
+        Some(raw) => serde_json::from_slice::<RewardPreference>(&raw).unwrap_or(RewardPreference {
+            reward_type: "standard".to_string(),
+        }),
+        None => RewardPreference {
+            reward_type: "standard".to_string(),
+        },
     };
     Ok(ok(pref))
 }
@@ -43,7 +56,7 @@ async fn get_reward_preference(
 async fn set_reward_preference(
     auth: AuthUser,
     State(state): State<AppState>,
-    Json(req): Json<RewardPreference>,
+    JsonBody(req): JsonBody<RewardPreference>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     const VALID_REWARD_TYPES: &[&str] = &["standard", "explorer", "achiever", "social"];
     if !VALID_REWARD_TYPES.contains(&req.reward_type.as_str()) {
@@ -53,11 +66,15 @@ async fn set_reward_preference(
         ));
     }
 
-    let key = keys::user_profile_key(&auth.user_id);
-    state.store().user_profiles.insert(
-        key.as_bytes(),
-        serde_json::to_vec(&req).map_err(|e| AppError::internal(&e.to_string()))?,
-    ).map_err(|e| AppError::internal(&e.to_string()))?;
+    let key = keys::user_profile_key(&auth.user_id)?;
+    state
+        .store()
+        .user_profiles
+        .insert(
+            key.as_bytes(),
+            serde_json::to_vec(&req).map_err(|e| AppError::internal(&e.to_string()))?,
+        )
+        .map_err(|e| AppError::internal(&e.to_string()))?;
     Ok(ok(req))
 }
 
@@ -70,7 +87,7 @@ async fn get_cognitive_profile(
     Ok(ok(user_state.cognitive_profile))
 }
 
-// B48: Learning style (VARK)
+// B48: Learning style — expose raw cognitive profile data
 async fn get_learning_style(
     auth: AuthUser,
     State(state): State<AppState>,
@@ -78,25 +95,10 @@ async fn get_learning_style(
     let user_state = state.amas().get_user_state(&auth.user_id)?;
     let cp = &user_state.cognitive_profile;
 
-    // Simple VARK classification based on cognitive profile
-    let style = if cp.processing_speed > 0.7 {
-        "visual"
-    } else if cp.memory_capacity > 0.7 {
-        "auditory"
-    } else if cp.stability > 0.7 {
-        "reading"
-    } else {
-        "kinesthetic"
-    };
-
     Ok(ok(serde_json::json!({
-        "style": style,
-        "scores": {
-            "visual": cp.processing_speed,
-            "auditory": cp.memory_capacity,
-            "reading": cp.stability,
-            "kinesthetic": 1.0 - cp.stability,
-        }
+        "processingSpeed": cp.processing_speed,
+        "memoryCapacity": cp.memory_capacity,
+        "stability": cp.stability,
     })))
 }
 
@@ -135,16 +137,19 @@ async fn get_habit_profile(
     auth: AuthUser,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let key = keys::habit_profile_key(&auth.user_id);
-    let profile = match state.store().habit_profiles.get(key.as_bytes())
+    let key = keys::habit_profile_key(&auth.user_id)?;
+    let profile = match state
+        .store()
+        .habit_profiles
+        .get(key.as_bytes())
         .map_err(|e| AppError::internal(&e.to_string()))?
     {
-        Some(raw) => serde_json::from_slice::<serde_json::Value>(&raw)
-            .unwrap_or(serde_json::json!({})),
+        Some(raw) => {
+            serde_json::from_slice::<serde_json::Value>(&raw).unwrap_or(serde_json::json!({}))
+        }
         None => {
             let user_state = state.amas().get_user_state(&auth.user_id)?;
-            serde_json::to_value(&user_state.habit_profile)
-                .unwrap_or(serde_json::json!({}))
+            serde_json::to_value(&user_state.habit_profile).unwrap_or(serde_json::json!({}))
         }
     };
     Ok(ok(profile))
@@ -153,7 +158,7 @@ async fn get_habit_profile(
 async fn set_habit_profile(
     auth: AuthUser,
     State(state): State<AppState>,
-    Json(req): Json<HabitProfileRequest>,
+    JsonBody(req): JsonBody<HabitProfileRequest>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     // Validate preferred_hours: each value must be 0-23
     if let Some(ref hours) = req.preferred_hours {
@@ -185,39 +190,102 @@ async fn set_habit_profile(
         }
     }
 
-    let key = keys::habit_profile_key(&auth.user_id);
+    let key = keys::habit_profile_key(&auth.user_id)?;
     let profile = serde_json::json!({
-        "preferredHours": req.preferred_hours.unwrap_or(vec![9, 14, 20]),
+        "preferredHours": req.preferred_hours.unwrap_or_else(|| DEFAULT_PREFERRED_HOURS.to_vec()),
         "medianSessionLengthMins": req.median_session_length_mins.unwrap_or(15.0),
         "sessionsPerDay": req.sessions_per_day.unwrap_or(1.0),
     });
-    state.store().habit_profiles.insert(
-        key.as_bytes(),
-        serde_json::to_vec(&profile).map_err(|e| AppError::internal(&e.to_string()))?,
-    ).map_err(|e| AppError::internal(&e.to_string()))?;
+    state
+        .store()
+        .habit_profiles
+        .insert(
+            key.as_bytes(),
+            serde_json::to_vec(&profile).map_err(|e| AppError::internal(&e.to_string()))?,
+        )
+        .map_err(|e| AppError::internal(&e.to_string()))?;
     Ok(ok(profile))
 }
 
 // B51: Avatar upload
+fn resolve_avatar_dir() -> PathBuf {
+    let cwd_static_dir = PathBuf::from("static");
+    if cwd_static_dir.is_dir() {
+        return cwd_static_dir.join("avatars");
+    }
+
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("static")
+        .join("avatars")
+}
+
 async fn upload_avatar(
     auth: AuthUser,
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     body: axum::body::Bytes,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     if body.is_empty() {
         return Err(AppError::bad_request("AVATAR_EMPTY", "No file uploaded"));
     }
 
-    // Store avatar to filesystem
-    let avatar_dir = "static/avatars";
-    let _ = std::fs::create_dir_all(avatar_dir);
-    let filename = format!("{}.bin", auth.user_id);
-    let path = format!("{}/{}", avatar_dir, filename);
+    // 限制头像大小为 512KB
+    const MAX_AVATAR_SIZE: usize = 512 * 1024;
+    if body.len() > MAX_AVATAR_SIZE {
+        return Err(AppError::bad_request(
+            "AVATAR_TOO_LARGE",
+            "Avatar must be smaller than 512KB",
+        ));
+    }
 
-    std::fs::write(&path, &body)
-        .map_err(|e| AppError::internal(&format!("Failed to save avatar: {e}")))?;
+    // 验证文件类型（通过 magic bytes）
+    let extension = match body.get(..4) {
+        Some(b"\x89PNG") => "png",
+        Some(b"\xFF\xD8\xFF\xE0") | Some(b"\xFF\xD8\xFF\xE1") | Some(b"\xFF\xD8\xFF\xDB") => "jpg",
+        Some(bytes) if bytes.starts_with(b"GIF8") => "gif",
+        Some(bytes) if bytes.starts_with(b"RIFF") && body.len() > 12 && &body[8..12] == b"WEBP" => {
+            "webp"
+        }
+        _ => {
+            return Err(AppError::bad_request(
+                "AVATAR_INVALID_TYPE",
+                "Only PNG, JPEG, GIF, and WebP images are allowed",
+            ))
+        }
+    };
+
+    let avatar_dir = resolve_avatar_dir();
+    tokio::fs::create_dir_all(&avatar_dir)
+        .await
+        .map_err(|e| AppError::internal(&format!("Failed to create avatar directory: {e}")))?;
+    // 确保 user_id 不包含路径遍历字符
+    let safe_id = auth.user_id.replace(['/', '\\', '.', '\0'], "_");
+    let filename = format!("{}.{}", safe_id, extension);
+    let path = avatar_dir.join(&filename);
+
+    tokio::fs::write(&path, &body)
+        .await
+        .map_err(|e| {
+            AppError::internal(&format!("Failed to save avatar to {}: {e}", path.display()))
+        })?;
+
+    let avatar_url = format!("/avatars/{}", filename);
+    let avatar_key = keys::user_avatar_key(&auth.user_id)?;
+    let avatar_metadata = serde_json::json!({
+        "avatarUrl": avatar_url,
+        "filename": filename,
+        "extension": extension,
+        "sizeBytes": body.len(),
+    });
+    state
+        .store()
+        .user_profiles
+        .insert(
+            avatar_key.as_bytes(),
+            serde_json::to_vec(&avatar_metadata).map_err(|e| AppError::internal(&e.to_string()))?,
+        )
+        .map_err(|e| AppError::internal(&e.to_string()))?;
 
     Ok(ok(serde_json::json!({
-        "avatarUrl": format!("/avatars/{}", filename),
+        "avatarUrl": avatar_metadata["avatarUrl"],
     })))
 }

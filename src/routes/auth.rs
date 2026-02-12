@@ -2,19 +2,22 @@ use axum::extract::State;
 use axum::http::{header::SET_COOKIE, HeaderMap, HeaderValue};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
-use axum::{Json, Router};
+use axum::Router;
+
+use crate::extractors::JsonBody;
 use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::auth::{
-    extract_token_from_headers, hash_password, hash_token, sign_jwt_for_user,
-    sign_refresh_token_for_user, verify_jwt, verify_password,
+    extract_refresh_token_from_headers, hash_password, hash_token, sign_jwt_for_user,
+    sign_refresh_token_for_user, verify_jwt, verify_password, AuthUser,
 };
 use crate::response::{created, ok, AppError};
 use crate::state::AppState;
 use crate::store::keys;
 use crate::store::operations::sessions::Session;
 use crate::store::operations::users::User;
+use crate::validation::{is_valid_email, validate_password, validate_username};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -27,6 +30,7 @@ pub fn router() -> Router<AppState> {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RegisterRequest {
     pub email: String,
     pub username: String,
@@ -34,6 +38,7 @@ pub struct RegisterRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LoginRequest {
     pub email: String,
     pub password: String,
@@ -75,9 +80,7 @@ impl From<&User> for UserProfile {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthResponse {
-    pub token: String,
     pub access_token: String,
-    pub refresh_token: String,
     pub user: UserProfile,
 }
 
@@ -88,11 +91,19 @@ struct PasswordResetEntry {
     expires_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// 每用户最大并发会话数
+const MAX_SESSIONS_PER_USER: usize = 10;
+
 /// Issue an access + refresh token pair and persist the access session.
-fn issue_token_pair(
-    user_id: &str,
-    state: &AppState,
-) -> Result<(String, String), AppError> {
+fn issue_token_pair(user_id: &str, state: &AppState) -> Result<(String, String), AppError> {
+    // 清理超出限制的旧会话
+    if let Err(e) = state
+        .store()
+        .cleanup_oldest_user_sessions(user_id, MAX_SESSIONS_PER_USER)
+    {
+        tracing::warn!(user_id, error = %e, "清理多余会话失败");
+    }
+
     let access_token = sign_jwt_for_user(
         user_id,
         &state.config().jwt_secret,
@@ -101,8 +112,8 @@ fn issue_token_pair(
 
     let refresh_token = sign_refresh_token_for_user(
         user_id,
-        &state.config().jwt_secret,
-        state.config().jwt_expires_in_hours,
+        &state.config().refresh_jwt_secret,
+        state.config().refresh_token_expires_in_hours,
     )?;
 
     // Persist the access token session
@@ -118,13 +129,12 @@ fn issue_token_pair(
 
     // Persist the refresh token session (longer expiry)
     let refresh_hash = hash_token(&refresh_token);
-    let refresh_hours = (state.config().jwt_expires_in_hours * 7).max(168);
     state.store().create_session(&Session {
         token_hash: refresh_hash,
         user_id: user_id.to_string(),
         token_type: "refresh".to_string(),
         created_at: Utc::now(),
-        expires_at: Utc::now() + Duration::hours(refresh_hours as i64),
+        expires_at: Utc::now() + Duration::hours(state.config().refresh_token_expires_in_hours as i64),
         revoked: false,
     })?;
 
@@ -133,37 +143,53 @@ fn issue_token_pair(
 
 async fn register(
     State(state): State<AppState>,
-    Json(req): Json<RegisterRequest>,
+    JsonBody(req): JsonBody<RegisterRequest>,
 ) -> Result<Response, AppError> {
-    if !req.email.contains('@') {
+    let system_settings = state.store().get_system_settings()?;
+    if !system_settings.registration_enabled {
+        return Err(AppError::forbidden("Registration is currently disabled"));
+    }
+    if system_settings.maintenance_mode {
+        return Err(AppError::forbidden("Service is under maintenance"));
+    }
+
+    let email = req.email.trim().to_lowercase();
+    if !is_valid_email(&email) {
         return Err(AppError::bad_request(
             "AUTH_INVALID_EMAIL",
             "Invalid email format",
         ));
     }
-    if req.password.len() < 8 {
-        return Err(AppError::bad_request(
-            "AUTH_WEAK_PASSWORD",
-            "Password must be at least 8 characters",
-        ));
+    let username = req.username.trim();
+    if let Err(msg) = validate_username(username) {
+        return Err(AppError::bad_request("AUTH_INVALID_USERNAME", msg));
+    }
+    if let Err(msg) = validate_password(&req.password) {
+        return Err(AppError::bad_request("AUTH_WEAK_PASSWORD", msg));
     }
 
-    if state.store().get_user_by_email(&req.email)?.is_some() {
+    if state.store().get_user_by_email(&email)?.is_some() {
         return Err(AppError::conflict(
             "AUTH_EMAIL_EXISTS",
             "Email already registered",
         ));
     }
 
+    if state.store().count_users()? >= system_settings.max_users as usize {
+        return Err(AppError::forbidden("User registration limit reached"));
+    }
+
     let now = Utc::now();
     let user = User {
         id: uuid::Uuid::new_v4().to_string(),
-        email: req.email.trim().to_lowercase(),
-        username: req.username.trim().to_string(),
+        email: email.clone(),
+        username: username.to_string(),
         password_hash: hash_password(&req.password)?,
         is_banned: false,
         created_at: now,
         updated_at: now,
+        failed_login_count: 0,
+        locked_until: None,
     };
 
     state.store().create_user(&user)?;
@@ -171,21 +197,24 @@ async fn register(
     let (access_token, refresh_token) = issue_token_pair(&user.id, &state)?;
 
     let payload = AuthResponse {
-        token: access_token.clone(),
         access_token: access_token.clone(),
-        refresh_token,
         user: UserProfile::from(&user),
     };
 
     let mut response = created(payload).into_response();
     set_token_cookie(&mut response, &access_token)?;
+    set_refresh_token_cookie(&mut response, &refresh_token)?;
     Ok(response)
 }
 
 async fn login(
     State(state): State<AppState>,
-    Json(req): Json<LoginRequest>,
+    JsonBody(req): JsonBody<LoginRequest>,
 ) -> Result<Response, AppError> {
+    if state.store().get_system_settings()?.maintenance_mode {
+        return Err(AppError::forbidden("Service is under maintenance"));
+    }
+
     let user = state
         .store()
         .get_user_by_email(&req.email)?
@@ -195,34 +224,42 @@ async fn login(
         return Err(AppError::forbidden("User is banned"));
     }
 
+    // 检查账户是否因多次登录失败而被锁定
+    if state.store().is_account_locked(&user.id)? {
+        return Err(AppError::too_many_requests(
+            "Account temporarily locked due to too many failed login attempts. Please try again later.",
+        ));
+    }
+
     let verified = verify_password(&req.password, &user.password_hash)?;
     if !verified {
+        // 记录登录失败，可能触发锁定
+        let _ = state.store().record_failed_login(&user.id);
         return Err(AppError::unauthorized("Invalid email or password"));
     }
+
+    // 登录成功，重置失败计数
+    let _ = state.store().reset_login_attempts(&user.id);
 
     let (access_token, refresh_token) = issue_token_pair(&user.id, &state)?;
 
     let payload = AuthResponse {
-        token: access_token.clone(),
         access_token: access_token.clone(),
-        refresh_token,
         user: UserProfile::from(&user),
     };
 
     let mut response = ok(payload).into_response();
     set_token_cookie(&mut response, &access_token)?;
+    set_refresh_token_cookie(&mut response, &refresh_token)?;
     Ok(response)
 }
 
-async fn refresh(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<impl IntoResponse, AppError> {
+async fn refresh(State(state): State<AppState>, headers: HeaderMap) -> Result<Response, AppError> {
     // Extract the refresh token from Authorization header or cookie
-    let old_token = extract_token_from_headers(&headers)?;
+    let old_token = extract_refresh_token_from_headers(&headers)?;
 
     // Verify the JWT is valid and has token_type == "refresh"
-    let claims = verify_jwt(&old_token, &state.config().jwt_secret)?;
+    let claims = verify_jwt(&old_token, &state.config().refresh_jwt_secret)?;
     if claims.token_type != "refresh" {
         return Err(AppError::unauthorized(
             "Invalid token type: expected refresh token",
@@ -240,12 +277,14 @@ async fn refresh(
         return Err(AppError::unauthorized("Refresh session mismatch"));
     }
 
-    // Revoke the old refresh session
-    let _ = state.store().delete_session(&old_hash);
+    // 原子性删除旧的 refresh 会话，防止 token 重放攻击
+    let was_deleted = state.store().delete_session_if_exists(&old_hash)?;
+    if !was_deleted {
+        // token 已被使用（可能是重放攻击），拒绝请求
+        return Err(AppError::unauthorized("Refresh token already consumed"));
+    }
 
-    // Issue a new token pair
-    let (access_token, refresh_token) = issue_token_pair(&claims.sub, &state)?;
-
+    // 在签发新 token 前检查用户状态（封禁检查）
     let user = state
         .store()
         .get_user_by_id(&claims.sub)?
@@ -255,27 +294,30 @@ async fn refresh(
         return Err(AppError::forbidden("User is banned"));
     }
 
-    Ok(ok(AuthResponse {
-        token: access_token.clone(),
+    // Issue a new token pair
+    let (access_token, refresh_token) = issue_token_pair(&claims.sub, &state)?;
+
+    let mut response = ok(AuthResponse {
         access_token: access_token.clone(),
-        refresh_token,
         user: UserProfile::from(&user),
-    }))
+    })
+    .into_response();
+    set_token_cookie(&mut response, &access_token)?;
+    set_refresh_token_cookie(&mut response, &refresh_token)?;
+    Ok(response)
 }
 
-async fn logout(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<impl IntoResponse, AppError> {
-    let token = extract_token_from_headers(&headers)?;
-    let token_hash = hash_token(&token);
-    state.store().delete_session(&token_hash)?;
-    Ok(ok(serde_json::json!({"loggedOut": true})))
+async fn logout(auth_user: AuthUser, State(state): State<AppState>) -> Result<Response, AppError> {
+    state.store().delete_user_sessions(&auth_user.user_id)?;
+
+    let mut response = ok(serde_json::json!({"loggedOut": true})).into_response();
+    clear_auth_cookies(&mut response)?;
+    Ok(response)
 }
 
 async fn forgot_password(
     State(state): State<AppState>,
-    Json(req): Json<ForgotPasswordRequest>,
+    JsonBody(req): JsonBody<ForgotPasswordRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     if let Some(user) = state.store().get_user_by_email(&req.email)? {
         let raw_token = uuid::Uuid::new_v4().simple().to_string();
@@ -290,38 +332,46 @@ async fn forgot_password(
             .store()
             .password_reset_tokens
             .insert(
-                keys::password_reset_key(&token_hash).as_bytes(),
+                keys::password_reset_key(&token_hash)?.as_bytes(),
                 serde_json::to_vec(&entry).map_err(|e| AppError::internal(&e.to_string()))?,
             )
             .map_err(|e| AppError::internal(&e.to_string()))?;
 
+        // 仅通过日志输出 token，绝不在响应中返回
+        tracing::trace!(
+            token_prefix = %&raw_token[..8],
+            "Password reset token generated (dev diagnostics only)"
+        );
+
         tracing::info!(
-            email = %user.email,
-            reset_token = %raw_token,
+            email = %mask_email_for_log(&user.email),
             "Password reset requested; email delivery disabled in trimmed build"
         );
     }
 
-    Ok(ok(serde_json::json!({"success": true})))
+    Ok(ok(serde_json::json!({
+        "emailSent": true,
+        "message": "If the email exists, a password reset link will be sent.",
+    })))
 }
 
 async fn reset_password(
     State(state): State<AppState>,
-    Json(req): Json<ResetPasswordRequest>,
+    JsonBody(req): JsonBody<ResetPasswordRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    if req.new_password.len() < 8 {
-        return Err(AppError::bad_request(
-            "AUTH_WEAK_PASSWORD",
-            "Password must be at least 8 characters",
-        ));
+    if let Err(msg) = validate_password(&req.new_password) {
+        return Err(AppError::bad_request("AUTH_WEAK_PASSWORD", msg));
     }
 
     let token_hash = hash_token(&req.token);
-    let key = keys::password_reset_key(&token_hash);
+    let key = keys::password_reset_key(&token_hash)?;
+
+    // 原子删除 token，防止 TOCTOU 竞态条件：
+    // 先 remove() 再检查返回值，确保同一 token 只能使用一次
     let raw = state
         .store()
         .password_reset_tokens
-        .get(key.as_bytes())
+        .remove(key.as_bytes())
         .map_err(|e| AppError::internal(&e.to_string()))?
         .ok_or_else(|| AppError::bad_request("AUTH_INVALID_RESET_TOKEN", "Invalid reset token"))?;
 
@@ -345,19 +395,76 @@ async fn reset_password(
     state.store().update_user(&user)?;
 
     let _ = state.store().delete_user_sessions(&user.id);
-    state
-        .store()
-        .password_reset_tokens
-        .remove(key.as_bytes())
-        .map_err(|e| AppError::internal(&e.to_string()))?;
 
-    Ok(ok(serde_json::json!({"success": true})))
+    Ok(ok(serde_json::json!({})))
 }
 
 fn set_token_cookie(response: &mut Response, token: &str) -> Result<(), AppError> {
-    let cookie = format!("token={token}; Path=/; SameSite=Strict; HttpOnly");
-    let value = HeaderValue::from_str(&cookie)
-        .map_err(|e| AppError::internal(&format!("token cookie set failed: {e}")))?;
+    let cookie = format!("token={token}; Path=/; SameSite=Strict; HttpOnly; Secure");
+    append_set_cookie(response, &cookie, "token cookie set failed")?;
+    Ok(())
+}
+
+fn set_refresh_token_cookie(response: &mut Response, refresh_token: &str) -> Result<(), AppError> {
+    let cookie =
+        format!("refresh_token={refresh_token}; Path=/; SameSite=Strict; HttpOnly; Secure");
+    append_set_cookie(response, &cookie, "refresh token cookie set failed")?;
+    Ok(())
+}
+
+fn clear_auth_cookies(response: &mut Response) -> Result<(), AppError> {
+    append_set_cookie(
+        response,
+        "token=; Path=/; Max-Age=0; SameSite=Strict; HttpOnly; Secure",
+        "token cookie clear failed",
+    )?;
+    append_set_cookie(
+        response,
+        "refresh_token=; Path=/; Max-Age=0; SameSite=Strict; HttpOnly; Secure",
+        "refresh token cookie clear failed",
+    )?;
+    Ok(())
+}
+
+fn append_set_cookie(
+    response: &mut Response,
+    cookie: &str,
+    error_context: &str,
+) -> Result<(), AppError> {
+    let value = HeaderValue::from_str(cookie)
+        .map_err(|e| AppError::internal(&format!("{error_context}: {e}")))?;
     response.headers_mut().append(SET_COOKIE, value);
     Ok(())
+}
+
+fn mask_email_for_log(email: &str) -> String {
+    let trimmed = email.trim();
+    let Some((local, domain)) = trimmed.split_once('@') else {
+        return "***".to_string();
+    };
+
+    let local_mask = local
+        .chars()
+        .next()
+        .map(|ch| format!("{ch}***"))
+        .unwrap_or_else(|| "***".to_string());
+    let domain_mask = domain
+        .chars()
+        .next()
+        .map(|ch| format!("{ch}***"))
+        .unwrap_or_else(|| "***".to_string());
+
+    format!("{local_mask}@{domain_mask}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mask_email_for_log_redacts_sensitive_parts() {
+        assert_eq!(mask_email_for_log("alice@example.com"), "a***@e***");
+        assert_eq!(mask_email_for_log("x@b.com"), "x***@b***");
+        assert_eq!(mask_email_for_log("invalid-email"), "***");
+    }
 }
