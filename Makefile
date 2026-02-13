@@ -20,18 +20,26 @@ coverage-backend: ## 生成后端覆盖率报告（HTML + JSON）
 		echo "安装 cargo-llvm-cov..."; \
 		cargo install cargo-llvm-cov; \
 	}
+	@echo "清理旧的覆盖率数据..."
+	cargo llvm-cov clean --workspace 2>/dev/null || true
+	@echo "生成 HTML 报告..."
 	JWT_SECRET="test_secret_key_for_jwt_signing_minimum_64_characters_long_abcd" \
 	ADMIN_JWT_SECRET="test_admin_secret_key_for_jwt_signing_minimum_64_chars_long" \
-	cargo llvm-cov --html --json \
+	cargo llvm-cov --html \
 		--ignore-filename-regex="tests/" \
-		--ignore-run-fail \
+		--ignore-run-fail
+	@echo "生成 JSON 报告..."
+	JWT_SECRET="test_secret_key_for_jwt_signing_minimum_64_characters_long_abcd" \
+	ADMIN_JWT_SECRET="test_admin_secret_key_for_jwt_signing_minimum_64_chars_long" \
+	cargo llvm-cov --json --no-run \
+		--ignore-filename-regex="tests/" \
 		--output-path target/llvm-cov/coverage.json
 	@echo "✓ 后端覆盖率报告已生成："
 	@echo "  HTML: target/llvm-cov/html/index.html"
 	@echo "  JSON: target/llvm-cov/coverage.json"
 	@JWT_SECRET="test_secret_key_for_jwt_signing_minimum_64_characters_long_abcd" \
 	ADMIN_JWT_SECRET="test_admin_secret_key_for_jwt_signing_minimum_64_chars_long" \
-	cargo llvm-cov --summary-only --ignore-filename-regex="tests/" --ignore-run-fail 2>/dev/null | grep "TOTAL"
+	cargo llvm-cov --summary-only --no-run --ignore-filename-regex="tests/" 2>/dev/null | grep "TOTAL" || echo "覆盖率摘要："
 
 coverage-frontend: ## 生成前端覆盖率报告
 	@echo "生成前端覆盖率报告..."
