@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use axum::extract::{Path, Query, State};
 use axum::routing::{get, post, put};
 use axum::Router;
@@ -88,57 +90,124 @@ struct Badge {
     unlocked_at: Option<chrono::DateTime<Utc>>,
 }
 
-fn default_badges() -> Vec<Badge> {
-    vec![
+async fn list_badges(
+    auth: AuthUser,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let store = state.store();
+
+    // first_word: check if user has any learning records
+    let record_count = store.count_user_records(&auth.user_id)
+        .map_err(|e| AppError::internal(&e.to_string()))?;
+    let first_word_unlocked = record_count > 0;
+
+    // streak_7: compute streak days from records
+    let records = store.get_user_records(&auth.user_id, state.config().limits.max_records_fetch)
+        .map_err(|e| AppError::internal(&e.to_string()))?;
+    let streak = compute_streak_days(&records);
+    let streak_progress = (streak as f64 / 7.0).min(1.0);
+    let streak_unlocked = streak >= 7;
+
+    // mastered_100: count mastered words
+    let word_stats = store.get_word_state_stats(&auth.user_id)
+        .map_err(|e| AppError::internal(&e.to_string()))?;
+    let mastered = word_stats.mastered;
+    let mastered_progress = (mastered as f64 / 100.0).min(1.0);
+    let mastered_unlocked = mastered >= 100;
+
+    let now = Utc::now();
+
+    // Load persisted unlock timestamps
+    let load_badge = |badge_id: &str| -> Option<Badge> {
+        let key = keys::badge_key(&auth.user_id, badge_id).ok()?;
+        let raw = store.badges.get(key.as_bytes()).ok()??;
+        serde_json::from_slice::<Badge>(&raw).ok()
+    };
+
+    let persisted_first = load_badge("first_word");
+    let persisted_streak = load_badge("streak_7");
+    let persisted_mastered = load_badge("mastered_100");
+
+    let badges = vec![
         Badge {
             id: "first_word".to_string(),
             name: "First Word".to_string(),
             description: "Learn your first word".to_string(),
-            unlocked: false,
-            progress: 0.0,
-            unlocked_at: None,
+            unlocked: first_word_unlocked || persisted_first.as_ref().map_or(false, |b| b.unlocked),
+            progress: if first_word_unlocked { 1.0 } else { 0.0 },
+            unlocked_at: if first_word_unlocked || persisted_first.as_ref().map_or(false, |b| b.unlocked) {
+                persisted_first.as_ref().and_then(|b| b.unlocked_at).or(Some(now))
+            } else {
+                None
+            },
         },
         Badge {
             id: "streak_7".to_string(),
             name: "Week Streak".to_string(),
             description: "Study for 7 consecutive days".to_string(),
-            unlocked: false,
-            progress: 0.0,
-            unlocked_at: None,
+            unlocked: streak_unlocked || persisted_streak.as_ref().map_or(false, |b| b.unlocked),
+            progress: streak_progress,
+            unlocked_at: if streak_unlocked || persisted_streak.as_ref().map_or(false, |b| b.unlocked) {
+                persisted_streak.as_ref().and_then(|b| b.unlocked_at).or(Some(now))
+            } else {
+                None
+            },
         },
         Badge {
             id: "mastered_100".to_string(),
             name: "Century Club".to_string(),
             description: "Master 100 words".to_string(),
-            unlocked: false,
-            progress: 0.0,
-            unlocked_at: None,
+            unlocked: mastered_unlocked || persisted_mastered.as_ref().map_or(false, |b| b.unlocked),
+            progress: mastered_progress,
+            unlocked_at: if mastered_unlocked || persisted_mastered.as_ref().map_or(false, |b| b.unlocked) {
+                persisted_mastered.as_ref().and_then(|b| b.unlocked_at).or(Some(now))
+            } else {
+                None
+            },
         },
-    ]
-}
+    ];
 
-async fn list_badges(
-    auth: AuthUser,
-    State(state): State<AppState>,
-) -> Result<impl axum::response::IntoResponse, AppError> {
-    let prefix = keys::badge_prefix(&auth.user_id)?;
-    let mut badges = Vec::new();
-
-    for item in state.store().badges.scan_prefix(prefix.as_bytes()) {
-        let (_, v) = match item {
-            Ok(kv) => kv,
-            Err(_) => continue,
-        };
-        if let Ok(b) = serde_json::from_slice::<Badge>(&v) {
-            badges.push(b);
+    // Persist newly unlocked badges
+    for badge in &badges {
+        if badge.unlocked {
+            let key = keys::badge_key(&auth.user_id, &badge.id)
+                .map_err(|e| AppError::internal(&e.to_string()))?;
+            store
+                .badges
+                .insert(
+                    key.as_bytes(),
+                    serde_json::to_vec(badge).map_err(|e| AppError::internal(&e.to_string()))?,
+                )
+                .map_err(|e| AppError::internal(&e.to_string()))?;
         }
     }
 
-    if badges.is_empty() {
-        badges = default_badges();
-    }
-
     Ok(ok(badges))
+}
+
+fn compute_streak_days(records: &[crate::store::operations::records::LearningRecord]) -> u32 {
+    if records.is_empty() {
+        return 0;
+    }
+    let today = Utc::now().date_naive();
+    let dates: BTreeSet<chrono::NaiveDate> =
+        records.iter().map(|r| r.created_at.date_naive()).collect();
+    let mut streak = 0u32;
+    let mut current = today;
+    if !dates.contains(&current) {
+        match current.pred_opt() {
+            Some(yesterday) if dates.contains(&yesterday) => current = yesterday,
+            _ => return 0,
+        }
+    }
+    while dates.contains(&current) {
+        streak += 1;
+        current = match current.pred_opt() {
+            Some(d) => d,
+            None => break,
+        };
+    }
+    streak
 }
 
 // B59: User preferences

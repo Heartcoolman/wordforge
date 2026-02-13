@@ -47,7 +47,7 @@ export interface LearningAnalytics {
 export interface SystemHealth {
   status: 'healthy' | 'degraded' | 'down';
   dbSizeBytes: number;
-  uptime: number;
+  uptimeSecs: number;
   version: string;
 }
 

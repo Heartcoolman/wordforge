@@ -27,6 +27,10 @@ export default function FlashcardPage() {
   const [unknown, setUnknown] = createSignal(0);
   const [sessionId, setSessionId] = createSignal('');
   const [done, setDone] = createSignal(false);
+  const [completing, setCompleting] = createSignal(false);
+  const [knownWordIds, setKnownWordIds] = createSignal<string[]>([]);
+  const [errorWordIds, setErrorWordIds] = createSignal<string[]>([]);
+  const [responseTimes, setResponseTimes] = createSignal<number[]>([]);
 
   // 疲劳检测相关状态
   const [showCameraPermission, setShowCameraPermission] = createSignal(false);
@@ -66,9 +70,16 @@ export default function FlashcardPage() {
   });
 
   function advance(correct: boolean) {
+    if (completing()) return;
     const w = words()[index()];
     const responseTime = Date.now() - cardShownTime;
     if (w) {
+      setResponseTimes((t) => [...t, responseTime]);
+      if (correct) {
+        setKnownWordIds((ids) => [...ids, w.id]);
+      } else {
+        setErrorWordIds((ids) => [...ids, w.id]);
+      }
       recordsApi.create({
         clientRecordId: crypto.randomUUID(),
         wordId: w.id,
@@ -88,12 +99,36 @@ export default function FlashcardPage() {
     }
 
     if (index() + 1 >= words().length) {
-      setDone(true);
+      completeCurrentSession();
       return;
     }
     setIndex((i) => i + 1);
     setFlipped(false);
     cardShownTime = Date.now();
+  }
+
+  async function completeCurrentSession() {
+    if (completing()) return;
+    setCompleting(true);
+    if (sessionId()) {
+      const times = responseTimes();
+      const avg = times.length > 0 ? Math.round(times.reduce((a, b) => a + b, 0) / times.length) : 0;
+      try {
+        await learningApi.completeSession({
+          sessionId: sessionId(),
+          masteredWordIds: knownWordIds(),
+          errorProneWordIds: errorWordIds(),
+          avgResponseTimeMs: avg,
+        });
+      } catch {
+        // completion failure should not block UI
+      }
+    }
+    setDone(true);
+  }
+
+  async function handleNewBatch() {
+    navigate('/flashcard', { replace: true });
   }
 
   function markKnown() { setKnown((n) => n + 1); advance(true); }
@@ -121,7 +156,7 @@ export default function FlashcardPage() {
               <div><p class="text-2xl font-bold text-success">{known()}</p><p class="text-xs text-content-secondary">认识</p></div>
               <div><p class="text-2xl font-bold text-error">{unknown()}</p><p class="text-xs text-content-secondary">不认识</p></div>
             </div>
-            <Button onClick={() => navigate('/flashcard', { replace: true })}>再来一组</Button>
+            <Button onClick={handleNewBatch}>再来一组</Button>
           </Card>
         }>
           <Show when={words().length > 0}>

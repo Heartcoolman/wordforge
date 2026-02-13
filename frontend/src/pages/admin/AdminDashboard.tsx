@@ -8,7 +8,7 @@ import { formatNumber } from '@/utils/formatters';
 
 export default function AdminDashboard() {
   const [stats, setStats] = createSignal<{ users: number; words: number; records: number } | null>(null);
-  const [health, setHealth] = createSignal<{ status: string; dbSizeBytes: number; uptime: string | number; version: string } | null>(null);
+  const [health, setHealth] = createSignal<{ status: string; dbSizeBytes: number; uptimeSecs: string | number; version: string } | null>(null);
   const [loading, setLoading] = createSignal(true);
   const [error, setError] = createSignal(false);
 
@@ -60,7 +60,7 @@ export default function AdminDashboard() {
               <div class="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
                 <div><p class="text-content-secondary">状态</p><p class="font-medium text-success">{h().status}</p></div>
                 <div><p class="text-content-secondary">数据库大小</p><p class="font-medium text-content">{(h().dbSizeBytes / 1024 / 1024).toFixed(2)} MB</p></div>
-                <div><p class="text-content-secondary">运行时间</p><p class="font-medium text-content">{typeof h().uptime === 'number' ? `${Math.floor(h().uptime as number / 3600)} 小时` : String(h().uptime)}</p></div>
+                <div><p class="text-content-secondary">运行时间</p><p class="font-medium text-content">{typeof h().uptimeSecs === 'number' ? `${Math.floor(h().uptimeSecs as number / 3600)} 小时` : String(h().uptimeSecs)}</p></div>
                 <div><p class="text-content-secondary">版本</p><p class="font-medium text-content">{h().version}</p></div>
               </div>
             </Card>

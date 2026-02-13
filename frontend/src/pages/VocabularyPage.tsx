@@ -1,4 +1,4 @@
-import { createSignal, createEffect, Show, For, onMount } from 'solid-js';
+import { createSignal, createEffect, Show, For, onMount, Switch, Match } from 'solid-js';
 import { Card } from '@/components/ui/Card';
 import { Input } from '@/components/ui/Input';
 import { Button } from '@/components/ui/Button';
@@ -9,8 +9,30 @@ import { Empty } from '@/components/ui/Empty';
 import { Spinner } from '@/components/ui/Spinner';
 import { uiStore } from '@/stores/ui';
 import { wordsApi } from '@/api/words';
+import { contentApi } from '@/api/content';
+import { wordStatesApi } from '@/api/wordStates';
 import { IMPORT_BATCH_SIZE } from '@/lib/constants';
 import type { Word, CreateWordRequest } from '@/types/word';
+import type { WordLearningState, WordStateType } from '@/types/wordState';
+import type { Etymology, Morpheme, WordContexts, ConfusionPairsResult } from '@/types/content';
+
+const STATE_LABELS: Record<WordStateType, string> = {
+  NEW: '新词',
+  LEARNING: '学习中',
+  REVIEWING: '复习中',
+  MASTERED: '已掌握',
+  FORGOTTEN: '已遗忘',
+};
+
+const STATE_VARIANTS: Record<WordStateType, 'default' | 'accent' | 'success' | 'warning' | 'error' | 'info'> = {
+  NEW: 'info',
+  LEARNING: 'accent',
+  REVIEWING: 'warning',
+  MASTERED: 'success',
+  FORGOTTEN: 'error',
+};
+
+type FilterMode = 'all' | 'due';
 
 export default function VocabularyPage() {
   const [words, setWords] = createSignal<Word[]>([]);
@@ -23,6 +45,12 @@ export default function VocabularyPage() {
   const [showImport, setShowImport] = createSignal(false);
   const [editing, setEditing] = createSignal<Word | null>(null);
   const [deleteTarget, setDeleteTarget] = createSignal<string | null>(null);
+  const [expandedId, setExpandedId] = createSignal<string | null>(null);
+  const [stateMap, setStateMap] = createSignal<Record<string, WordLearningState>>({});
+  const [filterMode, setFilterMode] = createSignal<FilterMode>('all');
+  const [dueWords, setDueWords] = createSignal<WordLearningState[]>([]);
+  const [dueWordDetails, setDueWordDetails] = createSignal<Word[]>([]);
+  const [semanticMode, setSemanticMode] = createSignal(false);
   const pageSize = 20;
 
   async function load() {
@@ -31,8 +59,50 @@ export default function VocabularyPage() {
       const res = await wordsApi.list({ perPage: pageSize, page: page(), search: search() || undefined });
       setWords(res.data);
       setTotal(res.total);
+      fetchStates(res.data.map(w => w.id));
     } catch (err: unknown) {
       uiStore.toast.error('加载失败', err instanceof Error ? err.message : '');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function fetchStates(wordIds: string[]) {
+    if (wordIds.length === 0) return;
+    try {
+      const states = await wordStatesApi.batchGet(wordIds);
+      const map: Record<string, WordLearningState> = { ...stateMap() };
+      for (const s of states) map[s.wordId] = s;
+      setStateMap(map);
+    } catch {
+      // Backend may not have states for these words yet
+    }
+  }
+
+  async function loadDueList() {
+    setLoading(true);
+    try {
+      const due = await wordStatesApi.getDueList();
+      setDueWords(due);
+      if (due.length > 0) {
+        const ids = due.map(d => d.wordId);
+        // Fetch word details for due words via individual lookups
+        const details: Word[] = [];
+        for (const id of ids) {
+          try {
+            const w = await wordsApi.get(id);
+            details.push(w);
+          } catch { /* word may have been deleted */ }
+        }
+        setDueWordDetails(details);
+        const map: Record<string, WordLearningState> = { ...stateMap() };
+        for (const s of due) map[s.wordId] = s;
+        setStateMap(map);
+      } else {
+        setDueWordDetails([]);
+      }
+    } catch (err: unknown) {
+      uiStore.toast.error('加载待复习列表失败', err instanceof Error ? err.message : '');
     } finally {
       setLoading(false);
     }
@@ -44,8 +114,28 @@ export default function VocabularyPage() {
     e.preventDefault();
     if (searchLoading()) return;
     setSearchLoading(true);
-    setPage(1);
-    load().finally(() => setSearchLoading(false));
+    if (filterMode() === 'due') {
+      setFilterMode('all');
+    }
+
+    if (semanticMode() && search().trim()) {
+      contentApi.semanticSearch(search().trim())
+        .then(res => {
+          setPage(1);
+          setWords(res.results as Word[]);
+          setTotal(res.total);
+          fetchStates(res.results.map(w => w.id));
+        })
+        .catch((err: unknown) => {
+          uiStore.toast.error('语义搜索失败，回退到普通搜索', err instanceof Error ? err.message : '');
+          setPage(1);
+          return load();
+        })
+        .finally(() => setSearchLoading(false));
+    } else {
+      setPage(1);
+      load().finally(() => setSearchLoading(false));
+    }
   }
 
   function handlePageChange(p: number) {
@@ -53,11 +143,21 @@ export default function VocabularyPage() {
     load();
   }
 
+  function handleFilterChange(mode: FilterMode) {
+    setFilterMode(mode);
+    setExpandedId(null);
+    if (mode === 'due') {
+      loadDueList();
+    } else {
+      load();
+    }
+  }
+
   async function deleteWord(id: string) {
     try {
       await wordsApi.delete(id);
       uiStore.toast.success('已删除');
-      load();
+      if (filterMode() === 'due') loadDueList(); else load();
     } catch (err: unknown) {
       uiStore.toast.error('删除失败', err instanceof Error ? err.message : '');
     } finally {
@@ -68,6 +168,32 @@ export default function VocabularyPage() {
   function confirmDelete(id: string) {
     setDeleteTarget(id);
   }
+
+  async function handleMarkMastered(wordId: string) {
+    try {
+      const updated = await wordStatesApi.markMastered(wordId);
+      setStateMap(prev => ({ ...prev, [wordId]: updated }));
+      uiStore.toast.success('已标记为掌握');
+    } catch (err: unknown) {
+      uiStore.toast.error('操作失败', err instanceof Error ? err.message : '');
+    }
+  }
+
+  async function handleResetState(wordId: string) {
+    try {
+      const updated = await wordStatesApi.reset(wordId);
+      setStateMap(prev => ({ ...prev, [wordId]: updated }));
+      uiStore.toast.success('状态已重置');
+    } catch (err: unknown) {
+      uiStore.toast.error('操作失败', err instanceof Error ? err.message : '');
+    }
+  }
+
+  function toggleExpand(wordId: string) {
+    setExpandedId(prev => prev === wordId ? null : wordId);
+  }
+
+  const displayWords = () => filterMode() === 'due' ? dueWordDetails() : words();
 
   return (
     <div class="space-y-6 animate-fade-in-up">
@@ -80,63 +206,128 @@ export default function VocabularyPage() {
       </div>
 
       <form onSubmit={handleSearch} class="flex gap-2">
-        <Input placeholder="搜索单词..." value={search()} onInput={(e) => setSearch(e.currentTarget.value)} class="flex-1" />
+        <Input placeholder={semanticMode() ? '语义搜索...' : '搜索单词...'} value={search()} onInput={(e) => setSearch(e.currentTarget.value)} class="flex-1" />
+        <Button
+          type="button"
+          variant={semanticMode() ? 'primary' : 'ghost'}
+          size="sm"
+          onClick={() => setSemanticMode(!semanticMode())}
+          title="切换语义搜索"
+        >
+          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9.663 17h4.674M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" /></svg>
+        </Button>
         <Button type="submit" variant="secondary" loading={searchLoading()}>搜索</Button>
       </form>
 
+      {/* Filter tabs */}
+      <div class="flex gap-2">
+        <Button
+          variant={filterMode() === 'all' ? 'primary' : 'ghost'}
+          size="xs"
+          onClick={() => handleFilterChange('all')}
+        >全部</Button>
+        <Button
+          variant={filterMode() === 'due' ? 'warning' : 'ghost'}
+          size="xs"
+          onClick={() => handleFilterChange('due')}
+        >待复习</Button>
+      </div>
+
       <Show when={!loading()} fallback={<div class="flex justify-center py-12"><Spinner size="lg" /></div>}>
-        <Show when={words().length > 0} fallback={
-          <Empty title="暂无单词" description="点击添加单词或批量导入" />
+        <Show when={displayWords().length > 0} fallback={
+          <Empty
+            title={filterMode() === 'due' ? '暂无待复习单词' : '暂无单词'}
+            description={filterMode() === 'due' ? '所有单词都已复习' : '点击添加单词或批量导入'}
+          />
         }>
           <div class="grid gap-3">
-            <For each={words()}>
-              {(word) => (
-                <Card variant="outlined" padding="sm" class="flex items-center justify-between gap-4">
-                  <div class="flex-1 min-w-0">
-                    <div class="flex items-center gap-2">
-                      <span class="font-semibold text-content">{word.text}</span>
-                      <Show when={word.pronunciation}>
-                        <span class="text-xs text-content-tertiary">{word.pronunciation}</span>
-                      </Show>
-                      <Show when={word.partOfSpeech}>
-                        <Badge size="sm" variant="accent">{word.partOfSpeech}</Badge>
-                      </Show>
-                    </div>
-                    <p class="text-sm text-content-secondary truncate">{word.meaning}</p>
-                  </div>
-                  <div class="flex items-center gap-1 flex-shrink-0">
-                    <For each={word.tags.slice(0, 2)}>
-                      {(tag) => <Badge size="sm">{tag}</Badge>}
-                    </For>
-                    <button
-                      onClick={() => { setEditing(word); setShowForm(true); }}
-                      class="p-1.5 rounded text-content-tertiary hover:text-accent transition-colors cursor-pointer"
+            <For each={displayWords()}>
+              {(word) => {
+                const ws = () => stateMap()[word.id];
+                return (
+                  <div>
+                    <Card
+                      variant="outlined"
+                      padding="sm"
+                      class="flex items-center justify-between gap-4 cursor-pointer"
+                      onClick={() => toggleExpand(word.id)}
                     >
-                      <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" /></svg>
-                    </button>
-                    <button
-                      onClick={() => confirmDelete(word.id)}
-                      class="p-1.5 rounded text-content-tertiary hover:text-error transition-colors cursor-pointer"
-                    >
-                      <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
-                    </button>
+                      <div class="flex-1 min-w-0">
+                        <div class="flex items-center gap-2 flex-wrap">
+                          <span class="font-semibold text-content">{word.text}</span>
+                          <Show when={word.pronunciation}>
+                            <span class="text-xs text-content-tertiary">{word.pronunciation}</span>
+                          </Show>
+                          <Show when={word.partOfSpeech}>
+                            <Badge size="sm" variant="accent">{word.partOfSpeech}</Badge>
+                          </Show>
+                          <Show when={ws()}>
+                            <Badge size="sm" variant={STATE_VARIANTS[ws()!.state]}>{STATE_LABELS[ws()!.state]}</Badge>
+                          </Show>
+                        </div>
+                        <p class="text-sm text-content-secondary truncate">{word.meaning}</p>
+                      </div>
+                      <div class="flex items-center gap-1 flex-shrink-0" onClick={(e) => e.stopPropagation()}>
+                        <For each={word.tags.slice(0, 2)}>
+                          {(tag) => <Badge size="sm">{tag}</Badge>}
+                        </For>
+                        <Show when={ws()?.state !== 'MASTERED'}>
+                          <button
+                            onClick={() => handleMarkMastered(word.id)}
+                            class="p-1.5 rounded text-content-tertiary hover:text-success transition-colors cursor-pointer"
+                            title="标记为已掌握"
+                          >
+                            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" /></svg>
+                          </button>
+                        </Show>
+                        <Show when={ws() && ws()!.state !== 'NEW'}>
+                          <button
+                            onClick={() => handleResetState(word.id)}
+                            class="p-1.5 rounded text-content-tertiary hover:text-warning transition-colors cursor-pointer"
+                            title="重置状态"
+                          >
+                            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
+                          </button>
+                        </Show>
+                        <button
+                          onClick={() => { setEditing(word); setShowForm(true); }}
+                          class="p-1.5 rounded text-content-tertiary hover:text-accent transition-colors cursor-pointer"
+                        >
+                          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" /></svg>
+                        </button>
+                        <button
+                          onClick={() => confirmDelete(word.id)}
+                          class="p-1.5 rounded text-content-tertiary hover:text-error transition-colors cursor-pointer"
+                        >
+                          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                        </button>
+                      </div>
+                    </Card>
+                    <Show when={expandedId() === word.id}>
+                      <WordDetailPanel wordId={word.id} wordText={word.text} />
+                    </Show>
                   </div>
-                </Card>
-              )}
+                );
+              }}
             </For>
           </div>
-          <div class="flex justify-between items-center">
-            <p class="text-sm text-content-tertiary">共 {total()} 个单词</p>
-            <Pagination page={page()} total={total()} pageSize={pageSize} onChange={handlePageChange} />
-          </div>
+          <Show when={filterMode() === 'all'}>
+            <div class="flex justify-between items-center">
+              <p class="text-sm text-content-tertiary">共 {total()} 个单词</p>
+              <Pagination page={page()} total={total()} pageSize={pageSize} onChange={handlePageChange} />
+            </div>
+          </Show>
+          <Show when={filterMode() === 'due'}>
+            <p class="text-sm text-content-tertiary">共 {dueWordDetails().length} 个待复习</p>
+          </Show>
         </Show>
       </Show>
 
       {/* Word Form Modal */}
-      <WordFormModal open={showForm()} onClose={() => setShowForm(false)} word={editing()} onSaved={load} />
+      <WordFormModal open={showForm()} onClose={() => setShowForm(false)} word={editing()} onSaved={() => { if (filterMode() === 'due') loadDueList(); else load(); }} />
 
       {/* Import Modal */}
-      <ImportModal open={showImport()} onClose={() => setShowImport(false)} onDone={load} />
+      <ImportModal open={showImport()} onClose={() => setShowImport(false)} onDone={() => { if (filterMode() === 'due') loadDueList(); else load(); }} />
 
       {/* Delete Confirm Modal */}
       <Modal open={deleteTarget() !== null} onClose={() => setDeleteTarget(null)} title="确认删除" size="sm">
@@ -146,6 +337,138 @@ export default function VocabularyPage() {
           <Button variant="danger" onClick={() => { const id = deleteTarget(); if (id) deleteWord(id); }}>删除</Button>
         </div>
       </Modal>
+    </div>
+  );
+}
+
+// ─── Word Detail Panel (inline expansion) ───
+function WordDetailPanel(props: { wordId: string; wordText: string }) {
+  const [tab, setTab] = createSignal<'etymology' | 'morphemes' | 'confusion' | 'contexts'>('etymology');
+  const [etymology, setEtymology] = createSignal<Etymology | null>(null);
+  const [morphemes, setMorphemes] = createSignal<Morpheme[]>([]);
+  const [confusionPairs, setConfusionPairs] = createSignal<ConfusionPairsResult | null>(null);
+  const [wordContexts, setWordContexts] = createSignal<WordContexts | null>(null);
+  const [detailLoading, setDetailLoading] = createSignal(false);
+  const [detailError, setDetailError] = createSignal('');
+
+  function loadTab(t: typeof tab extends () => infer R ? R : never) {
+    setDetailLoading(true);
+    setDetailError('');
+
+    const fetcher = (() => {
+      switch (t) {
+        case 'etymology':
+          return contentApi.getEtymology(props.wordId).then(res => setEtymology(res));
+        case 'morphemes':
+          return contentApi.getMorphemes(props.wordId).then(res => setMorphemes(res.morphemes));
+        case 'confusion':
+          return contentApi.getConfusionPairs(props.wordId).then(res => setConfusionPairs(res));
+        case 'contexts':
+          return contentApi.getWordContexts(props.wordId).then(res => setWordContexts(res));
+      }
+    })();
+
+    fetcher
+      .catch((err: unknown) => setDetailError(err instanceof Error ? err.message : '加载失败'))
+      .finally(() => setDetailLoading(false));
+  }
+
+  onMount(() => loadTab('etymology'));
+
+  function switchTab(t: typeof tab extends () => infer R ? R : never) {
+    setTab(t);
+    loadTab(t);
+  }
+
+  const MORPHEME_TYPE_LABELS: Record<string, string> = { prefix: '前缀', root: '词根', suffix: '后缀' };
+
+  return (
+    <div class="ml-4 mr-1 mt-1 mb-2 p-4 bg-surface-secondary rounded-lg border border-border/50 space-y-3 animate-fade-in-up">
+      <div class="flex gap-1 flex-wrap">
+        <Button size="xs" variant={tab() === 'etymology' ? 'primary' : 'ghost'} onClick={() => switchTab('etymology')}>词源</Button>
+        <Button size="xs" variant={tab() === 'morphemes' ? 'primary' : 'ghost'} onClick={() => switchTab('morphemes')}>构词</Button>
+        <Button size="xs" variant={tab() === 'confusion' ? 'primary' : 'ghost'} onClick={() => switchTab('confusion')}>易混淆</Button>
+        <Button size="xs" variant={tab() === 'contexts' ? 'primary' : 'ghost'} onClick={() => switchTab('contexts')}>语境</Button>
+      </div>
+
+      <Show when={detailLoading()}>
+        <div class="flex justify-center py-4"><Spinner size="sm" /></div>
+      </Show>
+
+      <Show when={detailError()}>
+        <p class="text-sm text-error">{detailError()}</p>
+      </Show>
+
+      <Show when={!detailLoading() && !detailError()}>
+        <Switch>
+          <Match when={tab() === 'etymology'}>
+            <Show when={etymology()} fallback={<p class="text-sm text-content-tertiary">暂无词源数据</p>}>
+              <div class="space-y-2">
+                <p class="text-sm text-content">{etymology()!.etymology}</p>
+                <Show when={etymology()!.roots.length > 0}>
+                  <div class="flex gap-1 flex-wrap">
+                    <span class="text-xs text-content-tertiary">词根:</span>
+                    <For each={etymology()!.roots}>
+                      {(root) => <Badge size="sm" variant="accent">{root}</Badge>}
+                    </For>
+                  </div>
+                </Show>
+                <Show when={!etymology()!.generated}>
+                  <p class="text-xs text-content-tertiary italic">数据待 LLM 生成</p>
+                </Show>
+              </div>
+            </Show>
+          </Match>
+
+          <Match when={tab() === 'morphemes'}>
+            <Show when={morphemes().length > 0} fallback={<p class="text-sm text-content-tertiary">暂无构词数据</p>}>
+              <div class="flex gap-2 flex-wrap">
+                <For each={morphemes()}>
+                  {(m) => (
+                    <div class="px-3 py-1.5 bg-surface rounded-lg border border-border/50">
+                      <span class="font-mono font-semibold text-sm text-content">{m.text}</span>
+                      <span class="text-xs text-content-tertiary ml-1">({MORPHEME_TYPE_LABELS[m.type] ?? m.type})</span>
+                      <p class="text-xs text-content-secondary">{m.meaning}</p>
+                    </div>
+                  )}
+                </For>
+              </div>
+            </Show>
+          </Match>
+
+          <Match when={tab() === 'confusion'}>
+            <Show when={confusionPairs()?.confusionPairs.length} fallback={<p class="text-sm text-content-tertiary">暂无易混淆词</p>}>
+              <div class="space-y-2">
+                <For each={confusionPairs()!.confusionPairs}>
+                  {(pair) => (
+                    <div class="flex items-center justify-between px-3 py-2 bg-surface rounded-lg border border-border/50">
+                      <div>
+                        <span class="font-semibold text-sm text-content">{pair.word}</span>
+                        <span class="text-xs text-content-secondary ml-2">{pair.meaning}</span>
+                      </div>
+                      <Badge size="sm" variant={pair.similarity > 0.8 ? 'error' : pair.similarity > 0.5 ? 'warning' : 'default'}>
+                        {(pair.similarity * 100).toFixed(0)}%
+                      </Badge>
+                    </div>
+                  )}
+                </For>
+              </div>
+            </Show>
+          </Match>
+
+          <Match when={tab() === 'contexts'}>
+            <Show when={wordContexts()?.examples.length} fallback={<p class="text-sm text-content-tertiary">暂无语境例句</p>}>
+              <div class="space-y-2">
+                <For each={wordContexts()!.examples}>
+                  {(example) => (
+                    <p class="text-sm text-content pl-3 border-l-2 border-accent/30">{example}</p>
+                  )}
+                </For>
+              </div>
+            </Show>
+          </Match>
+        </Switch>
+      </Show>
     </div>
   );
 }

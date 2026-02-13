@@ -4,28 +4,10 @@ import { uiStore } from '@/stores/ui';
 
 describe('uiStore', () => {
   beforeEach(() => {
-    // Clean up toasts and sidebar state
-    uiStore.setSidebarOpen(false);
+    // Clean up toasts
     for (const t of uiStore.toasts()) {
       uiStore.removeToast(t.id);
     }
-  });
-
-  it('sidebarOpen defaults to false', () => {
-    expect(uiStore.sidebarOpen()).toBe(false);
-  });
-
-  it('setSidebarOpen changes value', () => {
-    uiStore.setSidebarOpen(true);
-    expect(uiStore.sidebarOpen()).toBe(true);
-  });
-
-  it('toggleSidebar flips value', () => {
-    expect(uiStore.sidebarOpen()).toBe(false);
-    uiStore.toggleSidebar();
-    expect(uiStore.sidebarOpen()).toBe(true);
-    uiStore.toggleSidebar();
-    expect(uiStore.sidebarOpen()).toBe(false);
   });
 
   it('addToast adds a toast item', () => {
