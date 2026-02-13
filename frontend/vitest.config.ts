@@ -9,11 +9,17 @@ export default defineConfig({
       '@': fileURLToPath(new URL('./src', import.meta.url)),
     },
   },
+  define: {
+    'import.meta.env.VITE_API_BASE_URL': JSON.stringify('http://localhost:3000'),
+  },
   test: {
     globals: true,
-    environment: 'jsdom',
+    environment: 'happy-dom',
     setupFiles: ['./tests/setup.ts'],
     exclude: ['e2e/**', 'node_modules/**'],
+    env: {
+      VITE_API_BASE_URL: 'http://localhost:3000',
+    },
     coverage: {
       provider: 'v8',
       include: ['src/**/*.{ts,tsx}'],
