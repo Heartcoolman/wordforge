@@ -52,8 +52,11 @@ pkg/
 # Temp
 *.npmrc_temp
 
-# Coverage (backend)
+# Coverage
 coverage/
+lcov.info
+*.lcov
+/target/llvm-cov/
 
 # Debug symbols
 *.pdb
