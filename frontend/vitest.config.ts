@@ -2,6 +2,8 @@ import { defineConfig } from 'vitest/config';
 import solid from 'vite-plugin-solid';
 import { fileURLToPath, URL } from 'node:url';
 
+const TEST_API_BASE_URL = 'http://localhost:3000';
+
 export default defineConfig({
   plugins: [solid()],
   resolve: {
@@ -10,7 +12,7 @@ export default defineConfig({
     },
   },
   define: {
-    'import.meta.env.VITE_API_BASE_URL': JSON.stringify('http://localhost:3000'),
+    'import.meta.env.VITE_API_BASE_URL': JSON.stringify(TEST_API_BASE_URL),
   },
   test: {
     globals: true,
@@ -18,7 +20,7 @@ export default defineConfig({
     setupFiles: ['./tests/setup.ts'],
     exclude: ['e2e/**', 'node_modules/**'],
     env: {
-      VITE_API_BASE_URL: 'http://localhost:3000',
+      VITE_API_BASE_URL: TEST_API_BASE_URL,
     },
     coverage: {
       provider: 'v8',
