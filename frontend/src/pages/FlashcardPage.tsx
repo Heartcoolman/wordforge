@@ -88,12 +88,32 @@ export default function FlashcardPage() {
     }
 
     if (index() + 1 >= words().length) {
-      setDone(true);
+      completeCurrentSession();
       return;
     }
     setIndex((i) => i + 1);
     setFlipped(false);
     cardShownTime = Date.now();
+  }
+
+  async function completeCurrentSession() {
+    if (sessionId()) {
+      try {
+        await learningApi.completeSession({
+          sessionId: sessionId(),
+          masteredWordIds: [],
+          errorProneWordIds: [],
+          avgResponseTimeMs: 0,
+        });
+      } catch {
+        // completion failure should not block UI
+      }
+    }
+    setDone(true);
+  }
+
+  async function handleNewBatch() {
+    navigate('/flashcard', { replace: true });
   }
 
   function markKnown() { setKnown((n) => n + 1); advance(true); }
@@ -121,7 +141,7 @@ export default function FlashcardPage() {
               <div><p class="text-2xl font-bold text-success">{known()}</p><p class="text-xs text-content-secondary">认识</p></div>
               <div><p class="text-2xl font-bold text-error">{unknown()}</p><p class="text-xs text-content-secondary">不认识</p></div>
             </div>
-            <Button onClick={() => navigate('/flashcard', { replace: true })}>再来一组</Button>
+            <Button onClick={handleNewBatch}>再来一组</Button>
           </Card>
         }>
           <Show when={words().length > 0}>

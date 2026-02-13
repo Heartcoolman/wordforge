@@ -37,7 +37,7 @@ export interface ChangePasswordRequest {
 
 export interface UserPreferences {
   theme: 'light' | 'dark' | 'system';
-  language: 'zh-CN' | 'en';
+  language: 'zh' | 'en';
   notificationEnabled: boolean;
   soundEnabled: boolean;
 }

@@ -93,6 +93,15 @@ export default function LoginPage() {
         <p class="mt-4 text-center text-sm text-content-secondary">
           还没有账号？ <A href="/register" class="text-accent hover:underline">立即注册</A>
         </p>
+        <p class="mt-2 text-center">
+          <button
+            type="button"
+            class="text-sm text-content-tertiary hover:text-accent transition-colors cursor-pointer"
+            onClick={() => uiStore.toast.info('请联系管理员重置密码')}
+          >
+            忘记密码？
+          </button>
+        </p>
       </Card>
     </div>
   );

@@ -46,7 +46,7 @@ export default function AnalyticsPage() {
                 </div>
                 <div class="text-center">
                   <p class="text-2xl font-bold text-info">{formatPercent(e().retentionRate)}</p>
-                  <p class="text-xs text-content-secondary">留存率</p>
+                  <p class="text-xs text-content-secondary">日活跃率</p>
                 </div>
               </div>
             </Card>

@@ -10,7 +10,6 @@ export interface ToastItem {
 }
 
 function createUiStore() {
-  const [sidebarOpen, setSidebarOpen] = createSignal(false);
   const [toasts, setToasts] = createSignal<ToastItem[]>([]);
 
   let toastCounter = 0;
@@ -38,14 +37,7 @@ function createUiStore() {
     info: (title: string, message?: string) => addToast({ type: 'info', title, message }),
   };
 
-  function toggleSidebar() {
-    setSidebarOpen((prev) => !prev);
-  }
-
   return {
-    sidebarOpen,
-    setSidebarOpen,
-    toggleSidebar,
     toasts,
     addToast,
     removeToast,

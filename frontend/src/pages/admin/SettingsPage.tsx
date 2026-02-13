@@ -23,6 +23,8 @@ export default function SettingsPage() {
   const [broadcasting, setBroadcasting] = createSignal(false);
   const [showBroadcastConfirm, setShowBroadcastConfirm] = createSignal(false);
 
+  const [showMaintenanceConfirm, setShowMaintenanceConfirm] = createSignal(false);
+
   onMount(async () => {
     try {
       const s = await adminApi.getSettings();
@@ -81,12 +83,15 @@ export default function SettingsPage() {
 
   function handleMaintenanceToggle(value: boolean) {
     if (value) {
-      // 开启维护模式需要确认
-      if (!window.confirm('确定要开启维护模式吗？开启后所有非管理员用户将无法访问系统。')) {
-        return;
-      }
+      setShowMaintenanceConfirm(true);
+      return;
     }
     updateField('maintenanceMode', value);
+  }
+
+  function confirmMaintenance() {
+    setShowMaintenanceConfirm(false);
+    updateField('maintenanceMode', true);
   }
 
   function updateField(key: string, value: unknown) {
@@ -109,6 +114,20 @@ export default function SettingsPage() {
             <div class="flex justify-end gap-2">
               <Button size="sm" variant="ghost" onClick={() => setShowBroadcastConfirm(false)}>取消</Button>
               <Button size="sm" variant="warning" onClick={confirmBroadcast}>确认发送</Button>
+            </div>
+          </Card>
+        </div>
+      </Show>
+
+      {/* 维护模式确认弹窗 */}
+      <Show when={showMaintenanceConfirm()}>
+        <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => setShowMaintenanceConfirm(false)}>
+          <Card variant="elevated" class="max-w-sm mx-4" onClick={(e: MouseEvent) => e.stopPropagation()}>
+            <h3 class="text-lg font-semibold text-content mb-2">确认开启维护模式</h3>
+            <p class="text-sm text-content-secondary mb-4">开启后所有非管理员用户将无法访问系统，确定要开启维护模式吗？</p>
+            <div class="flex justify-end gap-2">
+              <Button size="sm" variant="ghost" onClick={() => setShowMaintenanceConfirm(false)}>取消</Button>
+              <Button size="sm" variant="warning" onClick={confirmMaintenance}>确认开启</Button>
             </div>
           </Card>
         </div>

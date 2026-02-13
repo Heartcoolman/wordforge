@@ -4,15 +4,21 @@ import { Button } from '@/components/ui/Button';
 import { Badge } from '@/components/ui/Badge';
 import { Empty } from '@/components/ui/Empty';
 import { Spinner } from '@/components/ui/Spinner';
+import { Switch } from '@/components/ui/Switch';
+import { Select } from '@/components/ui/Select';
 import { uiStore } from '@/stores/ui';
 import { notificationsApi } from '@/api/notifications';
 import type { Notification } from '@/types/notification';
+import type { UserPreferences } from '@/types/user';
 import { formatRelativeTime } from '@/utils/formatters';
 
 export default function NotificationsPage() {
   const [items, setItems] = createSignal<Notification[]>([]);
   const [serverUnreadCount, setServerUnreadCount] = createSignal<number | null>(null);
   const [loading, setLoading] = createSignal(true);
+  const [prefs, setPrefs] = createSignal<UserPreferences | null>(null);
+  const [prefsLoading, setPrefsLoading] = createSignal(false);
+  const [saving, setSaving] = createSignal(false);
 
   async function load() {
     setLoading(true);
@@ -30,7 +36,22 @@ export default function NotificationsPage() {
     }
   }
 
-  onMount(load);
+  async function loadPrefs() {
+    setPrefsLoading(true);
+    try {
+      const p = await notificationsApi.getPreferences();
+      setPrefs(p);
+    } catch {
+      /* ignore */
+    } finally {
+      setPrefsLoading(false);
+    }
+  }
+
+  onMount(() => {
+    load();
+    loadPrefs();
+  });
 
   async function markAllRead() {
     try {
@@ -51,8 +72,32 @@ export default function NotificationsPage() {
     } catch { /* ignore */ }
   }
 
+  async function updatePref(patch: Partial<UserPreferences>) {
+    setSaving(true);
+    try {
+      const updated = await notificationsApi.updatePreferences(patch);
+      setPrefs(updated);
+      uiStore.toast.success('设置已保存');
+    } catch (err: unknown) {
+      uiStore.toast.error('保存失败', err instanceof Error ? err.message : '');
+    } finally {
+      setSaving(false);
+    }
+  }
+
   const localUnreadCount = () => items().filter((n) => !n.read).length;
   const unreadCount = () => serverUnreadCount() ?? localUnreadCount();
+
+  const themeOptions = [
+    { value: 'light', label: '浅色' },
+    { value: 'dark', label: '深色' },
+    { value: 'system', label: '跟随系统' },
+  ];
+
+  const languageOptions = [
+    { value: 'zh', label: '中文' },
+    { value: 'en', label: 'English' },
+  ];
 
   return (
     <div class="max-w-2xl mx-auto space-y-6 animate-fade-in-up">
@@ -67,6 +112,41 @@ export default function NotificationsPage() {
           <Button variant="ghost" size="sm" onClick={markAllRead}>全部已读</Button>
         </Show>
       </div>
+
+      {/* Preferences */}
+      <Card variant="elevated">
+        <h2 class="text-lg font-semibold text-content mb-4">通知偏好设置</h2>
+        <Show when={!prefsLoading() && prefs()} fallback={
+          <Show when={prefsLoading()} fallback={null}>
+            <div class="flex justify-center py-4"><Spinner size="sm" /></div>
+          </Show>
+        }>
+          {(p) => (
+            <div class="space-y-4">
+              <div class="flex items-center justify-between">
+                <span class="text-sm text-content">通知开关</span>
+                <Switch checked={p().notificationEnabled} onChange={(v) => updatePref({ notificationEnabled: v })} disabled={saving()} />
+              </div>
+              <div class="flex items-center justify-between">
+                <span class="text-sm text-content">声音开关</span>
+                <Switch checked={p().soundEnabled} onChange={(v) => updatePref({ soundEnabled: v })} disabled={saving()} />
+              </div>
+              <div class="flex items-center justify-between gap-4">
+                <span class="text-sm text-content flex-shrink-0">主题设置</span>
+                <div class="w-40">
+                  <Select options={themeOptions} value={p().theme} onChange={(e) => updatePref({ theme: e.currentTarget.value as UserPreferences['theme'] })} disabled={saving()} />
+                </div>
+              </div>
+              <div class="flex items-center justify-between gap-4">
+                <span class="text-sm text-content flex-shrink-0">语言设置</span>
+                <div class="w-40">
+                  <Select options={languageOptions} value={p().language} onChange={(e) => updatePref({ language: e.currentTarget.value as UserPreferences['language'] })} disabled={saving()} />
+                </div>
+              </div>
+            </div>
+          )}
+        </Show>
+      </Card>
 
       <Show when={!loading()} fallback={<div class="flex justify-center py-12"><Spinner size="lg" /></div>}>
         <Show when={items().length > 0} fallback={<Empty title="暂无通知" />}>

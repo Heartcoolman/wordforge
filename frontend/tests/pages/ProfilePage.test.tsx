@@ -38,6 +38,31 @@ vi.mock('@/api/users', () => ({
   },
 }));
 
+vi.mock('@/api/userProfile', () => ({
+  userProfileApi: {
+    getReward: vi.fn().mockRejectedValue(new Error('not loaded')),
+    updateReward: vi.fn(),
+    getCognitive: vi.fn().mockRejectedValue(new Error('not loaded')),
+    getLearningStyle: vi.fn().mockRejectedValue(new Error('not loaded')),
+    getChronotype: vi.fn().mockRejectedValue(new Error('not loaded')),
+    getHabit: vi.fn().mockRejectedValue(new Error('not loaded')),
+    updateHabit: vi.fn(),
+    uploadAvatar: vi.fn(),
+  },
+}));
+
+vi.mock('@/api/notifications', () => ({
+  notificationsApi: {
+    getBadges: vi.fn().mockRejectedValue(new Error('not loaded')),
+    list: vi.fn(),
+    getUnreadCount: vi.fn(),
+    markRead: vi.fn(),
+    markAllRead: vi.fn(),
+    getPreferences: vi.fn(),
+    updatePreferences: vi.fn(),
+  },
+}));
+
 import { authStore } from '@/stores/auth';
 
 const mockAuthStore = authStore as unknown as {
