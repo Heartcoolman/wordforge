@@ -27,6 +27,10 @@ export default function FlashcardPage() {
   const [unknown, setUnknown] = createSignal(0);
   const [sessionId, setSessionId] = createSignal('');
   const [done, setDone] = createSignal(false);
+  const [completing, setCompleting] = createSignal(false);
+  const [knownWordIds, setKnownWordIds] = createSignal<string[]>([]);
+  const [errorWordIds, setErrorWordIds] = createSignal<string[]>([]);
+  const [responseTimes, setResponseTimes] = createSignal<number[]>([]);
 
   // 疲劳检测相关状态
   const [showCameraPermission, setShowCameraPermission] = createSignal(false);
@@ -66,9 +70,16 @@ export default function FlashcardPage() {
   });
 
   function advance(correct: boolean) {
+    if (completing()) return;
     const w = words()[index()];
     const responseTime = Date.now() - cardShownTime;
     if (w) {
+      setResponseTimes((t) => [...t, responseTime]);
+      if (correct) {
+        setKnownWordIds((ids) => [...ids, w.id]);
+      } else {
+        setErrorWordIds((ids) => [...ids, w.id]);
+      }
       recordsApi.create({
         clientRecordId: crypto.randomUUID(),
         wordId: w.id,
@@ -97,13 +108,17 @@ export default function FlashcardPage() {
   }
 
   async function completeCurrentSession() {
+    if (completing()) return;
+    setCompleting(true);
     if (sessionId()) {
+      const times = responseTimes();
+      const avg = times.length > 0 ? Math.round(times.reduce((a, b) => a + b, 0) / times.length) : 0;
       try {
         await learningApi.completeSession({
           sessionId: sessionId(),
-          masteredWordIds: [],
-          errorProneWordIds: [],
-          avgResponseTimeMs: 0,
+          masteredWordIds: knownWordIds(),
+          errorProneWordIds: errorWordIds(),
+          avgResponseTimeMs: avg,
         });
       } catch {
         // completion failure should not block UI

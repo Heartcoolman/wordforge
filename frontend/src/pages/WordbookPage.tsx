@@ -203,6 +203,7 @@ function WordbookDetailModal(props: { book: Wordbook | null; onClose: () => void
   const [removingId, setRemovingId] = createSignal<string | null>(null);
   const [confirmRemoveId, setConfirmRemoveId] = createSignal<string | null>(null);
   const [showAddWords, setShowAddWords] = createSignal(false);
+  const [allWordIds, setAllWordIds] = createSignal<string[]>([]);
 
   const isUser = () => props.book?.type === 'user';
 
@@ -259,7 +260,15 @@ function WordbookDetailModal(props: { book: Wordbook | null; onClose: () => void
         <div class="flex items-center justify-between">
           <span class="text-sm text-content-tertiary">共 {total()} 个单词</span>
           <Show when={isUser()}>
-            <Button size="xs" onClick={() => setShowAddWords(true)}>添加单词</Button>
+            <Button size="xs" onClick={async () => {
+              if (props.book) {
+                try {
+                  const res = await wordbooksApi.getWords(props.book.id, { page: 1, perPage: 10000 });
+                  setAllWordIds(res.data.map((w) => w.id));
+                } catch { /* fallback to current page */ }
+              }
+              setShowAddWords(true);
+            }}>添加单词</Button>
           </Show>
         </div>
 
@@ -329,7 +338,7 @@ function WordbookDetailModal(props: { book: Wordbook | null; onClose: () => void
       <Show when={showAddWords() && props.book}>
         <AddWordsModal
           bookId={props.book!.id}
-          existingWordIds={words().map((w) => w.id)}
+          existingWordIds={allWordIds().length > 0 ? allWordIds() : words().map((w) => w.id)}
           onClose={() => setShowAddWords(false)}
           onAdded={() => { loadWords(page()); props.onChanged(); }}
         />

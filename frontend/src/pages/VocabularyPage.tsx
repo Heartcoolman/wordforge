@@ -121,12 +121,14 @@ export default function VocabularyPage() {
     if (semanticMode() && search().trim()) {
       contentApi.semanticSearch(search().trim())
         .then(res => {
+          setPage(1);
           setWords(res.results as Word[]);
           setTotal(res.total);
           fetchStates(res.results.map(w => w.id));
         })
         .catch((err: unknown) => {
           uiStore.toast.error('语义搜索失败，回退到普通搜索', err instanceof Error ? err.message : '');
+          setPage(1);
           return load();
         })
         .finally(() => setSearchLoading(false));
