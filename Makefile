@@ -35,7 +35,7 @@ coverage-backend: ## 生成后端覆盖率报告（HTML + JSON）
 
 coverage-frontend: ## 生成前端覆盖率报告
 	@echo "生成前端覆盖率报告..."
-	cd frontend && npm run test:coverage || true
+	cd frontend && npm run test:coverage
 	@echo "✓ 前端覆盖率报告已生成："
 	@echo "  HTML: frontend/coverage/index.html"
 
