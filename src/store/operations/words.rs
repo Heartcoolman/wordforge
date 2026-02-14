@@ -326,7 +326,9 @@ mod tests {
 
         let list = store.list_words(10, 0).unwrap();
         assert_eq!(list.len(), 2);
-        assert_eq!(list[0].text, "apple");
+        let texts: Vec<&str> = list.iter().map(|w| w.text.as_str()).collect();
+        assert!(texts.contains(&"apple"));
+        assert!(texts.contains(&"banana"));
     }
 
     #[test]

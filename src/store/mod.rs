@@ -40,6 +40,7 @@ pub struct Store {
     pub word_morphemes: sled::Tree,
     pub confusion_pairs: sled::Tree,
     pub wb_center_imports: sled::Tree,
+    pub wordbook_type_index: sled::Tree,
     // Secondary index trees
     pub users_by_created_at: sled::Tree,
     pub words_by_created_at: sled::Tree,
@@ -72,7 +73,11 @@ pub enum StoreError {
 
 impl Store {
     pub fn open(sled_path: &str) -> Result<Self, StoreError> {
-        let db = sled::open(sled_path)?;
+        let db = sled::Config::new()
+            .path(sled_path)
+            .cache_capacity(512_000_000)
+            .flush_every_ms(Some(1000))
+            .open()?;
         let users = db.open_tree(trees::USERS)?;
         let sessions = db.open_tree(trees::SESSIONS)?;
         let admin_sessions = db.open_tree(trees::ADMIN_SESSIONS)?;
@@ -102,6 +107,7 @@ impl Store {
         let word_morphemes = db.open_tree(trees::WORD_MORPHEMES)?;
         let confusion_pairs = db.open_tree(trees::CONFUSION_PAIRS)?;
         let wb_center_imports = db.open_tree(trees::WB_CENTER_IMPORTS)?;
+        let wordbook_type_index = db.open_tree(trees::WORDBOOK_TYPE_INDEX)?;
         // Secondary index trees
         let users_by_created_at = db.open_tree(trees::USERS_BY_CREATED_AT)?;
         let words_by_created_at = db.open_tree(trees::WORDS_BY_CREATED_AT)?;
@@ -138,6 +144,7 @@ impl Store {
             word_morphemes,
             confusion_pairs,
             wb_center_imports,
+            wordbook_type_index,
             users_by_created_at,
             words_by_created_at,
             records_by_time,

@@ -89,11 +89,7 @@ export default function VocabularyPage() {
       setDueWords(due);
       if (due.length > 0) {
         const ids = due.map(d => d.wordId);
-        const details: Word[] = [];
-        const results = await Promise.allSettled(ids.map((id) => wordsApi.get(id)));
-        for (const r of results) {
-          if (r.status === 'fulfilled') details.push(r.value);
-        }
+        const details = await wordsApi.batchGet(ids);
         setDueWordDetails(details);
         const map: Record<string, WordLearningState> = { ...stateMap() };
         for (const s of due) map[s.wordId] = s;

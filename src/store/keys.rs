@@ -146,6 +146,27 @@ pub fn wordbook_words_prefix(wordbook_id: &str) -> Result<String, StoreError> {
     Ok(format!("{}:", validate_id(wordbook_id)?))
 }
 
+// Wordbook type index keys
+pub fn wordbook_type_index_key_system(wordbook_id: &str) -> Result<String, StoreError> {
+    Ok(format!("system:{}", validate_id(wordbook_id)?))
+}
+
+pub fn wordbook_type_index_key_user(user_id: &str, wordbook_id: &str) -> Result<String, StoreError> {
+    Ok(format!(
+        "user:{}:{}",
+        validate_id(user_id)?,
+        validate_id(wordbook_id)?
+    ))
+}
+
+pub fn wordbook_type_index_prefix_system() -> &'static str {
+    "system:"
+}
+
+pub fn wordbook_type_index_prefix_user(user_id: &str) -> Result<String, StoreError> {
+    Ok(format!("user:{}:", validate_id(user_id)?))
+}
+
 // Study config keys
 pub fn study_config_key(user_id: &str) -> Result<String, StoreError> {
     Ok(validate_id(user_id)?.to_string())

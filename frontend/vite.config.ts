@@ -25,6 +25,16 @@ export default defineConfig({
     emptyOutDir: true,
     target: 'esnext', // 确保支持 top-level await
     sourcemap: 'hidden',
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          'vendor-solid': ['solid-js', 'solid-js/web', 'solid-js/store'],
+          'vendor-router': ['@solidjs/router'],
+          'vendor-query': ['@tanstack/solid-query'],
+          'vendor-mediapipe': ['@mediapipe/tasks-vision'],
+        },
+      },
+    },
   },
   esbuild: {
     drop: ['debugger'],

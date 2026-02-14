@@ -13,6 +13,7 @@ fn migrations() -> Vec<(&'static str, MigrationFn)> {
         ("001_initial", m001_initial),
         ("002_word_due_index", m002_word_due_index),
         ("003_secondary_indexes", m003_secondary_indexes),
+        ("004_wordbook_type_index", m004_wordbook_type_index),
     ]
 }
 
@@ -192,6 +193,29 @@ fn m003_secondary_indexes(store: &Store) -> Result<(), StoreError> {
     Ok(())
 }
 
+/// Build wordbook_type_index for existing wordbooks.
+fn m004_wordbook_type_index(store: &Store) -> Result<(), StoreError> {
+    use crate::store::operations::wordbooks::{Wordbook, WordbookType};
+
+    for item in store.wordbooks.iter() {
+        let (_, value) = item?;
+        if let Ok(book) = Store::deserialize::<Wordbook>(&value) {
+            let idx_key = match book.book_type {
+                WordbookType::System => keys::wordbook_type_index_key_system(&book.id)?,
+                WordbookType::User => {
+                    let uid = book.user_id.as_deref().unwrap_or("unknown");
+                    keys::wordbook_type_index_key_user(uid, &book.id)?
+                }
+            };
+            store
+                .wordbook_type_index
+                .insert(idx_key.as_bytes(), book.id.as_bytes())?;
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use tempfile::tempdir;
@@ -209,8 +233,8 @@ mod tests {
         run(&store).unwrap();
         let second = get_current_version(&store).unwrap();
 
-        assert_eq!(first, 3);
-        assert_eq!(second, 3);
+        assert_eq!(first, 4);
+        assert_eq!(second, 4);
     }
 
     #[test]

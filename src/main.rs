@@ -14,6 +14,7 @@ use learning_backend::store::Store;
 use learning_backend::workers::WorkerManager;
 use tokio::sync::broadcast;
 use tower_http::catch_panic::CatchPanicLayer;
+use tower_http::compression::CompressionLayer;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
@@ -83,6 +84,7 @@ async fn main() {
 
     let app = build_router(state)
         .layer(cors_layer)
+        .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http())
         .layer(CatchPanicLayer::new())
         .layer(SetResponseHeaderLayer::overriding(

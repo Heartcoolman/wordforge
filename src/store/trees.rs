@@ -43,6 +43,8 @@ pub const WORD_MORPHEMES: &str = "word_morphemes";
 pub const CONFUSION_PAIRS: &str = "confusion_pairs";
 pub const WB_CENTER_IMPORTS: &str = "wb_center_imports";
 
+pub const WORDBOOK_TYPE_INDEX: &str = "idx_wordbook_type";
+
 // Secondary index trees (performance optimization)
 pub const USERS_BY_CREATED_AT: &str = "idx_users_by_created";
 pub const WORDS_BY_CREATED_AT: &str = "idx_words_by_created";

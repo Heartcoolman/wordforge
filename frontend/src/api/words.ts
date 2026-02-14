@@ -10,6 +10,7 @@ export const wordsApi = {
   update: (id: string, data: CreateWordRequest) => api.put<Word>(`/api/words/${id}`, data),
   delete: (id: string) => api.delete<{ deleted: boolean; id: string }>(`/api/words/${id}`),
   batchCreate: (words: CreateWordRequest[]) => api.post<BatchCreateResponse>('/api/words/batch', { words }),
+  batchGet: (ids: string[]) => api.post<Word[]>('/api/words/batch-get', { ids }),
   count: () => api.get<{ total: number }>('/api/words/count'),
   importUrl: (url: string) => api.post<ImportUrlResponse>('/api/words/import-url', { url }),
 };
