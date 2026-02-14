@@ -125,14 +125,14 @@ async fn it_learning_wordbooks_word_states_and_study_config_flow() {
     let list_book_words = request(
         &app.app,
         Method::GET,
-        &format!("/api/wordbooks/{wordbook_id}/words?limit=50&offset=0"),
+        &format!("/api/wordbooks/{wordbook_id}/words?page=1&per_page=50"),
         None,
         &[("authorization", auth_header(&token))],
     )
     .await;
     let (list_words_status, _, list_words_body) = response_json(list_book_words).await;
     assert_eq!(list_words_status, StatusCode::OK);
-    assert!(list_words_body["data"]["items"].is_array());
+    assert!(list_words_body["data"]["data"].is_array());
     assert!(list_words_body["data"]["total"].as_u64().unwrap_or(0) >= 3);
 
     let another_token = login_and_get_token(&app.app).await;
@@ -218,7 +218,7 @@ async fn it_learning_wordbooks_word_states_and_study_config_flow() {
 
     let study_words = request(
         &app.app,
-        Method::POST,
+        Method::GET,
         "/api/learning/study-words",
         None,
         &[("authorization", auth_header(&token))],
@@ -566,11 +566,23 @@ async fn it_user_profile_notifications_content_and_v1_flow() {
     let (avatar_empty_status, _, _) = response_json(avatar_empty).await;
     assert_eq!(avatar_empty_status, StatusCode::BAD_REQUEST);
 
+    // 最小的有效PNG文件（1x1像素，透明）
+    let minimal_png = vec![
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, // PNG signature
+        0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52, // IHDR chunk
+        0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+        0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4,
+        0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41,
+        0x54, 0x78, 0x9C, 0x63, 0x00, 0x01, 0x00, 0x00,
+        0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00,
+        0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE,
+        0x42, 0x60, 0x82
+    ];
     let avatar_ok = request_raw(
         &app.app,
         Method::POST,
         "/api/user-profile/avatar",
-        b"avatar-bytes".to_vec(),
+        minimal_png,
         &[("authorization", auth_header(&token))],
     )
     .await;
@@ -717,7 +729,7 @@ async fn it_user_profile_notifications_content_and_v1_flow() {
         Method::GET,
         &format!("/api/content/etymology/{word_id}"),
         None,
-        &[],
+        &[("authorization", auth_header(&token))],
     )
     .await;
     let (ety_first_status, _, ety_first_body) = response_json(etymology_first).await;
@@ -849,7 +861,7 @@ async fn it_user_profile_notifications_content_and_v1_flow() {
     let v1_words = request(
         &app.app,
         Method::GET,
-        "/api/v1/words?limit=10&offset=0",
+        "/api/v1/words?page=1&per_page=10",
         None,
         &[],
     )
@@ -886,7 +898,7 @@ async fn it_user_profile_notifications_content_and_v1_flow() {
     let v1_records = request(
         &app.app,
         Method::GET,
-        "/api/v1/records?limit=20&offset=0",
+        "/api/v1/records?page=1&per_page=20",
         None,
         &[("authorization", auth_header(&token))],
     )
@@ -1045,14 +1057,14 @@ async fn it_words_users_records_auth_and_extractor_edges() {
     let list_search = request(
         &app.app,
         Method::GET,
-        "/api/words?limit=20&offset=0&search=del",
+        "/api/words?page=1&per_page=20&search=del",
         None,
         &[("authorization", auth_header(&new_token))],
     )
     .await;
     let (list_search_status, _, list_search_body) = response_json(list_search).await;
     assert_eq!(list_search_status, StatusCode::OK);
-    assert!(list_search_body["data"]["items"].is_array());
+    assert!(list_search_body["data"]["data"].is_array());
 
     let count_words = request(
         &app.app,
@@ -1077,7 +1089,7 @@ async fn it_words_users_records_auth_and_extractor_edges() {
             "examples": ["example-1"],
             "tags": ["updated"]
         })),
-        &[("authorization", auth_header(&new_token))],
+        &[("authorization", auth_header(&admin_token))],
     )
     .await;
     let (update_word_status, _, update_word_body) = response_json(update_word).await;
@@ -1150,7 +1162,7 @@ async fn it_words_users_records_auth_and_extractor_edges() {
     let list_records = request(
         &app.app,
         Method::GET,
-        "/api/records?limit=20&offset=0",
+        "/api/records?page=1&per_page=20",
         None,
         &[("authorization", auth_header(&new_token))],
     )

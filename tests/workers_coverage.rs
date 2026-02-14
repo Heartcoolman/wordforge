@@ -137,13 +137,14 @@ async fn it_worker_manager_registers_jobs_and_shutdowns() {
     assert!(jobs
         .iter()
         .any(|j| j.name == workers::WorkerName::MetricsFlush && j.enabled));
-    // MonitoringAggregate and LlmAdvisor are now stub-disabled by default
+    // MonitoringAggregate is stub-disabled by default
     assert!(jobs
         .iter()
         .any(|j| j.name == workers::WorkerName::MonitoringAggregate && !j.enabled));
+    // LlmAdvisor is configurable and enabled in this test
     assert!(jobs
         .iter()
-        .any(|j| j.name == workers::WorkerName::LlmAdvisor && !j.enabled));
+        .any(|j| j.name == workers::WorkerName::LlmAdvisor && j.enabled));
 
     let mut worker_cfg_without_optional = worker_cfg.clone();
     worker_cfg_without_optional.enable_monitoring = false;

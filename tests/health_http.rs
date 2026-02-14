@@ -21,8 +21,11 @@ async fn it_health_live_and_ready() {
 #[tokio::test]
 async fn it_health_database_is_ok() {
     let app = spawn_test_server().await;
+    
+    use common::auth::{setup_admin_and_get_token, auth_header};
+    let admin_token = setup_admin_and_get_token(&app.app).await;
 
-    let db = request(&app.app, Method::GET, "/health/database", None, &[]).await;
+    let db = request(&app.app, Method::GET, "/health/database", None, &[("authorization", auth_header(&admin_token))]).await;
     let (status, _, body) = response_json(db).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["healthy"], true);
