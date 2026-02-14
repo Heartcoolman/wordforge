@@ -67,7 +67,7 @@ export default function AdminDashboard() {
                   <p class="text-content-secondary">版本</p>
                   <div class="flex items-center gap-2">
                     <p class="font-medium text-content">{h().version}</p>
-                    <Show when={updateInfo()?.hasUpdate}>
+                    <Show when={updateInfo()?.hasUpdate && updateInfo()?.releaseUrl}>
                       <a
                         href={updateInfo()!.releaseUrl!}
                         target="_blank"

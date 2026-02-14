@@ -81,13 +81,15 @@ async fn check_update(
         }
         Err(e) => {
             tracing::warn!("Failed to check for updates: {e}");
-            Ok(ok(serde_json::json!({
+            let fallback = serde_json::json!({
                 "currentVersion": current_version,
                 "latestVersion": current_version,
                 "hasUpdate": false,
                 "releaseUrl": null,
                 "releaseNotes": null,
-            })))
+            });
+            *state.update_cache().write().await = Some((Instant::now(), fallback.clone()));
+            Ok(ok(fallback))
         }
     }
 }
@@ -97,6 +99,7 @@ async fn fetch_latest_release(
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
     let client = reqwest::Client::builder()
         .user_agent("wordforge-update-checker")
+        .timeout(Duration::from_secs(10))
         .build()?;
 
     let resp = client
@@ -139,4 +142,44 @@ fn is_newer(latest: &str, current: &str) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn equal_versions() {
+        assert!(!is_newer("0.1.3", "0.1.3"));
+    }
+
+    #[test]
+    fn patch_increment() {
+        assert!(is_newer("0.1.4", "0.1.3"));
+        assert!(!is_newer("0.1.2", "0.1.3"));
+    }
+
+    #[test]
+    fn minor_increment() {
+        assert!(is_newer("0.2.0", "0.1.3"));
+        assert!(!is_newer("0.0.9", "0.1.0"));
+    }
+
+    #[test]
+    fn major_increment() {
+        assert!(is_newer("1.0.0", "0.9.9"));
+        assert!(!is_newer("0.9.9", "1.0.0"));
+    }
+
+    #[test]
+    fn shorter_version_string() {
+        assert!(!is_newer("0.1", "0.1.3"));
+        assert!(is_newer("0.2", "0.1.3"));
+    }
+
+    #[test]
+    fn prerelease_suffix_ignored() {
+        // filter_map 会跳过无法解析的段，"3-beta" 解析失败变成空
+        assert!(!is_newer("0.1.3-beta", "0.1.3"));
+    }
 }
