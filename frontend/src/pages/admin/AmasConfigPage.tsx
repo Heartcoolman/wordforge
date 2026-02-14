@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/Button';
 import { Spinner } from '@/components/ui/Spinner';
 import { uiStore } from '@/stores/ui';
 import { amasApi } from '@/api/amas';
+import { adminApi } from '@/api/admin';
 import type { AmasConfig } from '@/types/amas';
 
 export default function AmasConfigPage() {
@@ -11,6 +12,7 @@ export default function AmasConfigPage() {
   const [metrics, setMetrics] = createSignal<unknown>(null);
   const [loading, setLoading] = createSignal(true);
   const [saving, setSaving] = createSignal(false);
+  const [reloading, setReloading] = createSignal(false);
 
   onMount(async () => {
     const [c, m] = await Promise.allSettled([amasApi.getConfig(), amasApi.getMetrics()]);
@@ -19,29 +21,49 @@ export default function AmasConfigPage() {
     setLoading(false);
   });
 
-  async function saveConfig() {
+  function parseConfigInput() {
     let parsed: unknown;
     try {
       parsed = JSON.parse(config());
     } catch {
       uiStore.toast.error('保存失败', 'JSON 格式错误，请检查语法');
-      return;
+      return null;
     }
 
     // 基本 schema 校验：配置必须是一个非空对象
     if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
       uiStore.toast.error('保存失败', '配置必须是一个 JSON 对象');
-      return;
+      return null;
     }
+    return parsed as AmasConfig;
+  }
 
+  async function saveConfig() {
+    const parsed = parseConfigInput();
+    if (!parsed) return;
     try {
       setSaving(true);
-      await amasApi.updateConfig(parsed as AmasConfig);
+      await amasApi.updateConfig(parsed);
       uiStore.toast.success('AMAS 配置已更新');
     } catch (err: unknown) {
       uiStore.toast.error('保存失败', err instanceof Error ? err.message : '未知错误');
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function reloadAmasConfig() {
+    const parsed = parseConfigInput();
+    if (!parsed) return;
+    try {
+      setReloading(true);
+      const latest = await adminApi.reloadAmas(parsed);
+      setConfig(JSON.stringify(latest, null, 2));
+      uiStore.toast.success('AMAS 配置已热重载');
+    } catch (err: unknown) {
+      uiStore.toast.error('热重载失败', err instanceof Error ? err.message : '未知错误');
+    } finally {
+      setReloading(false);
     }
   }
 
@@ -59,7 +81,8 @@ export default function AmasConfigPage() {
             spellcheck={false}
           />
           <p class="text-xs text-content-tertiary mt-1">请输入合法的 JSON 对象，例如 {"{"} "key": "value" {"}"}</p>
-          <div class="flex justify-end mt-3">
+          <div class="flex justify-end gap-2 mt-3">
+            <Button onClick={reloadAmasConfig} loading={reloading()} variant="ghost">热重载配置</Button>
             <Button onClick={saveConfig} loading={saving()}>保存配置</Button>
           </div>
         </Card>

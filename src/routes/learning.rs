@@ -401,11 +401,11 @@ async fn adjust_words(
 
     if let Some(user_state) = req.user_state.as_deref() {
         match user_state.trim().to_ascii_lowercase().as_str() {
-            "focused" => {
+            "focused" | "engaged" | "confident" => {
                 strategy.difficulty = (strategy.difficulty + ls.difficulty_boost_step).min(1.0);
                 strategy.new_ratio = (strategy.new_ratio + ls.ratio_boost_step).min(1.0);
             }
-            "tired" | "fatigued" => {
+            "tired" | "fatigued" | "frustrated" | "distracted" => {
                 strategy.difficulty = (strategy.difficulty - ls.fatigue_difficulty_drop).max(0.0);
                 strategy.new_ratio = (strategy.new_ratio - ls.ratio_drop_step).max(0.0);
                 strategy.batch_size =

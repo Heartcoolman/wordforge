@@ -181,4 +181,25 @@ describe('adminApi', () => {
     const result = await adminApi.updateSettings({ registrationOpen: false } as any);
     expect(result).toEqual(updated);
   });
+
+  it('reloadAmas sends config and returns reloaded config', async () => {
+    const config = {
+      featureFlags: { ensembleEnabled: true, heuristicEnabled: true, igeEnabled: true, swdEnabled: true, mdmEnabled: true },
+      ensemble: { baseWeightHeuristic: 0.2, baseWeightIge: 0.4, baseWeightSwd: 0.4, warmupSamples: 20, blendScale: 100, blendMax: 0.5, minWeight: 0.15 },
+      modeling: { attentionSmoothing: 0.3, confidenceDecay: 0.99, minConfidence: 0.1, fatigueIncreaseRate: 0.02, fatigueRecoveryRate: 0.001, motivationMomentum: 0.1, visualFatigueWeight: 0.3 },
+      constraints: { highFatigueThreshold: 0.9, lowAttentionThreshold: 0.3, lowMotivationThreshold: -0.5, maxBatchSizeWhenFatigued: 5, maxNewRatioWhenFatigued: 0.2, maxDifficultyWhenFatigued: 0.55 },
+      monitoring: { sampleRate: 0.05, metricsFlushIntervalSecs: 300 },
+      coldStart: { classifyToExploreEvents: 20, classifyToExploreConfidence: 0.6, exploreToExploitEvents: 80 },
+      objectiveWeights: { retention: 0.35, accuracy: 0.25, speed: 0.15, fatigue: 0.15, frustration: 0.1 },
+    };
+    server.use(
+      http.post(`${BASE}/api/admin/settings/reload-amas`, async ({ request }) => {
+        const body = await request.json() as Record<string, unknown>;
+        expect(body).toEqual(config);
+        return HttpResponse.json({ success: true, data: config });
+      }),
+    );
+    const result = await adminApi.reloadAmas(config as any);
+    expect(result).toEqual(config);
+  });
 });

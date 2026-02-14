@@ -5,6 +5,7 @@ import type {
   EngagementAnalytics, LearningAnalytics,
   SystemHealth, DatabaseInfo, SystemSettings,
 } from '@/types/admin';
+import type { AmasConfig } from '@/types/amas';
 import type { BrowseItem, WordbookPreview, ImportResult, UpdateInfo, SyncResult } from '@/types/wordbookCenter';
 
 export const adminApi = {
@@ -22,6 +23,8 @@ export const adminApi = {
     api.get<AdminUsersPage>('/api/admin/users', params as Record<string, string | number | boolean | undefined>, { useAdminToken: true }),
   banUser: (id: string) => api.post<{ banned: boolean; userId: string }>(`/api/admin/users/${id}/ban`, undefined, { useAdminToken: true }),
   unbanUser: (id: string) => api.post<{ banned: boolean; userId: string }>(`/api/admin/users/${id}/unban`, undefined, { useAdminToken: true }),
+  resetUserPassword: (id: string) => api.post<{ resetKey: string; expiresInHours: number }>(`/api/admin/users/${id}/reset-password`, undefined, { useAdminToken: true }),
+  setUserPassword: (id: string, newPassword: string) => api.post<{ passwordReset: boolean; userId: string; sessionsRevoked: number }>(`/api/admin/users/${id}/set-password`, { newPassword }, { useAdminToken: true }),
   getStats: () => api.get<AdminStats>('/api/admin/stats', undefined, { useAdminToken: true }),
 
   // Analytics
@@ -36,6 +39,7 @@ export const adminApi = {
   broadcast: (data: { title: string; message: string }) => api.post<{ sent: number }>('/api/admin/broadcast', data, { useAdminToken: true }),
   getSettings: () => api.get<SystemSettings>('/api/admin/settings', undefined, { useAdminToken: true }),
   updateSettings: (data: Partial<SystemSettings>) => api.put<SystemSettings>('/api/admin/settings', data, { useAdminToken: true }),
+  reloadAmas: (data: AmasConfig) => api.post<AmasConfig>('/api/admin/settings/reload-amas', data, { useAdminToken: true }),
 
   // Wordbook Center
   wbCenterBrowse: () =>

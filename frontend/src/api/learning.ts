@@ -12,6 +12,10 @@ import type {
 } from '@/types/learning';
 import type { AmasStrategy } from '@/types/amas';
 
+interface SyncProgressOptions {
+  keepalive?: boolean;
+}
+
 export const learningApi = {
   createSession(data?: CreateSessionRequest) {
     return api.post<SessionResponse>('/api/learning/session', data ?? {});
@@ -33,10 +37,10 @@ export const learningApi = {
     return api.post<{ adjustedStrategy: AmasStrategy }>('/api/learning/adjust-words', data ?? {});
   },
 
-  syncProgress(data: SyncProgressRequest) {
+  syncProgress(data: SyncProgressRequest, options?: SyncProgressOptions) {
     const sanitized = { ...data };
     if (sanitized.totalQuestions != null) sanitized.totalQuestions = Math.round(sanitized.totalQuestions);
     if (sanitized.contextShifts != null) sanitized.contextShifts = Math.round(sanitized.contextShifts);
-    return api.post<LearningSession>('/api/learning/sync-progress', sanitized);
+    return api.post<LearningSession>('/api/learning/sync-progress', sanitized, { keepalive: options?.keepalive ?? false });
   },
 };

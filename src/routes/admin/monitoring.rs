@@ -41,9 +41,15 @@ async fn database_stats(
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     let db = state.store().raw_db();
+    let trees: Vec<String> = db
+        .tree_names()
+        .iter()
+        .map(|name| String::from_utf8_lossy(name.as_ref()).to_string())
+        .collect();
 
     Ok(ok(serde_json::json!({
         "sizeOnDisk": db.size_on_disk().unwrap_or(0),
-        "treeCount": db.tree_names().len(),
+        "treeCount": trees.len(),
+        "trees": trees,
     })))
 }

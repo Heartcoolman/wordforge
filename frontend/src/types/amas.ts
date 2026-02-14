@@ -8,6 +8,27 @@ export interface ProcessResult {
   coldStartPhase?: ColdStartPhase;
 }
 
+export interface ProcessEventRequest {
+  wordId: string;
+  isCorrect: boolean;
+  responseTime: number;
+  sessionId?: string;
+  isQuit?: boolean;
+  dwellTime?: number;
+  pauseCount?: number;
+  switchCount?: number;
+  retryCount?: number;
+  focusLossDuration?: number;
+  interactionDensity?: number;
+  pausedTimeMs?: number;
+  hintUsed?: boolean;
+}
+
+export interface BatchProcessResult {
+  count: number;
+  items: ProcessResult[];
+}
+
 export type ColdStartPhase = 'Classify' | 'Explore' | 'Exploit';
 
 export interface AmasStrategy {

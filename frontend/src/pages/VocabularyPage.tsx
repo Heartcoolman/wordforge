@@ -1,4 +1,5 @@
 import { createSignal, createEffect, Show, For, onMount, Switch, Match } from 'solid-js';
+import { useNavigate } from '@solidjs/router';
 import { Card } from '@/components/ui/Card';
 import { Input } from '@/components/ui/Input';
 import { Button } from '@/components/ui/Button';
@@ -35,6 +36,7 @@ const STATE_VARIANTS: Record<WordStateType, 'default' | 'accent' | 'success' | '
 type FilterMode = 'all' | 'due';
 
 export default function VocabularyPage() {
+  const navigate = useNavigate();
   const [words, setWords] = createSignal<Word[]>([]);
   const [total, setTotal] = createSignal(0);
   const [page, setPage] = createSignal(1);
@@ -51,6 +53,7 @@ export default function VocabularyPage() {
   const [dueWords, setDueWords] = createSignal<WordLearningState[]>([]);
   const [dueWordDetails, setDueWordDetails] = createSignal<Word[]>([]);
   const [semanticMode, setSemanticMode] = createSignal(false);
+  const canManageSystemWords = false;
   const pageSize = 20;
 
   async function load() {
@@ -200,8 +203,11 @@ export default function VocabularyPage() {
       <div class="flex items-center justify-between flex-wrap gap-3">
         <h1 class="text-2xl font-bold text-content">词库管理</h1>
         <div class="flex gap-2">
-          <Button onClick={() => setShowImport(true)} variant="outline" size="sm">批量导入</Button>
-          <Button onClick={() => { setEditing(null); setShowForm(true); }} size="sm">添加单词</Button>
+          <Button onClick={() => navigate('/wordbooks')} variant="ghost" size="sm">去个人词书</Button>
+          <Show when={canManageSystemWords}>
+            <Button onClick={() => setShowImport(true)} variant="outline" size="sm">批量导入</Button>
+            <Button onClick={() => { setEditing(null); setShowForm(true); }} size="sm">添加单词</Button>
+          </Show>
         </div>
       </div>
 
@@ -237,7 +243,7 @@ export default function VocabularyPage() {
         <Show when={displayWords().length > 0} fallback={
           <Empty
             title={filterMode() === 'due' ? '暂无待复习单词' : '暂无单词'}
-            description={filterMode() === 'due' ? '所有单词都已复习' : '点击添加单词或批量导入'}
+            description={filterMode() === 'due' ? '所有单词都已复习' : (canManageSystemWords ? '点击添加单词或批量导入' : '系统词库为只读，请到个人词书管理写入')}
           />
         }>
           <div class="grid gap-3">
@@ -289,18 +295,20 @@ export default function VocabularyPage() {
                             <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
                           </button>
                         </Show>
-                        <button
-                          onClick={() => { setEditing(word); setShowForm(true); }}
-                          class="p-1.5 rounded text-content-tertiary hover:text-accent transition-colors cursor-pointer"
-                        >
-                          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" /></svg>
-                        </button>
-                        <button
-                          onClick={() => confirmDelete(word.id)}
-                          class="p-1.5 rounded text-content-tertiary hover:text-error transition-colors cursor-pointer"
-                        >
-                          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
-                        </button>
+                        <Show when={canManageSystemWords}>
+                          <button
+                            onClick={() => { setEditing(word); setShowForm(true); }}
+                            class="p-1.5 rounded text-content-tertiary hover:text-accent transition-colors cursor-pointer"
+                          >
+                            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" /></svg>
+                          </button>
+                          <button
+                            onClick={() => confirmDelete(word.id)}
+                            class="p-1.5 rounded text-content-tertiary hover:text-error transition-colors cursor-pointer"
+                          >
+                            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                          </button>
+                        </Show>
                       </div>
                     </Card>
                     <Show when={expandedId() === word.id}>
@@ -323,20 +331,22 @@ export default function VocabularyPage() {
         </Show>
       </Show>
 
-      {/* Word Form Modal */}
-      <WordFormModal open={showForm()} onClose={() => setShowForm(false)} word={editing()} onSaved={() => { if (filterMode() === 'due') loadDueList(); else load(); }} />
+      <Show when={canManageSystemWords}>
+        {/* Word Form Modal */}
+        <WordFormModal open={showForm()} onClose={() => setShowForm(false)} word={editing()} onSaved={() => { if (filterMode() === 'due') loadDueList(); else load(); }} />
 
-      {/* Import Modal */}
-      <ImportModal open={showImport()} onClose={() => setShowImport(false)} onDone={() => { if (filterMode() === 'due') loadDueList(); else load(); }} />
+        {/* Import Modal */}
+        <ImportModal open={showImport()} onClose={() => setShowImport(false)} onDone={() => { if (filterMode() === 'due') loadDueList(); else load(); }} />
 
-      {/* Delete Confirm Modal */}
-      <Modal open={deleteTarget() !== null} onClose={() => setDeleteTarget(null)} title="确认删除" size="sm">
-        <p class="text-sm text-content-secondary mt-2">确定要删除该单词吗？此操作无法撤销。</p>
-        <div class="flex justify-end gap-2 mt-4">
-          <Button variant="ghost" onClick={() => setDeleteTarget(null)}>取消</Button>
-          <Button variant="danger" onClick={() => { const id = deleteTarget(); if (id) deleteWord(id); }}>删除</Button>
-        </div>
-      </Modal>
+        {/* Delete Confirm Modal */}
+        <Modal open={deleteTarget() !== null} onClose={() => setDeleteTarget(null)} title="确认删除" size="sm">
+          <p class="text-sm text-content-secondary mt-2">确定要删除该单词吗？此操作无法撤销。</p>
+          <div class="flex justify-end gap-2 mt-4">
+            <Button variant="ghost" onClick={() => setDeleteTarget(null)}>取消</Button>
+            <Button variant="danger" onClick={() => { const id = deleteTarget(); if (id) deleteWord(id); }}>删除</Button>
+          </div>
+        </Modal>
+      </Show>
     </div>
   );
 }
@@ -414,7 +424,7 @@ function WordDetailPanel(props: { wordId: string; wordText: string }) {
                   </div>
                 </Show>
                 <Show when={!etymology()!.generated}>
-                  <p class="text-xs text-content-tertiary italic">数据待 LLM 生成</p>
+                  <p class="text-xs text-content-tertiary italic">当前为规则化解释，后续可由 LLM 结果覆盖</p>
                 </Show>
               </div>
             </Show>
