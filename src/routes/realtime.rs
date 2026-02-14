@@ -29,10 +29,20 @@ pub async fn sse_handler(
     State(state): State<AppState>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, AppError> {
     let max_sse = state.config().limits.max_sse_connections;
-    let current = SSE_CONNECTION_COUNT.fetch_add(1, Ordering::SeqCst);
-    if current >= max_sse {
-        SSE_CONNECTION_COUNT.fetch_sub(1, Ordering::SeqCst);
-        return Err(AppError::too_many_requests("SSE连接数过多"));
+    loop {
+        let current = SSE_CONNECTION_COUNT.load(Ordering::SeqCst);
+        if current >= max_sse {
+            return Err(AppError::too_many_requests("SSE连接数过多"));
+        }
+        match SSE_CONNECTION_COUNT.compare_exchange(
+            current,
+            current + 1,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        ) {
+            Ok(_) => break,
+            Err(_) => continue,
+        }
     }
 
     let mut shutdown_rx = state.shutdown_rx();

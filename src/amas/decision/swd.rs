@@ -4,7 +4,7 @@ use crate::amas::config::AMASConfig;
 use crate::amas::types::*;
 
 const DECAY_HALF_LIFE_DAYS: f64 = 7.0;
-const LN2: f64 = 0.693;
+const LN2: f64 = 0.693_147_180_559_945_3;
 const CONFIDENCE_MIN: f64 = 0.2;
 const CONFIDENCE_MAX: f64 = 0.9;
 const NORMALIZATION_REF: f64 = 1_000_000.0;

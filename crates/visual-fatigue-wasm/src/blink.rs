@@ -57,6 +57,8 @@ pub struct BlinkDetector {
     open_threshold: f64,
     /// 当前眼睛状态
     state: EyeState,
+    /// Closing 状态已持续的帧数
+    closing_frame_count: u32,
     /// 开始闭眼的时间戳
     close_start_ts: f64,
     /// 眨眼事件历史（用于计算频率）
@@ -82,6 +84,7 @@ impl BlinkDetector {
             close_threshold,
             open_threshold,
             state: EyeState::Open,
+            closing_frame_count: 0,
             close_start_ts: 0.0,
             blink_history: VecDeque::new(),
             window_ms: 60_000.0, // 60秒窗口
@@ -107,13 +110,17 @@ impl BlinkDetector {
                 if ear < self.close_threshold {
                     // 睁眼 → 正在闭眼
                     self.state = EyeState::Closing;
+                    self.closing_frame_count = 1;
                     self.close_start_ts = timestamp;
                 }
             }
             EyeState::Closing => {
                 if ear < self.close_threshold {
-                    // 确认进入闭眼状态（EAR 持续低于阈值）
-                    self.state = EyeState::Closed;
+                    self.closing_frame_count += 1;
+                    // 至少持续 3 帧才确认进入闭眼状态，避免噪声误判
+                    if self.closing_frame_count >= 3 {
+                        self.state = EyeState::Closed;
+                    }
                 } else if ear >= self.open_threshold {
                     // 快速反弹回睁眼，可能是噪声，直接回到 Open
                     self.state = EyeState::Open;
@@ -195,6 +202,7 @@ impl BlinkDetector {
     /// 重置检测器状态
     pub fn reset(&mut self) {
         self.state = EyeState::Open;
+        self.closing_frame_count = 0;
         self.close_start_ts = 0.0;
         self.blink_history.clear();
     }
@@ -211,8 +219,7 @@ impl BlinkDetector {
         let first_ts = self.blink_history.front().unwrap().timestamp;
         let elapsed_ms = current_ts - first_ts;
 
-        if elapsed_ms < 1000.0 {
-            // 数据不足1秒，不计算频率
+        if elapsed_ms < 10_000.0 {
             return 0.0;
         }
 

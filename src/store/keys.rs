@@ -263,6 +263,54 @@ pub fn confusion_pair_key(word_id_a: &str, word_id_b: &str) -> Result<String, St
     }
 }
 
+// Secondary index keys
+
+/// users_by_created_at: `{timestamp_be_20}:{user_id}`
+pub fn users_by_created_at_key(created_at_ms: i64, user_id: &str) -> Result<String, StoreError> {
+    let ts = created_at_ms.max(0) as u64;
+    let reverse_ts = u64::MAX - ts;
+    Ok(format!("{:020}:{}", reverse_ts, validate_id(user_id)?))
+}
+
+/// words_by_created_at: `{timestamp_be_20}:{word_id}`
+pub fn words_by_created_at_key(created_at_ms: i64, word_id: &str) -> Result<String, StoreError> {
+    let ts = created_at_ms.max(0) as u64;
+    let reverse_ts = u64::MAX - ts;
+    Ok(format!("{:020}:{}", reverse_ts, validate_id(word_id)?))
+}
+
+/// records_by_time: `{timestamp_be_20}:{record_id}`
+/// Uses forward timestamp (big-endian) so range scan `start..` works for "since" queries.
+pub fn records_by_time_key(created_at_ms: i64, record_id: &str) -> Result<String, StoreError> {
+    let ts = created_at_ms.max(0) as u64;
+    Ok(format!("{:020}:{}", ts, validate_id(record_id)?))
+}
+
+/// records_by_time range start key for `since` queries.
+pub fn records_by_time_since_key(since_ms: i64) -> String {
+    let ts = since_ms.max(0) as u64;
+    format!("{:020}", ts)
+}
+
+/// word_references: `{word_id}:{tree_name}:{assoc_key_hex}`
+pub fn word_ref_key(word_id: &str, tree_name: &str, assoc_key: &[u8]) -> Result<String, StoreError> {
+    Ok(format!(
+        "{}:{}:{}",
+        validate_id(word_id)?,
+        validate_id(tree_name)?,
+        hex::encode(assoc_key)
+    ))
+}
+
+pub fn word_ref_prefix(word_id: &str) -> Result<String, StoreError> {
+    Ok(format!("{}:", validate_id(word_id)?))
+}
+
+/// user_stats key
+pub fn user_stats_key(user_id: &str) -> Result<String, StoreError> {
+    Ok(validate_id(user_id)?.to_string())
+}
+
 /// 解析 word_due_index 中条目的键，提取 (due_ts_ms, word_id)。
 /// 键格式: "{user_id}:{due_ts_ms:020}:{word_id}"
 /// 第一段（user_id）已被 scan_prefix 跳过，此处从第二段开始解析。

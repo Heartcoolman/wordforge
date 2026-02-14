@@ -80,15 +80,9 @@ impl MetricsRegistry {
         self.metrics
             .iter()
             .map(|(id, metric)| {
-                // 使用 load + fetch_sub 模式而非 swap(0)，避免并发写入丢数据
-                let call_count = metric.call_count.load(Ordering::Relaxed);
-                let total_latency_us = metric.total_latency_us.load(Ordering::Relaxed);
-                let error_count = metric.error_count.load(Ordering::Relaxed);
-                metric.call_count.fetch_sub(call_count, Ordering::Relaxed);
-                metric
-                    .total_latency_us
-                    .fetch_sub(total_latency_us, Ordering::Relaxed);
-                metric.error_count.fetch_sub(error_count, Ordering::Relaxed);
+                let call_count = metric.call_count.swap(0, Ordering::Relaxed);
+                let total_latency_us = metric.total_latency_us.swap(0, Ordering::Relaxed);
+                let error_count = metric.error_count.swap(0, Ordering::Relaxed);
                 (
                     id.as_str().to_string(),
                     MetricsSnapshot {

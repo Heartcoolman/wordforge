@@ -1,4 +1,4 @@
-import { createSignal, createEffect, Show } from 'solid-js';
+import { createSignal, createEffect, Show, onCleanup } from 'solid-js';
 import { A, useNavigate } from '@solidjs/router';
 import { Input } from '@/components/ui/Input';
 import { Button } from '@/components/ui/Button';
@@ -70,6 +70,7 @@ export default function LoginPage() {
             return v - 1;
           });
         }, 1000);
+        onCleanup(() => clearInterval(timer));
       }
     } finally {
       setLoading(false);

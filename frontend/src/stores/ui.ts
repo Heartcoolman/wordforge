@@ -14,11 +14,16 @@ function createUiStore() {
 
   let toastCounter = 0;
 
+  const MAX_TOASTS = 5;
+
   function addToast(toast: Omit<ToastItem, 'id'>) {
     toastCounter = (toastCounter + 1) % Number.MAX_SAFE_INTEGER;
     const id = `toast-${toastCounter}`;
     const item: ToastItem = { ...toast, id };
-    setToasts((prev) => [...prev, item]);
+    setToasts((prev) => {
+      const next = [...prev, item];
+      return next.length > MAX_TOASTS ? next.slice(next.length - MAX_TOASTS) : next;
+    });
 
     const duration = toast.duration ?? TOAST_DURATION_MS;
     setTimeout(() => removeToast(id), duration);

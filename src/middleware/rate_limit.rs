@@ -248,6 +248,22 @@ pub async fn rate_limit_cleanup_loop(
     }
 }
 
+pub async fn auth_rate_limit_cleanup_loop(
+    limiter: Arc<AuthRateLimitState>,
+    cleanup_interval_secs: u64,
+    mut shutdown_rx: broadcast::Receiver<()>,
+) {
+    let mut interval = tokio::time::interval(Duration::from_secs(cleanup_interval_secs));
+    loop {
+        tokio::select! {
+            _ = interval.tick() => {
+                limiter.limiter.cleanup().await;
+            }
+            _ = shutdown_rx.recv() => break,
+        }
+    }
+}
+
 /// 认证端点专用速率限制器：每 IP 每分钟 10 次
 #[derive(Debug, Clone)]
 pub struct AuthRateLimitState {

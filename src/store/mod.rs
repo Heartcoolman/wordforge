@@ -40,6 +40,12 @@ pub struct Store {
     pub word_morphemes: sled::Tree,
     pub confusion_pairs: sled::Tree,
     pub wb_center_imports: sled::Tree,
+    // Secondary index trees
+    pub users_by_created_at: sled::Tree,
+    pub words_by_created_at: sled::Tree,
+    pub records_by_time: sled::Tree,
+    pub word_references: sled::Tree,
+    pub user_stats: sled::Tree,
 }
 
 #[derive(Debug, Error)]
@@ -96,6 +102,12 @@ impl Store {
         let word_morphemes = db.open_tree(trees::WORD_MORPHEMES)?;
         let confusion_pairs = db.open_tree(trees::CONFUSION_PAIRS)?;
         let wb_center_imports = db.open_tree(trees::WB_CENTER_IMPORTS)?;
+        // Secondary index trees
+        let users_by_created_at = db.open_tree(trees::USERS_BY_CREATED_AT)?;
+        let words_by_created_at = db.open_tree(trees::WORDS_BY_CREATED_AT)?;
+        let records_by_time = db.open_tree(trees::RECORDS_BY_TIME)?;
+        let word_references = db.open_tree(trees::WORD_REFERENCES)?;
+        let user_stats = db.open_tree(trees::USER_STATS)?;
 
         Ok(Self {
             db,
@@ -126,6 +138,11 @@ impl Store {
             word_morphemes,
             confusion_pairs,
             wb_center_imports,
+            users_by_created_at,
+            words_by_created_at,
+            records_by_time,
+            word_references,
+            user_stats,
         })
     }
 

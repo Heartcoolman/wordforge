@@ -40,6 +40,8 @@ pub fn generate(
         strategy.batch_size = strategy.batch_size.min(h.low_motivation_max_batch);
     }
 
+    // 冷启动覆盖：新用户事件不足时，使用保守的固定策略参数，
+    // 覆盖前面所有规则的调整结果，确保初始体验稳定可控
     if user_state.total_event_count < h.cold_start_event_threshold {
         strategy.difficulty = h.cold_start_difficulty;
         strategy.batch_size = h.cold_start_batch_size;

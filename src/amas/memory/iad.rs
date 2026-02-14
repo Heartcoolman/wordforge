@@ -17,7 +17,7 @@ pub fn interference_penalty(word_id: &str, state: &IadState, config: &IadConfig)
     let mut total_interference = 0.0;
 
     for (confused_id, score) in &state.confusion_pairs {
-        if confused_id == word_id {
+        if confused_id != word_id {
             total_interference += score;
         }
     }

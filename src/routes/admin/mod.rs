@@ -196,7 +196,7 @@ async fn admin_reset_user_password(
 
     let entry = crate::routes::auth::PasswordResetEntry {
         user_id: id.clone(),
-        expires_at: chrono::Utc::now() + chrono::Duration::hours(24),
+        expires_at: chrono::Utc::now() + chrono::Duration::hours(4),
     };
 
     state
@@ -217,7 +217,7 @@ async fn admin_reset_user_password(
 
     Ok(ok(serde_json::json!({
         "resetKey": raw_token,
-        "expiresInHours": 24,
+        "expiresInHours": 4,
     })))
 }
 

@@ -97,7 +97,7 @@ impl Store {
         let entry_bytes = Self::serialize(&entry)?;
         let wb_key = keys::wordbook_key(wordbook_id)?;
 
-        (&self.wordbook_words, &self.wordbooks)
+        let inserted = (&self.wordbook_words, &self.wordbooks)
             .transaction(|(tx_ww, tx_wb)| {
                 let raw = tx_wb.get(wb_key.as_bytes())?.ok_or_else(|| {
                     sled::transaction::ConflictableTransactionError::Abort(StoreError::NotFound {
@@ -134,7 +134,16 @@ impl Store {
                         StoreError::Sled(sled_err)
                     }
                 },
-            )
+            )?;
+
+        // Maintain word_references index
+        if inserted {
+            if let Ok(ref_key) = keys::word_ref_key(word_id, "wordbook_words", ww_key.as_bytes()) {
+                let _ = self.word_references.insert(ref_key.as_bytes(), &[]);
+            }
+        }
+
+        Ok(inserted)
     }
 
     pub fn remove_word_from_wordbook(
@@ -145,7 +154,7 @@ impl Store {
         let ww_key = keys::wordbook_words_key(wordbook_id, word_id)?;
         let wb_key = keys::wordbook_key(wordbook_id)?;
 
-        (&self.wordbook_words, &self.wordbooks)
+        let removed = (&self.wordbook_words, &self.wordbooks)
             .transaction(|(tx_ww, tx_wb)| {
                 let removed_existing = tx_ww.remove(ww_key.as_bytes())?.is_some();
 
@@ -175,7 +184,16 @@ impl Store {
                         StoreError::Sled(sled_err)
                     }
                 },
-            )
+            )?;
+
+        // Clean up word_references index
+        if removed {
+            if let Ok(ref_key) = keys::word_ref_key(word_id, "wordbook_words", ww_key.as_bytes()) {
+                let _ = self.word_references.remove(ref_key.as_bytes());
+            }
+        }
+
+        Ok(removed)
     }
 
     pub fn list_wordbook_words(

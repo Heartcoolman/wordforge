@@ -279,6 +279,10 @@ async fn process_single_record(
     if let Some(ref sid) = req.session_id {
         if let Some(mut session) = state.store().get_learning_session(sid)? {
             session.total_questions += 1;
+            session.total_count += 1;
+            if req.is_correct {
+                session.correct_count += 1;
+            }
             if let Some(ref wm) = amas_result.word_mastery {
                 if wm.mastery_level == MasteryLevel::Mastered {
                     session.actual_mastery_count += 1;
@@ -433,36 +437,12 @@ async fn get_enhanced_statistics(
         })
         .collect();
 
-    // Current streak (consecutive days) - matches compute_streak_days logic
-    let streak = {
-        let today = Utc::now().date_naive();
-        let dates: std::collections::BTreeSet<chrono::NaiveDate> = by_day
-            .keys()
-            .filter_map(|d| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok())
-            .collect();
-
-        let mut s = 0u32;
-        let mut current = today;
-
-        // If no activity today, check if yesterday counts
-        if !dates.contains(&current) {
-            match current.pred_opt() {
-                Some(yesterday) if dates.contains(&yesterday) => current = yesterday,
-                _ => { /* streak stays 0 */ }
-            }
-        }
-
-        if dates.contains(&current) {
-            while dates.contains(&current) {
-                s += 1;
-                current = match current.pred_opt() {
-                    Some(d) => d,
-                    None => break,
-                };
-            }
-        }
-        s
-    };
+    // Current streak (consecutive days)
+    let dates: std::collections::BTreeSet<chrono::NaiveDate> = by_day
+        .keys()
+        .filter_map(|d| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok())
+        .collect();
+    let streak = super::users::compute_streak_from_dates(&dates);
 
     Ok(ok(serde_json::json!({
         "total": total,

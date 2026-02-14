@@ -27,7 +27,7 @@ pub struct MonitoringEvent {
     pub reward: serde_json::Value,
     pub cold_start_phase: Option<String>,
     pub selection_constraints_met: bool,
-    pub objective_score: f64,
+    pub reward_value: f64,
 }
 
 pub fn check_invariants(result: &ProcessResult) -> Vec<InvariantViolation> {
@@ -156,7 +156,7 @@ pub fn record_event(
         reward: serde_json::to_value(&result.reward).unwrap_or_default(),
         cold_start_phase: result.cold_start_phase.as_ref().map(|p| format!("{p:?}")),
         selection_constraints_met,
-        objective_score: result.reward.value,
+        reward_value: result.reward.value,
     };
 
     if is_anomaly {

@@ -63,6 +63,14 @@ impl Store {
                 sled::transaction::TransactionError::Storage(se) => StoreError::Sled(se),
             })?;
 
+        // Maintain users_by_created_at index
+        let idx_key = keys::users_by_created_at_key(
+            user.created_at.timestamp_millis(),
+            &user.id,
+        )?;
+        self.users_by_created_at
+            .insert(idx_key.as_bytes(), user.id.as_bytes())?;
+
         Ok(())
     }
 
@@ -244,10 +252,28 @@ impl Store {
     }
 
     pub fn list_users(&self, limit: usize, offset: usize) -> Result<Vec<User>, StoreError> {
-        // 注意：users tree 中的 key 混合了用户数据和 "email:" 索引条目，
-        // 需要先过滤掉索引条目。由于需要按 created_at 倒序排序，
-        // 无法直接在迭代器上使用 skip/take（Sled 按字典序存储）。
-        // TODO: 引入带时间戳前缀的二级索引来支持有序前缀扫描分页。
+        // Use users_by_created_at index (reverse timestamp = newest first)
+        if self.users_by_created_at.len() > 0 {
+            let mut users = Vec::new();
+            let mut skipped = 0usize;
+            for item in self.users_by_created_at.iter() {
+                let (_, value) = item?;
+                let user_id = String::from_utf8(value.to_vec()).unwrap_or_default();
+                if skipped < offset {
+                    skipped += 1;
+                    continue;
+                }
+                if let Some(user) = self.get_user_by_id(&user_id)? {
+                    users.push(user);
+                }
+                if users.len() >= limit {
+                    break;
+                }
+            }
+            return Ok(users);
+        }
+
+        // Fallback: full scan (only if index not yet built)
         let mut users = Vec::new();
         for item in self.users.iter() {
             let (key, value) = item?;
@@ -377,6 +403,19 @@ impl Store {
                 }
                 sled::transaction::TransactionError::Storage(se) => StoreError::Sled(se),
             })?;
+
+        // Clean up users_by_created_at index
+        if let Ok(idx_key) = keys::users_by_created_at_key(
+            user.created_at.timestamp_millis(),
+            user_id,
+        ) {
+            let _ = self.users_by_created_at.remove(idx_key.as_bytes());
+        }
+
+        // Clean up user_stats
+        if let Ok(stats_key) = keys::user_stats_key(user_id) {
+            let _ = self.user_stats.remove(stats_key.as_bytes());
+        }
 
         // 2. 删除用户会话
         if let Err(e) = self.delete_user_sessions(user_id) {

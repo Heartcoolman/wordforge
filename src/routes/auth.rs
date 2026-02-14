@@ -9,8 +9,8 @@ use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::auth::{
-    extract_refresh_token_from_headers, hash_password, hash_token, sign_jwt_for_user,
-    sign_refresh_token_for_user, verify_jwt, verify_password, AuthUser,
+    extract_refresh_token_from_headers, generate_dummy_argon2_hash, hash_password, hash_token,
+    sign_jwt_for_user, sign_refresh_token_for_user, verify_jwt, verify_password, AuthUser,
 };
 use crate::response::{created, ok, AppError};
 use crate::state::AppState;
@@ -203,6 +203,12 @@ async fn register(
 
     let (access_token, refresh_token) = issue_token_pair(&user.id, &state)?;
 
+    tracing::info!(
+        user_id = %user.id,
+        email = %mask_email_for_log(&user.email),
+        "用户注册成功"
+    );
+
     let payload = AuthResponse {
         access_token: access_token.clone(),
         user: UserProfile::from(&user),
@@ -222,33 +228,43 @@ async fn login(
         return Err(AppError::forbidden("系统正在维护中"));
     }
 
-    let user = state
-        .store()
-        .get_user_by_email(&req.email)?
-        .ok_or_else(|| AppError::unauthorized("邮箱或密码错误"))?;
+    let (user, stored_hash) = match state.store().get_user_by_email(&req.email)? {
+        Some(user) => {
+            let hash = user.password_hash.clone();
+            (Some(user), hash)
+        }
+        None => (None, generate_dummy_argon2_hash()),
+    };
+
+    let verified = verify_password(&req.password, &stored_hash)?;
+    if !verified || user.is_none() {
+        if let Some(ref u) = user {
+            let _ = state.store().record_failed_login(&u.id);
+        }
+        return Err(AppError::unauthorized("邮箱或密码错误"));
+    }
+
+    let user = user.unwrap();
 
     if user.is_banned {
         return Err(AppError::forbidden("用户已被封禁"));
     }
 
-    // 检查账户是否因多次登录失败而被锁定
     if state.store().is_account_locked(&user.id)? {
         return Err(AppError::too_many_requests(
             "账户因多次登录失败已被临时锁定，请稍后再试",
         ));
     }
 
-    let verified = verify_password(&req.password, &user.password_hash)?;
-    if !verified {
-        // 记录登录失败，可能触发锁定
-        let _ = state.store().record_failed_login(&user.id);
-        return Err(AppError::unauthorized("邮箱或密码错误"));
-    }
-
-    // 登录成功，重置失败计数
     let _ = state.store().reset_login_attempts(&user.id);
 
     let (access_token, refresh_token) = issue_token_pair(&user.id, &state)?;
+
+    tracing::info!(
+        user_id = %user.id,
+        email = %mask_email_for_log(&user.email),
+        "用户登录成功"
+    );
 
     let payload = AuthResponse {
         access_token: access_token.clone(),

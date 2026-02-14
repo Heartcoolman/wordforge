@@ -19,6 +19,10 @@ pub struct LearningSession {
     pub updated_at: DateTime<Utc>,
     #[serde(default)]
     pub summary: Option<SessionSummary>,
+    #[serde(default)]
+    pub correct_count: u32,
+    #[serde(default)]
+    pub total_count: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

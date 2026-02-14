@@ -13,6 +13,7 @@
 //! - Moderate (50-75): 中度疲劳
 //! - Severe (75-100): 严重疲劳
 
+use std::collections::VecDeque;
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
@@ -67,7 +68,7 @@ pub struct FatigueScorer {
     /// 权重配置
     weights: Weights,
     /// 历史评分，用于平滑输出
-    score_history: Vec<f64>,
+    score_history: VecDeque<f64>,
     /// 平滑窗口大小
     smooth_window: usize,
     /// 正常眨眼率范围
@@ -82,7 +83,7 @@ impl FatigueScorer {
     pub fn new() -> Self {
         Self {
             weights: Weights::default(),
-            score_history: Vec::new(),
+            score_history: VecDeque::new(),
             smooth_window: 5,
             normal_blink_min: 15.0,
             normal_blink_max: 20.0,
@@ -95,7 +96,7 @@ impl FatigueScorer {
     /// - `perclos`: PERCLOS 值 (0.0-1.0)
     /// - `blink_rate`: 眨眼频率（次/分钟）
     /// - `blink_abnormal`: 眨眼是否异常
-    /// - `yawn_count`: 近期哈欠次数
+    /// - `yawn_count`: 近期哈欠次数（仅透传到 FatigueResult，不参与评分计算）
     /// - `yawn_rate`: 哈欠频率（次/分钟）
     /// - `head_drop_ratio`: 头部下垂时间占比 (0.0-1.0)
     /// - `expression_score`: 表情疲劳分数 (0.0-1.0)，从 blendshapes 获取
@@ -163,9 +164,9 @@ impl FatigueScorer {
         let score = raw_score.clamp(0.0, 100.0);
 
         // 平滑处理
-        self.score_history.push(score);
-        if self.score_history.len() > 100 {
-            self.score_history.drain(0..self.score_history.len() - 100);
+        self.score_history.push_back(score);
+        while self.score_history.len() > 100 {
+            self.score_history.pop_front();
         }
 
         let smoothed_score = self.get_smoothed_score();
@@ -191,8 +192,7 @@ impl FatigueScorer {
             return 0.0;
         }
         let window = self.score_history.len().min(self.smooth_window);
-        let start = self.score_history.len() - window;
-        let sum: f64 = self.score_history[start..].iter().sum();
+        let sum: f64 = self.score_history.iter().rev().take(window).sum();
         (sum / window as f64).clamp(0.0, 100.0)
     }
 

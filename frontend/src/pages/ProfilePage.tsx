@@ -53,7 +53,7 @@ export default function ProfilePage() {
   const [cognitiveLoading, setCognitiveLoading] = createSignal(true);
 
   // Learning style (backend returns processingSpeed/memoryCapacity/stability)
-  const [learningStyle, setLearningStyle] = createSignal<{ processingSpeed: number; memoryCapacity: number; stability: number } | null>(null);
+  const [learningStyle, setLearningStyle] = createSignal<CognitiveProfile | null>(null);
   const [styleLoading, setStyleLoading] = createSignal(true);
 
   // Chronotype
@@ -95,7 +95,7 @@ export default function ProfilePage() {
     setCognitiveLoading(false);
 
     if (results[2].status === 'fulfilled') {
-      setLearningStyle(results[2].value as any);
+      setLearningStyle(results[2].value);
     }
     setStyleLoading(false);
 

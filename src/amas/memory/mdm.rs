@@ -111,9 +111,9 @@ pub fn recall_probability(state: &MdmState, now_ms: i64, config: &MemoryModelCon
         None => 0.0,
         Some(last) => {
             let delta_secs = ((now_ms - last) as f64 / 1000.0).max(0.0);
-            let half_life_secs = (state.memory_strength.max(0.0) + config.half_life_base_epsilon)
+            let time_constant_secs = (state.memory_strength.max(0.0) + config.half_life_base_epsilon)
                 * config.half_life_time_unit_secs;
-            (-delta_secs / half_life_secs).exp().clamp(0.0, 1.0)
+            (-delta_secs / time_constant_secs).exp().clamp(0.0, 1.0)
         }
     }
 }
@@ -124,9 +124,9 @@ pub fn compute_interval(
     interval_scale: f64,
     config: &MemoryModelConfig,
 ) -> i64 {
-    let half_life = (state.memory_strength.max(0.0) + config.half_life_base_epsilon)
+    let time_constant = (state.memory_strength.max(0.0) + config.half_life_base_epsilon)
         * config.half_life_time_unit_secs;
-    let interval = -half_life * target_recall.max(1e-6).ln();
+    let interval = -time_constant * target_recall.max(1e-6).ln();
     ((interval * interval_scale.max(0.1)).min(MAX_INTERVAL_DAYS * 86400.0) as i64).max(MIN_INTERVAL_SECS)
 }
 

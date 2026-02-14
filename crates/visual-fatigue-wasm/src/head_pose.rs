@@ -201,7 +201,7 @@ impl HeadPoseEstimator {
         let first_ts = self.drop_history.front().unwrap().timestamp;
         let elapsed_ms = current_ts - first_ts;
 
-        if elapsed_ms < 1000.0 {
+        if elapsed_ms < 10_000.0 {
             return 0.0;
         }
 

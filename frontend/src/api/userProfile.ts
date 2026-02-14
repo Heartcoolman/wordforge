@@ -3,7 +3,6 @@ import type {
   RewardType,
   RewardPreference,
   CognitiveProfile,
-  LearningStyle,
   Chronotype,
   HabitProfile,
   HabitProfileRequest,
@@ -13,7 +12,7 @@ export const userProfileApi = {
   getReward: () => api.get<RewardPreference>('/api/user-profile/reward'),
   updateReward: (rewardType: RewardType) => api.put<RewardPreference>('/api/user-profile/reward', { rewardType }),
   getCognitive: () => api.get<CognitiveProfile>('/api/user-profile/cognitive'),
-  getLearningStyle: () => api.get<LearningStyle>('/api/user-profile/learning-style'),
+  getLearningStyle: () => api.get<CognitiveProfile>('/api/user-profile/learning-style'),
   getChronotype: () => api.get<Chronotype>('/api/user-profile/chronotype'),
   getHabit: () => api.get<HabitProfile>('/api/user-profile/habit'),
   updateHabit: (data: HabitProfileRequest) => {

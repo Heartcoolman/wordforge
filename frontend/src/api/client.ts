@@ -9,6 +9,7 @@ const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.
 const DEFAULT_TIMEOUT_MS = 30_000;
 const SSE_INITIAL_RECONNECT_MS = 3_000;
 const SSE_MAX_RECONNECT_MS = 30_000;
+const SSE_READ_TIMEOUT_MS = 60_000;
 
 function resolveApiBase(): string {
   if (!API_BASE_URL) return window.location.origin;
@@ -247,7 +248,10 @@ export function connectAmasStateStream(
         let eventType = '';
 
         while (!aborted) {
-          const { done, value } = await reader.read();
+          const timeout = new Promise<{ done: true; value: undefined }>((resolve) =>
+            setTimeout(() => resolve({ done: true, value: undefined }), SSE_READ_TIMEOUT_MS),
+          );
+          const { done, value } = await Promise.race([reader.read(), timeout]);
           if (done) break;
 
           buffer += decoder.decode(value, { stream: true });

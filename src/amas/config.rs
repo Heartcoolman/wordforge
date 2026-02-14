@@ -869,6 +869,9 @@ impl AMASConfig {
         if self.elo.k_factor <= 0.0 {
             return Err("elo.k_factor must be > 0".to_string());
         }
+        if self.elo.min_elo >= self.elo.max_elo {
+            return Err("elo.min_elo must be < elo.max_elo".to_string());
+        }
         if self.elo.novice_k_multiplier <= 0.0 {
             return Err("elo.novice_k_multiplier must be > 0".to_string());
         }
