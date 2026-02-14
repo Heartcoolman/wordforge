@@ -272,9 +272,13 @@ export default function UserManagementPage() {
                 <Button
                   size="xs"
                   variant="outline"
-                  onClick={() => {
-                    navigator.clipboard.writeText(generatedKey());
-                    uiStore.toast.success('已复制到剪贴板');
+                  onClick={async () => {
+                    try {
+                      await navigator.clipboard.writeText(generatedKey());
+                      uiStore.toast.success('已复制到剪贴板');
+                    } catch {
+                      uiStore.toast.error('复制失败', '请手动选择并复制');
+                    }
                   }}
                 >
                   复制

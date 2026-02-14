@@ -94,7 +94,11 @@ export default function LoginPage() {
     setResetLoading(true);
     setResetError('');
     try {
-      await authApi.verifyResetToken(resetKey().trim());
+      const res = await authApi.verifyResetToken(resetKey().trim());
+      if (!res.valid) {
+        setResetError('密钥无效或已过期');
+        return;
+      }
       setResetStep('password');
     } catch (err: unknown) {
       setResetError(err instanceof Error ? err.message : '密钥无效或已过期');

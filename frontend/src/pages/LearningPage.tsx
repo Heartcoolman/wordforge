@@ -11,6 +11,7 @@ import { learningApi } from '@/api/learning';
 import { recordsApi } from '@/api/records';
 import { learningStore } from '@/stores/learning';
 import { uiStore } from '@/stores/ui';
+import { tokenManager } from '@/lib/token';
 import { createWordQueueManager, type QueuedWord } from '@/lib/WordQueueManager';
 import { fatigueStore } from '@/stores/fatigue';
 import { useFatigueDetection } from '@/hooks/useFatigueDetection';
@@ -89,10 +90,23 @@ export default function LearningPage() {
     const sid = sessionId();
     if (!sid) return;
 
-    void learningApi.syncProgress({
-      sessionId: sid,
-      totalQuestions: totalQuestions(),
-    }, { keepalive: true }).catch(() => {});
+    // 页面退出时直接使用 fetch + keepalive，绕过 api 客户端的 token 刷新/重试逻辑，
+    // 避免 pagehide/visibilitychange 期间额外请求被浏览器丢弃
+    const token = tokenManager.getToken();
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    try {
+      fetch(`${window.location.origin}/api/learning/sync-progress`, {
+        method: 'POST',
+        headers,
+        credentials: 'include',
+        body: JSON.stringify({ sessionId: sid, totalQuestions: Math.round(totalQuestions()) }),
+        keepalive: true,
+      }).catch(() => {});
+    } catch {
+      // best-effort, ignore errors
+    }
   }
 
   // 动态策略调整

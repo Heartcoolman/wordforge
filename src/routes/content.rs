@@ -140,6 +140,9 @@ async fn semantic_search(
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     let query = q.query.trim();
+    if query.is_empty() {
+        return Err(AppError::bad_request("INVALID_QUERY", "Search query cannot be empty"));
+    }
     let limit = q.limit.unwrap_or(10).clamp(1, 50);
 
     // TODO: 接入向量数据库实现真正的语义搜索，当前 fallback 到文本匹配
