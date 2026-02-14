@@ -52,7 +52,7 @@ async fn create_wordbook(
     if req.name.trim().is_empty() {
         return Err(AppError::bad_request(
             "WORDBOOK_INVALID_NAME",
-            "Name is required",
+            "名称不能为空",
         ));
     }
 
@@ -86,11 +86,11 @@ async fn list_wordbook_words(
     let book = state
         .store()
         .get_wordbook(&id)?
-        .ok_or_else(|| AppError::not_found("Wordbook not found"))?;
+        .ok_or_else(|| AppError::not_found("词书不存在"))?;
 
     // User wordbooks require ownership; system wordbooks are readable by anyone
     if book.user_id.is_some() && book.user_id.as_deref() != Some(&auth.user_id) {
-        return Err(AppError::forbidden("You do not own this wordbook"));
+        return Err(AppError::forbidden("您没有该词书的操作权限"));
     }
 
     let page = q.page.unwrap_or(1).clamp(1, u64::MAX);
@@ -127,21 +127,21 @@ async fn add_words(
     let book = state
         .store()
         .get_wordbook(&id)?
-        .ok_or_else(|| AppError::not_found("Wordbook not found"))?;
+        .ok_or_else(|| AppError::not_found("词书不存在"))?;
 
     // System wordbooks (user_id is None) cannot be modified by regular users
     if book.user_id.is_none() {
-        return Err(AppError::forbidden("Cannot modify a system wordbook"));
+        return Err(AppError::forbidden("无法修改系统词书"));
     }
     if book.user_id.as_deref() != Some(&auth.user_id) {
-        return Err(AppError::forbidden("You do not own this wordbook"));
+        return Err(AppError::forbidden("您没有该词书的操作权限"));
     }
 
     if req.word_ids.len() > state.config().limits.max_batch_size {
         return Err(AppError::bad_request(
             "WORDBOOK_TOO_MANY_WORDS",
             &format!(
-                "Cannot add more than {} words at once",
+                "单次添加单词数量不能超过{}",
                 state.config().limits.max_batch_size
             ),
         ));
@@ -165,14 +165,14 @@ async fn remove_word(
     let book = state
         .store()
         .get_wordbook(&id)?
-        .ok_or_else(|| AppError::not_found("Wordbook not found"))?;
+        .ok_or_else(|| AppError::not_found("词书不存在"))?;
 
     // System wordbooks (user_id is None) cannot be modified by regular users
     if book.user_id.is_none() {
-        return Err(AppError::forbidden("Cannot modify a system wordbook"));
+        return Err(AppError::forbidden("无法修改系统词书"));
     }
     if book.user_id.as_deref() != Some(&auth.user_id) {
-        return Err(AppError::forbidden("You do not own this wordbook"));
+        return Err(AppError::forbidden("您没有该词书的操作权限"));
     }
 
     let removed = state.store().remove_word_from_wordbook(&id, &word_id)?;

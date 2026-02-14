@@ -27,13 +27,13 @@ impl BroadcastRequest {
         if self.title.is_empty() || self.title.len() > 200 {
             return Err(AppError::bad_request(
                 "INVALID_TITLE",
-                "title must be 1-200 characters",
+                "标题长度需在1到200个字符之间",
             ));
         }
         if self.message.is_empty() || self.message.len() > 10000 {
             return Err(AppError::bad_request(
                 "INVALID_MESSAGE",
-                "message must be 1-10000 characters",
+                "消息内容长度需在1到10000个字符之间",
             ));
         }
         Ok(())

@@ -4,16 +4,16 @@
 /// 验证密码强度：至少 8 字符、最多 256 字符，需包含大小写字母和数字
 pub fn validate_password(password: &str) -> Result<(), &'static str> {
     if password.len() < 8 {
-        return Err("Password must be at least 8 characters");
+        return Err("密码长度不能少于8个字符");
     }
     if password.len() > 256 {
-        return Err("Password must be at most 256 characters");
+        return Err("密码长度不能超过256个字符");
     }
     let has_upper = password.chars().any(|c| c.is_ascii_uppercase());
     let has_lower = password.chars().any(|c| c.is_ascii_lowercase());
     let has_digit = password.chars().any(|c| c.is_ascii_digit());
     if !has_upper || !has_lower || !has_digit {
-        return Err("Password must contain at least one uppercase letter, one lowercase letter, and one digit");
+        return Err("密码必须包含至少一个大写字母、一个小写字母和一个数字");
     }
     Ok(())
 }
@@ -62,13 +62,13 @@ pub fn is_valid_email(email: &str) -> bool {
 pub fn validate_username(username: &str) -> Result<(), &'static str> {
     let char_count = username.chars().count();
     if char_count < 2 || char_count > 50 {
-        return Err("Username must be between 2 and 50 characters");
+        return Err("用户名长度需在2到50个字符之间");
     }
     if !username
         .chars()
         .all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == ' ')
     {
-        return Err("Username can only contain letters, numbers, underscores, hyphens, and spaces");
+        return Err("用户名只能包含字母、数字、下划线、连字符和空格");
     }
     Ok(())
 }

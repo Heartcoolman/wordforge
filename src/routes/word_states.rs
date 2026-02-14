@@ -34,7 +34,7 @@ async fn get_word_state(
 
     match wls {
         Some(s) => Ok(ok(s)),
-        None => Err(AppError::not_found("Word learning state not found")),
+        None => Err(AppError::not_found("单词学习状态不存在")),
     }
 }
 
@@ -53,7 +53,7 @@ async fn batch_query(
         return Err(AppError::bad_request(
             "BATCH_TOO_LARGE",
             &format!(
-                "batch_query accepts at most {} word_ids",
+                "批量查询单词数量上限为{}",
                 state.config().limits.max_batch_size
             ),
         ));
@@ -94,7 +94,7 @@ async fn mark_mastered(
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     if state.store().get_word(&word_id)?.is_none() {
-        return Err(AppError::not_found("Word not found"));
+        return Err(AppError::not_found("单词不存在"));
     }
 
     let mut wls = state
@@ -126,7 +126,7 @@ async fn reset_word(
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     if state.store().get_word(&word_id)?.is_none() {
-        return Err(AppError::not_found("Word not found"));
+        return Err(AppError::not_found("单词不存在"));
     }
 
     let wls = WordLearningState {
@@ -168,7 +168,7 @@ async fn batch_update(
         return Err(AppError::bad_request(
             "BATCH_TOO_LARGE",
             &format!(
-                "batch_update accepts at most {} updates",
+                "批量更新数量上限为{}",
                 state.config().limits.max_batch_size
             ),
         ));
@@ -183,7 +183,7 @@ async fn batch_update(
     if !missing.is_empty() {
         return Err(AppError::bad_request(
             "WORD_NOT_FOUND",
-            &format!("Words not found: {}", missing.join(", ")),
+            &format!("以下单词不存在：{}", missing.join(", ")),
         ));
     }
 

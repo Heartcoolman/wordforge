@@ -100,7 +100,7 @@ export function FatigueIndicator(props: FatigueIndicatorProps) {
           </p>
           <div class="space-y-0.5 text-content-secondary">
             <p>疲劳分数: {fatigueStore.fatigueScore()}</p>
-            <p>PERCLOS: {(fatigueStore.perclos() * 100).toFixed(1)}%</p>
+            <p>PERCLOS（闭眼时间占比）: {(fatigueStore.perclos() * 100).toFixed(1)}%</p>
             <p>眨眼频率: {fatigueStore.blinkRate().toFixed(1)} 次/分</p>
           </div>
           {/* 箭头 */}

@@ -114,7 +114,7 @@ async fn delete_word(
     let _ = state
         .store()
         .get_word(&id)?
-        .ok_or_else(|| AppError::not_found("Word not found"))?;
+        .ok_or_else(|| AppError::not_found("单词不存在"))?;
     state.store().delete_word(&id)?;
     Ok(ok(serde_json::json!({"deleted": true, "id": id})))
 }
@@ -127,7 +127,7 @@ async fn get_word(
     let word = state
         .store()
         .get_word(&id)?
-        .ok_or_else(|| AppError::not_found("Word not found"))?;
+        .ok_or_else(|| AppError::not_found("单词不存在"))?;
     Ok(ok(WordPublic::from(&word)))
 }
 
@@ -152,7 +152,7 @@ async fn create_word(
     if req.text.trim().is_empty() || req.meaning.trim().is_empty() {
         return Err(AppError::bad_request(
             "WORDS_INVALID_PAYLOAD",
-            "text and meaning are required",
+            "单词和释义不能为空",
         ));
     }
 
@@ -182,7 +182,7 @@ async fn update_word(
     let existing = state
         .store()
         .get_word(&id)?
-        .ok_or_else(|| AppError::not_found("Word not found"))?;
+        .ok_or_else(|| AppError::not_found("单词不存在"))?;
 
     let word = Word {
         id: existing.id,
@@ -227,7 +227,7 @@ async fn batch_create_words(
         return Err(AppError::bad_request(
             "BATCH_TOO_LARGE",
             &format!(
-                "batch_create_words accepts at most {} words",
+                "批量创建单词数量上限为{}",
                 state.config().limits.max_batch_size
             ),
         ));
@@ -300,7 +300,7 @@ async fn import_from_url(
         .map_err(|e| AppError::internal(&format!("HTTP client error: {e}")))?;
 
     let response = client.get(url_parsed.clone()).send().await.map_err(|e| {
-        AppError::bad_request("IMPORT_FETCH_FAILED", &format!("Failed to fetch URL: {e}"))
+        AppError::bad_request("IMPORT_FETCH_FAILED", &format!("获取URL失败：{e}"))
     })?;
 
     // 检查 Content-Length（如果服务端提供了）
@@ -308,7 +308,7 @@ async fn import_from_url(
         if len > MAX_RESPONSE_SIZE as u64 {
             return Err(AppError::bad_request(
                 "IMPORT_TOO_LARGE",
-                "Response too large (max 10MB)",
+                "响应内容过大（上限10MB）",
             ));
         }
     }
@@ -321,14 +321,14 @@ async fn import_from_url(
         let chunk = chunk_result.map_err(|e| {
             AppError::bad_request(
                 "IMPORT_READ_FAILED",
-                &format!("Failed to read content: {e}"),
+                &format!("读取内容失败：{e}"),
             )
         })?;
         body_bytes.extend_from_slice(&chunk);
         if body_bytes.len() > MAX_RESPONSE_SIZE {
             return Err(AppError::bad_request(
                 "IMPORT_TOO_LARGE",
-                "Response too large (max 10MB)",
+                "响应内容过大（上限10MB）",
             ));
         }
     }
@@ -393,24 +393,24 @@ async fn import_from_url(
 
 pub(crate) fn validate_import_url(raw_url: &str) -> Result<reqwest::Url, AppError> {
     let parsed = reqwest::Url::parse(raw_url)
-        .map_err(|e| AppError::bad_request("IMPORT_INVALID_URL", &format!("Invalid URL: {e}")))?;
+        .map_err(|e| AppError::bad_request("IMPORT_INVALID_URL", &format!("URL无效：{e}")))?;
 
     if parsed.scheme() != "http" && parsed.scheme() != "https" {
         return Err(AppError::bad_request(
             "IMPORT_INVALID_URL",
-            "Only http and https URLs are allowed",
+            "仅允许 http 和 https 协议的URL",
         ));
     }
 
     let host = parsed
         .host_str()
-        .ok_or_else(|| AppError::bad_request("IMPORT_INVALID_URL", "URL must have a host"))?;
+        .ok_or_else(|| AppError::bad_request("IMPORT_INVALID_URL", "URL必须包含主机名"))?;
 
     if let Ok(ip) = host.parse::<IpAddr>() {
         if is_private_ip(ip) {
             return Err(AppError::bad_request(
                 "IMPORT_BLOCKED_URL",
-                "Access to private networks is not allowed",
+                "不允许访问内网地址",
             ));
         }
     }
@@ -422,7 +422,7 @@ pub(crate) fn validate_import_url(raw_url: &str) -> Result<reqwest::Url, AppErro
     {
         return Err(AppError::bad_request(
             "IMPORT_BLOCKED_URL",
-            "Access to localhost is not allowed",
+            "不允许访问本地地址",
         ));
     }
 
@@ -434,7 +434,7 @@ pub(crate) async fn resolve_import_url_addrs(
 ) -> Result<(String, Vec<SocketAddr>), AppError> {
     let host = url
         .host_str()
-        .ok_or_else(|| AppError::bad_request("IMPORT_INVALID_URL", "URL must have a host"))?
+        .ok_or_else(|| AppError::bad_request("IMPORT_INVALID_URL", "URL必须包含主机名"))?
         .to_string();
     let port = url.port_or_known_default().unwrap_or(443);
 
@@ -443,7 +443,7 @@ pub(crate) async fn resolve_import_url_addrs(
     } else {
         tokio::net::lookup_host((host.as_str(), port))
             .await
-            .map_err(|_| AppError::bad_request("IMPORT_DNS_FAILED", "Could not resolve hostname"))?
+            .map_err(|_| AppError::bad_request("IMPORT_DNS_FAILED", "无法解析主机名"))?
             .collect::<Vec<SocketAddr>>()
     };
 
@@ -455,7 +455,7 @@ fn ensure_public_import_addrs(addrs: Vec<SocketAddr>) -> Result<Vec<SocketAddr>,
     if addrs.is_empty() {
         return Err(AppError::bad_request(
             "IMPORT_DNS_FAILED",
-            "Could not resolve hostname",
+            "无法解析主机名",
         ));
     }
 
@@ -463,7 +463,7 @@ fn ensure_public_import_addrs(addrs: Vec<SocketAddr>) -> Result<Vec<SocketAddr>,
         if is_private_ip(socket_addr.ip()) {
             return Err(AppError::bad_request(
                 "IMPORT_BLOCKED_URL",
-                "URL resolves to private IP",
+                "URL指向内网IP地址",
             ));
         }
     }

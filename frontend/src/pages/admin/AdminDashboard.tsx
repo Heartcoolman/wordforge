@@ -5,18 +5,20 @@ import { Empty } from '@/components/ui/Empty';
 import { adminApi } from '@/api/admin';
 import { uiStore } from '@/stores/ui';
 import { formatNumber } from '@/utils/formatters';
+import type { UpdateCheck } from '@/types/admin';
 
 export default function AdminDashboard() {
   const [stats, setStats] = createSignal<{ users: number; words: number; records: number } | null>(null);
   const [health, setHealth] = createSignal<{ status: string; dbSizeBytes: number; uptimeSecs: string | number; version: string } | null>(null);
+  const [updateInfo, setUpdateInfo] = createSignal<UpdateCheck | null>(null);
   const [loading, setLoading] = createSignal(true);
   const [error, setError] = createSignal(false);
 
   onMount(async () => {
-    const [s, h] = await Promise.allSettled([adminApi.getStats(), adminApi.getHealth()]);
+    const [s, h, u] = await Promise.allSettled([adminApi.getStats(), adminApi.getHealth(), adminApi.checkUpdate()]);
     if (s.status === 'fulfilled') setStats(s.value);
     if (h.status === 'fulfilled') setHealth(h.value);
-    // 部分失败时显示 toast 提示
+    if (u.status === 'fulfilled') setUpdateInfo(u.value);
     if (s.status === 'rejected' && h.status === 'fulfilled') {
       uiStore.toast.warning('统计数据加载失败', s.reason instanceof Error ? s.reason.message : '');
     } else if (h.status === 'rejected' && s.status === 'fulfilled') {
@@ -61,7 +63,22 @@ export default function AdminDashboard() {
                 <div><p class="text-content-secondary">状态</p><p class="font-medium text-success">{h().status}</p></div>
                 <div><p class="text-content-secondary">数据库大小</p><p class="font-medium text-content">{(h().dbSizeBytes / 1024 / 1024).toFixed(2)} MB</p></div>
                 <div><p class="text-content-secondary">运行时间</p><p class="font-medium text-content">{typeof h().uptimeSecs === 'number' ? `${Math.floor(h().uptimeSecs as number / 3600)} 小时` : String(h().uptimeSecs)}</p></div>
-                <div><p class="text-content-secondary">版本</p><p class="font-medium text-content">{h().version}</p></div>
+                <div>
+                  <p class="text-content-secondary">版本</p>
+                  <div class="flex items-center gap-2">
+                    <p class="font-medium text-content">{h().version}</p>
+                    <Show when={updateInfo()?.hasUpdate}>
+                      <a
+                        href={updateInfo()!.releaseUrl!}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        class="text-xs px-1.5 py-0.5 rounded bg-accent/10 text-accent hover:bg-accent/20 transition-colors"
+                      >
+                        新版本 {updateInfo()!.latestVersion}
+                      </a>
+                    </Show>
+                  </div>
+                </div>
               </div>
             </Card>
           )}

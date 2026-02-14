@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use axum::extract::State;
 use axum::routing::get;
 use axum::Router;
@@ -10,6 +12,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/health", get(system_health))
         .route("/database", get(database_stats))
+        .route("/check-update", get(check_update))
 }
 
 // B62: System health monitoring
@@ -52,4 +55,88 @@ async fn database_stats(
         "treeCount": trees.len(),
         "trees": trees,
     })))
+}
+
+const CACHE_TTL: Duration = Duration::from_secs(3600);
+
+async fn check_update(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    {
+        let cache = state.update_cache().read().await;
+        if let Some((cached_at, ref data)) = *cache {
+            if cached_at.elapsed() < CACHE_TTL {
+                return Ok(ok(data.clone()));
+            }
+        }
+    }
+
+    let current_version = env!("CARGO_PKG_VERSION");
+
+    match fetch_latest_release(current_version).await {
+        Ok(data) => {
+            *state.update_cache().write().await = Some((Instant::now(), data.clone()));
+            Ok(ok(data))
+        }
+        Err(e) => {
+            tracing::warn!("Failed to check for updates: {e}");
+            Ok(ok(serde_json::json!({
+                "currentVersion": current_version,
+                "latestVersion": current_version,
+                "hasUpdate": false,
+                "releaseUrl": null,
+                "releaseNotes": null,
+            })))
+        }
+    }
+}
+
+async fn fetch_latest_release(
+    current_version: &str,
+) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    let client = reqwest::Client::builder()
+        .user_agent("wordforge-update-checker")
+        .build()?;
+
+    let resp = client
+        .get("https://api.github.com/repos/Heartcoolman/wordforge/releases/latest")
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        return Err(format!("GitHub API returned {}", resp.status()).into());
+    }
+
+    let body: serde_json::Value = resp.json().await?;
+    let tag_name = body["tag_name"].as_str().unwrap_or("");
+    let latest_version = tag_name.trim_start_matches('v');
+    let has_update = is_newer(latest_version, current_version);
+
+    Ok(serde_json::json!({
+        "currentVersion": current_version,
+        "latestVersion": latest_version,
+        "hasUpdate": has_update,
+        "releaseUrl": body["html_url"].as_str(),
+        "releaseNotes": body["body"].as_str(),
+    }))
+}
+
+fn is_newer(latest: &str, current: &str) -> bool {
+    let parse = |v: &str| -> Vec<u64> {
+        v.split('.').filter_map(|s| s.parse().ok()).collect()
+    };
+    let l = parse(latest);
+    let c = parse(current);
+    for i in 0..3 {
+        let lv = l.get(i).copied().unwrap_or(0);
+        let cv = c.get(i).copied().unwrap_or(0);
+        if lv > cv {
+            return true;
+        }
+        if lv < cv {
+            return false;
+        }
+    }
+    false
 }

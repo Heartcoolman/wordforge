@@ -59,7 +59,7 @@ export default function RegisterPage() {
       <Card variant="elevated" class="w-full max-w-sm animate-fade-in-up">
         <h1 class="text-2xl font-bold text-center text-content mb-6">注册</h1>
         <form onSubmit={handleSubmit} class="space-y-4">
-          <Input label="邮箱" type="email" placeholder="your@email.com" value={email()} onInput={(e) => setEmail(e.currentTarget.value)} />
+          <Input label="邮箱" type="email" placeholder="请输入邮箱" value={email()} onInput={(e) => setEmail(e.currentTarget.value)} />
           <Input label="用户名" type="text" placeholder="昵称" value={username()} onInput={(e) => setUsername(e.currentTarget.value)} />
           <Input label="密码" type="password" placeholder={`至少 ${MIN_PASSWORD_LENGTH} 位`} value={password()} onInput={(e) => setPassword(e.currentTarget.value)} hint={`密码至少 ${MIN_PASSWORD_LENGTH} 位，建议包含大小写字母、数字和特殊字符`} />
           <Input label="确认密码" type="password" placeholder="再次输入密码" value={confirm()} onInput={(e) => setConfirm(e.currentTarget.value)} />

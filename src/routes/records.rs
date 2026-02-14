@@ -333,7 +333,7 @@ async fn batch_create_records(
         return Err(AppError::bad_request(
             "BATCH_TOO_LARGE",
             &format!(
-                "batch_create_records accepts at most {} records",
+                "批量创建记录数量上限为{}",
                 state.config().limits.max_batch_size
             ),
         ));

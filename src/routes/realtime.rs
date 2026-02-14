@@ -32,7 +32,7 @@ pub async fn sse_handler(
     let current = SSE_CONNECTION_COUNT.fetch_add(1, Ordering::SeqCst);
     if current >= max_sse {
         SSE_CONNECTION_COUNT.fetch_sub(1, Ordering::SeqCst);
-        return Err(AppError::too_many_requests("Too many SSE connections"));
+        return Err(AppError::too_many_requests("SSE连接数过多"));
     }
 
     let mut shutdown_rx = state.shutdown_rx();

@@ -4,6 +4,7 @@ import type {
   AdminUsersPage, AdminUsersQuery,
   EngagementAnalytics, LearningAnalytics,
   SystemHealth, DatabaseInfo, SystemSettings,
+  UpdateCheck,
 } from '@/types/admin';
 import type { AmasConfig } from '@/types/amas';
 import type { BrowseItem, WordbookPreview, ImportResult, UpdateInfo, SyncResult } from '@/types/wordbookCenter';
@@ -34,6 +35,7 @@ export const adminApi = {
   // Monitoring
   getHealth: () => api.get<SystemHealth>('/api/admin/monitoring/health', undefined, { useAdminToken: true }),
   getDatabase: () => api.get<DatabaseInfo>('/api/admin/monitoring/database', undefined, { useAdminToken: true }),
+  checkUpdate: () => api.get<UpdateCheck>('/api/admin/monitoring/check-update', undefined, { useAdminToken: true }),
 
   // Broadcast & Settings
   broadcast: (data: { title: string; message: string }) => api.post<{ sent: number }>('/api/admin/broadcast', data, { useAdminToken: true }),

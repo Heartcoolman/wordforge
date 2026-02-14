@@ -65,7 +65,7 @@ async fn mark_read(
 
     match notification {
         Some(notification) => Ok(ok(notification)),
-        None => Err(AppError::not_found("Notification not found")),
+        None => Err(AppError::not_found("通知不存在")),
     }
 }
 
@@ -278,7 +278,7 @@ async fn set_preferences(
         if !VALID_THEMES.contains(&v.as_str()) {
             return Err(AppError::bad_request(
                 "INVALID_THEME",
-                "theme must be one of: light, dark, system",
+                "主题必须是以下之一：light、dark、system",
             ));
         }
         prefs.theme = v.clone();
@@ -288,7 +288,7 @@ async fn set_preferences(
         if !VALID_LANGUAGES.contains(&v.as_str()) {
             return Err(AppError::bad_request(
                 "INVALID_LANGUAGE",
-                "language must be one of: en, zh, ja, ko, fr, de, es",
+                "语言必须是以下之一：en、zh、ja、ko、fr、de、es",
             ));
         }
         prefs.language = v.clone();
