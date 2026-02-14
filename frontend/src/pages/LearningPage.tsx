@@ -1,4 +1,4 @@
-import { createSignal, Show, onMount, onCleanup, For } from 'solid-js';
+import { createSignal, Show, onMount, onCleanup, For, createEffect } from 'solid-js';
 import { useNavigate } from '@solidjs/router';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
@@ -11,6 +11,7 @@ import { learningApi } from '@/api/learning';
 import { recordsApi } from '@/api/records';
 import { learningStore } from '@/stores/learning';
 import { uiStore } from '@/stores/ui';
+import { tokenManager } from '@/lib/token';
 import { createWordQueueManager, type QueuedWord } from '@/lib/WordQueueManager';
 import { fatigueStore } from '@/stores/fatigue';
 import { useFatigueDetection } from '@/hooks/useFatigueDetection';
@@ -18,7 +19,6 @@ import { FatigueToggle } from '@/components/fatigue/FatigueToggle';
 import { FatigueIndicator } from '@/components/fatigue/FatigueIndicator';
 import { FatigueWarningModal } from '@/components/fatigue/FatigueWarningModal';
 import { CameraPermission } from '@/components/fatigue/CameraPermission';
-import { tokenManager } from '@/lib/token';
 import type { CrossSessionHint } from '@/types/learning';
 import {
   FATIGUE_WARNING_COOLDOWN_MS,
@@ -57,6 +57,88 @@ export default function LearningPage() {
   const { start: startDetection } = useFatigueDetection();
 
   const queue = createWordQueueManager(5);
+  let syncWarningShown = false;
+
+  function markSyncHealthy() {
+    syncWarningShown = false;
+  }
+
+  function notifySyncFailure(err: unknown, title = '学习进度同步失败') {
+    if (syncWarningShown) return;
+    const message = err instanceof Error ? err.message : '请稍后重试';
+    uiStore.toast.warning(title, message);
+    syncWarningShown = true;
+  }
+
+  async function syncProgress(total = totalQuestions()) {
+    const sid = sessionId();
+    if (!sid) return true;
+    try {
+      await learningApi.syncProgress({
+        sessionId: sid,
+        totalQuestions: total,
+      });
+      markSyncHealthy();
+      return true;
+    } catch (err: unknown) {
+      notifySyncFailure(err);
+      return false;
+    }
+  }
+
+  function syncProgressOnPageExit() {
+    const sid = sessionId();
+    if (!sid) return;
+
+    // 页面退出时直接使用 fetch + keepalive，绕过 api 客户端的 token 刷新/重试逻辑，
+    // 避免 pagehide/visibilitychange 期间额外请求被浏览器丢弃
+    const token = tokenManager.getToken();
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    try {
+      fetch(`${window.location.origin}/api/learning/sync-progress`, {
+        method: 'POST',
+        headers,
+        credentials: 'include',
+        body: JSON.stringify({ sessionId: sid, totalQuestions: Math.round(totalQuestions()) }),
+        keepalive: true,
+      }).catch(() => {});
+    } catch {
+      // best-effort, ignore errors
+    }
+  }
+
+  // 动态策略调整
+  let lastAdjustedFatigueLevel: string | null = null;
+
+  async function adjustLearningStrategy() {
+    try {
+      const metrics = queue.computeSessionMetrics();
+      const userState = fatigueStore.detecting()
+        ? ({ alert: 'focused', mild: 'engaged', moderate: 'tired', severe: 'fatigued' } as const)[fatigueStore.fatigueLevel()]
+        : undefined;
+      const result = await learningApi.adjustWords({
+        userState,
+        recentPerformance: totalQuestions() > 0 ? metrics.recentAccuracy : undefined,
+      });
+      if (result.adjustedStrategy.batchSize) {
+        queue.setBatchSize(result.adjustedStrategy.batchSize);
+      }
+    } catch {
+      // silent
+    }
+  }
+
+  function handleVisibilityChange() {
+    if (document.visibilityState === 'hidden') {
+      syncProgressOnPageExit();
+    }
+  }
+
+  function handlePageHide() {
+    syncProgressOnPageExit();
+  }
 
   async function startWithGoal(goal: number) {
     setTargetMastery(goal);
@@ -106,32 +188,25 @@ export default function LearningPage() {
   onMount(() => {
     setPhase('goal-setup');
     document.addEventListener('keydown', handleKeyDown);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('pagehide', handlePageHide);
+  });
+
+  // 疲劳等级变化时自动调整学习策略
+  createEffect(() => {
+    if (!fatigueStore.detecting()) return;
+    const level = fatigueStore.fatigueLevel();
+    if (phase() !== 'quiz' && phase() !== 'feedback') return;
+    if (level === lastAdjustedFatigueLevel) return;
+    lastAdjustedFatigueLevel = level;
+    void adjustLearningStrategy();
   });
 
   onCleanup(() => {
     document.removeEventListener('keydown', handleKeyDown);
-    // 使用 sendBeacon 同步进度，确保页面离开时仍能发送
-    if (sessionId()) {
-      const payload = JSON.stringify({
-        sessionId: sessionId(),
-        totalQuestions: totalQuestions(),
-      });
-      const token = tokenManager.getToken();
-      const apiBase = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.trim() || '';
-      const url = `${apiBase}/api/learning/sync-progress`;
-      const blob = new Blob([payload], { type: 'application/json' });
-      // sendBeacon 无法设置 Authorization header，回退到 fetch + keepalive
-      if (token) {
-        fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-          body: payload,
-          keepalive: true,
-        }).catch(() => {});
-      } else {
-        navigator.sendBeacon(url, blob);
-      }
-    }
+    document.removeEventListener('visibilitychange', handleVisibilityChange);
+    window.removeEventListener('pagehide', handlePageHide);
+    syncProgressOnPageExit();
   });
 
   function showNextQuestion() {
@@ -161,10 +236,8 @@ export default function LearningPage() {
       const res = await learningApi.getNextWords({
         excludeWordIds: queue.getAllWordIds(),
         masteredWordIds: queue.getMasteredWordIds(),
-        sessionId: sessionId() || undefined,
         sessionPerformance: totalQuestions() > 0 ? {
           recentAccuracy: metrics.recentAccuracy,
-          overallAccuracy: metrics.overallAccuracy,
           masteredCount: queue.getMasteredCount(),
           targetMasteryCount: targetMastery(),
           errorProneWordIds: queue.getErrorProneWordIds(),
@@ -189,10 +262,8 @@ export default function LearningPage() {
       const res = await learningApi.getNextWords({
         excludeWordIds: queue.getAllWordIds(),
         masteredWordIds: queue.getMasteredWordIds(),
-        sessionId: sessionId() || undefined,
         sessionPerformance: {
           recentAccuracy: metrics.recentAccuracy,
-          overallAccuracy: metrics.overallAccuracy,
           masteredCount: queue.getMasteredCount(),
           targetMasteryCount: targetMastery(),
           errorProneWordIds: queue.getErrorProneWordIds(),
@@ -210,6 +281,7 @@ export default function LearningPage() {
 
   async function completeAndShowSummary() {
     try {
+      await syncProgress();
       const metrics = queue.computeSessionMetrics();
       await learningApi.completeSession({
         sessionId: sessionId(),
@@ -217,8 +289,8 @@ export default function LearningPage() {
         errorProneWordIds: queue.getErrorProneWordIds(),
         avgResponseTimeMs: Math.round(metrics.overallAvgResponseTimeMs),
       });
-    } catch {
-      // 完成请求失败不阻止显示总结
+    } catch (err: unknown) {
+      uiStore.toast.warning('会话结算失败', err instanceof Error ? err.message : '已保存本地进度');
     }
     setPhase('summary');
   }
@@ -235,7 +307,8 @@ export default function LearningPage() {
     setSelected(answer);
     setIsCorrect(correct);
     setPhase('feedback');
-    setTotalQuestions((n) => n + 1);
+    const nextTotalQuestions = totalQuestions() + 1;
+    setTotalQuestions(nextTotalQuestions);
     if (correct) setCorrectCount((n) => n + 1);
 
     const responseTime = Date.now() - startTime();
@@ -251,6 +324,15 @@ export default function LearningPage() {
     }).catch((err: unknown) => {
       uiStore.toast.warning('答题记录保存失败', err instanceof Error ? err.message : '');
     });
+
+    if (nextTotalQuestions % 5 === 0) {
+      void syncProgress(nextTotalQuestions);
+    }
+
+    // 每 10 题动态调整学习策略
+    if (nextTotalQuestions % 10 === 0) {
+      void adjustLearningStrategy();
+    }
 
     // 智能预取检查
     if (queue.shouldPrefetch() && !prefetching()) {
@@ -287,7 +369,9 @@ export default function LearningPage() {
     setCorrectCount(0);
     setSessionId('');
     setCrossSessionHint(null);
+    lastAdjustedFatigueLevel = null;
     setPhase('goal-setup');
+    markSyncHealthy();
   }
 
   return (

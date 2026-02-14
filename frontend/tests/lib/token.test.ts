@@ -34,7 +34,7 @@ describe('tokenManager', () => {
   describe('setTokens', () => {
     it('stores access token in memory', () => {
       const token = createFakeJwt({ exp: Math.floor(Date.now() / 1000) + 3600 });
-      tokenManager.setTokens(token, 'refresh-1');
+      tokenManager.setTokens(token);
       expect(tokenManager.getToken()).toBe(token);
       // Access token 不应写入 localStorage
       expect(localStorage.getItem('eng_auth_token')).toBeNull();

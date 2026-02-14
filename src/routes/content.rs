@@ -1,6 +1,7 @@
 use axum::extract::{Path, Query, State};
 use axum::routing::get;
 use axum::Router;
+use std::collections::HashSet;
 
 use crate::auth::{AdminAuthUser, AuthUser};
 use crate::constants::MAX_CONFUSION_PAIRS;
@@ -64,33 +65,63 @@ async fn get_etymology(
         .get_word(&word_id)?
         .ok_or_else(|| AppError::not_found("Word not found"))?;
 
-    // TODO: 接入 LLM API 生成真实词源数据，当前返回 pending_llm 占位信息
+    // 优先读取词素缓存，生成可用的规则化词源说明，避免返回 pending 占位信息。
+    let roots = {
+        let morpheme_key = keys::word_morpheme_key(&word_id)?;
+        match state
+            .store()
+            .word_morphemes
+            .get(morpheme_key.as_bytes())
+            .map_err(|e| AppError::internal(&e.to_string()))?
+        {
+            Some(raw) => serde_json::from_slice::<WordMorphemes>(&raw)
+                .map(|m| {
+                    m.morphemes
+                        .into_iter()
+                        .map(|item| item.text)
+                        .filter(|item| !item.trim().is_empty())
+                        .collect::<Vec<String>>()
+                })
+                .unwrap_or_default(),
+            None => Vec::new(),
+        }
+    };
+
+    let etymology_text = if !roots.is_empty() {
+        format!(
+            "'{}' 可拆分为 {}。该解释基于词素规则推断，后续可由 LLM 结果覆盖。",
+            word.text,
+            roots.join(" + ")
+        )
+    } else if !word.examples.is_empty() {
+        format!(
+            "'{}' 当前缺少词素拆分，已使用词条示例生成基础词源说明（非 LLM）。",
+            word.text
+        )
+    } else {
+        format!(
+            "'{}' 当前暂无可用词素数据，已返回基础词源说明（非 LLM）。",
+            word.text
+        )
+    };
+
     let etymology = serde_json::json!({
         "wordId": word_id,
         "word": word.text,
-        "etymology": format!("'{}' 的词源分析尚未生成，需要 LLM 服务支持", word.text),
-        "roots": [],
+        "etymology": etymology_text,
+        "roots": roots,
         "generated": false,
-        "status": "pending_llm",
+        "source": "rule_based_fallback",
     });
 
-    // 避免长期缓存 pending_llm 占位数据
-    let is_pending_llm = etymology
-        .get("status")
-        .and_then(|status| status.as_str())
-        .map(|status| status == "pending_llm")
-        .unwrap_or(false);
-
-    if !is_pending_llm {
-        state
-            .store()
-            .etymologies
-            .insert(
-                key.as_bytes(),
-                serde_json::to_vec(&etymology).map_err(|e| AppError::internal(&e.to_string()))?,
-            )
-            .map_err(|e| AppError::internal(&e.to_string()))?;
-    }
+    state
+        .store()
+        .etymologies
+        .insert(
+            key.as_bytes(),
+            serde_json::to_vec(&etymology).map_err(|e| AppError::internal(&e.to_string()))?,
+        )
+        .map_err(|e| AppError::internal(&e.to_string()))?;
 
     Ok(ok(etymology))
 }
@@ -108,17 +139,22 @@ async fn semantic_search(
     Query(q): Query<SemanticSearchQuery>,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
+    let query = q.query.trim();
+    if query.is_empty() {
+        return Err(AppError::bad_request("INVALID_QUERY", "Search query cannot be empty"));
+    }
     let limit = q.limit.unwrap_or(10).clamp(1, 50);
 
     // TODO: 接入向量数据库实现真正的语义搜索，当前 fallback 到文本匹配
-    let (items, total) = state.store().search_words(&q.query, limit, 0)?;
+    let (items, total) = state.store().search_words(query, limit, 0)?;
     let items: Vec<WordPublic> = items.iter().map(WordPublic::from).collect();
 
     Ok(ok(serde_json::json!({
-        "query": q.query,
+        "query": query,
         "results": items,
         "total": total,
-        "method": "text_search",
+        "method": "keyword_fallback",
+        "degraded": true,
     })))
 }
 
@@ -234,6 +270,47 @@ struct ConfusionPair {
     similarity: f64,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CachedConfusionPair {
+    word_a: String,
+    word_b: String,
+    score: f64,
+}
+
+fn decode_confusion_pair(
+    raw: &[u8],
+    target_word_id: &str,
+    state: &AppState,
+) -> Option<ConfusionPair> {
+    if let Ok(pair) = serde_json::from_slice::<ConfusionPair>(raw) {
+        if pair.word_id == target_word_id {
+            return None;
+        }
+        return Some(ConfusionPair {
+            similarity: pair.similarity.clamp(0.0, 1.0),
+            ..pair
+        });
+    }
+
+    let cached = serde_json::from_slice::<CachedConfusionPair>(raw).ok()?;
+    let other_word_id = if cached.word_a == target_word_id {
+        cached.word_b
+    } else if cached.word_b == target_word_id {
+        cached.word_a
+    } else {
+        return None;
+    };
+
+    let other_word = state.store().get_word(&other_word_id).ok().flatten()?;
+    Some(ConfusionPair {
+        word_id: other_word.id,
+        word: other_word.text,
+        meaning: other_word.meaning,
+        similarity: cached.score.clamp(0.0, 1.0),
+    })
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ConfusionPairsQuery {
@@ -249,6 +326,7 @@ async fn get_confusion_pairs(
     let limit = q.limit.unwrap_or(20).clamp(1, MAX_CONFUSION_PAIRS);
 
     let mut pairs = Vec::new();
+    let mut seen = HashSet::new();
 
     let prefix = format!("{}:", word_id);
     for item in state.store().confusion_pairs.scan_prefix(prefix.as_bytes()) {
@@ -259,8 +337,10 @@ async fn get_confusion_pairs(
             Ok(kv) => kv,
             Err(_) => continue,
         };
-        if let Ok(val) = serde_json::from_slice::<ConfusionPair>(&v) {
-            pairs.push(val);
+        if let Some(val) = decode_confusion_pair(&v, &word_id, &state) {
+            if seen.insert(val.word_id.clone()) {
+                pairs.push(val);
+            }
         }
     }
 
@@ -276,8 +356,10 @@ async fn get_confusion_pairs(
             };
             let key_str = String::from_utf8_lossy(&k);
             if key_str.ends_with(&suffix) {
-                if let Ok(val) = serde_json::from_slice::<ConfusionPair>(&v) {
-                    pairs.push(val);
+                if let Some(val) = decode_confusion_pair(&v, &word_id, &state) {
+                    if seen.insert(val.word_id.clone()) {
+                        pairs.push(val);
+                    }
                 }
             }
         }

@@ -27,6 +27,7 @@ pub fn router() -> Router<AppState> {
         .route("/logout", post(logout))
         .route("/forgot-password", post(forgot_password))
         .route("/reset-password", post(reset_password))
+        .route("/verify-reset-token", post(verify_reset_token))
 }
 
 #[derive(Debug, Deserialize)]
@@ -55,6 +56,12 @@ pub struct ForgotPasswordRequest {
 pub struct ResetPasswordRequest {
     pub token: String,
     pub new_password: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VerifyResetTokenRequest {
+    pub token: String,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -86,9 +93,9 @@ pub struct AuthResponse {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct PasswordResetEntry {
-    user_id: String,
-    expires_at: chrono::DateTime<chrono::Utc>,
+pub struct PasswordResetEntry {
+    pub user_id: String,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// 每用户最大并发会话数
@@ -397,6 +404,33 @@ async fn reset_password(
     let _ = state.store().delete_user_sessions(&user.id);
 
     Ok(ok(serde_json::json!({})))
+}
+
+async fn verify_reset_token(
+    State(state): State<AppState>,
+    JsonBody(req): JsonBody<VerifyResetTokenRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let token_hash = hash_token(&req.token);
+    let key = keys::password_reset_key(&token_hash)?;
+
+    let raw = state
+        .store()
+        .password_reset_tokens
+        .get(key.as_bytes())
+        .map_err(|e| AppError::internal(&e.to_string()))?
+        .ok_or_else(|| AppError::bad_request("AUTH_INVALID_RESET_TOKEN", "Invalid reset token"))?;
+
+    let entry: PasswordResetEntry = serde_json::from_slice(&raw)
+        .map_err(|e| AppError::internal(&format!("reset token decode error: {e}")))?;
+
+    if entry.expires_at <= Utc::now() {
+        return Err(AppError::bad_request(
+            "AUTH_EXPIRED_RESET_TOKEN",
+            "Reset token expired",
+        ));
+    }
+
+    Ok(ok(serde_json::json!({"valid": true})))
 }
 
 fn set_token_cookie(response: &mut Response, token: &str) -> Result<(), AppError> {

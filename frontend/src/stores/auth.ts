@@ -78,7 +78,7 @@ function createAuthStore() {
 
   async function login(email: string, password: string) {
     const res = await authApi.login({ email, password });
-    tokenManager.setTokens(res.accessToken, res.refreshToken);
+    tokenManager.setTokens(res.accessToken);
     setUser(res.user);
     storage.set(STORAGE_KEYS.USER, safeUserForStorage(res.user));
     resetUnauthorized();
@@ -87,7 +87,7 @@ function createAuthStore() {
 
   async function register(email: string, username: string, password: string) {
     const res = await authApi.register({ email, username, password });
-    tokenManager.setTokens(res.accessToken, res.refreshToken);
+    tokenManager.setTokens(res.accessToken);
     setUser(res.user);
     storage.set(STORAGE_KEYS.USER, safeUserForStorage(res.user));
     resetUnauthorized();

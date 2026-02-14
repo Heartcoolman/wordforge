@@ -42,7 +42,7 @@ export const tokenManager = {
   },
 
   /** Store access token in memory after login/register/refresh */
-  setTokens(accessToken: string, _refreshToken?: string): void {
+  setTokens(accessToken: string): void {
     inMemoryAccessToken = accessToken;
     // Refresh token is managed by HttpOnly cookie, never persisted in JS storage.
     // Clean up any legacy storage entries.
@@ -68,7 +68,7 @@ export const tokenManager = {
       try {
         const { authApi } = await import('@/api/auth');
         const res = await authApi.refresh();
-        tokenManager.setTokens(res.accessToken, res.refreshToken);
+        tokenManager.setTokens(res.accessToken);
         return true;
       } catch {
         tokenManager.clearTokens();

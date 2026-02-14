@@ -2,6 +2,9 @@ import { api, connectAmasStateStream } from './client';
 import type {
   AmasStateStreamEvent,
   AmasUserState,
+  ProcessResult,
+  ProcessEventRequest,
+  BatchProcessResult,
   AmasStrategy,
   AmasIntervention,
   LearningCurvePoint,
@@ -13,7 +16,30 @@ import type {
 } from '@/types/amas';
 import { AMAS_MONITORING_DEFAULT_LIMIT } from '@/lib/constants';
 
+function sanitizeProcessEventPayload(payload: ProcessEventRequest): ProcessEventRequest {
+  return {
+    ...payload,
+    responseTime: Math.round(payload.responseTime),
+    dwellTime: payload.dwellTime != null ? Math.round(payload.dwellTime) : undefined,
+    pauseCount: payload.pauseCount != null ? Math.round(payload.pauseCount) : undefined,
+    switchCount: payload.switchCount != null ? Math.round(payload.switchCount) : undefined,
+    retryCount: payload.retryCount != null ? Math.round(payload.retryCount) : undefined,
+    focusLossDuration: payload.focusLossDuration != null ? Math.round(payload.focusLossDuration) : undefined,
+    pausedTimeMs: payload.pausedTimeMs != null ? Math.round(payload.pausedTimeMs) : undefined,
+  };
+}
+
 export const amasApi = {
+  processEvent(payload: ProcessEventRequest) {
+    return api.post<ProcessResult>('/api/amas/process-event', sanitizeProcessEventPayload(payload));
+  },
+
+  batchProcess(events: ProcessEventRequest[]) {
+    return api.post<BatchProcessResult>('/api/amas/batch-process', {
+      events: events.map(sanitizeProcessEventPayload),
+    });
+  },
+
   getState() {
     return api.get<AmasUserState>('/api/amas/state');
   },

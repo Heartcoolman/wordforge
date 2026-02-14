@@ -44,7 +44,6 @@ export interface StudyWordsResponse {
 
 export interface SessionPerformanceData {
   recentAccuracy: number;
-  overallAccuracy: number;
   masteredCount: number;
   targetMasteryCount: number;
   errorProneWordIds: string[];
@@ -53,7 +52,6 @@ export interface SessionPerformanceData {
 export interface NextWordsRequest {
   excludeWordIds: string[];
   masteredWordIds?: string[];
-  sessionId?: string;
   sessionPerformance?: SessionPerformanceData;
 }
 
@@ -62,7 +60,16 @@ export interface NextWordsResponse {
   batchSize: number;
 }
 
-export type AdjustUserState = 'fatigued' | 'frustrated' | 'distracted' | 'engaged' | 'confident' | 'focused';
+export type AdjustUserState =
+  | 'focused'
+  | 'engaged'
+  | 'confident'
+  | 'tired'
+  | 'fatigued'
+  | 'frustrated'
+  | 'distracted'
+  | 'review'
+  | 'sprint';
 
 export interface AdjustWordsRequest {
   recentPerformance?: number;
@@ -80,8 +87,4 @@ export interface CompleteSessionRequest {
   masteredWordIds: string[];
   errorProneWordIds: string[];
   avgResponseTimeMs: number;
-}
-
-export interface CompleteSessionResponse {
-  session: LearningSession;
 }

@@ -25,6 +25,56 @@ vi.mock('@/api/auth', () => ({ authApi: { refresh: vi.fn() } }));
 import { amasApi } from '@/api/amas';
 
 describe('amasApi', () => {
+  it('processEvent sends payload and returns process result', async () => {
+    const result = {
+      sessionId: 's-1',
+      strategy: { difficulty: 0.5, batchSize: 10, newRatio: 0.3, intervalScale: 1, reviewMode: false },
+      explanation: { primaryReason: 'ok', factors: [] },
+      state: { attention: 0.7, fatigue: 0.2, motivation: 0.3, confidence: 0.5, sessionEventCount: 1, totalEventCount: 1, createdAt: '2026-02-14T00:00:00Z' },
+      reward: { value: 0.8, components: { accuracyReward: 1, speedReward: 1, fatiguePenalty: 0, frustrationPenalty: 0 } },
+    };
+    server.use(
+      http.post(`${BASE}/api/amas/process-event`, async ({ request }) => {
+        const body = await request.json() as Record<string, unknown>;
+        expect(body).toMatchObject({
+          wordId: 'word-1',
+          isCorrect: true,
+          responseTime: 901,
+          hintUsed: true,
+        });
+        return HttpResponse.json({ success: true, data: result });
+      }),
+    );
+    const response = await amasApi.processEvent({
+      wordId: 'word-1',
+      isCorrect: true,
+      responseTime: 900.6,
+      hintUsed: true,
+    });
+    expect(response).toEqual(result);
+  });
+
+  it('batchProcess sends events and returns batch result', async () => {
+    const result = {
+      count: 2,
+      items: [{ sessionId: 's-2' }, { sessionId: 's-3' }],
+    };
+    server.use(
+      http.post(`${BASE}/api/amas/batch-process`, async ({ request }) => {
+        const body = await request.json() as { events: Array<Record<string, unknown>> };
+        expect(body.events).toHaveLength(2);
+        expect(body.events[0]?.responseTime).toBe(801);
+        expect(body.events[1]?.responseTime).toBe(902);
+        return HttpResponse.json({ success: true, data: result });
+      }),
+    );
+    const response = await amasApi.batchProcess([
+      { wordId: 'w-1', isCorrect: true, responseTime: 800.8 },
+      { wordId: 'w-2', isCorrect: false, responseTime: 901.9 },
+    ]);
+    expect(response).toEqual(result);
+  });
+
   it('getState returns user state', async () => {
     const state = { userId: 'u1', level: 3, phase: 'Exploit' };
     server.use(

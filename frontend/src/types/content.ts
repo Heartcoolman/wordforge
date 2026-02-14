@@ -6,6 +6,7 @@ export interface Etymology {
   etymology: string;
   roots: string[];
   generated: boolean;
+  source?: string;
 }
 
 export type MorphemeType = 'prefix' | 'root' | 'suffix';
@@ -20,7 +21,11 @@ export interface WordContexts {
   wordId: string;
   word: string;
   examples: string[];
-  contexts: string[];
+  contexts: Array<{
+    id: string;
+    sentence: string;
+    source: string;
+  }>;
 }
 
 // SemanticSearchItem 与 Word 字段完全相同，直接复用

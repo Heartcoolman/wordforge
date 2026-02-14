@@ -120,8 +120,8 @@ export default function FlashcardPage() {
           errorProneWordIds: errorWordIds(),
           avgResponseTimeMs: avg,
         });
-      } catch {
-        // completion failure should not block UI
+      } catch (err: unknown) {
+        uiStore.toast.warning('会话结算失败', err instanceof Error ? err.message : '请稍后重试');
       }
     }
     setDone(true);

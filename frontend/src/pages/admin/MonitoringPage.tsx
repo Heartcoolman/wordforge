@@ -4,6 +4,7 @@ import { Spinner } from '@/components/ui/Spinner';
 import { Empty } from '@/components/ui/Empty';
 import { adminApi } from '@/api/admin';
 import { amasApi } from '@/api/amas';
+import { healthApi, type PublicHealthStatus } from '@/api/health';
 import type { SystemHealth, DatabaseInfo } from '@/types/admin';
 import type { MonitoringEvent } from '@/types/amas';
 import { MONITORING_DEFAULT_LIMIT } from '@/lib/constants';
@@ -30,27 +31,32 @@ function filterSensitiveFields(obj: unknown): unknown {
 
 export default function MonitoringPage() {
   const [health, setHealth] = createSignal<SystemHealth | null>(null);
+  const [publicHealth, setPublicHealth] = createSignal<PublicHealthStatus | null>(null);
   const [db, setDb] = createSignal<DatabaseInfo | null>(null);
   const [monitoring, setMonitoring] = createSignal<MonitoringEvent[] | null>(null);
   const [loading, setLoading] = createSignal(true);
   const [allFailed, setAllFailed] = createSignal(false);
   const [healthErr, setHealthErr] = createSignal('');
+  const [publicHealthErr, setPublicHealthErr] = createSignal('');
   const [dbErr, setDbErr] = createSignal('');
   const [monitoringErr, setMonitoringErr] = createSignal('');
 
   onMount(async () => {
-    const [h, d, m] = await Promise.allSettled([
+    const [h, ph, d, m] = await Promise.allSettled([
       adminApi.getHealth(),
+      healthApi.getStatus(),
       adminApi.getDatabase(),
       amasApi.getMonitoring(MONITORING_DEFAULT_LIMIT),
     ]);
     if (h.status === 'fulfilled') setHealth(h.value);
     else setHealthErr(h.reason instanceof Error ? h.reason.message : '加载失败');
+    if (ph.status === 'fulfilled') setPublicHealth(ph.value);
+    else setPublicHealthErr(ph.reason instanceof Error ? ph.reason.message : '加载失败');
     if (d.status === 'fulfilled') setDb(d.value);
     else setDbErr(d.reason instanceof Error ? d.reason.message : '加载失败');
     if (m.status === 'fulfilled') setMonitoring(m.value);
     else setMonitoringErr(m.reason instanceof Error ? m.reason.message : '加载失败');
-    if (h.status === 'rejected' && d.status === 'rejected' && m.status === 'rejected') {
+    if (h.status === 'rejected' && ph.status === 'rejected' && d.status === 'rejected' && m.status === 'rejected') {
       setAllFailed(true);
     }
     setLoading(false);
@@ -73,6 +79,19 @@ export default function MonitoringPage() {
               <h2 class="text-lg font-semibold text-content mb-3">系统健康</h2>
               <pre class="text-xs font-mono text-content-secondary bg-surface-secondary p-4 rounded-lg overflow-x-auto">
                 {JSON.stringify(filterSensitiveFields(health()), null, 2)}
+              </pre>
+            </Card>
+          </Show>
+
+          <Show when={publicHealth()} fallback={
+            <Show when={publicHealthErr()}>
+              <Card variant="outlined"><p class="text-sm text-error">公开健康探针: {publicHealthErr()}</p></Card>
+            </Show>
+          }>
+            <Card variant="elevated">
+              <h2 class="text-lg font-semibold text-content mb-3">公开健康探针</h2>
+              <pre class="text-xs font-mono text-content-secondary bg-surface-secondary p-4 rounded-lg overflow-x-auto">
+                {JSON.stringify(filterSensitiveFields(publicHealth()), null, 2)}
               </pre>
             </Card>
           </Show>

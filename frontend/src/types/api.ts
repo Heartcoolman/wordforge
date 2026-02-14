@@ -5,7 +5,7 @@ export interface ApiSuccessResponse<T> {
 
 export interface ApiErrorResponse {
   success: false;
-  error: string;
+  error?: string;
   code: string;
   message: string;
   traceId?: string;

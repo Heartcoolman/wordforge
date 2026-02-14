@@ -7,7 +7,6 @@ export interface User {
 
 export interface AuthResponse {
   accessToken: string;
-  refreshToken?: string;
   user: User;
 }
 
@@ -37,7 +36,7 @@ export interface ChangePasswordRequest {
 
 export interface UserPreferences {
   theme: 'light' | 'dark' | 'system';
-  language: 'zh' | 'en';
+  language: 'zh' | 'en' | 'ja' | 'ko' | 'fr' | 'de' | 'es';
   notificationEnabled: boolean;
   soundEnabled: boolean;
 }
