@@ -132,7 +132,7 @@ async fn ban_user(
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     if state.store().get_user_by_id(&id)?.is_none() {
-        return Err(AppError::not_found("User not found"));
+        return Err(AppError::not_found("用户不存在"));
     }
     state.store().ban_user(&id)?;
     // 封禁用户后撤销其所有活跃会话，防止已登录用户继续操作
@@ -155,7 +155,7 @@ async fn unban_user(
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     if state.store().get_user_by_id(&id)?.is_none() {
-        return Err(AppError::not_found("User not found"));
+        return Err(AppError::not_found("用户不存在"));
     }
     state.store().unban_user(&id)?;
     tracing::info!(
@@ -188,7 +188,7 @@ async fn admin_reset_user_password(
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     if state.store().get_user_by_id(&id)?.is_none() {
-        return Err(AppError::not_found("User not found"));
+        return Err(AppError::not_found("用户不存在"));
     }
 
     let raw_token = uuid::Uuid::new_v4().simple().to_string();
@@ -240,7 +240,7 @@ async fn admin_set_user_password(
     let mut user = state
         .store()
         .get_user_by_id(&id)?
-        .ok_or_else(|| AppError::not_found("User not found"))?;
+        .ok_or_else(|| AppError::not_found("用户不存在"))?;
 
     user.password_hash = hash_password(&req.new_password)?;
     user.updated_at = chrono::Utc::now();

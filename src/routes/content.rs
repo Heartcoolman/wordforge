@@ -63,7 +63,7 @@ async fn get_etymology(
     let word = state
         .store()
         .get_word(&word_id)?
-        .ok_or_else(|| AppError::not_found("Word not found"))?;
+        .ok_or_else(|| AppError::not_found("单词不存在"))?;
 
     // 优先读取词素缓存，生成可用的规则化词源说明，避免返回 pending 占位信息。
     let roots = {
@@ -141,7 +141,7 @@ async fn semantic_search(
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     let query = q.query.trim();
     if query.is_empty() {
-        return Err(AppError::bad_request("INVALID_QUERY", "Search query cannot be empty"));
+        return Err(AppError::bad_request("INVALID_QUERY", "搜索内容不能为空"));
     }
     let limit = q.limit.unwrap_or(10).clamp(1, 50);
 
@@ -167,7 +167,7 @@ async fn get_word_contexts(
     let word = state
         .store()
         .get_word(&word_id)?
-        .ok_or_else(|| AppError::not_found("Word not found"))?;
+        .ok_or_else(|| AppError::not_found("单词不存在"))?;
 
     // 从 word.examples 生成基本上下文数据
     let contexts: Vec<serde_json::Value> = word

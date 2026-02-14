@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, RwLock};
 
 use crate::amas::engine::AMASEngine;
 use crate::config::Config;
@@ -19,6 +19,7 @@ pub struct AppState {
     config: Arc<Config>,
     shutdown_tx: broadcast::Sender<()>,
     started_at: Instant,
+    update_cache: Arc<RwLock<Option<(Instant, serde_json::Value)>>>,
 }
 
 pub struct RuntimeConfig {
@@ -52,6 +53,7 @@ impl AppState {
             config: Arc::new(config.clone()),
             shutdown_tx,
             started_at: Instant::now(),
+            update_cache: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -89,6 +91,10 @@ impl AppState {
 
     pub fn uptime_secs(&self) -> u64 {
         self.started_at.elapsed().as_secs()
+    }
+
+    pub fn update_cache(&self) -> &RwLock<Option<(Instant, serde_json::Value)>> {
+        &self.update_cache
     }
 }
 

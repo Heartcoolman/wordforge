@@ -62,7 +62,7 @@ async fn set_reward_preference(
     if !VALID_REWARD_TYPES.contains(&req.reward_type.as_str()) {
         return Err(AppError::bad_request(
             "INVALID_REWARD_TYPE",
-            "reward_type must be one of: standard, explorer, achiever, social",
+            "奖励类型必须是以下之一：standard、explorer、achiever、social",
         ));
     }
 
@@ -165,7 +165,7 @@ async fn set_habit_profile(
         if hours.iter().any(|h| *h > 23) {
             return Err(AppError::bad_request(
                 "INVALID_PREFERRED_HOURS",
-                "preferred_hours values must be between 0 and 23",
+                "偏好时段的值必须在0到23之间",
             ));
         }
     }
@@ -175,7 +175,7 @@ async fn set_habit_profile(
         if !(1.0..=20.0).contains(&spd) {
             return Err(AppError::bad_request(
                 "INVALID_SESSIONS_PER_DAY",
-                "sessions_per_day must be between 1 and 20",
+                "每日学习次数必须在1到20之间",
             ));
         }
     }
@@ -185,7 +185,7 @@ async fn set_habit_profile(
         if !(1.0..=480.0).contains(&msl) {
             return Err(AppError::bad_request(
                 "INVALID_SESSION_LENGTH",
-                "median_session_length_mins must be between 1 and 480",
+                "单次学习时长（分钟）必须在1到480之间",
             ));
         }
     }
@@ -225,7 +225,7 @@ async fn upload_avatar(
     body: axum::body::Bytes,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     if body.is_empty() {
-        return Err(AppError::bad_request("AVATAR_EMPTY", "No file uploaded"));
+        return Err(AppError::bad_request("AVATAR_EMPTY", "未上传文件"));
     }
 
     // 限制头像大小为 512KB
@@ -233,7 +233,7 @@ async fn upload_avatar(
     if body.len() > MAX_AVATAR_SIZE {
         return Err(AppError::bad_request(
             "AVATAR_TOO_LARGE",
-            "Avatar must be smaller than 512KB",
+            "头像文件大小不能超过512KB",
         ));
     }
 
@@ -248,7 +248,7 @@ async fn upload_avatar(
         _ => {
             return Err(AppError::bad_request(
                 "AVATAR_INVALID_TYPE",
-                "Only PNG, JPEG, GIF, and WebP images are allowed",
+                "仅支持 PNG、JPEG、GIF 和 WebP 格式的图片",
             ))
         }
     };

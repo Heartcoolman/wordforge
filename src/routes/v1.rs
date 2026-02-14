@@ -58,7 +58,7 @@ async fn get_word(
     let word = state
         .store()
         .get_word(&id)?
-        .ok_or_else(|| AppError::not_found("Word not found"))?;
+        .ok_or_else(|| AppError::not_found("单词不存在"))?;
     Ok(ok(WordPublic::from(&word)))
 }
 

@@ -48,7 +48,7 @@ async fn update_config(
             if state.store().get_wordbook(id)?.is_none() {
                 return Err(AppError::bad_request(
                     "WORDBOOK_NOT_FOUND",
-                    &format!("Wordbook '{}' does not exist", id),
+                    &format!("词书 '{}' 不存在", id),
                 ));
             }
         }

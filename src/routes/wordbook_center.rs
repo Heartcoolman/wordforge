@@ -166,14 +166,14 @@ async fn fetch_remote_json<T: serde::de::DeserializeOwned>(
     let response = client.get(url_parsed).send().await.map_err(|e| {
         AppError::bad_request(
             "WB_CENTER_FETCH_FAILED",
-            &format!("Failed to fetch remote data: {e}"),
+            &format!("获取远程数据失败：{e}"),
         )
     })?;
 
     if !response.status().is_success() {
         return Err(AppError::bad_request(
             "WB_CENTER_FETCH_FAILED",
-            &format!("Remote returned status {}", response.status()),
+            &format!("远程服务返回状态码 {}", response.status()),
         ));
     }
 
@@ -182,7 +182,7 @@ async fn fetch_remote_json<T: serde::de::DeserializeOwned>(
         if len > MAX_SIZE as u64 {
             return Err(AppError::bad_request(
                 "WB_CENTER_TOO_LARGE",
-                "Response too large (max 50MB)",
+                "响应内容过大（上限50MB）",
             ));
         }
     }
@@ -194,14 +194,14 @@ async fn fetch_remote_json<T: serde::de::DeserializeOwned>(
         let chunk = chunk_result.map_err(|e| {
             AppError::bad_request(
                 "WB_CENTER_READ_FAILED",
-                &format!("Failed to read content: {e}"),
+                &format!("读取内容失败：{e}"),
             )
         })?;
         body_bytes.extend_from_slice(&chunk);
         if body_bytes.len() > MAX_SIZE {
             return Err(AppError::bad_request(
                 "WB_CENTER_TOO_LARGE",
-                "Response too large (max 50MB)",
+                "响应内容过大（上限50MB）",
             ));
         }
     }
@@ -209,7 +209,7 @@ async fn fetch_remote_json<T: serde::de::DeserializeOwned>(
     serde_json::from_slice(&body_bytes).map_err(|e| {
         AppError::bad_request(
             "WB_CENTER_PARSE_FAILED",
-            &format!("Failed to parse remote data: {e}"),
+            &format!("解析远程数据失败：{e}"),
         )
     })
 }
@@ -298,7 +298,7 @@ async fn do_import(
     {
         return Err(AppError::conflict(
             "WB_CENTER_ALREADY_IMPORTED",
-            "This wordbook has already been imported",
+            "该词书已被导入",
         ));
     }
 
@@ -476,7 +476,7 @@ async fn admin_browse(
     let base_url = settings.wordbook_center_url.ok_or_else(|| {
         AppError::bad_request(
             "WB_CENTER_NOT_CONFIGURED",
-            "Wordbook center URL is not configured",
+            "词书中心URL未配置",
         )
     })?;
 
@@ -496,7 +496,7 @@ async fn admin_preview(
     let base_url = settings.wordbook_center_url.ok_or_else(|| {
         AppError::bad_request(
             "WB_CENTER_NOT_CONFIGURED",
-            "Wordbook center URL is not configured",
+            "词书中心URL未配置",
         )
     })?;
 
@@ -535,7 +535,7 @@ async fn admin_import(
     let base_url = settings.wordbook_center_url.ok_or_else(|| {
         AppError::bad_request(
             "WB_CENTER_NOT_CONFIGURED",
-            "Wordbook center URL is not configured",
+            "词书中心URL未配置",
         )
     })?;
 
@@ -592,14 +592,14 @@ async fn admin_sync(
     let base_url = settings.wordbook_center_url.ok_or_else(|| {
         AppError::bad_request(
             "WB_CENTER_NOT_CONFIGURED",
-            "Wordbook center URL is not configured",
+            "词书中心URL未配置",
         )
     })?;
 
     let import_record = state
         .store()
         .get_wb_center_import(&base_url, &id)?
-        .ok_or_else(|| AppError::not_found("Import record not found"))?;
+        .ok_or_else(|| AppError::not_found("导入记录不存在"))?;
 
     let result = do_sync(&state, &base_url, &import_record).await?;
     Ok(ok(result))
@@ -726,7 +726,7 @@ async fn user_preview(
     let base_url = get_user_wb_center_url(&state, &auth.user_id)?.ok_or_else(|| {
         AppError::bad_request(
             "WB_CENTER_NOT_CONFIGURED",
-            "Personal wordbook center URL is not configured",
+            "个人词书中心URL未配置",
         )
     })?;
 
@@ -764,7 +764,7 @@ async fn user_import(
     let base_url = get_user_wb_center_url(&state, &auth.user_id)?.ok_or_else(|| {
         AppError::bad_request(
             "WB_CENTER_NOT_CONFIGURED",
-            "Personal wordbook center URL is not configured",
+            "个人词书中心URL未配置",
         )
     })?;
 
@@ -810,7 +810,7 @@ async fn user_import_url(
     {
         return Err(AppError::conflict(
             "WB_CENTER_ALREADY_IMPORTED",
-            "This wordbook has already been imported",
+            "该词书已被导入",
         ));
     }
 
@@ -902,18 +902,18 @@ async fn user_sync(
     let base_url = get_user_wb_center_url(&state, &auth.user_id)?.ok_or_else(|| {
         AppError::bad_request(
             "WB_CENTER_NOT_CONFIGURED",
-            "Personal wordbook center URL is not configured",
+            "个人词书中心URL未配置",
         )
     })?;
 
     let import_record = state
         .store()
         .get_wb_center_import(&base_url, &id)?
-        .ok_or_else(|| AppError::not_found("Import record not found"))?;
+        .ok_or_else(|| AppError::not_found("导入记录不存在"))?;
 
     if import_record.user_id.as_deref() != Some(&auth.user_id) {
         return Err(AppError::forbidden(
-            "You can only sync your own imported wordbooks",
+            "只能同步自己导入的词书",
         ));
     }
 

@@ -154,17 +154,17 @@ async fn register(
 ) -> Result<Response, AppError> {
     let system_settings = state.store().get_system_settings()?;
     if !system_settings.registration_enabled {
-        return Err(AppError::forbidden("Registration is currently disabled"));
+        return Err(AppError::forbidden("注册功能已关闭"));
     }
     if system_settings.maintenance_mode {
-        return Err(AppError::forbidden("Service is under maintenance"));
+        return Err(AppError::forbidden("系统正在维护中"));
     }
 
     let email = req.email.trim().to_lowercase();
     if !is_valid_email(&email) {
         return Err(AppError::bad_request(
             "AUTH_INVALID_EMAIL",
-            "Invalid email format",
+            "邮箱格式无效",
         ));
     }
     let username = req.username.trim();
@@ -178,12 +178,12 @@ async fn register(
     if state.store().get_user_by_email(&email)?.is_some() {
         return Err(AppError::conflict(
             "AUTH_EMAIL_EXISTS",
-            "Email already registered",
+            "该邮箱已被注册",
         ));
     }
 
     if state.store().count_users()? >= system_settings.max_users as usize {
-        return Err(AppError::forbidden("User registration limit reached"));
+        return Err(AppError::forbidden("用户注册数量已达上限"));
     }
 
     let now = Utc::now();
@@ -219,22 +219,22 @@ async fn login(
     JsonBody(req): JsonBody<LoginRequest>,
 ) -> Result<Response, AppError> {
     if state.store().get_system_settings()?.maintenance_mode {
-        return Err(AppError::forbidden("Service is under maintenance"));
+        return Err(AppError::forbidden("系统正在维护中"));
     }
 
     let user = state
         .store()
         .get_user_by_email(&req.email)?
-        .ok_or_else(|| AppError::unauthorized("Invalid email or password"))?;
+        .ok_or_else(|| AppError::unauthorized("邮箱或密码错误"))?;
 
     if user.is_banned {
-        return Err(AppError::forbidden("User is banned"));
+        return Err(AppError::forbidden("用户已被封禁"));
     }
 
     // 检查账户是否因多次登录失败而被锁定
     if state.store().is_account_locked(&user.id)? {
         return Err(AppError::too_many_requests(
-            "Account temporarily locked due to too many failed login attempts. Please try again later.",
+            "账户因多次登录失败已被临时锁定，请稍后再试",
         ));
     }
 
@@ -242,7 +242,7 @@ async fn login(
     if !verified {
         // 记录登录失败，可能触发锁定
         let _ = state.store().record_failed_login(&user.id);
-        return Err(AppError::unauthorized("Invalid email or password"));
+        return Err(AppError::unauthorized("邮箱或密码错误"));
     }
 
     // 登录成功，重置失败计数
@@ -269,7 +269,7 @@ async fn refresh(State(state): State<AppState>, headers: HeaderMap) -> Result<Re
     let claims = verify_jwt(&old_token, &state.config().refresh_jwt_secret)?;
     if claims.token_type != "refresh" {
         return Err(AppError::unauthorized(
-            "Invalid token type: expected refresh token",
+            "令牌类型无效：需要刷新令牌",
         ));
     }
 
@@ -278,27 +278,27 @@ async fn refresh(State(state): State<AppState>, headers: HeaderMap) -> Result<Re
     let session = state
         .store()
         .get_session(&old_hash)?
-        .ok_or_else(|| AppError::unauthorized("Refresh session not found or expired"))?;
+        .ok_or_else(|| AppError::unauthorized("刷新会话不存在或已过期"))?;
 
     if session.user_id != claims.sub {
-        return Err(AppError::unauthorized("Refresh session mismatch"));
+        return Err(AppError::unauthorized("刷新会话不匹配"));
     }
 
     // 原子性删除旧的 refresh 会话，防止 token 重放攻击
     let was_deleted = state.store().delete_session_if_exists(&old_hash)?;
     if !was_deleted {
         // token 已被使用（可能是重放攻击），拒绝请求
-        return Err(AppError::unauthorized("Refresh token already consumed"));
+        return Err(AppError::unauthorized("刷新令牌已被使用"));
     }
 
     // 在签发新 token 前检查用户状态（封禁检查）
     let user = state
         .store()
         .get_user_by_id(&claims.sub)?
-        .ok_or_else(|| AppError::unauthorized("User not found"))?;
+        .ok_or_else(|| AppError::unauthorized("用户不存在"))?;
 
     if user.is_banned {
-        return Err(AppError::forbidden("User is banned"));
+        return Err(AppError::forbidden("用户已被封禁"));
     }
 
     // Issue a new token pair
@@ -358,7 +358,7 @@ async fn forgot_password(
 
     Ok(ok(serde_json::json!({
         "emailSent": true,
-        "message": "If the email exists, a password reset link will be sent.",
+        "message": "如果该邮箱已注册，将会发送密码重置链接",
     })))
 }
 
@@ -380,7 +380,7 @@ async fn reset_password(
         .password_reset_tokens
         .remove(key.as_bytes())
         .map_err(|e| AppError::internal(&e.to_string()))?
-        .ok_or_else(|| AppError::bad_request("AUTH_INVALID_RESET_TOKEN", "Invalid reset token"))?;
+        .ok_or_else(|| AppError::bad_request("AUTH_INVALID_RESET_TOKEN", "重置令牌无效"))?;
 
     let entry: PasswordResetEntry = serde_json::from_slice(&raw)
         .map_err(|e| AppError::internal(&format!("reset token decode error: {e}")))?;
@@ -388,14 +388,14 @@ async fn reset_password(
     if entry.expires_at <= Utc::now() {
         return Err(AppError::bad_request(
             "AUTH_EXPIRED_RESET_TOKEN",
-            "Reset token expired",
+            "重置令牌已过期",
         ));
     }
 
     let mut user = state
         .store()
         .get_user_by_id(&entry.user_id)?
-        .ok_or_else(|| AppError::bad_request("AUTH_INVALID_RESET_TOKEN", "Invalid reset token"))?;
+        .ok_or_else(|| AppError::bad_request("AUTH_INVALID_RESET_TOKEN", "重置令牌无效"))?;
 
     user.password_hash = hash_password(&req.new_password)?;
     user.updated_at = Utc::now();
@@ -418,7 +418,7 @@ async fn verify_reset_token(
         .password_reset_tokens
         .get(key.as_bytes())
         .map_err(|e| AppError::internal(&e.to_string()))?
-        .ok_or_else(|| AppError::bad_request("AUTH_INVALID_RESET_TOKEN", "Invalid reset token"))?;
+        .ok_or_else(|| AppError::bad_request("AUTH_INVALID_RESET_TOKEN", "重置令牌无效"))?;
 
     let entry: PasswordResetEntry = serde_json::from_slice(&raw)
         .map_err(|e| AppError::internal(&format!("reset token decode error: {e}")))?;
@@ -426,7 +426,7 @@ async fn verify_reset_token(
     if entry.expires_at <= Utc::now() {
         return Err(AppError::bad_request(
             "AUTH_EXPIRED_RESET_TOKEN",
-            "Reset token expired",
+            "重置令牌已过期",
         ));
     }
 

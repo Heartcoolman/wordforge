@@ -32,7 +32,7 @@ export function AdminLayout(props: ParentProps) {
       )}>
         <div class="h-14 flex items-center justify-between px-4 border-b border-border">
           <Show when={!collapsed()}>
-            <span class="font-bold text-accent">Admin</span>
+            <span class="font-bold text-accent">管理后台</span>
           </Show>
           <button
             onClick={() => setCollapsed(!collapsed())}

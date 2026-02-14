@@ -116,7 +116,7 @@ impl IntoResponse for AppError {
         let exposed_message = if self.is_operational {
             self.message.clone()
         } else {
-            "Internal server error".to_string()
+            "服务器内部错误".to_string()
         };
 
         if self.is_operational {
@@ -211,7 +211,7 @@ mod tests {
         let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         let text = String::from_utf8(body.to_vec()).unwrap();
         assert!(!text.contains("db crash"));
-        assert!(text.contains("Internal server error"));
+        assert!(text.contains("服务器内部错误"));
     }
 
     #[tokio::test]

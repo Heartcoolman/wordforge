@@ -112,7 +112,7 @@ pub fn verify_jwt(token: &str, secret: &str) -> Result<Claims, AppError> {
         &validation,
     )
     .map(|data| data.claims)
-    .map_err(|_| AppError::unauthorized("Invalid or expired token"))
+    .map_err(|_| AppError::unauthorized("令牌无效或已过期"))
 }
 
 fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
@@ -145,7 +145,7 @@ pub fn extract_token_from_headers(headers: &HeaderMap) -> Result<String, AppErro
         return Ok(token);
     }
 
-    Err(AppError::unauthorized("Missing bearer token"))
+    Err(AppError::unauthorized("缺少认证令牌"))
 }
 
 pub fn extract_refresh_token_from_headers(headers: &HeaderMap) -> Result<String, AppError> {
@@ -161,7 +161,7 @@ pub fn extract_refresh_token_from_headers(headers: &HeaderMap) -> Result<String,
         return Ok(token);
     }
 
-    Err(AppError::unauthorized("Missing refresh token"))
+    Err(AppError::unauthorized("缺少刷新令牌"))
 }
 
 #[derive(Debug, Clone)]
@@ -188,26 +188,26 @@ where
         let claims = verify_jwt(&token, &app_state.config().jwt_secret)?;
 
         if claims.token_type != "user" {
-            return Err(AppError::unauthorized("Invalid token type"));
+            return Err(AppError::unauthorized("令牌类型无效"));
         }
 
         let token_hash = hash_token(&token);
         let session = app_state
             .store()
             .get_session(&token_hash)?
-            .ok_or_else(|| AppError::unauthorized("Session not found or expired"))?;
+            .ok_or_else(|| AppError::unauthorized("会话不存在或已过期"))?;
 
         if session.user_id != claims.sub {
-            return Err(AppError::unauthorized("Session mismatch"));
+            return Err(AppError::unauthorized("会话不匹配"));
         }
 
         let user = app_state
             .store()
             .get_user_by_id(&claims.sub)?
-            .ok_or_else(|| AppError::unauthorized("User not found"))?;
+            .ok_or_else(|| AppError::unauthorized("用户不存在"))?;
 
         if user.is_banned {
-            return Err(AppError::forbidden("User is banned"));
+            return Err(AppError::forbidden("用户已被封禁"));
         }
 
         Ok(AuthUser {
@@ -230,17 +230,17 @@ where
         let claims = verify_jwt(&token, &app_state.config().admin_jwt_secret)?;
 
         if claims.token_type != "admin" {
-            return Err(AppError::unauthorized("Invalid token type"));
+            return Err(AppError::unauthorized("令牌类型无效"));
         }
 
         let token_hash = hash_token(&token);
         let session = app_state
             .store()
             .get_admin_session(&token_hash)?
-            .ok_or_else(|| AppError::unauthorized("Admin session not found or expired"))?;
+            .ok_or_else(|| AppError::unauthorized("管理员会话不存在或已过期"))?;
 
         if session.user_id != claims.sub {
-            return Err(AppError::unauthorized("Admin session mismatch"));
+            return Err(AppError::unauthorized("管理员会话不匹配"));
         }
 
         Ok(AdminAuthUser {

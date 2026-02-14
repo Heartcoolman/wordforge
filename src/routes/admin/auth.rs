@@ -77,7 +77,7 @@ async fn setup(
     if !is_valid_email(&req.email) {
         return Err(AppError::bad_request(
             "ADMIN_INVALID_EMAIL",
-            "Invalid email format",
+            "邮箱格式无效",
         ));
     }
     if let Err(msg) = validate_password(&req.password) {
@@ -97,7 +97,7 @@ async fn setup(
     // 使用 create_first_admin 在事务内部原子性检查是否已有 admin，防止 TOCTOU
     state.store().create_first_admin(&admin).map_err(|e| {
         if matches!(e, crate::store::StoreError::Conflict { .. }) {
-            AppError::conflict("ADMIN_ALREADY_EXISTS", "Admin account already exists")
+            AppError::conflict("ADMIN_ALREADY_EXISTS", "管理员账户已存在")
         } else {
             AppError::from(e)
         }
@@ -144,7 +144,7 @@ async fn login(
     if let Some(ref a) = admin {
         if state.store().is_admin_account_locked(&a.id)? {
             return Err(AppError::too_many_requests(
-                "Account temporarily locked due to too many failed login attempts. Please try again later.",
+                "账户因多次登录失败已被临时锁定，请稍后再试",
             ));
         }
     }
@@ -161,7 +161,7 @@ async fn login(
                 );
             }
         }
-        return Err(AppError::unauthorized("Invalid email or password"));
+        return Err(AppError::unauthorized("邮箱或密码错误"));
     }
 
     let admin = admin.unwrap();
@@ -208,7 +208,7 @@ async fn verify(
     let admin_record = state
         .store()
         .get_admin_by_id(&admin.admin_id)?
-        .ok_or_else(|| AppError::unauthorized("Admin not found"))?;
+        .ok_or_else(|| AppError::unauthorized("管理员不存在"))?;
     Ok(ok(AdminProfile {
         id: admin_record.id,
         email: admin_record.email,

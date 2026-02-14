@@ -170,7 +170,7 @@ pub async fn rate_limit_middleware(
             Json(ErrorBody {
                 success: false,
                 code: "RATE_LIMITED".to_string(),
-                message: "Too many requests".to_string(),
+                message: "请求过于频繁".to_string(),
                 trace_id: None,
             }),
         )
@@ -281,7 +281,7 @@ pub async fn auth_rate_limit_middleware(
             Json(ErrorBody {
                 success: false,
                 code: "AUTH_RATE_LIMITED".to_string(),
-                message: "Too many authentication attempts. Please try again later.".to_string(),
+                message: "认证尝试次数过多，请稍后再试".to_string(),
                 trace_id: None,
             }),
         )

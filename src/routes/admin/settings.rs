@@ -32,7 +32,7 @@ impl UpdateSystemSettings {
             if !(1..=1_000_000).contains(&v) {
                 return Err(AppError::bad_request(
                     "INVALID_MAX_USERS",
-                    "max_users must be 1-1000000",
+                    "最大用户数必须在1到1000000之间",
                 ));
             }
         }
@@ -40,7 +40,7 @@ impl UpdateSystemSettings {
             if !(1..=500).contains(&v) {
                 return Err(AppError::bad_request(
                     "INVALID_DAILY_WORDS",
-                    "default_daily_words must be 1-500",
+                    "每日默认单词数必须在1到500之间",
                 ));
             }
         }

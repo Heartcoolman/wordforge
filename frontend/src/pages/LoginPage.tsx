@@ -139,7 +139,7 @@ export default function LoginPage() {
           <Input
             label="邮箱"
             type="email"
-            placeholder="your@email.com"
+            placeholder="请输入邮箱"
             value={email()}
             onInput={(e) => setEmail(e.currentTarget.value)}
             error={error() && !email() ? '请输入邮箱' : undefined}

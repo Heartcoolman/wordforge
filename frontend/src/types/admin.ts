@@ -57,6 +57,14 @@ export interface DatabaseInfo {
   trees: string[];
 }
 
+export interface UpdateCheck {
+  currentVersion: string;
+  latestVersion: string;
+  hasUpdate: boolean;
+  releaseUrl: string | null;
+  releaseNotes: string | null;
+}
+
 export interface SystemSettings {
   maxUsers: number;
   registrationEnabled: boolean;

@@ -29,7 +29,7 @@ async fn get_profile(
     let user = state
         .store()
         .get_user_by_id(&auth.user_id)?
-        .ok_or_else(|| AppError::not_found("User not found"))?;
+        .ok_or_else(|| AppError::not_found("用户不存在"))?;
     Ok(ok(UserProfile::from(&user)))
 }
 
@@ -47,7 +47,7 @@ async fn update_profile(
     let mut user = state
         .store()
         .get_user_by_id(&auth.user_id)?
-        .ok_or_else(|| AppError::not_found("User not found"))?;
+        .ok_or_else(|| AppError::not_found("用户不存在"))?;
 
     if let Some(username) = req.username {
         let trimmed = username.trim();
@@ -82,10 +82,10 @@ async fn change_password(
     let mut user = state
         .store()
         .get_user_by_id(&auth.user_id)?
-        .ok_or_else(|| AppError::not_found("User not found"))?;
+        .ok_or_else(|| AppError::not_found("用户不存在"))?;
 
     if !verify_password(&req.current_password, &user.password_hash)? {
-        return Err(AppError::unauthorized("Current password is incorrect"));
+        return Err(AppError::unauthorized("当前密码不正确"));
     }
 
     user.password_hash = hash_password(&req.new_password)?;

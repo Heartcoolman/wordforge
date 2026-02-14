@@ -252,7 +252,7 @@ async fn next_words(
         return Err(AppError::bad_request(
             "LEARNING_TOO_MANY_EXCLUDES",
             &format!(
-                "exclude_word_ids cannot exceed {}",
+                "排除单词数量不能超过{}",
                 state.config().limits.max_exclude_word_ids
             ),
         ));
@@ -386,7 +386,7 @@ async fn adjust_words(
         if !recent_performance.is_finite() || !(0.0..=1.0).contains(&recent_performance) {
             return Err(AppError::bad_request(
                 "LEARNING_INVALID_RECENT_PERFORMANCE",
-                "recentPerformance must be a number in [0,1]",
+                "recentPerformance 必须是0到1之间的数值",
             ));
         }
 
@@ -443,10 +443,10 @@ async fn sync_progress(
     let mut session = state
         .store()
         .get_learning_session(&req.session_id)?
-        .ok_or_else(|| AppError::not_found("Session not found"))?;
+        .ok_or_else(|| AppError::not_found("学习会话不存在"))?;
 
     if session.user_id != auth.user_id {
-        return Err(AppError::forbidden("Session belongs to another user"));
+        return Err(AppError::forbidden("该会话属于其他用户"));
     }
 
     // Only increment, never decrease
@@ -484,10 +484,10 @@ async fn complete_session(
     let mut session = state
         .store()
         .get_learning_session(&req.session_id)?
-        .ok_or_else(|| AppError::not_found("Session not found"))?;
+        .ok_or_else(|| AppError::not_found("学习会话不存在"))?;
 
     if session.user_id != auth.user_id {
-        return Err(AppError::forbidden("Session belongs to another user"));
+        return Err(AppError::forbidden("该会话属于其他用户"));
     }
 
     let now = Utc::now();

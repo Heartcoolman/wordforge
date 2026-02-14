@@ -100,7 +100,7 @@ async fn batch_process(
         return Err(AppError::bad_request(
             "BATCH_TOO_LARGE",
             &format!(
-                "batch_process accepts at most {} events",
+                "批量处理事件数量上限为{}",
                 state.config().limits.max_batch_size
             ),
         ));
@@ -187,7 +187,7 @@ async fn report_visual_fatigue(
     if !(0.0..=100.0).contains(&req.score) {
         return Err(AppError::bad_request(
             "INVALID_SCORE",
-            "score must be 0-100",
+            "分数必须在0到100之间",
         ));
     }
     let user_state = state
@@ -272,28 +272,28 @@ async fn get_intervention(
     if user_state.fatigue > iv.fatigue_alert_threshold {
         suggestions.push(serde_json::json!({
             "type": "rest",
-            "message": "You seem fatigued. Consider taking a break.",
+            "message": "您似乎有些疲劳，建议休息一下",
             "severity": "warning",
         }));
     }
     if user_state.motivation < iv.motivation_alert_threshold {
         suggestions.push(serde_json::json!({
             "type": "encouragement",
-            "message": "Try easier words to rebuild confidence.",
+            "message": "试试更简单的单词来重建信心",
             "severity": "info",
         }));
     }
     if user_state.attention < iv.attention_alert_threshold {
         suggestions.push(serde_json::json!({
             "type": "focus",
-            "message": "Your attention seems low. Try a shorter study session.",
+            "message": "您的注意力似乎有所下降，建议缩短学习时间",
             "severity": "warning",
         }));
     }
     if suggestions.is_empty() {
         suggestions.push(serde_json::json!({
             "type": "continue",
-            "message": "You're doing great! Keep going.",
+            "message": "表现很棒！继续保持",
             "severity": "success",
         }));
     }

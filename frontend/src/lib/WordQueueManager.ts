@@ -175,7 +175,7 @@ export function createWordQueueManager(batchSize = 5) {
         .map((q) => (mode === 'word-to-meaning' ? q.word.meaning : q.word.text));
 
       while (others.length < 3) {
-        others.push(mode === 'word-to-meaning' ? '(无释义)' : '(unknown)');
+        others.push(mode === 'word-to-meaning' ? '(无释义)' : '(未知)');
       }
 
       return shuffle([correctAnswer, ...others]);
