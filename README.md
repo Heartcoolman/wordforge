@@ -278,19 +278,101 @@ npx vite --host    # http://localhost:5173
 
 ## 测试
 
+项目包含完整的测试套件：
+
+### 快速测试
+
 ```bash
-# 后端测试
+# 运行所有测试（推荐）
+./run-all-tests.sh
+
+# 仅前端测试
+cd frontend && npm test
+
+# 仅后端测试
+JWT_SECRET="test_secret" ADMIN_JWT_SECRET="test_admin_secret" cargo test
+```
+
+### 单元测试
+
+**后端测试 (Rust)**
+
+```bash
+# 运行所有测试
+JWT_SECRET="test_secret_key_for_jwt_signing_minimum_64_characters_long_abcd" \
+ADMIN_JWT_SECRET="test_admin_secret_key_for_jwt_signing_minimum_64_chars_long" \
 cargo test
 
-# 前端单元测试
+# 运行特定测试
+cargo test --test auth_tests
+```
+
+**前端测试 (Vitest)**
+
+```bash
 cd frontend
+
+# 运行测试
 npm test
 
-# 前端测试（含覆盖率）
-npm run test:coverage
+# 监听模式
+npm run test:watch
 
-# E2E 测试
+# 生成覆盖率报告
+npm run test:coverage
+```
+
+### E2E测试
+
+项目包含完整的端到端测试套件，使用 Playwright 测试框架，覆盖71个测试用例。
+
+```bash
+cd frontend
+
+# 首次运行需要安装Playwright浏览器
+npx playwright install chromium
+
+# 运行E2E测试
 npm run test:e2e
+
+# 使用脚本运行（自动安装依赖）
+./run-e2e-tests.sh
+
+# 查看测试报告
+npx playwright show-report
+
+# 调试模式
+npx playwright test --debug
+```
+
+**E2E测试覆盖模块：**
+- ✅ 认证流程（登录、注册、密码重置）
+- ✅ 管理后台
+- ✅ 学习流程
+- ✅ 词本管理
+- ✅ 词书中心
+- ✅ 学习配置
+- ✅ 用户资料
+- ✅ 通知系统
+- ✅ 学习记录
+- ✅ 主页和导航
+
+详细文档见 [frontend/e2e/README.md](frontend/e2e/README.md)
+
+### 测试覆盖率
+
+```bash
+# 生成所有覆盖率报告
+make coverage
+
+# 仅后端
+make coverage-backend
+
+# 仅前端
+make coverage-frontend
+
+# 在浏览器中查看
+make coverage-open
 ```
 
 ---
