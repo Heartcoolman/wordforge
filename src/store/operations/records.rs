@@ -71,11 +71,12 @@ impl Store {
         let key = keys::record_key(&record.user_id, ts, &record.id)?;
         self.records
             .insert(key.as_bytes(), Self::serialize(record)?)?;
-        // Maintain records_by_time index
+        let idx_key = keys::record_id_index_key(&record.user_id, &record.id)?;
+        self.record_id_index
+            .insert(idx_key.as_bytes(), key.as_bytes())?;
         let time_key = keys::records_by_time_key(ts, &record.id)?;
         self.records_by_time
             .insert(time_key.as_bytes(), record.user_id.as_bytes())?;
-        // Maintain word_references index
         let ref_key = keys::word_ref_key(&record.word_id, "records", key.as_bytes())?;
         self.word_references.insert(ref_key.as_bytes(), &[])?;
         Ok(())
@@ -186,6 +187,8 @@ impl Store {
         // (these are idempotent and can be rebuilt from primary data)
         let _ = self.records_by_time.insert(time_index_key.as_bytes(), user_id_bytes.as_slice());
         let _ = self.word_references.insert(word_ref_key.as_bytes(), &[]);
+        let idx_key = keys::record_id_index_key(&record.user_id, &record.id)?;
+        let _ = self.record_id_index.insert(idx_key.as_bytes(), record_key.as_bytes());
 
         // Update user stats aggregation
         if let Ok(mut stats) = self.get_user_stats_agg(&record.user_id) {
@@ -208,13 +211,20 @@ impl Store {
         user_id: &str,
         record_id: &str,
     ) -> Result<Option<LearningRecord>, StoreError> {
+        let idx_key = keys::record_id_index_key(user_id, record_id)?;
+        if let Some(full_key_bytes) = self.record_id_index.get(idx_key.as_bytes())? {
+            if let Some(value) = self.records.get(&full_key_bytes)? {
+                return Ok(Some(Self::deserialize::<LearningRecord>(&value)?));
+            }
+        }
+
         let prefix = keys::record_prefix(user_id)?;
         let suffix = format!(":{record_id}");
-
         for item in self.records.scan_prefix(prefix.as_bytes()) {
             let (key, value) = item?;
             let key_text = String::from_utf8_lossy(&key);
             if key_text.ends_with(&suffix) {
+                let _ = self.record_id_index.insert(idx_key.as_bytes(), key.as_ref());
                 return Ok(Some(Self::deserialize::<LearningRecord>(&value)?));
             }
         }

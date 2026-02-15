@@ -38,7 +38,7 @@ export function useFatigueDetection() {
       try {
         const bitmap = await createImageBitmap(video);
         worker.postMessage(
-          { type: 'process', bitmap } satisfies WorkerCommand,
+          { type: 'process', bitmap, capturedAt: Date.now() } satisfies WorkerCommand,
           [bitmap],
         );
       } catch {

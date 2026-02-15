@@ -14,17 +14,42 @@ use tokio::sync::{broadcast, Mutex};
 use crate::response::{AppError, ErrorBody};
 use crate::state::AppState;
 
+const NUM_SHARDS: usize = 16;
+
 #[derive(Debug, Clone)]
 struct WindowEntry {
     count: u64,
     window_start: Instant,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
+struct Shard {
+    map: Mutex<HashMap<IpAddr, WindowEntry>>,
+}
+
+#[derive(Debug)]
 pub struct RateLimiter {
     window_secs: u64,
     max_requests: u64,
-    entries: Arc<Mutex<HashMap<IpAddr, WindowEntry>>>,
+    shards: Vec<Shard>,
+}
+
+fn shard_index(ip: &IpAddr) -> usize {
+    let hash = match ip {
+        IpAddr::V4(v4) => {
+            let octets = v4.octets();
+            u32::from_be_bytes(octets) as usize
+        }
+        IpAddr::V6(v6) => {
+            let segments = v6.segments();
+            (segments[0] as usize)
+                .wrapping_mul(31)
+                .wrapping_add(segments[1] as usize)
+                .wrapping_mul(31)
+                .wrapping_add(segments[2] as usize)
+        }
+    };
+    hash % NUM_SHARDS
 }
 
 #[derive(Debug, Clone)]
@@ -37,23 +62,28 @@ pub struct RateLimitResult {
 
 impl RateLimiter {
     pub fn new(window_secs: u64, max_requests: u64) -> Self {
+        let shards = (0..NUM_SHARDS)
+            .map(|_| Shard {
+                map: Mutex::new(HashMap::new()),
+            })
+            .collect();
         Self {
             window_secs,
             max_requests,
-            entries: Arc::new(Mutex::new(HashMap::new())),
+            shards,
         }
     }
 
     pub async fn check(&self, ip: IpAddr, max_entries: usize) -> RateLimitResult {
-        // IPv6 按 /64 前缀聚合限流，防止攻击者利用大量 IPv6 地址绕过限流
         let key = normalize_ip_for_rate_limit(ip);
         let now = Instant::now();
-        let mut map = self.entries.lock().await;
+        let shard = &self.shards[shard_index(&key)];
+        let mut map = shard.map.lock().await;
+        let per_shard_max = max_entries / NUM_SHARDS + 1;
 
-        if map.len() >= max_entries && !map.contains_key(&key) {
-            // 清理过期条目
+        if map.len() >= per_shard_max && !map.contains_key(&key) {
             map.retain(|_, v| now.duration_since(v.window_start).as_secs() < self.window_secs);
-            if map.len() >= max_entries {
+            if map.len() >= per_shard_max {
                 return RateLimitResult {
                     allowed: false,
                     limit: self.max_requests,
@@ -101,21 +131,20 @@ impl RateLimiter {
 
     pub async fn cleanup(&self) {
         let now = Instant::now();
-        let mut map = self.entries.lock().await;
-        map.retain(|_, value| {
-            now.duration_since(value.window_start).as_secs() <= self.window_secs * 2
-        });
+        for shard in &self.shards {
+            let mut map = shard.map.lock().await;
+            map.retain(|_, value| {
+                now.duration_since(value.window_start).as_secs() <= self.window_secs * 2
+            });
+        }
     }
 }
 
-/// IPv6 地址按 /64 前缀聚合，防止同一子网内的大量地址绕过限流。
-/// IPv4 地址保持不变。
 fn normalize_ip_for_rate_limit(ip: IpAddr) -> IpAddr {
     match ip {
         IpAddr::V4(_) => ip,
         IpAddr::V6(v6) => {
             let segments = v6.segments();
-            // 保留前 64 位（前 4 个 segment），后 64 位清零
             let normalized = std::net::Ipv6Addr::new(
                 segments[0],
                 segments[1],
@@ -131,7 +160,7 @@ fn normalize_ip_for_rate_limit(ip: IpAddr) -> IpAddr {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct RateLimitState {
     pub limiter: RateLimiter,
 }
@@ -228,7 +257,6 @@ pub fn extract_client_ip(
         }
     }
 
-    // 使用 TCP 连接的真实 IP
     connect_ip.unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST))
 }
 
@@ -264,8 +292,7 @@ pub async fn auth_rate_limit_cleanup_loop(
     }
 }
 
-/// 认证端点专用速率限制器：每 IP 每分钟 10 次
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct AuthRateLimitState {
     pub limiter: RateLimiter,
 }

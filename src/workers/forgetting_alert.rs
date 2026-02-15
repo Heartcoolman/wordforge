@@ -1,10 +1,9 @@
 //! B44: Forgetting alert worker
 //! Daily scan for words at high forgetting risk, generate notifications.
-//! 在发送通知前检查 48 小时内是否已有同类通知（去重）
+//! 使用 alert_dedup tree 进行 O(1) 去重检查
 
 use crate::constants::MILLIS_PER_HOUR;
 use crate::store::Store;
-use std::collections::HashSet;
 
 /// 通知去重窗口
 const DEDUP_WINDOW_HOURS: i64 = 48;
@@ -33,8 +32,6 @@ pub async fn run(store: &Store) {
             Ok(p) => p,
             Err(_) => continue,
         };
-
-        let mut recent_alert_word_ids: Option<HashSet<String>> = None;
 
         for item in store.word_due_index.scan_prefix(prefix.as_bytes()) {
             let (key, _) = match item {
@@ -74,11 +71,19 @@ pub async fn run(store: &Store) {
                 continue;
             }
 
-            let recent_word_ids = recent_alert_word_ids
-                .get_or_insert_with(|| recent_alert_word_ids_in_window(store, user_id, cutoff));
-            if recent_word_ids.contains(word_id.as_str()) {
-                skipped_dedup += 1;
-                continue;
+            let dedup_key = match crate::store::keys::alert_dedup_key(user_id, &word_id) {
+                Ok(k) => k,
+                Err(_) => continue,
+            };
+            if let Ok(Some(ts_bytes)) = store.alert_dedup.get(dedup_key.as_bytes()) {
+                if let Ok(ts_str) = std::str::from_utf8(&ts_bytes) {
+                    if let Ok(prev_ms) = ts_str.parse::<i64>() {
+                        if prev_ms >= cutoff_ms {
+                            skipped_dedup += 1;
+                            continue;
+                        }
+                    }
+                }
             }
 
             let overdue_hours = now_ms.saturating_sub(due_ts_ms) / MILLIS_PER_HOUR;
@@ -92,7 +97,7 @@ pub async fn run(store: &Store) {
                 "read": false,
             });
 
-            let key = match crate::store::keys::notification_key(
+            let notif_key = match crate::store::keys::notification_key(
                 user_id,
                 notification["id"].as_str().unwrap_or("unknown"),
             ) {
@@ -113,13 +118,15 @@ pub async fn run(store: &Store) {
 
             if let Err(e) = store
                 .notifications
-                .insert(key.as_bytes(), notification_bytes)
+                .insert(notif_key.as_bytes(), notification_bytes)
             {
                 tracing::warn!(error = %e, "Failed to insert forgetting alert notification");
                 continue;
             }
 
-            recent_word_ids.insert(word_id);
+            let _ = store
+                .alert_dedup
+                .insert(dedup_key.as_bytes(), now_ms.to_string().as_bytes());
             at_risk += 1;
         }
     }
@@ -131,50 +138,4 @@ pub async fn run(store: &Store) {
         );
     }
     tracing::info!(at_risk, "Forgetting alert: found at-risk words");
-}
-
-/// 收集指定用户在去重窗口内已发送 forgetting_alert 的 word_id 集合。
-fn recent_alert_word_ids_in_window(
-    store: &Store,
-    user_id: &str,
-    cutoff: chrono::DateTime<chrono::Utc>,
-) -> HashSet<String> {
-    let prefix = match crate::store::keys::notification_prefix(user_id) {
-        Ok(p) => p,
-        Err(_) => return HashSet::new(),
-    };
-    let mut word_ids = HashSet::new();
-
-    for item in store.notifications.scan_prefix(prefix.as_bytes()) {
-        let (_, v) = match item {
-            Ok(kv) => kv,
-            Err(_) => continue,
-        };
-
-        let notif: serde_json::Value = match serde_json::from_slice(&v) {
-            Ok(n) => n,
-            Err(_) => continue,
-        };
-
-        if notif.get("type").and_then(|t| t.as_str()) != Some("forgetting_alert") {
-            continue;
-        }
-
-        let Some(created_str) = notif.get("createdAt").and_then(|c| c.as_str()) else {
-            continue;
-        };
-        let Ok(created) = chrono::DateTime::parse_from_rfc3339(created_str) else {
-            continue;
-        };
-
-        if created.with_timezone(&chrono::Utc) < cutoff {
-            continue;
-        }
-
-        if let Some(word_id) = notif.get("wordId").and_then(|w| w.as_str()) {
-            word_ids.insert(word_id.to_string());
-        }
-    }
-
-    word_ids
 }

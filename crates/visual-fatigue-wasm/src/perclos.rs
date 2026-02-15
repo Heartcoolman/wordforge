@@ -130,6 +130,8 @@ impl PERCLOSCalculator {
     /// 使用时间加权方式：
     /// 相邻样本之间的时间段，如果前一样本为闭眼则该时间段计入闭眼时间。
     fn compute_perclos(&self) -> f64 {
+        const MAX_SAMPLE_INTERVAL_MS: f64 = 200.0;
+
         if self.samples.len() < 2 {
             return 0.0;
         }
@@ -143,7 +145,7 @@ impl PERCLOSCalculator {
         };
 
         for curr in iter {
-            let dt = curr.timestamp - prev.timestamp;
+            let dt = (curr.timestamp - prev.timestamp).min(MAX_SAMPLE_INTERVAL_MS);
             if dt > 0.0 {
                 total_duration += dt;
                 if prev.is_closed {

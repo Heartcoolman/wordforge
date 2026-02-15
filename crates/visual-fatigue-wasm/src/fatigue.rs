@@ -143,9 +143,7 @@ impl FatigueScorer {
             0.0 // 正常眨眼率 → 0分
         };
 
-        // 3. 哈欠评分
-        // 哈欠率 > 0 就开始计分，> 3次/5分钟 → 高分
-        let yawn_score = Self::map_range(yawn_rate, 0.0, 1.0);
+        let yawn_score = Self::map_range(yawn_rate, 0.0, 0.15);
 
         // 4. 头部下垂评分
         // 下垂占比 > 5% 开始计分，> 30% → 100分

@@ -31,6 +31,14 @@ pub fn count_overdue_words(store: &Store, now_ms: i64) -> u32 {
             Err(_) => continue,
         };
 
+        let state_prefix = match crate::store::keys::word_learning_state_prefix(user_id) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        let mut states: std::collections::HashMap<String, crate::store::operations::word_states::WordLearningState> =
+            std::collections::HashMap::new();
+        let mut states_loaded = false;
+
         for item in store.word_due_index.scan_prefix(prefix.as_bytes()) {
             let (key, _) = match item {
                 Ok(kv) => kv,
@@ -49,13 +57,21 @@ pub fn count_overdue_words(store: &Store, now_ms: i64) -> u32 {
                 break;
             }
 
-            let state = match store.get_word_learning_state(user_id, &word_id) {
-                Ok(Some(s)) => s,
-                Ok(None) => continue,
-                Err(e) => {
-                    tracing::warn!(error = %e, "Delayed reward: failed to read word state");
-                    continue;
+            if !states_loaded {
+                for si in store.word_learning_states.scan_prefix(state_prefix.as_bytes()) {
+                    let (_, v) = match si {
+                        Ok(kv) => kv,
+                        Err(_) => continue,
+                    };
+                    if let Ok(s) = serde_json::from_slice::<crate::store::operations::word_states::WordLearningState>(&v) {
+                        states.insert(s.word_id.clone(), s);
+                    }
                 }
+                states_loaded = true;
+            }
+
+            let Some(state) = states.get(&word_id) else {
+                continue;
             };
 
             if let Some(review_date) = state.next_review_date {

@@ -195,6 +195,41 @@ impl EARCalculator {
         self.threshold = threshold;
     }
 
+    /// 双眼 6 点联合计算：分别计算左右眼 EAR 后取平均，仅 push 一次
+    ///
+    /// 输入: 24 个浮点数（左眼 12 + 右眼 12）
+    #[wasm_bindgen(js_name = "calculateBinocular6Point")]
+    pub fn calculate_binocular_6point(&mut self, left: &[f64], right: &[f64]) -> EARResult {
+        let calc = |lm: &[f64]| -> Option<(f64, f64)> {
+            if lm.len() < 12 {
+                return None;
+            }
+            let p1 = Point::new(lm[0], lm[1]);
+            let p2 = Point::new(lm[2], lm[3]);
+            let p3 = Point::new(lm[4], lm[5]);
+            let p4 = Point::new(lm[6], lm[7]);
+            let p5 = Point::new(lm[8], lm[9]);
+            let p6 = Point::new(lm[10], lm[11]);
+            let h = p1.distance(&p4);
+            if h < 1e-6 {
+                return None;
+            }
+            let ear = (p2.distance(&p6) + p3.distance(&p5)) / (2.0 * h);
+            let conf = (h / 0.05).min(1.0);
+            Some((ear, conf))
+        };
+
+        let (left_ear, left_conf) = calc(left).unwrap_or((0.0, 0.0));
+        let (right_ear, right_conf) = calc(right).unwrap_or((0.0, 0.0));
+
+        let ear = (left_ear + right_ear) / 2.0;
+        let confidence = (left_conf + right_conf) / 2.0;
+
+        self.push_history(ear);
+
+        EARResult { ear, confidence }
+    }
+
     /// 重置计算器状态
     pub fn reset(&mut self) {
         self.history.clear();
@@ -202,7 +237,6 @@ impl EARCalculator {
 }
 
 impl EARCalculator {
-    /// 将 EAR 值加入历史队列
     fn push_history(&mut self, ear: f64) {
         self.history.push_back(ear);
         while self.history.len() > 100 {
