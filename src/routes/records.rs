@@ -410,8 +410,9 @@ async fn batch_create_records(
         }
     }
 
-    // 如果全部失败，回滚到初始用户状态
-    if !results.is_empty() && results.iter().all(|r| r.duplicate) && !errors.is_empty() {
+    // 如果全部失败（无新记录写入），回滚到初始用户状态
+    let has_new_records = results.iter().any(|r| !r.duplicate);
+    if !has_new_records && !errors.is_empty() {
         restore_user_state_snapshot(state.store(), &auth.user_id, &user_snapshot);
     }
 
@@ -466,6 +467,7 @@ async fn process_batch_record(
     let mastery_key = format!("mastery:{}", &req.word_id);
     let prev_mastery = state.store().get_engine_algo_state(user_id, &mastery_key)?;
     let prev_word_elo = state.store().get_word_elo(&req.word_id)?;
+    let prev_user_elo = state.store().get_user_elo(user_id)?;
 
     let amas_result = state
         .amas()
@@ -571,6 +573,10 @@ async fn process_batch_record(
             restore_engine_algo_state(state.store(), user_id, &mastery_key, &prev_mastery);
             if let Err(e) = state.store().set_word_elo(&req.word_id, &prev_word_elo) {
                 tracing::warn!(error = %e, "Failed to rollback word ELO in batch");
+            }
+            // 回滚 user ELO
+            if let Err(e) = state.store().set_user_elo(user_id, &prev_user_elo) {
+                tracing::warn!(error = %e, "Failed to rollback user ELO in batch");
             }
             AppError::internal(&error.to_string())
         })?;

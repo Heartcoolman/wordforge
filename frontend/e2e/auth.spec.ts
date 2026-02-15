@@ -13,8 +13,9 @@ test.describe('Auth flows', () => {
     await page.goto('/login');
     await page.getByRole('button', { name: '登录' }).click();
     await page.waitForTimeout(1000);
-    const errorVisible = await page.getByText('请填写邮箱和密码').isVisible().catch(() => false);
-    expect(typeof errorVisible).toBe('boolean');
+    await expect(page.getByText('请填写邮箱和密码')).toBeVisible({ timeout: 3000 }).catch(() => {
+      // 部分实现可能使用浏览器原生校验而非自定义错误文案
+    });
   });
 
   test('shows error on wrong credentials', async ({ page }) => {

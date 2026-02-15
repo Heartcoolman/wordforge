@@ -248,13 +248,17 @@ export function connectAmasStateStream(
         let eventType = '';
 
         while (!aborted) {
-          const timeout = new Promise<{ done: true; value: undefined }>((resolve) =>
-            setTimeout(() => resolve({ done: true, value: undefined }), SSE_READ_TIMEOUT_MS),
-          );
-          const { done, value } = await Promise.race([reader.read(), timeout]);
-          if (done) break;
+          let timerId: ReturnType<typeof setTimeout> | undefined;
+          const timeout = new Promise<{ done: true; value: undefined }>((resolve) => {
+            timerId = setTimeout(() => resolve({ done: true, value: undefined }), SSE_READ_TIMEOUT_MS);
+          });
+          const result = await Promise.race([
+            reader.read().then((r) => { clearTimeout(timerId); return r; }),
+            timeout,
+          ]);
+          if (result.done) { reader.cancel(); break; }
 
-          buffer += decoder.decode(value, { stream: true });
+          buffer += decoder.decode(result.value, { stream: true });
           const lines = buffer.split('\n');
           buffer = lines.pop() ?? '';
 

@@ -239,6 +239,25 @@ impl Store {
             }
         }
 
+        // Clean up records_by_time and record_id_index for deleted records
+        for rec_key in &rec_keys_to_remove {
+            let key_str = String::from_utf8_lossy(rec_key);
+            let parts: Vec<&str> = key_str.splitn(3, ':').collect();
+            if parts.len() == 3 {
+                let uid = parts[0];
+                let record_id = parts[2];
+                if let Ok(reverse_ts) = parts[1].parse::<u64>() {
+                    let ts = u64::MAX - reverse_ts;
+                    if let Ok(time_key) = keys::records_by_time_key(ts as i64, record_id) {
+                        let _ = self.records_by_time.remove(time_key.as_bytes());
+                    }
+                }
+                if let Ok(idx_key) = keys::record_id_index_key(uid, record_id) {
+                    let _ = self.record_id_index.remove(idx_key.as_bytes());
+                }
+            }
+        }
+
         // Clean up word_references index
         for (k, _) in self.word_references.scan_prefix(ref_prefix.as_bytes()).flatten() {
             let _ = self.word_references.remove(&k);

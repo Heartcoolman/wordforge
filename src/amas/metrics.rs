@@ -135,7 +135,7 @@ impl MetricsRegistry {
                 let total_latency_us = metric.total_latency_us.swap(0, Ordering::Relaxed);
                 let error_count = metric.error_count.swap(0, Ordering::Relaxed);
                 for bucket in &metric.latency_buckets {
-                    bucket.store(0, Ordering::Relaxed);
+                    bucket.swap(0, Ordering::Relaxed);
                 }
                 (
                     id.as_str().to_string(),

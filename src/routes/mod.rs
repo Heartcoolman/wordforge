@@ -93,7 +93,13 @@ async fn static_cache_headers(req: Request<axum::body::Body>, next: Next) -> Res
         return response;
     }
 
-    let cache_value = if path.ends_with(".html") || path == "/" {
+    let is_html = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.contains("text/html"));
+
+    let cache_value = if is_html {
         "no-cache, must-revalidate"
     } else if path.starts_with("/assets/") {
         "public, max-age=31536000, immutable"
