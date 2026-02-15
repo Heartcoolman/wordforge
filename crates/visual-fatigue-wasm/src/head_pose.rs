@@ -201,7 +201,7 @@ impl HeadPoseEstimator {
         let first_ts = self.drop_history.front().unwrap().timestamp;
         let elapsed_ms = current_ts - first_ts;
 
-        if elapsed_ms < 1000.0 {
+        if elapsed_ms < 10_000.0 {
             return 0.0;
         }
 
@@ -218,15 +218,19 @@ impl HeadPoseEstimator {
         let mut drop_duration = 0.0;
         let mut total_duration = 0.0;
 
-        let samples: Vec<&PoseSample> = self.pose_samples.iter().collect();
-        for i in 1..samples.len() {
-            let dt = samples[i].timestamp - samples[i - 1].timestamp;
+        let mut iter = self.pose_samples.iter();
+        let Some(mut prev) = iter.next() else {
+            return 0.0;
+        };
+        for curr in iter {
+            let dt = curr.timestamp - prev.timestamp;
             if dt > 0.0 {
                 total_duration += dt;
-                if samples[i - 1].is_dropping {
+                if prev.is_dropping {
                     drop_duration += dt;
                 }
             }
+            prev = curr;
         }
 
         if total_duration < 1e-6 {

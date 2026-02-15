@@ -23,6 +23,12 @@ export function ProtectedRoute(props: ParentProps) {
       return;
     }
 
+    if (Date.now() - lastValidated < VALIDATION_THROTTLE_MS && authStore.user()) {
+      setVerified(true);
+      setChecking(false);
+      return;
+    }
+
     try {
       const { usersApi } = await import('@/api/users');
       await usersApi.getMe();

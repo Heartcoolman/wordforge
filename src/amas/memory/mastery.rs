@@ -18,6 +18,8 @@ pub struct WordMasteryState {
     pub correct_streak: u32,
     pub total_attempts: u32,
     pub total_correct: u32,
+    #[serde(default)]
+    pub recent_results: Vec<bool>,
 }
 
 impl WordMasteryState {
@@ -29,6 +31,7 @@ impl WordMasteryState {
             correct_streak: 0,
             total_attempts: 0,
             total_correct: 0,
+            recent_results: Vec::new(),
         }
     }
 }
@@ -42,7 +45,8 @@ pub fn update_mastery(
     config: &MemoryModelConfig,
 ) -> WordMasteryDecision {
     let alpha = (interval_scale * ALPHA_SCALE).clamp(ALPHA_MIN, ALPHA_MAX);
-    super::mdm::update_strength(&mut state.mdm, quality, alpha, config);
+    let effective_quality = if is_correct { quality } else { quality * 0.1 };
+    super::mdm::update_strength(&mut state.mdm, effective_quality, alpha, config);
 
     state.total_attempts += 1;
     if is_correct {
@@ -50,6 +54,13 @@ pub fn update_mastery(
         state.correct_streak += 1;
     } else {
         state.correct_streak = 0;
+    }
+
+    state.recent_results.push(is_correct);
+    let window = config.mastery_window_size as usize;
+    if state.recent_results.len() > window {
+        let drain_count = state.recent_results.len() - window;
+        state.recent_results.drain(..drain_count);
     }
 
     state.mastery_level = determine_level(state, config);
@@ -69,10 +80,11 @@ pub fn update_mastery(
 }
 
 fn determine_level(state: &WordMasteryState, config: &MemoryModelConfig) -> MasteryLevel {
-    let accuracy = if state.total_attempts > 0 {
-        state.total_correct as f64 / state.total_attempts as f64
-    } else {
+    let accuracy = if state.recent_results.is_empty() {
         0.0
+    } else {
+        let correct = state.recent_results.iter().filter(|&&r| r).count();
+        correct as f64 / state.recent_results.len() as f64
     };
     let composite = super::mdm::composite_strength(&state.mdm, config);
 

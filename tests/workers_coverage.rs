@@ -137,13 +137,14 @@ async fn it_worker_manager_registers_jobs_and_shutdowns() {
     assert!(jobs
         .iter()
         .any(|j| j.name == workers::WorkerName::MetricsFlush && j.enabled));
-    // MonitoringAggregate and LlmAdvisor are now stub-disabled by default
+    // MonitoringAggregate is stub-disabled by default
     assert!(jobs
         .iter()
         .any(|j| j.name == workers::WorkerName::MonitoringAggregate && !j.enabled));
+    // LlmAdvisor is configurable and enabled in this test
     assert!(jobs
         .iter()
-        .any(|j| j.name == workers::WorkerName::LlmAdvisor && !j.enabled));
+        .any(|j| j.name == workers::WorkerName::LlmAdvisor && j.enabled));
 
     let mut worker_cfg_without_optional = worker_cfg.clone();
     worker_cfg_without_optional.enable_monitoring = false;
@@ -492,8 +493,9 @@ fn it_exercises_memory_models_and_metrics_registry() {
     iad::record_confusion(&mut iad_state, "word-a", "word-b", 0.0, &iad_config);
     let penalty = iad::interference_penalty("word-b", &iad_state, &iad_config);
     assert!(penalty > 0.0);
+    let empty_iad_state = iad::IadState::default();
     assert_eq!(
-        iad::interference_penalty("word-x", &iad_state, &iad_config),
+        iad::interference_penalty("word-x", &empty_iad_state, &iad_config),
         0.0
     );
     assert!(iad::interval_extension_factor(penalty, &iad_config) < 1.0);

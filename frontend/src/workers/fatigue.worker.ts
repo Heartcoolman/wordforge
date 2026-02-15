@@ -15,7 +15,7 @@ import { MEDIAPIPE_CDN_URLS, MEDIAPIPE_MODEL_ASSET_PATH } from '@/lib/constants'
 // 主线程 → Worker
 export type WorkerCommand =
   | { type: 'init' }
-  | { type: 'process'; bitmap: ImageBitmap }
+  | { type: 'process'; bitmap: ImageBitmap; capturedAt: number }
   | { type: 'reset' }
   | { type: 'destroy' };
 
@@ -32,12 +32,15 @@ const LEFT_EYE_IDX = [33, 160, 158, 133, 153, 144] as const;
 // 右眼 6 点
 const RIGHT_EYE_IDX = [362, 385, 387, 263, 373, 380] as const;
 // 嘴部 8 点 (用于 MAR 计算)
-const MOUTH_IDX = [61, 291, 39, 181, 0, 17, 269, 405] as const;
+// 顺序: p1(左嘴角), p2(上唇左外), p3(上唇中), p4(上唇右外), p5(右嘴角), p6(下唇右外), p7(下唇中), p8(下唇左外)
+// MAR = (|p2-p8| + |p3-p7| + |p4-p6|) / (2 * |p1-p5|)
+const MOUTH_IDX = [61, 39, 0, 269, 291, 405, 17, 181] as const;
 
 // --- 状态 ---
 
 let faceLandmarker: FaceLandmarker | null = null;
 let engine: FatigueEngine | null = null;
+let processing = false;
 
 /**
  * 从 478 个关键点中提取指定索引的 2D 坐标（仅 x, y）
@@ -60,8 +63,8 @@ function extract2DLandmarks(
 /**
  * 从 MediaPipe 4x4 变换矩阵提取欧拉角 (pitch/yaw/roll)
  *
- * 矩阵为行主序 (row-major)：
- * [r00, r01, r02, tx, r10, r11, r12, ty, r20, r21, r22, tz, 0, 0, 0, 1]
+ * MediaPipe facialTransformationMatrixes 返回列主序 (column-major) 4x4 矩阵：
+ * [r00, r10, r20, 0, r01, r11, r21, 0, r02, r12, r22, 0, tx, ty, tz, 1]
  *
  * ZYX 顺序欧拉角分解：
  * - pitch (绕X轴) = atan2(r21, r22)
@@ -71,11 +74,12 @@ function extract2DLandmarks(
 function matrixToEulerAngles(data: ArrayLike<number>): { pitch: number; yaw: number; roll: number } {
   const RAD2DEG = 180 / Math.PI;
 
-  const r00 = data[0];
-  const r10 = data[4];
-  const r20 = data[8];
-  const r21 = data[9];
-  const r22 = data[10];
+  // 列主序: data[col*4 + row]
+  const r00 = data[0];   // col=0, row=0
+  const r10 = data[1];   // col=0, row=1
+  const r20 = data[2];   // col=0, row=2
+  const r21 = data[6];   // col=1, row=2
+  const r22 = data[10];  // col=2, row=2
 
   const pitch = Math.atan2(r21, r22) * RAD2DEG;
   const yaw = Math.asin(-Math.max(-1, Math.min(1, r20))) * RAD2DEG;
@@ -88,7 +92,6 @@ function matrixToEulerAngles(data: ArrayLike<number>): { pitch: number; yaw: num
  * 从 MediaPipe blendshapes 计算表情疲劳分数
  *
  * 关注与疲劳相关的 blendshape 类别：
- * - eyeBlinkLeft / eyeBlinkRight: 眨眼强度
  * - eyeSquintLeft / eyeSquintRight: 眯眼
  * - browDownLeft / browDownRight: 皱眉
  */
@@ -117,9 +120,6 @@ function computeExpressionFatigue(
 }
 
 /**
- * 初始化 MediaPipe FaceLandmarker 和 WASM 疲劳引擎
- */
-/**
  * 尝试多个 CDN 加载 MediaPipe Vision，返回第一个成功的结果
  */
 async function resolveVisionWithFallback() {
@@ -133,15 +133,16 @@ async function resolveVisionWithFallback() {
   throw new Error('所有 CDN 均无法加载 MediaPipe Vision WASM');
 }
 
+/**
+ * 初始化 MediaPipe FaceLandmarker 和 WASM 疲劳引擎
+ */
 async function handleInit(): Promise<void> {
   try {
-    // 并行加载 MediaPipe 和 WASM
     const [vision, wasmEngine] = await Promise.all([
       resolveVisionWithFallback(),
       initFatigueEngine(),
     ]);
 
-    // 尝试多个 CDN 加载模型资源
     let landmarker: FaceLandmarker | null = null;
     for (const cdnUrl of MEDIAPIPE_CDN_URLS) {
       try {
@@ -167,7 +168,6 @@ async function handleInit(): Promise<void> {
     }
 
     faceLandmarker = landmarker;
-
     engine = wasmEngine;
 
     self.postMessage({ type: 'ready' } satisfies WorkerResult);
@@ -178,16 +178,20 @@ async function handleInit(): Promise<void> {
 }
 
 /**
- * 处理单帧图像
+ * 处理单帧图像（含背压：上一帧未处理完时丢弃新帧）
  */
-function handleProcess(bitmap: ImageBitmap): void {
+function handleProcess(bitmap: ImageBitmap, capturedAt: number): void {
+  if (processing) {
+    bitmap.close();
+    return;
+  }
+  processing = true;
   try {
     if (!faceLandmarker || !engine) {
       bitmap.close();
       return;
     }
 
-    // MediaPipe 面部关键点检测
     const result = faceLandmarker.detect(bitmap);
     bitmap.close();
 
@@ -196,18 +200,15 @@ function handleProcess(bitmap: ImageBitmap): void {
     }
 
     const landmarks = result.faceLandmarks[0];
-    const now = Date.now();
+    const now = capturedAt;
 
-    // === EAR 计算 ===
-    // 提取 2D 坐标 (x,y)，每眼 6 点 × 2 = 12 个 float
+    // === EAR 计算（双眼联合，仅 push 一次均值） ===
     const leftEyeCoords = extract2DLandmarks(landmarks, LEFT_EYE_IDX);
     const rightEyeCoords = extract2DLandmarks(landmarks, RIGHT_EYE_IDX);
 
-    const leftEAR = engine.earCalculator.calculate6Point(leftEyeCoords);
-    const rightEAR = engine.earCalculator.calculate6Point(rightEyeCoords);
-    const avgEAR = (leftEAR.ear + rightEAR.ear) / 2;
-    leftEAR.free();
-    rightEAR.free();
+    const earResult = engine.earCalculator.calculateBinocular6Point(leftEyeCoords, rightEyeCoords);
+    const avgEAR = earResult.ear;
+    earResult.free();
 
     // === PERCLOS ===
     const perclos = engine.perclosCalculator.update(avgEAR, now);
@@ -219,7 +220,6 @@ function handleProcess(bitmap: ImageBitmap): void {
     blinkResult.free();
 
     // === 哈欠检测 ===
-    // 提取 2D 嘴部坐标，8 点 × 2 = 16 个 float
     const mouthCoords = extract2DLandmarks(landmarks, MOUTH_IDX);
     const yawnResult = engine.yawnDetector.update(mouthCoords, now);
     const yawnCount = yawnResult.yawn_count;
@@ -248,7 +248,6 @@ function handleProcess(bitmap: ImageBitmap): void {
     }
 
     // === 综合疲劳评分 ===
-    // FatigueScorer.calculate() 返回 serde 序列化的 JsValue（已含 camelCase 字段）
     const fatigueJsValue = engine.fatigueScorer.calculate(
       perclos,
       blinkRate,
@@ -260,13 +259,14 @@ function handleProcess(bitmap: ImageBitmap): void {
       now,
     );
 
-    // serde-wasm-bindgen 序列化结果已经是普通 JS 对象
     const fatigueResult = fatigueJsValue as FatigueResult;
 
     self.postMessage({ type: 'result', data: fatigueResult } satisfies WorkerResult);
   } catch (err) {
     const message = err instanceof Error ? err.message : '处理帧数据时出错';
     self.postMessage({ type: 'error', message } satisfies WorkerResult);
+  } finally {
+    processing = false;
   }
 }
 
@@ -308,7 +308,7 @@ self.onmessage = async (e: MessageEvent<WorkerCommand>) => {
       await handleInit();
       break;
     case 'process':
-      handleProcess(cmd.bitmap);
+      handleProcess(cmd.bitmap, cmd.capturedAt);
       break;
     case 'reset':
       handleReset();

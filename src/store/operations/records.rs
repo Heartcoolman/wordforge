@@ -18,35 +18,50 @@ pub struct LearningRecord {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct UserStatsAgg {
+    pub total_records: u64,
+    pub correct_records: u64,
+    pub word_ids: HashSet<String>,
+    pub session_ids: HashSet<String>,
+}
+
 impl Store {
-    /// 统计自指定时间以来的活跃用户数。
-    /// 注意：record_key 格式为 `{user_id}:{reverse_timestamp}:{record_id}`，
-    /// 按字典序排列时同一用户的记录按时间倒序排列。
-    /// 但由于需要跨所有用户统计，无法通过单一前缀扫描来利用时间戳有序性。
-    /// TODO: 考虑维护一个按全局时间戳排序的二级索引（如 `{reverse_timestamp}:{user_id}:{record_id}`），
-    /// 以支持高效的时间范围扫描。
+    pub fn get_user_stats_agg(&self, user_id: &str) -> Result<UserStatsAgg, StoreError> {
+        let key = keys::user_stats_key(user_id)?;
+        match self.user_stats.get(key.as_bytes())? {
+            Some(raw) => Ok(Self::deserialize(&raw)?),
+            None => Ok(UserStatsAgg::default()),
+        }
+    }
+
+    fn set_user_stats_agg(&self, user_id: &str, stats: &UserStatsAgg) -> Result<(), StoreError> {
+        let key = keys::user_stats_key(user_id)?;
+        self.user_stats
+            .insert(key.as_bytes(), Self::serialize(stats)?)?;
+        Ok(())
+    }
+
+    /// 统计自指定时间以来的活跃用户数（使用 records_by_time 索引）。
     pub fn count_active_users_since(&self, since: DateTime<Utc>) -> Result<usize, StoreError> {
-        let mut active_users: HashSet<String> = HashSet::new();
-        for item in self.records.iter() {
+        let start_key = keys::records_by_time_since_key(since.timestamp_millis());
+        let mut active_users: HashSet<Vec<u8>> = HashSet::new();
+        for item in self.records_by_time.range(start_key.as_bytes()..) {
             let (_, value) = item?;
-            let record: LearningRecord = Self::deserialize(&value)?;
-            if record.created_at >= since {
-                active_users.insert(record.user_id);
-            }
+            // value stores user_id bytes
+            active_users.insert(value.to_vec());
         }
         Ok(active_users.len())
     }
 
-    /// 统计自指定时间以来的学习记录数。
-    /// TODO: 同 count_active_users_since，需要全局时间戳索引来避免全表扫描。
+    /// 统计自指定时间以来的学习记录数（使用 records_by_time 索引）。
     pub fn count_records_since(&self, since: DateTime<Utc>) -> Result<usize, StoreError> {
+        let start_key = keys::records_by_time_since_key(since.timestamp_millis());
         let mut count = 0usize;
-        for item in self.records.iter() {
-            let (_, value) = item?;
-            let record: LearningRecord = Self::deserialize(&value)?;
-            if record.created_at >= since {
-                count += 1;
-            }
+        for item in self.records_by_time.range(start_key.as_bytes()..) {
+            let _ = item?;
+            count += 1;
         }
         Ok(count)
     }
@@ -56,6 +71,14 @@ impl Store {
         let key = keys::record_key(&record.user_id, ts, &record.id)?;
         self.records
             .insert(key.as_bytes(), Self::serialize(record)?)?;
+        let idx_key = keys::record_id_index_key(&record.user_id, &record.id)?;
+        self.record_id_index
+            .insert(idx_key.as_bytes(), key.as_bytes())?;
+        let time_key = keys::records_by_time_key(ts, &record.id)?;
+        self.records_by_time
+            .insert(time_key.as_bytes(), record.user_id.as_bytes())?;
+        let ref_key = keys::word_ref_key(&record.word_id, "records", key.as_bytes())?;
+        self.word_references.insert(ref_key.as_bytes(), &[])?;
         Ok(())
     }
 
@@ -96,6 +119,13 @@ impl Store {
         } else {
             None
         };
+
+        // records_by_time index
+        let time_index_key = keys::records_by_time_key(ts, &record.id)?;
+        let user_id_bytes = record.user_id.as_bytes().to_vec();
+
+        // word_references index for records
+        let word_ref_key = keys::word_ref_key(&record.word_id, "records", record_key.as_bytes())?;
 
         (
             &self.records,
@@ -153,6 +183,26 @@ impl Store {
                 },
             )?;
 
+        // Maintain secondary indexes outside of the main transaction
+        // (these are idempotent and can be rebuilt from primary data)
+        let _ = self.records_by_time.insert(time_index_key.as_bytes(), user_id_bytes.as_slice());
+        let _ = self.word_references.insert(word_ref_key.as_bytes(), &[]);
+        let idx_key = keys::record_id_index_key(&record.user_id, &record.id)?;
+        let _ = self.record_id_index.insert(idx_key.as_bytes(), record_key.as_bytes());
+
+        // Update user stats aggregation
+        if let Ok(mut stats) = self.get_user_stats_agg(&record.user_id) {
+            stats.total_records += 1;
+            if record.is_correct {
+                stats.correct_records += 1;
+            }
+            stats.word_ids.insert(record.word_id.clone());
+            if let Some(ref sid) = record.session_id {
+                stats.session_ids.insert(sid.clone());
+            }
+            let _ = self.set_user_stats_agg(&record.user_id, &stats);
+        }
+
         Ok(())
     }
 
@@ -161,13 +211,20 @@ impl Store {
         user_id: &str,
         record_id: &str,
     ) -> Result<Option<LearningRecord>, StoreError> {
+        let idx_key = keys::record_id_index_key(user_id, record_id)?;
+        if let Some(full_key_bytes) = self.record_id_index.get(idx_key.as_bytes())? {
+            if let Some(value) = self.records.get(&full_key_bytes)? {
+                return Ok(Some(Self::deserialize::<LearningRecord>(&value)?));
+            }
+        }
+
         let prefix = keys::record_prefix(user_id)?;
         let suffix = format!(":{record_id}");
-
         for item in self.records.scan_prefix(prefix.as_bytes()) {
             let (key, value) = item?;
             let key_text = String::from_utf8_lossy(&key);
             if key_text.ends_with(&suffix) {
+                let _ = self.record_id_index.insert(idx_key.as_bytes(), key.as_ref());
                 return Ok(Some(Self::deserialize::<LearningRecord>(&value)?));
             }
         }

@@ -15,12 +15,6 @@ pub fn generate(
     let h = &config.heuristic;
     let mut strategy = StrategyParams::default();
 
-    if user_state.fatigue > config.constraints.high_fatigue_threshold {
-        strategy.difficulty = strategy.difficulty.min(FATIGUE_DIFFICULTY_CAP);
-        strategy.batch_size = strategy.batch_size.min(FATIGUE_BATCH_SIZE_CAP);
-        strategy.new_ratio = strategy.new_ratio.min(FATIGUE_NEW_RATIO_CAP);
-    }
-
     if user_state.attention < config.constraints.low_attention_threshold {
         strategy.review_mode = true;
         strategy.new_ratio = 0.0;
@@ -40,10 +34,18 @@ pub fn generate(
         strategy.batch_size = strategy.batch_size.min(h.low_motivation_max_batch);
     }
 
+    // 冷启动覆盖：新用户事件不足时，使用保守的固定策略参数，
+    // 覆盖前面所有规则的调整结果，确保初始体验稳定可控
     if user_state.total_event_count < h.cold_start_event_threshold {
         strategy.difficulty = h.cold_start_difficulty;
         strategy.batch_size = h.cold_start_batch_size;
         strategy.new_ratio = h.cold_start_new_ratio;
+    }
+
+    if user_state.fatigue > config.constraints.high_fatigue_threshold {
+        strategy.difficulty = strategy.difficulty.min(FATIGUE_DIFFICULTY_CAP);
+        strategy.batch_size = strategy.batch_size.min(FATIGUE_BATCH_SIZE_CAP);
+        strategy.new_ratio = strategy.new_ratio.min(FATIGUE_NEW_RATIO_CAP);
     }
 
     DecisionCandidate {
@@ -66,8 +68,10 @@ mod tests {
 
     #[test]
     fn high_fatigue_lowers_difficulty() {
-        let mut state = UserState::default();
-        state.fatigue = 0.95;
+        let state = UserState {
+            fatigue: 0.95,
+            ..Default::default()
+        };
         let feature = FeatureVector {
             accuracy: 1.0,
             response_speed: 0.9,

@@ -32,19 +32,28 @@ pub fn get_weights(
     trust_scores: &TrustScores,
     config: &EnsembleConfig,
 ) -> HashMap<AlgorithmId, f64> {
-    let blend = if total_samples < config.warmup_samples {
+    let in_warmup = total_samples < config.warmup_samples;
+
+    let blend = if in_warmup {
         0.0
     } else {
         let raw = (total_samples - config.warmup_samples) as f64 / config.blend_scale;
         raw.min(config.blend_max)
     };
 
-    let w_h = ((1.0 - blend) * config.base_weight_heuristic + blend * trust_scores.heuristic)
-        .max(config.min_weight);
+    let mut w_h =
+        ((1.0 - blend) * config.base_weight_heuristic + blend * trust_scores.heuristic)
+            .max(config.min_weight);
     let w_i =
-        ((1.0 - blend) * config.base_weight_ige + blend * trust_scores.ige).max(config.min_weight);
+        ((1.0 - blend) * config.base_weight_ige + blend * trust_scores.ige)
+            .max(config.min_weight);
     let w_s =
-        ((1.0 - blend) * config.base_weight_swd + blend * trust_scores.swd).max(config.min_weight);
+        ((1.0 - blend) * config.base_weight_swd + blend * trust_scores.swd)
+            .max(config.min_weight);
+
+    if in_warmup {
+        w_h += config.warmup_heuristic_boost;
+    }
 
     let total = w_h + w_i + w_s;
 
@@ -63,15 +72,22 @@ pub fn get_weights_for_candidates(
 ) -> HashMap<AlgorithmId, f64> {
     let all_weights = get_weights(total_samples, trust_scores, config);
 
-    // Filter to only algorithms that produced candidates
+    let normalized_confidence: HashMap<AlgorithmId, f64> = candidates
+        .iter()
+        .map(|c| (c.algorithm_id, c.confidence.clamp(0.0, 1.0)))
+        .collect();
+
     let candidate_ids: std::collections::HashSet<AlgorithmId> =
         candidates.iter().map(|c| c.algorithm_id).collect();
     let mut filtered: HashMap<AlgorithmId, f64> = all_weights
         .into_iter()
         .filter(|(id, _)| candidate_ids.contains(id))
+        .map(|(id, w)| {
+            let conf = normalized_confidence.get(&id).copied().unwrap_or(0.5);
+            (id, w * conf)
+        })
         .collect();
 
-    // Re-normalize
     let total: f64 = filtered.values().sum();
     if total > 0.0 {
         for v in filtered.values_mut() {

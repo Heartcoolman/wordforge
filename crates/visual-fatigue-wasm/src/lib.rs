@@ -25,3 +25,21 @@ pub use fatigue::FatigueScorer;
 pub use head_pose::HeadPoseEstimator;
 pub use perclos::PERCLOSCalculator;
 pub use yawn::YawnDetector;
+
+/// 二维点，表示一个关键点的坐标
+#[derive(Clone, Copy)]
+pub(crate) struct Point {
+    pub x: f64,
+    pub y: f64,
+}
+
+impl Point {
+    pub fn new(x: f64, y: f64) -> Self {
+        Self { x, y }
+    }
+
+    /// 计算两点之间的欧几里得距离
+    pub fn distance(&self, other: &Point) -> f64 {
+        ((self.x - other.x).powi(2) + (self.y - other.y).powi(2)).sqrt()
+    }
+}

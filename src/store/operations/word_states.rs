@@ -102,6 +102,16 @@ impl Store {
                 },
             )?;
 
+        // Maintain word_references index
+        if let Ok(ref_key) = keys::word_ref_key(&wls.word_id, "word_learning_states", key.as_bytes()) {
+            let _ = self.word_references.insert(ref_key.as_bytes(), &[]);
+        }
+        if let Some(ref due_key) = next_due_index_key {
+            if let Ok(ref_key) = keys::word_ref_key(&wls.word_id, "word_due_index", due_key.as_bytes()) {
+                let _ = self.word_references.insert(ref_key.as_bytes(), &[]);
+            }
+        }
+
         Ok(())
     }
 

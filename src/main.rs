@@ -6,6 +6,7 @@ use learning_backend::amas::config::AMASConfig;
 use learning_backend::amas::engine::AMASEngine;
 use learning_backend::config::Config;
 use learning_backend::logging::{init_tracing, LogConfig};
+use learning_backend::middleware::rate_limit::{auth_rate_limit_cleanup_loop, rate_limit_cleanup_loop};
 use learning_backend::routes::build_router;
 use learning_backend::services::llm_provider::LlmProvider;
 use learning_backend::state::AppState;
@@ -13,6 +14,7 @@ use learning_backend::store::Store;
 use learning_backend::workers::WorkerManager;
 use tokio::sync::broadcast;
 use tower_http::catch_panic::CatchPanicLayer;
+use tower_http::compression::CompressionLayer;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
@@ -51,6 +53,17 @@ async fn main() {
         shutdown_tx.clone(),
     );
 
+    tokio::spawn(rate_limit_cleanup_loop(
+        state.rate_limit().clone(),
+        config.rate_limit.window_secs,
+        shutdown_tx.subscribe(),
+    ));
+    tokio::spawn(auth_rate_limit_cleanup_loop(
+        state.auth_rate_limit().clone(),
+        config.auth_rate_limit.window_secs,
+        shutdown_tx.subscribe(),
+    ));
+
     let worker_handle = if config.worker.is_leader {
         let worker_manager = WorkerManager::new(
             store.clone(),
@@ -71,6 +84,7 @@ async fn main() {
 
     let app = build_router(state)
         .layer(cors_layer)
+        .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http())
         .layer(CatchPanicLayer::new())
         .layer(SetResponseHeaderLayer::overriding(
@@ -142,6 +156,7 @@ fn build_cors_layer(config: &Config) -> CorsLayer {
     match config.cors_origin.parse::<axum::http::HeaderValue>() {
         Ok(origin) => CorsLayer::new()
             .allow_origin(origin)
+            .allow_credentials(true)
             .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE, header::ACCEPT])
             .allow_methods(Any),
         Err(e) => {

@@ -11,22 +11,7 @@
 use std::collections::VecDeque;
 use wasm_bindgen::prelude::*;
 
-/// 二维点
-#[derive(Clone, Copy)]
-struct Point {
-    x: f64,
-    y: f64,
-}
-
-impl Point {
-    fn new(x: f64, y: f64) -> Self {
-        Self { x, y }
-    }
-
-    fn distance(&self, other: &Point) -> f64 {
-        ((self.x - other.x).powi(2) + (self.y - other.y).powi(2)).sqrt()
-    }
-}
+use crate::Point;
 
 /// 哈欠事件记录
 #[derive(Clone, Copy)]
@@ -231,7 +216,7 @@ impl YawnDetector {
         let first_ts = self.yawn_history.front().unwrap().timestamp;
         let elapsed_ms = current_ts - first_ts;
 
-        if elapsed_ms < 1000.0 {
+        if elapsed_ms < 10_000.0 {
             return 0.0;
         }
 

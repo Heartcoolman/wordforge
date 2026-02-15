@@ -95,6 +95,28 @@ struct EngineStateSnapshot {
     word_elo: crate::amas::elo::EloRating,
 }
 
+#[derive(Debug, Clone)]
+struct UserStateSnapshot {
+    user_state: Option<serde_json::Value>,
+    ige: Option<serde_json::Value>,
+    swd: Option<serde_json::Value>,
+    trust: Option<serde_json::Value>,
+    user_elo: crate::amas::elo::EloRating,
+}
+
+fn capture_user_state_snapshot(
+    store: &crate::store::Store,
+    user_id: &str,
+) -> Result<UserStateSnapshot, AppError> {
+    Ok(UserStateSnapshot {
+        user_state: store.get_engine_user_state(user_id)?,
+        ige: store.get_engine_algo_state(user_id, "ige")?,
+        swd: store.get_engine_algo_state(user_id, "swd")?,
+        trust: store.get_engine_algo_state(user_id, "trust")?,
+        user_elo: store.get_user_elo(user_id)?,
+    })
+}
+
 fn capture_engine_state_snapshot(
     store: &crate::store::Store,
     user_id: &str,
@@ -144,6 +166,33 @@ fn restore_engine_state_snapshot(
     }
     if let Err(error) = store.set_word_elo(word_id, &snapshot.word_elo) {
         tracing::warn!(word_id, error = %error, "Failed to rollback word ELO");
+    }
+}
+
+fn restore_user_state_snapshot(
+    store: &crate::store::Store,
+    user_id: &str,
+    snapshot: &UserStateSnapshot,
+) {
+    match &snapshot.user_state {
+        Some(previous) => {
+            if let Err(error) = store.set_engine_user_state(user_id, previous) {
+                tracing::warn!(user_id, error = %error, "Failed to rollback AMAS user state");
+            }
+        }
+        None => {
+            if let Err(error) = store.delete_engine_user_state(user_id) {
+                tracing::warn!(user_id, error = %error, "Failed to delete AMAS user state during rollback");
+            }
+        }
+    }
+
+    restore_engine_algo_state(store, user_id, "ige", &snapshot.ige);
+    restore_engine_algo_state(store, user_id, "swd", &snapshot.swd);
+    restore_engine_algo_state(store, user_id, "trust", &snapshot.trust);
+
+    if let Err(error) = store.set_user_elo(user_id, &snapshot.user_elo) {
+        tracing::warn!(user_id, error = %error, "Failed to rollback user ELO");
     }
 }
 
@@ -279,6 +328,10 @@ async fn process_single_record(
     if let Some(ref sid) = req.session_id {
         if let Some(mut session) = state.store().get_learning_session(sid)? {
             session.total_questions += 1;
+            session.total_count += 1;
+            if req.is_correct {
+                session.correct_count += 1;
+            }
             if let Some(ref wm) = amas_result.word_mastery {
                 if wm.mastery_level == MasteryLevel::Mastered {
                     session.actual_mastery_count += 1;
@@ -338,10 +391,14 @@ async fn batch_create_records(
             ),
         ));
     }
+
+    // S6: 在批量首条前捕获一次用户级快照
+    let user_snapshot = capture_user_state_snapshot(state.store(), &auth.user_id)?;
+
     let mut results: Vec<CreateRecordResponse> = Vec::new();
     let mut errors = Vec::new();
     for (index, item) in req.records.iter().enumerate() {
-        match process_single_record(&auth.user_id, item, &state).await {
+        match process_batch_record(&auth.user_id, item, &state).await {
             Ok(result) => results.push(result),
             Err(error) => {
                 errors.push(serde_json::json!({
@@ -351,6 +408,12 @@ async fn batch_create_records(
                 }));
             }
         }
+    }
+
+    // 如果全部失败（无新记录写入），回滚到初始用户状态
+    let has_new_records = results.iter().any(|r| !r.duplicate);
+    if !has_new_records && !errors.is_empty() {
+        restore_user_state_snapshot(state.store(), &auth.user_id, &user_snapshot);
     }
 
     let payload = serde_json::json!({
@@ -366,6 +429,163 @@ async fn batch_create_records(
     } else {
         Ok(created(payload).into_response())
     }
+}
+
+/// S5: 批量场景下的单条记录处理，只捕获 word 级快照（mastery + word_elo）
+async fn process_batch_record(
+    user_id: &str,
+    req: &CreateRecordRequest,
+    state: &AppState,
+) -> Result<CreateRecordResponse, AppError> {
+    let record_id = req
+        .client_record_id
+        .as_ref()
+        .map(|id| id.trim())
+        .filter(|id| !id.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+    if let Some(existing) = state.store().get_user_record_by_id(user_id, &record_id)? {
+        return Ok(CreateRecordResponse {
+            record: existing,
+            amas_result: None,
+            duplicate: true,
+        });
+    }
+
+    let record = LearningRecord {
+        id: record_id,
+        user_id: user_id.to_string(),
+        word_id: req.word_id.clone(),
+        is_correct: req.is_correct,
+        response_time_ms: req.response_time_ms,
+        session_id: req.session_id.clone(),
+        created_at: Utc::now(),
+    };
+
+    // S6: 只捕获 word 级状态
+    let mastery_key = format!("mastery:{}", &req.word_id);
+    let prev_mastery = state.store().get_engine_algo_state(user_id, &mastery_key)?;
+    let prev_word_elo = state.store().get_word_elo(&req.word_id)?;
+    let prev_user_elo = state.store().get_user_elo(user_id)?;
+
+    let amas_result = state
+        .amas()
+        .process_event(
+            user_id,
+            RawEvent {
+                word_id: req.word_id.clone(),
+                is_correct: req.is_correct,
+                response_time_ms: req.response_time_ms,
+                session_id: req.session_id.clone(),
+                is_quit: req.is_quit.unwrap_or(false),
+                dwell_time_ms: req.dwell_time_ms,
+                pause_count: req.pause_count,
+                switch_count: req.switch_count,
+                retry_count: req.retry_count,
+                focus_loss_duration_ms: req.focus_loss_duration_ms,
+                interaction_density: req.interaction_density,
+                paused_time_ms: req.paused_time_ms,
+                hint_used: req.hint_used.unwrap_or(false),
+                confused_with: None,
+            },
+        )
+        .await?;
+
+    {
+        let amas_config = state.amas().get_config().await;
+        let mut user_elo = state.store().get_user_elo(user_id)?;
+        let mut word_elo = state.store().get_word_elo(&req.word_id)?;
+        crate::amas::elo::update_elo(
+            &mut user_elo,
+            &mut word_elo,
+            req.is_correct,
+            &amas_config.elo,
+        );
+        state.store().set_user_elo(user_id, &user_elo)?;
+        state.store().set_word_elo(&req.word_id, &word_elo)?;
+    }
+
+    let mut next_word_state: Option<WordLearningState> = None;
+    if let Some(ref wm) = amas_result.word_mastery {
+        let new_state = match wm.mastery_level {
+            MasteryLevel::New => WordState::New,
+            MasteryLevel::Learning => WordState::Learning,
+            MasteryLevel::Reviewing => WordState::Reviewing,
+            MasteryLevel::Mastered => WordState::Mastered,
+            MasteryLevel::Forgotten => WordState::Forgotten,
+        };
+
+        let mut wls = state
+            .store()
+            .get_word_learning_state(user_id, &req.word_id)?
+            .unwrap_or_else(|| WordLearningState {
+                user_id: user_id.to_string(),
+                word_id: req.word_id.clone(),
+                state: WordState::New,
+                mastery_level: 0.0,
+                next_review_date: None,
+                half_life: DEFAULT_HALF_LIFE_HOURS,
+                correct_streak: 0,
+                total_attempts: 0,
+                updated_at: Utc::now(),
+            });
+
+        wls.state = new_state;
+        wls.mastery_level = wm.memory_strength;
+        wls.total_attempts += 1;
+        if req.is_correct {
+            wls.correct_streak += 1;
+        } else {
+            wls.correct_streak = 0;
+        }
+        if wm.next_review_interval_secs > 0 {
+            wls.next_review_date =
+                Some(Utc::now() + chrono::Duration::seconds(wm.next_review_interval_secs));
+        }
+        wls.updated_at = Utc::now();
+        next_word_state = Some(wls);
+    }
+
+    let mut next_session: Option<LearningSession> = None;
+    if let Some(ref sid) = req.session_id {
+        if let Some(mut session) = state.store().get_learning_session(sid)? {
+            session.total_questions += 1;
+            session.total_count += 1;
+            if req.is_correct {
+                session.correct_count += 1;
+            }
+            if let Some(ref wm) = amas_result.word_mastery {
+                if wm.mastery_level == MasteryLevel::Mastered {
+                    session.actual_mastery_count += 1;
+                }
+            }
+            session.updated_at = Utc::now();
+            next_session = Some(session);
+        }
+    }
+
+    state
+        .store()
+        .create_record_with_updates(&record, next_word_state.as_ref(), next_session.as_ref())
+        .map_err(|error| {
+            // 回滚 word 级状态
+            restore_engine_algo_state(state.store(), user_id, &mastery_key, &prev_mastery);
+            if let Err(e) = state.store().set_word_elo(&req.word_id, &prev_word_elo) {
+                tracing::warn!(error = %e, "Failed to rollback word ELO in batch");
+            }
+            // 回滚 user ELO
+            if let Err(e) = state.store().set_user_elo(user_id, &prev_user_elo) {
+                tracing::warn!(error = %e, "Failed to rollback user ELO in batch");
+            }
+            AppError::internal(&error.to_string())
+        })?;
+
+    Ok(CreateRecordResponse {
+        record,
+        amas_result: Some(amas_result),
+        duplicate: false,
+    })
 }
 
 // B32: Statistics
@@ -433,36 +653,12 @@ async fn get_enhanced_statistics(
         })
         .collect();
 
-    // Current streak (consecutive days) - matches compute_streak_days logic
-    let streak = {
-        let today = Utc::now().date_naive();
-        let dates: std::collections::BTreeSet<chrono::NaiveDate> = by_day
-            .keys()
-            .filter_map(|d| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok())
-            .collect();
-
-        let mut s = 0u32;
-        let mut current = today;
-
-        // If no activity today, check if yesterday counts
-        if !dates.contains(&current) {
-            match current.pred_opt() {
-                Some(yesterday) if dates.contains(&yesterday) => current = yesterday,
-                _ => { /* streak stays 0 */ }
-            }
-        }
-
-        if dates.contains(&current) {
-            while dates.contains(&current) {
-                s += 1;
-                current = match current.pred_opt() {
-                    Some(d) => d,
-                    None => break,
-                };
-            }
-        }
-        s
-    };
+    // Current streak (consecutive days)
+    let dates: std::collections::BTreeSet<chrono::NaiveDate> = by_day
+        .keys()
+        .filter_map(|d| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok())
+        .collect();
+    let streak = super::users::compute_streak_from_dates(&dates);
 
     Ok(ok(serde_json::json!({
         "total": total,

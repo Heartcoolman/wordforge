@@ -16,6 +16,9 @@ pub mod wordbooks;
 pub mod words;
 
 use axum::extract::DefaultBodyLimit;
+use axum::http::{header, HeaderValue, Request};
+use axum::middleware::Next;
+use axum::response::Response;
 use axum::Router;
 use tower_http::services::{ServeDir, ServeFile};
 
@@ -76,6 +79,37 @@ pub fn build_router(state: AppState) -> Router {
         .nest("/api", api_routes)
         .nest("/health", health::router())
         .fallback_service(spa_fallback)
+        .layer(axum::middleware::from_fn(static_cache_headers))
         .layer(axum::middleware::from_fn(request_id::request_id_middleware))
         .with_state(state)
+}
+
+async fn static_cache_headers(req: Request<axum::body::Body>, next: Next) -> Response {
+    let path = req.uri().path().to_string();
+    let mut response = next.run(req).await;
+
+    // Skip API and health routes
+    if path.starts_with("/api/") || path.starts_with("/health") {
+        return response;
+    }
+
+    let is_html = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.contains("text/html"));
+
+    let cache_value = if is_html {
+        "no-cache, must-revalidate"
+    } else if path.starts_with("/assets/") {
+        "public, max-age=31536000, immutable"
+    } else {
+        "public, max-age=3600"
+    };
+
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static(cache_value),
+    );
+    response
 }

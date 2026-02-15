@@ -3,7 +3,10 @@
 //! 提供基于眼部关键点的 EAR 计算，支持标准6点和增强16点两种模式。
 //! EAR 值用于判断眼睛的睁闭状态，是疲劳检测的核心指标之一。
 
+use std::collections::VecDeque;
 use wasm_bindgen::prelude::*;
+
+use crate::Point;
 
 const EAR_16POINT_PAIRS: [(usize, usize); 7] = [
     (1, 15),
@@ -22,24 +25,6 @@ fn distance_from_landmarks(landmarks: &[f64], a: usize, b: usize) -> f64 {
     let by = landmarks[b * 2 + 1];
 
     ((ax - bx).powi(2) + (ay - by).powi(2)).sqrt()
-}
-
-/// 二维点，表示一个关键点的坐标
-#[derive(Clone, Copy)]
-struct Point {
-    x: f64,
-    y: f64,
-}
-
-impl Point {
-    fn new(x: f64, y: f64) -> Self {
-        Self { x, y }
-    }
-
-    /// 计算两点之间的欧几里得距离
-    fn distance(&self, other: &Point) -> f64 {
-        ((self.x - other.x).powi(2) + (self.y - other.y).powi(2)).sqrt()
-    }
 }
 
 /// EAR 计算结果
@@ -61,7 +46,7 @@ pub struct EARCalculator {
     /// EAR 阈值，低于此值视为闭眼
     threshold: f64,
     /// 历史 EAR 值，用于平滑
-    history: Vec<f64>,
+    history: VecDeque<f64>,
     /// 平滑窗口大小
     smooth_window: usize,
 }
@@ -77,7 +62,7 @@ impl EARCalculator {
     pub fn new(threshold: f64, smooth_window: usize) -> Self {
         Self {
             threshold,
-            history: Vec::with_capacity(100),
+            history: VecDeque::with_capacity(100),
             smooth_window: if smooth_window == 0 { 1 } else { smooth_window },
         }
     }
@@ -120,6 +105,7 @@ impl EARCalculator {
         let ear = (vertical1 + vertical2) / (2.0 * horizontal);
 
         // 置信度基于水平距离的合理性（太小说明检测不可靠）
+        // 输入坐标应为归一化 [0,1] 范围，阈值 0.05 基于此约定
         let confidence = (horizontal / 0.05).min(1.0);
 
         self.push_history(ear);
@@ -168,6 +154,7 @@ impl EARCalculator {
         let ear = vertical_avg / horizontal;
 
         // 16点模式置信度更高
+        // 输入坐标应为归一化 [0,1] 范围，阈值 0.03 基于此约定
         let confidence = (horizontal / 0.03).min(1.0);
 
         self.push_history(ear);
@@ -184,8 +171,7 @@ impl EARCalculator {
             return 0.0;
         }
         let window = self.history.len().min(self.smooth_window);
-        let start = self.history.len() - window;
-        let sum: f64 = self.history[start..].iter().sum();
+        let sum: f64 = self.history.iter().rev().take(window).sum();
         sum / window as f64
     }
 
@@ -209,6 +195,41 @@ impl EARCalculator {
         self.threshold = threshold;
     }
 
+    /// 双眼 6 点联合计算：分别计算左右眼 EAR 后取平均，仅 push 一次
+    ///
+    /// 输入: 24 个浮点数（左眼 12 + 右眼 12）
+    #[wasm_bindgen(js_name = "calculateBinocular6Point")]
+    pub fn calculate_binocular_6point(&mut self, left: &[f64], right: &[f64]) -> EARResult {
+        let calc = |lm: &[f64]| -> Option<(f64, f64)> {
+            if lm.len() < 12 {
+                return None;
+            }
+            let p1 = Point::new(lm[0], lm[1]);
+            let p2 = Point::new(lm[2], lm[3]);
+            let p3 = Point::new(lm[4], lm[5]);
+            let p4 = Point::new(lm[6], lm[7]);
+            let p5 = Point::new(lm[8], lm[9]);
+            let p6 = Point::new(lm[10], lm[11]);
+            let h = p1.distance(&p4);
+            if h < 1e-6 {
+                return None;
+            }
+            let ear = (p2.distance(&p6) + p3.distance(&p5)) / (2.0 * h);
+            let conf = (h / 0.05).min(1.0);
+            Some((ear, conf))
+        };
+
+        let (left_ear, left_conf) = calc(left).unwrap_or((0.0, 0.0));
+        let (right_ear, right_conf) = calc(right).unwrap_or((0.0, 0.0));
+
+        let ear = (left_ear + right_ear) / 2.0;
+        let confidence = (left_conf + right_conf) / 2.0;
+
+        self.push_history(ear);
+
+        EARResult { ear, confidence }
+    }
+
     /// 重置计算器状态
     pub fn reset(&mut self) {
         self.history.clear();
@@ -216,12 +237,10 @@ impl EARCalculator {
 }
 
 impl EARCalculator {
-    /// 将 EAR 值加入历史队列
     fn push_history(&mut self, ear: f64) {
-        self.history.push(ear);
-        // 只保留最近 100 帧的历史，避免内存无限增长
-        if self.history.len() > 100 {
-            self.history.drain(0..self.history.len() - 100);
+        self.history.push_back(ear);
+        while self.history.len() > 100 {
+            self.history.pop_front();
         }
     }
 }

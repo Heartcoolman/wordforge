@@ -110,47 +110,72 @@ async fn get_stats(
     auth: AuthUser,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    // 限制单次查询量，后续应改为增量聚合以支持更大数据量
-    let records = state.store().get_user_records(&auth.user_id, state.config().limits.max_records_fetch)?;
-    let total_records = records.len() as u64;
-    let correct = records.iter().filter(|r| r.is_correct).count() as u64;
+    let agg = state.store().get_user_stats_agg(&auth.user_id)?;
 
-    let accuracy_rate = if total_records == 0 {
-        0.0
+    if agg.total_records > 0 {
+        // Use pre-aggregated stats
+        let accuracy_rate = agg.correct_records as f64 / agg.total_records as f64;
+
+        // Streak still requires date-based scan (lightweight: just keys, not full deser)
+        let records = state.store().get_user_records(&auth.user_id, state.config().limits.max_records_fetch)?;
+
+        Ok(ok(UserStats {
+            total_words_learned: agg.word_ids.len() as u64,
+            total_sessions: agg.session_ids.len() as u64,
+            total_records: agg.total_records,
+            streak_days: compute_streak_days(&records),
+            accuracy_rate,
+        }))
     } else {
-        correct as f64 / total_records as f64
-    };
+        // Fallback for users without aggregated stats (pre-migration data)
+        let records = state.store().get_user_records(&auth.user_id, state.config().limits.max_records_fetch)?;
+        let total_records = records.len() as u64;
+        let correct = records.iter().filter(|r| r.is_correct).count() as u64;
 
-    Ok(ok(UserStats {
-        total_words_learned: records
-            .iter()
-            .map(|r| r.word_id.clone())
-            .collect::<std::collections::HashSet<_>>()
-            .len() as u64,
-        total_sessions: records
-            .iter()
-            .filter_map(|r| r.session_id.clone())
-            .collect::<std::collections::HashSet<_>>()
-            .len() as u64,
-        total_records,
-        streak_days: compute_streak_days(&records),
-        accuracy_rate,
-    }))
+        let accuracy_rate = if total_records == 0 {
+            0.0
+        } else {
+            correct as f64 / total_records as f64
+        };
+
+        Ok(ok(UserStats {
+            total_words_learned: records
+                .iter()
+                .map(|r| r.word_id.clone())
+                .collect::<std::collections::HashSet<_>>()
+                .len() as u64,
+            total_sessions: records
+                .iter()
+                .filter_map(|r| r.session_id.clone())
+                .collect::<std::collections::HashSet<_>>()
+                .len() as u64,
+            total_records,
+            streak_days: compute_streak_days(&records),
+            accuracy_rate,
+        }))
+    }
 }
 
-fn compute_streak_days(records: &[LearningRecord]) -> u32 {
+pub fn compute_streak_days(records: &[LearningRecord]) -> u32 {
     if records.is_empty() {
         return 0;
     }
 
-    let today = Utc::now().date_naive();
     let dates: BTreeSet<chrono::NaiveDate> =
         records.iter().map(|r| r.created_at.date_naive()).collect();
 
+    compute_streak_from_dates(&dates)
+}
+
+pub fn compute_streak_from_dates(dates: &BTreeSet<chrono::NaiveDate>) -> u32 {
+    if dates.is_empty() {
+        return 0;
+    }
+
+    let today = Utc::now().date_naive();
     let mut streak = 0u32;
     let mut current = today;
 
-    // If no activity today, check if yesterday counts
     if !dates.contains(&current) {
         match current.pred_opt() {
             Some(yesterday) if dates.contains(&yesterday) => current = yesterday,

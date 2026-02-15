@@ -132,6 +132,8 @@ async fn create_or_resume_session(
         created_at: Utc::now(),
         updated_at: Utc::now(),
         summary: None,
+        correct_count: 0,
+        total_count: 0,
     };
 
     state.store().create_learning_session(&session)?;
@@ -204,9 +206,11 @@ async fn get_study_words(
         &strategy_params,
         batch_size,
         None,
-        &amas_config.word_selector,
-        &amas_config.elo,
-        &amas_config.memory_model,
+        &word_selector::SelectionConfigs {
+            word_selector: &amas_config.word_selector,
+            elo: &amas_config.elo,
+            memory_model: &amas_config.memory_model,
+        },
     )?;
 
     let scored_word_ids: Vec<String> = scored.iter().map(|sw| sw.word_id.clone()).collect();
@@ -347,9 +351,11 @@ async fn next_words(
         &strategy_params,
         batch_size,
         session_context.as_ref(),
-        &amas_config.word_selector,
-        &amas_config.elo,
-        &amas_config.memory_model,
+        &word_selector::SelectionConfigs {
+            word_selector: &amas_config.word_selector,
+            elo: &amas_config.elo,
+            memory_model: &amas_config.memory_model,
+        },
     )?;
 
     let scored_word_ids: Vec<String> = scored.iter().map(|sw| sw.word_id.clone()).collect();
@@ -494,13 +500,16 @@ async fn complete_session(
     let duration_secs = (now - session.created_at).num_seconds();
     let hour_of_day = now.format("%H").to_string().parse::<u8>().unwrap_or(12);
 
-    // Compute accuracy from actual correct answers in session records
-    let session_records = state.store().get_user_records(&auth.user_id, 5000)?;
-    let correct_in_session = session_records
-        .iter()
-        .filter(|r| r.session_id.as_deref() == Some(&req.session_id) && r.is_correct)
-        .count();
-    let accuracy = if session.total_questions > 0 {
+    // Compute accuracy from incremental counters on the session
+    let accuracy = if session.total_count > 0 {
+        session.correct_count as f64 / session.total_count as f64
+    } else if session.total_questions > 0 {
+        // Fallback for sessions created before incremental counters
+        let session_records = state.store().get_user_records(&auth.user_id, 5000)?;
+        let correct_in_session = session_records
+            .iter()
+            .filter(|r| r.session_id.as_deref() == Some(&req.session_id) && r.is_correct)
+            .count();
         correct_in_session as f64 / session.total_questions as f64
     } else {
         0.0

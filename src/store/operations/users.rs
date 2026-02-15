@@ -63,6 +63,14 @@ impl Store {
                 sled::transaction::TransactionError::Storage(se) => StoreError::Sled(se),
             })?;
 
+        // Maintain users_by_created_at index
+        let idx_key = keys::users_by_created_at_key(
+            user.created_at.timestamp_millis(),
+            &user.id,
+        )?;
+        self.users_by_created_at
+            .insert(idx_key.as_bytes(), user.id.as_bytes())?;
+
         Ok(())
     }
 
@@ -244,10 +252,28 @@ impl Store {
     }
 
     pub fn list_users(&self, limit: usize, offset: usize) -> Result<Vec<User>, StoreError> {
-        // 注意：users tree 中的 key 混合了用户数据和 "email:" 索引条目，
-        // 需要先过滤掉索引条目。由于需要按 created_at 倒序排序，
-        // 无法直接在迭代器上使用 skip/take（Sled 按字典序存储）。
-        // TODO: 引入带时间戳前缀的二级索引来支持有序前缀扫描分页。
+        // Use users_by_created_at index (reverse timestamp = newest first)
+        if !self.users_by_created_at.is_empty() {
+            let mut users = Vec::new();
+            let mut skipped = 0usize;
+            for item in self.users_by_created_at.iter() {
+                let (_, value) = item?;
+                let user_id = String::from_utf8(value.to_vec()).unwrap_or_default();
+                if skipped < offset {
+                    skipped += 1;
+                    continue;
+                }
+                if let Some(user) = self.get_user_by_id(&user_id)? {
+                    users.push(user);
+                }
+                if users.len() >= limit {
+                    break;
+                }
+            }
+            return Ok(users);
+        }
+
+        // Fallback: full scan (only if index not yet built)
         let mut users = Vec::new();
         for item in self.users.iter() {
             let (key, value) = item?;
@@ -378,6 +404,19 @@ impl Store {
                 sled::transaction::TransactionError::Storage(se) => StoreError::Sled(se),
             })?;
 
+        // Clean up users_by_created_at index
+        if let Ok(idx_key) = keys::users_by_created_at_key(
+            user.created_at.timestamp_millis(),
+            user_id,
+        ) {
+            let _ = self.users_by_created_at.remove(idx_key.as_bytes());
+        }
+
+        // Clean up user_stats
+        if let Ok(stats_key) = keys::user_stats_key(user_id) {
+            let _ = self.user_stats.remove(stats_key.as_bytes());
+        }
+
         // 2. 删除用户会话
         if let Err(e) = self.delete_user_sessions(user_id) {
             tracing::warn!(user_id, error = %e, "删除用户会话失败");
@@ -385,30 +424,26 @@ impl Store {
 
         // 3. 删除学习记录
         let record_prefix = keys::record_prefix(user_id)?;
-        for item in self.records.scan_prefix(record_prefix.as_bytes()) {
-            if let Ok((key, _)) = item {
-                let _ = self.records.remove(&key);
-            }
+        for (key, _) in self.records.scan_prefix(record_prefix.as_bytes()).flatten() {
+            let _ = self.records.remove(&key);
         }
 
         // 4. 删除单词学习状态及到期索引
         let wls_prefix = keys::word_learning_state_prefix(user_id)?;
-        for item in self.word_learning_states.scan_prefix(wls_prefix.as_bytes()) {
-            if let Ok((key, value)) = item {
-                let _ = self.word_learning_states.remove(&key);
-                // 清理对应的 due index
-                if let Ok(state) = Self::deserialize::<
-                    crate::store::operations::word_states::WordLearningState,
-                >(&value)
-                {
-                    if let Some(next_review_date) = state.next_review_date {
-                        if let Ok(due_key) = keys::word_due_index_key(
-                            user_id,
-                            next_review_date.timestamp_millis(),
-                            &state.word_id,
-                        ) {
-                            let _ = self.word_due_index.remove(due_key.as_bytes());
-                        }
+        for (key, value) in self.word_learning_states.scan_prefix(wls_prefix.as_bytes()).flatten() {
+            let _ = self.word_learning_states.remove(&key);
+            // 清理对应的 due index
+            if let Ok(state) = Self::deserialize::<
+                crate::store::operations::word_states::WordLearningState,
+            >(&value)
+            {
+                if let Some(next_review_date) = state.next_review_date {
+                    if let Ok(due_key) = keys::word_due_index_key(
+                        user_id,
+                        next_review_date.timestamp_millis(),
+                        &state.word_id,
+                    ) {
+                        let _ = self.word_due_index.remove(due_key.as_bytes());
                     }
                 }
             }
@@ -434,18 +469,14 @@ impl Store {
 
         // 8. 删除通知
         let notif_prefix = keys::notification_prefix(user_id)?;
-        for item in self.notifications.scan_prefix(notif_prefix.as_bytes()) {
-            if let Ok((key, _)) = item {
-                let _ = self.notifications.remove(&key);
-            }
+        for (key, _) in self.notifications.scan_prefix(notif_prefix.as_bytes()).flatten() {
+            let _ = self.notifications.remove(&key);
         }
 
         // 9. 删除徽章
         let badge_prefix = keys::badge_prefix(user_id)?;
-        for item in self.badges.scan_prefix(badge_prefix.as_bytes()) {
-            if let Ok((key, _)) = item {
-                let _ = self.badges.remove(&key);
-            }
+        for (key, _) in self.badges.scan_prefix(badge_prefix.as_bytes()).flatten() {
+            let _ = self.badges.remove(&key);
         }
 
         // 10. 删除用户偏好设置
@@ -455,16 +486,14 @@ impl Store {
 
         // 11. 删除学习会话索引
         let ls_prefix = keys::learning_session_user_index_prefix(user_id)?;
-        for item in self.learning_sessions.scan_prefix(ls_prefix.as_bytes()) {
-            if let Ok((key, _)) = item {
-                let key_str = String::from_utf8(key.to_vec()).unwrap_or_default();
-                if let Some(session_id) = key_str.rsplit(':').next() {
-                    if let Ok(sk) = keys::learning_session_key(session_id) {
-                        let _ = self.learning_sessions.remove(sk.as_bytes());
-                    }
+        for (key, _) in self.learning_sessions.scan_prefix(ls_prefix.as_bytes()).flatten() {
+            let key_str = String::from_utf8(key.to_vec()).unwrap_or_default();
+            if let Some(session_id) = key_str.rsplit(':').next() {
+                if let Ok(sk) = keys::learning_session_key(session_id) {
+                    let _ = self.learning_sessions.remove(sk.as_bytes());
                 }
-                let _ = self.learning_sessions.remove(&key);
             }
+            let _ = self.learning_sessions.remove(&key);
         }
 
         tracing::info!(user_id, "用户及关联数据已删除");

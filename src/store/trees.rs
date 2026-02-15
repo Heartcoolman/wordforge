@@ -7,7 +7,6 @@
 ///
 /// 常量名使用完整拼写以提高代码可读性，tree 名使用缩写以节省存储空间。
 /// 修改 tree 名称会导致数据不可访问，请勿随意更改。
-
 pub const USERS: &str = "users";
 pub const SESSIONS: &str = "sessions";
 pub const ADMIN_SESSIONS: &str = "admin_sessions";
@@ -42,3 +41,15 @@ pub const ETYMOLOGIES: &str = "etymologies";
 pub const WORD_MORPHEMES: &str = "word_morphemes";
 pub const CONFUSION_PAIRS: &str = "confusion_pairs";
 pub const WB_CENTER_IMPORTS: &str = "wb_center_imports";
+
+pub const WORDBOOK_TYPE_INDEX: &str = "idx_wordbook_type";
+
+// Secondary index trees (performance optimization)
+pub const USERS_BY_CREATED_AT: &str = "idx_users_by_created";
+pub const WORDS_BY_CREATED_AT: &str = "idx_words_by_created";
+pub const RECORDS_BY_TIME: &str = "idx_records_by_time";
+pub const WORD_REFERENCES: &str = "idx_word_refs";
+pub const USER_STATS: &str = "idx_user_stats";
+pub const RECORD_ID_INDEX: &str = "idx_record_id";
+pub const ALERT_DEDUP: &str = "idx_alert_dedup";
+pub const MONITORING_TIMESERIES: &str = "monitoring_ts";

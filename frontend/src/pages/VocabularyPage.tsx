@@ -89,14 +89,7 @@ export default function VocabularyPage() {
       setDueWords(due);
       if (due.length > 0) {
         const ids = due.map(d => d.wordId);
-        // Fetch word details for due words via individual lookups
-        const details: Word[] = [];
-        for (const id of ids) {
-          try {
-            const w = await wordsApi.get(id);
-            details.push(w);
-          } catch { /* word may have been deleted */ }
-        }
+        const details = await wordsApi.batchGet(ids);
         setDueWordDetails(details);
         const map: Record<string, WordLearningState> = { ...stateMap() };
         for (const s of due) map[s.wordId] = s;

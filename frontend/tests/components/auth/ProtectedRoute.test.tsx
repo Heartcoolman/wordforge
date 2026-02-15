@@ -43,7 +43,7 @@ describe('ProtectedRoute', () => {
   it('shows spinner when loading', async () => {
     const { authStore } = await import('@/stores/auth');
     (authStore.loading as ReturnType<typeof vi.fn>).mockReturnValue(true);
-    (authStore.initialized as ReturnType<typeof vi.fn>).mockReturnValue(true);
+    (authStore.initialized as unknown as ReturnType<typeof vi.fn>).mockReturnValue(true);
     const { ProtectedRoute } = await import('@/components/auth/ProtectedRoute');
     renderWithProviders(() => <ProtectedRoute>Secret</ProtectedRoute>);
     expect(screen.getByRole('status')).toBeInTheDocument();
@@ -55,7 +55,7 @@ describe('ProtectedRoute', () => {
     const { usersApi } = await import('@/api/users');
     (authStore.loading as ReturnType<typeof vi.fn>).mockReturnValue(false);
     (authStore.isAuthenticated as ReturnType<typeof vi.fn>).mockReturnValue(true);
-    (authStore.initialized as ReturnType<typeof vi.fn>).mockReturnValue(true);
+    (authStore.initialized as unknown as ReturnType<typeof vi.fn>).mockReturnValue(true);
     (usersApi.getMe as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'user-1', username: 'test' });
     const { ProtectedRoute } = await import('@/components/auth/ProtectedRoute');
     renderWithProviders(() => <ProtectedRoute>Secret Content</ProtectedRoute>);
@@ -69,7 +69,7 @@ describe('ProtectedRoute', () => {
     const { authStore } = await import('@/stores/auth');
     (authStore.loading as ReturnType<typeof vi.fn>).mockReturnValue(false);
     (authStore.isAuthenticated as ReturnType<typeof vi.fn>).mockReturnValue(false);
-    (authStore.initialized as ReturnType<typeof vi.fn>).mockReturnValue(true);
+    (authStore.initialized as unknown as ReturnType<typeof vi.fn>).mockReturnValue(true);
     const { ProtectedRoute } = await import('@/components/auth/ProtectedRoute');
     renderWithProviders(() => <ProtectedRoute>Secret</ProtectedRoute>);
     await waitFor(() => {

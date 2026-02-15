@@ -1,6 +1,5 @@
 /// 公共验证函数模块
 /// 提供密码、邮箱、用户名等输入验证，供认证和用户相关路由共用。
-
 /// 验证密码强度：至少 8 字符、最多 256 字符，需包含大小写字母和数字
 pub fn validate_password(password: &str) -> Result<(), &'static str> {
     if password.len() < 8 {
@@ -61,7 +60,7 @@ pub fn is_valid_email(email: &str) -> bool {
 /// 验证用户名格式：2-50 字符，只允许字母、数字、下划线、连字符和空格
 pub fn validate_username(username: &str) -> Result<(), &'static str> {
     let char_count = username.chars().count();
-    if char_count < 2 || char_count > 50 {
+    if !(2..=50).contains(&char_count) {
         return Err("用户名长度需在2到50个字符之间");
     }
     if !username

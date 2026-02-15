@@ -5,7 +5,7 @@ use tokio::sync::{Mutex, RwLock};
 
 use crate::amas::config::AMASConfig;
 use crate::amas::decision::{ensemble, heuristic, ige, swd};
-use crate::amas::memory::{iad, mastery, mdm, mtp};
+use crate::amas::memory::{evm, iad, mastery, mdm, mtp};
 use crate::amas::metrics;
 use crate::amas::monitoring;
 use crate::amas::types::*;
@@ -26,7 +26,8 @@ fn sanitize_float(value: f64, default: f64) -> f64 {
 }
 
 pub struct AMASEngine {
-    config: Arc<RwLock<AMASConfig>>,
+    config: Arc<RwLock<Arc<AMASConfig>>>,
+    config_hash: Arc<RwLock<String>>,
     store: Arc<Store>,
     user_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     metrics_registry: Arc<metrics::MetricsRegistry>,
@@ -41,8 +42,10 @@ pub struct AlgoStates {
 
 impl AMASEngine {
     pub fn new(config: AMASConfig, store: Arc<Store>) -> Self {
+        let hash = monitoring::compute_config_hash(&config);
         Self {
-            config: Arc::new(RwLock::new(config)),
+            config: Arc::new(RwLock::new(Arc::new(config))),
+            config_hash: Arc::new(RwLock::new(hash)),
             store,
             user_locks: Arc::new(Mutex::new(HashMap::new())),
             metrics_registry: Arc::new(metrics::MetricsRegistry::new()),
@@ -51,14 +54,17 @@ impl AMASEngine {
 
     pub async fn reload_config(&self, new_config: AMASConfig) -> Result<(), String> {
         new_config.validate()?;
+        let hash = monitoring::compute_config_hash(&new_config);
         let mut cfg = self.config.write().await;
-        *cfg = new_config;
+        *cfg = Arc::new(new_config);
+        let mut h = self.config_hash.write().await;
+        *h = hash;
         tracing::info!("AMAS config reloaded");
         Ok(())
     }
 
     pub async fn get_config(&self) -> AMASConfig {
-        self.config.read().await.clone()
+        self.config.read().await.as_ref().clone()
     }
 
     pub fn metrics_registry(&self) -> &Arc<metrics::MetricsRegistry> {
@@ -100,12 +106,13 @@ impl AMASEngine {
         let user_lock = self.acquire_user_lock(user_id).await;
         let _guard = user_lock.lock().await;
 
-        let config = self.config.read().await.clone();
+        let config = Arc::clone(&*self.config.read().await);
+        let now = chrono::Utc::now();
 
         let mut user_state = self.load_or_init_state(user_id)?;
         let mut algo_states = self.load_algo_states(user_id)?;
 
-        let feature = self.build_feature_vector(&raw_event, &user_state, &config);
+        let feature = self.build_feature_vector(&raw_event, &user_state, &config, now);
         self.update_modeling(&mut user_state, &feature, &config);
 
         let cold_start_phase = self.determine_cold_start_phase(&user_state, &config);
@@ -122,7 +129,7 @@ impl AMASEngine {
             .as_ref()
             .map(|wm| wm.recall_probability)
             .unwrap_or(0.0);
-        let _objective = self.evaluate_objective(&reward, retention_signal, &config);
+        let objective = self.evaluate_objective(&reward, retention_signal, &config);
 
         let constrained_strategy =
             self.apply_constraints(final_strategy.clone(), &user_state, &config);
@@ -131,6 +138,7 @@ impl AMASEngine {
             &mut algo_states,
             &candidates,
             reward.value,
+            objective.score,
             &user_state,
             &weights,
             &config,
@@ -138,7 +146,7 @@ impl AMASEngine {
 
         user_state.session_event_count += 1;
         user_state.total_event_count += 1;
-        user_state.last_active_at = Some(chrono::Utc::now());
+        user_state.last_active_at = Some(now);
 
         // 检测 session 切换，重置 session 事件计数
         let current_session_id = raw_event
@@ -146,17 +154,17 @@ impl AMASEngine {
             .as_deref()
             .unwrap_or("");
         if !current_session_id.is_empty() {
-            let session_changed = user_state
+            let session_changed = !user_state
                 .last_session_id
                 .as_deref()
-                .map_or(true, |prev| prev != current_session_id);
+                .is_some_and(|prev| prev == current_session_id);
             if session_changed {
                 user_state.session_event_count = 1;
                 user_state.last_session_id = Some(current_session_id.to_string());
             }
         }
 
-        self.persist_state(user_id, &user_state, &algo_states)?;
+        self.persist_state(user_id, &mut user_state, &algo_states)?;
 
         let explanation = self.build_explanation(&constrained_strategy, &user_state, &weights);
 
@@ -176,6 +184,8 @@ impl AMASEngine {
         };
 
         let latency_ms = start.elapsed().as_millis() as i64;
+        let config_version = self.config_hash.read().await.clone();
+        drop(_guard);
         self.emit_monitoring(
             user_id,
             &session_id,
@@ -183,6 +193,7 @@ impl AMASEngine {
             latency_ms,
             &config,
             &final_strategy,
+            &config_version,
         );
 
         Ok(result)
@@ -196,10 +207,9 @@ impl AMASEngine {
         let user_lock = self.acquire_user_lock(user_id).await;
         let _guard = user_lock.lock().await;
 
-        let config = self.config.read().await.clone();
+        let config = Arc::clone(&*self.config.read().await);
         let mut user_state = self.load_or_init_state(user_id)?;
 
-        // 将 0-100 映射到 0.0-1.0
         let visual_fatigue = (visual_score / 100.0).clamp(0.0, 1.0);
 
         // 混合公式：behavioral_weight * 行为疲劳 + visual_weight * 视觉疲劳
@@ -229,8 +239,8 @@ impl AMASEngine {
         let config = self
             .config
             .try_read()
-            .map(|c| c.clone())
-            .unwrap_or_default();
+            .map(|c| Arc::clone(&c))
+            .unwrap_or_else(|_| Arc::new(AMASConfig::default()));
         self.compute_strategy_from_state_with_config(user_state, &config)
     }
 
@@ -260,7 +270,7 @@ impl AMASEngine {
 
     pub async fn get_phase(&self, user_id: &str) -> Result<Option<ColdStartPhase>, AppError> {
         let state = self.load_or_init_state(user_id)?;
-        let config = self.config.read().await.clone();
+        let config = Arc::clone(&*self.config.read().await);
         Ok(self.determine_cold_start_phase(&state, &config))
     }
 
@@ -268,7 +278,7 @@ impl AMASEngine {
         self.store
             .set_engine_user_state(
                 user_id,
-                &serde_json::to_value(&UserState::default())
+                &serde_json::to_value(UserState::default())
                     .map_err(|e| AppError::internal(&e.to_string()))?,
             )
             .map_err(|e| AppError::internal(&e.to_string()))?;
@@ -294,7 +304,7 @@ impl AMASEngine {
         let user_lock = self.acquire_user_lock(user_id).await;
         let _guard = user_lock.lock().await;
 
-        let config = self.config.read().await.clone();
+        let config = Arc::clone(&*self.config.read().await);
         let mut user_state = self.load_or_init_state(user_id)?;
         let stats = &mut user_state.habit_profile.temporal_performance;
         let idx = (hour as usize).min(23);
@@ -329,8 +339,8 @@ impl AMASEngine {
         let config = self
             .config
             .try_read()
-            .map(|c| c.clone())
-            .unwrap_or_default();
+            .map(|c| Arc::clone(&c))
+            .unwrap_or_else(|_| Arc::new(AMASConfig::default()));
         let state = self.load_or_init_state(user_id)?;
         let stats = &state.habit_profile.temporal_performance;
         let idx = (hour as usize).min(23);
@@ -410,6 +420,7 @@ impl AMASEngine {
         event: &RawEvent,
         state: &UserState,
         config: &AMASConfig,
+        now: chrono::DateTime<chrono::Utc>,
     ) -> FeatureVector {
         let m = &config.modeling;
         let accuracy = if event.is_correct { 1.0 } else { 0.0 };
@@ -422,10 +433,15 @@ impl AMASEngine {
             + response_speed * f.quality_speed_weight
             - hint_penalty)
             .clamp(0.0, 1.0);
+        let quality = if event.is_correct {
+            quality
+        } else {
+            quality * f.incorrect_quality_scale
+        };
         let engagement = Self::compute_engagement(event, m);
 
         let time_since_last = match state.last_active_at {
-            Some(last) => (chrono::Utc::now() - last).num_seconds() as f64,
+            Some(last) => (now - last).num_seconds() as f64,
             None => 0.0,
         };
 
@@ -545,8 +561,8 @@ impl AMASEngine {
         let config = self
             .config
             .try_read()
-            .map(|c| c.clone())
-            .unwrap_or_default();
+            .map(|c| Arc::clone(&c))
+            .unwrap_or_else(|_| Arc::new(AMASConfig::default()));
         let state = self.load_or_init_state(user_id)?;
         let cp = &state.cognitive_profile;
         let cl = &config.classifier;
@@ -751,7 +767,9 @@ impl AMASEngine {
                         &config.iad,
                     );
                     if let Ok(val) = serde_json::to_value(&iad_state) {
-                        let _ = self.store.set_engine_algo_state(user_id, iad_key, &val);
+                        if let Err(e) = self.store.set_engine_algo_state(user_id, iad_key, &val) {
+                            tracing::warn!(user_id, key = iad_key, error = %e, "failed to persist algo state");
+                        }
                     }
                 }
             }
@@ -812,8 +830,34 @@ impl AMASEngine {
                         &config.mtp,
                     );
                     if let Ok(val) = serde_json::to_value(&mtp_state) {
-                        let _ = self.store.set_engine_algo_state(user_id, mtp_key, &val);
+                        if let Err(e) = self.store.set_engine_algo_state(user_id, mtp_key, &val) {
+                            tracing::warn!(user_id, key = mtp_key, error = %e, "failed to persist algo state");
+                        }
                     }
+                }
+            }
+        }
+
+        // B39: EVM - Encoding Variability Model
+        {
+            let evm_key = format!("evm:{}", raw_event.word_id);
+            let mut evm_state: evm::EvmState = self
+                .store
+                .get_engine_algo_state(user_id, &evm_key)
+                .map_err(|e| AppError::internal(&e.to_string()))?
+                .and_then(|v| serde_json::from_value(v).ok())
+                .unwrap_or_default();
+
+            let is_new_context = raw_event
+                .session_id
+                .as_deref()
+                .is_some_and(|sid| !sid.is_empty());
+            evm::record_context(&mut evm_state, is_new_context);
+            adjusted_interval_scale *= evm::interval_modifier(&evm_state);
+
+            if let Ok(val) = serde_json::to_value(&evm_state) {
+                if let Err(e) = self.store.set_engine_algo_state(user_id, &evm_key, &val) {
+                    tracing::warn!(user_id, key = %evm_key, error = %e, "failed to persist algo state");
                 }
             }
         }
@@ -884,23 +928,30 @@ impl AMASEngine {
         algo_states: &mut AlgoStates,
         candidates: &[DecisionCandidate],
         reward: f64,
+        objective_score: f64,
         user_state: &UserState,
         weights: &HashMap<AlgorithmId, f64>,
         config: &AMASConfig,
     ) {
+        let blended = reward * 0.5 + objective_score * 0.5;
+        let max_weight = weights
+            .values()
+            .copied()
+            .fold(0.0_f64, f64::max)
+            .max(1e-9);
+
         for candidate in candidates {
             let weight = weights.get(&candidate.algorithm_id).copied().unwrap_or(0.0);
-            let learning_rate = config.feature.trust_base_learning_rate
-                * (config.feature.trust_weight_blend + weight);
+            let lr = config.feature.trust_base_learning_rate * (weight / max_weight).max(0.1);
             ensemble::update_trust(
                 &mut algo_states.trust_scores,
                 candidate.algorithm_id,
-                reward,
-                learning_rate,
+                blended,
+                lr,
             );
 
             if candidate.algorithm_id == AlgorithmId::Ige {
-                ige::update(&mut algo_states.ige, &candidate.strategy, reward);
+                ige::update(&mut algo_states.ige, &candidate.strategy, blended);
             }
 
             if candidate.algorithm_id == AlgorithmId::Swd {
@@ -908,7 +959,7 @@ impl AMASEngine {
                     &mut algo_states.swd,
                     user_state,
                     &candidate.strategy,
-                    reward,
+                    blended,
                     config,
                 );
             }
@@ -918,24 +969,23 @@ impl AMASEngine {
     fn persist_state(
         &self,
         user_id: &str,
-        user_state: &UserState,
+        user_state: &mut UserState,
         algo_states: &AlgoStates,
     ) -> Result<(), AppError> {
         // 在保存前清理浮点字段，防止 NaN 传播
-        let mut state = user_state.clone();
-        state.attention = sanitize_float(state.attention, 0.5).clamp(0.0, 1.0);
-        state.fatigue = sanitize_float(state.fatigue, 0.0).clamp(0.0, 1.0);
-        state.motivation = sanitize_float(state.motivation, 0.0).clamp(-1.0, 1.0);
-        state.confidence = sanitize_float(state.confidence, 0.5).clamp(0.0, 1.0);
-        state.cognitive_profile.memory_capacity =
-            sanitize_float(state.cognitive_profile.memory_capacity, 0.5).clamp(0.0, 1.0);
-        state.cognitive_profile.processing_speed =
-            sanitize_float(state.cognitive_profile.processing_speed, 0.5).clamp(0.0, 1.0);
-        state.cognitive_profile.stability =
-            sanitize_float(state.cognitive_profile.stability, 0.5).clamp(0.0, 1.0);
+        user_state.attention = sanitize_float(user_state.attention, 0.5).clamp(0.0, 1.0);
+        user_state.fatigue = sanitize_float(user_state.fatigue, 0.0).clamp(0.0, 1.0);
+        user_state.motivation = sanitize_float(user_state.motivation, 0.0).clamp(-1.0, 1.0);
+        user_state.confidence = sanitize_float(user_state.confidence, 0.5).clamp(0.0, 1.0);
+        user_state.cognitive_profile.memory_capacity =
+            sanitize_float(user_state.cognitive_profile.memory_capacity, 0.5).clamp(0.0, 1.0);
+        user_state.cognitive_profile.processing_speed =
+            sanitize_float(user_state.cognitive_profile.processing_speed, 0.5).clamp(0.0, 1.0);
+        user_state.cognitive_profile.stability =
+            sanitize_float(user_state.cognitive_profile.stability, 0.5).clamp(0.0, 1.0);
 
         let user_state_json =
-            serde_json::to_value(&state).map_err(|e| AppError::internal(&e.to_string()))?;
+            serde_json::to_value(&*user_state).map_err(|e| AppError::internal(&e.to_string()))?;
 
         let algo_entries: Vec<(String, serde_json::Value)> = vec![
             (
@@ -1008,6 +1058,7 @@ impl AMASEngine {
         latency_ms: i64,
         config: &AMASConfig,
         pre_constraint_strategy: &StrategyParams,
+        config_version: &str,
     ) {
         monitoring::record_event(
             &self.store,
@@ -1017,6 +1068,7 @@ impl AMASEngine {
             latency_ms,
             config,
             pre_constraint_strategy,
+            config_version,
         );
     }
 }

@@ -27,7 +27,9 @@ pub struct MonitoringEvent {
     pub reward: serde_json::Value,
     pub cold_start_phase: Option<String>,
     pub selection_constraints_met: bool,
-    pub objective_score: f64,
+    pub reward_value: f64,
+    #[serde(default)]
+    pub config_version: String,
 }
 
 pub fn check_invariants(result: &ProcessResult) -> Vec<InvariantViolation> {
@@ -120,6 +122,15 @@ pub fn should_sample(
     rand::random::<f64>() < sample_rate
 }
 
+pub fn compute_config_hash(config: &AMASConfig) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let json = serde_json::to_string(config).unwrap_or_default();
+    let mut hasher = DefaultHasher::new();
+    json.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
 pub fn record_event(
     store: &Store,
     user_id: &str,
@@ -128,6 +139,7 @@ pub fn record_event(
     latency_ms: i64,
     config: &AMASConfig,
     pre_constraint_strategy: &StrategyParams,
+    config_version: &str,
 ) {
     let violations = check_invariants(result);
     let is_anomaly = !violations.is_empty();
@@ -156,7 +168,8 @@ pub fn record_event(
         reward: serde_json::to_value(&result.reward).unwrap_or_default(),
         cold_start_phase: result.cold_start_phase.as_ref().map(|p| format!("{p:?}")),
         selection_constraints_met,
-        objective_score: result.reward.value,
+        reward_value: result.reward.value,
+        config_version: config_version.to_string(),
     };
 
     if is_anomaly {

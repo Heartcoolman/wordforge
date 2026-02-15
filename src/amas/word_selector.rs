@@ -63,13 +63,13 @@ fn score_review_word_prefetched(
     mdm_state: &MdmState,
     now_ms: i64,
     mm: &MemoryModelConfig,
+    ws: &WordSelectorConfig,
 ) -> (f64, f64) {
     let recall = crate::amas::memory::mdm::recall_probability(mdm_state, now_ms, mm);
 
     let mut score = 1.0 - recall;
-    if recall < mm.recall_risk_threshold {
-        score += mm.recall_risk_bonus;
-    }
+    let sigmoid = |x: f64| 1.0 / (1.0 + (-x).exp());
+    score += mm.recall_risk_bonus * sigmoid((mm.recall_risk_threshold - recall) * ws.sigmoid_steepness);
 
     (score, recall)
 }
@@ -89,6 +89,12 @@ pub struct SessionSelectionContext {
     pub temporal_boost: f64,
 }
 
+pub struct SelectionConfigs<'a> {
+    pub word_selector: &'a WordSelectorConfig,
+    pub elo: &'a EloConfig,
+    pub memory_model: &'a MemoryModelConfig,
+}
+
 /// 从候选词中选出最优学习批次
 pub fn select_words(
     store: &Store,
@@ -97,10 +103,11 @@ pub fn select_words(
     strategy: &StrategyParams,
     batch_size: usize,
     context: Option<&SessionSelectionContext>,
-    ws: &WordSelectorConfig,
-    elo_config: &EloConfig,
-    mm: &MemoryModelConfig,
+    configs: &SelectionConfigs<'_>,
 ) -> Result<Vec<ScoredWord>, AppError> {
+    let ws = configs.word_selector;
+    let elo_config = configs.elo;
+    let mm = configs.memory_model;
     let now_ms = chrono::Utc::now().timestamp_millis();
 
     let words_by_id = store
@@ -174,7 +181,7 @@ pub fn select_words(
             let mdm_state = mastery_state_by_id
                 .get(word_id)
                 .unwrap_or(&default_mdm_state);
-            let (base_score, recall) = score_review_word_prefetched(mdm_state, now_ms, mm);
+            let (base_score, recall) = score_review_word_prefetched(mdm_state, now_ms, mm, ws);
             let mut score =
                 base_score + review_ucb_bonus(review_population, attempts.unwrap_or_default(), ws);
 
@@ -184,10 +191,10 @@ pub fn select_words(
             }
 
             // 上下文加权：recently_mastered 且回忆概率低的词加分
-            if recently_mastered_set.contains(word_id.as_str()) {
-                if recall < ws.recall_mastered_threshold {
-                    score += ws.recently_mastered_bonus;
-                }
+            if recently_mastered_set.contains(word_id.as_str())
+                && recall < ws.recall_mastered_threshold
+            {
+                score += ws.recently_mastered_bonus;
             }
 
             review_words.push(ScoredWord {
@@ -204,7 +211,7 @@ pub fn select_words(
     } else {
         strategy.new_ratio
     };
-    let new_count = (batch_size as f64 * effective_new_ratio).ceil() as usize;
+    let new_count = (batch_size as f64 * effective_new_ratio).round() as usize;
     let review_count = batch_size.saturating_sub(new_count);
 
     // 使用 Top-K 选择而非全量排序：从 O(n log n) 收敛为 O(n + k log k)

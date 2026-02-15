@@ -4,10 +4,16 @@
 use crate::store::Store;
 
 const USER_BATCH_SIZE: usize = 100;
-/// 每个用户读取的最大记录数
 const MAX_RECORDS_PER_USER: usize = 500;
-/// 每个单词最多保留的混淆对数量
 const MAX_PAIRS_PER_WORD: usize = 10;
+const MAX_CONFUSION_ENTRIES: usize = 10000;
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RecordMinimal {
+    word_id: String,
+    is_correct: bool,
+}
 
 pub async fn run(store: &Store) {
     tracing::info!("Confusion pair cache worker running");
@@ -32,20 +38,42 @@ pub async fn run(store: &Store) {
         let batch_len = users.len();
 
         for user in &users {
-            let records = store.get_user_records(&user.id, MAX_RECORDS_PER_USER).unwrap_or_default();
+            if confusion_map.len() >= MAX_CONFUSION_ENTRIES {
+                break;
+            }
 
+            let prefix = match crate::store::keys::record_prefix(&user.id) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+
+            let mut records_read = 0usize;
             let mut prev_incorrect: Option<String> = None;
-            for record in &records {
+
+            for item in store.records.scan_prefix(prefix.as_bytes()) {
+                if records_read >= MAX_RECORDS_PER_USER {
+                    break;
+                }
+                let (_, v) = match item {
+                    Ok(kv) => kv,
+                    Err(_) => continue,
+                };
+                let record: RecordMinimal = match serde_json::from_slice(&v) {
+                    Ok(r) => r,
+                    Err(_) => continue,
+                };
+                records_read += 1;
+
                 if !record.is_correct {
                     if let Some(ref prev_word) = prev_incorrect {
-                        if prev_word != &record.word_id {
+                        if prev_word != &record.word_id && confusion_map.len() < MAX_CONFUSION_ENTRIES {
                             confusion_map
                                 .entry(prev_word.clone())
                                 .or_default()
                                 .push(record.word_id.clone());
                         }
                     }
-                    prev_incorrect = Some(record.word_id.clone());
+                    prev_incorrect = Some(record.word_id);
                 } else {
                     prev_incorrect = None;
                 }
@@ -54,19 +82,17 @@ pub async fn run(store: &Store) {
 
         offset += batch_len;
 
-        if batch_len < USER_BATCH_SIZE {
+        if batch_len < USER_BATCH_SIZE || confusion_map.len() >= MAX_CONFUSION_ENTRIES {
             break;
         }
     }
 
     let mut cached = 0u32;
     for (word_id, confused_with) in &confusion_map {
-        // 统计每个混淆目标出现的频次
         let mut freq: std::collections::HashMap<&str, u32> = std::collections::HashMap::new();
         for other_id in confused_with {
             *freq.entry(other_id.as_str()).or_insert(0) += 1;
         }
-        // 按频次降序排序，保留 top-N
         let mut freq_vec: Vec<_> = freq.into_iter().collect();
         freq_vec.sort_by(|a, b| b.1.cmp(&a.1));
         freq_vec.truncate(MAX_PAIRS_PER_WORD);

@@ -153,6 +153,8 @@ async fn create_session(
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
         summary: None,
+        correct_count: 0,
+        total_count: 0,
     };
 
     state.store().create_learning_session(&session)?;

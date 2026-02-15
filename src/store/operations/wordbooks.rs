@@ -38,6 +38,18 @@ impl Store {
         let key = keys::wordbook_key(&wordbook.id)?;
         self.wordbooks
             .insert(key.as_bytes(), Self::serialize(wordbook)?)?;
+
+        // Maintain wordbook_type_index
+        let idx_key = match wordbook.book_type {
+            WordbookType::System => keys::wordbook_type_index_key_system(&wordbook.id)?,
+            WordbookType::User => {
+                let uid = wordbook.user_id.as_deref().unwrap_or("unknown");
+                keys::wordbook_type_index_key_user(uid, &wordbook.id)?
+            }
+        };
+        self.wordbook_type_index
+            .insert(idx_key.as_bytes(), wordbook.id.as_bytes())?;
+
         Ok(())
     }
 
@@ -55,11 +67,12 @@ impl Store {
     /// TODO: 引入类型前缀索引（如 `system:{wordbook_id}` / `user:{user_id}:{wordbook_id}`），
     /// 以支持按类型的高效前缀扫描。
     pub fn list_system_wordbooks(&self) -> Result<Vec<Wordbook>, StoreError> {
+        let prefix = keys::wordbook_type_index_prefix_system();
         let mut books = Vec::new();
-        for item in self.wordbooks.iter() {
+        for item in self.wordbook_type_index.scan_prefix(prefix.as_bytes()) {
             let (_, v) = item?;
-            let book: Wordbook = Self::deserialize(&v)?;
-            if book.book_type == WordbookType::System {
+            let wb_id = String::from_utf8(v.to_vec()).unwrap_or_default();
+            if let Some(book) = self.get_wordbook(&wb_id)? {
                 books.push(book);
             }
         }
@@ -70,11 +83,12 @@ impl Store {
     /// 列出指定用户的词书。
     /// TODO: 同 list_system_wordbooks，需要类型前缀索引来避免全表扫描。
     pub fn list_user_wordbooks(&self, user_id: &str) -> Result<Vec<Wordbook>, StoreError> {
+        let prefix = keys::wordbook_type_index_prefix_user(user_id)?;
         let mut books = Vec::new();
-        for item in self.wordbooks.iter() {
+        for item in self.wordbook_type_index.scan_prefix(prefix.as_bytes()) {
             let (_, v) = item?;
-            let book: Wordbook = Self::deserialize(&v)?;
-            if book.book_type == WordbookType::User && book.user_id.as_deref() == Some(user_id) {
+            let wb_id = String::from_utf8(v.to_vec()).unwrap_or_default();
+            if let Some(book) = self.get_wordbook(&wb_id)? {
                 books.push(book);
             }
         }
@@ -97,7 +111,7 @@ impl Store {
         let entry_bytes = Self::serialize(&entry)?;
         let wb_key = keys::wordbook_key(wordbook_id)?;
 
-        (&self.wordbook_words, &self.wordbooks)
+        let inserted = (&self.wordbook_words, &self.wordbooks)
             .transaction(|(tx_ww, tx_wb)| {
                 let raw = tx_wb.get(wb_key.as_bytes())?.ok_or_else(|| {
                     sled::transaction::ConflictableTransactionError::Abort(StoreError::NotFound {
@@ -134,7 +148,16 @@ impl Store {
                         StoreError::Sled(sled_err)
                     }
                 },
-            )
+            )?;
+
+        // Maintain word_references index
+        if inserted {
+            if let Ok(ref_key) = keys::word_ref_key(word_id, "wordbook_words", ww_key.as_bytes()) {
+                let _ = self.word_references.insert(ref_key.as_bytes(), &[]);
+            }
+        }
+
+        Ok(inserted)
     }
 
     pub fn remove_word_from_wordbook(
@@ -145,7 +168,7 @@ impl Store {
         let ww_key = keys::wordbook_words_key(wordbook_id, word_id)?;
         let wb_key = keys::wordbook_key(wordbook_id)?;
 
-        (&self.wordbook_words, &self.wordbooks)
+        let removed = (&self.wordbook_words, &self.wordbooks)
             .transaction(|(tx_ww, tx_wb)| {
                 let removed_existing = tx_ww.remove(ww_key.as_bytes())?.is_some();
 
@@ -175,7 +198,16 @@ impl Store {
                         StoreError::Sled(sled_err)
                     }
                 },
-            )
+            )?;
+
+        // Clean up word_references index
+        if removed {
+            if let Ok(ref_key) = keys::word_ref_key(word_id, "wordbook_words", ww_key.as_bytes()) {
+                let _ = self.word_references.remove(ref_key.as_bytes());
+            }
+        }
+
+        Ok(removed)
     }
 
     pub fn list_wordbook_words(

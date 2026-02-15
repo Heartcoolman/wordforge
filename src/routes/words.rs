@@ -49,6 +49,7 @@ pub fn router() -> Router<AppState> {
         .route("/", get(list_words).post(create_word))
         .route("/count", get(count_words))
         .route("/batch", post(batch_create_words))
+        .route("/batch-get", post(batch_get_words))
         .route("/import-url", post(import_from_url))
         .route("/:id", get(get_word).put(update_word).delete(delete_word))
 }
@@ -103,6 +104,35 @@ async fn count_words(
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     let total = state.store().count_words()?;
     Ok(ok(serde_json::json!({"total": total})))
+}
+
+// Batch get words by IDs
+#[derive(Debug, Deserialize)]
+struct BatchGetRequest {
+    ids: Vec<String>,
+}
+
+async fn batch_get_words(
+    _user: AuthUser,
+    State(state): State<AppState>,
+    JsonBody(req): JsonBody<BatchGetRequest>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    if req.ids.len() > state.config().limits.max_batch_size {
+        return Err(AppError::bad_request(
+            "BATCH_TOO_LARGE",
+            &format!(
+                "批量获取单词数量上限为{}",
+                state.config().limits.max_batch_size
+            ),
+        ));
+    }
+    let words_map = state.store().get_words_by_ids(&req.ids)?;
+    let words: Vec<WordPublic> = req
+        .ids
+        .iter()
+        .filter_map(|id| words_map.get(id).map(WordPublic::from))
+        .collect();
+    Ok(ok(words))
 }
 
 // B14: Delete word

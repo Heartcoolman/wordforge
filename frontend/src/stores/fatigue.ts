@@ -1,4 +1,4 @@
-import { createSignal, createRoot, onCleanup } from 'solid-js';
+import { createSignal, createRoot } from 'solid-js';
 import { storage, STORAGE_KEYS } from '@/lib/storage';
 
 // 疲劳等级：清醒 → 轻度 → 中度 → 重度

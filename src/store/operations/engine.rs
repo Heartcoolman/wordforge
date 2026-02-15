@@ -108,6 +108,18 @@ impl Store {
         Ok(())
     }
 
+    pub fn batch_upsert_metrics_daily(
+        &self,
+        entries: &[(String, serde_json::Value)],
+    ) -> Result<(), StoreError> {
+        let mut batch = sled::Batch::default();
+        for (key, value) in entries {
+            batch.insert(key.as_bytes(), Self::serialize(value)?);
+        }
+        self.algorithm_metrics_daily.apply_batch(batch)?;
+        Ok(())
+    }
+
     pub fn get_metrics_daily(
         &self,
         date: &str,
