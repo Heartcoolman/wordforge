@@ -3,13 +3,14 @@ mod common;
 use axum::http::{Method, StatusCode};
 
 use common::app::spawn_test_server;
-use common::auth::{auth_header, login_and_get_token};
+use common::auth::{auth_header, login_and_get_token, setup_admin_and_get_token};
 use common::http::{request, response_json};
 
 #[tokio::test]
 async fn it_word_create_and_list() {
     let app = spawn_test_server().await;
     let token = login_and_get_token(&app.app).await;
+    let admin_token = setup_admin_and_get_token(&app.app).await;
 
     let create = request(
         &app.app,
@@ -20,7 +21,7 @@ async fn it_word_create_and_list() {
             "meaning": "苹果",
             "difficulty": 0.4
         })),
-        &[("authorization", auth_header(&token))],
+        &[("authorization", auth_header(&admin_token))],
     )
     .await;
 

@@ -11,6 +11,8 @@ beforeAll(() => {
       ...window.location,
       origin: TEST_BASE_URL,
       href: TEST_BASE_URL,
+      pathname: '/',
+      search: '',
     },
   });
 });
