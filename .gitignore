@@ -60,3 +60,7 @@ lcov.info
 
 # Debug symbols
 *.pdb
+
+# VitePress
+docs/.vitepress/dist
+docs/.vitepress/cache
