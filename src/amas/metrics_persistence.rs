@@ -36,7 +36,7 @@ pub fn flush_metrics(
         };
 
         let value =
-            serde_json::to_value(merged).map_err(|e| crate::store::StoreError::Serialization(e))?;
+            serde_json::to_value(merged).map_err(crate::store::StoreError::Serialization)?;
         store.upsert_metrics_daily(&today, algo_id, &value)?;
     }
 

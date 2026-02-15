@@ -401,7 +401,7 @@ function AddWordsModal(props: {
     try {
       const res = await wordbooksApi.addWords(props.bookId, ids);
       uiStore.toast.success(`已添加 ${res.added} 个单词`);
-      setSelected(new Set());
+      setSelected(new Set<string>());
       setQuery('');
       setResults([]);
       setSearched(false);

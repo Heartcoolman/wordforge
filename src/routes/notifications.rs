@@ -133,9 +133,9 @@ async fn list_badges(
             id: "first_word".to_string(),
             name: "First Word".to_string(),
             description: "Learn your first word".to_string(),
-            unlocked: first_word_unlocked || persisted_first.as_ref().map_or(false, |b| b.unlocked),
+            unlocked: first_word_unlocked || persisted_first.as_ref().is_some_and(|b| b.unlocked),
             progress: if first_word_unlocked { 1.0 } else { 0.0 },
-            unlocked_at: if first_word_unlocked || persisted_first.as_ref().map_or(false, |b| b.unlocked) {
+            unlocked_at: if first_word_unlocked || persisted_first.as_ref().is_some_and(|b| b.unlocked) {
                 persisted_first.as_ref().and_then(|b| b.unlocked_at).or(Some(now))
             } else {
                 None
@@ -145,9 +145,9 @@ async fn list_badges(
             id: "streak_7".to_string(),
             name: "Week Streak".to_string(),
             description: "Study for 7 consecutive days".to_string(),
-            unlocked: streak_unlocked || persisted_streak.as_ref().map_or(false, |b| b.unlocked),
+            unlocked: streak_unlocked || persisted_streak.as_ref().is_some_and(|b| b.unlocked),
             progress: streak_progress,
-            unlocked_at: if streak_unlocked || persisted_streak.as_ref().map_or(false, |b| b.unlocked) {
+            unlocked_at: if streak_unlocked || persisted_streak.as_ref().is_some_and(|b| b.unlocked) {
                 persisted_streak.as_ref().and_then(|b| b.unlocked_at).or(Some(now))
             } else {
                 None
@@ -157,9 +157,9 @@ async fn list_badges(
             id: "mastered_100".to_string(),
             name: "Century Club".to_string(),
             description: "Master 100 words".to_string(),
-            unlocked: mastered_unlocked || persisted_mastered.as_ref().map_or(false, |b| b.unlocked),
+            unlocked: mastered_unlocked || persisted_mastered.as_ref().is_some_and(|b| b.unlocked),
             progress: mastered_progress,
-            unlocked_at: if mastered_unlocked || persisted_mastered.as_ref().map_or(false, |b| b.unlocked) {
+            unlocked_at: if mastered_unlocked || persisted_mastered.as_ref().is_some_and(|b| b.unlocked) {
                 persisted_mastered.as_ref().and_then(|b| b.unlocked_at).or(Some(now))
             } else {
                 None

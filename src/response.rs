@@ -179,7 +179,7 @@ pub fn paginated<T: Serialize>(
     per_page: u64,
 ) -> impl IntoResponse {
     let total_pages = if per_page > 0 {
-        (total + per_page - 1) / per_page
+        total.div_ceil(per_page)
     } else {
         0
     };

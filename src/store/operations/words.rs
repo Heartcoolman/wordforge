@@ -65,7 +65,7 @@ impl Store {
 
     pub fn list_words(&self, limit: usize, offset: usize) -> Result<Vec<Word>, StoreError> {
         // Use words_by_created_at index (reverse timestamp = newest first)
-        if self.words_by_created_at.len() > 0 {
+        if !self.words_by_created_at.is_empty() {
             let mut words = Vec::new();
             let mut skipped = 0usize;
             for item in self.words_by_created_at.iter() {
@@ -240,10 +240,8 @@ impl Store {
         }
 
         // Clean up word_references index
-        for item in self.word_references.scan_prefix(ref_prefix.as_bytes()) {
-            if let Ok((k, _)) = item {
-                let _ = self.word_references.remove(&k);
-            }
+        for (k, _) in self.word_references.scan_prefix(ref_prefix.as_bytes()).flatten() {
+            let _ = self.word_references.remove(&k);
         }
 
         Ok(())

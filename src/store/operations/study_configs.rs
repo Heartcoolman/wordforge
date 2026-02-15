@@ -41,9 +41,10 @@ impl Store {
         match self.study_configs.get(key.as_bytes())? {
             Some(raw) => Ok(Self::deserialize(&raw)?),
             None => {
-                let mut config = UserStudyConfig::default();
-                config.user_id = user_id.to_string();
-                Ok(config)
+                Ok(UserStudyConfig {
+                    user_id: user_id.to_string(),
+                    ..Default::default()
+                })
             }
         }
     }

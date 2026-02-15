@@ -68,8 +68,10 @@ mod tests {
 
     #[test]
     fn high_fatigue_lowers_difficulty() {
-        let mut state = UserState::default();
-        state.fatigue = 0.95;
+        let state = UserState {
+            fatigue: 0.95,
+            ..Default::default()
+        };
         let feature = FeatureVector {
             accuracy: 1.0,
             response_speed: 0.9,

@@ -40,7 +40,7 @@ async fn it_word_create_and_list() {
     let (list_status, _, body) = response_json(list).await;
     assert_eq!(list_status, StatusCode::OK);
     assert!(body["data"]["data"].is_array());
-    assert!(body["data"]["data"].as_array().unwrap().len() >= 1);
+    assert!(!body["data"]["data"].as_array().unwrap().is_empty());
     assert!(body["data"]["page"].as_u64().unwrap() == 1);
     assert!(body["data"]["perPage"].as_u64().unwrap() == 20);
 }

@@ -13,14 +13,20 @@ pub struct AlgorithmMetrics {
     pub last_called_at: RwLock<Option<chrono::DateTime<chrono::Utc>>>,
 }
 
-impl AlgorithmMetrics {
-    pub fn new() -> Self {
+impl Default for AlgorithmMetrics {
+    fn default() -> Self {
         Self {
             call_count: AtomicU64::new(0),
             total_latency_us: AtomicU64::new(0),
             error_count: AtomicU64::new(0),
             last_called_at: RwLock::new(None),
         }
+    }
+}
+
+impl AlgorithmMetrics {
+    pub fn new() -> Self {
+        Self::default()
     }
 }
 

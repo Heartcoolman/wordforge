@@ -89,6 +89,12 @@ pub struct SessionSelectionContext {
     pub temporal_boost: f64,
 }
 
+pub struct SelectionConfigs<'a> {
+    pub word_selector: &'a WordSelectorConfig,
+    pub elo: &'a EloConfig,
+    pub memory_model: &'a MemoryModelConfig,
+}
+
 /// 从候选词中选出最优学习批次
 pub fn select_words(
     store: &Store,
@@ -97,10 +103,11 @@ pub fn select_words(
     strategy: &StrategyParams,
     batch_size: usize,
     context: Option<&SessionSelectionContext>,
-    ws: &WordSelectorConfig,
-    elo_config: &EloConfig,
-    mm: &MemoryModelConfig,
+    configs: &SelectionConfigs<'_>,
 ) -> Result<Vec<ScoredWord>, AppError> {
+    let ws = configs.word_selector;
+    let elo_config = configs.elo;
+    let mm = configs.memory_model;
     let now_ms = chrono::Utc::now().timestamp_millis();
 
     let words_by_id = store
@@ -184,10 +191,10 @@ pub fn select_words(
             }
 
             // 上下文加权：recently_mastered 且回忆概率低的词加分
-            if recently_mastered_set.contains(word_id.as_str()) {
-                if recall < ws.recall_mastered_threshold {
-                    score += ws.recently_mastered_bonus;
-                }
+            if recently_mastered_set.contains(word_id.as_str())
+                && recall < ws.recall_mastered_threshold
+            {
+                score += ws.recently_mastered_bonus;
             }
 
             review_words.push(ScoredWord {

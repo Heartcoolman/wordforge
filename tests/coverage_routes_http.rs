@@ -101,11 +101,10 @@ async fn it_learning_wordbooks_word_states_and_study_config_flow() {
     let (list_user_status, _, list_user_body) = response_json(list_user_books).await;
     assert_eq!(list_user_status, StatusCode::OK);
     assert!(
-        list_user_body["data"]
+        !list_user_body["data"]
             .as_array()
             .unwrap_or(&Vec::new())
-            .len()
-            >= 1
+            .is_empty()
     );
 
     let add_words = request(

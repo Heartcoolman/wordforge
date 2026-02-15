@@ -7,7 +7,6 @@
 ///
 /// 常量名使用完整拼写以提高代码可读性，tree 名使用缩写以节省存储空间。
 /// 修改 tree 名称会导致数据不可访问，请勿随意更改。
-
 pub const USERS: &str = "users";
 pub const SESSIONS: &str = "sessions";
 pub const ADMIN_SESSIONS: &str = "admin_sessions";

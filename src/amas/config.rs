@@ -669,7 +669,7 @@ impl Default for LearningStrategyConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AMASConfig {
     pub feature_flags: FeatureFlags,
@@ -707,34 +707,6 @@ pub struct AMASConfig {
     pub learning_strategy: LearningStrategyConfig,
     #[serde(default)]
     pub classifier: ClassifierConfig,
-}
-
-impl Default for AMASConfig {
-    fn default() -> Self {
-        Self {
-            feature_flags: FeatureFlags::default(),
-            ensemble: EnsembleConfig::default(),
-            modeling: ModelingConfig::default(),
-            constraints: ConstraintConfig::default(),
-            monitoring: MonitoringConfig::default(),
-            cold_start: ColdStartConfig::default(),
-            objective_weights: ObjectiveWeights::default(),
-            reward: RewardConfig::default(),
-            feature: FeatureConfig::default(),
-            elo: EloConfig::default(),
-            fatigue_decay: FatigueDecayConfig::default(),
-            heuristic: HeuristicConfig::default(),
-            ige: IgeConfig::default(),
-            swd: SwdConfig::default(),
-            memory_model: MemoryModelConfig::default(),
-            iad: IadConfig::default(),
-            mtp: MtpConfig::default(),
-            word_selector: WordSelectorConfig::default(),
-            intervention: InterventionConfig::default(),
-            learning_strategy: LearningStrategyConfig::default(),
-            classifier: ClassifierConfig::default(),
-        }
-    }
 }
 
 impl AMASConfig {

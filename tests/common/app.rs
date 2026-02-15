@@ -27,7 +27,7 @@ async fn spawn_with_limits(api_limit: u64) -> TestApp {
     let test_admin_secret = format!("integration-test-admin-secret-{}", uuid::Uuid::new_v4());
     let test_refresh_secret = format!("integration-test-refresh-secret-{}", uuid::Uuid::new_v4());
 
-    let mut config = Config {
+    let config = Config {
         host: std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
         port: 3000,
         log_level: "info".to_string(),

@@ -146,10 +146,10 @@ impl AMASEngine {
             .as_deref()
             .unwrap_or("");
         if !current_session_id.is_empty() {
-            let session_changed = user_state
+            let session_changed = !user_state
                 .last_session_id
                 .as_deref()
-                .map_or(true, |prev| prev != current_session_id);
+                .is_some_and(|prev| prev == current_session_id);
             if session_changed {
                 user_state.session_event_count = 1;
                 user_state.last_session_id = Some(current_session_id.to_string());
@@ -268,7 +268,7 @@ impl AMASEngine {
         self.store
             .set_engine_user_state(
                 user_id,
-                &serde_json::to_value(&UserState::default())
+                &serde_json::to_value(UserState::default())
                     .map_err(|e| AppError::internal(&e.to_string()))?,
             )
             .map_err(|e| AppError::internal(&e.to_string()))?;

@@ -4,7 +4,7 @@ use axum::http::{Method, StatusCode};
 use chrono::Utc;
 
 use common::app::spawn_test_server;
-use common::auth::{auth_header, login_and_get_token, setup_admin_and_get_token};
+use common::auth::{auth_header, login_and_get_token};
 use common::http::{request, response_json};
 
 async fn create_word(app: &axum::Router, token: &str, text: &str) -> String {
@@ -315,11 +315,10 @@ async fn it_admin_auth_and_management_routes() {
     let (notifications_status, _, notifications_body) = response_json(notifications).await;
     assert_eq!(notifications_status, StatusCode::OK);
     assert!(
-        notifications_body["data"]
+        !notifications_body["data"]
             .as_array()
             .unwrap_or(&Vec::new())
-            .len()
-            >= 1
+            .is_empty()
     );
 
     let logout = request(

@@ -42,5 +42,5 @@ async fn it_record_create_and_query() {
     let (list_status, _, list_body) = response_json(list).await;
     assert_eq!(list_status, StatusCode::OK);
     assert!(list_body["data"]["data"].is_array());
-    assert!(list_body["data"]["data"].as_array().unwrap().len() >= 1);
+    assert!(!list_body["data"]["data"].as_array().unwrap().is_empty());
 }

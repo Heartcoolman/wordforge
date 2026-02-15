@@ -206,9 +206,11 @@ async fn get_study_words(
         &strategy_params,
         batch_size,
         None,
-        &amas_config.word_selector,
-        &amas_config.elo,
-        &amas_config.memory_model,
+        &word_selector::SelectionConfigs {
+            word_selector: &amas_config.word_selector,
+            elo: &amas_config.elo,
+            memory_model: &amas_config.memory_model,
+        },
     )?;
 
     let scored_word_ids: Vec<String> = scored.iter().map(|sw| sw.word_id.clone()).collect();
@@ -349,9 +351,11 @@ async fn next_words(
         &strategy_params,
         batch_size,
         session_context.as_ref(),
-        &amas_config.word_selector,
-        &amas_config.elo,
-        &amas_config.memory_model,
+        &word_selector::SelectionConfigs {
+            word_selector: &amas_config.word_selector,
+            elo: &amas_config.elo,
+            memory_model: &amas_config.memory_model,
+        },
     )?;
 
     let scored_word_ids: Vec<String> = scored.iter().map(|sw| sw.word_id.clone()).collect();
