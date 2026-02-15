@@ -14,13 +14,12 @@ pub struct IadState {
 /// Calculate interference penalty for a word based on confusion pairs.
 /// Higher confusion scores mean more interference -> lower retrievability.
 pub fn interference_penalty(word_id: &str, state: &IadState, config: &IadConfig) -> f64 {
-    let mut total_interference = 0.0;
-
-    for (confused_id, score) in &state.confusion_pairs {
-        if confused_id == word_id {
-            total_interference += score;
-        }
-    }
+    let total_interference: f64 = state
+        .confusion_pairs
+        .iter()
+        .filter(|(id, _)| id == word_id)
+        .map(|(_, score)| score)
+        .sum();
 
     (total_interference * config.interference_penalty_factor)
         .clamp(0.0, config.interference_penalty_cap)

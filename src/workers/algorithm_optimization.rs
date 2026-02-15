@@ -7,6 +7,8 @@ use std::sync::Arc;
 use crate::amas::engine::AMASEngine;
 use crate::store::Store;
 
+use super::parse_record_timestamp_ms;
+
 #[derive(serde::Deserialize)]
 struct RecordCorrectOnly {
     is_correct: bool,
@@ -18,20 +20,7 @@ struct RecordWithCreatedAt {
     created_at: chrono::DateTime<chrono::Utc>,
 }
 
-fn parse_record_timestamp_ms(record_key: &[u8]) -> Option<i64> {
-    let first_sep = record_key.iter().position(|b| *b == b':')?;
-    let tail = &record_key[first_sep + 1..];
-    let second_sep = tail.iter().position(|b| *b == b':')?;
-    let reverse_ts_bytes = &tail[..second_sep];
-
-    let reverse_ts_str = std::str::from_utf8(reverse_ts_bytes).ok()?;
-    let reverse_ts = reverse_ts_str.parse::<u64>().ok()?;
-    let ts_u64 = u64::MAX.checked_sub(reverse_ts)?;
-
-    i64::try_from(ts_u64).ok()
-}
-
-pub async fn run(store: &Store, _engine: &Arc<AMASEngine>) {
+pub async fn run(store: &Store, engine: &Arc<AMASEngine>) {
     tracing::info!("Algorithm optimization worker running");
 
     let now = chrono::Utc::now();
@@ -41,8 +30,6 @@ pub async fn run(store: &Store, _engine: &Arc<AMASEngine>) {
     let mut total_records = 0u64;
     let mut total_correct = 0u64;
 
-    // 按用户前缀扫描，利用 record_key 的时间倒序特性只看近期记录。
-    // 这里仅拉取 user_id，避免 list_users 的全量反序列化和排序开销。
     let user_ids = match store.list_user_ids() {
         Ok(ids) => ids,
         Err(e) => {
@@ -62,8 +49,6 @@ pub async fn run(store: &Store, _engine: &Arc<AMASEngine>) {
                 Err(_) => continue,
             };
 
-            // record_key 按时间倒序，新记录在前；遇到超过 24 小时前的记录即停止。
-            // 优先基于 key 中的时间戳短路，避免不必要的 JSON 反序列化。
             if let Some(ts_ms) = parse_record_timestamp_ms(&k) {
                 if ts_ms < cutoff_ms {
                     break;
@@ -109,6 +94,44 @@ pub async fn run(store: &Store, _engine: &Arc<AMASEngine>) {
         overall_accuracy = format!("{:.3}", overall_accuracy),
         "Algorithm optimization: collected aggregate statistics"
     );
+
+    // E4: Simple parameter adjustment based on overall accuracy
+    if total_records >= 50 {
+        let mut config = engine.get_config().await;
+        let mut adjusted = false;
+
+        if overall_accuracy < 0.4 {
+            let old = config.constraints.max_difficulty_when_fatigued;
+            config.constraints.max_difficulty_when_fatigued = (old - 0.05).max(0.2);
+            if (config.constraints.max_difficulty_when_fatigued - old).abs() > f64::EPSILON {
+                tracing::info!(
+                    old = format!("{:.3}", old),
+                    new = format!("{:.3}", config.constraints.max_difficulty_when_fatigued),
+                    "Algorithm optimization: lowered max_difficulty_when_fatigued due to low accuracy"
+                );
+                adjusted = true;
+            }
+        }
+
+        if overall_accuracy > 0.85 {
+            let old = config.constraints.max_difficulty_when_fatigued;
+            config.constraints.max_difficulty_when_fatigued = (old + 0.03).min(0.9);
+            if (config.constraints.max_difficulty_when_fatigued - old).abs() > f64::EPSILON {
+                tracing::info!(
+                    old = format!("{:.3}", old),
+                    new = format!("{:.3}", config.constraints.max_difficulty_when_fatigued),
+                    "Algorithm optimization: raised max_difficulty_when_fatigued due to high accuracy"
+                );
+                adjusted = true;
+            }
+        }
+
+        if adjusted {
+            if let Err(e) = engine.reload_config(config).await {
+                tracing::warn!(error = %e, "Algorithm optimization: failed to update config");
+            }
+        }
+    }
 
     let date = now.format("%Y-%m-%d").to_string();
     let metrics = serde_json::json!({

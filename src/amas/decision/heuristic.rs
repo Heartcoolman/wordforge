@@ -15,12 +15,6 @@ pub fn generate(
     let h = &config.heuristic;
     let mut strategy = StrategyParams::default();
 
-    if user_state.fatigue > config.constraints.high_fatigue_threshold {
-        strategy.difficulty = strategy.difficulty.min(FATIGUE_DIFFICULTY_CAP);
-        strategy.batch_size = strategy.batch_size.min(FATIGUE_BATCH_SIZE_CAP);
-        strategy.new_ratio = strategy.new_ratio.min(FATIGUE_NEW_RATIO_CAP);
-    }
-
     if user_state.attention < config.constraints.low_attention_threshold {
         strategy.review_mode = true;
         strategy.new_ratio = 0.0;
@@ -46,6 +40,12 @@ pub fn generate(
         strategy.difficulty = h.cold_start_difficulty;
         strategy.batch_size = h.cold_start_batch_size;
         strategy.new_ratio = h.cold_start_new_ratio;
+    }
+
+    if user_state.fatigue > config.constraints.high_fatigue_threshold {
+        strategy.difficulty = strategy.difficulty.min(FATIGUE_DIFFICULTY_CAP);
+        strategy.batch_size = strategy.batch_size.min(FATIGUE_BATCH_SIZE_CAP);
+        strategy.new_ratio = strategy.new_ratio.min(FATIGUE_NEW_RATIO_CAP);
     }
 
     DecisionCandidate {

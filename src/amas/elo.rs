@@ -43,9 +43,9 @@ pub fn update_elo(
         config.k_factor
     };
     let k_word = if word_elo.games < config.novice_game_threshold {
-        config.k_factor * config.novice_k_multiplier
+        config.k_factor * config.novice_k_multiplier * config.word_k_factor_ratio
     } else {
-        config.k_factor
+        config.k_factor * config.word_k_factor_ratio
     };
 
     user_elo.rating =

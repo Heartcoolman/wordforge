@@ -46,6 +46,9 @@ impl Default for MdmState {
 pub fn update_strength(state: &mut MdmState, quality: f64, alpha: f64, config: &MemoryModelConfig) {
     let quality = quality.clamp(0.0, 1.0);
 
+    // Fix 1: Apply passive time decay before updating
+    apply_passive_decay(state, config);
+
     state.short_term_strength +=
         config.short_term_learning_rate * (quality - state.short_term_strength);
     state.medium_term_strength +=
@@ -57,19 +60,36 @@ pub fn update_strength(state: &mut MdmState, quality: f64, alpha: f64, config: &
     state.medium_term_strength = state.medium_term_strength.clamp(0.0, 1.0);
     state.long_term_strength = state.long_term_strength.clamp(0.0, 1.0);
 
-    // B36: Update consolidation alongside memory_strength
-    // Consolidation grows slowly through successful reviews
-    let consolidation_rate = config.consolidation_rate_scale * quality;
-    state.consolidation = (state.consolidation + consolidation_rate).clamp(0.0, 1.0);
+    // Fix 5: Consolidation decays on low quality, grows on high quality
+    let consolidation_delta = config.consolidation_rate_scale * (quality - 0.5) * 2.0;
+    state.consolidation = (state.consolidation + consolidation_delta).clamp(0.0, 1.0);
 
     let composite = composite_strength(state, config);
-    // B36: Vocabulary-specific correction using consolidation
     let vocab_corrected = composite * (1.0 + state.consolidation * config.consolidation_bonus);
     state.memory_strength += alpha.clamp(0.0, 1.0) * (vocab_corrected - state.memory_strength);
     state.memory_strength = state.memory_strength.clamp(0.0, 1.0);
 
     state.review_count += 1;
     state.last_review_at = Some(chrono::Utc::now().timestamp_millis());
+}
+
+/// Power-law passive decay: strength *= (1 + days/half_life)^(-power)
+fn apply_passive_decay(state: &mut MdmState, config: &MemoryModelConfig) {
+    let last = match state.last_review_at {
+        Some(t) => t,
+        None => return,
+    };
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let elapsed_days = (now_ms - last) as f64 / 86_400_000.0;
+    if elapsed_days <= 0.0 {
+        return;
+    }
+    let decay = (1.0 + elapsed_days / config.passive_decay_half_life_days)
+        .powf(-config.passive_decay_power);
+    state.short_term_strength *= decay;
+    state.medium_term_strength *= decay;
+    state.long_term_strength *= decay;
+    state.consolidation *= decay;
 }
 
 /// B40: Compute adaptive desired_retention based on various factors
@@ -81,20 +101,11 @@ pub fn adaptive_desired_retention(
 ) -> f64 {
     let mut retention = base_retention;
 
-    // High accuracy -> can push for higher retention
-    if accuracy > HIGH_ACCURACY_THRESHOLD {
-        retention += HIGH_ACCURACY_RETENTION_BOOST;
-    }
+    let sigmoid = |x: f64| 1.0 / (1.0 + (-x).exp());
 
-    // High fatigue -> lower retention target (easier to reach)
-    if fatigue > HIGH_FATIGUE_THRESHOLD {
-        retention -= HIGH_FATIGUE_RETENTION_DROP;
-    }
-
-    // Low motivation -> slightly lower target
-    if motivation < LOW_MOTIVATION_THRESHOLD {
-        retention -= LOW_MOTIVATION_RETENTION_DROP;
-    }
+    retention += HIGH_ACCURACY_RETENTION_BOOST * sigmoid((accuracy - HIGH_ACCURACY_THRESHOLD) * 10.0);
+    retention -= HIGH_FATIGUE_RETENTION_DROP * sigmoid((fatigue - HIGH_FATIGUE_THRESHOLD) * 10.0);
+    retention -= LOW_MOTIVATION_RETENTION_DROP * sigmoid((LOW_MOTIVATION_THRESHOLD - motivation) * 10.0);
 
     retention.clamp(RETENTION_MIN, RETENTION_MAX)
 }
@@ -112,6 +123,7 @@ pub fn recall_probability(state: &MdmState, now_ms: i64, config: &MemoryModelCon
         Some(last) => {
             let delta_secs = ((now_ms - last) as f64 / 1000.0).max(0.0);
             let time_constant_secs = (state.memory_strength.max(0.0) + config.half_life_base_epsilon)
+                .powf(0.7)
                 * config.half_life_time_unit_secs;
             (-delta_secs / time_constant_secs).exp().clamp(0.0, 1.0)
         }
@@ -125,6 +137,7 @@ pub fn compute_interval(
     config: &MemoryModelConfig,
 ) -> i64 {
     let time_constant = (state.memory_strength.max(0.0) + config.half_life_base_epsilon)
+        .powf(0.7)
         * config.half_life_time_unit_secs;
     let interval = -time_constant * target_recall.max(1e-6).ln();
     ((interval * interval_scale.max(0.1)).min(MAX_INTERVAL_DAYS * 86400.0) as i64).max(MIN_INTERVAL_SECS)

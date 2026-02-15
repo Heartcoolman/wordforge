@@ -1,16 +1,18 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
 
 use crate::amas::types::AlgorithmId;
+
+const LATENCY_BUCKETS: [u64; 6] = [100, 500, 1_000, 5_000, 10_000, u64::MAX];
 
 pub struct AlgorithmMetrics {
     pub call_count: AtomicU64,
     pub total_latency_us: AtomicU64,
     pub error_count: AtomicU64,
-    pub last_called_at: RwLock<Option<chrono::DateTime<chrono::Utc>>>,
+    pub last_called_at: AtomicI64,
+    latency_buckets: [AtomicU64; 6],
 }
 
 impl Default for AlgorithmMetrics {
@@ -19,7 +21,15 @@ impl Default for AlgorithmMetrics {
             call_count: AtomicU64::new(0),
             total_latency_us: AtomicU64::new(0),
             error_count: AtomicU64::new(0),
-            last_called_at: RwLock::new(None),
+            last_called_at: AtomicI64::new(0),
+            latency_buckets: [
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+            ],
         }
     }
 }
@@ -27,6 +37,43 @@ impl Default for AlgorithmMetrics {
 impl AlgorithmMetrics {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn record_latency_bucket(&self, latency_us: u64) {
+        for (i, &threshold) in LATENCY_BUCKETS.iter().enumerate() {
+            if latency_us <= threshold {
+                self.latency_buckets[i].fetch_add(1, Ordering::Relaxed);
+                return;
+            }
+        }
+    }
+
+    pub fn get_percentiles(&self) -> (f64, f64, f64) {
+        let counts: Vec<u64> = self
+            .latency_buckets
+            .iter()
+            .map(|b| b.load(Ordering::Relaxed))
+            .collect();
+        let total: u64 = counts.iter().sum();
+        if total == 0 {
+            return (0.0, 0.0, 0.0);
+        }
+
+        let bucket_midpoints: [f64; 6] = [50.0, 300.0, 750.0, 3000.0, 7500.0, 15000.0];
+
+        let percentile = |pct: f64| -> f64 {
+            let target = (pct / 100.0 * total as f64).ceil() as u64;
+            let mut cumulative = 0u64;
+            for (i, &count) in counts.iter().enumerate() {
+                cumulative += count;
+                if cumulative >= target {
+                    return bucket_midpoints[i];
+                }
+            }
+            bucket_midpoints[5]
+        };
+
+        (percentile(50.0), percentile(95.0), percentile(99.0))
     }
 }
 
@@ -59,10 +106,8 @@ impl MetricsRegistry {
             if is_error {
                 metric.error_count.fetch_add(1, Ordering::Relaxed);
             }
-
-            if let Ok(mut guard) = metric.last_called_at.try_write() {
-                *guard = Some(chrono::Utc::now());
-            }
+            metric.record_latency_bucket(latency_us);
+            metric.last_called_at.store(chrono::Utc::now().timestamp_millis(), Ordering::Relaxed);
         }
     }
 
@@ -89,6 +134,9 @@ impl MetricsRegistry {
                 let call_count = metric.call_count.swap(0, Ordering::Relaxed);
                 let total_latency_us = metric.total_latency_us.swap(0, Ordering::Relaxed);
                 let error_count = metric.error_count.swap(0, Ordering::Relaxed);
+                for bucket in &metric.latency_buckets {
+                    bucket.store(0, Ordering::Relaxed);
+                }
                 (
                     id.as_str().to_string(),
                     MetricsSnapshot {
@@ -101,7 +149,6 @@ impl MetricsRegistry {
             .collect()
     }
 
-    /// 从持久化的快照恢复 metrics 数据（启动时调用）
     pub fn restore(&self, algo_id_str: &str, snapshot: &MetricsSnapshot) {
         let algo_id = match algo_id_str {
             "heuristic" => AlgorithmId::Heuristic,
@@ -130,6 +177,9 @@ impl MetricsRegistry {
             metric.call_count.store(0, Ordering::Relaxed);
             metric.total_latency_us.store(0, Ordering::Relaxed);
             metric.error_count.store(0, Ordering::Relaxed);
+            for bucket in &metric.latency_buckets {
+                bucket.store(0, Ordering::Relaxed);
+            }
         }
     }
 }

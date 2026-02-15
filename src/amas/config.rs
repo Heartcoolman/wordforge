@@ -40,18 +40,25 @@ pub struct EnsembleConfig {
     pub blend_scale: f64,
     pub blend_max: f64,
     pub min_weight: f64,
+    #[serde(default = "default_warmup_heuristic_boost")]
+    pub warmup_heuristic_boost: f64,
+}
+
+fn default_warmup_heuristic_boost() -> f64 {
+    0.20
 }
 
 impl Default for EnsembleConfig {
     fn default() -> Self {
         Self {
-            base_weight_heuristic: 0.20,
-            base_weight_ige: 0.40,
-            base_weight_swd: 0.40,
+            base_weight_heuristic: 0.40,
+            base_weight_ige: 0.30,
+            base_weight_swd: 0.30,
             warmup_samples: 20,
             blend_scale: 100.0,
             blend_max: 0.50,
             min_weight: 0.15,
+            warmup_heuristic_boost: 0.20,
         }
     }
 }
@@ -315,6 +322,8 @@ pub struct FeatureConfig {
     pub temporal_boost_max: f64,
     pub trust_base_learning_rate: f64,
     pub trust_weight_blend: f64,
+    #[serde(default = "default_incorrect_quality_scale")]
+    pub incorrect_quality_scale: f64,
 }
 
 impl Default for FeatureConfig {
@@ -334,8 +343,13 @@ impl Default for FeatureConfig {
             temporal_boost_max: 1.5,
             trust_base_learning_rate: 0.05,
             trust_weight_blend: 0.5,
+            incorrect_quality_scale: 0.1,
         }
     }
+}
+
+fn default_incorrect_quality_scale() -> f64 {
+    0.1
 }
 
 // --- 以下为热重载子配置结构体 ---
@@ -353,6 +367,12 @@ pub struct EloConfig {
     pub min_elo: f64,
     #[serde(default = "default_max_elo")]
     pub max_elo: f64,
+    #[serde(default = "default_word_k_factor_ratio")]
+    pub word_k_factor_ratio: f64,
+}
+
+fn default_word_k_factor_ratio() -> f64 {
+    0.5
 }
 
 fn default_min_elo() -> f64 {
@@ -373,6 +393,7 @@ impl Default for EloConfig {
             zpd_gaussian_sigma: 150.0,
             min_elo: 400.0,
             max_elo: 2400.0,
+            word_k_factor_ratio: 0.5,
         }
     }
 }
@@ -459,6 +480,12 @@ pub struct SwdConfig {
     pub max_history_size: usize,
     pub history_filter_threshold: f64,
     pub fallback_confidence: f64,
+    #[serde(default = "default_similarity_cache_ttl_secs")]
+    pub similarity_cache_ttl_secs: u64,
+}
+
+fn default_similarity_cache_ttl_secs() -> u64 {
+    300
 }
 
 impl Default for SwdConfig {
@@ -467,6 +494,7 @@ impl Default for SwdConfig {
             max_history_size: 200,
             history_filter_threshold: -0.5,
             fallback_confidence: 0.2,
+            similarity_cache_ttl_secs: 300,
         }
     }
 }
@@ -492,10 +520,25 @@ pub struct MemoryModelConfig {
     pub recall_risk_threshold: f64,
     #[serde(default = "default_base_desired_retention")]
     pub base_desired_retention: f64,
+    #[serde(default = "default_passive_decay_half_life_days")]
+    pub passive_decay_half_life_days: f64,
+    #[serde(default = "default_passive_decay_power")]
+    pub passive_decay_power: f64,
+    #[serde(default = "default_mastery_window_size")]
+    pub mastery_window_size: u32,
 }
 
 fn default_base_desired_retention() -> f64 {
     0.85
+}
+fn default_passive_decay_half_life_days() -> f64 {
+    30.0
+}
+fn default_passive_decay_power() -> f64 {
+    0.5
+}
+fn default_mastery_window_size() -> u32 {
+    20
 }
 
 impl Default for MemoryModelConfig {
@@ -518,6 +561,9 @@ impl Default for MemoryModelConfig {
             recall_risk_bonus: 0.2,
             recall_risk_threshold: 0.5,
             base_desired_retention: 0.85,
+            passive_decay_half_life_days: 30.0,
+            passive_decay_power: 0.5,
+            mastery_window_size: 20,
         }
     }
 }
@@ -584,6 +630,12 @@ pub struct WordSelectorConfig {
     pub error_prone_bonus: f64,
     pub recently_mastered_bonus: f64,
     pub recall_mastered_threshold: f64,
+    #[serde(default = "default_sigmoid_steepness")]
+    pub sigmoid_steepness: f64,
+}
+
+fn default_sigmoid_steepness() -> f64 {
+    8.0
 }
 
 impl Default for WordSelectorConfig {
@@ -595,6 +647,7 @@ impl Default for WordSelectorConfig {
             error_prone_bonus: 0.3,
             recently_mastered_bonus: 0.15,
             recall_mastered_threshold: 0.7,
+            sigmoid_steepness: 8.0,
         }
     }
 }
@@ -821,6 +874,12 @@ impl AMASConfig {
         if !(0.0..=1.0).contains(&self.feature.quality_speed_weight) {
             return Err("feature.quality_speed_weight must be in [0,1]".to_string());
         }
+        if !(0.001..=1.0).contains(&self.feature.trust_base_learning_rate) {
+            return Err("feature.trust_base_learning_rate must be in [0.001,1]".to_string());
+        }
+        if !(0.0..=1.0).contains(&self.feature.incorrect_quality_scale) {
+            return Err("feature.incorrect_quality_scale must be in [0,1]".to_string());
+        }
 
         // RewardConfig
         if self.reward.speed_reward_scale < 0.0 || self.reward.speed_reward_scale > 10.0 {
@@ -828,6 +887,9 @@ impl AMASConfig {
         }
         if self.reward.fatigue_penalty_scale < 0.0 || self.reward.fatigue_penalty_scale > 10.0 {
             return Err("reward.fatigue_penalty_scale must be in [0,10]".to_string());
+        }
+        if self.reward.frustration_penalty_threshold > 0.0 {
+            return Err("reward.frustration_penalty_threshold must be <= 0".to_string());
         }
 
         // ModelingConfig - engagement penalties
@@ -915,6 +977,24 @@ impl AMASConfig {
         }
         if self.memory_model.half_life_time_unit_secs <= 0.0 {
             return Err("memory_model.half_life_time_unit_secs must be > 0".to_string());
+        }
+        if self.memory_model.half_life_base_epsilon <= 0.0 {
+            return Err("memory_model.half_life_base_epsilon must be > 0".to_string());
+        }
+        if !(0.5..=0.99).contains(&self.memory_model.base_desired_retention) {
+            return Err("memory_model.base_desired_retention must be in [0.5,0.99]".to_string());
+        }
+        if self.memory_model.consolidation_bonus < 0.0 {
+            return Err("memory_model.consolidation_bonus must be >= 0".to_string());
+        }
+        if self.memory_model.passive_decay_half_life_days <= 0.0 {
+            return Err("memory_model.passive_decay_half_life_days must be > 0".to_string());
+        }
+        if self.memory_model.passive_decay_power <= 0.0 {
+            return Err("memory_model.passive_decay_power must be > 0".to_string());
+        }
+        if self.memory_model.mastery_window_size == 0 {
+            return Err("memory_model.mastery_window_size must be > 0".to_string());
         }
 
         // IadConfig

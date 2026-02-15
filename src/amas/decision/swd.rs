@@ -1,3 +1,6 @@
+use std::collections::HashMap;
+use std::sync::Mutex;
+
 use serde::{Deserialize, Serialize};
 
 use crate::amas::config::AMASConfig;
@@ -8,6 +11,7 @@ const LN2: f64 = std::f64::consts::LN_2;
 const CONFIDENCE_MIN: f64 = 0.2;
 const CONFIDENCE_MAX: f64 = 0.9;
 const NORMALIZATION_REF: f64 = 1_000_000.0;
+const NEGATIVE_EXPERIENCE_WEIGHT: f64 = 0.3;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SwdState {
@@ -41,6 +45,24 @@ pub struct UserStateSnapshot {
     pub total_event_count: u64,
 }
 
+struct CacheEntry {
+    similarities: Vec<f64>,
+    created_at: i64,
+}
+
+static SIMILARITY_CACHE: std::sync::LazyLock<Mutex<HashMap<u64, CacheEntry>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn state_cache_key(user_state: &UserState) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::hash::DefaultHasher::new();
+    user_state.attention.to_bits().hash(&mut hasher);
+    user_state.fatigue.to_bits().hash(&mut hasher);
+    user_state.motivation.to_bits().hash(&mut hasher);
+    user_state.total_event_count.hash(&mut hasher);
+    hasher.finish()
+}
+
 pub fn generate(
     user_state: &UserState,
     swd_state: &SwdState,
@@ -52,6 +74,40 @@ pub fn generate(
         return fallback_candidate(swd.fallback_confidence);
     }
 
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let cache_key = state_cache_key(user_state);
+    let ttl_ms = swd.similarity_cache_ttl_secs as i64 * 1000;
+
+    let cached_sims = SIMILARITY_CACHE.lock().ok().and_then(|cache| {
+        cache.get(&cache_key).and_then(|entry| {
+            if now_ms - entry.created_at < ttl_ms
+                && entry.similarities.len() == swd_state.strategy_history.len()
+            {
+                Some(entry.similarities.clone())
+            } else {
+                None
+            }
+        })
+    });
+
+    let similarities = cached_sims.unwrap_or_else(|| {
+        let sims: Vec<f64> = swd_state
+            .strategy_history
+            .iter()
+            .map(|e| similarity(user_state, &e.user_state_snapshot))
+            .collect();
+        if let Ok(mut cache) = SIMILARITY_CACHE.lock() {
+            cache.insert(
+                cache_key,
+                CacheEntry {
+                    similarities: sims.clone(),
+                    created_at: now_ms,
+                },
+            );
+        }
+        sims
+    });
+
     let mut difficulty_sum = 0.0;
     let mut batch_size_sum: f64 = 0.0;
     let mut new_ratio_sum = 0.0;
@@ -60,20 +116,18 @@ pub fn generate(
     let mut review_votes_for = 0.0;
     let mut review_votes_against = 0.0;
 
-    let now_ms = chrono::Utc::now().timestamp_millis();
-    for entry in &swd_state.strategy_history {
-        if entry.reward <= swd.history_filter_threshold {
-            continue;
-        }
-
-        let sim = similarity(user_state, &entry.user_state_snapshot);
-        // 时间衰减：旧记录降权，半衰期为 7 天
+    for (i, entry) in swd_state.strategy_history.iter().enumerate() {
+        let sim = similarities[i];
         let age_ms = (now_ms - entry.timestamp).max(0) as f64;
         let half_life_ms = DECAY_HALF_LIFE_DAYS * 24.0 * 3600.0 * 1000.0;
         let time_decay = (-age_ms * LN2 / half_life_ms).exp();
-        let weight = sim * time_decay;
-        total_weight += weight;
+        let mut weight = sim * time_decay;
 
+        if entry.reward <= swd.history_filter_threshold {
+            weight *= NEGATIVE_EXPERIENCE_WEIGHT;
+        }
+
+        total_weight += weight;
         difficulty_sum += entry.strategy.difficulty * weight;
         batch_size_sum += entry.strategy.batch_size as f64 * weight;
         new_ratio_sum += entry.strategy.new_ratio * weight;
@@ -101,7 +155,8 @@ pub fn generate(
     DecisionCandidate {
         algorithm_id: AlgorithmId::Swd,
         strategy,
-        confidence: (total_weight / swd_state.strategy_history.len() as f64).clamp(CONFIDENCE_MIN, CONFIDENCE_MAX),
+        confidence: (total_weight / swd_state.strategy_history.len() as f64)
+            .clamp(CONFIDENCE_MIN, CONFIDENCE_MAX),
         explanation: "Similarity-weighted strategy".to_string(),
     }
 }

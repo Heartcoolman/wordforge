@@ -332,6 +332,28 @@ pub fn user_stats_key(user_id: &str) -> Result<String, StoreError> {
     Ok(validate_id(user_id)?.to_string())
 }
 
+pub fn record_id_index_key(user_id: &str, record_id: &str) -> Result<String, StoreError> {
+    Ok(format!(
+        "{}:{}",
+        validate_id(user_id)?,
+        validate_id(record_id)?
+    ))
+}
+
+pub fn alert_dedup_key(user_id: &str, word_id: &str) -> Result<String, StoreError> {
+    Ok(format!(
+        "{}:{}",
+        validate_id(user_id)?,
+        validate_id(word_id)?
+    ))
+}
+
+pub fn monitoring_ts_key(timestamp_ms: i64, period_id: &str) -> Result<String, StoreError> {
+    let ts = timestamp_ms.max(0) as u64;
+    let reverse_ts = u64::MAX - ts;
+    Ok(format!("{:020}:{}", reverse_ts, validate_id(period_id)?))
+}
+
 /// 解析 word_due_index 中条目的键，提取 (due_ts_ms, word_id)。
 /// 键格式: "{user_id}:{due_ts_ms:020}:{word_id}"
 /// 第一段（user_id）已被 scan_prefix 跳过，此处从第二段开始解析。

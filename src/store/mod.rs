@@ -47,6 +47,9 @@ pub struct Store {
     pub records_by_time: sled::Tree,
     pub word_references: sled::Tree,
     pub user_stats: sled::Tree,
+    pub record_id_index: sled::Tree,
+    pub alert_dedup: sled::Tree,
+    pub monitoring_timeseries: sled::Tree,
 }
 
 #[derive(Debug, Error)]
@@ -114,6 +117,9 @@ impl Store {
         let records_by_time = db.open_tree(trees::RECORDS_BY_TIME)?;
         let word_references = db.open_tree(trees::WORD_REFERENCES)?;
         let user_stats = db.open_tree(trees::USER_STATS)?;
+        let record_id_index = db.open_tree(trees::RECORD_ID_INDEX)?;
+        let alert_dedup = db.open_tree(trees::ALERT_DEDUP)?;
+        let monitoring_timeseries = db.open_tree(trees::MONITORING_TIMESERIES)?;
 
         Ok(Self {
             db,
@@ -150,6 +156,9 @@ impl Store {
             records_by_time,
             word_references,
             user_stats,
+            record_id_index,
+            alert_dedup,
+            monitoring_timeseries,
         })
     }
 

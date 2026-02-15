@@ -1,3 +1,5 @@
+use std::hash::{Hash, Hasher};
+
 use serde::{Deserialize, Serialize};
 
 use crate::amas::config::AMASConfig;
@@ -59,7 +61,7 @@ impl BinStats {
 }
 
 pub fn generate(
-    _user_state: &UserState,
+    user_state: &UserState,
     _feature: &FeatureVector,
     ige_state: &IgeState,
     config: &AMASConfig,
@@ -102,10 +104,15 @@ pub fn generate(
         .cloned()
         .unwrap_or_else(|| BinStats::new(0.25, 0.5));
 
+    let mut difficulty = best_diff.midpoint().clamp(0.0, 1.0);
+    if user_state.fatigue > 0.7 {
+        difficulty = difficulty.min(0.5);
+    }
+
     DecisionCandidate {
         algorithm_id: AlgorithmId::Ige,
         strategy: StrategyParams {
-            difficulty: best_diff.midpoint().clamp(0.0, 1.0),
+            difficulty,
             batch_size: ige.batch_size,
             new_ratio: best_ratio.midpoint().clamp(0.0, 1.0),
             interval_scale: ige.interval_scale,
@@ -118,8 +125,12 @@ pub fn generate(
 
 fn ucb(bin: &BinStats, total: f64, ucb_coeff: f64) -> f64 {
     if bin.count == 0 {
-        // 为未探索 bin 添加微小随机扰动，打破对称性
-        return UNEXPLORED_BIN_SCORE + rand::random::<f64>() * 0.01;
+        let mut hasher = std::hash::DefaultHasher::new();
+        bin.range_start.to_bits().hash(&mut hasher);
+        bin.range_end.to_bits().hash(&mut hasher);
+        let h = hasher.finish();
+        let deterministic_noise = (h % 10000) as f64 / 1_000_000.0;
+        return UNEXPLORED_BIN_SCORE + deterministic_noise;
     }
     let count = bin.count as f64;
     bin.avg_reward + (ucb_coeff * total.ln() / count).sqrt()
@@ -151,7 +162,7 @@ fn update_bin(bin: &mut BinStats, reward: f64) {
     let n = bin.count as f64;
     bin.avg_reward += (reward - bin.avg_reward) / n;
     // Welford's online variance: reconstruct M2 from old count, then update
-    let m2 = bin.variance * old_count;
+    let m2 = bin.variance * (old_count - 1.0).max(0.0);
     let new_m2 = m2 + (reward - old_avg) * (reward - bin.avg_reward);
     bin.variance = if n > 1.0 { new_m2 / (n - 1.0) } else { 0.0 };
 }

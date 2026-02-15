@@ -1,6 +1,6 @@
 use crate::amas::metrics::{MetricsRegistry, MetricsSnapshot};
 use crate::amas::types::AlgorithmId;
-use crate::store::Store;
+use crate::store::{keys, Store};
 
 const ALL_ALGORITHM_IDS: &[AlgorithmId] = &[
     AlgorithmId::Heuristic,
@@ -17,6 +17,8 @@ pub fn flush_metrics(
 ) -> Result<(), crate::store::StoreError> {
     let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
     let snapshot = registry.snapshot_and_reset();
+
+    let mut batch_entries: Vec<(String, serde_json::Value)> = Vec::with_capacity(snapshot.len());
 
     for (algo_id, metrics) in &snapshot {
         let merged = match store.get_metrics_daily(&today, algo_id)? {
@@ -35,10 +37,13 @@ pub fn flush_metrics(
             None => metrics.clone(),
         };
 
+        let key = keys::metrics_daily_key(&today, algo_id)?;
         let value =
             serde_json::to_value(merged).map_err(crate::store::StoreError::Serialization)?;
-        store.upsert_metrics_daily(&today, algo_id, &value)?;
+        batch_entries.push((key, value));
     }
+
+    store.batch_upsert_metrics_daily(&batch_entries)?;
 
     tracing::debug!(algorithms = snapshot.len(), "Metrics flushed");
     Ok(())

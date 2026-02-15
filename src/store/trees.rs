@@ -50,3 +50,6 @@ pub const WORDS_BY_CREATED_AT: &str = "idx_words_by_created";
 pub const RECORDS_BY_TIME: &str = "idx_records_by_time";
 pub const WORD_REFERENCES: &str = "idx_word_refs";
 pub const USER_STATS: &str = "idx_user_stats";
+pub const RECORD_ID_INDEX: &str = "idx_record_id";
+pub const ALERT_DEDUP: &str = "idx_alert_dedup";
+pub const MONITORING_TIMESERIES: &str = "monitoring_ts";

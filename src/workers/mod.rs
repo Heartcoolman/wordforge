@@ -20,6 +20,26 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Parse timestamp (ms) from a record key formatted as `{user_id}:{reverse_ts:020}:{record_id}`.
+pub fn parse_record_timestamp_ms(record_key: &[u8]) -> Option<i64> {
+    let first_sep = record_key.iter().position(|b| *b == b':')?;
+    let tail = &record_key[first_sep + 1..];
+    let second_sep = tail.iter().position(|b| *b == b':')?;
+    let reverse_ts_str = std::str::from_utf8(&tail[..second_sep]).ok()?;
+    let reverse_ts = reverse_ts_str.parse::<u64>().ok()?;
+    let ts_u64 = u64::MAX.checked_sub(reverse_ts)?;
+    i64::try_from(ts_u64).ok()
+}
+
+/// Parse timestamp (ms) from a monitoring event key formatted as `{reverse_ts:020}:{event_id}`.
+pub fn parse_monitoring_event_timestamp_ms(key: &[u8]) -> Option<i64> {
+    let sep = key.iter().position(|b| *b == b':')?;
+    let reverse_ts_str = std::str::from_utf8(&key[..sep]).ok()?;
+    let reverse_ts = reverse_ts_str.parse::<u64>().ok()?;
+    let ts_u64 = u64::MAX.checked_sub(reverse_ts)?;
+    i64::try_from(ts_u64).ok()
+}
+
 use tokio::sync::broadcast;
 use tokio_cron_scheduler::{Job, JobScheduler};
 

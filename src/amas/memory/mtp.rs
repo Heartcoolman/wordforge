@@ -1,6 +1,8 @@
 //! B37: Morpheme Transfer Prediction (MTP)
 //! Known morphemes boost learning efficiency for words sharing those morphemes.
 
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 
 use crate::amas::config::MtpConfig;
@@ -22,15 +24,17 @@ pub fn morpheme_transfer_bonus(
         return 0.0;
     }
 
+    let known_set: HashSet<&str> = known.iter().map(|(m, _)| m.as_str()).collect();
     let mut total_bonus = 0.0;
     let mut match_count = 0;
 
     for morpheme in word_morphemes {
-        for (known_m, familiarity) in known {
-            if morpheme == known_m {
-                total_bonus += familiarity * config.morpheme_transfer_coeff;
-                match_count += 1;
-            }
+        if !known_set.contains(morpheme.as_str()) {
+            continue;
+        }
+        if let Some((_, familiarity)) = known.iter().find(|(m, _)| m == morpheme) {
+            total_bonus += familiarity * config.morpheme_transfer_coeff;
+            match_count += 1;
         }
     }
 
