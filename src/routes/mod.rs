@@ -107,9 +107,8 @@ async fn static_cache_headers(req: Request<axum::body::Body>, next: Next) -> Res
         "public, max-age=3600"
     };
 
-    response.headers_mut().insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static(cache_value),
-    );
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static(cache_value));
     response
 }

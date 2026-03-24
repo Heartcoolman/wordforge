@@ -414,8 +414,9 @@ async fn adjust_words(
             "tired" | "fatigued" | "frustrated" | "distracted" => {
                 strategy.difficulty = (strategy.difficulty - ls.fatigue_difficulty_drop).max(0.0);
                 strategy.new_ratio = (strategy.new_ratio - ls.ratio_drop_step).max(0.0);
-                strategy.batch_size =
-                    ((strategy.batch_size as f64 * ls.fatigue_batch_scale).round().max(1.0)) as u32;
+                strategy.batch_size = ((strategy.batch_size as f64 * ls.fatigue_batch_scale)
+                    .round()
+                    .max(1.0)) as u32;
             }
             "review" => {
                 strategy.review_mode = true;
@@ -541,13 +542,16 @@ async fn complete_session(
         0.0
     };
 
-    state.amas().update_temporal_profile(
-        &auth.user_id,
-        hour_of_day,
-        accuracy,
-        req.avg_response_time_ms as f64,
-        mastery_efficiency,
-    ).await?;
+    state
+        .amas()
+        .update_temporal_profile(
+            &auth.user_id,
+            hour_of_day,
+            accuracy,
+            req.avg_response_time_ms as f64,
+            mastery_efficiency,
+        )
+        .await?;
 
     Ok(ok(session))
 }

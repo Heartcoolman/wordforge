@@ -26,7 +26,9 @@ impl Default for SystemSettings {
             registration_enabled: true,
             maintenance_mode: false,
             default_daily_words: DEFAULT_DAILY_WORDS,
-            wordbook_center_url: Some("https://cdn.jsdelivr.net/gh/Heartcoolman/wordbook-center@main".to_string()),
+            wordbook_center_url: Some(
+                "https://cdn.jsdelivr.net/gh/Heartcoolman/wordbook-center@main".to_string(),
+            ),
         }
     }
 }

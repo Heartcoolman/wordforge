@@ -59,9 +59,7 @@ async fn mark_read(
     Path(id): Path<String>,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let notification = state
-        .store()
-        .mark_notification_read(&auth.user_id, &id)?;
+    let notification = state.store().mark_notification_read(&auth.user_id, &id)?;
 
     match notification {
         Some(notification) => Ok(ok(notification)),
@@ -97,19 +95,22 @@ async fn list_badges(
     let store = state.store();
 
     // first_word: check if user has any learning records
-    let record_count = store.count_user_records(&auth.user_id)
+    let record_count = store
+        .count_user_records(&auth.user_id)
         .map_err(|e| AppError::internal(&e.to_string()))?;
     let first_word_unlocked = record_count > 0;
 
     // streak_7: compute streak days from records
-    let records = store.get_user_records(&auth.user_id, state.config().limits.max_records_fetch)
+    let records = store
+        .get_user_records(&auth.user_id, state.config().limits.max_records_fetch)
         .map_err(|e| AppError::internal(&e.to_string()))?;
     let streak = compute_streak_days(&records);
     let streak_progress = (streak as f64 / 7.0).min(1.0);
     let streak_unlocked = streak >= 7;
 
     // mastered_100: count mastered words
-    let word_stats = store.get_word_state_stats(&auth.user_id)
+    let word_stats = store
+        .get_word_state_stats(&auth.user_id)
         .map_err(|e| AppError::internal(&e.to_string()))?;
     let mastered = word_stats.mastered;
     let mastered_progress = (mastered as f64 / 100.0).min(1.0);
@@ -135,8 +136,13 @@ async fn list_badges(
             description: "Learn your first word".to_string(),
             unlocked: first_word_unlocked || persisted_first.as_ref().is_some_and(|b| b.unlocked),
             progress: if first_word_unlocked { 1.0 } else { 0.0 },
-            unlocked_at: if first_word_unlocked || persisted_first.as_ref().is_some_and(|b| b.unlocked) {
-                persisted_first.as_ref().and_then(|b| b.unlocked_at).or(Some(now))
+            unlocked_at: if first_word_unlocked
+                || persisted_first.as_ref().is_some_and(|b| b.unlocked)
+            {
+                persisted_first
+                    .as_ref()
+                    .and_then(|b| b.unlocked_at)
+                    .or(Some(now))
             } else {
                 None
             },
@@ -147,8 +153,12 @@ async fn list_badges(
             description: "Study for 7 consecutive days".to_string(),
             unlocked: streak_unlocked || persisted_streak.as_ref().is_some_and(|b| b.unlocked),
             progress: streak_progress,
-            unlocked_at: if streak_unlocked || persisted_streak.as_ref().is_some_and(|b| b.unlocked) {
-                persisted_streak.as_ref().and_then(|b| b.unlocked_at).or(Some(now))
+            unlocked_at: if streak_unlocked || persisted_streak.as_ref().is_some_and(|b| b.unlocked)
+            {
+                persisted_streak
+                    .as_ref()
+                    .and_then(|b| b.unlocked_at)
+                    .or(Some(now))
             } else {
                 None
             },
@@ -159,8 +169,13 @@ async fn list_badges(
             description: "Master 100 words".to_string(),
             unlocked: mastered_unlocked || persisted_mastered.as_ref().is_some_and(|b| b.unlocked),
             progress: mastered_progress,
-            unlocked_at: if mastered_unlocked || persisted_mastered.as_ref().is_some_and(|b| b.unlocked) {
-                persisted_mastered.as_ref().and_then(|b| b.unlocked_at).or(Some(now))
+            unlocked_at: if mastered_unlocked
+                || persisted_mastered.as_ref().is_some_and(|b| b.unlocked)
+            {
+                persisted_mastered
+                    .as_ref()
+                    .and_then(|b| b.unlocked_at)
+                    .or(Some(now))
             } else {
                 None
             },

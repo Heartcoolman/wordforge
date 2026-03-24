@@ -6,7 +6,9 @@ use learning_backend::amas::config::AMASConfig;
 use learning_backend::amas::engine::AMASEngine;
 use learning_backend::config::Config;
 use learning_backend::logging::{init_tracing, LogConfig};
-use learning_backend::middleware::rate_limit::{auth_rate_limit_cleanup_loop, rate_limit_cleanup_loop};
+use learning_backend::middleware::rate_limit::{
+    auth_rate_limit_cleanup_loop, rate_limit_cleanup_loop,
+};
 use learning_backend::routes::build_router;
 use learning_backend::services::llm_provider::LlmProvider;
 use learning_backend::state::AppState;

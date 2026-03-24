@@ -107,11 +107,11 @@ fn m003_secondary_indexes(store: &Store) -> Result<(), StoreError> {
             continue;
         }
         if let Ok(user) = Store::deserialize::<User>(&value) {
-            let idx_key = keys::users_by_created_at_key(
-                user.created_at.timestamp_millis(),
-                &user.id,
-            )?;
-            store.users_by_created_at.insert(idx_key.as_bytes(), user.id.as_bytes())?;
+            let idx_key =
+                keys::users_by_created_at_key(user.created_at.timestamp_millis(), &user.id)?;
+            store
+                .users_by_created_at
+                .insert(idx_key.as_bytes(), user.id.as_bytes())?;
         }
     }
 
@@ -119,11 +119,11 @@ fn m003_secondary_indexes(store: &Store) -> Result<(), StoreError> {
     for item in store.words.iter() {
         let (_, value) = item?;
         if let Ok(word) = Store::deserialize::<Word>(&value) {
-            let idx_key = keys::words_by_created_at_key(
-                word.created_at.timestamp_millis(),
-                &word.id,
-            )?;
-            store.words_by_created_at.insert(idx_key.as_bytes(), word.id.as_bytes())?;
+            let idx_key =
+                keys::words_by_created_at_key(word.created_at.timestamp_millis(), &word.id)?;
+            store
+                .words_by_created_at
+                .insert(idx_key.as_bytes(), word.id.as_bytes())?;
         }
     }
 
@@ -136,7 +136,9 @@ fn m003_secondary_indexes(store: &Store) -> Result<(), StoreError> {
         if let Ok(record) = Store::deserialize::<LearningRecord>(&value) {
             let ts = record.created_at.timestamp_millis();
             let time_key = keys::records_by_time_key(ts, &record.id)?;
-            store.records_by_time.insert(time_key.as_bytes(), record.user_id.as_bytes())?;
+            store
+                .records_by_time
+                .insert(time_key.as_bytes(), record.user_id.as_bytes())?;
 
             // word_references index
             let ref_key = keys::word_ref_key(&record.word_id, "records", &k)?;
@@ -158,13 +160,17 @@ fn m003_secondary_indexes(store: &Store) -> Result<(), StoreError> {
     // Write user stats
     for (user_id, stats) in &user_stats_map {
         let key = keys::user_stats_key(user_id)?;
-        store.user_stats.insert(key.as_bytes(), Store::serialize(stats)?)?;
+        store
+            .user_stats
+            .insert(key.as_bytes(), Store::serialize(stats)?)?;
     }
 
     // 4. word_references for wordbook_words
     for item in store.wordbook_words.iter() {
         let (k, value) = item?;
-        if let Ok(entry) = Store::deserialize::<crate::store::operations::wordbooks::WordbookWordEntry>(&value) {
+        if let Ok(entry) =
+            Store::deserialize::<crate::store::operations::wordbooks::WordbookWordEntry>(&value)
+        {
             let ref_key = keys::word_ref_key(&entry.word_id, "wordbook_words", &k)?;
             store.word_references.insert(ref_key.as_bytes(), &[])?;
         }
@@ -184,7 +190,8 @@ fn m003_secondary_indexes(store: &Store) -> Result<(), StoreError> {
                     next_review_date.timestamp_millis(),
                     &state.word_id,
                 )?;
-                let ref_due_key = keys::word_ref_key(&state.word_id, "word_due_index", due_key.as_bytes())?;
+                let ref_due_key =
+                    keys::word_ref_key(&state.word_id, "word_due_index", due_key.as_bytes())?;
                 store.word_references.insert(ref_due_key.as_bytes(), &[])?;
             }
         }

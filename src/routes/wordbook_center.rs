@@ -164,10 +164,7 @@ async fn fetch_remote_json<T: serde::de::DeserializeOwned>(
         .map_err(|e| AppError::internal(&format!("HTTP client error: {e}")))?;
 
     let response = client.get(url_parsed).send().await.map_err(|e| {
-        AppError::bad_request(
-            "WB_CENTER_FETCH_FAILED",
-            &format!("获取远程数据失败：{e}"),
-        )
+        AppError::bad_request("WB_CENTER_FETCH_FAILED", &format!("获取远程数据失败：{e}"))
     })?;
 
     if !response.status().is_success() {
@@ -192,10 +189,7 @@ async fn fetch_remote_json<T: serde::de::DeserializeOwned>(
     use futures::StreamExt;
     while let Some(chunk_result) = stream.next().await {
         let chunk = chunk_result.map_err(|e| {
-            AppError::bad_request(
-                "WB_CENTER_READ_FAILED",
-                &format!("读取内容失败：{e}"),
-            )
+            AppError::bad_request("WB_CENTER_READ_FAILED", &format!("读取内容失败：{e}"))
         })?;
         body_bytes.extend_from_slice(&chunk);
         if body_bytes.len() > MAX_SIZE {
@@ -207,10 +201,7 @@ async fn fetch_remote_json<T: serde::de::DeserializeOwned>(
     }
 
     serde_json::from_slice(&body_bytes).map_err(|e| {
-        AppError::bad_request(
-            "WB_CENTER_PARSE_FAILED",
-            &format!("解析远程数据失败：{e}"),
-        )
+        AppError::bad_request("WB_CENTER_PARSE_FAILED", &format!("解析远程数据失败：{e}"))
     })
 }
 
@@ -218,10 +209,8 @@ fn build_browse_items(
     catalog: Vec<RemoteWordbookMeta>,
     imports: &[WordbookCenterImport],
 ) -> Vec<BrowseItem> {
-    let import_map: HashMap<&str, &WordbookCenterImport> = imports
-        .iter()
-        .map(|i| (i.remote_id.as_str(), i))
-        .collect();
+    let import_map: HashMap<&str, &WordbookCenterImport> =
+        imports.iter().map(|i| (i.remote_id.as_str(), i)).collect();
 
     catalog
         .into_iter()
@@ -317,7 +306,8 @@ async fn do_import(
     };
     state.store().upsert_wordbook(&book)?;
 
-    let (imported, skipped) = import_words_to_store(state, &wordbook_id, &remote.id, &remote.words)?;
+    let (imported, skipped) =
+        import_words_to_store(state, &wordbook_id, &remote.id, &remote.words)?;
 
     if let Some(mut wb) = state.store().get_wordbook(&wordbook_id)? {
         wb.word_count = imported;
@@ -473,12 +463,9 @@ async fn admin_browse(
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     let settings = state.store().get_system_settings()?;
-    let base_url = settings.wordbook_center_url.ok_or_else(|| {
-        AppError::bad_request(
-            "WB_CENTER_NOT_CONFIGURED",
-            "词书中心URL未配置",
-        )
-    })?;
+    let base_url = settings
+        .wordbook_center_url
+        .ok_or_else(|| AppError::bad_request("WB_CENTER_NOT_CONFIGURED", "词书中心URL未配置"))?;
 
     let catalog: RemoteCatalog = fetch_remote_json(&base_url, "index.json").await?;
     let imports = state.store().list_wb_center_imports_by_source(&base_url)?;
@@ -493,12 +480,9 @@ async fn admin_preview(
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     let settings = state.store().get_system_settings()?;
-    let base_url = settings.wordbook_center_url.ok_or_else(|| {
-        AppError::bad_request(
-            "WB_CENTER_NOT_CONFIGURED",
-            "词书中心URL未配置",
-        )
-    })?;
+    let base_url = settings
+        .wordbook_center_url
+        .ok_or_else(|| AppError::bad_request("WB_CENTER_NOT_CONFIGURED", "词书中心URL未配置"))?;
 
     let remote: RemoteWordbook =
         fetch_remote_json(&base_url, &format!("wordbooks/{}.json", id)).await?;
@@ -510,7 +494,12 @@ async fn admin_preview(
         .clamp(1, MAX_PAGE_SIZE);
     let total = remote.words.len() as u64;
     let offset = ((page - 1) * per_page) as usize;
-    let words: Vec<&RemoteWord> = remote.words.iter().skip(offset).take(per_page as usize).collect();
+    let words: Vec<&RemoteWord> = remote
+        .words
+        .iter()
+        .skip(offset)
+        .take(per_page as usize)
+        .collect();
 
     Ok(ok(serde_json::json!({
         "id": remote.id,
@@ -532,12 +521,9 @@ async fn admin_import(
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     let settings = state.store().get_system_settings()?;
-    let base_url = settings.wordbook_center_url.ok_or_else(|| {
-        AppError::bad_request(
-            "WB_CENTER_NOT_CONFIGURED",
-            "词书中心URL未配置",
-        )
-    })?;
+    let base_url = settings
+        .wordbook_center_url
+        .ok_or_else(|| AppError::bad_request("WB_CENTER_NOT_CONFIGURED", "词书中心URL未配置"))?;
 
     let result = do_import(&state, &base_url, &id, WordbookType::System, None).await?;
     Ok(created(result))
@@ -589,12 +575,9 @@ async fn admin_sync(
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     let settings = state.store().get_system_settings()?;
-    let base_url = settings.wordbook_center_url.ok_or_else(|| {
-        AppError::bad_request(
-            "WB_CENTER_NOT_CONFIGURED",
-            "词书中心URL未配置",
-        )
-    })?;
+    let base_url = settings
+        .wordbook_center_url
+        .ok_or_else(|| AppError::bad_request("WB_CENTER_NOT_CONFIGURED", "词书中心URL未配置"))?;
 
     let import_record = state
         .store()
@@ -724,10 +707,7 @@ async fn user_preview(
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     let base_url = get_user_wb_center_url(&state, &auth.user_id)?.ok_or_else(|| {
-        AppError::bad_request(
-            "WB_CENTER_NOT_CONFIGURED",
-            "个人词书中心URL未配置",
-        )
+        AppError::bad_request("WB_CENTER_NOT_CONFIGURED", "个人词书中心URL未配置")
     })?;
 
     let remote: RemoteWordbook =
@@ -740,7 +720,12 @@ async fn user_preview(
         .clamp(1, MAX_PAGE_SIZE);
     let total = remote.words.len() as u64;
     let offset = ((page - 1) * per_page) as usize;
-    let words: Vec<&RemoteWord> = remote.words.iter().skip(offset).take(per_page as usize).collect();
+    let words: Vec<&RemoteWord> = remote
+        .words
+        .iter()
+        .skip(offset)
+        .take(per_page as usize)
+        .collect();
 
     Ok(ok(serde_json::json!({
         "id": remote.id,
@@ -762,10 +747,7 @@ async fn user_import(
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     let base_url = get_user_wb_center_url(&state, &auth.user_id)?.ok_or_else(|| {
-        AppError::bad_request(
-            "WB_CENTER_NOT_CONFIGURED",
-            "个人词书中心URL未配置",
-        )
+        AppError::bad_request("WB_CENTER_NOT_CONFIGURED", "个人词书中心URL未配置")
     })?;
 
     let result = do_import(
@@ -793,10 +775,7 @@ async fn user_import_url(
     validate_import_url(&req.url)?;
 
     // Split URL into base and filename for fetch
-    let (base, file) = req
-        .url
-        .rsplit_once('/')
-        .unwrap_or((&req.url, ""));
+    let (base, file) = req.url.rsplit_once('/').unwrap_or((&req.url, ""));
 
     let remote: RemoteWordbook = fetch_remote_json(base, file).await?;
 
@@ -826,7 +805,8 @@ async fn user_import_url(
     };
     state.store().upsert_wordbook(&book)?;
 
-    let (imported, skipped) = import_words_to_store(&state, &wordbook_id, &remote.id, &remote.words)?;
+    let (imported, skipped) =
+        import_words_to_store(&state, &wordbook_id, &remote.id, &remote.words)?;
 
     if let Some(mut wb) = state.store().get_wordbook(&wordbook_id)? {
         wb.word_count = imported;
@@ -900,10 +880,7 @@ async fn user_sync(
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     let base_url = get_user_wb_center_url(&state, &auth.user_id)?.ok_or_else(|| {
-        AppError::bad_request(
-            "WB_CENTER_NOT_CONFIGURED",
-            "个人词书中心URL未配置",
-        )
+        AppError::bad_request("WB_CENTER_NOT_CONFIGURED", "个人词书中心URL未配置")
     })?;
 
     let import_record = state
@@ -912,9 +889,7 @@ async fn user_sync(
         .ok_or_else(|| AppError::not_found("导入记录不存在"))?;
 
     if import_record.user_id.as_deref() != Some(&auth.user_id) {
-        return Err(AppError::forbidden(
-            "只能同步自己导入的词书",
-        ));
+        return Err(AppError::forbidden("只能同步自己导入的词书"));
     }
 
     let result = do_sync(&state, &base_url, &import_record).await?;

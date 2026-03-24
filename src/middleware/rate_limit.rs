@@ -331,7 +331,13 @@ pub async fn auth_rate_limit_middleware(
             .into_response();
 
         apply_rate_limit_headers(&mut response, &result);
-        if let Ok(v) = state.config().auth_rate_limit.window_secs.to_string().parse() {
+        if let Ok(v) = state
+            .config()
+            .auth_rate_limit
+            .window_secs
+            .to_string()
+            .parse()
+        {
             response.headers_mut().insert("retry-after", v);
         }
         return Ok(response);

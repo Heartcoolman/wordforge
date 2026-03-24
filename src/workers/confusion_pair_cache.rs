@@ -66,7 +66,9 @@ pub async fn run(store: &Store) {
 
                 if !record.is_correct {
                     if let Some(ref prev_word) = prev_incorrect {
-                        if prev_word != &record.word_id && confusion_map.len() < MAX_CONFUSION_ENTRIES {
+                        if prev_word != &record.word_id
+                            && confusion_map.len() < MAX_CONFUSION_ENTRIES
+                        {
                             confusion_map
                                 .entry(prev_word.clone())
                                 .or_default()

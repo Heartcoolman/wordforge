@@ -131,7 +131,10 @@ impl fmt::Debug for Config {
             .field("jwt_secret", &"***REDACTED***")
             .field("refresh_jwt_secret", &"***REDACTED***")
             .field("jwt_expires_in_hours", &self.jwt_expires_in_hours)
-            .field("refresh_token_expires_in_hours", &self.refresh_token_expires_in_hours)
+            .field(
+                "refresh_token_expires_in_hours",
+                &self.refresh_token_expires_in_hours,
+            )
             .field("admin_jwt_secret", &"***REDACTED***")
             .field(
                 "admin_jwt_expires_in_hours",
@@ -237,9 +240,18 @@ impl Config {
                 max_import_words: env_or_parse("LIMITS_MAX_IMPORT_WORDS", 5000_usize),
                 max_records_fetch: env_or_parse("LIMITS_MAX_RECORDS_FETCH", 10000_usize),
                 max_stats_records: env_or_parse("LIMITS_MAX_STATS_RECORDS", 5000_usize),
-                candidate_word_pool_size: env_or_parse("LIMITS_CANDIDATE_WORD_POOL_SIZE", 500_usize),
-                rate_limit_max_entries: env_or_parse("LIMITS_RATE_LIMIT_MAX_ENTRIES", 100_000_usize),
-                rate_limit_cleanup_interval_secs: env_or_parse("LIMITS_RATE_LIMIT_CLEANUP_INTERVAL_SECS", 300_u64),
+                candidate_word_pool_size: env_or_parse(
+                    "LIMITS_CANDIDATE_WORD_POOL_SIZE",
+                    500_usize,
+                ),
+                rate_limit_max_entries: env_or_parse(
+                    "LIMITS_RATE_LIMIT_MAX_ENTRIES",
+                    100_000_usize,
+                ),
+                rate_limit_cleanup_interval_secs: env_or_parse(
+                    "LIMITS_RATE_LIMIT_CLEANUP_INTERVAL_SECS",
+                    300_u64,
+                ),
             },
         };
 

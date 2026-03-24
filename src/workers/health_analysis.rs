@@ -36,7 +36,9 @@ pub async fn run(store: &Store) {
 
         for user in &users {
             total_users += 1;
-            let records = store.get_user_records(&user.id, MAX_RECORDS_PER_USER).unwrap_or_default();
+            let records = store
+                .get_user_records(&user.id, MAX_RECORDS_PER_USER)
+                .unwrap_or_default();
 
             let recent = records.iter().filter(|r| r.created_at > week_ago).count();
 

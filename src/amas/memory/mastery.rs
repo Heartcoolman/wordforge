@@ -44,10 +44,9 @@ pub fn update_mastery(
     desired_retention: f64,
     config: &MemoryModelConfig,
 ) -> WordMasteryDecision {
-    let alpha = (interval_scale * ALPHA_SCALE).clamp(ALPHA_MIN, ALPHA_MAX);
-    let effective_quality = if is_correct { quality } else { quality * 0.1 };
-    super::mdm::update_strength(&mut state.mdm, effective_quality, alpha, config);
+    let now = chrono::Utc::now().timestamp_millis();
 
+    // post-increment: update streak before computing alpha
     state.total_attempts += 1;
     if is_correct {
         state.total_correct += 1;
@@ -56,6 +55,13 @@ pub fn update_mastery(
         state.correct_streak = 0;
     }
 
+    let base_alpha = (interval_scale * ALPHA_SCALE).clamp(ALPHA_MIN, ALPHA_MAX);
+    let streak_bonus = 1.0 + (state.correct_streak.min(5) as f64) * 0.1;
+    let alpha = (base_alpha * streak_bonus).clamp(ALPHA_MIN, ALPHA_MAX);
+
+    let effective_quality = if is_correct { quality } else { quality * 0.1 };
+    super::mdm::update_strength(&mut state.mdm, effective_quality, alpha, now, config);
+
     state.recent_results.push(is_correct);
     let window = config.mastery_window_size as usize;
     if state.recent_results.len() > window {
@@ -63,9 +69,8 @@ pub fn update_mastery(
         state.recent_results.drain(..drain_count);
     }
 
-    state.mastery_level = determine_level(state, config);
+    state.mastery_level = determine_level(state, now, config);
 
-    let now = chrono::Utc::now().timestamp_millis();
     let recall = super::mdm::recall_probability(&state.mdm, now, config);
     let interval =
         super::mdm::compute_interval(&state.mdm, desired_retention, interval_scale, config);
@@ -79,7 +84,11 @@ pub fn update_mastery(
     }
 }
 
-fn determine_level(state: &WordMasteryState, config: &MemoryModelConfig) -> MasteryLevel {
+fn determine_level(
+    state: &WordMasteryState,
+    now_ms: i64,
+    config: &MemoryModelConfig,
+) -> MasteryLevel {
     let accuracy = if state.recent_results.is_empty() {
         0.0
     } else {
@@ -96,8 +105,7 @@ fn determine_level(state: &WordMasteryState, config: &MemoryModelConfig) -> Mast
     {
         MasteryLevel::Mastered
     } else {
-        let now = chrono::Utc::now().timestamp_millis();
-        let recall = super::mdm::recall_probability(&state.mdm, now, config);
+        let recall = super::mdm::recall_probability(&state.mdm, now_ms, config);
         if recall < FORGETTING_THRESHOLD {
             MasteryLevel::Forgotten
         } else if composite > config.reviewing_threshold {

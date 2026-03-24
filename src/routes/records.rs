@@ -36,7 +36,9 @@ impl ListRecordsQuery {
         self.page.unwrap_or(1).clamp(1, u64::MAX)
     }
     fn per_page(&self) -> u64 {
-        self.per_page.unwrap_or(DEFAULT_PAGE_SIZE_RECORDS).clamp(1, MAX_PAGE_SIZE)
+        self.per_page
+            .unwrap_or(DEFAULT_PAGE_SIZE_RECORDS)
+            .clamp(1, MAX_PAGE_SIZE)
     }
 }
 
@@ -620,7 +622,9 @@ async fn get_enhanced_statistics(
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     // 限制单次查询量，后续应改为增量聚合以支持更大数据量
-    let records = state.store().get_user_records(&auth.user_id, state.config().limits.max_stats_records)?;
+    let records = state
+        .store()
+        .get_user_records(&auth.user_id, state.config().limits.max_stats_records)?;
     let total = records.len();
     let correct = records.iter().filter(|r| r.is_correct).count();
     let accuracy = if total > 0 {

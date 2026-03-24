@@ -35,7 +35,9 @@ pub async fn run(store: &Store) {
         for user in &users {
             // 利用 record_key 的时间倒序特性，只读取近期记录
             // 一旦遇到 week_ago 之前的记录立即停止扫描
-            let records = store.get_user_records(&user.id, MAX_RECORDS_PER_USER).unwrap_or_default();
+            let records = store
+                .get_user_records(&user.id, MAX_RECORDS_PER_USER)
+                .unwrap_or_default();
             let mut has_weekly = false;
 
             for r in &records {

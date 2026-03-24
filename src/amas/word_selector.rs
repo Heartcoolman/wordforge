@@ -59,6 +59,21 @@ fn score_new_word_prefetched(
     zpd_priority(user_elo_rating, word_elo_rating, elo_config) * difficulty_penalty
 }
 
+fn cooldown_factor(last_review_at: Option<i64>, now_ms: i64, cooldown_secs: f64) -> f64 {
+    match last_review_at {
+        None => 1.0,
+        Some(last) => {
+            let elapsed_secs = (now_ms - last) as f64 / 1000.0;
+            1.0 - (-elapsed_secs / cooldown_secs).exp()
+        }
+    }
+}
+
+fn gaussian_recall_bonus(recall: f64, center: f64, sigma: f64) -> f64 {
+    let d = (recall - center) / sigma;
+    (-0.5 * d * d).exp()
+}
+
 fn score_review_word_prefetched(
     mdm_state: &MdmState,
     now_ms: i64,
@@ -67,9 +82,25 @@ fn score_review_word_prefetched(
 ) -> (f64, f64) {
     let recall = crate::amas::memory::mdm::recall_probability(mdm_state, now_ms, mm);
 
+    // Skip well-mastered words: don't waste budget on recall >= 0.80
+    if recall >= 0.80 {
+        return (0.001, recall);
+    }
+
     let mut score = 1.0 - recall;
     let sigmoid = |x: f64| 1.0 / (1.0 + (-x).exp());
-    score += mm.recall_risk_bonus * sigmoid((mm.recall_risk_threshold - recall) * ws.sigmoid_steepness);
+    score +=
+        mm.recall_risk_bonus * sigmoid((mm.recall_risk_threshold - recall) * ws.sigmoid_steepness);
+
+    // Gaussian bonus: prioritize words at optimal recall zone
+    let g_bonus = gaussian_recall_bonus(recall, ws.optimal_recall_center, ws.optimal_recall_sigma);
+    // Urgency floor: prevent Gaussian from zeroing out weak/new words
+    let g_bonus = g_bonus.max(0.15);
+    // Spacing cooldown
+    let cd = cooldown_factor(mdm_state.last_review_at, now_ms, ws.spacing_cooldown_secs);
+
+    // Multiplicative composition
+    score *= g_bonus * cd;
 
     (score, recall)
 }

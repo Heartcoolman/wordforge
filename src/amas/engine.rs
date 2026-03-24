@@ -122,8 +122,14 @@ impl AMASEngine {
             self.ensemble_or_fallback(&candidates, &user_state, &algo_states, &config);
 
         let reward = self.compute_reward(&feature, &user_state, &config);
-        let word_mastery =
-            self.update_memory(user_id, &raw_event, &feature, &final_strategy, &user_state, &config)?;
+        let word_mastery = self.update_memory(
+            user_id,
+            &raw_event,
+            &feature,
+            &final_strategy,
+            &user_state,
+            &config,
+        )?;
 
         let retention_signal = word_mastery
             .as_ref()
@@ -149,10 +155,7 @@ impl AMASEngine {
         user_state.last_active_at = Some(now);
 
         // 检测 session 切换，重置 session 事件计数
-        let current_session_id = raw_event
-            .session_id
-            .as_deref()
-            .unwrap_or("");
+        let current_session_id = raw_event.session_id.as_deref().unwrap_or("");
         if !current_session_id.is_empty() {
             let session_changed = !user_state
                 .last_session_id
@@ -793,17 +796,13 @@ impl AMASEngine {
                     serde_json::from_slice::<serde_json::Value>(&raw)
                         .ok()
                         .and_then(|data| {
-                            data.get("morphemes")
-                                .and_then(|m| m.as_array())
-                                .map(|arr| {
-                                    arr.iter()
-                                        .filter_map(|v| {
-                                            v.get("text")
-                                                .and_then(|t| t.as_str())
-                                                .map(String::from)
-                                        })
-                                        .collect()
-                                })
+                            data.get("morphemes").and_then(|m| m.as_array()).map(|arr| {
+                                arr.iter()
+                                    .filter_map(|v| {
+                                        v.get("text").and_then(|t| t.as_str()).map(String::from)
+                                    })
+                                    .collect()
+                            })
                         })
                         .unwrap_or_default()
                 } else {
@@ -934,11 +933,7 @@ impl AMASEngine {
         config: &AMASConfig,
     ) {
         let blended = reward * 0.5 + objective_score * 0.5;
-        let max_weight = weights
-            .values()
-            .copied()
-            .fold(0.0_f64, f64::max)
-            .max(1e-9);
+        let max_weight = weights.values().copied().fold(0.0_f64, f64::max).max(1e-9);
 
         for candidate in candidates {
             let weight = weights.get(&candidate.algorithm_id).copied().unwrap_or(0.0);

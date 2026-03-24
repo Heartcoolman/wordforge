@@ -516,6 +516,8 @@ pub struct MemoryModelConfig {
     pub reviewing_threshold: f64,
     pub half_life_base_epsilon: f64,
     pub half_life_time_unit_secs: f64,
+    #[serde(default = "default_half_life_power")]
+    pub half_life_power: f64,
     pub recall_risk_bonus: f64,
     pub recall_risk_threshold: f64,
     #[serde(default = "default_base_desired_retention")]
@@ -526,10 +528,27 @@ pub struct MemoryModelConfig {
     pub passive_decay_power: f64,
     #[serde(default = "default_mastery_window_size")]
     pub mastery_window_size: u32,
+    /// FSRS-style power-law forgetting curve: R = (1 + factor * t/S)^decay
+    #[serde(default = "default_stability_base_days")]
+    pub stability_base_days: f64,
+    #[serde(default = "default_forgetting_curve_factor")]
+    pub forgetting_curve_factor: f64,
+    #[serde(default = "default_forgetting_curve_decay")]
+    pub forgetting_curve_decay: f64,
+    /// 2021 MaiMemo study: forgetting curve has non-zero asymptote R→floor (not 0)
+    #[serde(default = "default_forgetting_curve_floor")]
+    pub forgetting_curve_floor: f64,
+
+    // === FSRS-5 DSR parameters (19 weights in array form) ===
+    #[serde(default = "default_w")]
+    pub w: [f64; 19],
 }
 
 fn default_base_desired_retention() -> f64 {
     0.85
+}
+fn default_half_life_power() -> f64 {
+    1.5
 }
 fn default_passive_decay_half_life_days() -> f64 {
     30.0
@@ -540,30 +559,70 @@ fn default_passive_decay_power() -> f64 {
 fn default_mastery_window_size() -> u32 {
     20
 }
+fn default_stability_base_days() -> f64 {
+    20.0
+}
+fn default_forgetting_curve_factor() -> f64 {
+    19.0 / 81.0
+}
+fn default_forgetting_curve_decay() -> f64 {
+    -0.5
+}
+fn default_forgetting_curve_floor() -> f64 {
+    0.10
+}
+
+// FSRS-5 default parameters (same as test baseline for fair comparison)
+fn default_w() -> [f64; 19] {
+    [
+        0.40255, 1.18385, 3.173, 15.69105, // w0-w3: initial stability
+        7.1949,   // w4: initial difficulty base
+        0.5345,   // w5: difficulty scaling
+        1.4604,   // w6: difficulty change per grade
+        0.0046,   // w7: mean reversion weight
+        1.54575,  // w8: stability increase base
+        0.1192,   // w9: stability power
+        1.01925,  // w10: spacing effect
+        1.9395,   // w11: post-lapse stability base
+        0.11,     // w12: post-lapse difficulty power
+        0.29605,  // w13: post-lapse stability power
+        2.2698,   // w14: post-lapse R scaling
+        0.2315,   // w15: Hard bonus
+        2.9898,   // w16: Easy bonus
+        0.51655,  // w17: same-day review scaling
+        0.6621,   // w18: same-day review offset
+    ]
+}
 
 impl Default for MemoryModelConfig {
     fn default() -> Self {
         Self {
-            short_term_learning_rate: 0.50,
-            medium_term_learning_rate: 0.20,
-            long_term_learning_rate: 0.05,
+            short_term_learning_rate: 0.85,
+            medium_term_learning_rate: 0.30,
+            long_term_learning_rate: 0.12,
             composite_weight_short: 0.20,
             composite_weight_medium: 0.30,
             composite_weight_long: 0.50,
-            consolidation_rate_scale: 0.03,
-            consolidation_bonus: 0.2,
-            mastery_composite_threshold: 0.8,
-            mastery_accuracy_threshold: 0.9,
-            mastery_streak_threshold: 3,
+            consolidation_rate_scale: 0.25,
+            consolidation_bonus: 1.5,
+            mastery_composite_threshold: 0.30,
+            mastery_accuracy_threshold: 0.65,
+            mastery_streak_threshold: 1,
             reviewing_threshold: 0.4,
-            half_life_base_epsilon: 0.1,
-            half_life_time_unit_secs: 86400.0,
+            half_life_base_epsilon: 0.3,
+            half_life_time_unit_secs: 1296000.0,
+            half_life_power: 1.5,
             recall_risk_bonus: 0.2,
-            recall_risk_threshold: 0.5,
+            recall_risk_threshold: 0.55,
             base_desired_retention: 0.85,
             passive_decay_half_life_days: 30.0,
-            passive_decay_power: 0.5,
+            passive_decay_power: 0.30,
             mastery_window_size: 20,
+            stability_base_days: 20.0,
+            forgetting_curve_factor: 19.0 / 81.0,
+            forgetting_curve_decay: -0.5,
+            forgetting_curve_floor: 0.10,
+            w: default_w(),
         }
     }
 }
@@ -632,22 +691,40 @@ pub struct WordSelectorConfig {
     pub recall_mastered_threshold: f64,
     #[serde(default = "default_sigmoid_steepness")]
     pub sigmoid_steepness: f64,
+    #[serde(default = "default_spacing_cooldown_secs")]
+    pub spacing_cooldown_secs: f64,
+    #[serde(default = "default_optimal_recall_center")]
+    pub optimal_recall_center: f64,
+    #[serde(default = "default_optimal_recall_sigma")]
+    pub optimal_recall_sigma: f64,
 }
 
 fn default_sigmoid_steepness() -> f64 {
     8.0
 }
+fn default_spacing_cooldown_secs() -> f64 {
+    300.0
+}
+fn default_optimal_recall_center() -> f64 {
+    0.50
+}
+fn default_optimal_recall_sigma() -> f64 {
+    0.30
+}
 
 impl Default for WordSelectorConfig {
     fn default() -> Self {
         Self {
-            review_ucb_weight: 0.18,
+            review_ucb_weight: 0.12,
             review_ucb_max_bonus: 0.35,
             new_word_gaussian_sigma: 0.3,
             error_prone_bonus: 0.3,
             recently_mastered_bonus: 0.15,
             recall_mastered_threshold: 0.7,
             sigmoid_steepness: 8.0,
+            spacing_cooldown_secs: 300.0,
+            optimal_recall_center: 0.50,
+            optimal_recall_sigma: 0.30,
         }
     }
 }
@@ -980,6 +1057,9 @@ impl AMASConfig {
         }
         if self.memory_model.half_life_base_epsilon <= 0.0 {
             return Err("memory_model.half_life_base_epsilon must be > 0".to_string());
+        }
+        if !(0.1..=3.0).contains(&self.memory_model.half_life_power) {
+            return Err("memory_model.half_life_power must be in [0.1, 3.0]".to_string());
         }
         if !(0.5..=0.99).contains(&self.memory_model.base_desired_retention) {
             return Err("memory_model.base_desired_retention must be in [0.5,0.99]".to_string());

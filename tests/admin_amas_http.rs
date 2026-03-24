@@ -314,12 +314,10 @@ async fn it_admin_auth_and_management_routes() {
     .await;
     let (notifications_status, _, notifications_body) = response_json(notifications).await;
     assert_eq!(notifications_status, StatusCode::OK);
-    assert!(
-        !notifications_body["data"]
-            .as_array()
-            .unwrap_or(&Vec::new())
-            .is_empty()
-    );
+    assert!(!notifications_body["data"]
+        .as_array()
+        .unwrap_or(&Vec::new())
+        .is_empty());
 
     let logout = request(
         &app.app,
