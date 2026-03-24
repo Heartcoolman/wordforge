@@ -706,10 +706,10 @@ fn default_spacing_cooldown_secs() -> f64 {
     300.0
 }
 fn default_optimal_recall_center() -> f64 {
-    0.65
+    0.50
 }
 fn default_optimal_recall_sigma() -> f64 {
-    0.20
+    0.30
 }
 
 impl Default for WordSelectorConfig {

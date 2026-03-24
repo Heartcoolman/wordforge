@@ -58,6 +58,31 @@ impl Default for MdmState {
     }
 }
 
+impl MdmState {
+    /// Migrate legacy state: if stability is still the serde default (0.4)
+    /// but memory_strength has a learned value, convert it to DSR stability.
+    /// This prevents resetting historical memory progress on upgrade.
+    pub fn migrate_legacy(&mut self) {
+        const DEFAULT_STABILITY: f64 = 0.4;
+        const STABILITY_BASE: f64 = 20.0;
+        const HALF_LIFE_EPSILON: f64 = 0.3;
+        const HALF_LIFE_POWER: f64 = 1.5;
+
+        // Only migrate if stability was not explicitly set (still default)
+        // AND the user has a non-trivial learned memory_strength
+        if (self.stability - DEFAULT_STABILITY).abs() < 1e-9
+            && self.memory_strength > 0.01
+            && self.review_count > 0
+        {
+            // Old formula: stability_days = (memory_strength + epsilon)^power * base
+            let migrated = (self.memory_strength + HALF_LIFE_EPSILON)
+                .powf(HALF_LIFE_POWER)
+                * STABILITY_BASE;
+            self.stability = migrated.clamp(0.01, 365.0);
+        }
+    }
+}
+
 /// Main DSR update function.
 /// Uses FSRS-5 formulas for stability transitions.
 ///
