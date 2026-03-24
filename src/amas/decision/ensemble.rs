@@ -41,15 +41,12 @@ pub fn get_weights(
         raw.min(config.blend_max)
     };
 
-    let mut w_h =
-        ((1.0 - blend) * config.base_weight_heuristic + blend * trust_scores.heuristic)
-            .max(config.min_weight);
+    let mut w_h = ((1.0 - blend) * config.base_weight_heuristic + blend * trust_scores.heuristic)
+        .max(config.min_weight);
     let w_i =
-        ((1.0 - blend) * config.base_weight_ige + blend * trust_scores.ige)
-            .max(config.min_weight);
+        ((1.0 - blend) * config.base_weight_ige + blend * trust_scores.ige).max(config.min_weight);
     let w_s =
-        ((1.0 - blend) * config.base_weight_swd + blend * trust_scores.swd)
-            .max(config.min_weight);
+        ((1.0 - blend) * config.base_weight_swd + blend * trust_scores.swd).max(config.min_weight);
 
     if in_warmup {
         w_h += config.warmup_heuristic_boost;

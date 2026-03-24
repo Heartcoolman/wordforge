@@ -117,7 +117,9 @@ async fn get_stats(
         let accuracy_rate = agg.correct_records as f64 / agg.total_records as f64;
 
         // Streak still requires date-based scan (lightweight: just keys, not full deser)
-        let records = state.store().get_user_records(&auth.user_id, state.config().limits.max_records_fetch)?;
+        let records = state
+            .store()
+            .get_user_records(&auth.user_id, state.config().limits.max_records_fetch)?;
 
         Ok(ok(UserStats {
             total_words_learned: agg.word_ids.len() as u64,
@@ -128,7 +130,9 @@ async fn get_stats(
         }))
     } else {
         // Fallback for users without aggregated stats (pre-migration data)
-        let records = state.store().get_user_records(&auth.user_id, state.config().limits.max_records_fetch)?;
+        let records = state
+            .store()
+            .get_user_records(&auth.user_id, state.config().limits.max_records_fetch)?;
         let total_records = records.len() as u64;
         let correct = records.iter().filter(|r| r.is_correct).count() as u64;
 

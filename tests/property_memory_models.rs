@@ -15,7 +15,7 @@ proptest! {
     ) {
         let config = MemoryModelConfig::default();
         let mut state = MdmState::default();
-        update_strength(&mut state, quality, alpha, &config);
+        update_strength(&mut state, quality, alpha, chrono::Utc::now().timestamp_millis(), &config);
         let base = state.last_review_at.unwrap_or(0);
 
         let p1 = recall_probability(&state, base + delta1, &config);
@@ -34,7 +34,7 @@ proptest! {
     ) {
         let config = MemoryModelConfig::default();
         let mut state = MdmState::default();
-        update_strength(&mut state, quality, 0.3, &config);
+        update_strength(&mut state, quality, 0.3, chrono::Utc::now().timestamp_millis(), &config);
         let interval = compute_interval(&state, target, scale, &config);
         prop_assert!(interval >= 0);
     }

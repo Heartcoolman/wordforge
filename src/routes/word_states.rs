@@ -167,10 +167,7 @@ async fn batch_update(
     if req.updates.len() > state.config().limits.max_batch_size {
         return Err(AppError::bad_request(
             "BATCH_TOO_LARGE",
-            &format!(
-                "批量更新数量上限为{}",
-                state.config().limits.max_batch_size
-            ),
+            &format!("批量更新数量上限为{}", state.config().limits.max_batch_size),
         ));
     }
     let word_ids: Vec<String> = req.updates.iter().map(|u| u.word_id.clone()).collect();

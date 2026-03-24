@@ -262,11 +262,9 @@ async fn upload_avatar(
     let filename = format!("{}.{}", safe_id, extension);
     let path = avatar_dir.join(&filename);
 
-    tokio::fs::write(&path, &body)
-        .await
-        .map_err(|e| {
-            AppError::internal(&format!("Failed to save avatar to {}: {e}", path.display()))
-        })?;
+    tokio::fs::write(&path, &body).await.map_err(|e| {
+        AppError::internal(&format!("Failed to save avatar to {}: {e}", path.display()))
+    })?;
 
     let avatar_url = format!("/avatars/{}", filename);
     let avatar_key = keys::user_avatar_key(&auth.user_id)?;

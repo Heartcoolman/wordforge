@@ -25,12 +25,14 @@ pub fn generate(
     }
 
     if feature.accuracy < 0.5 {
-        strategy.difficulty = (strategy.difficulty - h.low_accuracy_difficulty_drop).max(LOW_ACCURACY_DIFFICULTY_FLOOR);
+        strategy.difficulty = (strategy.difficulty - h.low_accuracy_difficulty_drop)
+            .max(LOW_ACCURACY_DIFFICULTY_FLOOR);
         strategy.new_ratio = (strategy.new_ratio - h.low_accuracy_ratio_drop).max(0.0);
     }
 
     if user_state.motivation < config.constraints.low_motivation_threshold {
-        strategy.difficulty = (strategy.difficulty - h.low_motivation_difficulty_drop).max(LOW_MOTIVATION_DIFFICULTY_FLOOR);
+        strategy.difficulty = (strategy.difficulty - h.low_motivation_difficulty_drop)
+            .max(LOW_MOTIVATION_DIFFICULTY_FLOOR);
         strategy.batch_size = strategy.batch_size.min(h.low_motivation_max_batch);
     }
 

@@ -29,7 +29,8 @@ pub fn record_context(state: &mut EvmState, is_new_context: bool) {
         state.context_count += 1;
     }
     // Update diversity score based on context count
-    state.diversity_score = (1.0 - (-DIVERSITY_GROWTH_RATE * state.context_count as f64).exp()).clamp(0.0, 1.0);
+    state.diversity_score =
+        (1.0 - (-DIVERSITY_GROWTH_RATE * state.context_count as f64).exp()).clamp(0.0, 1.0);
 }
 
 /// Modify interval scaling based on encoding variability

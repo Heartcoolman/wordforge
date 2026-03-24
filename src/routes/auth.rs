@@ -141,7 +141,8 @@ fn issue_token_pair(user_id: &str, state: &AppState) -> Result<(String, String),
         user_id: user_id.to_string(),
         token_type: "refresh".to_string(),
         created_at: Utc::now(),
-        expires_at: Utc::now() + Duration::hours(state.config().refresh_token_expires_in_hours as i64),
+        expires_at: Utc::now()
+            + Duration::hours(state.config().refresh_token_expires_in_hours as i64),
         revoked: false,
     })?;
 
@@ -162,10 +163,7 @@ async fn register(
 
     let email = req.email.trim().to_lowercase();
     if !is_valid_email(&email) {
-        return Err(AppError::bad_request(
-            "AUTH_INVALID_EMAIL",
-            "邮箱格式无效",
-        ));
+        return Err(AppError::bad_request("AUTH_INVALID_EMAIL", "邮箱格式无效"));
     }
     let username = req.username.trim();
     if let Err(msg) = validate_username(username) {
@@ -176,10 +174,7 @@ async fn register(
     }
 
     if state.store().get_user_by_email(&email)?.is_some() {
-        return Err(AppError::conflict(
-            "AUTH_EMAIL_EXISTS",
-            "该邮箱已被注册",
-        ));
+        return Err(AppError::conflict("AUTH_EMAIL_EXISTS", "该邮箱已被注册"));
     }
 
     if state.store().count_users()? >= system_settings.max_users as usize {
@@ -284,9 +279,7 @@ async fn refresh(State(state): State<AppState>, headers: HeaderMap) -> Result<Re
     // Verify the JWT is valid and has token_type == "refresh"
     let claims = verify_jwt(&old_token, &state.config().refresh_jwt_secret)?;
     if claims.token_type != "refresh" {
-        return Err(AppError::unauthorized(
-            "令牌类型无效：需要刷新令牌",
-        ));
+        return Err(AppError::unauthorized("令牌类型无效：需要刷新令牌"));
     }
 
     // Verify the refresh session exists in the store

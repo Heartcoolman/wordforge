@@ -185,10 +185,14 @@ impl Store {
 
         // Maintain secondary indexes outside of the main transaction
         // (these are idempotent and can be rebuilt from primary data)
-        let _ = self.records_by_time.insert(time_index_key.as_bytes(), user_id_bytes.as_slice());
+        let _ = self
+            .records_by_time
+            .insert(time_index_key.as_bytes(), user_id_bytes.as_slice());
         let _ = self.word_references.insert(word_ref_key.as_bytes(), &[]);
         let idx_key = keys::record_id_index_key(&record.user_id, &record.id)?;
-        let _ = self.record_id_index.insert(idx_key.as_bytes(), record_key.as_bytes());
+        let _ = self
+            .record_id_index
+            .insert(idx_key.as_bytes(), record_key.as_bytes());
 
         // Update user stats aggregation
         if let Ok(mut stats) = self.get_user_stats_agg(&record.user_id) {
@@ -224,7 +228,9 @@ impl Store {
             let (key, value) = item?;
             let key_text = String::from_utf8_lossy(&key);
             if key_text.ends_with(&suffix) {
-                let _ = self.record_id_index.insert(idx_key.as_bytes(), key.as_ref());
+                let _ = self
+                    .record_id_index
+                    .insert(idx_key.as_bytes(), key.as_ref());
                 return Ok(Some(Self::deserialize::<LearningRecord>(&value)?));
             }
         }

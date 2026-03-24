@@ -24,10 +24,7 @@ pub fn source_url_hash_prefix(url: &str) -> String {
 }
 
 impl Store {
-    pub fn upsert_wb_center_import(
-        &self,
-        import: &WordbookCenterImport,
-    ) -> Result<(), StoreError> {
+    pub fn upsert_wb_center_import(&self, import: &WordbookCenterImport) -> Result<(), StoreError> {
         let prefix = source_url_hash_prefix(&import.source_url);
         let key = keys::wb_center_import_key(&prefix, &import.remote_id)?;
         self.wb_center_imports

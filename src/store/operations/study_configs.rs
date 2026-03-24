@@ -40,12 +40,10 @@ impl Store {
         let key = keys::study_config_key(user_id)?;
         match self.study_configs.get(key.as_bytes())? {
             Some(raw) => Ok(Self::deserialize(&raw)?),
-            None => {
-                Ok(UserStudyConfig {
-                    user_id: user_id.to_string(),
-                    ..Default::default()
-                })
-            }
+            None => Ok(UserStudyConfig {
+                user_id: user_id.to_string(),
+                ..Default::default()
+            }),
         }
     }
 

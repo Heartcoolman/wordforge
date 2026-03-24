@@ -32,7 +32,8 @@ pub fn verify_password(password: &str, hash: &str) -> Result<bool, AppError> {
 /// Used when the requested account doesn't exist so that the response time
 /// is indistinguishable from a real password verification.
 pub fn generate_dummy_argon2_hash() -> String {
-    "$argon2id$v=19$m=19456,t=2,p=1$ZHVtbXlzYWx0ZHVtbXk$YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY".to_string()
+    "$argon2id$v=19$m=19456,t=2,p=1$ZHVtbXlzYWx0ZHVtbXk$YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY"
+        .to_string()
 }
 
 pub fn hash_token(token: &str) -> String {

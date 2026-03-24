@@ -64,10 +64,7 @@ impl Store {
             })?;
 
         // Maintain users_by_created_at index
-        let idx_key = keys::users_by_created_at_key(
-            user.created_at.timestamp_millis(),
-            &user.id,
-        )?;
+        let idx_key = keys::users_by_created_at_key(user.created_at.timestamp_millis(), &user.id)?;
         self.users_by_created_at
             .insert(idx_key.as_bytes(), user.id.as_bytes())?;
 
@@ -405,10 +402,9 @@ impl Store {
             })?;
 
         // Clean up users_by_created_at index
-        if let Ok(idx_key) = keys::users_by_created_at_key(
-            user.created_at.timestamp_millis(),
-            user_id,
-        ) {
+        if let Ok(idx_key) =
+            keys::users_by_created_at_key(user.created_at.timestamp_millis(), user_id)
+        {
             let _ = self.users_by_created_at.remove(idx_key.as_bytes());
         }
 
@@ -430,7 +426,11 @@ impl Store {
 
         // 4. 删除单词学习状态及到期索引
         let wls_prefix = keys::word_learning_state_prefix(user_id)?;
-        for (key, value) in self.word_learning_states.scan_prefix(wls_prefix.as_bytes()).flatten() {
+        for (key, value) in self
+            .word_learning_states
+            .scan_prefix(wls_prefix.as_bytes())
+            .flatten()
+        {
             let _ = self.word_learning_states.remove(&key);
             // 清理对应的 due index
             if let Ok(state) = Self::deserialize::<
@@ -469,7 +469,11 @@ impl Store {
 
         // 8. 删除通知
         let notif_prefix = keys::notification_prefix(user_id)?;
-        for (key, _) in self.notifications.scan_prefix(notif_prefix.as_bytes()).flatten() {
+        for (key, _) in self
+            .notifications
+            .scan_prefix(notif_prefix.as_bytes())
+            .flatten()
+        {
             let _ = self.notifications.remove(&key);
         }
 
@@ -486,7 +490,11 @@ impl Store {
 
         // 11. 删除学习会话索引
         let ls_prefix = keys::learning_session_user_index_prefix(user_id)?;
-        for (key, _) in self.learning_sessions.scan_prefix(ls_prefix.as_bytes()).flatten() {
+        for (key, _) in self
+            .learning_sessions
+            .scan_prefix(ls_prefix.as_bytes())
+            .flatten()
+        {
             let key_str = String::from_utf8(key.to_vec()).unwrap_or_default();
             if let Some(session_id) = key_str.rsplit(':').next() {
                 if let Ok(sk) = keys::learning_session_key(session_id) {

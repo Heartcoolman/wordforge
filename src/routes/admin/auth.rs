@@ -75,10 +75,7 @@ async fn setup(
     JsonBody(req): JsonBody<SetupRequest>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     if !is_valid_email(&req.email) {
-        return Err(AppError::bad_request(
-            "ADMIN_INVALID_EMAIL",
-            "邮箱格式无效",
-        ));
+        return Err(AppError::bad_request("ADMIN_INVALID_EMAIL", "邮箱格式无效"));
     }
     if let Err(msg) = validate_password(&req.password) {
         return Err(AppError::bad_request("ADMIN_WEAK_PASSWORD", msg));

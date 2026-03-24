@@ -107,7 +107,9 @@ impl MetricsRegistry {
                 metric.error_count.fetch_add(1, Ordering::Relaxed);
             }
             metric.record_latency_bucket(latency_us);
-            metric.last_called_at.store(chrono::Utc::now().timestamp_millis(), Ordering::Relaxed);
+            metric
+                .last_called_at
+                .store(chrono::Utc::now().timestamp_millis(), Ordering::Relaxed);
         }
     }
 

@@ -151,7 +151,10 @@ pub fn wordbook_type_index_key_system(wordbook_id: &str) -> Result<String, Store
     Ok(format!("system:{}", validate_id(wordbook_id)?))
 }
 
-pub fn wordbook_type_index_key_user(user_id: &str, wordbook_id: &str) -> Result<String, StoreError> {
+pub fn wordbook_type_index_key_user(
+    user_id: &str,
+    wordbook_id: &str,
+) -> Result<String, StoreError> {
     Ok(format!(
         "user:{}:{}",
         validate_id(user_id)?,
@@ -253,7 +256,10 @@ pub fn word_morpheme_key(word_id: &str) -> Result<String, StoreError> {
 }
 
 // Wordbook center import keys
-pub fn wb_center_import_key(source_url_hash_prefix: &str, remote_id: &str) -> Result<String, StoreError> {
+pub fn wb_center_import_key(
+    source_url_hash_prefix: &str,
+    remote_id: &str,
+) -> Result<String, StoreError> {
     Ok(format!(
         "{}:{}",
         validate_id(source_url_hash_prefix)?,
@@ -314,7 +320,11 @@ pub fn records_by_time_since_key(since_ms: i64) -> String {
 }
 
 /// word_references: `{word_id}:{tree_name}:{assoc_key_hex}`
-pub fn word_ref_key(word_id: &str, tree_name: &str, assoc_key: &[u8]) -> Result<String, StoreError> {
+pub fn word_ref_key(
+    word_id: &str,
+    tree_name: &str,
+    assoc_key: &[u8],
+) -> Result<String, StoreError> {
     Ok(format!(
         "{}:{}:{}",
         validate_id(word_id)?,

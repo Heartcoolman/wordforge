@@ -68,7 +68,9 @@ impl ListWordsQuery {
     }
 
     fn per_page(&self) -> u64 {
-        self.per_page.unwrap_or(DEFAULT_PAGE_SIZE).clamp(1, MAX_PAGE_SIZE)
+        self.per_page
+            .unwrap_or(DEFAULT_PAGE_SIZE)
+            .clamp(1, MAX_PAGE_SIZE)
     }
 }
 
@@ -329,9 +331,10 @@ async fn import_from_url(
         .build()
         .map_err(|e| AppError::internal(&format!("HTTP client error: {e}")))?;
 
-    let response = client.get(url_parsed.clone()).send().await.map_err(|e| {
-        AppError::bad_request("IMPORT_FETCH_FAILED", &format!("获取URL失败：{e}"))
-    })?;
+    let response =
+        client.get(url_parsed.clone()).send().await.map_err(|e| {
+            AppError::bad_request("IMPORT_FETCH_FAILED", &format!("获取URL失败：{e}"))
+        })?;
 
     // 检查 Content-Length（如果服务端提供了）
     if let Some(len) = response.content_length() {
@@ -349,10 +352,7 @@ async fn import_from_url(
     use futures::StreamExt;
     while let Some(chunk_result) = stream.next().await {
         let chunk = chunk_result.map_err(|e| {
-            AppError::bad_request(
-                "IMPORT_READ_FAILED",
-                &format!("读取内容失败：{e}"),
-            )
+            AppError::bad_request("IMPORT_READ_FAILED", &format!("读取内容失败：{e}"))
         })?;
         body_bytes.extend_from_slice(&chunk);
         if body_bytes.len() > MAX_RESPONSE_SIZE {
@@ -483,10 +483,7 @@ pub(crate) async fn resolve_import_url_addrs(
 
 fn ensure_public_import_addrs(addrs: Vec<SocketAddr>) -> Result<Vec<SocketAddr>, AppError> {
     if addrs.is_empty() {
-        return Err(AppError::bad_request(
-            "IMPORT_DNS_FAILED",
-            "无法解析主机名",
-        ));
+        return Err(AppError::bad_request("IMPORT_DNS_FAILED", "无法解析主机名"));
     }
 
     for socket_addr in &addrs {

@@ -26,10 +26,7 @@ impl Store {
         let key = keys::word_key(&word.id)?;
         self.words.insert(key.as_bytes(), Self::serialize(word)?)?;
         // Maintain words_by_created_at index
-        let idx_key = keys::words_by_created_at_key(
-            word.created_at.timestamp_millis(),
-            &word.id,
-        )?;
+        let idx_key = keys::words_by_created_at_key(word.created_at.timestamp_millis(), &word.id)?;
         self.words_by_created_at
             .insert(idx_key.as_bytes(), word.id.as_bytes())?;
         Ok(())
@@ -104,7 +101,11 @@ impl Store {
 
         // Try to use word_references index for fast lookup
         let ref_prefix = keys::word_ref_prefix(word_id)?;
-        let has_refs = self.word_references.scan_prefix(ref_prefix.as_bytes()).next().is_some();
+        let has_refs = self
+            .word_references
+            .scan_prefix(ref_prefix.as_bytes())
+            .next()
+            .is_some();
 
         let mut ww_keys_to_remove: Vec<Vec<u8>> = Vec::new();
         let mut affected_wordbook_ids: Vec<String> = Vec::new();
@@ -128,7 +129,10 @@ impl Store {
                     "records" => rec_keys_to_remove.push(assoc_key),
                     "wordbook_words" => {
                         if let Some(raw) = self.wordbook_words.get(&assoc_key)? {
-                            if let Ok(ww_entry) = Self::deserialize::<crate::store::operations::wordbooks::WordbookWordEntry>(&raw) {
+                            if let Ok(ww_entry) = Self::deserialize::<
+                                crate::store::operations::wordbooks::WordbookWordEntry,
+                            >(&raw)
+                            {
                                 affected_wordbook_ids.push(ww_entry.wordbook_id.clone());
                             }
                         }
@@ -145,8 +149,9 @@ impl Store {
                 let (k, v) = item?;
                 let key_str = String::from_utf8_lossy(&k);
                 if key_str.ends_with(&suffix) {
-                    if let Ok(entry) =
-                        Self::deserialize::<crate::store::operations::wordbooks::WordbookWordEntry>(&v)
+                    if let Ok(entry) = Self::deserialize::<
+                        crate::store::operations::wordbooks::WordbookWordEntry,
+                    >(&v)
                     {
                         affected_wordbook_ids.push(entry.wordbook_id.clone());
                     }
@@ -234,7 +239,9 @@ impl Store {
 
         // Clean up words_by_created_at index
         if let Some(word) = word_data {
-            if let Ok(idx_key) = keys::words_by_created_at_key(word.created_at.timestamp_millis(), word_id) {
+            if let Ok(idx_key) =
+                keys::words_by_created_at_key(word.created_at.timestamp_millis(), word_id)
+            {
                 let _ = self.words_by_created_at.remove(idx_key.as_bytes());
             }
         }
@@ -259,7 +266,11 @@ impl Store {
         }
 
         // Clean up word_references index
-        for (k, _) in self.word_references.scan_prefix(ref_prefix.as_bytes()).flatten() {
+        for (k, _) in self
+            .word_references
+            .scan_prefix(ref_prefix.as_bytes())
+            .flatten()
+        {
             let _ = self.word_references.remove(&k);
         }
 
