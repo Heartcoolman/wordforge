@@ -75,10 +75,16 @@ impl Store {
         Ok(())
     }
 
-    pub(crate) fn conn(
+    pub fn connection(
         &self,
     ) -> Result<r2d2::PooledConnection<SqliteConnectionManager>, StoreError> {
         Ok(self.pool.get()?)
+    }
+
+    pub(crate) fn conn(
+        &self,
+    ) -> Result<r2d2::PooledConnection<SqliteConnectionManager>, StoreError> {
+        self.connection()
     }
 
     pub(crate) fn serialize_json<T: Serialize>(value: &T) -> Result<String, StoreError> {

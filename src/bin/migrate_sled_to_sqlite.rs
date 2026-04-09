@@ -40,7 +40,7 @@ mod sled_migrate {
 
         let sled_db = sled::Config::new()
             .path(&sled_path)
-            .read_only(true)
+            .mode(sled::Mode::LowSpace)
             .open()
             .expect("Failed to open sled database");
 
@@ -58,7 +58,7 @@ mod sled_migrate {
         let mut stats: HashMap<String, usize> = HashMap::new();
 
         for tree_name in &tree_names {
-            if INDEX_TREES.iter().any(|idx| tree_name.starts_with(idx))
+            if INDEX_TREES.iter().any(|idx: &&str| tree_name.starts_with(idx))
                 || SKIP_TREES.contains(&tree_name.as_str())
             {
                 println!("  SKIP {}", tree_name);
@@ -87,7 +87,7 @@ mod sled_migrate {
     }
 
     fn migrate_tree(store: &learning_backend::store::Store, tree_name: &str, tree: &sled::Tree) -> usize {
-        let conn = store.conn().expect("get connection");
+        let conn = store.connection().expect("get connection");
         let mut count = 0;
 
         for item in tree.iter() {
