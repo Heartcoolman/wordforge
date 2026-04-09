@@ -364,13 +364,11 @@ async fn reset_password(
 
     let token_hash = hash_token(&req.token);
 
-    // 先查询再删除，确保同一 token 只能使用一次
+    // 原子删除+返回，确保同一 token 只能使用一次
     let entry = state
         .store()
-        .get_password_reset_token(&token_hash)?
+        .take_password_reset_token(&token_hash)?
         .ok_or_else(|| AppError::bad_request("AUTH_INVALID_RESET_TOKEN", "重置令牌无效"))?;
-
-    state.store().delete_password_reset_token(&token_hash)?;
 
     let expires_at = chrono::DateTime::parse_from_rfc3339(
         entry["expires_at"].as_str().unwrap_or_default(),

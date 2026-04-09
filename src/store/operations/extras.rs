@@ -461,13 +461,26 @@ impl Store {
         .map_err(StoreError::from)
     }
 
-    pub fn delete_password_reset_token(&self, token_hash: &str) -> Result<(), StoreError> {
+    pub fn take_password_reset_token(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<serde_json::Value>, StoreError> {
         let conn = self.conn()?;
-        conn.execute(
-            "DELETE FROM password_reset_tokens WHERE token_hash=?1",
-            params![token_hash],
-        )?;
-        Ok(())
+        let entry = conn
+            .query_row(
+                "DELETE FROM password_reset_tokens WHERE token_hash=?1
+                 RETURNING token_hash, user_id, expires_at",
+                params![token_hash],
+                |r| {
+                    Ok(serde_json::json!({
+                        "token_hash": r.get::<_, String>(0)?,
+                        "user_id": r.get::<_, String>(1)?,
+                        "expires_at": r.get::<_, String>(2)?,
+                    }))
+                },
+            )
+            .optional()?;
+        Ok(entry)
     }
 
     // -- Word Morphemes Write --

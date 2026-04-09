@@ -162,9 +162,9 @@ async fn set_habit_profile(
     }
 
     let profile = serde_json::json!({
-        "preferredHours": req.preferred_hours.unwrap_or_else(|| DEFAULT_PREFERRED_HOURS.to_vec()),
-        "medianSessionLengthMins": req.median_session_length_mins.unwrap_or(15.0),
-        "sessionsPerDay": req.sessions_per_day.unwrap_or(1.0),
+        "preferred_hours": req.preferred_hours.unwrap_or_else(|| DEFAULT_PREFERRED_HOURS.to_vec()),
+        "median_session_length_mins": req.median_session_length_mins.unwrap_or(15.0),
+        "sessions_per_day": req.sessions_per_day.unwrap_or(1.0),
     });
     state.store().set_habit_profile(&auth.user_id, &profile)?;
     Ok(ok(profile))

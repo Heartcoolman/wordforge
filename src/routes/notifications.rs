@@ -259,11 +259,15 @@ async fn set_preferences(
     State(state): State<AppState>,
     JsonBody(req): JsonBody<UpdateUserPreferences>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let mut prefs = match state
+    let existing = state
         .store()
         .get_user_preferences(&auth.user_id)
-        .map_err(|e| AppError::internal(&e.to_string()))?
-    {
+        .map_err(|e| AppError::internal(&e.to_string()))?;
+    let existing_wbc_url = existing
+        .as_ref()
+        .and_then(|v| v["wordbook_center_url"].as_str())
+        .map(|s| s.to_string());
+    let mut prefs = match existing {
         Some(val) => UserPreferences {
             theme: val["theme"].as_str().unwrap_or(DEFAULT_THEME).to_string(),
             language: val["language"].as_str().unwrap_or(DEFAULT_LANGUAGE).to_string(),
@@ -305,6 +309,7 @@ async fn set_preferences(
         "language": prefs.language,
         "notification_enabled": prefs.notification_enabled,
         "sound_enabled": prefs.sound_enabled,
+        "wordbook_center_url": existing_wbc_url,
     });
     state
         .store()
