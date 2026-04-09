@@ -71,16 +71,19 @@ pub fn build_router(state: AppState) -> Router {
         ))
         .layer(DefaultBodyLimit::max(MAX_BODY_SIZE));
 
-    // B29: Static file serving with SPA fallback
-    let spa_fallback =
-        ServeDir::new("static").not_found_service(ServeFile::new("static/index.html"));
-
-    Router::new()
+    let mut app = Router::new()
         .nest("/api", api_routes)
-        .nest("/health", health::router())
-        .fallback_service(spa_fallback)
-        .layer(axum::middleware::from_fn(static_cache_headers))
-        .layer(axum::middleware::from_fn(request_id::request_id_middleware))
+        .nest("/health", health::router());
+
+    if !state.config().api_only {
+        let spa_fallback =
+            ServeDir::new("static").not_found_service(ServeFile::new("static/index.html"));
+        app = app
+            .fallback_service(spa_fallback)
+            .layer(axum::middleware::from_fn(static_cache_headers));
+    }
+
+    app.layer(axum::middleware::from_fn(request_id::request_id_middleware))
         .with_state(state)
 }
 

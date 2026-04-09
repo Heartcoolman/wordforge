@@ -12,7 +12,10 @@ pub struct Config {
     pub log_level: String,
     pub enable_file_logs: bool,
     pub log_dir: String,
-    pub sled_path: String,
+    pub database_url: String,
+    pub api_only: bool,
+    pub sqlite_busy_timeout_ms: u64,
+    pub sqlite_pool_size: u32,
     pub jwt_secret: String,
     pub refresh_jwt_secret: String,
     pub jwt_expires_in_hours: u64,
@@ -127,7 +130,10 @@ impl fmt::Debug for Config {
             .field("log_level", &self.log_level)
             .field("enable_file_logs", &self.enable_file_logs)
             .field("log_dir", &self.log_dir)
-            .field("sled_path", &self.sled_path)
+            .field("database_url", &self.database_url)
+            .field("api_only", &self.api_only)
+            .field("sqlite_busy_timeout_ms", &self.sqlite_busy_timeout_ms)
+            .field("sqlite_pool_size", &self.sqlite_pool_size)
             .field("jwt_secret", &"***REDACTED***")
             .field("refresh_jwt_secret", &"***REDACTED***")
             .field("jwt_expires_in_hours", &self.jwt_expires_in_hours)
@@ -195,7 +201,10 @@ impl Config {
             log_level: env_or("RUST_LOG", "info"),
             enable_file_logs: env_or_bool("ENABLE_FILE_LOGS", false),
             log_dir: env_or("LOG_DIR", "./logs"),
-            sled_path: normalized_sled_path(&env_or("SLED_PATH", "./data/learning.sled")),
+            database_url: normalized_db_path(&env_or("DATABASE_URL", "./data/learning.db")),
+            api_only: env_or_bool("API_ONLY", false),
+            sqlite_busy_timeout_ms: env_or_parse("SQLITE_BUSY_TIMEOUT_MS", 5000_u64),
+            sqlite_pool_size: env_or_parse("SQLITE_POOL_SIZE", 4_u32),
             jwt_secret,
             refresh_jwt_secret,
             jwt_expires_in_hours: env_or_parse("JWT_EXPIRES_IN_HOURS", 24_u64),
@@ -338,7 +347,7 @@ impl Config {
     }
 }
 
-fn normalized_sled_path(raw: &str) -> String {
+fn normalized_db_path(raw: &str) -> String {
     let path = Path::new(raw);
     if path.is_absolute() {
         return path.to_string_lossy().to_string();

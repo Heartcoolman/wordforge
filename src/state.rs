@@ -133,7 +133,7 @@ mod tests {
         let cfg = Config::from_env();
         let tmp = tempfile::tempdir().expect("tempdir");
         let store =
-            Arc::new(Store::open(tmp.path().join("state_atomic.sled").to_str().unwrap()).unwrap());
+            Arc::new(Store::open(tmp.path().join("state_atomic.db").to_str().unwrap(), 5000, 4).unwrap());
         let amas = Arc::new(AMASEngine::new(AMASConfig::default(), store.clone()));
         let (tx, _) = broadcast::channel(4);
         let state = AppState::new(store, amas, &cfg, tx);
@@ -147,7 +147,7 @@ mod tests {
         let cfg = Config::from_env();
         let tmp = tempfile::tempdir().expect("tempdir");
         let store = Arc::new(
-            Store::open(tmp.path().join("state_shutdown.sled").to_str().unwrap()).unwrap(),
+            Store::open(tmp.path().join("state_shutdown.db").to_str().unwrap(), 5000, 4).unwrap(),
         );
         let amas = Arc::new(AMASEngine::new(AMASConfig::default(), store.clone()));
         let (tx, _) = broadcast::channel(4);

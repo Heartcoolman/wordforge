@@ -21,7 +21,7 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
 
-const CSP_HEADER: &str = "default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data: blob:; worker-src 'self' blob:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
+const CSP_HEADER: &str = "default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self' https: capacitor: ionic:; img-src 'self' data: blob:; worker-src 'self' blob:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
 const HSTS_HEADER: &str = "max-age=31536000; includeSubDomains";
 
 #[tokio::main]
@@ -40,7 +40,14 @@ async fn main() {
     // Validate LLM config at startup (panics if enabled=true, mock=false)
     LlmProvider::validate_config(&config.llm);
 
-    let store = Arc::new(Store::open(&config.sled_path).expect("Failed to open sled database"));
+    let store = Arc::new(
+        Store::open(
+            &config.database_url,
+            config.sqlite_busy_timeout_ms,
+            config.sqlite_pool_size,
+        )
+        .expect("Failed to open SQLite database"),
+    );
     store.run_migrations().expect("Failed to run migrations");
 
     let (shutdown_tx, _) = broadcast::channel::<()>(8);
@@ -138,16 +145,13 @@ async fn main() {
         tracing::error!(error = %e, "HTTP server crashed");
     }
 
-    tracing::info!("Flushing store before exit");
-    if let Err(e) = store.flush() {
-        tracing::error!(error = %e, "Failed to flush store before exit");
-    }
     tracing::info!("Shutdown complete");
 }
 
 fn build_cors_layer(config: &Config) -> CorsLayer {
-    if config.cors_origin.trim() == "*" {
-        // 通配符模式仅用于开发环境，通配符与 credentials 互斥
+    let origin_str = config.cors_origin.trim();
+
+    if origin_str == "*" {
         return CorsLayer::new()
             .allow_origin(Any)
             .allow_credentials(false)
@@ -155,7 +159,30 @@ fn build_cors_layer(config: &Config) -> CorsLayer {
             .allow_methods(Any);
     }
 
-    match config.cors_origin.parse::<axum::http::HeaderValue>() {
+    if origin_str.contains(',') {
+        let origins: Vec<HeaderValue> = origin_str
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| {
+                s.parse::<HeaderValue>().unwrap_or_else(|e| {
+                    panic!("FATAL: Invalid origin '{}' in CORS_ORIGIN: {}", s, e);
+                })
+            })
+            .collect();
+
+        if origins.is_empty() {
+            panic!("FATAL: CORS_ORIGIN contains no valid origins");
+        }
+
+        return CorsLayer::new()
+            .allow_origin(origins)
+            .allow_credentials(true)
+            .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE, header::ACCEPT])
+            .allow_methods(Any);
+    }
+
+    match origin_str.parse::<HeaderValue>() {
         Ok(origin) => CorsLayer::new()
             .allow_origin(origin)
             .allow_credentials(true)

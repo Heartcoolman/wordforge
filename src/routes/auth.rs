@@ -14,7 +14,6 @@ use crate::auth::{
 };
 use crate::response::{created, ok, AppError};
 use crate::state::AppState;
-use crate::store::keys;
 use crate::store::operations::sessions::Session;
 use crate::store::operations::users::User;
 use crate::validation::{is_valid_email, validate_password, validate_username};
@@ -89,13 +88,6 @@ impl From<&User> for UserProfile {
 pub struct AuthResponse {
     pub access_token: String,
     pub user: UserProfile,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PasswordResetEntry {
-    pub user_id: String,
-    pub expires_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// 每用户最大并发会话数
@@ -338,20 +330,11 @@ async fn forgot_password(
     if let Some(user) = state.store().get_user_by_email(&req.email)? {
         let raw_token = uuid::Uuid::new_v4().simple().to_string();
         let token_hash = hash_token(&raw_token);
-
-        let entry = PasswordResetEntry {
-            user_id: user.id.clone(),
-            expires_at: Utc::now() + Duration::hours(1),
-        };
+        let expires_at = (Utc::now() + Duration::hours(1)).to_rfc3339();
 
         state
             .store()
-            .password_reset_tokens
-            .insert(
-                keys::password_reset_key(&token_hash)?.as_bytes(),
-                serde_json::to_vec(&entry).map_err(|e| AppError::internal(&e.to_string()))?,
-            )
-            .map_err(|e| AppError::internal(&e.to_string()))?;
+            .create_password_reset_token(&token_hash, &user.id, &expires_at)?;
 
         // 仅通过日志输出 token，绝不在响应中返回
         tracing::trace!(
@@ -380,30 +363,34 @@ async fn reset_password(
     }
 
     let token_hash = hash_token(&req.token);
-    let key = keys::password_reset_key(&token_hash)?;
 
-    // 原子删除 token，防止 TOCTOU 竞态条件：
-    // 先 remove() 再检查返回值，确保同一 token 只能使用一次
-    let raw = state
+    // 先查询再删除，确保同一 token 只能使用一次
+    let entry = state
         .store()
-        .password_reset_tokens
-        .remove(key.as_bytes())
-        .map_err(|e| AppError::internal(&e.to_string()))?
+        .get_password_reset_token(&token_hash)?
         .ok_or_else(|| AppError::bad_request("AUTH_INVALID_RESET_TOKEN", "重置令牌无效"))?;
 
-    let entry: PasswordResetEntry = serde_json::from_slice(&raw)
-        .map_err(|e| AppError::internal(&format!("reset token decode error: {e}")))?;
+    state.store().delete_password_reset_token(&token_hash)?;
 
-    if entry.expires_at <= Utc::now() {
+    let expires_at = chrono::DateTime::parse_from_rfc3339(
+        entry["expires_at"].as_str().unwrap_or_default(),
+    )
+    .map_err(|e| AppError::internal(&format!("reset token expires_at parse error: {e}")))?;
+
+    if expires_at <= Utc::now() {
         return Err(AppError::bad_request(
             "AUTH_EXPIRED_RESET_TOKEN",
             "重置令牌已过期",
         ));
     }
 
+    let user_id = entry["user_id"]
+        .as_str()
+        .ok_or_else(|| AppError::internal("reset token missing user_id"))?;
+
     let mut user = state
         .store()
-        .get_user_by_id(&entry.user_id)?
+        .get_user_by_id(user_id)?
         .ok_or_else(|| AppError::bad_request("AUTH_INVALID_RESET_TOKEN", "重置令牌无效"))?;
 
     user.password_hash = hash_password(&req.new_password)?;
@@ -420,19 +407,18 @@ async fn verify_reset_token(
     JsonBody(req): JsonBody<VerifyResetTokenRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     let token_hash = hash_token(&req.token);
-    let key = keys::password_reset_key(&token_hash)?;
 
-    let raw = state
+    let entry = state
         .store()
-        .password_reset_tokens
-        .get(key.as_bytes())
-        .map_err(|e| AppError::internal(&e.to_string()))?
+        .get_password_reset_token(&token_hash)?
         .ok_or_else(|| AppError::bad_request("AUTH_INVALID_RESET_TOKEN", "重置令牌无效"))?;
 
-    let entry: PasswordResetEntry = serde_json::from_slice(&raw)
-        .map_err(|e| AppError::internal(&format!("reset token decode error: {e}")))?;
+    let expires_at = chrono::DateTime::parse_from_rfc3339(
+        entry["expires_at"].as_str().unwrap_or_default(),
+    )
+    .map_err(|e| AppError::internal(&format!("reset token expires_at parse error: {e}")))?;
 
-    if entry.expires_at <= Utc::now() {
+    if expires_at <= Utc::now() {
         return Err(AppError::bad_request(
             "AUTH_EXPIRED_RESET_TOKEN",
             "重置令牌已过期",

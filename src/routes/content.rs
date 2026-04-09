@@ -1,8 +1,6 @@
 use axum::extract::{Path, Query, State};
 use axum::routing::get;
 use axum::Router;
-use std::collections::HashSet;
-
 use crate::auth::{AdminAuthUser, AuthUser};
 use crate::constants::MAX_CONFUSION_PAIRS;
 use crate::extractors::JsonBody;
@@ -11,7 +9,6 @@ use serde::{Deserialize, Serialize};
 use crate::response::{ok, AppError};
 use crate::routes::words::WordPublic;
 use crate::state::AppState;
-use crate::store::keys;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -31,17 +28,8 @@ async fn get_etymology(
     Path(word_id): Path<String>,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let key = keys::etymology_key(&word_id)?;
-
     // Check cache first
-    if let Some(raw) = state
-        .store()
-        .etymologies
-        .get(key.as_bytes())
-        .map_err(|e| AppError::internal(&e.to_string()))?
-    {
-        let cached: serde_json::Value =
-            serde_json::from_slice(&raw).unwrap_or(serde_json::json!({}));
+    if let Some(cached) = state.store().get_etymology(&word_id)? {
         let is_pending_llm = cached
             .get("status")
             .and_then(|status| status.as_str())
@@ -52,11 +40,7 @@ async fn get_etymology(
             return Ok(ok(cached));
         }
 
-        state
-            .store()
-            .etymologies
-            .remove(key.as_bytes())
-            .map_err(|e| AppError::internal(&e.to_string()))?;
+        state.store().delete_etymology(&word_id)?;
     }
 
     // Look up the word
@@ -66,25 +50,14 @@ async fn get_etymology(
         .ok_or_else(|| AppError::not_found("单词不存在"))?;
 
     // 优先读取词素缓存，生成可用的规则化词源说明，避免返回 pending 占位信息。
-    let roots = {
-        let morpheme_key = keys::word_morpheme_key(&word_id)?;
-        match state
-            .store()
-            .word_morphemes
-            .get(morpheme_key.as_bytes())
-            .map_err(|e| AppError::internal(&e.to_string()))?
-        {
-            Some(raw) => serde_json::from_slice::<WordMorphemes>(&raw)
-                .map(|m| {
-                    m.morphemes
-                        .into_iter()
-                        .map(|item| item.text)
-                        .filter(|item| !item.trim().is_empty())
-                        .collect::<Vec<String>>()
-                })
-                .unwrap_or_default(),
-            None => Vec::new(),
-        }
+    let roots = match state.store().get_word_morphemes(&word_id)? {
+        Some(serde_json::Value::Array(arr)) => arr
+            .iter()
+            .filter_map(|item| item.get("text").and_then(|t| t.as_str()))
+            .map(|s| s.to_string())
+            .filter(|s| !s.trim().is_empty())
+            .collect::<Vec<String>>(),
+        _ => Vec::new(),
     };
 
     let etymology_text = if !roots.is_empty() {
@@ -114,14 +87,7 @@ async fn get_etymology(
         "source": "rule_based_fallback",
     });
 
-    state
-        .store()
-        .etymologies
-        .insert(
-            key.as_bytes(),
-            serde_json::to_vec(&etymology).map_err(|e| AppError::internal(&e.to_string()))?,
-        )
-        .map_err(|e| AppError::internal(&e.to_string()))?;
+    state.store().set_etymology(&word_id, &etymology)?;
 
     Ok(ok(etymology))
 }
@@ -213,18 +179,18 @@ async fn get_morphemes(
     Path(word_id): Path<String>,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let key = keys::word_morpheme_key(&word_id)?;
-    let morphemes = match state
-        .store()
-        .word_morphemes
-        .get(key.as_bytes())
-        .map_err(|e| AppError::internal(&e.to_string()))?
-    {
-        Some(raw) => serde_json::from_slice::<WordMorphemes>(&raw).unwrap_or(WordMorphemes {
-            word_id: word_id.clone(),
-            morphemes: Vec::new(),
-        }),
-        None => WordMorphemes {
+    let morphemes = match state.store().get_word_morphemes(&word_id)? {
+        Some(serde_json::Value::Array(arr)) => {
+            let items: Vec<Morpheme> = arr
+                .iter()
+                .filter_map(|v| serde_json::from_value::<Morpheme>(v.clone()).ok())
+                .collect();
+            WordMorphemes {
+                word_id: word_id.clone(),
+                morphemes: items,
+            }
+        }
+        _ => WordMorphemes {
             word_id: word_id.clone(),
             morphemes: Vec::new(),
         },
@@ -244,19 +210,18 @@ async fn set_morphemes(
     State(state): State<AppState>,
     JsonBody(req): JsonBody<SetMorphemesRequest>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let key = keys::word_morpheme_key(&word_id)?;
+    let morphemes_json: Vec<serde_json::Value> = req
+        .morphemes
+        .iter()
+        .map(|m| serde_json::to_value(m).unwrap_or_default())
+        .collect();
+    state
+        .store()
+        .set_word_morphemes(&word_id, &morphemes_json)?;
     let data = WordMorphemes {
         word_id,
         morphemes: req.morphemes,
     };
-    state
-        .store()
-        .word_morphemes
-        .insert(
-            key.as_bytes(),
-            serde_json::to_vec(&data).map_err(|e| AppError::internal(&e.to_string()))?,
-        )
-        .map_err(|e| AppError::internal(&e.to_string()))?;
     Ok(ok(data))
 }
 
@@ -268,47 +233,6 @@ struct ConfusionPair {
     word: String,
     meaning: String,
     similarity: f64,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct CachedConfusionPair {
-    word_a: String,
-    word_b: String,
-    score: f64,
-}
-
-fn decode_confusion_pair(
-    raw: &[u8],
-    target_word_id: &str,
-    state: &AppState,
-) -> Option<ConfusionPair> {
-    if let Ok(pair) = serde_json::from_slice::<ConfusionPair>(raw) {
-        if pair.word_id == target_word_id {
-            return None;
-        }
-        return Some(ConfusionPair {
-            similarity: pair.similarity.clamp(0.0, 1.0),
-            ..pair
-        });
-    }
-
-    let cached = serde_json::from_slice::<CachedConfusionPair>(raw).ok()?;
-    let other_word_id = if cached.word_a == target_word_id {
-        cached.word_b
-    } else if cached.word_b == target_word_id {
-        cached.word_a
-    } else {
-        return None;
-    };
-
-    let other_word = state.store().get_word(&other_word_id).ok().flatten()?;
-    Some(ConfusionPair {
-        word_id: other_word.id,
-        word: other_word.text,
-        meaning: other_word.meaning,
-        similarity: cached.score.clamp(0.0, 1.0),
-    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -325,43 +249,16 @@ async fn get_confusion_pairs(
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     let limit = q.limit.unwrap_or(20).clamp(1, MAX_CONFUSION_PAIRS);
 
+    let raw_pairs = state.store().get_confusion_pairs_for_word(&word_id, limit)?;
     let mut pairs = Vec::new();
-    let mut seen = HashSet::new();
-
-    let prefix = format!("{}:", word_id);
-    for item in state.store().confusion_pairs.scan_prefix(prefix.as_bytes()) {
-        if pairs.len() >= limit {
-            break;
-        }
-        let (_k, v) = match item {
-            Ok(kv) => kv,
-            Err(_) => continue,
-        };
-        if let Some(val) = decode_confusion_pair(&v, &word_id, &state) {
-            if seen.insert(val.word_id.clone()) {
-                pairs.push(val);
-            }
-        }
-    }
-
-    if pairs.len() < limit {
-        let suffix = format!(":{}", word_id);
-        for item in state.store().confusion_pairs.iter() {
-            if pairs.len() >= limit {
-                break;
-            }
-            let (k, v) = match item {
-                Ok(kv) => kv,
-                Err(_) => continue,
-            };
-            let key_str = String::from_utf8_lossy(&k);
-            if key_str.ends_with(&suffix) {
-                if let Some(val) = decode_confusion_pair(&v, &word_id, &state) {
-                    if seen.insert(val.word_id.clone()) {
-                        pairs.push(val);
-                    }
-                }
-            }
+    for (other_word_id, score) in raw_pairs {
+        if let Some(word) = state.store().get_word(&other_word_id)? {
+            pairs.push(ConfusionPair {
+                word_id: other_word_id,
+                word: word.text.clone(),
+                meaning: word.meaning.clone(),
+                similarity: score.clamp(0.0, 1.0),
+            });
         }
     }
 
