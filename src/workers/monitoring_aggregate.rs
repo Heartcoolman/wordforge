@@ -83,24 +83,7 @@ pub async fn run(store: &Store) {
         "activeUsers": active_users,
     });
 
-    let ts_key = match crate::store::keys::monitoring_ts_key(now.timestamp_millis(), &period_id) {
-        Ok(k) => k,
-        Err(e) => {
-            tracing::warn!(error = %e, "monitoring_aggregate: failed to build key");
-            return;
-        }
-    };
-
-    if let Err(e) = store.monitoring_timeseries.insert(
-        ts_key.as_bytes(),
-        match serde_json::to_vec(&aggregate) {
-            Ok(b) => b,
-            Err(e) => {
-                tracing::warn!(error = %e, "monitoring_aggregate: failed to serialize");
-                return;
-            }
-        },
-    ) {
+    if let Err(e) = store.insert_monitoring_timeseries(&period_id, &aggregate) {
         tracing::warn!(error = %e, "monitoring_aggregate: failed to store");
     }
 
