@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
+use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use sled::Transactional;
 use std::collections::HashMap;
 
 use crate::store::keys;
@@ -21,264 +21,157 @@ pub struct Word {
     pub created_at: DateTime<Utc>,
 }
 
+fn word_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Word> {
+    let created_at_str: String = row.get(9)?;
+    let created_at = DateTime::parse_from_rfc3339(&created_at_str)
+        .map(|dt| dt.with_timezone(&Utc))
+        .map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(
+                9,
+                rusqlite::types::Type::Text,
+                Box::new(e),
+            )
+        })?;
+
+    let examples_json: String = row.get(6)?;
+    let tags_json: String = row.get(7)?;
+    let embedding_json: Option<String> = row.get(8)?;
+
+    Ok(Word {
+        id: row.get(0)?,
+        text: row.get(1)?,
+        meaning: row.get(2)?,
+        pronunciation: row.get(3)?,
+        part_of_speech: row.get(4)?,
+        difficulty: row.get(5)?,
+        examples: serde_json::from_str(&examples_json).unwrap_or_default(),
+        tags: serde_json::from_str(&tags_json).unwrap_or_default(),
+        embedding: embedding_json
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .unwrap_or_default(),
+        created_at,
+    })
+}
+
+const WORD_COLS: &str =
+    "id, text, meaning, pronunciation, part_of_speech, difficulty, examples_json, tags_json, embedding_json, created_at";
+
 impl Store {
     pub fn upsert_word(&self, word: &Word) -> Result<(), StoreError> {
-        let key = keys::word_key(&word.id)?;
-        self.words.insert(key.as_bytes(), Self::serialize(word)?)?;
-        // Maintain words_by_created_at index
-        let idx_key = keys::words_by_created_at_key(word.created_at.timestamp_millis(), &word.id)?;
-        self.words_by_created_at
-            .insert(idx_key.as_bytes(), word.id.as_bytes())?;
+        keys::validate_id(&word.id)?;
+        let conn = self.conn()?;
+        conn.execute(
+            "INSERT OR REPLACE INTO words (id, text, meaning, pronunciation, part_of_speech, difficulty, examples_json, tags_json, embedding_json, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                word.id,
+                word.text,
+                word.meaning,
+                word.pronunciation,
+                word.part_of_speech,
+                word.difficulty,
+                Self::serialize_json(&word.examples)?,
+                Self::serialize_json(&word.tags)?,
+                word.embedding.as_ref().map(|e| Self::serialize_json(e)).transpose()?,
+                word.created_at.to_rfc3339(),
+            ],
+        )?;
         Ok(())
     }
 
     pub fn get_word(&self, word_id: &str) -> Result<Option<Word>, StoreError> {
-        let key = keys::word_key(word_id)?;
-        match self.words.get(key.as_bytes())? {
-            Some(raw) => Ok(Some(Self::deserialize(&raw)?)),
-            None => Ok(None),
-        }
+        let conn = self.conn()?;
+        Ok(conn
+            .query_row(
+                &format!("SELECT {WORD_COLS} FROM words WHERE id = ?1"),
+                params![word_id],
+                word_from_row,
+            )
+            .optional()?)
     }
 
-    /// 批量获取单词信息（仅返回存在的单词）
     pub fn get_words_by_ids(
         &self,
         word_ids: &[String],
     ) -> Result<HashMap<String, Word>, StoreError> {
-        let mut words = HashMap::with_capacity(word_ids.len());
-
-        for word_id in word_ids {
-            if words.contains_key(word_id) {
-                continue;
-            }
-
-            if let Some(word) = self.get_word(word_id)? {
-                words.insert(word_id.clone(), word);
-            }
+        if word_ids.is_empty() {
+            return Ok(HashMap::new());
         }
-
+        let conn = self.conn()?;
+        let mut words = HashMap::with_capacity(word_ids.len());
+        let placeholders: Vec<&str> = word_ids.iter().map(|_| "?").collect();
+        let sql = format!(
+            "SELECT {WORD_COLS} FROM words WHERE id IN ({})",
+            placeholders.join(",")
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(word_ids.iter()), word_from_row)?;
+        for row in rows {
+            let word = row?;
+            words.entry(word.id.clone()).or_insert(word);
+        }
         Ok(words)
     }
 
     pub fn list_words(&self, limit: usize, offset: usize) -> Result<Vec<Word>, StoreError> {
-        // Use words_by_created_at index (reverse timestamp = newest first)
-        if !self.words_by_created_at.is_empty() {
-            let mut words = Vec::new();
-            let mut skipped = 0usize;
-            for item in self.words_by_created_at.iter() {
-                let (_, value) = item?;
-                let word_id = String::from_utf8(value.to_vec()).unwrap_or_default();
-                if skipped < offset {
-                    skipped += 1;
-                    continue;
-                }
-                if let Some(word) = self.get_word(&word_id)? {
-                    words.push(word);
-                }
-                if words.len() >= limit {
-                    break;
-                }
-            }
-            return Ok(words);
-        }
-
-        // Fallback: full scan (only if index not yet built)
-        let mut words = Vec::new();
-        for item in self.words.iter() {
-            let (_, v) = item?;
-            words.push(Self::deserialize::<Word>(&v)?);
-        }
-
-        words.sort_by(|a, b| a.text.cmp(&b.text));
-        Ok(words.into_iter().skip(offset).take(limit).collect())
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {WORD_COLS} FROM words ORDER BY created_at DESC LIMIT ?1 OFFSET ?2"
+        ))?;
+        let rows = stmt.query_map(params![limit as i64, offset as i64], word_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
     pub fn delete_word(&self, word_id: &str) -> Result<(), StoreError> {
-        let word_key = keys::word_key(word_id)?;
-
-        // Get word data before deletion for index cleanup
-        let word_data = self.get_word(word_id)?;
-
-        // Try to use word_references index for fast lookup
-        let ref_prefix = keys::word_ref_prefix(word_id)?;
-        let has_refs = self
-            .word_references
-            .scan_prefix(ref_prefix.as_bytes())
-            .next()
-            .is_some();
-
-        let mut ww_keys_to_remove: Vec<Vec<u8>> = Vec::new();
-        let mut affected_wordbook_ids: Vec<String> = Vec::new();
-        let mut wls_keys_to_remove: Vec<Vec<u8>> = Vec::new();
-        let mut due_index_keys_to_remove: Vec<Vec<u8>> = Vec::new();
-        let mut rec_keys_to_remove: Vec<Vec<u8>> = Vec::new();
-
-        if has_refs {
-            for item in self.word_references.scan_prefix(ref_prefix.as_bytes()) {
-                let (ref_key, _) = item?;
-                let ref_key_str = String::from_utf8_lossy(&ref_key);
-                let parts: Vec<&str> = ref_key_str.splitn(3, ':').collect();
-                if parts.len() < 3 {
-                    continue;
-                }
-                let tree_name = parts[1];
-                let assoc_key_hex = parts[2];
-                let assoc_key = hex::decode(assoc_key_hex).unwrap_or_default();
-
-                match tree_name {
-                    "records" => rec_keys_to_remove.push(assoc_key),
-                    "wordbook_words" => {
-                        if let Some(raw) = self.wordbook_words.get(&assoc_key)? {
-                            if let Ok(ww_entry) = Self::deserialize::<
-                                crate::store::operations::wordbooks::WordbookWordEntry,
-                            >(&raw)
-                            {
-                                affected_wordbook_ids.push(ww_entry.wordbook_id.clone());
-                            }
-                        }
-                        ww_keys_to_remove.push(assoc_key);
-                    }
-                    "word_learning_states" => wls_keys_to_remove.push(assoc_key),
-                    "word_due_index" => due_index_keys_to_remove.push(assoc_key),
-                    _ => {}
-                }
-            }
-        } else {
-            let suffix = format!(":{}", word_id);
-            for item in self.wordbook_words.iter() {
-                let (k, v) = item?;
-                let key_str = String::from_utf8_lossy(&k);
-                if key_str.ends_with(&suffix) {
-                    if let Ok(entry) = Self::deserialize::<
-                        crate::store::operations::wordbooks::WordbookWordEntry,
-                    >(&v)
-                    {
-                        affected_wordbook_ids.push(entry.wordbook_id.clone());
-                    }
-                    ww_keys_to_remove.push(k.to_vec());
-                }
-            }
-
-            for item in self.word_learning_states.iter() {
-                let (k, _) = item?;
-                let key_str = String::from_utf8_lossy(&k);
-                if key_str.ends_with(&suffix) {
-                    wls_keys_to_remove.push(k.to_vec());
-                }
-            }
-
-            for item in self.word_due_index.iter() {
-                let (k, _) = item?;
-                let key_str = String::from_utf8_lossy(&k);
-                if key_str.ends_with(&suffix) {
-                    due_index_keys_to_remove.push(k.to_vec());
-                }
-            }
-
-            for item in self.records.iter() {
-                let (k, v) = item?;
-                let value_str = String::from_utf8_lossy(&v);
-                if value_str.contains(word_id) {
-                    if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&v) {
-                        if val.get("wordId").and_then(|v| v.as_str()) == Some(word_id) {
-                            rec_keys_to_remove.push(k.to_vec());
-                        }
-                    }
-                }
-            }
-        }
-
-        let mut wordbook_updates: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
-        for wb_id in &affected_wordbook_ids {
-            let wb_key = keys::wordbook_key(wb_id)?;
-            if let Some(raw) = self.wordbooks.get(wb_key.as_bytes())? {
-                let mut book: crate::store::operations::wordbooks::Wordbook =
-                    Self::deserialize(&raw)?;
-                book.word_count = book.word_count.saturating_sub(1);
-                wordbook_updates.push((wb_key.into_bytes(), Self::serialize(&book)?));
-            }
-        }
-
-        (
-            &self.words,
-            &self.wordbook_words,
-            &self.word_learning_states,
-            &self.word_due_index,
-            &self.records,
-            &self.wordbooks,
-        )
-            .transaction(|(tx_words, tx_ww, tx_wls, tx_due, tx_rec, tx_wb)| {
-                tx_words.remove(word_key.as_bytes())?;
-
-                for k in &ww_keys_to_remove {
-                    tx_ww.remove(k.as_slice())?;
-                }
-                for k in &wls_keys_to_remove {
-                    tx_wls.remove(k.as_slice())?;
-                }
-                for k in &due_index_keys_to_remove {
-                    tx_due.remove(k.as_slice())?;
-                }
-                for k in &rec_keys_to_remove {
-                    tx_rec.remove(k.as_slice())?;
-                }
-                for (wb_key, wb_bytes) in &wordbook_updates {
-                    tx_wb.insert(wb_key.as_slice(), wb_bytes.as_slice())?;
-                }
-
-                Ok(())
-            })
-            .map_err(
-                |e: sled::transaction::TransactionError<StoreError>| match e {
-                    sled::transaction::TransactionError::Abort(store_err) => store_err,
-                    sled::transaction::TransactionError::Storage(sled_err) => {
-                        StoreError::Sled(sled_err)
-                    }
-                },
+        let conn = self.conn()?;
+        conn.execute_batch("BEGIN")?;
+        let result = (|| -> Result<(), StoreError> {
+            // Decrement word_count before deleting wordbook_words rows
+            conn.execute(
+                "UPDATE wordbooks SET word_count = MAX(word_count - 1, 0)
+                 WHERE id IN (SELECT wordbook_id FROM wordbook_words WHERE word_id = ?1)",
+                params![word_id],
             )?;
-
-        // Clean up words_by_created_at index
-        if let Some(word) = word_data {
-            if let Ok(idx_key) =
-                keys::words_by_created_at_key(word.created_at.timestamp_millis(), word_id)
-            {
-                let _ = self.words_by_created_at.remove(idx_key.as_bytes());
+            for table in &[
+                "wordbook_words",
+                "learning_records",
+                "word_learning_states",
+                "mastery_states",
+                "word_elo",
+                "etymologies",
+                "word_morphemes",
+                "alert_dedup",
+            ] {
+                conn.execute(
+                    &format!("DELETE FROM {table} WHERE word_id = ?1"),
+                    params![word_id],
+                )?;
+            }
+            conn.execute(
+                "DELETE FROM confusion_pairs WHERE word_id_a = ?1 OR word_id_b = ?1",
+                params![word_id],
+            )?;
+            conn.execute("DELETE FROM words WHERE id = ?1", params![word_id])?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                conn.execute_batch("COMMIT")?;
+                Ok(())
+            }
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(e)
             }
         }
-
-        // Clean up records_by_time and record_id_index for deleted records
-        for rec_key in &rec_keys_to_remove {
-            let key_str = String::from_utf8_lossy(rec_key);
-            let parts: Vec<&str> = key_str.splitn(3, ':').collect();
-            if parts.len() == 3 {
-                let uid = parts[0];
-                let record_id = parts[2];
-                if let Ok(reverse_ts) = parts[1].parse::<u64>() {
-                    let ts = u64::MAX - reverse_ts;
-                    if let Ok(time_key) = keys::records_by_time_key(ts as i64, record_id) {
-                        let _ = self.records_by_time.remove(time_key.as_bytes());
-                    }
-                }
-                if let Ok(idx_key) = keys::record_id_index_key(uid, record_id) {
-                    let _ = self.record_id_index.remove(idx_key.as_bytes());
-                }
-            }
-        }
-
-        // Clean up word_references index
-        for (k, _) in self
-            .word_references
-            .scan_prefix(ref_prefix.as_bytes())
-            .flatten()
-        {
-            let _ = self.word_references.remove(&k);
-        }
-
-        Ok(())
     }
 
     pub fn count_words(&self) -> Result<u64, StoreError> {
-        Ok(self.words.len() as u64)
+        let conn = self.conn()?;
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM words", [], |r| r.get(0))?;
+        Ok(count as u64)
     }
 
     pub fn search_words(
@@ -287,46 +180,44 @@ impl Store {
         limit: usize,
         offset: usize,
     ) -> Result<(Vec<Word>, u64), StoreError> {
-        // 注意：文本搜索需要遍历所有单词来匹配，无法使用前缀扫描优化。
-        // TODO: 引入全文搜索索引（如倒排索引）来避免全表扫描。
-        let query_lower = query.to_lowercase();
-        let mut matching = Vec::new();
-        for item in self.words.iter() {
-            let (_, v) = item?;
-            let word: Word = Self::deserialize(&v)?;
-            if word.text.to_lowercase().contains(&query_lower)
-                || word.meaning.to_lowercase().contains(&query_lower)
-            {
-                matching.push(word);
-            }
-        }
-        matching.sort_by(|a, b| a.text.cmp(&b.text));
-        let total = matching.len() as u64;
-        let items = matching.into_iter().skip(offset).take(limit).collect();
-        Ok((items, total))
+        let conn = self.conn()?;
+        let pattern = format!("%{query}%");
+
+        let total: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM words WHERE text LIKE ?1 OR meaning LIKE ?1",
+            params![pattern],
+            |r| r.get(0),
+        )?;
+
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {WORD_COLS} FROM words WHERE text LIKE ?1 OR meaning LIKE ?1 ORDER BY text LIMIT ?2 OFFSET ?3"
+        ))?;
+        let rows = stmt.query_map(
+            params![pattern, limit as i64, offset as i64],
+            word_from_row,
+        )?;
+        let words: Vec<Word> = rows.collect::<Result<Vec<_>, _>>()?;
+        Ok((words, total as u64))
     }
 
     pub fn get_words_without_embedding(&self, limit: usize) -> Result<Vec<Word>, StoreError> {
-        let mut words = Vec::new();
-        for item in self.words.iter() {
-            let (_, v) = item?;
-            let word: Word = Self::deserialize(&v)?;
-            if word.embedding.is_none() {
-                words.push(word);
-            }
-            if words.len() >= limit {
-                break;
-            }
-        }
-        Ok(words)
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {WORD_COLS} FROM words WHERE embedding_json IS NULL ORDER BY created_at DESC LIMIT ?1"
+        ))?;
+        let rows = stmt.query_map(params![limit as i64], word_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use tempfile::tempdir;
-
     use super::*;
+
+    fn test_store() -> Store {
+        let store = Store::open(":memory:", 5000, 1).unwrap();
+        store
+    }
 
     fn sample_word(id: &str, text: &str) -> Word {
         Word {
@@ -345,10 +236,7 @@ mod tests {
 
     #[test]
     fn create_and_list_words() {
-        let dir = tempdir().unwrap();
-        let db_path = dir.path().join("words-db");
-        let store = Store::open(db_path.to_str().unwrap()).unwrap();
-
+        let store = test_store();
         store.upsert_word(&sample_word("w1", "apple")).unwrap();
         store.upsert_word(&sample_word("w2", "banana")).unwrap();
 
@@ -361,10 +249,7 @@ mod tests {
 
     #[test]
     fn get_words_by_ids_returns_existing_words_only() {
-        let dir = tempdir().unwrap();
-        let db_path = dir.path().join("words-db-batch");
-        let store = Store::open(db_path.to_str().unwrap()).unwrap();
-
+        let store = test_store();
         store.upsert_word(&sample_word("w1", "apple")).unwrap();
         store.upsert_word(&sample_word("w2", "banana")).unwrap();
 
@@ -380,5 +265,81 @@ mod tests {
         assert_eq!(words.len(), 2);
         assert!(words.contains_key("w1"));
         assert!(words.contains_key("w2"));
+    }
+
+    #[test]
+    fn search_words_matches_text_and_meaning() {
+        let store = test_store();
+        let mut w = sample_word("w1", "apple");
+        w.meaning = "a fruit".to_string();
+        store.upsert_word(&w).unwrap();
+        store.upsert_word(&sample_word("w2", "banana")).unwrap();
+
+        let (results, total) = store.search_words("app", 10, 0).unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(results[0].id, "w1");
+
+        let (results, total) = store.search_words("fruit", 10, 0).unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(results[0].id, "w1");
+    }
+
+    #[test]
+    fn get_words_without_embedding_filters_correctly() {
+        let store = test_store();
+        store.upsert_word(&sample_word("w1", "apple")).unwrap();
+        let mut w2 = sample_word("w2", "banana");
+        w2.embedding = Some(vec![0.1, 0.2]);
+        store.upsert_word(&w2).unwrap();
+
+        let words = store.get_words_without_embedding(10).unwrap();
+        assert_eq!(words.len(), 1);
+        assert_eq!(words[0].id, "w1");
+    }
+
+    #[test]
+    fn upsert_word_overwrites_existing() {
+        let store = test_store();
+        store.upsert_word(&sample_word("w1", "apple")).unwrap();
+        let mut updated = sample_word("w1", "apricot");
+        updated.meaning = "updated".to_string();
+        store.upsert_word(&updated).unwrap();
+
+        let word = store.get_word("w1").unwrap().unwrap();
+        assert_eq!(word.text, "apricot");
+        assert_eq!(word.meaning, "updated");
+        assert_eq!(store.count_words().unwrap(), 1);
+    }
+
+    #[test]
+    fn delete_word_removes_word() {
+        let store = test_store();
+        store.upsert_word(&sample_word("w1", "apple")).unwrap();
+        store.delete_word("w1").unwrap();
+        assert!(store.get_word("w1").unwrap().is_none());
+        assert_eq!(store.count_words().unwrap(), 0);
+    }
+
+    #[test]
+    fn count_words_returns_correct_count() {
+        let store = test_store();
+        assert_eq!(store.count_words().unwrap(), 0);
+        store.upsert_word(&sample_word("w1", "apple")).unwrap();
+        store.upsert_word(&sample_word("w2", "banana")).unwrap();
+        assert_eq!(store.count_words().unwrap(), 2);
+    }
+
+    #[test]
+    fn list_words_with_offset() {
+        let store = test_store();
+        store.upsert_word(&sample_word("w1", "apple")).unwrap();
+        store.upsert_word(&sample_word("w2", "banana")).unwrap();
+        store.upsert_word(&sample_word("w3", "cherry")).unwrap();
+
+        let list = store.list_words(2, 1).unwrap();
+        assert_eq!(list.len(), 2);
+
+        let list = store.list_words(10, 3).unwrap();
+        assert!(list.is_empty());
     }
 }
