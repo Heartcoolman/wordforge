@@ -249,6 +249,8 @@ pub struct RewardComponents {
     pub speed_reward: f64,
     pub fatigue_penalty: f64,
     pub frustration_penalty: f64,
+    #[serde(default)]
+    pub expected_forget_cost: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

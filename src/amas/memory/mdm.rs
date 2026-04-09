@@ -118,7 +118,16 @@ pub fn update_strength(
         let d0_4 = (config.w[4] - (config.w[5] * 3.0).exp() + 1.0).clamp(1.0, 10.0);
         state.difficulty = (config.w[7] * d0_4 + (1.0 - config.w[7]) * d_prime).clamp(1.0, 10.0);
 
-        if grade >= 2 {
+        let elapsed_days = state.last_review_at
+            .map(|last| ((now_ms - last) as f64 / 86_400_000.0).max(0.0))
+            .unwrap_or(1.0);
+
+        if elapsed_days < 1.0 {
+            // Same-day review: FSRS-5 short-term stability formula
+            let grade_f = grade as f64;
+            let exponent = (config.w[17] * (grade_f - 3.0 + config.w[18])).clamp(-20.0, 20.0);
+            state.stability = (state.stability * exponent.exp()).max(0.01);
+        } else if grade >= 2 {
             // Successful recall: S'_r = S * (e^w8 * (11-D) * S^{-w9} * (e^{w10*(1-R)} - 1) * bonus + 1)
             let bonus = if grade == 2 { config.w[15] }      // Hard
                 else if grade == 4 { config.w[16] }           // Easy
@@ -136,7 +145,7 @@ pub fn update_strength(
                 * state.difficulty.powf(-config.w[12])
                 * ((state.stability + 1.0).powf(config.w[13]) - 1.0)
                 * (config.w[14] * (1.0 - r)).exp())
-                .clamp(0.01, state.stability);
+                .clamp(0.01, state.stability.max(0.01));
         }
     }
 
