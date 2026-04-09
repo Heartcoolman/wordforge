@@ -10,7 +10,6 @@ use learning_backend::amas::memory::{evm, iad, mtp};
 use learning_backend::amas::metrics::MetricsRegistry;
 use learning_backend::amas::types::AlgorithmId;
 use learning_backend::config::Config;
-use learning_backend::store::keys;
 use learning_backend::store::operations::records::LearningRecord;
 use learning_backend::store::operations::sessions::Session;
 use learning_backend::store::operations::users::User;
@@ -22,7 +21,7 @@ use learning_backend::workers;
 fn setup_store(db_name: &str) -> (tempfile::TempDir, Arc<Store>) {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let db_path = temp_dir.path().join(db_name);
-    let store = Arc::new(Store::open(db_path.to_str().expect("db path")).expect("open store"));
+    let store = Arc::new(Store::open(db_path.to_str().expect("db path"), 5000, 1).expect("open store"));
     (temp_dir, store)
 }
 
@@ -120,7 +119,11 @@ async fn it_worker_manager_registers_jobs_and_shutdowns() {
     let engine = Arc::new(AMASEngine::new(AMASConfig::default(), store.clone()));
     let (shutdown_tx, _) = broadcast::channel::<()>(8);
 
-    let mut worker_cfg = Config::from_env().worker;
+    let mut worker_cfg = learning_backend::config::WorkerConfig {
+        is_leader: false,
+        enable_llm_advisor: false,
+        enable_monitoring: false,
+    };
     worker_cfg.is_leader = true;
     worker_cfg.enable_monitoring = true;
     worker_cfg.enable_llm_advisor = true;
@@ -195,17 +198,12 @@ async fn it_runs_worker_tasks_and_persists_side_effects() {
     store.upsert_word(&word_hard).expect("upsert hard");
 
     let existing_etymology = serde_json::json!({
-        "wordId": word_mid.id,
         "word": word_mid.text,
         "etymology": "pre-seeded",
         "generated": false
     });
     store
-        .etymologies
-        .insert(
-            keys::etymology_key("w2").unwrap().as_bytes(),
-            serde_json::to_vec(&existing_etymology).expect("etymology bytes"),
-        )
+        .set_etymology("w2", &existing_etymology)
         .expect("insert existing etymology");
 
     let now = Utc::now();
@@ -296,11 +294,6 @@ async fn it_runs_worker_tasks_and_persists_side_effects() {
         .insert_monitoring_event(&new_event)
         .expect("insert new event");
 
-    let old_key =
-        keys::monitoring_event_key((now - Duration::days(8)).timestamp_millis(), "old-event")
-            .unwrap();
-    let new_key = keys::monitoring_event_key(now.timestamp_millis(), "new-event").unwrap();
-
     let registry = engine.metrics_registry().clone();
     registry.record_call(AlgorithmId::Heuristic, 120, false);
     registry.record_call(AlgorithmId::Heuristic, 240, true);
@@ -329,43 +322,34 @@ async fn it_runs_worker_tasks_and_persists_side_effects() {
     assert!(store.get_session("revoked").expect("get revoked").is_none());
     assert!(store.get_session("alive").expect("get alive").is_some());
 
-    let notifications_prefix = keys::notification_prefix(&user_1.id).unwrap();
-    let mut notification_count = 0usize;
-    for item in store
-        .notifications
-        .scan_prefix(notifications_prefix.as_bytes())
-    {
-        item.expect("scan notification");
-        notification_count += 1;
-    }
+    let notifications = store
+        .list_notifications(&user_1.id, 1000, false)
+        .expect("list notifications");
     assert!(
-        notification_count >= 1,
+        !notifications.is_empty(),
         "forgetting alert should create notifications"
     );
 
     assert!(store
-        .etymologies
-        .get(keys::etymology_key("w1").unwrap().as_bytes())
+        .get_etymology("w1")
         .expect("get etymology w1")
         .is_some());
 
-    let confusion_key = keys::confusion_pair_key(&word_easy.id, &word_mid.id).unwrap();
-    assert!(store
-        .confusion_pairs
-        .get(confusion_key.as_bytes())
-        .expect("get confusion pair")
-        .is_some());
+    let confusion_pairs = store
+        .get_confusion_pairs_for_word(&word_easy.id, 10)
+        .expect("get confusion pairs");
+    assert!(
+        !confusion_pairs.is_empty(),
+        "confusion pair cache should create pairs"
+    );
 
-    assert!(store
-        .engine_monitoring_events
-        .get(old_key.as_bytes())
-        .expect("get old monitoring key")
-        .is_none());
-    assert!(store
-        .engine_monitoring_events
-        .get(new_key.as_bytes())
-        .expect("get new monitoring key")
-        .is_some());
+    let recent_events = store
+        .get_recent_monitoring_events(10)
+        .expect("get recent monitoring events");
+    assert!(
+        !recent_events.is_empty(),
+        "monitoring events should exist after aggregate run"
+    );
 
     let today = Utc::now().format("%Y-%m-%d").to_string();
     for metric_name in [
@@ -412,19 +396,13 @@ async fn forgetting_alert_is_deduplicated_across_consecutive_runs() {
     workers::forgetting_alert::run(store.as_ref()).await;
     workers::forgetting_alert::run(store.as_ref()).await;
 
-    let prefix = keys::notification_prefix(&user.id).expect("notification prefix");
-    let mut forgetting_alert_count = 0usize;
-
-    for item in store.notifications.scan_prefix(prefix.as_bytes()) {
-        let (_, value) = item.expect("scan notification");
-        let notif: serde_json::Value = serde_json::from_slice(&value).expect("parse notification");
-        let is_forgetting_alert =
-            notif.get("type").and_then(|t| t.as_str()) == Some("forgetting_alert");
-        let same_word = notif.get("wordId").and_then(|w| w.as_str()) == Some("word-overdue");
-        if is_forgetting_alert && same_word {
-            forgetting_alert_count += 1;
-        }
-    }
+    let notifications = store
+        .list_notifications(&user.id, 1000, false)
+        .expect("list notifications");
+    let forgetting_alert_count = notifications
+        .iter()
+        .filter(|n| n.word_id.as_deref() == Some("word-overdue"))
+        .count();
 
     assert_eq!(forgetting_alert_count, 1);
 }

@@ -20,8 +20,6 @@ pub struct TestApp {
 
 async fn spawn_with_limits(api_limit: u64) -> TestApp {
     let temp_dir = tempfile::tempdir().expect("tempdir");
-    let sled_path = temp_dir.path().join("learning-test.sled");
-
     // 直接构造 Config，避免使用 set_var 造成多线程测试环境变量竞态
     let test_secret = format!("integration-test-jwt-secret-{}", uuid::Uuid::new_v4());
     let test_admin_secret = format!("integration-test-admin-secret-{}", uuid::Uuid::new_v4());
@@ -33,7 +31,10 @@ async fn spawn_with_limits(api_limit: u64) -> TestApp {
         log_level: "info".to_string(),
         enable_file_logs: false,
         log_dir: "./logs".to_string(),
-        sled_path: sled_path.to_string_lossy().to_string(),
+        database_url: temp_dir.path().join("test.db").to_string_lossy().to_string(),
+        api_only: false,
+        sqlite_busy_timeout_ms: 5000,
+        sqlite_pool_size: 2,
         jwt_secret: test_secret,
         refresh_jwt_secret: test_refresh_secret,
         jwt_expires_in_hours: 24,
@@ -67,7 +68,10 @@ async fn spawn_with_limits(api_limit: u64) -> TestApp {
         limits: Default::default(),
     };
 
-    let store = Arc::new(Store::open(&config.sled_path).expect("open store"));
+    let store = Arc::new(
+        Store::open(&config.database_url, config.sqlite_busy_timeout_ms, config.sqlite_pool_size)
+            .expect("open store"),
+    );
     store.run_migrations().expect("run migrations");
 
     let amas_engine = Arc::new(AMASEngine::new(

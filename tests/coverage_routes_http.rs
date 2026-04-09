@@ -5,7 +5,7 @@ use axum::http::{Method, Request, StatusCode};
 use axum::response::Response;
 use axum::Router;
 use chrono::{Duration, Utc};
-use learning_backend::store::keys;
+use learning_backend::store::operations::extras::Badge;
 use tower::util::ServiceExt;
 
 use common::app::spawn_test_server;
@@ -595,7 +595,7 @@ async fn it_user_profile_notifications_content_and_v1_flow() {
     });
     let notification_2 = serde_json::json!({
         "id": "n-2",
-        "userId": current_user_id(&app.app, &token).await,
+        "userId": user_id,
         "type": "reward",
         "title": "badge",
         "message": "earned",
@@ -604,42 +604,25 @@ async fn it_user_profile_notifications_content_and_v1_flow() {
     });
     app.state
         .store()
-        .notifications
-        .insert(
-            keys::notification_key(&current_user_id(&app.app, &token).await, "n-1")
-                .unwrap()
-                .as_bytes(),
-            serde_json::to_vec(&notification_1).expect("notification 1 bytes"),
-        )
+        .create_notification(&notification_1)
         .expect("insert notification 1");
     app.state
         .store()
-        .notifications
-        .insert(
-            keys::notification_key(&current_user_id(&app.app, &token).await, "n-2")
-                .unwrap()
-                .as_bytes(),
-            serde_json::to_vec(&notification_2).expect("notification 2 bytes"),
-        )
+        .create_notification(&notification_2)
         .expect("insert notification 2");
 
-    let badge = serde_json::json!({
-        "id": "first_word",
-        "name": "First Word",
-        "description": "Learn first word",
-        "unlocked": true,
-        "progress": 1.0,
-        "unlockedAt": Utc::now().to_rfc3339(),
-    });
+    let badge = Badge {
+        user_id: user_id.clone(),
+        id: "first_word".to_string(),
+        name: "First Word".to_string(),
+        description: "Learn first word".to_string(),
+        unlocked: true,
+        progress: 1.0,
+        unlocked_at: Some(Utc::now().to_rfc3339()),
+    };
     app.state
         .store()
-        .badges
-        .insert(
-            keys::badge_key(&current_user_id(&app.app, &token).await, "first_word")
-                .unwrap()
-                .as_bytes(),
-            serde_json::to_vec(&badge).expect("badge bytes"),
-        )
+        .save_badge(&badge)
         .expect("insert badge");
 
     let list_notifications = request(
@@ -816,29 +799,11 @@ async fn it_user_profile_notifications_content_and_v1_flow() {
     let current_user = current_user_id(&app.app, &token).await;
     app.state
         .store()
-        .confusion_pairs
-        .insert(
-            keys::confusion_pair_key("aaa-word", &word_id)
-                .unwrap()
-                .as_bytes(),
-            serde_json::to_vec(
-                &serde_json::json!({ "wordA": "aaa-word", "wordB": word_id, "score": 0.9 }),
-            )
-            .expect("confusion pair 1 bytes"),
-        )
+        .set_confusion_pair("aaa-word", &word_id, 0.9)
         .expect("insert confusion pair 1");
     app.state
         .store()
-        .confusion_pairs
-        .insert(
-            keys::confusion_pair_key(&word_id, "zzzz")
-                .unwrap()
-                .as_bytes(),
-            serde_json::to_vec(
-                &serde_json::json!({ "wordA": word_id, "wordB": "zzzz", "score": 0.4 }),
-            )
-            .expect("confusion pair 2 bytes"),
-        )
+        .set_confusion_pair(&word_id, "zzzz", 0.4)
         .expect("insert confusion pair 2");
 
     let confusion_pairs = request(
