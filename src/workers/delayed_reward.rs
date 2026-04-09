@@ -3,6 +3,8 @@
 
 use crate::store::Store;
 
+const MAX_DUE_WORDS_PER_USER: usize = 1000;
+
 pub async fn run(store: &Store) {
     tracing::debug!("Delayed reward worker tick");
 
@@ -14,7 +16,7 @@ pub async fn run(store: &Store) {
     }
 }
 
-pub fn count_overdue_words(store: &Store, now_ms: i64) -> u32 {
+pub fn count_overdue_words(store: &Store, _now_ms: i64) -> u32 {
     let mut evaluated = 0u32;
 
     let user_ids = match store.list_user_ids() {
@@ -26,70 +28,17 @@ pub fn count_overdue_words(store: &Store, now_ms: i64) -> u32 {
     };
 
     for user_id in &user_ids {
-        let prefix = match crate::store::keys::word_due_index_prefix(user_id) {
-            Ok(p) => p,
-            Err(_) => continue,
+        let due_words = match store.get_due_words(user_id, MAX_DUE_WORDS_PER_USER) {
+            Ok(w) => w,
+            Err(e) => {
+                tracing::warn!(error = %e, user_id, "Delayed reward: failed to get due words");
+                continue;
+            }
         };
 
-        let state_prefix = match crate::store::keys::word_learning_state_prefix(user_id) {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
-        let mut states: std::collections::HashMap<
-            String,
-            crate::store::operations::word_states::WordLearningState,
-        > = std::collections::HashMap::new();
-        let mut states_loaded = false;
-
-        for item in store.word_due_index.scan_prefix(prefix.as_bytes()) {
-            let (key, _) = match item {
-                Ok(kv) => kv,
-                Err(e) => {
-                    tracing::warn!(error = %e, "Error scanning word_due_index");
-                    continue;
-                }
-            };
-
-            let Some((due_ts_ms, word_id)) = crate::store::keys::parse_due_index_item_key(&key)
-            else {
-                continue;
-            };
-
-            if due_ts_ms > now_ms {
-                break;
-            }
-
-            if !states_loaded {
-                for si in store
-                    .word_learning_states
-                    .scan_prefix(state_prefix.as_bytes())
-                {
-                    let (_, v) = match si {
-                        Ok(kv) => kv,
-                        Err(_) => continue,
-                    };
-                    if let Ok(s) = serde_json::from_slice::<
-                        crate::store::operations::word_states::WordLearningState,
-                    >(&v)
-                    {
-                        states.insert(s.word_id.clone(), s);
-                    }
-                }
-                states_loaded = true;
-            }
-
-            let Some(state) = states.get(&word_id) else {
-                continue;
-            };
-
-            if let Some(review_date) = state.next_review_date {
-                let review_ts_ms = review_date.timestamp_millis().max(0);
-                if review_ts_ms == due_ts_ms
-                    && review_ts_ms <= now_ms
-                    && state.state != crate::store::operations::word_states::WordState::Mastered
-                {
-                    evaluated += 1;
-                }
+        for state in &due_words {
+            if state.state != crate::store::operations::word_states::WordState::Mastered {
+                evaluated += 1;
             }
         }
     }
@@ -142,7 +91,7 @@ mod tests {
     #[test]
     fn count_overdue_words_ignores_future_and_mastered() {
         let dir = tempdir().unwrap();
-        let store = Store::open(dir.path().join("db-delayed-reward").to_str().unwrap()).unwrap();
+        let store = Store::open(dir.path().join("db-delayed-reward").to_str().unwrap(), 5000, 1).unwrap();
 
         let user = sample_user("u1", "u1@example.com");
         store.create_user(&user).unwrap();

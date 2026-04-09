@@ -1,5 +1,4 @@
 //! B74: Confusion pair cache (weekly Sunday 5:00)
-//! 分页加载用户，每批 100 个
 
 use crate::store::Store;
 
@@ -7,13 +6,6 @@ const USER_BATCH_SIZE: usize = 100;
 const MAX_RECORDS_PER_USER: usize = 500;
 const MAX_PAIRS_PER_WORD: usize = 10;
 const MAX_CONFUSION_ENTRIES: usize = 10000;
-
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RecordMinimal {
-    word_id: String,
-    is_correct: bool,
-}
 
 pub async fn run(store: &Store) {
     tracing::info!("Confusion pair cache worker running");
@@ -42,40 +34,24 @@ pub async fn run(store: &Store) {
                 break;
             }
 
-            let prefix = match crate::store::keys::record_prefix(&user.id) {
-                Ok(p) => p,
+            let records = match store.get_user_records_minimal(&user.id, MAX_RECORDS_PER_USER) {
+                Ok(r) => r,
                 Err(_) => continue,
             };
 
-            let mut records_read = 0usize;
             let mut prev_incorrect: Option<String> = None;
 
-            for item in store.records.scan_prefix(prefix.as_bytes()) {
-                if records_read >= MAX_RECORDS_PER_USER {
-                    break;
-                }
-                let (_, v) = match item {
-                    Ok(kv) => kv,
-                    Err(_) => continue,
-                };
-                let record: RecordMinimal = match serde_json::from_slice(&v) {
-                    Ok(r) => r,
-                    Err(_) => continue,
-                };
-                records_read += 1;
-
-                if !record.is_correct {
+            for (word_id, is_correct) in &records {
+                if !is_correct {
                     if let Some(ref prev_word) = prev_incorrect {
-                        if prev_word != &record.word_id
-                            && confusion_map.len() < MAX_CONFUSION_ENTRIES
-                        {
+                        if prev_word != word_id && confusion_map.len() < MAX_CONFUSION_ENTRIES {
                             confusion_map
                                 .entry(prev_word.clone())
                                 .or_default()
-                                .push(record.word_id.clone());
+                                .push(word_id.clone());
                         }
                     }
-                    prev_incorrect = Some(record.word_id);
+                    prev_incorrect = Some(word_id.clone());
                 } else {
                     prev_incorrect = None;
                 }
@@ -99,27 +75,9 @@ pub async fn run(store: &Store) {
         freq_vec.sort_by(|a, b| b.1.cmp(&a.1));
         freq_vec.truncate(MAX_PAIRS_PER_WORD);
 
-        for (other_id, score) in &freq_vec {
-            let key = match crate::store::keys::confusion_pair_key(word_id, other_id) {
-                Ok(k) => k,
-                Err(_) => continue,
-            };
-            let pair = serde_json::json!({
-                "wordA": word_id,
-                "wordB": other_id,
-                "score": *score as f64 / confused_with.len().max(1) as f64,
-                "updatedAt": chrono::Utc::now().to_rfc3339(),
-            });
-            if let Err(e) = store.confusion_pairs.insert(
-                key.as_bytes(),
-                match serde_json::to_vec(&pair) {
-                    Ok(bytes) => bytes,
-                    Err(e) => {
-                        tracing::warn!(error = %e, "Failed to serialize confusion pair");
-                        continue;
-                    }
-                },
-            ) {
+        for (other_id, count) in &freq_vec {
+            let score = *count as f64 / confused_with.len().max(1) as f64;
+            if let Err(e) = store.set_confusion_pair(word_id, other_id, score) {
                 tracing::warn!(error = %e, "Failed to store confusion pair");
             }
             cached += 1;

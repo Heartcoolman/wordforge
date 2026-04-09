@@ -1615,7 +1615,7 @@ fn monte_carlo_mastery_progression() {
 
         // 正向：连续正确复习 → 应该达到 Mastered
         for _ in 0..15 {
-            let _ = update_mastery(&mut state, true, 0.90, 1.0, 0.85, &config);
+            let _ = update_mastery(&mut state, true, 0.90, 1.0, 0.85, &config, None);
         }
         if matches!(
             state.mastery_level,
@@ -1632,7 +1632,7 @@ fn monte_carlo_mastery_progression() {
         // 反向：连续错误 → mastery 回退
         let _peak_level = state.mastery_level.clone();
         for _ in 0..20 {
-            let _ = update_mastery(&mut state, false, 0.1, 1.0, 0.85, &config);
+            let _ = update_mastery(&mut state, false, 0.1, 1.0, 0.85, &config, None);
         }
         if !matches!(state.mastery_level, MasteryLevel::Mastered) {
             regresses_on_errors += 1;

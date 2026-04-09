@@ -1,12 +1,11 @@
 //! B44: Forgetting alert worker
 //! Daily scan for words at high forgetting risk, generate notifications.
-//! 使用 alert_dedup tree 进行 O(1) 去重检查
 
 use crate::constants::MILLIS_PER_HOUR;
 use crate::store::Store;
 
-/// 通知去重窗口
 const DEDUP_WINDOW_HOURS: i64 = 48;
+const MAX_DUE_WORDS_PER_USER: usize = 500;
 
 pub async fn run(store: &Store) {
     tracing::info!("Forgetting alert worker running");
@@ -28,105 +27,60 @@ pub async fn run(store: &Store) {
     };
 
     for user_id in &user_ids {
-        let prefix = match crate::store::keys::word_due_index_prefix(user_id) {
-            Ok(p) => p,
-            Err(_) => continue,
+        let due_words = match store.get_due_words(user_id, MAX_DUE_WORDS_PER_USER) {
+            Ok(w) => w,
+            Err(e) => {
+                tracing::warn!(error = %e, user_id, "Forgetting alert: failed to get due words");
+                continue;
+            }
         };
 
-        for item in store.word_due_index.scan_prefix(prefix.as_bytes()) {
-            let (key, _) = match item {
-                Ok(kv) => kv,
-                Err(e) => {
-                    tracing::warn!(error = %e, "Error scanning word_due_index");
-                    continue;
-                }
-            };
-
-            let Some((due_ts_ms, word_id)) = crate::store::keys::parse_due_index_item_key(&key)
-            else {
-                continue;
-            };
-
-            if due_ts_ms > cutoff_ms {
-                break;
-            }
-
-            let state = match store.get_word_learning_state(user_id, &word_id) {
-                Ok(Some(s)) => s,
-                Ok(None) => continue,
-                Err(e) => {
-                    tracing::warn!(error = %e, "Forgetting alert: failed to read word state");
-                    continue;
-                }
-            };
-
+        for state in &due_words {
             let Some(review_date) = state.next_review_date else {
                 continue;
             };
 
             let review_ts_ms = review_date.timestamp_millis().max(0);
-            if review_ts_ms != due_ts_ms
-                || state.state == crate::store::operations::word_states::WordState::Mastered
-            {
+            if review_ts_ms > cutoff_ms {
                 continue;
             }
 
-            let dedup_key = match crate::store::keys::alert_dedup_key(user_id, &word_id) {
-                Ok(k) => k,
-                Err(_) => continue,
-            };
-            if let Ok(Some(ts_bytes)) = store.alert_dedup.get(dedup_key.as_bytes()) {
-                if let Ok(ts_str) = std::str::from_utf8(&ts_bytes) {
-                    if let Ok(prev_ms) = ts_str.parse::<i64>() {
-                        if prev_ms >= cutoff_ms {
-                            skipped_dedup += 1;
-                            continue;
-                        }
-                    }
-                }
+            if state.state == crate::store::operations::word_states::WordState::Mastered {
+                continue;
             }
 
-            let overdue_hours = now_ms.saturating_sub(due_ts_ms) / MILLIS_PER_HOUR;
+            // Dedup check
+            match store.get_alert_dedup(user_id, &state.word_id) {
+                Ok(Some(prev_ms)) if prev_ms >= cutoff_ms => {
+                    skipped_dedup += 1;
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Forgetting alert: failed to check dedup");
+                    continue;
+                }
+                _ => {}
+            }
+
+            let overdue_hours = now_ms.saturating_sub(review_ts_ms) / MILLIS_PER_HOUR;
             let notification = serde_json::json!({
                 "id": uuid::Uuid::new_v4().to_string(),
                 "userId": user_id,
-                "type": "forgetting_alert",
-                "wordId": word_id,
+                "type": "reminder",
+                "title": "Forgetting Alert",
+                "message": format!("Word '{}' is overdue by {} hours", state.word_id, overdue_hours),
+                "wordId": state.word_id,
                 "overdueHours": overdue_hours,
                 "createdAt": now.to_rfc3339(),
                 "read": false,
             });
 
-            let notif_key = match crate::store::keys::notification_key(
-                user_id,
-                notification["id"].as_str().unwrap_or("unknown"),
-            ) {
-                Ok(k) => k,
-                Err(e) => {
-                    tracing::warn!(error = %e, "Failed to build notification key");
-                    continue;
-                }
-            };
-
-            let notification_bytes = match serde_json::to_vec(&notification) {
-                Ok(bytes) => bytes,
-                Err(e) => {
-                    tracing::warn!(error = %e, "Failed to serialize forgetting alert notification");
-                    continue;
-                }
-            };
-
-            if let Err(e) = store
-                .notifications
-                .insert(notif_key.as_bytes(), notification_bytes)
-            {
+            if let Err(e) = store.create_notification(&notification) {
                 tracing::warn!(error = %e, "Failed to insert forgetting alert notification");
                 continue;
             }
 
-            let _ = store
-                .alert_dedup
-                .insert(dedup_key.as_bytes(), now_ms.to_string().as_bytes());
+            let _ = store.set_alert_dedup(user_id, &state.word_id, now_ms);
             at_risk += 1;
         }
     }

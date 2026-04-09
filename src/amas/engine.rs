@@ -5,7 +5,7 @@ use tokio::sync::{Mutex, RwLock};
 
 use crate::amas::config::AMASConfig;
 use crate::amas::decision::{ensemble, heuristic, ige, swd};
-use crate::amas::memory::{evm, iad, mastery, mdm, mtp};
+use crate::amas::memory::{evm, iad, mastery, mdm, mtp, ssp};
 use crate::amas::metrics;
 use crate::amas::monitoring;
 use crate::amas::types::*;
@@ -31,6 +31,7 @@ pub struct AMASEngine {
     store: Arc<Store>,
     user_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     metrics_registry: Arc<metrics::MetricsRegistry>,
+    ssp_policy: Option<Arc<ssp::SspPolicy>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -43,12 +44,23 @@ pub struct AlgoStates {
 impl AMASEngine {
     pub fn new(config: AMASConfig, store: Arc<Store>) -> Self {
         let hash = monitoring::compute_config_hash(&config);
+        let ssp_policy = if config.feature_flags.ssp_enabled {
+            let result = ssp::precompute(&config.ssp, &config.memory_model);
+            Some(Arc::new(if result.dual_grid {
+                ssp::SspPolicy::from_tables_with_bins(result.tables, result.stability_list)
+            } else {
+                ssp::SspPolicy::from_tables(result.tables, &config.ssp)
+            }))
+        } else {
+            None
+        };
         Self {
             config: Arc::new(RwLock::new(Arc::new(config))),
             config_hash: Arc::new(RwLock::new(hash)),
             store,
             user_locks: Arc::new(Mutex::new(HashMap::new())),
             metrics_registry: Arc::new(metrics::MetricsRegistry::new()),
+            ssp_policy,
         }
     }
 
@@ -61,6 +73,10 @@ impl AMASEngine {
         *h = hash;
         tracing::info!("AMAS config reloaded");
         Ok(())
+    }
+
+    pub fn ssp_policy(&self) -> Option<&ssp::SspPolicy> {
+        self.ssp_policy.as_deref()
     }
 
     pub async fn get_config(&self) -> AMASConfig {
@@ -110,7 +126,7 @@ impl AMASEngine {
         let now = chrono::Utc::now();
 
         let mut user_state = self.load_or_init_state(user_id)?;
-        let mut algo_states = self.load_algo_states(user_id)?;
+        let mut algo_states = self.load_algo_states(user_id, &config)?;
 
         let feature = self.build_feature_vector(&raw_event, &user_state, &config, now);
         self.update_modeling(&mut user_state, &feature, &config);
@@ -121,7 +137,7 @@ impl AMASEngine {
         let (final_strategy, weights) =
             self.ensemble_or_fallback(&candidates, &user_state, &algo_states, &config);
 
-        let reward = self.compute_reward(&feature, &user_state, &config);
+        let ssp_ref = self.ssp_policy.as_deref();
         let word_mastery = self.update_memory(
             user_id,
             &raw_event,
@@ -129,12 +145,14 @@ impl AMASEngine {
             &final_strategy,
             &user_state,
             &config,
+            ssp_ref,
         )?;
 
         let retention_signal = word_mastery
             .as_ref()
             .map(|wm| wm.recall_probability)
             .unwrap_or(0.0);
+        let reward = self.compute_reward(&feature, &user_state, retention_signal, &config);
         let objective = self.evaluate_objective(&reward, retention_signal, &config);
 
         let constrained_strategy =
@@ -370,7 +388,7 @@ impl AMASEngine {
         }
     }
 
-    fn load_algo_states(&self, user_id: &str) -> Result<AlgoStates, AppError> {
+    fn load_algo_states(&self, user_id: &str, config: &AMASConfig) -> Result<AlgoStates, AppError> {
         let mut states = AlgoStates::default();
 
         if let Some(v) = self
@@ -382,9 +400,11 @@ impl AMASEngine {
                 Ok(s) => s,
                 Err(e) => {
                     tracing::warn!(user_id, algo = "ige", error = %e, "Algo state deserialization failed, using default");
-                    ige::IgeState::default()
+                    ige::IgeState::new(&config.ige)
                 }
             };
+        } else {
+            states.ige = ige::IgeState::new(&config.ige);
         }
 
         if let Some(v) = self
@@ -663,6 +683,7 @@ impl AMASEngine {
         &self,
         feature: &FeatureVector,
         state: &UserState,
+        recall_prob: f64,
         config: &AMASConfig,
     ) -> Reward {
         let r = &config.reward;
@@ -678,8 +699,9 @@ impl AMASEngine {
         } else {
             0.0
         };
+        let expected_forget_cost = (1.0 - recall_prob) * r.expected_forget_cost_weight;
 
-        let value = accuracy_reward + speed_reward - fatigue_penalty - frustration_penalty;
+        let value = accuracy_reward + speed_reward - fatigue_penalty - frustration_penalty - expected_forget_cost;
 
         Reward {
             value: value.clamp(-1.0, 1.0),
@@ -688,6 +710,7 @@ impl AMASEngine {
                 speed_reward,
                 fatigue_penalty,
                 frustration_penalty,
+                expected_forget_cost,
             },
         }
     }
@@ -723,6 +746,7 @@ impl AMASEngine {
         strategy: &StrategyParams,
         user_state: &UserState,
         config: &AMASConfig,
+        ssp_policy: Option<&ssp::SspPolicy>,
     ) -> Result<Option<WordMasteryDecision>, AppError> {
         if raw_event.word_id.is_empty() {
             return Ok(None);
@@ -789,25 +813,21 @@ impl AMASEngine {
                 .unwrap_or_default();
 
             // 获取当前词的词素列表
-            let morpheme_key =
-                crate::store::keys::word_morpheme_key(&raw_event.word_id).unwrap_or_default();
-            let word_morphemes: Vec<String> =
-                if let Ok(Some(raw)) = self.store.word_morphemes.get(morpheme_key.as_bytes()) {
-                    serde_json::from_slice::<serde_json::Value>(&raw)
-                        .ok()
-                        .and_then(|data| {
-                            data.get("morphemes").and_then(|m| m.as_array()).map(|arr| {
-                                arr.iter()
-                                    .filter_map(|v| {
-                                        v.get("text").and_then(|t| t.as_str()).map(String::from)
-                                    })
-                                    .collect()
+            let word_morphemes: Vec<String> = self
+                .store
+                .get_word_morphemes(&raw_event.word_id)
+                .ok()
+                .flatten()
+                .and_then(|data| {
+                    data.as_array().map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| {
+                                v.get("text").and_then(|t| t.as_str()).map(String::from)
                             })
-                        })
-                        .unwrap_or_default()
-                } else {
-                    Vec::new()
-                };
+                            .collect()
+                    })
+                })
+                .unwrap_or_default();
 
             if !word_morphemes.is_empty() {
                 // 计算词素迁移加成并应用到 interval_scale
@@ -876,6 +896,7 @@ impl AMASEngine {
             adjusted_interval_scale,
             desired_retention,
             &config.memory_model,
+            ssp_policy,
         );
 
         self.store

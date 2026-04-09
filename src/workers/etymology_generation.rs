@@ -8,65 +8,30 @@ use crate::store::Store;
 pub async fn run(store: &Store) {
     tracing::info!("Etymology generation worker running");
 
-    let mut words_to_process = Vec::new();
-
-    for item in store.words.iter() {
-        let (_, v) = match item {
-            Ok(kv) => kv,
-            Err(_) => continue,
-        };
-
-        let word: crate::store::operations::words::Word = match serde_json::from_slice(&v) {
-            Ok(w) => w,
-            Err(_) => continue,
-        };
-
-        let key = match crate::store::keys::etymology_key(&word.id) {
-            Ok(k) => k,
-            Err(_) => continue,
-        };
-        if store
-            .etymologies
-            .get(key.as_bytes())
-            .ok()
-            .flatten()
-            .is_none()
-        {
-            words_to_process.push(word);
+    let words_to_process = match store.list_words_without_etymology(50) {
+        Ok(w) => w,
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to list words without etymology");
+            return;
         }
+    };
 
-        if words_to_process.len() >= 50 {
-            break;
-        }
-    }
+    for word_val in &words_to_process {
+        let word_id = word_val["id"].as_str().unwrap_or_default();
+        let word_text = word_val["text"].as_str().unwrap_or_default();
 
-    for word in &words_to_process {
         let etymology = serde_json::json!({
-            "wordId": word.id,
-            "word": word.text,
+            "word_id": word_id,
+            "word": word_text,
             // TODO: 接入 LLM API 生成真实词源，当前为占位文本
-            "etymology": format!("Auto-generated etymology for '{}'", word.text),
+            "etymology": format!("Auto-generated etymology for '{}'", word_text),
             "roots": [],
             "generated": true,
-            "generatedAt": chrono::Utc::now().to_rfc3339(),
+            "generated_at": chrono::Utc::now().to_rfc3339(),
         });
 
-        let key = match crate::store::keys::etymology_key(&word.id) {
-            Ok(k) => k,
-            Err(e) => {
-                tracing::warn!(word_id = %word.id, error = %e, "Failed to build etymology key");
-                continue;
-            }
-        };
-        let bytes = match serde_json::to_vec(&etymology) {
-            Ok(b) => b,
-            Err(e) => {
-                tracing::warn!(word_id = %word.id, error = %e, "Failed to serialize etymology");
-                continue;
-            }
-        };
-        if let Err(e) = store.etymologies.insert(key.as_bytes(), bytes) {
-            tracing::warn!(word_id = %word.id, error = %e, "Failed to store etymology");
+        if let Err(e) = store.set_etymology(word_id, &etymology) {
+            tracing::warn!(word_id, error = %e, "Failed to store etymology");
         }
     }
 

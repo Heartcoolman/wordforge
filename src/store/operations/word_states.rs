@@ -1,7 +1,6 @@
 use chrono::{DateTime, Utc};
+use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use sled::Transactional;
-use std::collections::{HashMap, HashSet};
 
 use crate::store::keys;
 use crate::store::{Store, StoreError};
@@ -30,6 +29,29 @@ pub enum WordState {
     Forgotten,
 }
 
+impl WordState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::New => "NEW",
+            Self::Learning => "LEARNING",
+            Self::Reviewing => "REVIEWING",
+            Self::Mastered => "MASTERED",
+            Self::Forgotten => "FORGOTTEN",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Result<Self, StoreError> {
+        match s {
+            "NEW" => Ok(Self::New),
+            "LEARNING" => Ok(Self::Learning),
+            "REVIEWING" => Ok(Self::Reviewing),
+            "MASTERED" => Ok(Self::Mastered),
+            "FORGOTTEN" => Ok(Self::Forgotten),
+            _ => Err(StoreError::Validation(format!("invalid word state: {s}"))),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct WordStateStats {
@@ -40,15 +62,34 @@ pub struct WordStateStats {
     pub forgotten: u64,
 }
 
-fn due_index_key_for_state(wls: &WordLearningState) -> Result<Option<String>, StoreError> {
-    match wls.next_review_date {
-        Some(next_review_date) => Ok(Some(keys::word_due_index_key(
-            &wls.user_id,
-            next_review_date.timestamp_millis(),
-            &wls.word_id,
-        )?)),
-        None => Ok(None),
-    }
+const WLS_COLS: &str =
+    "user_id, word_id, state, mastery_level, next_review_date, half_life, correct_streak, total_attempts, updated_at";
+
+fn wls_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WordLearningState> {
+    let state_str: String = row.get(2)?;
+    let state = WordState::from_str(&state_str).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, Box::new(e))
+    })?;
+    let next_review: Option<String> = row.get(4)?;
+    Ok(WordLearningState {
+        user_id: row.get(0)?,
+        word_id: row.get(1)?,
+        state,
+        mastery_level: row.get(3)?,
+        next_review_date: next_review.map(parse_dt).transpose()?,
+        half_life: row.get(5)?,
+        correct_streak: row.get::<_, i64>(6)? as u32,
+        total_attempts: row.get::<_, i64>(7)? as u32,
+        updated_at: parse_dt(row.get(8)?)?,
+    })
+}
+
+fn parse_dt(s: String) -> rusqlite::Result<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(&s)
+        .map(|dt| dt.with_timezone(&Utc))
+        .map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+        })
 }
 
 impl Store {
@@ -57,65 +98,39 @@ impl Store {
         user_id: &str,
         word_id: &str,
     ) -> Result<Option<WordLearningState>, StoreError> {
-        let key = keys::word_learning_state_key(user_id, word_id)?;
-        match self.word_learning_states.get(key.as_bytes())? {
-            Some(raw) => Ok(Some(Self::deserialize(&raw)?)),
-            None => Ok(None),
-        }
+        keys::validate_id(user_id)?;
+        keys::validate_id(word_id)?;
+        let conn = self.conn()?;
+        Ok(conn
+            .query_row(
+                &format!("SELECT {WLS_COLS} FROM word_learning_states WHERE user_id=?1 AND word_id=?2"),
+                params![user_id, word_id],
+                wls_from_row,
+            )
+            .optional()?)
     }
 
     pub fn set_word_learning_state(&self, wls: &WordLearningState) -> Result<(), StoreError> {
-        let key = keys::word_learning_state_key(&wls.user_id, &wls.word_id)?;
-        let value = Self::serialize(wls)?;
-        let next_due_index_key = due_index_key_for_state(wls)?;
-
-        (&self.word_learning_states, &self.word_due_index)
-            .transaction(|(tx_states, tx_due_index)| {
-                if let Some(old_raw) = tx_states.get(key.as_bytes())? {
-                    let old_state: WordLearningState =
-                        serde_json::from_slice(&old_raw).map_err(|error| {
-                            sled::transaction::ConflictableTransactionError::Abort(
-                                StoreError::Serialization(error),
-                            )
-                        })?;
-                    if let Some(old_due_index_key) = due_index_key_for_state(&old_state)
-                        .map_err(sled::transaction::ConflictableTransactionError::Abort)?
-                    {
-                        tx_due_index.remove(old_due_index_key.as_bytes())?;
-                    }
-                }
-
-                tx_states.insert(key.as_bytes(), value.as_slice())?;
-
-                if let Some(due_index_key) = &next_due_index_key {
-                    tx_due_index.insert(due_index_key.as_bytes(), &[])?;
-                }
-
-                Ok(())
-            })
-            .map_err(
-                |error: sled::transaction::TransactionError<StoreError>| match error {
-                    sled::transaction::TransactionError::Abort(store_error) => store_error,
-                    sled::transaction::TransactionError::Storage(storage_error) => {
-                        StoreError::Sled(storage_error)
-                    }
-                },
-            )?;
-
-        // Maintain word_references index
-        if let Ok(ref_key) =
-            keys::word_ref_key(&wls.word_id, "word_learning_states", key.as_bytes())
-        {
-            let _ = self.word_references.insert(ref_key.as_bytes(), &[]);
-        }
-        if let Some(ref due_key) = next_due_index_key {
-            if let Ok(ref_key) =
-                keys::word_ref_key(&wls.word_id, "word_due_index", due_key.as_bytes())
-            {
-                let _ = self.word_references.insert(ref_key.as_bytes(), &[]);
-            }
-        }
-
+        keys::validate_id(&wls.user_id)?;
+        keys::validate_id(&wls.word_id)?;
+        let conn = self.conn()?;
+        let next_review = wls.next_review_date.map(|d| d.to_rfc3339());
+        conn.execute(
+            "INSERT OR REPLACE INTO word_learning_states
+             (user_id, word_id, state, mastery_level, next_review_date, half_life, correct_streak, total_attempts, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                &wls.user_id,
+                &wls.word_id,
+                wls.state.as_str(),
+                wls.mastery_level,
+                next_review.as_deref(),
+                wls.half_life,
+                wls.correct_streak as i64,
+                wls.total_attempts as i64,
+                wls.updated_at.to_rfc3339(),
+            ],
+        )?;
         Ok(())
     }
 
@@ -124,31 +139,40 @@ impl Store {
         user_id: &str,
         word_ids: &[String],
     ) -> Result<Vec<WordLearningState>, StoreError> {
-        let mut state_by_word_id: HashMap<&str, Option<WordLearningState>> =
-            HashMap::with_capacity(word_ids.len());
-
-        for wid in word_ids {
-            if state_by_word_id.contains_key(wid.as_str()) {
-                continue;
-            }
-
-            let key = keys::word_learning_state_key(user_id, wid)?;
-            let state = self
-                .word_learning_states
-                .get(key.as_bytes())?
-                .map(|raw| Self::deserialize(&raw))
-                .transpose()?;
-            state_by_word_id.insert(wid.as_str(), state);
+        keys::validate_id(user_id)?;
+        if word_ids.is_empty() {
+            return Ok(Vec::new());
         }
 
-        let mut states = Vec::with_capacity(word_ids.len());
+        let conn = self.conn()?;
+        let placeholders: Vec<String> = (0..word_ids.len()).map(|i| format!("?{}", i + 2)).collect();
+        let sql = format!(
+            "SELECT {WLS_COLS} FROM word_learning_states WHERE user_id=?1 AND word_id IN ({})",
+            placeholders.join(",")
+        );
+        let mut stmt = conn.prepare(&sql)?;
+
+        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::with_capacity(word_ids.len() + 1);
+        param_values.push(Box::new(user_id.to_string()));
         for wid in word_ids {
-            if let Some(Some(state)) = state_by_word_id.get(wid.as_str()) {
-                states.push(state.clone());
+            param_values.push(Box::new(wid.clone()));
+        }
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+
+        let rows: std::collections::HashMap<String, WordLearningState> = stmt
+            .query_map(param_refs.as_slice(), wls_from_row)?
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(|s| (s.word_id.clone(), s))
+            .collect();
+
+        let mut result = Vec::with_capacity(word_ids.len());
+        for wid in word_ids {
+            if let Some(state) = rows.get(wid) {
+                result.push(state.clone());
             }
         }
-
-        Ok(states)
+        Ok(result)
     }
 
     pub fn get_due_words(
@@ -159,53 +183,40 @@ impl Store {
         if limit == 0 {
             return Ok(Vec::new());
         }
-
-        let prefix = keys::word_due_index_prefix(user_id)?;
-        let now = Utc::now().timestamp_millis().max(0);
-        let mut due = Vec::with_capacity(limit);
-        let mut seen_word_ids = HashSet::new();
-
-        for item in self.word_due_index.scan_prefix(prefix.as_bytes()) {
-            let (key, _) = item?;
-            let Some((due_ts_ms, word_id)) = keys::parse_due_index_item_key(&key) else {
-                continue;
-            };
-
-            if due_ts_ms > now {
-                break;
-            }
-
-            if let Some(state) = self.get_word_learning_state(user_id, &word_id)? {
-                if let Some(next_review_date) = state.next_review_date {
-                    let state_due_ts_ms = next_review_date.timestamp_millis().max(0);
-                    if state_due_ts_ms == due_ts_ms
-                        && state_due_ts_ms <= now
-                        && seen_word_ids.insert(word_id)
-                    {
-                        due.push(state);
-                        if due.len() >= limit {
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(due)
+        keys::validate_id(user_id)?;
+        let conn = self.conn()?;
+        let now = Utc::now().to_rfc3339();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {WLS_COLS} FROM word_learning_states
+             WHERE user_id=?1 AND next_review_date IS NOT NULL AND next_review_date <= ?2
+             ORDER BY next_review_date ASC
+             LIMIT ?3"
+        ))?;
+        let states = stmt
+            .query_map(params![user_id, &now, limit as i64], wls_from_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(states)
     }
 
     pub fn get_word_state_stats(&self, user_id: &str) -> Result<WordStateStats, StoreError> {
-        let prefix = keys::word_learning_state_prefix(user_id)?;
+        keys::validate_id(user_id)?;
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT state, COUNT(*) FROM word_learning_states WHERE user_id=?1 GROUP BY state",
+        )?;
         let mut stats = WordStateStats::default();
-        for item in self.word_learning_states.scan_prefix(prefix.as_bytes()) {
-            let (_, v) = item?;
-            let wls: WordLearningState = Self::deserialize(&v)?;
-            match wls.state {
-                WordState::New => stats.new_count += 1,
-                WordState::Learning => stats.learning += 1,
-                WordState::Reviewing => stats.reviewing += 1,
-                WordState::Mastered => stats.mastered += 1,
-                WordState::Forgotten => stats.forgotten += 1,
+        let rows = stmt.query_map(params![user_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        for row in rows {
+            let (state, count) = row?;
+            match state.as_str() {
+                "NEW" => stats.new_count = count as u64,
+                "LEARNING" => stats.learning = count as u64,
+                "REVIEWING" => stats.reviewing = count as u64,
+                "MASTERED" => stats.mastered = count as u64,
+                "FORGOTTEN" => stats.forgotten = count as u64,
+                _ => {}
             }
         }
         Ok(stats)
@@ -216,37 +227,13 @@ impl Store {
         user_id: &str,
         word_id: &str,
     ) -> Result<(), StoreError> {
-        let key = keys::word_learning_state_key(user_id, word_id)?;
-
-        (&self.word_learning_states, &self.word_due_index)
-            .transaction(|(tx_states, tx_due_index)| {
-                let removed = tx_states.remove(key.as_bytes())?;
-
-                if let Some(raw) = removed {
-                    let removed_state: WordLearningState =
-                        serde_json::from_slice(&raw).map_err(|error| {
-                            sled::transaction::ConflictableTransactionError::Abort(
-                                StoreError::Serialization(error),
-                            )
-                        })?;
-                    if let Some(due_index_key) = due_index_key_for_state(&removed_state)
-                        .map_err(sled::transaction::ConflictableTransactionError::Abort)?
-                    {
-                        tx_due_index.remove(due_index_key.as_bytes())?;
-                    }
-                }
-
-                Ok(())
-            })
-            .map_err(
-                |error: sled::transaction::TransactionError<StoreError>| match error {
-                    sled::transaction::TransactionError::Abort(store_error) => store_error,
-                    sled::transaction::TransactionError::Storage(storage_error) => {
-                        StoreError::Sled(storage_error)
-                    }
-                },
-            )?;
-
+        keys::validate_id(user_id)?;
+        keys::validate_id(word_id)?;
+        let conn = self.conn()?;
+        conn.execute(
+            "DELETE FROM word_learning_states WHERE user_id=?1 AND word_id=?2",
+            params![user_id, word_id],
+        )?;
         Ok(())
     }
 
@@ -256,13 +243,15 @@ impl Store {
         limit: usize,
         offset: usize,
     ) -> Result<Vec<WordLearningState>, StoreError> {
-        let prefix = keys::word_learning_state_prefix(user_id)?;
-        let mut states = Vec::new();
-        for item in self.word_learning_states.scan_prefix(prefix.as_bytes()) {
-            let (_, v) = item?;
-            states.push(Self::deserialize::<WordLearningState>(&v)?);
-        }
-        Ok(states.into_iter().skip(offset).take(limit).collect())
+        keys::validate_id(user_id)?;
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {WLS_COLS} FROM word_learning_states WHERE user_id=?1 LIMIT ?2 OFFSET ?3"
+        ))?;
+        let states = stmt
+            .query_map(params![user_id, limit as i64, offset as i64], wls_from_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(states)
     }
 }
 
@@ -271,7 +260,10 @@ mod tests {
     use super::{WordLearningState, WordState};
     use crate::store::Store;
     use chrono::{Duration, Utc};
-    use tempfile::tempdir;
+
+    fn test_store() -> Store {
+        Store::open(":memory:", 5000, 1).unwrap()
+    }
 
     fn mock_word_learning_state(
         user_id: &str,
@@ -292,10 +284,24 @@ mod tests {
     }
 
     #[test]
-    fn get_word_states_batch_preserves_order_duplicates_and_skips_missing() {
-        let dir = tempdir().unwrap();
-        let store = Store::open(dir.path().join("db").to_str().unwrap()).unwrap();
+    fn set_and_get_word_state() {
+        let store = test_store();
+        let wls = mock_word_learning_state("u1", "w1", 3);
+        store.set_word_learning_state(&wls).unwrap();
+        let got = store.get_word_learning_state("u1", "w1").unwrap().unwrap();
+        assert_eq!(got.word_id, "w1");
+        assert_eq!(got.total_attempts, 3);
+    }
 
+    #[test]
+    fn get_missing_returns_none() {
+        let store = test_store();
+        assert!(store.get_word_learning_state("u1", "missing").unwrap().is_none());
+    }
+
+    #[test]
+    fn get_word_states_batch_preserves_order_duplicates_and_skips_missing() {
+        let store = test_store();
         let w1 = mock_word_learning_state("u1", "w1", 3);
         let w3 = mock_word_learning_state("u1", "w3", 7);
         store.set_word_learning_state(&w1).unwrap();
@@ -324,9 +330,7 @@ mod tests {
 
     #[test]
     fn get_due_words_returns_asc_order_and_respects_limit() {
-        let dir = tempdir().unwrap();
-        let store = Store::open(dir.path().join("db-due-order").to_str().unwrap()).unwrap();
-
+        let store = test_store();
         let now = Utc::now();
         let mut w1 = mock_word_learning_state("u1", "w1", 1);
         w1.next_review_date = Some(now - Duration::minutes(5));
@@ -343,7 +347,6 @@ mod tests {
         store.set_word_learning_state(&w4).unwrap();
 
         let due = store.get_due_words("u1", 2).unwrap();
-
         assert_eq!(due.len(), 2);
         assert_eq!(due[0].word_id, "w1");
         assert_eq!(due[1].word_id, "w3");
@@ -351,9 +354,7 @@ mod tests {
 
     #[test]
     fn get_due_words_uses_latest_review_date_after_update() {
-        let dir = tempdir().unwrap();
-        let store = Store::open(dir.path().join("db-due-update").to_str().unwrap()).unwrap();
-
+        let store = test_store();
         let now = Utc::now();
         let mut state = mock_word_learning_state("u1", "w1", 1);
         state.next_review_date = Some(now - Duration::minutes(5));
@@ -363,7 +364,6 @@ mod tests {
         store.set_word_learning_state(&state).unwrap();
 
         let due = store.get_due_words("u1", 10).unwrap();
-
         assert_eq!(due.len(), 1);
         assert_eq!(due[0].word_id, "w1");
         assert_eq!(due[0].next_review_date, state.next_review_date);
@@ -371,18 +371,62 @@ mod tests {
 
     #[test]
     fn deleted_word_state_disappears_from_due_words() {
-        let dir = tempdir().unwrap();
-        let store = Store::open(dir.path().join("db-due-delete").to_str().unwrap()).unwrap();
-
+        let store = test_store();
         let now = Utc::now();
         let mut state = mock_word_learning_state("u1", "w1", 1);
         state.next_review_date = Some(now - Duration::minutes(2));
         store.set_word_learning_state(&state).unwrap();
 
         assert_eq!(store.get_due_words("u1", 10).unwrap().len(), 1);
-
         store.delete_word_learning_state("u1", "w1").unwrap();
-
         assert!(store.get_due_words("u1", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn word_state_stats_counts_correctly() {
+        let store = test_store();
+        let mut s1 = mock_word_learning_state("u1", "w1", 1);
+        s1.state = WordState::New;
+        let mut s2 = mock_word_learning_state("u1", "w2", 1);
+        s2.state = WordState::Learning;
+        let mut s3 = mock_word_learning_state("u1", "w3", 1);
+        s3.state = WordState::Mastered;
+
+        store.set_word_learning_state(&s1).unwrap();
+        store.set_word_learning_state(&s2).unwrap();
+        store.set_word_learning_state(&s3).unwrap();
+
+        let stats = store.get_word_state_stats("u1").unwrap();
+        assert_eq!(stats.new_count, 1);
+        assert_eq!(stats.learning, 1);
+        assert_eq!(stats.mastered, 1);
+        assert_eq!(stats.reviewing, 0);
+        assert_eq!(stats.forgotten, 0);
+    }
+
+    #[test]
+    fn list_user_word_states_with_limit_offset() {
+        let store = test_store();
+        for i in 0..5 {
+            let wls = mock_word_learning_state("u1", &format!("w{i}"), i);
+            store.set_word_learning_state(&wls).unwrap();
+        }
+        let page = store.list_user_word_states("u1", 2, 1).unwrap();
+        assert_eq!(page.len(), 2);
+    }
+
+    #[test]
+    fn upsert_overwrites_existing() {
+        let store = test_store();
+        let mut wls = mock_word_learning_state("u1", "w1", 1);
+        store.set_word_learning_state(&wls).unwrap();
+
+        wls.total_attempts = 5;
+        wls.state = WordState::Mastered;
+        store.set_word_learning_state(&wls).unwrap();
+
+        let got = store.get_word_learning_state("u1", "w1").unwrap().unwrap();
+        assert_eq!(got.total_attempts, 5);
+        assert_eq!(got.state, WordState::Mastered);
     }
 }

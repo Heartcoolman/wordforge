@@ -14,6 +14,9 @@ pub struct FeatureFlags {
     /// B37: Morpheme Transfer Prediction - 词素迁移预测
     #[serde(default)]
     pub mtp_enabled: bool,
+    /// SSP-MMC: 最优间隔调度（离线 DP 预计算策略表）
+    #[serde(default)]
+    pub ssp_enabled: bool,
 }
 
 impl Default for FeatureFlags {
@@ -26,6 +29,7 @@ impl Default for FeatureFlags {
             mdm_enabled: true,
             iad_enabled: false,
             mtp_enabled: false,
+            ssp_enabled: false,
         }
     }
 }
@@ -291,6 +295,12 @@ pub struct RewardConfig {
     pub fatigue_penalty_scale: f64,
     pub frustration_penalty_threshold: f64,
     pub frustration_penalty_scale: f64,
+    #[serde(default = "default_expected_forget_cost_weight")]
+    pub expected_forget_cost_weight: f64,
+}
+
+fn default_expected_forget_cost_weight() -> f64 {
+    0.3
 }
 
 impl Default for RewardConfig {
@@ -301,6 +311,7 @@ impl Default for RewardConfig {
             fatigue_penalty_scale: 0.3,
             frustration_penalty_threshold: -0.3,
             frustration_penalty_scale: 0.2,
+            expected_forget_cost_weight: 0.3,
         }
     }
 }
@@ -461,6 +472,21 @@ pub struct IgeConfig {
     pub interval_scale: f64,
     pub ucb_confidence_coeff: f64,
     pub default_confidence: f64,
+    #[serde(default = "default_difficulty_bin_count")]
+    pub difficulty_bin_count: usize,
+    #[serde(default = "default_ratio_bin_count")]
+    pub ratio_bin_count: usize,
+    #[serde(default)]
+    pub pretrained_difficulty_rewards: Option<Vec<f64>>,
+    #[serde(default)]
+    pub pretrained_ratio_rewards: Option<Vec<f64>>,
+}
+
+fn default_difficulty_bin_count() -> usize {
+    20
+}
+fn default_ratio_bin_count() -> usize {
+    16
 }
 
 impl Default for IgeConfig {
@@ -470,6 +496,10 @@ impl Default for IgeConfig {
             interval_scale: 1.0,
             ucb_confidence_coeff: 2.0,
             default_confidence: 0.6,
+            difficulty_bin_count: 20,
+            ratio_bin_count: 16,
+            pretrained_difficulty_rewards: None,
+            pretrained_ratio_rewards: None,
         }
     }
 }
@@ -575,22 +605,22 @@ fn default_forgetting_curve_floor() -> f64 {
 // FSRS-5 default parameters (same as test baseline for fair comparison)
 fn default_w() -> [f64; 19] {
     [
-        0.40255, 1.18385, 3.173, 15.69105, // w0-w3: initial stability
-        7.1949,   // w4: initial difficulty base
-        0.5345,   // w5: difficulty scaling
-        1.4604,   // w6: difficulty change per grade
-        0.0046,   // w7: mean reversion weight
-        1.54575,  // w8: stability increase base
-        0.1192,   // w9: stability power
-        1.01925,  // w10: spacing effect
-        1.9395,   // w11: post-lapse stability base
-        0.11,     // w12: post-lapse difficulty power
-        0.29605,  // w13: post-lapse stability power
-        2.2698,   // w14: post-lapse R scaling
-        0.2315,   // w15: Hard bonus
-        2.9898,   // w16: Easy bonus
-        0.51655,  // w17: same-day review scaling
-        0.6621,   // w18: same-day review offset
+        0.2, 0.6, 1.6, 6.0,     // w0-w3: tuned initial stability
+        7.1949,  // w4: initial difficulty base
+        0.5345,  // w5: difficulty scaling
+        1.4604,  // w6: difficulty change per grade
+        0.0046,  // w7: mean reversion weight
+        0.9,     // w8: tuned stability increase base
+        0.18,    // w9: tuned stability power
+        0.6,     // w10: tuned spacing effect
+        1.2,     // w11: tuned post-lapse stability base
+        0.08,    // w12: tuned post-lapse difficulty power
+        0.20,    // w13: tuned post-lapse stability power
+        1.3,     // w14: tuned post-lapse R scaling
+        0.2315,  // w15: Hard bonus
+        2.9898,  // w16: Easy bonus
+        0.51655, // w17: same-day review scaling
+        0.6621,  // w18: same-day review offset
     ]
 }
 
@@ -614,14 +644,14 @@ impl Default for MemoryModelConfig {
             half_life_power: 1.5,
             recall_risk_bonus: 0.2,
             recall_risk_threshold: 0.55,
-            base_desired_retention: 0.85,
+            base_desired_retention: 0.92,
             passive_decay_half_life_days: 30.0,
             passive_decay_power: 0.30,
             mastery_window_size: 20,
             stability_base_days: 20.0,
-            forgetting_curve_factor: 19.0 / 81.0,
+            forgetting_curve_factor: 0.30,
             forgetting_curve_decay: -0.5,
-            forgetting_curve_floor: 0.10,
+            forgetting_curve_floor: 0.0,
             w: default_w(),
         }
     }
@@ -799,6 +829,129 @@ impl Default for LearningStrategyConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SspCostParams {
+    /// stability 对 recall cost 的线性调制系数
+    #[serde(default)]
+    pub recall_s_coeff: f64,
+    /// difficulty 对 recall cost 的线性调制系数
+    #[serde(default)]
+    pub recall_d_coeff: f64,
+    /// stability 对 forget cost 的线性调制系数
+    #[serde(default)]
+    pub forget_s_coeff: f64,
+    /// difficulty 对 forget cost 的线性调制系数
+    #[serde(default)]
+    pub forget_d_coeff: f64,
+}
+
+impl Default for SspCostParams {
+    fn default() -> Self {
+        Self {
+            recall_s_coeff: 0.0,
+            recall_d_coeff: 0.0,
+            forget_s_coeff: 0.0,
+            forget_d_coeff: 0.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SspConfig {
+    pub recall_cost: f64,
+    pub forget_cost: f64,
+    /// 目标 stability（天）：halflife 达到此值视为"长期记住"
+    pub target_stability_days: f64,
+    /// 离散化底数（与墨墨一致）
+    pub base: f64,
+    /// stability log 等比 bins 的最小指数
+    pub min_index: i32,
+    /// stability log 等比 bins 的最大指数
+    pub max_index: i32,
+    /// 遗忘后难度增量（映射到 D ∈ [1,10]）
+    pub difficulty_offset_on_lapse: f64,
+    /// DP 最大迭代次数
+    pub max_iterations: u32,
+    /// DP 收敛阈值
+    pub convergence_threshold: f64,
+    /// Bellman 折扣因子 γ ∈ [0,1]，防止无穷代价堆积
+    #[serde(default = "default_ssp_discount_factor")]
+    pub discount_factor: f64,
+    /// 双网格离散化：小 S 用 log 间距，大 S 用线性间距
+    #[serde(default)]
+    pub dual_grid_enabled: bool,
+    /// 双网格切换阈值（天）
+    #[serde(default = "default_ssp_dual_grid_threshold")]
+    pub dual_grid_threshold_days: f64,
+    /// 线性间距步长（天）
+    #[serde(default = "default_ssp_linear_step")]
+    pub linear_step_days: f64,
+    /// 参数化代价函数：recall/forget cost 随 S/D 调制
+    #[serde(default)]
+    pub cost_params: SspCostParams,
+    /// 3D 求解器：目标保持率搜索下界
+    #[serde(default = "default_ssp_r_min")]
+    pub r_min: f64,
+    /// 3D 求解器：目标保持率搜索上界
+    #[serde(default = "default_ssp_r_max")]
+    pub r_max: f64,
+    /// 3D 求解器：保持率离散步长
+    #[serde(default = "default_ssp_r_step")]
+    pub r_step: f64,
+    /// 评分概率分布 [Hard, Good, Easy]
+    #[serde(default = "default_ssp_rating_probs")]
+    pub review_rating_probs: [f64; 3],
+}
+
+fn default_ssp_discount_factor() -> f64 {
+    1.0
+}
+fn default_ssp_r_min() -> f64 {
+    0.70
+}
+fn default_ssp_r_max() -> f64 {
+    0.99
+}
+fn default_ssp_r_step() -> f64 {
+    0.01
+}
+fn default_ssp_rating_probs() -> [f64; 3] {
+    [0.224, 0.631, 0.145]
+}
+fn default_ssp_dual_grid_threshold() -> f64 {
+    10.0
+}
+fn default_ssp_linear_step() -> f64 {
+    5.0
+}
+
+impl Default for SspConfig {
+    fn default() -> Self {
+        Self {
+            recall_cost: 3.0,
+            forget_cost: 9.0,
+            target_stability_days: 360.0,
+            base: 1.05,
+            min_index: -30,
+            max_index: 122,
+            difficulty_offset_on_lapse: 1.0,
+            max_iterations: 200_000,
+            convergence_threshold: 0.1,
+            discount_factor: 1.0,
+            dual_grid_enabled: true,
+            dual_grid_threshold_days: 10.0,
+            linear_step_days: 5.0,
+            cost_params: SspCostParams::default(),
+            r_min: 0.70,
+            r_max: 0.99,
+            r_step: 0.01,
+            review_rating_probs: [0.224, 0.631, 0.145],
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AMASConfig {
@@ -837,6 +990,8 @@ pub struct AMASConfig {
     pub learning_strategy: LearningStrategyConfig,
     #[serde(default)]
     pub classifier: ClassifierConfig,
+    #[serde(default)]
+    pub ssp: SspConfig,
 }
 
 impl AMASConfig {
@@ -1131,6 +1286,26 @@ impl AMASConfig {
             return Err(
                 "learning_strategy.fatigue_reduction_threshold must be in [0,1]".to_string(),
             );
+        }
+
+        // SspConfig
+        if self.ssp.recall_cost <= 0.0 {
+            return Err("ssp.recall_cost must be > 0".to_string());
+        }
+        if self.ssp.forget_cost <= 0.0 {
+            return Err("ssp.forget_cost must be > 0".to_string());
+        }
+        if self.ssp.target_stability_days <= 0.0 {
+            return Err("ssp.target_stability_days must be > 0".to_string());
+        }
+        if self.ssp.base <= 1.0 {
+            return Err("ssp.base must be > 1.0".to_string());
+        }
+        if self.ssp.min_index >= self.ssp.max_index {
+            return Err("ssp.min_index must be < ssp.max_index".to_string());
+        }
+        if !(0.0..=1.0).contains(&self.ssp.discount_factor) {
+            return Err("ssp.discount_factor must be in [0,1]".to_string());
         }
 
         Ok(())

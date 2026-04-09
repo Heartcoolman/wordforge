@@ -4,6 +4,7 @@ use crate::amas::config::MemoryModelConfig;
 use crate::amas::types::*;
 
 use super::mdm::MdmState;
+use super::ssp::SspPolicy;
 
 const ALPHA_SCALE: f64 = 0.3;
 const ALPHA_MIN: f64 = 0.1;
@@ -43,6 +44,7 @@ pub fn update_mastery(
     interval_scale: f64,
     desired_retention: f64,
     config: &MemoryModelConfig,
+    ssp_policy: Option<&SspPolicy>,
 ) -> WordMasteryDecision {
     let now = chrono::Utc::now().timestamp_millis();
 
@@ -72,8 +74,13 @@ pub fn update_mastery(
     state.mastery_level = determine_level(state, now, config);
 
     let recall = super::mdm::recall_probability(&state.mdm, now, config);
-    let interval =
-        super::mdm::compute_interval(&state.mdm, desired_retention, interval_scale, config);
+    let interval = if let Some(policy) = ssp_policy {
+        let optimal_days = policy.optimal_interval(state.mdm.stability, state.mdm.difficulty);
+        let secs = (optimal_days * 86400.0 * interval_scale).min(90.0 * 86400.0) as i64;
+        secs.max(60)
+    } else {
+        super::mdm::compute_interval(&state.mdm, desired_retention, interval_scale, config)
+    };
 
     WordMasteryDecision {
         word_id: state.word_id.clone(),
@@ -125,7 +132,7 @@ mod tests {
         let config = MemoryModelConfig::default();
         let mut state = WordMasteryState::new("w1");
         for _ in 0..5 {
-            let _ = update_mastery(&mut state, true, 0.95, 1.0, 0.9, &config);
+            let _ = update_mastery(&mut state, true, 0.95, 1.0, 0.9, &config, None);
         }
         assert!(matches!(
             state.mastery_level,

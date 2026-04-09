@@ -4,7 +4,6 @@ use tempfile::tempdir;
 
 use chrono::{DateTime, Duration, Utc};
 
-use learning_backend::store::keys;
 use learning_backend::store::operations::users::User;
 use learning_backend::store::operations::word_states::{WordLearningState, WordState};
 use learning_backend::store::Store;
@@ -80,17 +79,8 @@ fn seed_perf_data(store: &Store) -> DateTime<Utc> {
                     "createdAt": (now - Duration::hours(12)).to_rfc3339(),
                     "read": false,
                 });
-                let key = keys::notification_key(
-                    &format!("u{user_index}"),
-                    &format!("n{user_index}_{word_index}"),
-                )
-                .expect("notification key");
                 store
-                    .notifications
-                    .insert(
-                        key.as_bytes(),
-                        serde_json::to_vec(&notification).expect("notification bytes"),
-                    )
+                    .create_notification(&notification)
                     .expect("insert notification");
             }
         }
@@ -104,10 +94,8 @@ fn baseline_delayed_reward_count(store: &Store, now: DateTime<Utc>) -> u32 {
     let user_ids = store.list_user_ids().expect("list users");
 
     for user_id in &user_ids {
-        let prefix = keys::word_learning_state_prefix(user_id).expect("prefix");
-        for item in store.word_learning_states.scan_prefix(prefix.as_bytes()) {
-            let (_, value) = item.expect("scan wls");
-            let state: WordLearningState = serde_json::from_slice(&value).expect("deserialize wls");
+        let states = store.list_user_word_states(user_id, 100_000, 0).expect("list wls");
+        for state in &states {
             if let Some(review_date) = state.next_review_date {
                 if review_date <= now && state.state != WordState::Mastered {
                     evaluated += 1;
@@ -126,34 +114,17 @@ fn baseline_has_recent_alert(
     now: DateTime<Utc>,
     window: Duration,
 ) -> bool {
-    let prefix = match keys::notification_prefix(user_id) {
-        Ok(p) => p,
-        Err(_) => return false,
-    };
     let cutoff = now - window;
 
-    for item in store.notifications.scan_prefix(prefix.as_bytes()) {
-        let (_, value) = match item {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
+    let notifications = match store.list_notifications(user_id, 100_000, false) {
+        Ok(n) => n,
+        Err(_) => return false,
+    };
 
-        let notif: serde_json::Value = match serde_json::from_slice(&value) {
-            Ok(n) => n,
-            Err(_) => continue,
-        };
-
-        let is_alert = notif.get("type").and_then(|t| t.as_str()) == Some("forgetting_alert");
-        let same_word = notif.get("wordId").and_then(|w| w.as_str()) == Some(word_id);
-
-        if is_alert && same_word {
-            if let Some(created_str) = notif.get("createdAt").and_then(|c| c.as_str()) {
-                if let Ok(created) = DateTime::parse_from_rfc3339(created_str) {
-                    if created.with_timezone(&Utc) >= cutoff {
-                        return true;
-                    }
-                }
-            }
+    for notif in &notifications {
+        let same_word = notif.word_id.as_deref() == Some(word_id);
+        if same_word && notif.created_at >= cutoff {
+            return true;
         }
     }
 
@@ -164,30 +135,28 @@ fn baseline_forgetting_alert_candidates(store: &Store, now: DateTime<Utc>) -> u3
     let dedup_window = Duration::hours(48);
     let mut at_risk = 0u32;
 
-    for item in store.word_learning_states.iter() {
-        let (_, value) = match item {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-
-        let state: WordLearningState = match serde_json::from_slice(&value) {
+    let user_ids = store.list_user_ids().unwrap_or_default();
+    for user_id in &user_ids {
+        let states = match store.list_user_word_states(user_id, 100_000, 0) {
             Ok(s) => s,
             Err(_) => continue,
         };
 
-        if let Some(review_date) = state.next_review_date {
-            let overdue_hours = (now - review_date).num_hours();
-            if overdue_hours > 48 && state.state != WordState::Mastered {
-                if baseline_has_recent_alert(
-                    store,
-                    &state.user_id,
-                    &state.word_id,
-                    now,
-                    dedup_window,
-                ) {
-                    continue;
+        for state in &states {
+            if let Some(review_date) = state.next_review_date {
+                let overdue_hours = (now - review_date).num_hours();
+                if overdue_hours > 48 && state.state != WordState::Mastered {
+                    if baseline_has_recent_alert(
+                        store,
+                        &state.user_id,
+                        &state.word_id,
+                        now,
+                        dedup_window,
+                    ) {
+                        continue;
+                    }
+                    at_risk += 1;
                 }
-                at_risk += 1;
             }
         }
     }
@@ -195,58 +164,28 @@ fn baseline_forgetting_alert_candidates(store: &Store, now: DateTime<Utc>) -> u3
     at_risk
 }
 
-fn parse_due_index_item_key(key: &[u8]) -> Option<(i64, String)> {
-    let key_text = std::str::from_utf8(key).ok()?;
-    let mut parts = key_text.splitn(3, ':');
-    let _ = parts.next()?;
-    let due_ts_part = parts.next()?;
-    let word_id = parts.next()?.to_string();
-    let due_ts = due_ts_part
-        .parse::<u64>()
-        .ok()
-        .map(|value| value.min(i64::MAX as u64) as i64)?;
-    Some((due_ts, word_id))
-}
-
 fn optimized_recent_alert_word_ids_in_window(
     store: &Store,
     user_id: &str,
     cutoff: DateTime<Utc>,
 ) -> HashSet<String> {
-    let prefix = match keys::notification_prefix(user_id) {
-        Ok(p) => p,
+    let notifications = match store.list_notifications(user_id, 100_000, false) {
+        Ok(n) => n,
         Err(_) => return HashSet::new(),
     };
 
     let mut word_ids = HashSet::new();
-    for item in store.notifications.scan_prefix(prefix.as_bytes()) {
-        let (_, value) = match item {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-
-        let notif: serde_json::Value = match serde_json::from_slice(&value) {
-            Ok(n) => n,
-            Err(_) => continue,
-        };
-
-        if notif.get("type").and_then(|t| t.as_str()) != Some("forgetting_alert") {
+    for notif in &notifications {
+        if notif.word_id.is_none() {
             continue;
         }
 
-        let Some(created_str) = notif.get("createdAt").and_then(|c| c.as_str()) else {
-            continue;
-        };
-        let Ok(created) = DateTime::parse_from_rfc3339(created_str) else {
-            continue;
-        };
-
-        if created.with_timezone(&Utc) < cutoff {
+        if notif.created_at < cutoff {
             continue;
         }
 
-        if let Some(word_id) = notif.get("wordId").and_then(|w| w.as_str()) {
-            word_ids.insert(word_id.to_string());
+        if let Some(word_id) = &notif.word_id {
+            word_ids.insert(word_id.clone());
         }
     }
 
@@ -256,7 +195,6 @@ fn optimized_recent_alert_word_ids_in_window(
 fn optimized_forgetting_alert_candidates(store: &Store, now: DateTime<Utc>) -> u32 {
     let dedup_window = Duration::hours(48);
     let cutoff = now - dedup_window;
-    let cutoff_ms = cutoff.timestamp_millis().max(0);
     let mut at_risk = 0u32;
 
     let user_ids = match store.list_user_ids() {
@@ -265,38 +203,20 @@ fn optimized_forgetting_alert_candidates(store: &Store, now: DateTime<Utc>) -> u
     };
 
     for user_id in &user_ids {
-        let prefix = match keys::word_due_index_prefix(user_id) {
-            Ok(p) => p,
+        let due_words = match store.get_due_words(user_id, 100_000) {
+            Ok(w) => w,
             Err(_) => continue,
         };
 
         let mut recent_alert_word_ids: Option<HashSet<String>> = None;
 
-        for item in store.word_due_index.scan_prefix(prefix.as_bytes()) {
-            let (key, _) = match item {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-
-            let Some((due_ts_ms, word_id)) = parse_due_index_item_key(&key) else {
-                continue;
-            };
-
-            if due_ts_ms > cutoff_ms {
-                break;
-            }
-
-            let state = match store.get_word_learning_state(user_id, &word_id) {
-                Ok(Some(s)) => s,
-                _ => continue,
-            };
-
+        for state in &due_words {
             let Some(review_date) = state.next_review_date else {
                 continue;
             };
 
-            let review_ts_ms = review_date.timestamp_millis().max(0);
-            if review_ts_ms != due_ts_ms || state.state == WordState::Mastered {
+            let overdue_hours = (now - review_date).num_hours();
+            if overdue_hours <= 48 || state.state == WordState::Mastered {
                 continue;
             }
 
@@ -304,11 +224,11 @@ fn optimized_forgetting_alert_candidates(store: &Store, now: DateTime<Utc>) -> u
                 optimized_recent_alert_word_ids_in_window(store, user_id, cutoff)
             });
 
-            if recent_word_ids.contains(word_id.as_str()) {
+            if recent_word_ids.contains(state.word_id.as_str()) {
                 continue;
             }
 
-            recent_word_ids.insert(word_id);
+            recent_word_ids.insert(state.word_id.clone());
             at_risk += 1;
         }
     }
@@ -338,7 +258,7 @@ where
 #[ignore]
 fn compare_workers_before_after_latency() {
     let dir = tempdir().expect("tempdir");
-    let store = Store::open(dir.path().join("db").to_str().expect("db path")).expect("open");
+    let store = Store::open(dir.path().join("db").to_str().expect("db path"), 5000, 1).expect("open");
 
     let now = seed_perf_data(&store);
 

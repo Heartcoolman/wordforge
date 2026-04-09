@@ -64,3 +64,12 @@ lcov.info
 # VitePress
 docs/.vitepress/dist
 docs/.vitepress/cache
+
+# User uploads
+static/avatars/
+
+# Proptest
+*.proptest-regressions
+
+# Benchmarks
+benchmarks/

@@ -1,0 +1,424 @@
+pub const DDL: &str = r#"
+-- Core user management
+CREATE TABLE IF NOT EXISTS users (
+    id TEXT NOT NULL,
+    email TEXT NOT NULL COLLATE NOCASE,
+    username TEXT NOT NULL,
+    password_hash TEXT NOT NULL,
+    is_banned INTEGER NOT NULL DEFAULT 0 CHECK (is_banned IN (0, 1)),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    failed_login_count INTEGER NOT NULL DEFAULT 0,
+    locked_until TEXT DEFAULT NULL,
+    PRIMARY KEY (id),
+    UNIQUE (email)
+);
+CREATE INDEX IF NOT EXISTS idx_users_created_at ON users(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS admins (
+    id TEXT NOT NULL,
+    email TEXT NOT NULL COLLATE NOCASE,
+    password_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    failed_login_count INTEGER NOT NULL DEFAULT 0,
+    locked_until TEXT DEFAULT NULL,
+    PRIMARY KEY (id),
+    UNIQUE (email)
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    token_hash TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    token_type TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    revoked INTEGER NOT NULL DEFAULT 0 CHECK (revoked IN (0, 1)),
+    PRIMARY KEY (token_hash)
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id, created_at ASC);
+CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
+
+CREATE TABLE IF NOT EXISTS admin_sessions (
+    token_hash TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    token_type TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    revoked INTEGER NOT NULL DEFAULT 0 CHECK (revoked IN (0, 1)),
+    PRIMARY KEY (token_hash)
+);
+CREATE INDEX IF NOT EXISTS idx_admin_sessions_user ON admin_sessions(user_id, created_at ASC);
+CREATE INDEX IF NOT EXISTS idx_admin_sessions_expires_at ON admin_sessions(expires_at);
+
+CREATE TABLE IF NOT EXISTS password_reset_tokens (
+    token_hash TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    PRIMARY KEY (token_hash)
+);
+CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_expires_at ON password_reset_tokens(expires_at);
+
+-- User profile tables
+CREATE TABLE IF NOT EXISTS reward_preferences (
+    user_id TEXT NOT NULL,
+    reward_type TEXT NOT NULL DEFAULT 'standard',
+    PRIMARY KEY (user_id)
+);
+
+CREATE TABLE IF NOT EXISTS user_avatars (
+    user_id TEXT NOT NULL,
+    avatar_url TEXT NOT NULL,
+    filename TEXT NOT NULL,
+    extension TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (user_id)
+);
+
+CREATE TABLE IF NOT EXISTS habit_profiles (
+    user_id TEXT NOT NULL,
+    preferred_hours_json TEXT NOT NULL DEFAULT '[9,14,20]',
+    median_session_length_mins REAL NOT NULL DEFAULT 15.0,
+    sessions_per_day REAL NOT NULL DEFAULT 1.0,
+    temporal_hourly_stats_json TEXT NOT NULL DEFAULT '[]',
+    temporal_total_sessions INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (user_id)
+);
+
+CREATE TABLE IF NOT EXISTS user_preferences (
+    user_id TEXT NOT NULL,
+    theme TEXT NOT NULL DEFAULT 'light',
+    language TEXT NOT NULL DEFAULT 'en',
+    notification_enabled INTEGER NOT NULL DEFAULT 1 CHECK (notification_enabled IN (0, 1)),
+    sound_enabled INTEGER NOT NULL DEFAULT 1 CHECK (sound_enabled IN (0, 1)),
+    wordbook_center_url TEXT DEFAULT NULL,
+    PRIMARY KEY (user_id)
+);
+
+CREATE TABLE IF NOT EXISTS notifications (
+    user_id TEXT NOT NULL,
+    id TEXT NOT NULL,
+    notification_type TEXT NOT NULL,
+    title TEXT NOT NULL DEFAULT '',
+    message TEXT NOT NULL DEFAULT '',
+    word_id TEXT DEFAULT NULL,
+    overdue_hours INTEGER DEFAULT NULL,
+    read INTEGER NOT NULL DEFAULT 0 CHECK (read IN (0, 1)),
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (user_id, id)
+);
+CREATE INDEX IF NOT EXISTS idx_notifications_user_created_at ON notifications(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_notifications_user_unread ON notifications(user_id, read, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS badges (
+    user_id TEXT NOT NULL,
+    id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL,
+    unlocked INTEGER NOT NULL DEFAULT 0 CHECK (unlocked IN (0, 1)),
+    progress REAL NOT NULL DEFAULT 0.0,
+    unlocked_at TEXT DEFAULT NULL,
+    PRIMARY KEY (user_id, id)
+);
+
+-- Content tables
+CREATE TABLE IF NOT EXISTS words (
+    id TEXT NOT NULL,
+    text TEXT NOT NULL,
+    meaning TEXT NOT NULL,
+    pronunciation TEXT DEFAULT NULL,
+    part_of_speech TEXT DEFAULT NULL,
+    difficulty REAL NOT NULL DEFAULT 0.0,
+    examples_json TEXT NOT NULL DEFAULT '[]',
+    tags_json TEXT NOT NULL DEFAULT '[]',
+    embedding_json TEXT DEFAULT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (id)
+);
+CREATE INDEX IF NOT EXISTS idx_words_created_at ON words(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_words_without_embedding ON words(created_at DESC)
+    WHERE embedding_json IS NULL;
+
+CREATE TABLE IF NOT EXISTS wordbooks (
+    id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL,
+    book_type TEXT NOT NULL CHECK (book_type IN ('system', 'user')),
+    user_id TEXT DEFAULT NULL,
+    word_count INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (id)
+);
+CREATE INDEX IF NOT EXISTS idx_wordbooks_system ON wordbooks(name)
+    WHERE book_type = 'system';
+CREATE INDEX IF NOT EXISTS idx_wordbooks_user ON wordbooks(user_id, created_at DESC)
+    WHERE book_type = 'user';
+
+CREATE TABLE IF NOT EXISTS wordbook_words (
+    wordbook_id TEXT NOT NULL,
+    word_id TEXT NOT NULL,
+    added_at TEXT NOT NULL,
+    PRIMARY KEY (wordbook_id, word_id)
+);
+CREATE INDEX IF NOT EXISTS idx_wordbook_words_word_id ON wordbook_words(word_id);
+
+CREATE TABLE IF NOT EXISTS etymologies (
+    word_id TEXT NOT NULL,
+    word TEXT NOT NULL,
+    etymology TEXT NOT NULL,
+    roots_json TEXT NOT NULL DEFAULT '[]',
+    generated INTEGER NOT NULL DEFAULT 0 CHECK (generated IN (0, 1)),
+    source TEXT DEFAULT NULL,
+    generated_at TEXT DEFAULT NULL,
+    PRIMARY KEY (word_id)
+);
+
+CREATE TABLE IF NOT EXISTS word_morphemes (
+    word_id TEXT NOT NULL,
+    position INTEGER NOT NULL DEFAULT 0,
+    text TEXT NOT NULL,
+    morpheme_type TEXT NOT NULL,
+    meaning TEXT NOT NULL,
+    PRIMARY KEY (word_id, position)
+);
+
+CREATE TABLE IF NOT EXISTS confusion_pairs (
+    word_id_a TEXT NOT NULL,
+    word_id_b TEXT NOT NULL,
+    score REAL NOT NULL DEFAULT 0.0,
+    updated_at TEXT DEFAULT NULL,
+    PRIMARY KEY (word_id_a, word_id_b),
+    CHECK (word_id_a < word_id_b)
+);
+CREATE INDEX IF NOT EXISTS idx_confusion_pairs_a ON confusion_pairs(word_id_a, score DESC);
+CREATE INDEX IF NOT EXISTS idx_confusion_pairs_b ON confusion_pairs(word_id_b, score DESC);
+
+CREATE TABLE IF NOT EXISTS wb_center_imports (
+    source_url_hash_prefix TEXT NOT NULL,
+    source_url TEXT NOT NULL,
+    remote_id TEXT NOT NULL,
+    local_wordbook_id TEXT NOT NULL,
+    version TEXT NOT NULL,
+    user_id TEXT DEFAULT NULL,
+    imported_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    word_count INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (source_url_hash_prefix, remote_id)
+);
+CREATE INDEX IF NOT EXISTS idx_wb_center_imports_source_url ON wb_center_imports(source_url);
+CREATE INDEX IF NOT EXISTS idx_wb_center_imports_user ON wb_center_imports(user_id, updated_at DESC);
+
+-- Learning data tables
+CREATE TABLE IF NOT EXISTS study_configs (
+    user_id TEXT NOT NULL,
+    selected_wordbook_ids_json TEXT NOT NULL DEFAULT '[]',
+    daily_word_count INTEGER NOT NULL DEFAULT 20,
+    study_mode TEXT NOT NULL DEFAULT 'normal'
+        CHECK (study_mode IN ('normal', 'intensive', 'review', 'casual')),
+    daily_mastery_target INTEGER NOT NULL DEFAULT 10,
+    PRIMARY KEY (user_id)
+);
+
+CREATE TABLE IF NOT EXISTS learning_sessions (
+    id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active'
+        CHECK (status IN ('active', 'completed', 'abandoned')),
+    target_mastery_count INTEGER NOT NULL DEFAULT 0,
+    total_questions INTEGER NOT NULL DEFAULT 0,
+    actual_mastery_count INTEGER NOT NULL DEFAULT 0,
+    context_shifts INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    summary_accuracy REAL DEFAULT NULL,
+    summary_avg_response_time_ms INTEGER DEFAULT NULL,
+    summary_mastered_word_ids_json TEXT NOT NULL DEFAULT '[]',
+    summary_error_prone_word_ids_json TEXT NOT NULL DEFAULT '[]',
+    summary_duration_secs INTEGER DEFAULT NULL,
+    summary_hour_of_day INTEGER DEFAULT NULL,
+    summary_final_difficulty REAL DEFAULT NULL,
+    correct_count INTEGER NOT NULL DEFAULT 0,
+    total_count INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (id)
+);
+CREATE INDEX IF NOT EXISTS idx_learning_sessions_user_status
+    ON learning_sessions(user_id, status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_learning_sessions_user_created_at
+    ON learning_sessions(user_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS learning_records (
+    user_id TEXT NOT NULL,
+    id TEXT NOT NULL,
+    word_id TEXT NOT NULL,
+    is_correct INTEGER NOT NULL DEFAULT 0 CHECK (is_correct IN (0, 1)),
+    response_time_ms INTEGER NOT NULL DEFAULT 0,
+    session_id TEXT DEFAULT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (user_id, id)
+);
+CREATE INDEX IF NOT EXISTS idx_learning_records_user_time
+    ON learning_records(user_id, created_at DESC, id);
+CREATE INDEX IF NOT EXISTS idx_learning_records_time_user
+    ON learning_records(created_at, user_id);
+CREATE INDEX IF NOT EXISTS idx_learning_records_user_word
+    ON learning_records(user_id, word_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_learning_records_word_id
+    ON learning_records(word_id);
+
+CREATE TABLE IF NOT EXISTS word_learning_states (
+    user_id TEXT NOT NULL,
+    word_id TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'NEW'
+        CHECK (state IN ('NEW', 'LEARNING', 'REVIEWING', 'MASTERED', 'FORGOTTEN')),
+    mastery_level REAL NOT NULL DEFAULT 0.0,
+    next_review_date TEXT DEFAULT NULL,
+    half_life REAL NOT NULL DEFAULT 24.0,
+    correct_streak INTEGER NOT NULL DEFAULT 0,
+    total_attempts INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (user_id, word_id)
+);
+CREATE INDEX IF NOT EXISTS idx_word_learning_states_due
+    ON word_learning_states(user_id, next_review_date, word_id)
+    WHERE next_review_date IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_word_learning_states_state
+    ON word_learning_states(user_id, state);
+CREATE INDEX IF NOT EXISTS idx_word_learning_states_word
+    ON word_learning_states(word_id);
+
+CREATE TABLE IF NOT EXISTS user_stats (
+    user_id TEXT NOT NULL,
+    total_records INTEGER NOT NULL DEFAULT 0,
+    correct_records INTEGER NOT NULL DEFAULT 0,
+    word_ids_json TEXT NOT NULL DEFAULT '[]',
+    session_ids_json TEXT NOT NULL DEFAULT '[]',
+    PRIMARY KEY (user_id)
+);
+
+-- Engine/AMAS tables
+CREATE TABLE IF NOT EXISTS engine_user_states (
+    user_id TEXT NOT NULL,
+    state_json TEXT NOT NULL DEFAULT '{}',
+    attention REAL NOT NULL DEFAULT 0.7,
+    fatigue REAL NOT NULL DEFAULT 0.0,
+    motivation REAL NOT NULL DEFAULT 0.0,
+    confidence REAL NOT NULL DEFAULT 0.1,
+    last_active_at TEXT DEFAULT NULL,
+    session_event_count INTEGER NOT NULL DEFAULT 0,
+    total_event_count INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    cognitive_memory_capacity REAL NOT NULL DEFAULT 0.5,
+    cognitive_processing_speed REAL NOT NULL DEFAULT 0.5,
+    cognitive_stability REAL NOT NULL DEFAULT 0.5,
+    trend_accuracy REAL NOT NULL DEFAULT 0.0,
+    trend_speed REAL NOT NULL DEFAULT 0.0,
+    trend_engagement REAL NOT NULL DEFAULT 0.0,
+    habit_preferred_hours_json TEXT NOT NULL DEFAULT '[9,14,20]',
+    habit_median_session_mins REAL NOT NULL DEFAULT 15.0,
+    habit_sessions_per_day REAL NOT NULL DEFAULT 1.0,
+    habit_hourly_stats_json TEXT NOT NULL DEFAULT '[]',
+    habit_total_sessions INTEGER NOT NULL DEFAULT 0,
+    last_session_id TEXT DEFAULT NULL,
+    PRIMARY KEY (user_id)
+);
+
+CREATE TABLE IF NOT EXISTS user_elo (
+    user_id TEXT NOT NULL,
+    rating REAL NOT NULL DEFAULT 1200.0,
+    games INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (user_id)
+);
+
+CREATE TABLE IF NOT EXISTS word_elo (
+    word_id TEXT NOT NULL,
+    rating REAL NOT NULL DEFAULT 1200.0,
+    games INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (word_id)
+);
+
+CREATE TABLE IF NOT EXISTS mastery_states (
+    user_id TEXT NOT NULL,
+    word_id TEXT NOT NULL,
+    mdm_stability REAL NOT NULL DEFAULT 0.4,
+    mdm_difficulty REAL NOT NULL DEFAULT 5.0,
+    mdm_memory_strength REAL NOT NULL DEFAULT 0.0,
+    mdm_last_review_at_ms INTEGER DEFAULT NULL,
+    mdm_review_count INTEGER NOT NULL DEFAULT 0,
+    mdm_short_term_strength REAL NOT NULL DEFAULT 0.0,
+    PRIMARY KEY (user_id, word_id)
+);
+CREATE INDEX IF NOT EXISTS idx_mastery_states_word ON mastery_states(word_id);
+
+CREATE TABLE IF NOT EXISTS engine_algo_states (
+    user_id TEXT NOT NULL,
+    algo_id TEXT NOT NULL,
+    state_json TEXT NOT NULL DEFAULT '{}',
+    PRIMARY KEY (user_id, algo_id)
+);
+
+CREATE TABLE IF NOT EXISTS engine_monitoring_events (
+    id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    event_type TEXT NOT NULL DEFAULT 'process_event',
+    timestamp TEXT NOT NULL,
+    latency_ms INTEGER NOT NULL DEFAULT 0,
+    is_anomaly INTEGER NOT NULL DEFAULT 0 CHECK (is_anomaly IN (0, 1)),
+    invariant_violations_json TEXT NOT NULL DEFAULT '[]',
+    user_state_attention REAL NOT NULL DEFAULT 0.7,
+    user_state_fatigue REAL NOT NULL DEFAULT 0.0,
+    user_state_motivation REAL NOT NULL DEFAULT 0.0,
+    user_state_confidence REAL NOT NULL DEFAULT 0.1,
+    user_state_session_event_count INTEGER NOT NULL DEFAULT 0,
+    user_state_total_event_count INTEGER NOT NULL DEFAULT 0,
+    strategy_json TEXT NOT NULL DEFAULT '{}',
+    reward_json TEXT NOT NULL DEFAULT '{}',
+    cold_start_phase TEXT DEFAULT NULL,
+    selection_constraints_met INTEGER NOT NULL DEFAULT 0 CHECK (selection_constraints_met IN (0, 1)),
+    reward_value REAL NOT NULL DEFAULT 0.0,
+    config_version TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (id)
+);
+CREATE INDEX IF NOT EXISTS idx_monitoring_events_timestamp
+    ON engine_monitoring_events(timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_monitoring_events_user
+    ON engine_monitoring_events(user_id, timestamp DESC);
+
+CREATE TABLE IF NOT EXISTS algorithm_metrics_daily (
+    metric_date TEXT NOT NULL,
+    algorithm_id TEXT NOT NULL,
+    metrics_json TEXT NOT NULL DEFAULT '{}',
+    PRIMARY KEY (metric_date, algorithm_id)
+);
+
+CREATE TABLE IF NOT EXISTS alert_dedup (
+    user_id TEXT NOT NULL,
+    word_id TEXT NOT NULL,
+    last_alerted_at_ms INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (user_id, word_id)
+);
+
+CREATE TABLE IF NOT EXISTS monitoring_timeseries (
+    period_id TEXT NOT NULL,
+    data_json TEXT NOT NULL DEFAULT '{}',
+    PRIMARY KEY (period_id)
+);
+
+-- System tables
+CREATE TABLE IF NOT EXISTS system_settings (
+    singleton_id INTEGER NOT NULL DEFAULT 1 CHECK (singleton_id = 1),
+    max_users INTEGER NOT NULL DEFAULT 10000,
+    registration_enabled INTEGER NOT NULL DEFAULT 1 CHECK (registration_enabled IN (0, 1)),
+    maintenance_mode INTEGER NOT NULL DEFAULT 0 CHECK (maintenance_mode IN (0, 1)),
+    default_daily_words INTEGER NOT NULL DEFAULT 20,
+    wordbook_center_url TEXT DEFAULT 'https://cdn.jsdelivr.net/gh/Heartcoolman/wordbook-center@main',
+    PRIMARY KEY (singleton_id)
+);
+
+CREATE TABLE IF NOT EXISTS schema_version (
+    singleton_id INTEGER NOT NULL DEFAULT 1 CHECK (singleton_id = 1),
+    version INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (singleton_id)
+);
+"#;

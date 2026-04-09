@@ -1,6 +1,6 @@
 use crate::amas::metrics::{MetricsRegistry, MetricsSnapshot};
 use crate::amas::types::AlgorithmId;
-use crate::store::{keys, Store};
+use crate::store::Store;
 
 const ALL_ALGORITHM_IDS: &[AlgorithmId] = &[
     AlgorithmId::Heuristic,
@@ -37,7 +37,7 @@ pub fn flush_metrics(
             None => metrics.clone(),
         };
 
-        let key = keys::metrics_daily_key(&today, algo_id)?;
+        let key = format!("{today}:{algo_id}");
         let value =
             serde_json::to_value(merged).map_err(crate::store::StoreError::Serialization)?;
         batch_entries.push((key, value));

@@ -20,15 +20,10 @@ async fn system_health(
     _admin: AdminAuthUser,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let db = state.store().raw_db();
-    let size_on_disk = db.size_on_disk().unwrap_or(0);
+    let size_on_disk = state.store().db_size_bytes().unwrap_or(0);
     let uptime_secs = state.uptime_secs();
     let store_probe_ok = state.store().get_user_by_id("__health_check__").is_ok();
-    let status = if store_probe_ok {
-        "healthy"
-    } else {
-        "degraded"
-    };
+    let status = if store_probe_ok { "healthy" } else { "degraded" };
 
     Ok(ok(serde_json::json!({
         "status": status,
@@ -43,17 +38,13 @@ async fn database_stats(
     _admin: AdminAuthUser,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let db = state.store().raw_db();
-    let trees: Vec<String> = db
-        .tree_names()
-        .iter()
-        .map(|name| String::from_utf8_lossy(name.as_ref()).to_string())
-        .collect();
+    let size = state.store().db_size_bytes().unwrap_or(0);
+    let tables = state.store().db_table_list().unwrap_or_default();
 
     Ok(ok(serde_json::json!({
-        "sizeOnDisk": db.size_on_disk().unwrap_or(0),
-        "treeCount": trees.len(),
-        "trees": trees,
+        "sizeOnDisk": size,
+        "tableCount": tables.len(),
+        "tables": tables,
     })))
 }
 

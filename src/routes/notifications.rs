@@ -11,7 +11,7 @@ use crate::constants::{DEFAULT_LANGUAGE, DEFAULT_THEME};
 use crate::extractors::JsonBody;
 use crate::response::{ok, AppError};
 use crate::state::AppState;
-use crate::store::keys;
+use crate::store::operations::extras::Badge as StoreBadge;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -119,80 +119,59 @@ async fn list_badges(
     let now = Utc::now();
 
     // Load persisted unlock timestamps
-    let load_badge = |badge_id: &str| -> Option<Badge> {
-        let key = keys::badge_key(&auth.user_id, badge_id).ok()?;
-        let raw = store.badges.get(key.as_bytes()).ok()??;
-        serde_json::from_slice::<Badge>(&raw).ok()
+    let load_badge = |badge_id: &str| -> Option<StoreBadge> {
+        store.get_badge(&auth.user_id, badge_id).ok()?
     };
 
     let persisted_first = load_badge("first_word");
     let persisted_streak = load_badge("streak_7");
     let persisted_mastered = load_badge("mastered_100");
 
+    let make_badge =
+        |id: &str, name: &str, desc: &str, computed_unlocked: bool, progress: f64, persisted: &Option<StoreBadge>| {
+            let unlocked = computed_unlocked || persisted.as_ref().is_some_and(|b| b.unlocked);
+            let unlocked_at: Option<chrono::DateTime<Utc>> = if unlocked {
+                persisted
+                    .as_ref()
+                    .and_then(|b| b.unlocked_at.as_deref())
+                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .or(Some(now))
+            } else {
+                None
+            };
+            Badge {
+                id: id.to_string(),
+                name: name.to_string(),
+                description: desc.to_string(),
+                unlocked,
+                progress: if computed_unlocked { progress.max(1.0) } else { progress },
+                unlocked_at,
+            }
+        };
+
     let badges = vec![
-        Badge {
-            id: "first_word".to_string(),
-            name: "First Word".to_string(),
-            description: "Learn your first word".to_string(),
-            unlocked: first_word_unlocked || persisted_first.as_ref().is_some_and(|b| b.unlocked),
-            progress: if first_word_unlocked { 1.0 } else { 0.0 },
-            unlocked_at: if first_word_unlocked
-                || persisted_first.as_ref().is_some_and(|b| b.unlocked)
-            {
-                persisted_first
-                    .as_ref()
-                    .and_then(|b| b.unlocked_at)
-                    .or(Some(now))
-            } else {
-                None
-            },
-        },
-        Badge {
-            id: "streak_7".to_string(),
-            name: "Week Streak".to_string(),
-            description: "Study for 7 consecutive days".to_string(),
-            unlocked: streak_unlocked || persisted_streak.as_ref().is_some_and(|b| b.unlocked),
-            progress: streak_progress,
-            unlocked_at: if streak_unlocked || persisted_streak.as_ref().is_some_and(|b| b.unlocked)
-            {
-                persisted_streak
-                    .as_ref()
-                    .and_then(|b| b.unlocked_at)
-                    .or(Some(now))
-            } else {
-                None
-            },
-        },
-        Badge {
-            id: "mastered_100".to_string(),
-            name: "Century Club".to_string(),
-            description: "Master 100 words".to_string(),
-            unlocked: mastered_unlocked || persisted_mastered.as_ref().is_some_and(|b| b.unlocked),
-            progress: mastered_progress,
-            unlocked_at: if mastered_unlocked
-                || persisted_mastered.as_ref().is_some_and(|b| b.unlocked)
-            {
-                persisted_mastered
-                    .as_ref()
-                    .and_then(|b| b.unlocked_at)
-                    .or(Some(now))
-            } else {
-                None
-            },
-        },
+        make_badge("first_word", "First Word", "Learn your first word",
+            first_word_unlocked, if first_word_unlocked { 1.0 } else { 0.0 }, &persisted_first),
+        make_badge("streak_7", "Week Streak", "Study for 7 consecutive days",
+            streak_unlocked, streak_progress, &persisted_streak),
+        make_badge("mastered_100", "Century Club", "Master 100 words",
+            mastered_unlocked, mastered_progress, &persisted_mastered),
     ];
 
     // Persist newly unlocked badges
     for badge in &badges {
         if badge.unlocked {
-            let key = keys::badge_key(&auth.user_id, &badge.id)
-                .map_err(|e| AppError::internal(&e.to_string()))?;
             store
-                .badges
-                .insert(
-                    key.as_bytes(),
-                    serde_json::to_vec(badge).map_err(|e| AppError::internal(&e.to_string()))?,
-                )
+                .save_badge(&StoreBadge {
+                    user_id: auth.user_id.clone(),
+                    id: badge.id.clone(),
+                    name: badge.name.clone(),
+                    description: badge.description.clone(),
+                    unlocked: badge.unlocked,
+                    progress: badge.progress,
+                    unlocked_at: badge.unlocked_at.map(|dt| dt.to_rfc3339()),
+                })
                 .map_err(|e| AppError::internal(&e.to_string()))?;
         }
     }
@@ -259,14 +238,17 @@ async fn get_preferences(
     auth: AuthUser,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let key = keys::user_preferences_key(&auth.user_id)?;
     let prefs = match state
         .store()
-        .user_preferences
-        .get(key.as_bytes())
+        .get_user_preferences(&auth.user_id)
         .map_err(|e| AppError::internal(&e.to_string()))?
     {
-        Some(raw) => serde_json::from_slice::<UserPreferences>(&raw).unwrap_or_default(),
+        Some(val) => UserPreferences {
+            theme: val["theme"].as_str().unwrap_or(DEFAULT_THEME).to_string(),
+            language: val["language"].as_str().unwrap_or(DEFAULT_LANGUAGE).to_string(),
+            notification_enabled: val["notification_enabled"].as_bool().unwrap_or(true),
+            sound_enabled: val["sound_enabled"].as_bool().unwrap_or(true),
+        },
         None => UserPreferences::default(),
     };
     Ok(ok(prefs))
@@ -277,14 +259,21 @@ async fn set_preferences(
     State(state): State<AppState>,
     JsonBody(req): JsonBody<UpdateUserPreferences>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let key = keys::user_preferences_key(&auth.user_id)?;
-    let mut prefs = match state
+    let existing = state
         .store()
-        .user_preferences
-        .get(key.as_bytes())
-        .map_err(|e| AppError::internal(&e.to_string()))?
-    {
-        Some(raw) => serde_json::from_slice::<UserPreferences>(&raw).unwrap_or_default(),
+        .get_user_preferences(&auth.user_id)
+        .map_err(|e| AppError::internal(&e.to_string()))?;
+    let existing_wbc_url = existing
+        .as_ref()
+        .and_then(|v| v["wordbook_center_url"].as_str())
+        .map(|s| s.to_string());
+    let mut prefs = match existing {
+        Some(val) => UserPreferences {
+            theme: val["theme"].as_str().unwrap_or(DEFAULT_THEME).to_string(),
+            language: val["language"].as_str().unwrap_or(DEFAULT_LANGUAGE).to_string(),
+            notification_enabled: val["notification_enabled"].as_bool().unwrap_or(true),
+            sound_enabled: val["sound_enabled"].as_bool().unwrap_or(true),
+        },
         None => UserPreferences::default(),
     };
 
@@ -315,13 +304,16 @@ async fn set_preferences(
         prefs.sound_enabled = v;
     }
 
+    let prefs_val = serde_json::json!({
+        "theme": prefs.theme,
+        "language": prefs.language,
+        "notification_enabled": prefs.notification_enabled,
+        "sound_enabled": prefs.sound_enabled,
+        "wordbook_center_url": existing_wbc_url,
+    });
     state
         .store()
-        .user_preferences
-        .insert(
-            key.as_bytes(),
-            serde_json::to_vec(&prefs).map_err(|e| AppError::internal(&e.to_string()))?,
-        )
+        .set_user_preferences(&auth.user_id, &prefs_val)
         .map_err(|e| AppError::internal(&e.to_string()))?;
     Ok(ok(prefs))
 }

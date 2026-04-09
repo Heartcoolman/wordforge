@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
+use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
-use crate::store::keys;
 use crate::store::{Store, StoreError};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -15,292 +15,179 @@ pub struct Session {
     pub revoked: bool,
 }
 
+fn session_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
+    Ok(Session {
+        token_hash: row.get(0)?,
+        user_id: row.get(1)?,
+        token_type: row.get(2)?,
+        created_at: parse_dt(row.get(3)?)?,
+        expires_at: parse_dt(row.get(4)?)?,
+        revoked: row.get::<_, i64>(5)? != 0,
+    })
+}
+
+fn parse_dt(s: String) -> rusqlite::Result<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(&s)
+        .map(|dt| dt.with_timezone(&Utc))
+        .map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Text,
+                Box::new(e),
+            )
+        })
+}
+
+const COLS: &str = "token_hash, user_id, token_type, created_at, expires_at, revoked";
+
+const INSERT_SQL: &str =
+    "INSERT INTO {T} (token_hash, user_id, token_type, created_at, expires_at, revoked) \
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6)";
+
+fn insert_session(
+    conn: &rusqlite::Connection,
+    table: &str,
+    s: &Session,
+) -> Result<(), StoreError> {
+    conn.execute(
+        &INSERT_SQL.replace("{T}", table),
+        params![
+            &s.token_hash,
+            &s.user_id,
+            &s.token_type,
+            s.created_at.to_rfc3339(),
+            s.expires_at.to_rfc3339(),
+            s.revoked as i64,
+        ],
+    )?;
+    Ok(())
+}
+
+fn get_active_session(
+    conn: &rusqlite::Connection,
+    table: &str,
+    token_hash: &str,
+) -> Result<Option<Session>, StoreError> {
+    let sql = format!(
+        "SELECT {COLS} FROM {table} WHERE token_hash = ?1 AND revoked = 0 AND expires_at > ?2"
+    );
+    Ok(conn
+        .query_row(&sql, params![token_hash, Utc::now().to_rfc3339()], session_from_row)
+        .optional()?)
+}
+
+fn delete_session_row(
+    conn: &rusqlite::Connection,
+    table: &str,
+    token_hash: &str,
+) -> Result<(), StoreError> {
+    conn.execute(
+        &format!("DELETE FROM {table} WHERE token_hash = ?1"),
+        params![token_hash],
+    )?;
+    Ok(())
+}
+
 impl Store {
     pub fn create_session(&self, session: &Session) -> Result<(), StoreError> {
-        let key = keys::session_key(&session.token_hash)?;
-        let index_key = keys::session_user_index_key(&session.user_id, &session.token_hash)?;
-        let session_bytes = Self::serialize(session)?;
-
-        let key_bytes = key.as_bytes().to_vec();
-        let index_key_bytes = index_key.as_bytes().to_vec();
-        self.sessions
-            .transaction(move |tx| {
-                tx.insert(key_bytes.as_slice(), session_bytes.as_slice())?;
-                tx.insert(index_key_bytes.as_slice(), &[] as &[u8])?;
-                Ok(())
-            })
-            .map_err(|e: sled::transaction::TransactionError<()>| match e {
-                sled::transaction::TransactionError::Abort(()) => {
-                    StoreError::Sled(sled::Error::Unsupported("transaction aborted".into()))
-                }
-                sled::transaction::TransactionError::Storage(se) => StoreError::Sled(se),
-            })?;
-        Ok(())
+        let conn = self.conn()?;
+        insert_session(&conn, "sessions", session)
     }
 
-    /// 获取会话，如果已过期或已撤销则返回 None。
-    /// 不产生删除副作用——过期会话的清理由专用后台任务 cleanup_expired_sessions 负责。
     pub fn get_session(&self, token_hash: &str) -> Result<Option<Session>, StoreError> {
-        let key = keys::session_key(token_hash)?;
-        let Some(raw) = self.sessions.get(key.as_bytes())? else {
-            return Ok(None);
-        };
-
-        let session = Self::deserialize::<Session>(&raw)?;
-        if session.revoked || session.expires_at <= Utc::now() {
-            return Ok(None);
-        }
-
-        Ok(Some(session))
+        let conn = self.conn()?;
+        get_active_session(&conn, "sessions", token_hash)
     }
 
     pub fn delete_session(&self, token_hash: &str) -> Result<(), StoreError> {
-        let key = keys::session_key(token_hash)?;
-        let raw = self.sessions.get(key.as_bytes())?;
-
-        let session_key_bytes = key.as_bytes().to_vec();
-        let index_key_bytes = raw
-            .as_ref()
-            .and_then(|r| Self::deserialize::<Session>(r).ok())
-            .and_then(|session| {
-                keys::session_user_index_key(&session.user_id, token_hash)
-                    .ok()
-                    .map(|k| k.as_bytes().to_vec())
-            });
-
-        self.sessions
-            .transaction(move |tx| {
-                if let Some(ref idx_key) = index_key_bytes {
-                    tx.remove(idx_key.as_slice())?;
-                }
-                tx.remove(session_key_bytes.as_slice())?;
-                Ok(())
-            })
-            .map_err(|e: sled::transaction::TransactionError<()>| match e {
-                sled::transaction::TransactionError::Abort(()) => {
-                    StoreError::Sled(sled::Error::Unsupported("transaction aborted".into()))
-                }
-                sled::transaction::TransactionError::Storage(se) => StoreError::Sled(se),
-            })?;
-
-        Ok(())
+        let conn = self.conn()?;
+        delete_session_row(&conn, "sessions", token_hash)
     }
 
-    /// 原子性删除会话：如果存在则删除并返回 true，不存在则返回 false。
-    /// 用于 refresh token 轮换时防止竞态重放攻击。
-    /// 在事务内读取并删除，保证原子性。
     pub fn delete_session_if_exists(&self, token_hash: &str) -> Result<bool, StoreError> {
-        let key = keys::session_key(token_hash)?;
-        let session_key_bytes = key.as_bytes().to_vec();
-        let token_hash_owned = token_hash.to_string();
-
-        self.sessions
-            .transaction(move |tx| {
-                let Some(raw) = tx.remove(session_key_bytes.as_slice())? else {
-                    return Ok(false);
-                };
-
-                // 尝试删除用户索引
-                if let Ok(session) = serde_json::from_slice::<Session>(&raw) {
-                    if let Ok(idx_key) =
-                        keys::session_user_index_key(&session.user_id, &token_hash_owned)
-                    {
-                        tx.remove(idx_key.as_bytes())?;
-                    }
-                }
-
-                Ok(true)
-            })
-            .map_err(|e: sled::transaction::TransactionError<()>| match e {
-                sled::transaction::TransactionError::Abort(()) => {
-                    StoreError::Sled(sled::Error::Unsupported("transaction aborted".into()))
-                }
-                sled::transaction::TransactionError::Storage(se) => StoreError::Sled(se),
-            })
+        let conn = self.conn()?;
+        let deleted = conn.execute(
+            "DELETE FROM sessions WHERE token_hash = ?1",
+            params![token_hash],
+        )?;
+        Ok(deleted > 0)
     }
 
     pub fn delete_user_sessions(&self, user_id: &str) -> Result<u32, StoreError> {
-        let prefix = keys::session_user_index_prefix(user_id)?;
-        let mut hashes = Vec::new();
-
-        for item in self.sessions.scan_prefix(prefix.as_bytes()) {
-            let (k, _) = item?;
-            let key_str = match String::from_utf8(k.to_vec()) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::warn!(error = %e, "Skipping session index key with invalid UTF-8");
-                    continue;
-                }
-            };
-            if let Some(hash) = key_str.rsplit(':').next() {
-                hashes.push(hash.to_string());
-            }
-        }
-
-        let count = hashes.len() as u32;
-        for hash in hashes {
-            self.delete_session(&hash)?;
-        }
-        Ok(count)
+        let conn = self.conn()?;
+        let deleted = conn.execute(
+            "DELETE FROM sessions WHERE user_id = ?1",
+            params![user_id],
+        )?;
+        Ok(deleted as u32)
     }
 
-    /// 统计指定用户的当前会话数
     pub fn count_user_sessions(&self, user_id: &str) -> Result<usize, StoreError> {
-        let prefix = keys::session_user_index_prefix(user_id)?;
-        let mut count = 0usize;
-        for item in self.sessions.scan_prefix(prefix.as_bytes()) {
-            let _ = item?;
-            count += 1;
-        }
-        Ok(count)
+        let conn = self.conn()?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sessions WHERE user_id = ?1",
+            params![user_id],
+            |r| r.get(0),
+        )?;
+        Ok(count as usize)
     }
 
-    /// 如果用户会话数超过 max_sessions，按创建时间从旧到新清理多余会话
     pub fn cleanup_oldest_user_sessions(
         &self,
         user_id: &str,
         max_sessions: usize,
     ) -> Result<(), StoreError> {
-        let prefix = keys::session_user_index_prefix(user_id)?;
-        let mut sessions: Vec<(String, chrono::DateTime<Utc>)> = Vec::new();
-
-        for item in self.sessions.scan_prefix(prefix.as_bytes()) {
-            let (k, _) = item?;
-            let key_str = match String::from_utf8(k.to_vec()) {
-                Ok(s) => s,
-                Err(_) => continue,
-            };
-            if let Some(hash) = key_str.rsplit(':').next() {
-                if let Ok(session_key) = keys::session_key(hash) {
-                    if let Some(raw) = self.sessions.get(session_key.as_bytes())? {
-                        if let Ok(session) = Self::deserialize::<Session>(&raw) {
-                            sessions.push((hash.to_string(), session.created_at));
-                        }
-                    }
-                }
-            }
-        }
-
-        if sessions.len() <= max_sessions {
-            return Ok(());
-        }
-
-        // 按创建时间升序排列（最旧的在前）
-        sessions.sort_by_key(|(_, created_at)| *created_at);
-
-        let to_remove = sessions.len() - max_sessions;
-        for (hash, _) in sessions.into_iter().take(to_remove) {
-            self.delete_session(&hash)?;
-        }
-
+        let conn = self.conn()?;
+        conn.execute(
+            "DELETE FROM sessions WHERE token_hash IN (
+                SELECT token_hash FROM sessions
+                WHERE user_id = ?1
+                ORDER BY created_at DESC
+                LIMIT -1 OFFSET ?2
+            )",
+            params![user_id, max_sessions as i64],
+        )?;
         Ok(())
     }
 
-    /// 清理过期会话，每批最多处理 1000 条，避免长时间阻塞。
-    /// 返回本批次实际删除的会话数。
     pub fn cleanup_expired_sessions(&self) -> Result<u32, StoreError> {
-        const MAX_BATCH_SIZE: usize = 1000;
-
-        let mut expired = Vec::new();
-        for item in self.sessions.iter() {
-            let (k, v) = item?;
-            let key_str = String::from_utf8_lossy(&k);
-            if key_str.starts_with("user:") {
-                continue;
-            }
-            let session: Session = Self::deserialize(&v)?;
-            if session.expires_at <= Utc::now() || session.revoked {
-                expired.push(session.token_hash);
-                if expired.len() >= MAX_BATCH_SIZE {
-                    break;
-                }
-            }
-        }
-
-        let count = expired.len() as u32;
-        for token_hash in expired {
-            self.delete_session(&token_hash)?;
-        }
-
-        Ok(count)
+        let conn = self.conn()?;
+        let deleted = conn.execute(
+            "DELETE FROM sessions WHERE token_hash IN (
+                SELECT token_hash FROM sessions
+                WHERE expires_at <= ?1 OR revoked = 1
+                LIMIT 1000
+            )",
+            params![Utc::now().to_rfc3339()],
+        )?;
+        Ok(deleted as u32)
     }
 
     pub fn create_admin_session(&self, session: &Session) -> Result<(), StoreError> {
-        let key = keys::session_key(&session.token_hash)?;
-        let index_key = keys::session_user_index_key(&session.user_id, &session.token_hash)?;
-        let session_bytes = Self::serialize(session)?;
-
-        let key_bytes = key.as_bytes().to_vec();
-        let index_key_bytes = index_key.as_bytes().to_vec();
-        self.admin_sessions
-            .transaction(move |tx| {
-                tx.insert(key_bytes.as_slice(), session_bytes.as_slice())?;
-                tx.insert(index_key_bytes.as_slice(), &[] as &[u8])?;
-                Ok(())
-            })
-            .map_err(|e: sled::transaction::TransactionError<()>| match e {
-                sled::transaction::TransactionError::Abort(()) => {
-                    StoreError::Sled(sled::Error::Unsupported("transaction aborted".into()))
-                }
-                sled::transaction::TransactionError::Storage(se) => StoreError::Sled(se),
-            })?;
-        Ok(())
+        let conn = self.conn()?;
+        insert_session(&conn, "admin_sessions", session)
     }
 
-    /// 获取管理员会话，如果已过期或已撤销则返回 None。
-    /// 不产生删除副作用——过期会话的清理由专用后台任务负责。
     pub fn get_admin_session(&self, token_hash: &str) -> Result<Option<Session>, StoreError> {
-        let key = keys::session_key(token_hash)?;
-        let Some(raw) = self.admin_sessions.get(key.as_bytes())? else {
-            return Ok(None);
-        };
-
-        let session = Self::deserialize::<Session>(&raw)?;
-        if session.revoked || session.expires_at <= Utc::now() {
-            return Ok(None);
-        }
-
-        Ok(Some(session))
+        let conn = self.conn()?;
+        get_active_session(&conn, "admin_sessions", token_hash)
     }
 
     pub fn delete_admin_session(&self, token_hash: &str) -> Result<(), StoreError> {
-        let key = keys::session_key(token_hash)?;
-        let session_key_bytes = key.as_bytes().to_vec();
-        let index_key_bytes = self
-            .admin_sessions
-            .get(key.as_bytes())?
-            .and_then(|raw| Self::deserialize::<Session>(&raw).ok())
-            .and_then(|session| {
-                keys::session_user_index_key(&session.user_id, token_hash)
-                    .ok()
-                    .map(|k| k.as_bytes().to_vec())
-            });
-
-        self.admin_sessions
-            .transaction(move |tx| {
-                if let Some(ref idx_key) = index_key_bytes {
-                    tx.remove(idx_key.as_slice())?;
-                }
-                tx.remove(session_key_bytes.as_slice())?;
-                Ok(())
-            })
-            .map_err(|e: sled::transaction::TransactionError<()>| match e {
-                sled::transaction::TransactionError::Abort(()) => {
-                    StoreError::Sled(sled::Error::Unsupported("transaction aborted".into()))
-                }
-                sled::transaction::TransactionError::Storage(se) => StoreError::Sled(se),
-            })?;
-
-        Ok(())
+        let conn = self.conn()?;
+        delete_session_row(&conn, "admin_sessions", token_hash)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use chrono::Duration;
-    use tempfile::tempdir;
 
     use super::*;
+
+    fn test_store() -> Store {
+        Store::open(":memory:", 5000, 1).unwrap()
+    }
 
     fn sample_session(token_hash: &str, user_id: &str, expires_in_hours: i64) -> Session {
         Session {
@@ -315,10 +202,7 @@ mod tests {
 
     #[test]
     fn create_and_get_session() {
-        let dir = tempdir().unwrap();
-        let db_path = dir.path().join("sessions-db");
-        let store = Store::open(db_path.to_str().unwrap()).unwrap();
-
+        let store = test_store();
         let session = sample_session("h1", "u1", 1);
         store.create_session(&session).unwrap();
 
@@ -327,11 +211,65 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_expired() {
-        let dir = tempdir().unwrap();
-        let db_path = dir.path().join("sessions-db2");
-        let store = Store::open(db_path.to_str().unwrap()).unwrap();
+    fn expired_session_not_returned() {
+        let store = test_store();
+        store
+            .create_session(&sample_session("h_expired", "u1", -1))
+            .unwrap();
+        assert!(store.get_session("h_expired").unwrap().is_none());
+    }
 
+    #[test]
+    fn revoked_session_not_returned() {
+        let store = test_store();
+        let mut s = sample_session("h_revoked", "u1", 1);
+        s.revoked = true;
+        store.create_session(&s).unwrap();
+        assert!(store.get_session("h_revoked").unwrap().is_none());
+    }
+
+    #[test]
+    fn delete_session_if_exists_returns_correct_flag() {
+        let store = test_store();
+        store
+            .create_session(&sample_session("h1", "u1", 1))
+            .unwrap();
+        assert!(store.delete_session_if_exists("h1").unwrap());
+        assert!(!store.delete_session_if_exists("h1").unwrap());
+    }
+
+    #[test]
+    fn delete_user_sessions_removes_all() {
+        let store = test_store();
+        store
+            .create_session(&sample_session("h1", "u1", 1))
+            .unwrap();
+        store
+            .create_session(&sample_session("h2", "u1", 1))
+            .unwrap();
+        store
+            .create_session(&sample_session("h3", "u2", 1))
+            .unwrap();
+        assert_eq!(store.delete_user_sessions("u1").unwrap(), 2);
+        assert_eq!(store.count_user_sessions("u1").unwrap(), 0);
+        assert_eq!(store.count_user_sessions("u2").unwrap(), 1);
+    }
+
+    #[test]
+    fn cleanup_oldest_keeps_newest() {
+        let store = test_store();
+        for i in 0..5 {
+            let mut s = sample_session(&format!("h{i}"), "u1", 1);
+            s.created_at = Utc::now() + Duration::seconds(i);
+            store.create_session(&s).unwrap();
+        }
+        store.cleanup_oldest_user_sessions("u1", 2).unwrap();
+        assert_eq!(store.count_user_sessions("u1").unwrap(), 2);
+    }
+
+    #[test]
+    fn cleanup_expired() {
+        let store = test_store();
         store
             .create_session(&sample_session("h_expired", "u1", -1))
             .unwrap();
@@ -341,7 +279,19 @@ mod tests {
 
         let cleaned = store.cleanup_expired_sessions().unwrap();
         assert_eq!(cleaned, 1);
-        assert!(store.get_session("h_expired").unwrap().is_none());
-        assert!(store.get_session("h_alive").unwrap().is_some());
+        assert_eq!(store.count_user_sessions("u1").unwrap(), 1);
+    }
+
+    #[test]
+    fn admin_session_crud() {
+        let store = test_store();
+        let session = sample_session("ah1", "admin1", 1);
+        store.create_admin_session(&session).unwrap();
+
+        let got = store.get_admin_session("ah1").unwrap().unwrap();
+        assert_eq!(got.user_id, "admin1");
+
+        store.delete_admin_session("ah1").unwrap();
+        assert!(store.get_admin_session("ah1").unwrap().is_none());
     }
 }

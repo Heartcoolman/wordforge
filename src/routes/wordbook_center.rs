@@ -591,22 +591,13 @@ async fn admin_sync(
 // ════════════════════ User endpoints ════════════════════
 
 fn get_user_wb_center_url(state: &AppState, user_id: &str) -> Result<Option<String>, AppError> {
-    let key = crate::store::keys::user_preferences_key(user_id)?;
-    match state
-        .store()
-        .user_preferences
-        .get(key.as_bytes())
-        .map_err(|e| AppError::internal(&e.to_string()))?
-    {
-        Some(raw) => {
-            let val: serde_json::Value =
-                serde_json::from_slice(&raw).unwrap_or(serde_json::Value::Null);
-            Ok(val
-                .get("wordbookCenterUrl")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_string()))
-        }
+    match state.store().get_user_preferences(user_id)? {
+        Some(val) => Ok(val
+            .get("wordbook_center_url")
+            .or(val.get("wordbookCenterUrl"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())),
         None => Ok(None),
     }
 }
@@ -616,39 +607,26 @@ fn set_user_wb_center_url(
     user_id: &str,
     url: Option<&str>,
 ) -> Result<(), AppError> {
-    let key = crate::store::keys::user_preferences_key(user_id)?;
-    let mut val: serde_json::Value = match state
+    let mut prefs = state
         .store()
-        .user_preferences
-        .get(key.as_bytes())
-        .map_err(|e| AppError::internal(&e.to_string()))?
-    {
-        Some(raw) => serde_json::from_slice(&raw).unwrap_or(serde_json::json!({})),
-        None => serde_json::json!({}),
-    };
+        .get_user_preferences(user_id)?
+        .unwrap_or(serde_json::json!({}));
 
-    if let Some(obj) = val.as_object_mut() {
+    if let Some(obj) = prefs.as_object_mut() {
         match url {
             Some(u) if !u.is_empty() => {
                 obj.insert(
-                    "wordbookCenterUrl".to_string(),
+                    "wordbook_center_url".to_string(),
                     serde_json::Value::String(u.to_string()),
                 );
             }
             _ => {
-                obj.remove("wordbookCenterUrl");
+                obj.remove("wordbook_center_url");
             }
         }
     }
 
-    state
-        .store()
-        .user_preferences
-        .insert(
-            key.as_bytes(),
-            serde_json::to_vec(&val).map_err(|e| AppError::internal(&e.to_string()))?,
-        )
-        .map_err(|e| AppError::internal(&e.to_string()))?;
+    state.store().set_user_preferences(user_id, &prefs)?;
     Ok(())
 }
 

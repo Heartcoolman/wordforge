@@ -120,7 +120,7 @@ fn test_mastery_reachable() {
     let mut state = WordMasteryState::new("test-word");
 
     for _ in 0..5 {
-        let _ = update_mastery(&mut state, true, 0.95, 1.0, 0.9, &config);
+        let _ = update_mastery(&mut state, true, 0.95, 1.0, 0.9, &config, None);
     }
 
     assert!(
@@ -271,7 +271,7 @@ fn test_mastery_regresses_on_errors() {
 
     // Build up to Reviewing/Mastered
     for _ in 0..10 {
-        let _ = update_mastery(&mut state, true, 0.95, 1.0, 0.9, &config);
+        let _ = update_mastery(&mut state, true, 0.95, 1.0, 0.9, &config, None);
     }
     let peak_level = state.mastery_level.clone();
     assert!(
@@ -282,7 +282,7 @@ fn test_mastery_regresses_on_errors() {
 
     // Multiple incorrect answers should reduce mastery
     for _ in 0..15 {
-        let _ = update_mastery(&mut state, false, 0.1, 1.0, 0.9, &config);
+        let _ = update_mastery(&mut state, false, 0.1, 1.0, 0.9, &config, None);
     }
 
     assert!(

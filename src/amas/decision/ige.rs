@@ -2,7 +2,7 @@ use std::hash::{Hash, Hasher};
 
 use serde::{Deserialize, Serialize};
 
-use crate::amas::config::AMASConfig;
+use crate::amas::config::{AMASConfig, IgeConfig};
 use crate::amas::types::*;
 
 const UNEXPLORED_BIN_SCORE: f64 = 1e6;
@@ -23,27 +23,6 @@ pub struct BinStats {
     pub variance: f64,
 }
 
-impl Default for IgeState {
-    fn default() -> Self {
-        Self {
-            difficulty_bins: vec![
-                BinStats::new(0.0, 0.2),
-                BinStats::new(0.2, 0.4),
-                BinStats::new(0.4, 0.6),
-                BinStats::new(0.6, 0.8),
-                BinStats::new(0.8, 1.0),
-            ],
-            ratio_bins: vec![
-                BinStats::new(0.0, 0.25),
-                BinStats::new(0.25, 0.5),
-                BinStats::new(0.5, 0.75),
-                BinStats::new(0.75, 1.0),
-            ],
-            total_explorations: 0,
-        }
-    }
-}
-
 impl BinStats {
     fn new(range_start: f64, range_end: f64) -> Self {
         Self {
@@ -57,6 +36,83 @@ impl BinStats {
 
     fn midpoint(&self) -> f64 {
         (self.range_start + self.range_end) / 2.0
+    }
+}
+
+/// Bell-CDF bin boundaries: denser in the middle [0.3, 0.7].
+/// Inverse CDF of Beta(2,2): solves 3x²-2x³ = p via Newton's method.
+fn logistic_boundaries(count: usize) -> Vec<f64> {
+    if count < 2 {
+        return vec![0.0, 1.0];
+    }
+    let mut boundaries = Vec::with_capacity(count + 1);
+    for i in 0..=count {
+        let p = i as f64 / count as f64;
+        boundaries.push(beta22_inv_cdf(p));
+    }
+    boundaries[0] = 0.0;
+    boundaries[count] = 1.0;
+    boundaries
+}
+
+fn beta22_inv_cdf(p: f64) -> f64 {
+    if p <= 0.0 {
+        return 0.0;
+    }
+    if p >= 1.0 {
+        return 1.0;
+    }
+    let mut x = p;
+    for _ in 0..12 {
+        let f = 3.0 * x * x - 2.0 * x * x * x - p;
+        let fp = 6.0 * x * (1.0 - x);
+        if fp.abs() < 1e-15 {
+            break;
+        }
+        x -= f / fp;
+    }
+    x.clamp(0.0, 1.0)
+}
+
+fn generate_log_bins(count: usize) -> Vec<BinStats> {
+    let bounds = logistic_boundaries(count);
+    bounds
+        .windows(2)
+        .map(|w| BinStats::new(w[0], w[1]))
+        .collect()
+}
+
+fn apply_pretrained_rewards(mut bins: Vec<BinStats>, rewards: &[f64]) -> Vec<BinStats> {
+    for (bin, reward) in bins.iter_mut().zip(rewards.iter()) {
+        bin.avg_reward = *reward;
+        bin.count = 1;
+    }
+    bins
+}
+
+impl IgeState {
+    pub fn new(config: &IgeConfig) -> Self {
+        let mut diff_bins = generate_log_bins(config.difficulty_bin_count);
+        let mut ratio_bins = generate_log_bins(config.ratio_bin_count);
+
+        if let Some(ref rewards) = config.pretrained_difficulty_rewards {
+            diff_bins = apply_pretrained_rewards(diff_bins, rewards);
+        }
+        if let Some(ref rewards) = config.pretrained_ratio_rewards {
+            ratio_bins = apply_pretrained_rewards(ratio_bins, rewards);
+        }
+
+        Self {
+            difficulty_bins: diff_bins,
+            ratio_bins,
+            total_explorations: 0,
+        }
+    }
+}
+
+impl Default for IgeState {
+    fn default() -> Self {
+        Self::new(&IgeConfig::default())
     }
 }
 
@@ -91,7 +147,14 @@ pub fn generate(
                 .unwrap_or(std::cmp::Ordering::Equal)
         })
         .cloned()
-        .unwrap_or_else(|| BinStats::new(0.4, 0.6));
+        .unwrap_or_else(|| {
+            let mid = ige_state
+                .difficulty_bins
+                .get(ige_state.difficulty_bins.len() / 2)
+                .cloned()
+                .unwrap_or_else(|| BinStats::new(0.4, 0.6));
+            mid
+        });
 
     let best_ratio = ige_state
         .ratio_bins
@@ -102,7 +165,14 @@ pub fn generate(
                 .unwrap_or(std::cmp::Ordering::Equal)
         })
         .cloned()
-        .unwrap_or_else(|| BinStats::new(0.25, 0.5));
+        .unwrap_or_else(|| {
+            let mid = ige_state
+                .ratio_bins
+                .get(ige_state.ratio_bins.len() / 2)
+                .cloned()
+                .unwrap_or_else(|| BinStats::new(0.25, 0.5));
+            mid
+        });
 
     let mut difficulty = best_diff.midpoint().clamp(0.0, 1.0);
     if user_state.fatigue > 0.7 {
@@ -161,8 +231,60 @@ fn update_bin(bin: &mut BinStats, reward: f64) {
     bin.count += 1;
     let n = bin.count as f64;
     bin.avg_reward += (reward - bin.avg_reward) / n;
-    // Welford's online variance: reconstruct M2 from old count, then update
     let m2 = bin.variance * (old_count - 1.0).max(0.0);
     let new_m2 = m2 + (reward - old_avg) * (reward - bin.avg_reward);
     bin.variance = if n > 1.0 { new_m2 / (n - 1.0) } else { 0.0 };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn log_bins_cover_full_range() {
+        let bins = generate_log_bins(20);
+        assert!((bins[0].range_start - 0.0).abs() < 1e-9);
+        assert!((bins.last().unwrap().range_end - 1.0).abs() < 1e-9);
+        // Verify contiguous
+        for w in bins.windows(2) {
+            assert!((w[0].range_end - w[1].range_start).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn log_bins_denser_in_middle() {
+        let bins = generate_log_bins(20);
+        let first_span = bins[4].range_end - bins[0].range_start;
+        let last_span = bins[19].range_end - bins[15].range_start;
+        assert!((first_span - last_span).abs() < 0.05);
+        let mid_avg = (bins[11].range_end - bins[8].range_start) / 3.0;
+        let edge_avg = first_span / 4.0;
+        assert!(
+            mid_avg < edge_avg,
+            "middle bins should be narrower: mid_avg={mid_avg} < edge_avg={edge_avg}"
+        );
+    }
+
+    #[test]
+    fn pretrained_rewards_applied() {
+        let rewards = vec![0.5, 0.6, 0.7];
+        let bins = generate_log_bins(3);
+        let applied = apply_pretrained_rewards(bins, &rewards);
+        for (bin, expected) in applied.iter().zip(rewards.iter()) {
+            assert!((bin.avg_reward - expected).abs() < 1e-9);
+            assert_eq!(bin.count, 1);
+        }
+    }
+
+    #[test]
+    fn ige_state_new_uses_config() {
+        let config = IgeConfig {
+            difficulty_bin_count: 10,
+            ratio_bin_count: 8,
+            ..Default::default()
+        };
+        let state = IgeState::new(&config);
+        assert_eq!(state.difficulty_bins.len(), 10);
+        assert_eq!(state.ratio_bins.len(), 8);
+    }
 }

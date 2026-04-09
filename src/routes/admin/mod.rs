@@ -194,18 +194,11 @@ async fn admin_reset_user_password(
     let raw_token = uuid::Uuid::new_v4().simple().to_string();
     let token_hash = hash_token(&raw_token);
 
-    let entry = crate::routes::auth::PasswordResetEntry {
-        user_id: id.clone(),
-        expires_at: chrono::Utc::now() + chrono::Duration::hours(4),
-    };
+    let expires_at = (chrono::Utc::now() + chrono::Duration::hours(4)).to_rfc3339();
 
     state
         .store()
-        .password_reset_tokens
-        .insert(
-            crate::store::keys::password_reset_key(&token_hash)?.as_bytes(),
-            serde_json::to_vec(&entry).map_err(|e| AppError::internal(&e.to_string()))?,
-        )
+        .create_password_reset_token(&token_hash, &id, &expires_at)
         .map_err(|e| AppError::internal(&e.to_string()))?;
 
     tracing::info!(
