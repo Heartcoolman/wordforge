@@ -93,6 +93,7 @@ interface PickNextWordRequest {
   activeWordIds: string[];      // 当前队列中的单词 ID
   errorWordIds: string[];       // 有错误记录的单词 ID
   lastShownMap?: Record<string, number>; // 各单词上次展示时间戳（ms）
+  priorityMap?: Record<string, number>;  // 各单词优先级（数值越大越优先）
 }
 
 // 响应
@@ -102,7 +103,7 @@ interface PickNextWordResponse {
 }
 ```
 
-选词逻辑：错误词优先（按 lastShown 升序），无错误时按 lastShown 升序。
+选词逻辑：错误词优先（按 lastShown 升序），无错误时按 priority 降序、lastShown 升序。
 
 ### 选项生成请求
 

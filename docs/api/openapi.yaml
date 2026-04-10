@@ -888,6 +888,10 @@ paths:
                   type: object
                   additionalProperties:
                     type: integer
+                priorityMap:
+                  type: object
+                  additionalProperties:
+                    type: integer
       responses:
         '200':
           description: Next word to show
@@ -2678,7 +2682,7 @@ components:
 
     WordState:
       type: string
-      enum: [New, Learning, Reviewing, Mastered, Forgotten]
+      enum: [NEW, LEARNING, REVIEWING, MASTERED, FORGOTTEN]
 
     WordLearningState:
       type: object
