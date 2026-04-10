@@ -3,15 +3,19 @@ layout: page
 ---
 
 <script setup>
-import { onMounted } from 'vue'
+import { onMounted, onUnmounted } from 'vue'
 
 onMounted(() => {
+  document.documentElement.classList.add('openapi-page')
+
   const link = document.createElement('link')
   link.rel = 'stylesheet'
+  link.id = 'swagger-css'
   link.href = 'https://unpkg.com/swagger-ui-dist@5/swagger-ui.css'
   document.head.appendChild(link)
 
   const script = document.createElement('script')
+  script.id = 'swagger-js'
   script.src = 'https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js'
   script.onload = () => {
     window.SwaggerUIBundle({
@@ -25,17 +29,21 @@ onMounted(() => {
   }
   document.head.appendChild(script)
 })
+
+onUnmounted(() => {
+  document.documentElement.classList.remove('openapi-page')
+})
 </script>
 
 <div id="swagger-ui"></div>
 
 <style>
-/* 隐藏 VitePress 侧边栏和右侧导航，释放全部宽度 */
-.VPSidebar { display: none !important; }
-.VPDocAside { display: none !important; }
-.VPDoc .container { max-width: 100% !important; }
-.VPDoc .content { max-width: 100% !important; padding: 0 24px !important; }
-.VPContent.has-sidebar { padding-left: 0 !important; }
+/* 仅在 OpenAPI 页面生效 */
+html.openapi-page .VPSidebar { display: none !important; }
+html.openapi-page .VPDocAside { display: none !important; }
+html.openapi-page .VPDoc .container { max-width: 100% !important; }
+html.openapi-page .VPDoc .content { max-width: 100% !important; padding: 0 24px !important; }
+html.openapi-page .VPContent.has-sidebar { padding-left: 0 !important; }
 
 /* Swagger UI 样式优化 */
 .swagger-ui .topbar { display: none; }
