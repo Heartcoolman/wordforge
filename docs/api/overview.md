@@ -29,8 +29,11 @@ Authorization: Bearer <JWT>
 | [单词管理](/api/words) | `/api/words`, `/api/wordbooks`, `/api/word-states` | 单词 CRUD、词书管理、学习状态 |
 | [管理后台](/api/admin) | `/api/admin` | 用户管理、系统监控、数据分析、系统设置 |
 | 用户 | `/api/users` | 用户信息、统计 |
-| 用户画像 | `/api/user-profile` | 奖励偏好、认知画像、学习风格、时间类型 |
-| 通知 | `/api/notifications` | 通知列表、已读标记、徽章、偏好 |
+| 用户画像 | `/api/user-profile` | 奖励偏好、习惯画像、头像管理 |
+| 通知 | `/api/notifications` | 通知列表、已读标记、徽章、用户偏好设置 |
 | 内容增强 | `/api/content` | 词源分析、语义搜索、词素拆解、混淆词对 |
+| 词书中心 | `/api/wordbook-center` | 在线词书浏览、预览、导入 |
 | 实时事件 | `/api/realtime/events` | SSE 连接，推送 AMAS 状态变更 |
 | 健康检查 | `/health` | 存活探测、就绪探测、数据库健康、算法指标 |
+
+详细的接口规范请参阅 [OpenAPI 文档](https://github.com/Heartcoolman/wordforge/blob/main/docs/api/openapi.yaml) 或 [客户端接入指南](/api/client-guide)。

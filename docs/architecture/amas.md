@@ -1,6 +1,6 @@
 # AMAS 自适应算法
 
-**Adaptive Mastery Acquisition System** 是系统的核心学习引擎。
+**Adaptive Mastery Acquisition System** 是系统的核心学习引擎，采用 DSR (Difficulty-Stability-Retrievability) 架构。
 
 ## 工作流程
 
@@ -11,11 +11,11 @@
        ▼
 ┌──────────────┐     ┌────────────────┐
 │  ELO 评分    │────▶│  记忆模型更新   │
-│  (难度匹配)  │     │  (遗忘概率预测) │
+│  (难度匹配)  │     │  (DSR 状态追踪) │
 └──────┬───────┘     └───────┬────────┘
        ▼                     ▼
 ┌──────────────────────────────────┐
-│        智能选词决策引擎           │
+│      智能生成引擎 (IGE)           │
 │  综合：遗忘概率 × 难度匹配 ×     │
 │        学习阶段 × 疲劳状态       │
 └──────────────┬───────────────────┘
@@ -29,18 +29,37 @@
 ## 核心组件
 
 - **ELO 系统**：借鉴国际象棋评分，为用户和单词分别维护评分，实现精准难度匹配
-- **多模型记忆曲线**：支持多种遗忘模型的集成预测
-- **实时策略调整**：根据用户疲劳度和近期表现，动态调节新词比例、难度区间和每批词量
+- **DSR 记忆模型**：基于 FSRS-5 的 19 参数可训练模型，Stability 直接代表「回忆率 90% 对应的天数」
+- **多模型集成**：支持多种记忆模型（Mastery、MDM、SSP、EVM、IAD、MTP）的集成预测
+- **IGE 决策引擎**：智能生成引擎，根据用户状态实时调节新词比例、难度区间和每批词量
+
+## 记忆模型
+
+| 模型 | 文件 | 说明 |
+|------|------|------|
+| Mastery | `mastery.rs` | 掌握度追踪模型 |
+| MDM | `mdm.rs` | 多维记忆模型 |
+| SSP | `ssp.rs` | 间隔重复调度模型 |
+| EVM | `evm.rs` | 指数衰减模型 |
+| IAD | `iad.rs` | 间隔自适应模型 |
+| MTP | `mtp.rs` | 多轨迹预测模型 |
 
 ## 冷启动阶段
-
-AMAS 引擎包含三个冷启动阶段：
 
 | 阶段 | 说明 |
 |------|------|
 | Classify | 初始分类，快速评估用户水平 |
 | Explore | 探索阶段，测试不同难度范围 |
 | Normal | 常规阶段，稳定的个性化推荐 |
+
+## 决策层
+
+| 模块 | 文件 | 说明 |
+|------|------|------|
+| IGE | `ige.rs` | 智能生成引擎，核心决策逻辑 |
+| Ensemble | `ensemble.rs` | 多模型集成决策 |
+| Heuristic | `heuristic.rs` | 启发式规则决策 |
+| SWD | `swd.rs` | 选词决策策略 |
 
 ## 算法决策结果
 
@@ -55,12 +74,25 @@ AMAS 引擎包含三个冷启动阶段：
 
 ```
 src/amas/
-├── engine.rs         # 引擎核心
-├── elo.rs            # ELO 评分系统
-├── memory/           # 记忆模型（遗忘曲线）
-├── decision/         # 决策层
-├── word_selector.rs  # 智能选词
-├── config.rs         # 算法参数配置
-├── metrics.rs        # 性能指标
-└── monitoring.rs     # 引擎监控
+├── engine.rs              # 引擎核心调度
+├── elo.rs                 # ELO 评分系统
+├── config.rs              # 算法参数配置
+├── types.rs               # 类型定义
+├── word_selector.rs       # 智能选词
+├── metrics.rs             # 性能指标
+├── metrics_persistence.rs # 指标持久化
+├── monitoring.rs          # 引擎监控
+├── memory/                # 记忆模型
+│   ├── mastery.rs         #   掌握度模型
+│   ├── mdm.rs             #   多维记忆模型
+│   ├── ssp.rs             #   SSP 间隔重复调度
+│   ├── evm.rs             #   指数衰减模型
+│   ├── iad.rs             #   间隔自适应模型
+│   ├── mtp.rs             #   多轨迹预测模型
+│   └── benchmark_adapter.rs # 性能基准适配器
+└── decision/              # 决策层
+    ├── ige.rs             #   智能生成引擎
+    ├── ensemble.rs        #   集成决策
+    ├── heuristic.rs       #   启发式决策
+    └── swd.rs             #   选词决策
 ```
