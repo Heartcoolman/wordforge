@@ -33,6 +33,7 @@ export default defineConfig({
           items: [
             { text: '技术栈', link: '/architecture/tech-stack' },
             { text: 'AMAS 自适应算法', link: '/architecture/amas' },
+            { text: '核心算法详解', link: '/architecture/core-algorithms' },
             { text: '认证机制', link: '/architecture/auth' },
             { text: '疲劳检测方案', link: '/architecture/fatigue-detection' },
             { text: '后台任务系统', link: '/architecture/workers' },
@@ -44,6 +45,7 @@ export default defineConfig({
           text: 'API 文档',
           items: [
             { text: 'API 总览', link: '/api/overview' },
+            { text: '客户端接入指南', link: '/api/client-guide' },
             { text: '认证 API', link: '/api/auth' },
             { text: '学习 API', link: '/api/learning' },
             { text: '单词管理 API', link: '/api/words' },

@@ -5,7 +5,7 @@
 | 层级 | 技术 |
 |------|------|
 | 框架 | Axum 0.7 + Tokio 异步运行时 |
-| 存储 | sled 0.34 嵌入式 KV 数据库（零依赖部署） |
+| 存储 | SQLite (rusqlite + r2d2 连接池) 嵌入式关系数据库 |
 | 认证 | JWT (jsonwebtoken) + Argon2 密码哈希 + HttpOnly Cookie |
 | 安全 | SHA-256 Token 哈希、速率限制、CORS、请求体大小限制 |
 | 调度 | tokio-cron-scheduler 后台任务系统（17+ 定时任务） |

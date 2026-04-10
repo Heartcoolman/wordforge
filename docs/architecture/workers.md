@@ -19,12 +19,18 @@
 | `algorithm_optimization` | 算法参数自优化 |
 | `health_analysis` | 系统健康分析 |
 | `monitoring_aggregate` | 监控数据聚合 |
+| `confusion_pair_cache` | 混淆词对缓存更新 |
+| `word_clustering` | 词汇聚类分析 |
+| `etymology_generation` | 词源信息生成 |
+| `embedding_generation` | 词向量嵌入生成 |
+| `llm_advisor` | LLM 顾问（需开启 `ENABLE_LLM_ADVISOR_WORKER`） |
 | `log_export` | 日志导出 |
 
 ## 代码位置
 
 ```
 src/workers/
+├── mod.rs                    # 任务注册与调度
 ├── session_cleanup.rs
 ├── password_reset_cleanup.rs
 ├── forgetting_alert.rs
@@ -36,6 +42,10 @@ src/workers/
 ├── algorithm_optimization.rs
 ├── health_analysis.rs
 ├── monitoring_aggregate.rs
-├── log_export.rs
-└── ...
+├── confusion_pair_cache.rs
+├── word_clustering.rs
+├── etymology_generation.rs
+├── embedding_generation.rs
+├── llm_advisor.rs
+└── log_export.rs
 ```

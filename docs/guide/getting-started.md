@@ -8,8 +8,8 @@
 ## 1. 克隆与配置
 
 ```bash
-git clone <repo-url> english
-cd english
+git clone https://github.com/Heartcoolman/wordforge.git
+cd wordforge
 cp .env.example .env
 ```
 
