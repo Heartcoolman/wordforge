@@ -1,0 +1,2377 @@
+openapi: 3.0.3
+info:
+  title: WordForge API
+  description: 基于 AMAS 自适应引擎的英语学习 REST API
+  version: 1.0.0
+
+servers:
+  - url: /
+
+tags:
+  - name: Auth
+    description: 注册、登录、Token 刷新、登出、密码重置
+  - name: Users
+    description: 当前用户资料与统计
+  - name: Words
+    description: 单词 CRUD、批量操作、导入
+  - name: Wordbooks
+    description: 系统词书与用户词书管理
+  - name: WordStates
+    description: 用户维度的单词学习状态
+  - name: Learning
+    description: 学习会话与 AMAS 驱动的选词策略
+  - name: Records
+    description: 作答记录与统计
+  - name: StudyConfig
+    description: 用户学习配置
+  - name: AMAS
+    description: 自适应学习引擎状态与策略
+  - name: UserProfile
+    description: 奖励偏好、认知画像、习惯画像、头像
+  - name: Notifications
+    description: 通知、徽章、用户偏好设置
+  - name: Content
+    description: 词源、语义搜索、词素分析、混淆词对
+  - name: WordbookCenter
+    description: 远程词书浏览、导入、同步
+  - name: Realtime
+    description: SSE 实时事件推送
+  - name: Admin
+    description: 管理员认证、用户管理、分析看板、系统监控
+  - name: Health
+    description: 存活探针、就绪探针、数据库健康、算法指标
+  - name: V1
+    description: V1 兼容层（无 AMAS）
+
+paths:
+  # ── Auth ──
+  /api/auth/register:
+    post:
+      tags: [Auth]
+      summary: 注册新用户
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+      responses:
+        '201':
+          description: Registration successful
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse_AuthResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/auth/login:
+    post:
+      tags: [Auth]
+      summary: 邮箱密码登录
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Login successful
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse_AuthResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /api/auth/refresh:
+    post:
+      tags: [Auth]
+      summary: 刷新 access token
+      description: |
+        Send the refresh token via `Authorization: Bearer <refresh_token>`
+        header or `refresh_token` cookie. Returns a new token pair.
+        The old refresh token is invalidated (rotation).
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Token refreshed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse_AuthResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/auth/logout:
+    post:
+      tags: [Auth]
+      summary: 登出并撤销所有会话
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Logged out
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse_LoggedOut'
+
+  /api/auth/forgot-password:
+    post:
+      tags: [Auth]
+      summary: 请求密码重置邮件
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email:
+                  type: string
+                  format: email
+      responses:
+        '200':
+          description: Always returns success (prevents email enumeration)
+
+  /api/auth/reset-password:
+    post:
+      tags: [Auth]
+      summary: 使用 token 重置密码
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResetPasswordRequest'
+      responses:
+        '200':
+          description: Password reset successful
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /api/auth/verify-reset-token:
+    post:
+      tags: [Auth]
+      summary: 验证密码重置 token 有效性
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token:
+                  type: string
+      responses:
+        '200':
+          description: Token is valid
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  # ── Users ──
+  /api/users/me:
+    get:
+      tags: [Users]
+      summary: 获取当前用户资料
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: User profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse_UserProfile'
+    put:
+      tags: [Users]
+      summary: 更新用户名
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                username:
+                  type: string
+      responses:
+        '200':
+          description: Updated profile
+
+  /api/users/me/password:
+    put:
+      tags: [Users]
+      summary: 修改密码
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [currentPassword, newPassword]
+              properties:
+                currentPassword:
+                  type: string
+                newPassword:
+                  type: string
+
+      responses:
+        '200':
+          description: Password changed
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/users/me/stats:
+    get:
+      tags: [Users]
+      summary: 获取用户学习统计
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: User stats
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse_UserStats'
+
+  # ── Words ──
+  /api/words:
+    get:
+      tags: [Words]
+      summary: 列出单词（分页、可搜索）
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/page'
+        - $ref: '#/components/parameters/perPage'
+        - name: search
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Paginated word list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedResponse_Word'
+    post:
+      tags: [Words]
+      summary: 创建单词（管理员）
+      security:
+        - AdminBearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpsertWordRequest'
+      responses:
+        '201':
+          description: Word created
+
+  /api/words/{id}:
+    get:
+      tags: [Words]
+      summary: 按 ID 获取单词
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/id'
+      responses:
+        '200':
+          description: Word detail
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags: [Words]
+      summary: 更新单词（管理员）
+      security:
+        - AdminBearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/id'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpsertWordRequest'
+      responses:
+        '200':
+          description: Word updated
+    delete:
+      tags: [Words]
+      summary: 删除单词（管理员）
+      security:
+        - AdminBearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/id'
+      responses:
+        '200':
+          description: Word deleted
+
+  /api/words/count:
+    get:
+      tags: [Words]
+      summary: 获取单词总数
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Word count
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      total:
+                        type: integer
+
+  /api/words/batch:
+    post:
+      tags: [Words]
+      summary: 批量创建单词（管理员）
+      security:
+        - AdminBearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [words]
+              properties:
+                words:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/UpsertWordRequest'
+      responses:
+        '201':
+          description: Batch result with count, skipped indices, items
+
+  /api/words/batch-get:
+    post:
+      tags: [Words]
+      summary: 批量按 ID 获取单词
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids]
+              properties:
+                ids:
+                  type: array
+                  items:
+                    type: string
+      responses:
+        '200':
+          description: Array of words
+
+  /api/words/import-url:
+    post:
+      tags: [Words]
+      summary: 从 URL 导入单词（管理员）
+      security:
+        - AdminBearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url]
+              properties:
+                url:
+                  type: string
+                  format: uri
+      responses:
+        '201':
+          description: Import result
+
+  # ── Wordbooks ──
+  /api/wordbooks/system:
+    get:
+      tags: [Wordbooks]
+      summary: 列出系统词书
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: System wordbook list
+
+  /api/wordbooks/user:
+    get:
+      tags: [Wordbooks]
+      summary: 列出用户词书
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: User wordbook list
+
+  /api/wordbooks:
+    post:
+      tags: [Wordbooks]
+      summary: 创建用户词书
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                description:
+                  type: string
+      responses:
+        '201':
+          description: Wordbook created
+
+  /api/wordbooks/{id}/words:
+    get:
+      tags: [Wordbooks]
+      summary: 列出词书中的单词（分页）
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/id'
+        - $ref: '#/components/parameters/page'
+        - $ref: '#/components/parameters/perPage'
+      responses:
+        '200':
+          description: Paginated word list
+    post:
+      tags: [Wordbooks]
+      summary: 向词书添加单词
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/id'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [wordIds]
+              properties:
+                wordIds:
+                  type: array
+                  items:
+                    type: string
+      responses:
+        '200':
+          description: Words added
+
+  /api/wordbooks/{id}/words/{word_id}:
+    delete:
+      tags: [Wordbooks]
+      summary: 从词书移除单词
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/id'
+        - name: word_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Word removed
+
+  # ── Word States ──
+  /api/word-states/{word_id}:
+    get:
+      tags: [WordStates]
+      summary: 获取单词学习状态
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: word_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Word learning state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse_WordLearningState'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/word-states/batch:
+    post:
+      tags: [WordStates]
+      summary: 批量查询单词状态
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [wordIds]
+              properties:
+                wordIds:
+                  type: array
+                  items:
+                    type: string
+      responses:
+        '200':
+          description: Array of word learning states
+
+  /api/word-states/batch-update:
+    post:
+      tags: [WordStates]
+      summary: 批量更新单词状态
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [updates]
+              properties:
+                updates:
+                  type: array
+                  items:
+                    type: object
+                    required: [wordId]
+                    properties:
+                      wordId:
+                        type: string
+                      state:
+                        $ref: '#/components/schemas/WordState'
+                      masteryLevel:
+                        type: number
+                        minimum: 0
+                        maximum: 1
+      responses:
+        '200':
+          description: Update count
+
+  /api/word-states/due/list:
+    get:
+      tags: [WordStates]
+      summary: 获取待复习单词
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+            maximum: 200
+      responses:
+        '200':
+          description: Due word list
+
+  /api/word-states/stats/overview:
+    get:
+      tags: [WordStates]
+      summary: 单词状态统计概览
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Stats by state (new, learning, reviewing, mastered)
+
+  /api/word-states/{word_id}/mark-mastered:
+    post:
+      tags: [WordStates]
+      summary: 标记单词为已掌握
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: word_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Word marked as mastered
+
+  /api/word-states/{word_id}/reset:
+    post:
+      tags: [WordStates]
+      summary: 重置单词学习状态
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: word_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Word state reset
+
+  # ── Learning ──
+  /api/learning/session:
+    post:
+      tags: [Learning]
+      summary: 创建或恢复学习会话
+      security:
+        - BearerAuth: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                targetMasteryCount:
+                  type: integer
+      responses:
+        '200':
+          description: Session created or resumed
+
+  /api/learning/study-words:
+    get:
+      tags: [Learning]
+      summary: 获取 AMAS 策略推荐的学习单词
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Words and strategy parameters
+
+  /api/learning/next-words:
+    post:
+      tags: [Learning]
+      summary: 获取下一批单词
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [excludeWordIds]
+              properties:
+                excludeWordIds:
+                  type: array
+                  items:
+                    type: string
+                masteredWordIds:
+                  type: array
+                  items:
+                    type: string
+                sessionPerformance:
+                  type: object
+                  properties:
+                    recentAccuracy:
+                      type: number
+                    masteredCount:
+                      type: integer
+                    targetMasteryCount:
+                      type: integer
+                    errorProneWordIds:
+                      type: array
+                      items:
+                        type: string
+      responses:
+        '200':
+          description: Next batch of words
+
+  /api/learning/adjust-words:
+    post:
+      tags: [Learning]
+      summary: 动态调整学习策略
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                recentPerformance:
+                  type: number
+                  minimum: 0
+                  maximum: 1
+                userState:
+                  type: string
+                  enum: [focused, engaged, confident, tired, fatigued, frustrated, distracted, review, sprint]
+      responses:
+        '200':
+          description: Adjusted strategy
+
+  /api/learning/sync-progress:
+    post:
+      tags: [Learning]
+      summary: 同步会话进度
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [sessionId]
+              properties:
+                sessionId:
+                  type: string
+                totalQuestions:
+                  type: integer
+                contextShifts:
+                  type: integer
+      responses:
+        '200':
+          description: Updated session
+
+  /api/learning/complete-session:
+    post:
+      tags: [Learning]
+      summary: 完成学习会话
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [sessionId, masteredWordIds, errorProneWordIds, avgResponseTimeMs]
+              properties:
+                sessionId:
+                  type: string
+                masteredWordIds:
+                  type: array
+                  items:
+                    type: string
+                errorProneWordIds:
+                  type: array
+                  items:
+                    type: string
+                avgResponseTimeMs:
+                  type: integer
+      responses:
+        '200':
+          description: Completed session with summary
+
+  # ── Records ──
+  /api/records:
+    get:
+      tags: [Records]
+      summary: 列出学习记录（分页）
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/page'
+        - $ref: '#/components/parameters/perPage'
+      responses:
+        '200':
+          description: Paginated records
+    post:
+      tags: [Records]
+      summary: 提交作答记录（触发 AMAS 处理）
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateRecordRequest'
+      responses:
+        '201':
+          description: Record created with AMAS result
+        '200':
+          description: Duplicate record (idempotent)
+
+  /api/records/batch:
+    post:
+      tags: [Records]
+      summary: 批量提交作答记录
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [records]
+              properties:
+                records:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/CreateRecordRequest'
+      responses:
+        '201':
+          description: Batch result
+
+  /api/records/statistics:
+    get:
+      tags: [Records]
+      summary: 基础记录统计
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Total, correct, accuracy
+
+  /api/records/statistics/enhanced:
+    get:
+      tags: [Records]
+      summary: 增强统计（含每日明细和连续天数）
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Enhanced stats
+
+  # ── Study Config ──
+  /api/study-config:
+    get:
+      tags: [StudyConfig]
+      summary: 获取学习配置
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Study config
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse_StudyConfig'
+    put:
+      tags: [StudyConfig]
+      summary: 更新学习配置
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                selectedWordbookIds:
+                  type: array
+                  items:
+                    type: string
+                dailyWordCount:
+                  type: integer
+                  minimum: 1
+                  maximum: 200
+                studyMode:
+                  type: string
+                  enum: [MASTERY, REVIEW, MIXED]
+                dailyMasteryTarget:
+                  type: integer
+                  minimum: 1
+                  maximum: 100
+      responses:
+        '200':
+          description: Updated config
+
+  /api/study-config/today-words:
+    get:
+      tags: [StudyConfig]
+      summary: 获取今日学习单词
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Today's words and target count
+
+  /api/study-config/progress:
+    get:
+      tags: [StudyConfig]
+      summary: 获取学习进度
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Progress breakdown by state
+
+  # ── AMAS ──
+  /api/amas/state:
+    get:
+      tags: [AMAS]
+      summary: 获取用户 AMAS 状态
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: AMAS user state
+
+  /api/amas/strategy:
+    get:
+      tags: [AMAS]
+      summary: 获取当前推荐策略
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Strategy parameters
+
+  /api/amas/phase:
+    get:
+      tags: [AMAS]
+      summary: 获取冷启动阶段
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Phase info
+
+  /api/amas/learning-curve:
+    get:
+      tags: [AMAS]
+      summary: 获取学习曲线数据
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Learning curve
+
+  /api/amas/intervention:
+    get:
+      tags: [AMAS]
+      summary: 获取干预建议
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Intervention advice
+
+  /api/amas/reset:
+    post:
+      tags: [AMAS]
+      summary: 重置 AMAS 状态
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: AMAS state reset
+
+  /api/amas/mastery/evaluate:
+    get:
+      tags: [AMAS]
+      summary: 评估单词掌握度
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: wordId
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Mastery evaluation result
+
+  /api/amas/config:
+    get:
+      tags: [AMAS, Admin]
+      summary: 获取 AMAS 引擎配置（管理员）
+      security:
+        - AdminBearerAuth: []
+      responses:
+        '200':
+          description: AMAS config
+    put:
+      tags: [AMAS, Admin]
+      summary: 更新 AMAS 引擎配置（管理员）
+      security:
+        - AdminBearerAuth: []
+      responses:
+        '200':
+          description: Updated config
+
+  /api/amas/metrics:
+    get:
+      tags: [AMAS, Admin]
+      summary: 获取算法指标快照（管理员）
+      security:
+        - AdminBearerAuth: []
+      responses:
+        '200':
+          description: Metrics snapshot
+
+  /api/amas/monitoring:
+    get:
+      tags: [AMAS, Admin]
+      summary: 列出监控事件（管理员）
+      security:
+        - AdminBearerAuth: []
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+      responses:
+        '200':
+          description: Monitoring events
+
+  # ── User Profile ──
+  /api/user-profile/reward:
+    get:
+      tags: [UserProfile]
+      summary: 获取奖励偏好
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Reward preference
+    put:
+      tags: [UserProfile]
+      summary: 设置奖励偏好
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [rewardType]
+              properties:
+                rewardType:
+                  type: string
+                  enum: [standard, explorer, achiever, social]
+      responses:
+        '200':
+          description: Updated preference
+
+  /api/user-profile/cognitive:
+    get:
+      tags: [UserProfile]
+      summary: 获取认知画像（AMAS 生成）
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Cognitive profile
+
+  /api/user-profile/learning-style:
+    get:
+      tags: [UserProfile]
+      summary: 获取学习风格
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Processing speed, memory capacity, stability
+
+  /api/user-profile/chronotype:
+    get:
+      tags: [UserProfile]
+      summary: 获取作息类型与偏好时段
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Chronotype (morning/evening/neutral)
+
+  /api/user-profile/habit:
+    get:
+      tags: [UserProfile]
+      summary: 获取习惯画像
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Habit profile
+    post:
+      tags: [UserProfile]
+      summary: 设置习惯画像
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                preferredHours:
+                  type: array
+                  items:
+                    type: integer
+                    minimum: 0
+                    maximum: 23
+                medianSessionLengthMins:
+                  type: number
+                  minimum: 1
+                  maximum: 480
+                sessionsPerDay:
+                  type: number
+                  minimum: 1
+                  maximum: 20
+      responses:
+        '200':
+          description: Updated habit profile
+
+  /api/user-profile/avatar:
+    post:
+      tags: [UserProfile]
+      summary: 上传头像（原始二进制）
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          image/png:
+            schema:
+              type: string
+              format: binary
+          image/jpeg:
+            schema:
+              type: string
+              format: binary
+          image/gif:
+            schema:
+              type: string
+              format: binary
+          image/webp:
+            schema:
+              type: string
+              format: binary
+      responses:
+        '200':
+          description: Avatar URL
+
+  # ── Notifications ──
+  /api/notifications:
+    get:
+      tags: [Notifications]
+      summary: 列出通知
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+        - name: unreadOnly
+          in: query
+          schema:
+            type: boolean
+      responses:
+        '200':
+          description: Notification list
+
+  /api/notifications/unread-count:
+    get:
+      tags: [Notifications]
+      summary: 获取未读通知数
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Unread count
+
+  /api/notifications/{id}/read:
+    put:
+      tags: [Notifications]
+      summary: 标记通知为已读
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/id'
+      responses:
+        '200':
+          description: Marked as read
+
+  /api/notifications/read-all:
+    post:
+      tags: [Notifications]
+      summary: 标记全部通知为已读
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Count of marked notifications
+
+  /api/notifications/badges:
+    get:
+      tags: [Notifications]
+      summary: 列出徽章及进度
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Badge list
+
+  /api/notifications/preferences:
+    get:
+      tags: [Notifications]
+      summary: 获取用户偏好设置
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: User preferences
+    put:
+      tags: [Notifications]
+      summary: 更新用户偏好设置
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                theme:
+                  type: string
+                  enum: [light, dark, system]
+                language:
+                  type: string
+                  enum: [en, zh, ja, ko, fr, de, es]
+                notificationEnabled:
+                  type: boolean
+                soundEnabled:
+                  type: boolean
+      responses:
+        '200':
+          description: Updated preferences
+
+  # ── Content ──
+  /api/content/etymology/{word_id}:
+    get:
+      tags: [Content]
+      summary: 获取词源
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: word_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Etymology data
+
+  /api/content/semantic/search:
+    get:
+      tags: [Content]
+      summary: 语义搜索（关键词回退）
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: query
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 10
+            maximum: 50
+      responses:
+        '200':
+          description: Search results
+
+  /api/content/word-contexts/{word_id}:
+    get:
+      tags: [Content]
+      summary: 获取单词上下文与例句
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: word_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Word contexts
+
+  /api/content/morphemes/{word_id}:
+    get:
+      tags: [Content]
+      summary: 获取词素分析
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: word_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Morpheme breakdown
+    post:
+      tags: [Content]
+      summary: 设置词素（管理员）
+      security:
+        - AdminBearerAuth: []
+      parameters:
+        - name: word_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [morphemes]
+              properties:
+                morphemes:
+                  type: array
+                  items:
+                    type: object
+                    required: [text, type, meaning]
+                    properties:
+                      text:
+                        type: string
+                      type:
+                        type: string
+                        enum: [prefix, root, suffix]
+                      meaning:
+                        type: string
+      responses:
+        '200':
+          description: Morphemes set
+
+  /api/content/confusion-pairs/{word_id}:
+    get:
+      tags: [Content]
+      summary: 获取混淆词对
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: word_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+      responses:
+        '200':
+          description: Confusion pairs with similarity scores
+
+  # ── Wordbook Center (User) ──
+  /api/wordbook-center/browse:
+    get:
+      tags: [WordbookCenter]
+      summary: 浏览远程词书
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Remote wordbook catalog
+
+  /api/wordbook-center/browse/{id}:
+    get:
+      tags: [WordbookCenter]
+      summary: 预览远程词书
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/id'
+        - $ref: '#/components/parameters/page'
+        - $ref: '#/components/parameters/perPage'
+      responses:
+        '200':
+          description: Wordbook detail with paginated words
+
+  /api/wordbook-center/import/{id}:
+    post:
+      tags: [WordbookCenter]
+      summary: 导入远程词书
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/id'
+      responses:
+        '201':
+          description: Import result
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/wordbook-center/import-url:
+    post:
+      tags: [WordbookCenter]
+      summary: 从 URL 直接导入词书
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url]
+              properties:
+                url:
+                  type: string
+                  format: uri
+      responses:
+        '201':
+          description: Import result
+
+  /api/wordbook-center/updates:
+    get:
+      tags: [WordbookCenter]
+      summary: 检查词书更新
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Available updates
+
+  /api/wordbook-center/updates/{id}/sync:
+    post:
+      tags: [WordbookCenter]
+      summary: 同步远程词书
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/id'
+      responses:
+        '200':
+          description: Sync result
+
+  /api/wordbook-center/settings:
+    get:
+      tags: [WordbookCenter]
+      summary: 获取词书中心 URL
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Current URL setting
+    put:
+      tags: [WordbookCenter]
+      summary: 设置词书中心 URL
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                wordbookCenterUrl:
+                  type: string
+                  format: uri
+      responses:
+        '200':
+          description: Updated setting
+
+  # ── Realtime ──
+  /api/realtime/events:
+    get:
+      tags: [Realtime]
+      summary: AMAS 状态变更 SSE 推送
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: SSE event stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  # ── Admin Auth ──
+  /api/admin/auth/status:
+    get:
+      tags: [Admin]
+      summary: 检查管理员是否已初始化
+      responses:
+        '200':
+          description: Admin initialization status
+
+  /api/admin/auth/setup:
+    post:
+      tags: [Admin]
+      summary: 首次管理员设置
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email:
+                  type: string
+                  format: email
+                password:
+                  type: string
+      responses:
+        '201':
+          description: Admin created
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/admin/auth/login:
+    post:
+      tags: [Admin]
+      summary: 管理员登录
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email:
+                  type: string
+                password:
+                  type: string
+      responses:
+        '200':
+          description: Admin login successful
+
+  /api/admin/auth/logout:
+    post:
+      tags: [Admin]
+      summary: 管理员登出
+      security:
+        - AdminBearerAuth: []
+      responses:
+        '200':
+          description: Logged out
+
+  # ── Admin Management ──
+  /api/admin/users:
+    get:
+      tags: [Admin]
+      summary: 列出用户（分页、可筛选）
+      security:
+        - AdminBearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/page'
+        - $ref: '#/components/parameters/perPage'
+        - name: search
+          in: query
+          schema:
+            type: string
+        - name: banned
+          in: query
+          schema:
+            type: boolean
+      responses:
+        '200':
+          description: Paginated user list
+
+  /api/admin/users/{id}/ban:
+    post:
+      tags: [Admin]
+      summary: 封禁用户
+      security:
+        - AdminBearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/id'
+      responses:
+        '200':
+          description: User banned
+
+  /api/admin/users/{id}/unban:
+    post:
+      tags: [Admin]
+      summary: 解封用户
+      security:
+        - AdminBearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/id'
+      responses:
+        '200':
+          description: User unbanned
+
+  /api/admin/users/{id}/reset-password:
+    post:
+      tags: [Admin]
+      summary: 生成用户密码重置密钥
+      security:
+        - AdminBearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/id'
+      responses:
+        '200':
+          description: Reset key and expiry
+
+  /api/admin/users/{id}/set-password:
+    post:
+      tags: [Admin]
+      summary: 直接设置用户密码
+      security:
+        - AdminBearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/id'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [newPassword]
+              properties:
+                newPassword:
+                  type: string
+      responses:
+        '200':
+          description: Password reset
+
+  /api/admin/stats:
+    get:
+      tags: [Admin]
+      summary: 系统统计（用户、单词、记录）
+      security:
+        - AdminBearerAuth: []
+      responses:
+        '200':
+          description: System stats
+
+  /api/admin/analytics/engagement:
+    get:
+      tags: [Admin]
+      summary: 用户参与度分析
+      security:
+        - AdminBearerAuth: []
+      responses:
+        '200':
+          description: Engagement data
+
+  /api/admin/analytics/learning:
+    get:
+      tags: [Admin]
+      summary: 学习分析
+      security:
+        - AdminBearerAuth: []
+      responses:
+        '200':
+          description: Learning data
+
+  /api/admin/monitoring/health:
+    get:
+      tags: [Admin]
+      summary: 系统健康状态
+      security:
+        - AdminBearerAuth: []
+      responses:
+        '200':
+          description: Health status
+
+  /api/admin/monitoring/database:
+    get:
+      tags: [Admin]
+      summary: 数据库信息
+      security:
+        - AdminBearerAuth: []
+      responses:
+        '200':
+          description: Database metrics
+
+  /api/admin/broadcast:
+    post:
+      tags: [Admin]
+      summary: 发送全局广播通知
+      security:
+        - AdminBearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title, message]
+              properties:
+                title:
+                  type: string
+                message:
+                  type: string
+      responses:
+        '200':
+          description: Broadcast sent
+
+  /api/admin/settings:
+    get:
+      tags: [Admin]
+      summary: 获取系统设置
+      security:
+        - AdminBearerAuth: []
+      responses:
+        '200':
+          description: System settings
+    put:
+      tags: [Admin]
+      summary: 更新系统设置
+      security:
+        - AdminBearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SystemSettings'
+      responses:
+        '200':
+          description: Updated settings
+
+  # ── Admin Wordbook Center ──
+  /api/admin/wordbook-center/browse:
+    get:
+      tags: [Admin, WordbookCenter]
+      summary: 浏览远程词书 (admin)
+      security:
+        - AdminBearerAuth: []
+      responses:
+        '200':
+          description: Remote wordbook catalog
+
+  /api/admin/wordbook-center/browse/{id}:
+    get:
+      tags: [Admin, WordbookCenter]
+      summary: 预览远程词书（管理员）
+      security:
+        - AdminBearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/id'
+        - $ref: '#/components/parameters/page'
+        - $ref: '#/components/parameters/perPage'
+      responses:
+        '200':
+          description: Wordbook detail
+
+  /api/admin/wordbook-center/import/{id}:
+    post:
+      tags: [Admin, WordbookCenter]
+      summary: 导入为系统词书（管理员）
+      security:
+        - AdminBearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/id'
+      responses:
+        '201':
+          description: Import result
+
+  /api/admin/wordbook-center/updates:
+    get:
+      tags: [Admin, WordbookCenter]
+      summary: 检查系统词书更新（管理员）
+      security:
+        - AdminBearerAuth: []
+      responses:
+        '200':
+          description: Available updates
+
+  /api/admin/wordbook-center/updates/{id}/sync:
+    post:
+      tags: [Admin, WordbookCenter]
+      summary: 同步系统词书（管理员）
+      security:
+        - AdminBearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/id'
+      responses:
+        '200':
+          description: Sync result
+
+  # ── Health ──
+  /health:
+    get:
+      tags: [Health]
+      summary: 健康检查
+      responses:
+        '200':
+          description: Service status and uptime
+
+  /health/live:
+    get:
+      tags: [Health]
+      summary: 存活探针
+      responses:
+        '200':
+          description: OK
+
+  /health/ready:
+    get:
+      tags: [Health]
+      summary: 就绪探针
+      responses:
+        '200':
+          description: Ready
+        '503':
+          description: Not ready
+
+  /health/database:
+    get:
+      tags: [Health]
+      summary: 数据库健康（管理员）
+      security:
+        - AdminBearerAuth: []
+      responses:
+        '200':
+          description: Database health and latency
+
+  /health/metrics:
+    get:
+      tags: [Health]
+      summary: 算法指标（管理员）
+      security:
+        - AdminBearerAuth: []
+      responses:
+        '200':
+          description: Algorithm metrics snapshot
+
+  # ── V1 Compatibility ──
+  /api/v1/words:
+    get:
+      tags: [V1]
+      summary: 列出单词（V1，无 AMAS）
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/page'
+        - $ref: '#/components/parameters/perPage'
+      responses:
+        '200':
+          description: Paginated words
+
+  /api/v1/words/{id}:
+    get:
+      tags: [V1]
+      summary: 获取单词（V1）
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/id'
+      responses:
+        '200':
+          description: Word detail
+
+  /api/v1/records:
+    get:
+      tags: [V1]
+      summary: 列出记录（V1）
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/page'
+        - $ref: '#/components/parameters/perPage'
+      responses:
+        '200':
+          description: Paginated records
+    post:
+      tags: [V1]
+      summary: 提交记录（V1，无 AMAS）
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [wordId, isCorrect, responseTimeMs]
+              properties:
+                wordId:
+                  type: string
+                isCorrect:
+                  type: boolean
+                responseTimeMs:
+                  type: integer
+      responses:
+        '200':
+          description: Record created
+
+  /api/v1/study-config:
+    get:
+      tags: [V1]
+      summary: 获取学习配置（V1）
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Study config
+
+  /api/v1/learning/session:
+    post:
+      tags: [V1]
+      summary: 创建/恢复会话（V1，无 AMAS）
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Session ID
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: 用户登录/注册获取的 JWT token
+    AdminBearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: 管理员 JWT token（独立 secret，与用户 token 不互通）
+
+  parameters:
+    id:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+    page:
+      name: page
+      in: query
+      schema:
+        type: integer
+        default: 1
+        minimum: 1
+    perPage:
+      name: perPage
+      in: query
+      schema:
+        type: integer
+        default: 20
+        minimum: 1
+        maximum: 100
+
+  schemas:
+    RegisterRequest:
+      type: object
+      required: [email, username, password]
+      properties:
+        email:
+          type: string
+          format: email
+        username:
+          type: string
+        password:
+          type: string
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+
+    ResetPasswordRequest:
+      type: object
+      required: [token, newPassword]
+      properties:
+        token:
+          type: string
+        newPassword:
+          type: string
+
+    UserProfile:
+      type: object
+      properties:
+        id:
+          type: string
+        email:
+          type: string
+        username:
+          type: string
+        isBanned:
+          type: boolean
+
+    AuthResponse:
+      type: object
+      properties:
+        accessToken:
+          type: string
+        user:
+          $ref: '#/components/schemas/UserProfile'
+
+    UserStats:
+      type: object
+      properties:
+        totalWordsLearned:
+          type: integer
+        totalSessions:
+          type: integer
+        totalRecords:
+          type: integer
+        streakDays:
+          type: integer
+        accuracyRate:
+          type: number
+
+    Word:
+      type: object
+      properties:
+        id:
+          type: string
+        text:
+          type: string
+        meaning:
+          type: string
+        pronunciation:
+          type: string
+          nullable: true
+        partOfSpeech:
+          type: string
+          nullable: true
+        difficulty:
+          type: number
+          minimum: 0
+          maximum: 1
+        examples:
+          type: array
+          items:
+            type: string
+        tags:
+          type: array
+          items:
+            type: string
+        createdAt:
+          type: string
+          format: date-time
+
+    UpsertWordRequest:
+      type: object
+      required: [text, meaning]
+      properties:
+        id:
+          type: string
+        text:
+          type: string
+        meaning:
+          type: string
+        pronunciation:
+          type: string
+        partOfSpeech:
+          type: string
+        difficulty:
+          type: number
+          minimum: 0
+          maximum: 1
+        examples:
+          type: array
+          items:
+            type: string
+        tags:
+          type: array
+          items:
+            type: string
+
+    Wordbook:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        bookType:
+          type: string
+          enum: [System, User]
+        userId:
+          type: string
+          nullable: true
+        wordCount:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+
+    WordState:
+      type: string
+      enum: [New, Learning, Reviewing, Mastered, Forgotten]
+
+    WordLearningState:
+      type: object
+      properties:
+        userId:
+          type: string
+        wordId:
+          type: string
+        state:
+          $ref: '#/components/schemas/WordState'
+        masteryLevel:
+          type: number
+          minimum: 0
+          maximum: 1
+        nextReviewDate:
+          type: string
+          format: date-time
+          nullable: true
+        halfLife:
+          type: number
+          description: 半衰期（小时）
+        correctStreak:
+          type: integer
+        totalAttempts:
+          type: integer
+        updatedAt:
+          type: string
+          format: date-time
+
+    CreateRecordRequest:
+      type: object
+      required: [wordId, isCorrect, responseTimeMs]
+      properties:
+        clientRecordId:
+          type: string
+          description: 客户端提供的 ID，用于幂等提交
+        wordId:
+          type: string
+        isCorrect:
+          type: boolean
+        responseTimeMs:
+          type: integer
+        sessionId:
+          type: string
+        isQuit:
+          type: boolean
+        dwellTimeMs:
+          type: integer
+        pauseCount:
+          type: integer
+        switchCount:
+          type: integer
+        retryCount:
+          type: integer
+        focusLossDurationMs:
+          type: integer
+        interactionDensity:
+          type: number
+        pausedTimeMs:
+          type: integer
+        hintUsed:
+          type: boolean
+
+    StudyConfig:
+      type: object
+      properties:
+        userId:
+          type: string
+        selectedWordbookIds:
+          type: array
+          items:
+            type: string
+        dailyWordCount:
+          type: integer
+          minimum: 1
+          maximum: 200
+        studyMode:
+          type: string
+          enum: [MASTERY, REVIEW, MIXED]
+        dailyMasteryTarget:
+          type: integer
+          minimum: 1
+          maximum: 100
+
+    SystemSettings:
+      type: object
+      properties:
+        maxUsers:
+          type: integer
+        registrationEnabled:
+          type: boolean
+        maintenanceMode:
+          type: boolean
+        defaultDailyWords:
+          type: integer
+        wordbookCenterUrl:
+          type: string
+          nullable: true
+
+    ErrorResponse:
+      type: object
+      required: [success, code, message]
+      properties:
+        success:
+          type: boolean
+          enum: [false]
+        code:
+          type: string
+        message:
+          type: string
+        traceId:
+          type: string
+
+    # ── Generic wrappers ──
+    SuccessResponse_AuthResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: '#/components/schemas/AuthResponse'
+
+    SuccessResponse_UserProfile:
+      type: object
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: '#/components/schemas/UserProfile'
+
+    SuccessResponse_UserStats:
+      type: object
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: '#/components/schemas/UserStats'
+
+    SuccessResponse_WordLearningState:
+      type: object
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: '#/components/schemas/WordLearningState'
+
+    SuccessResponse_StudyConfig:
+      type: object
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          $ref: '#/components/schemas/StudyConfig'
+
+    SuccessResponse_LoggedOut:
+      type: object
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          type: object
+          properties:
+            loggedOut:
+              type: boolean
+
+    PaginatedResponse_Word:
+      type: object
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+        data:
+          type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: '#/components/schemas/Word'
+            total:
+              type: integer
+            page:
+              type: integer
+            perPage:
+              type: integer
+            totalPages:
+              type: integer
+
+  responses:
+    BadRequest:
+      description: Bad request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Unauthorized:
+      description: Authentication required or token invalid
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Forbidden:
+      description: Insufficient permissions
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Conflict:
+      description: Resource already exists
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    TooManyRequests:
+      description: Rate limited
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
