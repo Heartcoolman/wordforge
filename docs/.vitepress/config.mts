@@ -50,6 +50,7 @@ export default defineConfig({
             { text: '学习 API', link: '/api/learning' },
             { text: '单词管理 API', link: '/api/words' },
             { text: '管理后台 API', link: '/api/admin' },
+            { text: 'OpenAPI 接口规范', link: '/api/openapi' },
           ],
         },
       ],
