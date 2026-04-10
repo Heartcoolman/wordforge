@@ -76,6 +76,51 @@ interface StudyConfig {
 }
 ```
 
+## 服务端选词与选项生成
+
+替代客户端 WordQueueManager，使任何平台的前端都能纯 API 驱动学习答题流程。
+
+| 方法 | 端点 | 说明 |
+|------|------|------|
+| POST | `/api/learning/pick-next-word` | 从当前队列中选出下一个应展示的单词 |
+| POST | `/api/learning/generate-options` | 为指定单词生成 4 选 1 选项 |
+
+### 选词请求
+
+```typescript
+// POST /api/learning/pick-next-word
+interface PickNextWordRequest {
+  activeWordIds: string[];      // 当前队列中的单词 ID
+  errorWordIds: string[];       // 有错误记录的单词 ID
+  lastShownMap?: Record<string, number>; // 各单词上次展示时间戳（ms）
+}
+
+// 响应
+interface PickNextWordResponse {
+  word: Word;
+  priority: "error_review" | "normal";
+}
+```
+
+选词逻辑：错误词优先（按 lastShown 升序），无错误时按 lastShown 升序。
+
+### 选项生成请求
+
+```typescript
+// POST /api/learning/generate-options
+interface GenerateOptionsRequest {
+  wordId: string;               // 目标单词 ID
+  mode: "word-to-meaning" | "meaning-to-word";
+  poolWordIds: string[];        // 干扰项候选池（通常传入 activeWordIds）
+}
+
+// 响应
+interface GenerateOptionsResponse {
+  options: string[];            // 洗牌后的 4 个选项
+  correctIndex: number;         // 正确答案索引
+}
+```
+
 ## AMAS API `/api/amas`
 
 | 方法 | 端点 | 说明 |
