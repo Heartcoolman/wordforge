@@ -670,6 +670,15 @@ paths:
       responses:
         '200':
           description: Session created or resumed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/SessionResponse'
 
   /api/learning/study-words:
     get:
@@ -680,6 +689,15 @@ paths:
       responses:
         '200':
           description: Words and strategy parameters
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/StudyWordsResponse'
 
   /api/learning/next-words:
     post:
@@ -719,6 +737,22 @@ paths:
       responses:
         '200':
           description: Next batch of words
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      words:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/Word'
+                      batchSize:
+                        type: integer
 
   /api/learning/adjust-words:
     post:
@@ -743,6 +777,18 @@ paths:
       responses:
         '200':
           description: Adjusted strategy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      adjustedStrategy:
+                        $ref: '#/components/schemas/StrategyParams'
 
   /api/learning/sync-progress:
     post:
@@ -767,6 +813,15 @@ paths:
       responses:
         '200':
           description: Updated session
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/LearningSession'
 
   /api/learning/complete-session:
     post:
@@ -797,6 +852,94 @@ paths:
       responses:
         '200':
           description: Completed session with summary
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/LearningSession'
+
+  /api/learning/pick-next-word:
+    post:
+      tags: [Learning]
+      summary: 服务端选词（替代客户端 WordQueueManager）
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [activeWordIds, errorWordIds]
+              properties:
+                activeWordIds:
+                  type: array
+                  items:
+                    type: string
+                errorWordIds:
+                  type: array
+                  items:
+                    type: string
+                lastShownMap:
+                  type: object
+                  additionalProperties:
+                    type: integer
+                priorityMap:
+                  type: object
+                  additionalProperties:
+                    type: integer
+      responses:
+        '200':
+          description: Next word to show
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/PickNextWordResponse'
+
+  /api/learning/generate-options:
+    post:
+      tags: [Learning]
+      summary: 服务端生成选项（替代客户端选项生成）
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [wordId, mode, poolWordIds]
+              properties:
+                wordId:
+                  type: string
+                mode:
+                  type: string
+                  enum: [word-to-meaning, meaning-to-word]
+                poolWordIds:
+                  type: array
+                  items:
+                    type: string
+      responses:
+        '200':
+          description: Shuffled options with correct index
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/GenerateOptionsResponse'
 
   # ── Records ──
   /api/records:
@@ -825,8 +968,26 @@ paths:
       responses:
         '201':
           description: Record created with AMAS result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/CreateRecordResponse'
         '200':
           description: Duplicate record (idempotent)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/CreateRecordResponse'
 
   /api/records/batch:
     post:
@@ -849,6 +1010,15 @@ paths:
       responses:
         '201':
           description: Batch result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/BatchRecordResponse'
 
   /api/records/statistics:
     get:
@@ -859,6 +1029,15 @@ paths:
       responses:
         '200':
           description: Total, correct, accuracy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/BasicStatistics'
 
   /api/records/statistics/enhanced:
     get:
@@ -869,6 +1048,15 @@ paths:
       responses:
         '200':
           description: Enhanced stats
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/EnhancedStatistics'
 
   # ── Study Config ──
   /api/study-config:
@@ -945,6 +1133,15 @@ paths:
       responses:
         '200':
           description: AMAS user state
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/UserState'
 
   /api/amas/strategy:
     get:
@@ -955,6 +1152,15 @@ paths:
       responses:
         '200':
           description: Strategy parameters
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/StrategyParams'
 
   /api/amas/phase:
     get:
@@ -965,6 +1171,20 @@ paths:
       responses:
         '200':
           description: Phase info
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      phase:
+                        type: string
+                        enum: [Classify, Explore, Exploit]
+                        nullable: true
 
   /api/amas/learning-curve:
     get:
@@ -975,6 +1195,29 @@ paths:
       responses:
         '200':
           description: Learning curve
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      curve:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            date:
+                              type: string
+                            total:
+                              type: integer
+                            correct:
+                              type: integer
+                            accuracy:
+                              type: number
 
   /api/amas/intervention:
     get:
@@ -985,6 +1228,29 @@ paths:
       responses:
         '200':
           description: Intervention advice
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      interventions:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            type:
+                              type: string
+                              enum: [rest, encouragement, focus, continue]
+                            message:
+                              type: string
+                            severity:
+                              type: string
+                              enum: [info, warning, success]
 
   /api/amas/reset:
     post:
@@ -995,6 +1261,18 @@ paths:
       responses:
         '200':
           description: AMAS state reset
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      reset:
+                        type: boolean
 
   /api/amas/mastery/evaluate:
     get:
@@ -1011,6 +1289,30 @@ paths:
       responses:
         '200':
           description: Mastery evaluation result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      wordId:
+                        type: string
+                      state:
+                        $ref: '#/components/schemas/WordState'
+                      masteryLevel:
+                        type: number
+                      correctStreak:
+                        type: integer
+                      totalAttempts:
+                        type: integer
+                      nextReviewDate:
+                        type: string
+                        format: date-time
+                        nullable: true
 
   /api/amas/config:
     get:
@@ -1066,6 +1368,19 @@ paths:
       responses:
         '200':
           description: Reward preference
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      rewardType:
+                        type: string
+                        enum: [standard, explorer, achiever, social]
     put:
       tags: [UserProfile]
       summary: 设置奖励偏好
@@ -1095,6 +1410,15 @@ paths:
       responses:
         '200':
           description: Cognitive profile
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/CognitiveProfile'
 
   /api/user-profile/learning-style:
     get:
@@ -1105,6 +1429,22 @@ paths:
       responses:
         '200':
           description: Processing speed, memory capacity, stability
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      processingSpeed:
+                        type: number
+                      memoryCapacity:
+                        type: number
+                      stability:
+                        type: number
 
   /api/user-profile/chronotype:
     get:
@@ -1115,6 +1455,23 @@ paths:
       responses:
         '200':
           description: Chronotype (morning/evening/neutral)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      chronotype:
+                        type: string
+                        enum: [morning, evening, neutral]
+                      preferredHours:
+                        type: array
+                        items:
+                          type: integer
 
   /api/user-profile/habit:
     get:
@@ -1125,6 +1482,15 @@ paths:
       responses:
         '200':
           description: Habit profile
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/HabitProfile'
     post:
       tags: [UserProfile]
       summary: 设置习惯画像
@@ -1183,6 +1549,18 @@ paths:
       responses:
         '200':
           description: Avatar URL
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      avatarUrl:
+                        type: string
 
   # ── Notifications ──
   /api/notifications:
@@ -1204,6 +1582,17 @@ paths:
       responses:
         '200':
           description: Notification list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Notification'
 
   /api/notifications/unread-count:
     get:
@@ -1214,6 +1603,18 @@ paths:
       responses:
         '200':
           description: Unread count
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      unreadCount:
+                        type: integer
 
   /api/notifications/{id}/read:
     put:
@@ -1246,6 +1647,17 @@ paths:
       responses:
         '200':
           description: Badge list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Badge'
 
   /api/notifications/preferences:
     get:
@@ -1256,6 +1668,15 @@ paths:
       responses:
         '200':
           description: User preferences
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/UserPreferences'
     put:
       tags: [Notifications]
       summary: 更新用户偏好设置
@@ -1298,6 +1719,15 @@ paths:
       responses:
         '200':
           description: Etymology data
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/EtymologyResponse'
 
   /api/content/semantic/search:
     get:
@@ -1320,6 +1750,15 @@ paths:
       responses:
         '200':
           description: Search results
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/SemanticSearchResponse'
 
   /api/content/word-contexts/{word_id}:
     get:
@@ -1336,6 +1775,35 @@ paths:
       responses:
         '200':
           description: Word contexts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      wordId:
+                        type: string
+                      word:
+                        type: string
+                      examples:
+                        type: array
+                        items:
+                          type: string
+                      contexts:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            id:
+                              type: string
+                            sentence:
+                              type: string
+                            source:
+                              type: string
 
   /api/content/morphemes/{word_id}:
     get:
@@ -1352,6 +1820,15 @@ paths:
       responses:
         '200':
           description: Morpheme breakdown
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/WordMorphemes'
     post:
       tags: [Content]
       summary: 设置词素（管理员）
@@ -1408,6 +1885,15 @@ paths:
       responses:
         '200':
           description: Confusion pairs with similarity scores
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/ConfusionPairsResponse'
 
   # ── Wordbook Center (User) ──
   /api/wordbook-center/browse:
@@ -1687,6 +2173,22 @@ paths:
       responses:
         '200':
           description: System stats
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    type: object
+                    properties:
+                      users:
+                        type: integer
+                      words:
+                        type: integer
+                      records:
+                        type: integer
 
   /api/admin/analytics/engagement:
     get:
@@ -1697,6 +2199,15 @@ paths:
       responses:
         '200':
           description: Engagement data
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/EngagementAnalytics'
 
   /api/admin/analytics/learning:
     get:
@@ -1707,6 +2218,15 @@ paths:
       responses:
         '200':
           description: Learning data
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/LearningAnalytics'
 
   /api/admin/monitoring/health:
     get:
@@ -1717,6 +2237,15 @@ paths:
       responses:
         '200':
           description: Health status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/SystemHealth'
 
   /api/admin/monitoring/database:
     get:
@@ -1727,6 +2256,15 @@ paths:
       responses:
         '200':
           description: Database metrics
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/DatabaseStats'
 
   /api/admin/broadcast:
     post:
@@ -2144,7 +2682,7 @@ components:
 
     WordState:
       type: string
-      enum: [New, Learning, Reviewing, Mastered, Forgotten]
+      enum: [NEW, LEARNING, REVIEWING, MASTERED, FORGOTTEN]
 
     WordLearningState:
       type: object
@@ -2315,6 +2853,590 @@ components:
           properties:
             loggedOut:
               type: boolean
+
+    # ── AMAS Types ──
+    StrategyParams:
+      type: object
+      properties:
+        difficulty:
+          type: number
+          minimum: 0
+          maximum: 1
+        batchSize:
+          type: integer
+        newRatio:
+          type: number
+          minimum: 0
+          maximum: 1
+        intervalScale:
+          type: number
+        reviewMode:
+          type: boolean
+
+    CognitiveProfile:
+      type: object
+      properties:
+        memoryCapacity:
+          type: number
+        processingSpeed:
+          type: number
+        stability:
+          type: number
+
+    TrendState:
+      type: object
+      properties:
+        accuracyTrend:
+          type: number
+        speedTrend:
+          type: number
+        engagementTrend:
+          type: number
+
+    HabitProfile:
+      type: object
+      properties:
+        preferredHours:
+          type: array
+          items:
+            type: integer
+        medianSessionLengthMins:
+          type: number
+        sessionsPerDay:
+          type: number
+        temporalPerformance:
+          type: object
+          properties:
+            hourlyStats:
+              type: array
+              items:
+                type: object
+                properties:
+                  sessionCount:
+                    type: integer
+                  avgAccuracy:
+                    type: number
+                  avgResponseTimeMs:
+                    type: number
+                  masteryEfficiency:
+                    type: number
+            totalSessions:
+              type: integer
+
+    UserState:
+      type: object
+      properties:
+        attention:
+          type: number
+        fatigue:
+          type: number
+        motivation:
+          type: number
+        confidence:
+          type: number
+        lastActiveAt:
+          type: string
+          format: date-time
+          nullable: true
+        sessionEventCount:
+          type: integer
+        totalEventCount:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+        cognitiveProfile:
+          $ref: '#/components/schemas/CognitiveProfile'
+        trendState:
+          $ref: '#/components/schemas/TrendState'
+        habitProfile:
+          $ref: '#/components/schemas/HabitProfile'
+        lastSessionId:
+          type: string
+          nullable: true
+
+    Explanation:
+      type: object
+      properties:
+        primaryReason:
+          type: string
+        factors:
+          type: array
+          items:
+            type: object
+            properties:
+              name:
+                type: string
+              value:
+                type: number
+              impact:
+                type: string
+
+    MasteryLevel:
+      type: string
+      enum: [NEW, LEARNING, REVIEWING, MASTERED, FORGOTTEN]
+
+    WordMasteryDecision:
+      type: object
+      properties:
+        wordId:
+          type: string
+        memoryStrength:
+          type: number
+        recallProbability:
+          type: number
+        nextReviewIntervalSecs:
+          type: integer
+        masteryLevel:
+          $ref: '#/components/schemas/MasteryLevel'
+
+    Reward:
+      type: object
+      properties:
+        value:
+          type: number
+        components:
+          type: object
+          properties:
+            accuracyReward:
+              type: number
+            speedReward:
+              type: number
+            fatiguePenalty:
+              type: number
+            frustrationPenalty:
+              type: number
+            expectedForgetCost:
+              type: number
+
+    ProcessResult:
+      type: object
+      properties:
+        sessionId:
+          type: string
+        strategy:
+          $ref: '#/components/schemas/StrategyParams'
+        explanation:
+          $ref: '#/components/schemas/Explanation'
+        state:
+          $ref: '#/components/schemas/UserState'
+        wordMastery:
+          $ref: '#/components/schemas/WordMasteryDecision'
+          nullable: true
+        reward:
+          $ref: '#/components/schemas/Reward'
+        coldStartPhase:
+          type: string
+          enum: [Classify, Explore, Exploit]
+          nullable: true
+
+    # ── Learning Types ──
+    SessionResponse:
+      type: object
+      properties:
+        sessionId:
+          type: string
+        status:
+          type: string
+          enum: [active, completed, abandoned]
+        resumed:
+          type: boolean
+        targetMasteryCount:
+          type: integer
+        crossSessionHint:
+          type: object
+          nullable: true
+          properties:
+            prevAccuracy:
+              type: number
+            prevMasteredCount:
+              type: integer
+            gapMinutes:
+              type: integer
+            suggestedDifficulty:
+              type: number
+            errorProneWordIds:
+              type: array
+              items:
+                type: string
+            recentlyMasteredWordIds:
+              type: array
+              items:
+                type: string
+
+    StudyWordsResponse:
+      type: object
+      properties:
+        words:
+          type: array
+          items:
+            $ref: '#/components/schemas/Word'
+        strategy:
+          type: object
+          properties:
+            difficultyRange:
+              type: array
+              items:
+                type: number
+              minItems: 2
+              maxItems: 2
+            newRatio:
+              type: number
+            batchSize:
+              type: integer
+
+    LearningSession:
+      type: object
+      properties:
+        id:
+          type: string
+        userId:
+          type: string
+        status:
+          type: string
+          enum: [active, completed, abandoned]
+        targetMasteryCount:
+          type: integer
+        totalQuestions:
+          type: integer
+        actualMasteryCount:
+          type: integer
+        contextShifts:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        summary:
+          type: object
+          nullable: true
+          properties:
+            accuracy:
+              type: number
+            avgResponseTimeMs:
+              type: integer
+            masteredWordIds:
+              type: array
+              items:
+                type: string
+            errorProneWordIds:
+              type: array
+              items:
+                type: string
+            durationSecs:
+              type: integer
+            hourOfDay:
+              type: integer
+            finalDifficulty:
+              type: number
+
+    PickNextWordResponse:
+      type: object
+      properties:
+        word:
+          $ref: '#/components/schemas/Word'
+        priority:
+          type: string
+          enum: [error_review, normal]
+
+    GenerateOptionsResponse:
+      type: object
+      properties:
+        options:
+          type: array
+          items:
+            type: string
+        correctIndex:
+          type: integer
+
+    # ── Records Types ──
+    LearningRecord:
+      type: object
+      properties:
+        id:
+          type: string
+        userId:
+          type: string
+        wordId:
+          type: string
+        isCorrect:
+          type: boolean
+        responseTimeMs:
+          type: integer
+        sessionId:
+          type: string
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+
+    CreateRecordResponse:
+      type: object
+      properties:
+        record:
+          $ref: '#/components/schemas/LearningRecord'
+        amasResult:
+          $ref: '#/components/schemas/ProcessResult'
+          nullable: true
+        duplicate:
+          type: boolean
+
+    BatchRecordResponse:
+      type: object
+      properties:
+        count:
+          type: integer
+        failed:
+          type: integer
+        partial:
+          type: boolean
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/CreateRecordResponse'
+        errors:
+          type: array
+          items:
+            type: object
+            properties:
+              index:
+                type: integer
+              code:
+                type: string
+              message:
+                type: string
+
+    BasicStatistics:
+      type: object
+      properties:
+        total:
+          type: integer
+        correct:
+          type: integer
+        accuracy:
+          type: number
+
+    EnhancedStatistics:
+      type: object
+      properties:
+        total:
+          type: integer
+        correct:
+          type: integer
+        accuracy:
+          type: number
+        streak:
+          type: integer
+        daily:
+          type: array
+          items:
+            type: object
+            properties:
+              date:
+                type: string
+              total:
+                type: integer
+              correct:
+                type: integer
+              accuracy:
+                type: number
+
+    # ── Notification Types ──
+    Notification:
+      type: object
+      properties:
+        id:
+          type: string
+        userId:
+          type: string
+        notificationType:
+          type: string
+          enum: [system, achievement, reminder, info, broadcast]
+        title:
+          type: string
+        message:
+          type: string
+        read:
+          type: boolean
+        priority:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+
+    Badge:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        unlocked:
+          type: boolean
+        progress:
+          type: number
+          minimum: 0
+          maximum: 1
+        unlockedAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    UserPreferences:
+      type: object
+      properties:
+        theme:
+          type: string
+          enum: [light, dark, system]
+        language:
+          type: string
+          enum: [en, zh, ja, ko, fr, de, es]
+        notificationEnabled:
+          type: boolean
+        soundEnabled:
+          type: boolean
+
+    # ── Content Types ──
+    EtymologyResponse:
+      type: object
+      properties:
+        wordId:
+          type: string
+        word:
+          type: string
+        etymology:
+          type: string
+        roots:
+          type: array
+          items:
+            type: string
+        generated:
+          type: boolean
+        source:
+          type: string
+
+    SemanticSearchResponse:
+      type: object
+      properties:
+        query:
+          type: string
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/Word'
+        total:
+          type: integer
+        method:
+          type: string
+        degraded:
+          type: boolean
+
+    WordMorphemes:
+      type: object
+      properties:
+        wordId:
+          type: string
+        morphemes:
+          type: array
+          items:
+            type: object
+            properties:
+              text:
+                type: string
+              type:
+                type: string
+                enum: [prefix, root, suffix]
+              meaning:
+                type: string
+
+    ConfusionPairsResponse:
+      type: object
+      properties:
+        wordId:
+          type: string
+        confusionPairs:
+          type: array
+          items:
+            type: object
+            properties:
+              wordId:
+                type: string
+              word:
+                type: string
+              meaning:
+                type: string
+              similarity:
+                type: number
+
+    # ── Admin Types ──
+    EngagementAnalytics:
+      type: object
+      properties:
+        totalUsers:
+          type: integer
+        activeToday:
+          type: integer
+        retentionRate:
+          type: number
+
+    LearningAnalytics:
+      type: object
+      properties:
+        totalWords:
+          type: integer
+        totalRecords:
+          type: integer
+        totalCorrect:
+          type: integer
+        overallAccuracy:
+          type: number
+
+    SystemHealth:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [healthy, degraded]
+        storeProbeOk:
+          type: boolean
+        dbSizeBytes:
+          type: integer
+        uptimeSecs:
+          type: number
+        version:
+          type: string
+
+    DatabaseStats:
+      type: object
+      properties:
+        sizeOnDisk:
+          type: integer
+        tableCount:
+          type: integer
+        tables:
+          type: array
+          items:
+            type: string
+
+    CheckUpdateResponse:
+      type: object
+      properties:
+        currentVersion:
+          type: string
+        latestVersion:
+          type: string
+        hasUpdate:
+          type: boolean
+        releaseUrl:
+          type: string
+          nullable: true
+        releaseNotes:
+          type: string
+          nullable: true
 
     PaginatedResponse_Word:
       type: object

@@ -2144,7 +2144,7 @@ components:
 
     WordState:
       type: string
-      enum: [New, Learning, Reviewing, Mastered, Forgotten]
+      enum: [NEW, LEARNING, REVIEWING, MASTERED, FORGOTTEN]
 
     WordLearningState:
       type: object
