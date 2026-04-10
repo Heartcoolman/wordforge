@@ -1,12 +1,12 @@
-# WordForge 核心算法文档
+# 核心算法详解
 
 ## 概述
 
-WordForge 是一个算法驱动的自适应英语词汇学习平台，后端采用 Rust (Axum) 编写，前端采用 SolidJS。其核心是 **AMAS（Adaptive Mastery Acquisition System）** 引擎，融合认知科学与机器学习，实现个性化的间隔复习调度。
+WordForge 的核心是 **AMAS（Adaptive Mastery Acquisition System）** 引擎，融合认知科学与机器学习，实现个性化的间隔复习调度。
 
 ---
 
-## 一、MDM — 多维记忆模型（Multi-Dimensional Memory Model）
+## 一、MDM — 多维记忆模型
 
 ### 1.1 状态结构
 
@@ -26,36 +26,48 @@ WordForge 是一个算法驱动的自适应英语词汇学习平台，后端采�
 
 三维记忆分量通过固定权重线性融合：
 
-$$composite = 0.20 \times S_{short} + 0.30 \times S_{medium} + 0.50 \times S_{long}$$
+```
+composite = 0.20 × S_short + 0.30 × S_medium + 0.50 × S_long
+```
 
 权重设计体现认知科学原理：长期记忆对掌握度的贡献最大（50%），短期记忆权重最低（20%）。
 
 ### 1.3 强度更新（指数移动平均）
 
-每次作答后，各维度以不同学习率向答题质量 $q \in [0,1]$ 收敛：
+每次作答后，各维度以不同学习率向答题质量 `q ∈ [0,1]` 收敛：
 
-$$S_{short} \mathrel{+}= 0.50 \times (q - S_{short})$$
-$$S_{medium} \mathrel{+}= 0.20 \times (q - S_{medium})$$
-$$S_{long} \mathrel{+}= 0.12 \times (q - S_{long})$$
+```
+S_short  += 0.50 × (q - S_short)
+S_medium += 0.20 × (q - S_medium)
+S_long   += 0.12 × (q - S_long)
+```
 
 巩固度更新：
 
-$$\Delta c = 0.14 \times (q - 0.5) \times 2.0$$
+```
+Δc = 0.14 × (q - 0.5) × 2.0
+```
 
 综合强度最终更新（虚拟增益叠加巩固效果后再做 EMA）：
 
-$$composite_{virtual} = composite \times (1 + c \times 0.6)$$
-$$memory\_strength \mathrel{+}= \alpha \times (composite_{virtual} - memory\_strength)$$
+```
+composite_virtual = composite × (1 + c × 0.6)
+memory_strength += α × (composite_virtual - memory_strength)
+```
 
 ### 1.4 被动衰减（Passive Decay）
 
 未复习期间，各维度自然衰减，但速率不同（长期记忆衰减更慢）：
 
-$$decay = \left(1 + \frac{elapsed\_days}{30}\right)^{-0.30}$$
+```
+decay      = (1 + elapsed_days / 30) ^ (-0.30)
+slow_decay = 1 - 0.7 × (1 - decay)
 
-$$S_{short} \mathrel{\times}= decay, \quad S_{medium} \mathrel{\times}= decay$$
-$$slow\_decay = 1 - 0.7 \times (1 - decay)$$
-$$S_{long} \mathrel{\times}= slow\_decay, \quad c \mathrel{\times}= slow\_decay$$
+S_short  *= decay
+S_medium *= decay
+S_long   *= slow_decay
+c        *= slow_decay
+```
 
 ---
 
@@ -65,15 +77,16 @@ $$S_{long} \mathrel{\times}= slow\_decay, \quad c \mathrel{\times}= slow\_decay$
 
 采用指数衰减模型，时间常数由记忆强度决定：
 
-$$tc = (ms + 0.3)^{1.5} \times 1{,}296{,}000 \text{ (s)}$$
+```
+tc = (ms + 0.3) ^ 1.5 × 1,296,000 (秒)
+R(t) = e ^ (-Δt / tc)
+```
 
-$$R(t) = e^{-\Delta t / tc}$$
-
-其中 $1{,}296{,}000$ 秒 = 15 天，为基础时间单位。
+其中 1,296,000 秒 = 15 天，为基础时间单位。
 
 各强度对应的半衰期：
 
-| 记忆强度 $ms$ | 时间常数 $tc$ | 半衰期 |
+| 记忆强度 ms | 时间常数 tc | 半衰期 |
 |---|---|---|
 | 0.2 | ~91,652 s | ~17.7 小时 |
 | 0.5 | ~185,474 s | ~2.1 天 |
@@ -81,11 +94,13 @@ $$R(t) = e^{-\Delta t / tc}$$
 
 ### 2.2 最优复习间隔
 
-以目标保留率 $r_0 = 0.85$ 反推最佳复习时间点：
+以目标保留率 `r₀ = 0.85` 反推最佳复习时间点：
 
-$$interval = -tc \times \ln(r_0)$$
+```
+interval = -tc × ln(r₀)
+```
 
-结果 clamp 至 $[60\text{ s},\ 90\text{ 天}]$。
+结果 clamp 至 `[60 秒, 90 天]`。
 
 ---
 
@@ -93,64 +108,87 @@ $$interval = -tc \times \ln(r_0)$$
 
 核心得分公式融合了四个认知/信息论因子：
 
-$$score = \underbrace{(1 - R + bonus_{risk})}_{\text{遗忘风险}} \times \underbrace{cooldown}_{\text{冷却}} \times \underbrace{bonus_{zone}}_{\text{最佳区间}} + \underbrace{bonus_{UCB}}_{\text{探索}}$$
+```
+score = (1 - R + bonus_risk) × cooldown × bonus_zone + bonus_UCB
+         ─── 遗忘风险 ───    ─ 冷却 ─   ─ 最佳区间 ─   ─ 探索 ─
+```
 
 ### 3.1 各因子定义
 
 **① 风险奖励**（sigmoid，recall 低时放大紧迫性）：
 
-$$bonus_{risk} = \frac{0.2}{1 + e^{-(0.55 - R) \times 8.0}}$$
+```
+bonus_risk = 0.2 / (1 + e ^ (-(0.55 - R) × 8.0))
+```
 
 **② 冷却因子**（防止短时间内重复推送同一词）：
 
-$$cooldown = 1 - e^{-elapsed\_secs / 300}$$
+```
+cooldown = 1 - e ^ (-elapsed_secs / 300)
+```
 
-**③ 最佳区间奖励**（高斯分布，中心 $R^* = 0.65$，$\sigma = 0.20$）：
+**③ 最佳区间奖励**（高斯分布，中心 R\* = 0.65，σ = 0.20）：
 
-$$bonus_{zone} = \exp\left(-\frac{(R - 0.65)^2}{2 \times 0.20^2}\right)$$
+```
+bonus_zone = exp(-(R - 0.65)² / (2 × 0.20²))
+```
 
 依据"可取难度（Desirable Difficulty）"原理：recall ≈ 0.65 时，复习带来的记忆增益最大化。
 
 **④ UCB 探索奖励**（Upper Confidence Bound，平衡高低频词）：
 
-$$bonus_{UCB} = \min\left(0.12 \times \sqrt{\frac{\ln(N+1)}{attempts+1}},\ 0.35\right)$$
+```
+bonus_UCB = min(0.12 × sqrt(ln(N+1) / (attempts+1)), 0.35)
+```
 
-$N$ 为总复习次数，$attempts$ 为该词被选中次数。
+N 为总复习次数，attempts 为该词被选中次数。
 
 ---
 
 ## 四、FSRS-5 记忆稳定性模型
 
-FSRS-5（Free Spaced Repetition Scheduler v5）是学术界验证的间隔重复算法，作为系统内置基线和参数优化目标，含 **19 个可学习参数** $w[0..18]$。
+FSRS-5（Free Spaced Repetition Scheduler v5）是学术界验证的间隔重复算法，作为系统内置基线和参数优化目标，含 **19 个可学习参数** `w[0..18]`。
 
 ### 4.1 遗忘概率（幂律衰减）
 
-$$R(t, S) = \left(1 + factor \times \frac{t}{S}\right)^{decay}$$
+```
+R(t, S) = (1 + factor × t / S) ^ decay
+```
 
-其中 $factor = 0.30$，$decay = -0.50$（对应 $R = 0.9$ 时的期望复习间隔）。
+其中 `factor = 0.30`，`decay = -0.50`（对应 R = 0.9 时的期望复习间隔）。
 
 ### 4.2 稳定性更新
 
 **首次学习：**
 
-$$S_0 = w[grade - 1], \quad grade \in \{1,2,3,4\}$$
+```
+S₀ = w[grade - 1],  grade ∈ {1, 2, 3, 4}
+```
 
-**同日复习（$elapsed < 1$ 天）：**
+**同日复习（elapsed < 1 天）：**
 
-$$S' = S \times e^{\text{clamp}(w[17] \times (grade - 3 + w[18]),\ -20,\ 20)}$$
+```
+S' = S × e ^ clamp(w[17] × (grade - 3 + w[18]), -20, 20)
+```
 
 **常规成功复习：**
 
-$$S' = S \times \left(1 + e^{w[8]} \times (11 - D) \times S^{-w[9]} \times (e^{w[10](1-R)} - 1) \times bonus\right)$$
+```
+S' = S × (1 + e^w[8] × (11 - D) × S^(-w[9]) × (e^(w[10]×(1-R)) - 1) × bonus)
+```
 
 **遗忘后重学：**
 
-$$S' = w[11] \times D^{-w[12]} \times \left((S+1)^{w[13]} - 1\right) \times e^{w[14](1-R)}$$
+```
+S' = w[11] × D^(-w[12]) × ((S+1)^w[13] - 1) × e^(w[14]×(1-R))
+```
 
 ### 4.3 难度更新（均值回归）
 
-$$\Delta D = -w[6] \times (grade - 3)$$
-$$D' = w[7] \times D_0(4) + (1 - w[7]) \times \left(D + \Delta D \times \frac{10 - D}{9}\right)$$
+```
+ΔD = -w[6] × (grade - 3)
+D' = w[7] × D₀(4) + (1 - w[7]) × (D + ΔD × (10 - D) / 9)
+```
 
 ### 4.4 初始参数
 
@@ -206,10 +244,12 @@ GRU 输出概率经三种校准器竞争选择（最小化 logLoss + MAE + AUC�
 
 ### 6.1 目标函数
 
-$$objective = 0.55 \times predictionScore + 0.45 \times policyScore$$
+```
+objective = 0.55 × predictionScore + 0.45 × policyScore
+```
 
 - **predictionScore**：候选参数在 logLoss/ICI/AUC/MAE 上相对基线的综合改善
-- **policyScore**：$safety \times efficiency$，衡量调度决策质量（基于 GRU Oracle 定义最优区间）
+- **policyScore**：safety × efficiency，衡量调度决策质量（基于 GRU Oracle 定义最优区间）
 
 ### 6.2 三阶段筛选
 
@@ -220,8 +260,8 @@ $$objective = 0.55 \times predictionScore + 0.45 \times policyScore$$
 | Stage 3 | 4 组配置 | 100% 用户 | 通过门槛者 |
 
 **Stage 3 通过条件**：
-- $predictionGain \geq 2\%$
-- $intervalGain \geq 5\%$
+- predictionGain ≥ 2%
+- intervalGain ≥ 5%
 - DHP expectedMemory 退步不超过 10%
 
 ---
@@ -232,14 +272,18 @@ DHP（Difficulty-Halflife-Performance）是墨墨背单词的核心算法，用�
 
 **成功复习（记忆增强）：**
 
-$$h' = h \times \left(1 + e^{r_a} \times d^{r_b} \times h^{r_c} \times (1-p)^{r_d}\right)$$
+```
+h' = h × (1 + e^rₐ × d^r_b × h^r_c × (1-p)^r_d)
+```
 
 **遗忘后重学：**
 
-$$h' = e^{f_a} \times d^{f_b} \times h^{f_c} \times (1-p)^{f_d}$$
-$$d' = \min(d + 2,\ 18)$$
+```
+h' = e^fₐ × d^f_b × h^f_c × (1-p)^f_d
+d' = min(d + 2, 18)
+```
 
-其中 $h$ 为半衰期，$d$ 为难度，$p$ 为当前回忆概率，共 8 个参数。
+其中 h 为半衰期，d 为难度，p 为当前回忆概率，共 8 个参数。
 
 ---
 
@@ -273,7 +317,7 @@ Web Worker（零主线程阻塞）
 
 ---
 
-## 九、A/B 测试框架（amas_ab_test.py）
+## 九、A/B 测试框架
 
 对比三种调度策略（50 词 × 30 天 × 每天最多 20 轮 × 300 次随机试验）：
 
@@ -314,7 +358,3 @@ is_mastered = (composite_strength > 0.5
 | `passiveDecayPower` | 0.30 | 被动衰减幂次 |
 | `zoneCenter / zoneSigma` | 0.65 / 0.20 | 最佳复习区间高斯参数 |
 | `ucbMaxBonus` | 0.35 | UCB 探索奖励上限 |
-
----
-
-*本文档由 **Tencent Cloud Code Assistant** IDE 插件配合 **腾讯云代码助手智能编程模型** 自动生成。*
