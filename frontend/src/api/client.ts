@@ -255,7 +255,6 @@ export function connectSseStream(callbacks: SseCallbacks): () => void {
         });
 
         if (!response.ok || !response.body) {
-          if (response.status === 401 || response.status === 403) return;
           throw new Error(`SSE 连接失败: ${response.status}`);
         }
 
@@ -314,7 +313,8 @@ export function connectSseStream(callbacks: SseCallbacks): () => void {
         }
       } catch (err) {
         if (aborted) return;
-        await new Promise(resolve => setTimeout(resolve, reconnectDelay));
+        const delay = !tokenManager.getToken() ? SSE_MAX_RECONNECT_MS : reconnectDelay;
+        await new Promise(resolve => setTimeout(resolve, delay));
         reconnectDelay = Math.min(reconnectDelay * 2, SSE_MAX_RECONNECT_MS);
       }
     }

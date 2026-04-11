@@ -22,9 +22,18 @@ export function trackError() {
   errorCount++;
 }
 
+function resetCounters() {
+  sessionStart = Date.now();
+  actionCount = 0;
+  errorCount = 0;
+  Object.keys(featureUsage).forEach((k) => delete featureUsage[k]);
+}
+
 async function sendTelemetry(eventType = 'periodic', requestId: string | null = null) {
-  if (!tokenManager.getToken()) return;
-  if (!getDeviceId()) return;
+  if (!tokenManager.getToken() || !getDeviceId()) {
+    resetCounters();
+    return;
+  }
 
   const now = Date.now();
   const durationSecs = Math.round((now - sessionStart) / 1000);
@@ -50,11 +59,7 @@ async function sendTelemetry(eventType = 'periodic', requestId: string | null = 
     // ignore
   }
 
-  // reset counters
-  sessionStart = Date.now();
-  actionCount = 0;
-  errorCount = 0;
-  Object.keys(featureUsage).forEach((k) => delete featureUsage[k]);
+  resetCounters();
 }
 
 export function startTelemetryWorker() {
