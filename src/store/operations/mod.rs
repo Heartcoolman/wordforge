@@ -1,4 +1,5 @@
 pub mod admins;
+pub mod clients;
 pub mod elo;
 pub mod engine;
 pub mod extras;
@@ -8,6 +9,7 @@ pub mod records;
 pub mod sessions;
 pub mod study_configs;
 pub mod system_settings;
+pub mod telemetry;
 pub mod users;
 pub mod wb_center;
 pub mod word_states;
