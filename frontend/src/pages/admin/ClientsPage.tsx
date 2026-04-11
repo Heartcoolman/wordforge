@@ -134,7 +134,11 @@ export default function ClientsPage() {
                         <td class="py-2 pr-4">{Math.floor(entry.connectedSecs / 60)}m</td>
                         <td class="py-2 pr-4">{entry.connectionCount}</td>
                         <td class="py-2 flex gap-1">
-                          <Button size="xs" variant="danger" onClick={() => setBanTarget({ id: entry.deviceId, action: 'ban' })}>封禁</Button>
+                          <Show when={entry.isBanned} fallback={
+                            <Button size="xs" variant="danger" onClick={() => setBanTarget({ id: entry.deviceId, action: 'ban' })}>封禁</Button>
+                          }>
+                            <Button size="xs" variant="success" onClick={() => setBanTarget({ id: entry.deviceId, action: 'unban' })}>解封</Button>
+                          </Show>
                           <Button size="xs" variant="outline" onClick={() => requestTelemetry(entry.deviceId)}>拉取遥测</Button>
                           <Button size="xs" variant="ghost" onClick={() => loadTelemetry(entry.deviceId)}>历史</Button>
                         </td>

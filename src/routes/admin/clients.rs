@@ -29,6 +29,7 @@ struct SseLiveEntry {
     user_id: String,
     connected_secs: u64,
     connection_count: usize,
+    is_banned: bool,
 }
 
 #[derive(Serialize)]
@@ -53,12 +54,14 @@ async fn list_clients(
             let device_id = entry.key().clone();
             let conns = entry.value();
             let first = conns.first()?;
+            let is_banned = state.store().is_device_banned(&device_id).unwrap_or(false);
             Some(SseLiveEntry {
                 device_id,
                 platform: first.platform.clone(),
                 user_id: first.user_id.clone(),
                 connected_secs: first.connected_at.elapsed().as_secs(),
                 connection_count: conns.len(),
+                is_banned,
             })
         })
         .collect();

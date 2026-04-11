@@ -15,6 +15,7 @@ export interface SseLiveEntry {
   userId: string;
   connectedSecs: number;
   connectionCount: number;
+  isBanned: boolean;
 }
 
 export interface RecentlyActiveEntry {
