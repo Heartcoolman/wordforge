@@ -55,11 +55,17 @@ async fn main() {
     let amas_config = AMASConfig::from_env(&config.amas);
     let amas_engine = Arc::new(AMASEngine::new(amas_config, store.clone()));
 
+    let initial_maintenance = store
+        .get_system_settings()
+        .map(|s| s.maintenance_mode)
+        .unwrap_or(false);
+
     let state = AppState::new(
         store.clone(),
         amas_engine.clone(),
         &config,
         shutdown_tx.clone(),
+        initial_maintenance,
     );
 
     tokio::spawn(rate_limit_cleanup_loop(
