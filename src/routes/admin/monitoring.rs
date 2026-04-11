@@ -64,7 +64,7 @@ async fn check_update(
     }
 
     let git_version = env!("GIT_VERSION");
-    let current_version = git_version.trim_start_matches('v').split('-').next().unwrap_or(git_version);
+    let current_version = git_version.trim_start_matches('v');
 
     match fetch_latest_release(git_version, current_version).await {
         Ok(data) => {
