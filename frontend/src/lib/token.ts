@@ -93,9 +93,13 @@ export const tokenManager = {
   },
 
   getAdminToken(): string | null {
+    if (!inMemoryAdminToken) {
+      inMemoryAdminToken = storage.getString(STORAGE_KEYS.ADMIN_TOKEN, '') || null;
+    }
     if (!inMemoryAdminToken) return null;
     if (isTokenExpired(inMemoryAdminToken)) {
       inMemoryAdminToken = null;
+      storage.remove(STORAGE_KEYS.ADMIN_TOKEN);
       return null;
     }
     return inMemoryAdminToken;
@@ -103,6 +107,7 @@ export const tokenManager = {
 
   setAdminToken(token: string): void {
     inMemoryAdminToken = token;
+    storage.setString(STORAGE_KEYS.ADMIN_TOKEN, token);
   },
 
   clearAdminToken(): void {
