@@ -9,6 +9,33 @@ import type {
 import type { AmasConfig } from '@/types/amas';
 import type { BrowseItem, WordbookPreview, ImportResult, UpdateInfo, SyncResult } from '@/types/wordbookCenter';
 
+export interface SseLiveEntry {
+  deviceId: string;
+  platform: string;
+  userId: string;
+  connectedSecs: number;
+  connectionCount: number;
+}
+
+export interface RecentlyActiveEntry {
+  deviceId: string;
+  platform: string;
+  userId: string | null;
+  lastSeenAt: string;
+  isBanned: boolean;
+}
+
+export interface TelemetryRecord {
+  id: string;
+  deviceId: string;
+  userId: string | null;
+  eventType: string;
+  triggeredByRequestId: string | null;
+  payload: Record<string, unknown>;
+  clientTs: string;
+  serverTs: string;
+}
+
 export const adminApi = {
   // Auth
   checkStatus: () => api.get<{ initialized: boolean }>('/api/admin/auth/status'),
@@ -42,6 +69,20 @@ export const adminApi = {
   getSettings: () => api.get<SystemSettings>('/api/admin/settings', undefined, { useAdminToken: true }),
   updateSettings: (data: Partial<SystemSettings>) => api.put<SystemSettings>('/api/admin/settings', data, { useAdminToken: true }),
   reloadAmas: (data: AmasConfig) => api.post<AmasConfig>('/api/admin/settings/reload-amas', data, { useAdminToken: true }),
+  broadcastUpdate: (data?: { message?: string; version?: string }) =>
+    api.post<{ broadcasted: boolean }>('/api/admin/broadcast-update', data || {}, { useAdminToken: true }),
+
+  // Clients
+  getClients: () =>
+    api.get<{ sseLive: SseLiveEntry[]; recentlyActive: RecentlyActiveEntry[] }>('/api/admin/clients', undefined, { useAdminToken: true }),
+  banClient: (id: string, reason?: string) =>
+    api.post<{ banned: boolean; deviceId: string }>(`/api/admin/clients/${id}/ban`, reason ? { reason } : undefined, { useAdminToken: true }),
+  unbanClient: (id: string) =>
+    api.post<{ banned: boolean; deviceId: string }>(`/api/admin/clients/${id}/unban`, undefined, { useAdminToken: true }),
+  requestTelemetry: (id: string) =>
+    api.post<{ requestId: string }>(`/api/admin/clients/${id}/request-telemetry`, undefined, { useAdminToken: true }),
+  getTelemetry: (deviceId: string, params?: { limit?: number; offset?: number }) =>
+    api.get<{ records: TelemetryRecord[]; total: number }>(`/api/admin/telemetry/${deviceId}`, params as Record<string, string | number | boolean | undefined>, { useAdminToken: true }),
 
   // Wordbook Center
   wbCenterBrowse: () =>

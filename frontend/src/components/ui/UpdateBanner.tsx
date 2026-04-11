@@ -1,0 +1,28 @@
+import { Show } from 'solid-js';
+import { updateInfo, setUpdateInfo } from '@/api/client';
+
+export function UpdateBanner() {
+  return (
+    <Show when={updateInfo()}>
+      {(info) => (
+        <div class="fixed top-0 left-0 right-0 z-40 bg-accent/10 border-b border-accent/30 text-accent px-4 py-3 flex items-center justify-between shadow-sm">
+          <span class="text-sm font-medium">{info().message}</span>
+          <div class="flex items-center gap-3">
+            <button
+              onClick={() => window.location.reload()}
+              class="text-sm font-semibold hover:underline"
+            >
+              刷新
+            </button>
+            <button
+              onClick={() => setUpdateInfo(null)}
+              class="text-sm font-semibold opacity-80 hover:opacity-100"
+            >
+              关闭
+            </button>
+          </div>
+        </div>
+      )}
+    </Show>
+  );
+}

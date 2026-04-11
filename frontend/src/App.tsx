@@ -1,5 +1,5 @@
 import { Router, Route } from '@solidjs/router';
-import { lazy, Suspense } from 'solid-js';
+import { lazy, Suspense, Show, createSignal, onMount, onCleanup } from 'solid-js';
 import { Toaster } from '@/components/ui/Toast';
 import { AppErrorBoundary } from '@/components/ErrorBoundary';
 import { PageLayout } from '@/components/layout/PageLayout';
@@ -7,6 +7,10 @@ import { AdminLayout } from '@/components/layout/AdminLayout';
 import { ProtectedRoute } from '@/components/auth/ProtectedRoute';
 import { AdminProtectedRoute } from '@/components/auth/ProtectedRoute';
 import { Spinner } from '@/components/ui/Spinner';
+import { api, maintenanceActive, setMaintenanceActive, setUpdateInfo, connectSseStream } from '@/api/client';
+import { startTelemetryWorker, stopTelemetryWorker, handleTelemetryRequest } from '@/workers/telemetry';
+import MaintenancePage from '@/pages/MaintenancePage';
+import { UpdateBanner } from '@/components/ui/UpdateBanner';
 
 const NotFoundPage = lazy(() => import('@/pages/NotFoundPage'));
 
@@ -34,6 +38,7 @@ const MonitoringPage = lazy(() => import('@/pages/admin/MonitoringPage'));
 const AnalyticsPage = lazy(() => import('@/pages/admin/AnalyticsPage'));
 const SettingsPage = lazy(() => import('@/pages/admin/SettingsPage'));
 const AdminWordbookCenterPage = lazy(() => import('@/pages/admin/AdminWordbookCenterPage'));
+const ClientsPage = lazy(() => import('@/pages/admin/ClientsPage'));
 
 function PageSpinner() {
   return (
@@ -43,9 +48,57 @@ function PageSpinner() {
   );
 }
 
+function MaintenanceProvider(props: { children: any }) {
+  let pollTimer: ReturnType<typeof setInterval> | undefined;
+  let disconnectSse: (() => void) | undefined;
+  let initialVersion: string | undefined;
+
+  const checkStatus = async () => {
+    try {
+      const data = await api.get<{ maintenanceMode: boolean; version?: string }>('/api/status');
+      setMaintenanceActive(data.maintenanceMode);
+      if (data.version) {
+        if (!initialVersion) {
+          initialVersion = data.version;
+        } else if (initialVersion !== data.version) {
+          setUpdateInfo({ version: data.version, message: '有新版本可用，请刷新页面获取最新内容' });
+          initialVersion = data.version;
+        }
+      }
+    } catch {
+      // ignore
+    }
+  };
+
+  onMount(() => {
+    checkStatus();
+    pollTimer = setInterval(checkStatus, 30_000);
+    startTelemetryWorker();
+    disconnectSse = connectSseStream({
+      onTelemetryRequest: handleTelemetryRequest,
+    });
+  });
+
+  onCleanup(() => {
+    if (pollTimer) clearInterval(pollTimer);
+    stopTelemetryWorker();
+    disconnectSse?.();
+  });
+
+  return (
+    <>
+      <UpdateBanner />
+      <Show when={!maintenanceActive()} fallback={<MaintenancePage />}>
+        {props.children}
+      </Show>
+    </>
+  );
+}
+
 export default function App() {
   return (
     <AppErrorBoundary>
+      <MaintenanceProvider>
       <Router>
         <Route path="/" component={PageLayout}>
           <Route
@@ -212,6 +265,16 @@ export default function App() {
               )}
             />
             <Route
+              path="/clients"
+              component={() => (
+                <AdminProtectedRoute>
+                  <Suspense fallback={<PageSpinner />}>
+                    <ClientsPage />
+                  </Suspense>
+                </AdminProtectedRoute>
+              )}
+            />
+            <Route
               path="/amas-config"
               component={() => (
                 <AdminProtectedRoute>
@@ -272,6 +335,7 @@ export default function App() {
           />
         </Route>
       </Router>
+      </MaintenanceProvider>
       <Toaster />
     </AppErrorBoundary>
   );
