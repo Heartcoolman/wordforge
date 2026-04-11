@@ -31,6 +31,8 @@ pub enum SseEvent {
     },
     #[serde(rename = "banned")]
     Banned,
+    #[serde(rename = "unbanned")]
+    Unbanned,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

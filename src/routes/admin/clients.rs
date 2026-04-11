@@ -108,9 +108,9 @@ async fn ban_client(
         .store()
         .ban_client_device(&id, &admin.admin_id, reason.as_deref())?;
 
-    // Notify then drop active SSE connections for this device
-    if let Some((_, conns)) = state.active_sse().remove(&id) {
-        for conn in conns {
+    // Notify via SSE but keep connection alive for instant unban
+    if let Some(conns) = state.active_sse().get(&id) {
+        for conn in conns.value() {
             let _ = conn.tx.send(SseEvent::Banned);
         }
     }
@@ -128,6 +128,14 @@ async fn unban_client(
         return Err(AppError::not_found("设备不存在"));
     }
     state.store().unban_client_device(&id)?;
+
+    // Notify via existing SSE connection for instant unban
+    if let Some(conns) = state.active_sse().get(&id) {
+        for conn in conns.value() {
+            let _ = conn.tx.send(SseEvent::Unbanned);
+        }
+    }
+
     tracing::info!(admin_id = %admin.admin_id, device_id = %id, "管理员解封设备");
     Ok(ok(serde_json::json!({ "banned": false, "deviceId": id })))
 }

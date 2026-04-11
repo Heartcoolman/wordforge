@@ -157,6 +157,7 @@ pub async fn sse_handler(
                                     crate::state::SseEvent::Maintenance { .. } => "maintenance",
                                     crate::state::SseEvent::TelemetryRequest { .. } => "telemetry_request",
                                     crate::state::SseEvent::Banned => "banned",
+                                    crate::state::SseEvent::Unbanned => "unbanned",
                                 };
                                 yield Ok(Event::default().event(event_name).data(json));
                             }
