@@ -55,8 +55,8 @@ impl Store {
             "SELECT device_id, platform, user_id, first_seen_at, last_seen_at,
                     is_banned, banned_at, banned_by, ban_reason
              FROM client_devices
-             WHERE last_seen_at >= datetime('now', ?1)
-             ORDER BY last_seen_at DESC",
+             WHERE last_seen_at >= datetime('now', ?1) OR is_banned = 1
+             ORDER BY is_banned DESC, last_seen_at DESC",
         )?;
         let offset = format!("-{} minutes", minutes);
         let rows = stmt.query_map(params![offset], |r| {
