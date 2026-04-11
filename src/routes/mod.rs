@@ -89,7 +89,7 @@ pub fn build_router(state: AppState) -> Router {
 
     if !state.config().api_only {
         let spa_fallback =
-            ServeDir::new("static").not_found_service(ServeFile::new("static/index.html"));
+            ServeDir::new("static").fallback(ServeFile::new("static/index.html"));
         app = app
             .fallback_service(spa_fallback)
             .layer(axum::middleware::from_fn(static_cache_headers));
