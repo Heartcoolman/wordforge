@@ -22,6 +22,9 @@ export default function SettingsPage() {
   const [broadcastMsg, setBroadcastMsg] = createSignal('');
   const [broadcasting, setBroadcasting] = createSignal(false);
   const [showBroadcastConfirm, setShowBroadcastConfirm] = createSignal(false);
+  const [updateMsg, setUpdateMsg] = createSignal('');
+  const [sendingUpdate, setSendingUpdate] = createSignal(false);
+  const [showUpdateConfirm, setShowUpdateConfirm] = createSignal(false);
 
   const [showMaintenanceConfirm, setShowMaintenanceConfirm] = createSignal(false);
 
@@ -81,6 +84,20 @@ export default function SettingsPage() {
     }
   }
 
+  async function confirmUpdateBroadcast() {
+    setShowUpdateConfirm(false);
+    setSendingUpdate(true);
+    try {
+      await adminApi.broadcastUpdate(updateMsg().trim() ? { message: updateMsg() } : undefined);
+      uiStore.toast.success('更新通知已发送');
+      setUpdateMsg('');
+    } catch (err: unknown) {
+      uiStore.toast.error('发送失败', err instanceof Error ? err.message : '');
+    } finally {
+      setSendingUpdate(false);
+    }
+  }
+
   function handleMaintenanceToggle(value: boolean) {
     if (value) {
       setShowMaintenanceConfirm(true);
@@ -114,6 +131,20 @@ export default function SettingsPage() {
             <div class="flex justify-end gap-2">
               <Button size="sm" variant="ghost" onClick={() => setShowBroadcastConfirm(false)}>取消</Button>
               <Button size="sm" variant="warning" onClick={confirmBroadcast}>确认发送</Button>
+            </div>
+          </Card>
+        </div>
+      </Show>
+
+      {/* 更新通知确认弹窗 */}
+      <Show when={showUpdateConfirm()}>
+        <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => setShowUpdateConfirm(false)}>
+          <Card variant="elevated" class="max-w-sm mx-4" onClick={(e: MouseEvent) => e.stopPropagation()}>
+            <h3 class="text-lg font-semibold text-content mb-2">确认发送更新通知</h3>
+            <p class="text-sm text-content-secondary mb-4">此通知将提示所有在线用户刷新页面获取新版本，确认发送吗？</p>
+            <div class="flex justify-end gap-2">
+              <Button size="sm" variant="ghost" onClick={() => setShowUpdateConfirm(false)}>取消</Button>
+              <Button size="sm" variant="warning" onClick={confirmUpdateBroadcast}>确认发送</Button>
             </div>
           </Card>
         </div>
@@ -193,6 +224,22 @@ export default function SettingsPage() {
               />
             </div>
             <Button onClick={handleBroadcastClick} loading={broadcasting()} variant="warning">发送广播</Button>
+          </div>
+        </Card>
+
+        <Card variant="elevated">
+          <h2 class="text-lg font-semibold text-content mb-4">更新通知</h2>
+          <div class="space-y-3">
+            <div class="flex flex-col gap-1.5">
+              <label class="text-sm font-medium text-content-secondary">提示信息（可选）</label>
+              <textarea
+                class="w-full px-3 py-2 rounded-lg text-sm bg-surface text-content border border-border focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent resize-y min-h-[80px]"
+                value={updateMsg()}
+                onInput={(e) => setUpdateMsg(e.currentTarget.value)}
+                placeholder="有新版本可用，请刷新页面获取最新内容"
+              />
+            </div>
+            <Button onClick={() => setShowUpdateConfirm(true)} loading={sendingUpdate()} variant="warning">发送更新通知</Button>
           </div>
         </Card>
       </Show>

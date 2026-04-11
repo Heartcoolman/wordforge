@@ -40,8 +40,14 @@ fn json_rejection_to_app_error(rejection: JsonRejection) -> AppError {
             AppError::bad_request("INVALID_REQUEST_BODY", "请求体格式无效")
         }
         JsonRejection::BytesRejection(e) => {
-            tracing::warn!(error = %e, "Failed to read request body bytes");
-            AppError::bad_request("INVALID_REQUEST_BODY", "请求体格式无效")
+            let msg = e.to_string();
+            if msg.contains("length limit") {
+                tracing::warn!(error = %e, "Request body exceeds size limit");
+                AppError::payload_too_large("请求体超出大小限制")
+            } else {
+                tracing::warn!(error = %e, "Failed to read request body bytes");
+                AppError::bad_request("INVALID_REQUEST_BODY", "请求体格式无效")
+            }
         }
         other => {
             tracing::warn!(error = %other, "Unexpected JSON body rejection");

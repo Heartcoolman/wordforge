@@ -80,7 +80,7 @@ async fn spawn_with_limits(api_limit: u64) -> TestApp {
     ));
     let (shutdown_tx, _) = broadcast::channel::<()>(8);
 
-    let state = AppState::new(store, amas_engine, &config, shutdown_tx);
+    let state = AppState::new(store, amas_engine, &config, shutdown_tx, false);
 
     let app = build_router(state.clone());
 

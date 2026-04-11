@@ -83,6 +83,10 @@ async fn update_settings(
 
     state.store().save_system_settings(&settings)?;
 
+    if req.maintenance_mode.is_some() {
+        state.set_maintenance(settings.maintenance_mode);
+    }
+
     tracing::info!(
         admin_id = %admin.admin_id,
         action = "update_settings",

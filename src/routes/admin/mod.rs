@@ -2,6 +2,7 @@ pub mod amas;
 pub mod analytics;
 pub mod auth;
 pub mod broadcast;
+pub mod clients;
 pub mod monitoring;
 pub mod settings;
 
@@ -51,9 +52,12 @@ pub fn router() -> Router<AppState> {
         .nest("/analytics", analytics::router())
         .nest("/monitoring", monitoring::router())
         .nest("/broadcast", broadcast::router())
+        .route("/broadcast-update", post(broadcast::broadcast_update))
         .nest("/settings", settings::router())
         .nest("/wordbook-center", super::wordbook_center::admin_router())
         .nest("/amas", amas::admin_router())
+        .nest("/clients", clients::router())
+        .nest("/telemetry", clients::telemetry_router())
         .route("/users", get(list_users))
         .route("/users/:id/ban", post(ban_user))
         .route("/users/:id/unban", post(unban_user))

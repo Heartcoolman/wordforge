@@ -3,7 +3,10 @@ use crate::store::{Store, StoreError};
 type MigrationFn = fn(&Store) -> Result<(), StoreError>;
 
 fn migrations() -> Vec<(&'static str, MigrationFn)> {
-    vec![("001_initial_sqlite", m001_initial)]
+    vec![
+        ("001_initial_sqlite", m001_initial),
+        ("002_client_management", m002_client_management),
+    ]
 }
 
 pub fn run(store: &Store) -> Result<(), StoreError> {
@@ -58,6 +61,41 @@ fn m001_initial(_store: &Store) -> Result<(), StoreError> {
     Ok(())
 }
 
+fn m002_client_management(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS client_devices (
+            device_id TEXT NOT NULL,
+            platform TEXT NOT NULL DEFAULT 'unknown',
+            user_id TEXT,
+            first_seen_at TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL,
+            is_banned INTEGER NOT NULL DEFAULT 0 CHECK (is_banned IN (0, 1)),
+            banned_at TEXT DEFAULT NULL,
+            banned_by TEXT DEFAULT NULL,
+            ban_reason TEXT DEFAULT NULL,
+            PRIMARY KEY (device_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_client_devices_user ON client_devices(user_id, last_seen_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_client_devices_active ON client_devices(last_seen_at DESC) WHERE is_banned = 0;
+
+        CREATE TABLE IF NOT EXISTS telemetry_events (
+            id TEXT NOT NULL,
+            device_id TEXT NOT NULL,
+            user_id TEXT,
+            event_type TEXT NOT NULL DEFAULT 'periodic',
+            triggered_by_request_id TEXT DEFAULT NULL,
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            client_ts TEXT NOT NULL,
+            server_ts TEXT NOT NULL,
+            PRIMARY KEY (id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_telemetry_device ON telemetry_events(device_id, server_ts DESC);
+        CREATE INDEX IF NOT EXISTS idx_telemetry_server_ts ON telemetry_events(server_ts DESC);",
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -71,8 +109,9 @@ mod tests {
         run(&store).unwrap();
         let second = get_current_version(&store).unwrap();
 
-        assert_eq!(first, 1);
-        assert_eq!(second, 1);
+        let expected = migrations().len() as u32;
+        assert_eq!(first, expected);
+        assert_eq!(second, expected);
     }
 
     #[test]

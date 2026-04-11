@@ -6,7 +6,9 @@ pub mod learning;
 pub mod notifications;
 pub mod realtime;
 pub mod records;
+pub mod status;
 pub mod study_config;
+pub mod telemetry;
 pub mod user_profile;
 pub mod users;
 pub mod v1;
@@ -22,7 +24,7 @@ use axum::response::Response;
 use axum::Router;
 use tower_http::services::{ServeDir, ServeFile};
 
-use crate::middleware::{rate_limit, request_id};
+use crate::middleware::{device, maintenance, rate_limit, request_id};
 use crate::state::AppState;
 
 /// Maximum request body size: 2 MiB.
@@ -65,6 +67,16 @@ pub fn build_router(state: AppState) -> Router {
         .nest("/content", content::router())
         .nest("/wordbook-center", wordbook_center::user_router())
         .nest("/v1", v1::router())
+        .nest("/status", status::router())
+        .nest("/telemetry", telemetry::router())
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            device::device_middleware,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            maintenance::maintenance_middleware,
+        ))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             rate_limit::rate_limit_middleware,

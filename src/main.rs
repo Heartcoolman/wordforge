@@ -55,11 +55,17 @@ async fn main() {
     let amas_config = AMASConfig::from_env(&config.amas);
     let amas_engine = Arc::new(AMASEngine::new(amas_config, store.clone()));
 
+    let initial_maintenance = store
+        .get_system_settings()
+        .map(|s| s.maintenance_mode)
+        .unwrap_or(false);
+
     let state = AppState::new(
         store.clone(),
         amas_engine.clone(),
         &config,
         shutdown_tx.clone(),
+        initial_maintenance,
     );
 
     tokio::spawn(rate_limit_cleanup_loop(
@@ -155,7 +161,13 @@ fn build_cors_layer(config: &Config) -> CorsLayer {
         return CorsLayer::new()
             .allow_origin(Any)
             .allow_credentials(false)
-            .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE, header::ACCEPT])
+            .allow_headers([
+                header::AUTHORIZATION,
+                header::CONTENT_TYPE,
+                header::ACCEPT,
+                HeaderName::from_static("x-device-id"),
+                HeaderName::from_static("x-device-platform"),
+            ])
             .allow_methods(Any);
     }
 
@@ -178,7 +190,13 @@ fn build_cors_layer(config: &Config) -> CorsLayer {
         return CorsLayer::new()
             .allow_origin(origins)
             .allow_credentials(true)
-            .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE, header::ACCEPT])
+            .allow_headers([
+                header::AUTHORIZATION,
+                header::CONTENT_TYPE,
+                header::ACCEPT,
+                HeaderName::from_static("x-device-id"),
+                HeaderName::from_static("x-device-platform"),
+            ])
             .allow_methods([
                 Method::GET,
                 Method::POST,
@@ -193,7 +211,13 @@ fn build_cors_layer(config: &Config) -> CorsLayer {
         Ok(origin) => CorsLayer::new()
             .allow_origin(origin)
             .allow_credentials(true)
-            .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE, header::ACCEPT])
+            .allow_headers([
+                header::AUTHORIZATION,
+                header::CONTENT_TYPE,
+                header::ACCEPT,
+                HeaderName::from_static("x-device-id"),
+                HeaderName::from_static("x-device-platform"),
+            ])
             .allow_methods([
                 Method::GET,
                 Method::POST,

@@ -1,4 +1,5 @@
 import { tokenManager } from '@/lib/token';
+import { getDeviceId, getDevicePlatform } from '@/lib/device';
 import { createSignal } from 'solid-js';
 import type { AmasStateStreamEvent } from '@/types/amas';
 
@@ -38,6 +39,14 @@ export class ApiError extends Error {
 // ── Reactive 401 signal for SPA navigation (avoids hard refresh) ──
 const [unauthorized, setUnauthorized] = createSignal(false);
 export { unauthorized };
+
+// ── Maintenance mode reactive signal ──
+const [maintenanceActive, setMaintenanceActive] = createSignal(false);
+export { maintenanceActive, setMaintenanceActive };
+
+// ── Update info reactive signal ──
+const [updateInfo, setUpdateInfo] = createSignal<{ version: string; message: string } | null>(null);
+export { updateInfo, setUpdateInfo };
 
 /** Reset unauthorized state (call after successful login) */
 export function resetUnauthorized() {
@@ -138,6 +147,8 @@ async function req<T>(path: string, opts: ReqOpts = {}): Promise<T> {
   }
 
   setAuthorizationHeader(headers, useAdminToken);
+  headers.set('X-Device-Id', getDeviceId());
+  headers.set('X-Device-Platform', getDevicePlatform());
 
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeout);
@@ -209,9 +220,14 @@ function isAmasStatePayload(payload: unknown): payload is AmasStateStreamEvent {
     && typeof record.totalEventCount === 'number';
 }
 
-export function connectAmasStateStream(
-  onState: (payload: AmasStateStreamEvent) => void,
-): () => void {
+export interface SseCallbacks {
+  onAmasState?: (payload: AmasStateStreamEvent) => void;
+  onMaintenance?: (active: boolean) => void;
+  onTelemetryRequest?: (requestId: string) => void;
+  onUpdateAvailable?: (payload: { version: string; message: string }) => void;
+}
+
+export function connectSseStream(callbacks: SseCallbacks): () => void {
   let aborted = false;
   let currentCtrl: AbortController | null = null;
   let reconnectDelay = SSE_INITIAL_RECONNECT_MS;
@@ -231,6 +247,8 @@ export function connectAmasStateStream(
           headers: {
             ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
             'Accept': 'text/event-stream',
+            'X-Device-Id': getDeviceId(),
+            'X-Device-Platform': getDevicePlatform(),
           },
           credentials: 'include',
           signal: ctrl.signal,
@@ -252,10 +270,15 @@ export function connectAmasStateStream(
           const timeout = new Promise<{ done: true; value: undefined }>((resolve) => {
             timerId = setTimeout(() => resolve({ done: true, value: undefined }), SSE_READ_TIMEOUT_MS);
           });
-          const result = await Promise.race([
-            reader.read().then((r) => { clearTimeout(timerId); return r; }),
-            timeout,
-          ]);
+          let result;
+          try {
+            result = await Promise.race([
+              reader.read().catch(() => ({ done: true as const, value: undefined })),
+              timeout,
+            ]);
+          } finally {
+            clearTimeout(timerId);
+          }
           if (result.done) { reader.cancel(); break; }
 
           buffer += decoder.decode(result.value, { stream: true });
@@ -265,11 +288,19 @@ export function connectAmasStateStream(
           for (const line of lines) {
             if (line.startsWith('event:')) {
               eventType = line.slice(6).trim();
-            } else if (line.startsWith('data:') && eventType === 'amas_state') {
+            } else if (line.startsWith('data:') && eventType) {
               try {
-                const payload = JSON.parse(line.slice(5).trim()) as unknown;
-                if (isAmasStatePayload(payload)) {
-                  onState(payload);
+                const data = JSON.parse(line.slice(5).trim());
+                if (eventType === 'amas_state' && callbacks.onAmasState && isAmasStatePayload(data)) {
+                  callbacks.onAmasState(data);
+                } else if (eventType === 'maintenance') {
+                  setMaintenanceActive(!!data.active);
+                  callbacks.onMaintenance?.(data.active);
+                } else if (eventType === 'telemetry_request' && callbacks.onTelemetryRequest && data.requestId) {
+                  callbacks.onTelemetryRequest(data.requestId);
+                } else if (eventType === 'update_available' && data.version) {
+                  setUpdateInfo({ version: data.version, message: data.message || '' });
+                  callbacks.onUpdateAvailable?.({ version: data.version, message: data.message || '' });
                 }
               } catch {
                 // 忽略格式错误的事件数据
@@ -282,7 +313,8 @@ export function connectAmasStateStream(
         }
       } catch (err) {
         if (aborted) return;
-        await new Promise(resolve => setTimeout(resolve, reconnectDelay));
+        const delay = !tokenManager.getToken() ? SSE_MAX_RECONNECT_MS : reconnectDelay;
+        await new Promise(resolve => setTimeout(resolve, delay));
         reconnectDelay = Math.min(reconnectDelay * 2, SSE_MAX_RECONNECT_MS);
       }
     }
@@ -294,6 +326,12 @@ export function connectAmasStateStream(
     aborted = true;
     currentCtrl?.abort();
   };
+}
+
+export function connectAmasStateStream(
+  onState: (payload: AmasStateStreamEvent) => void,
+): () => void {
+  return connectSseStream({ onAmasState: onState });
 }
 
 export const api = {
