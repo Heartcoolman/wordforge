@@ -156,6 +156,7 @@ pub async fn sse_handler(
                                 let event_name = match &event {
                                     crate::state::SseEvent::Maintenance { .. } => "maintenance",
                                     crate::state::SseEvent::TelemetryRequest { .. } => "telemetry_request",
+                                    crate::state::SseEvent::Banned => "banned",
                                 };
                                 yield Ok(Event::default().event(event_name).data(json));
                             }

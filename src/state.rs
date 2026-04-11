@@ -29,6 +29,8 @@ pub enum SseEvent {
         #[serde(rename = "requestId")]
         request_id: String,
     },
+    #[serde(rename = "banned")]
+    Banned,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

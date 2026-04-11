@@ -108,10 +108,10 @@ async fn ban_client(
         .store()
         .ban_client_device(&id, &admin.admin_id, reason.as_deref())?;
 
-    // Drop active SSE connections for this device
+    // Notify then drop active SSE connections for this device
     if let Some((_, conns)) = state.active_sse().remove(&id) {
         for conn in conns {
-            drop(conn.tx);
+            let _ = conn.tx.send(SseEvent::Banned);
         }
     }
 
