@@ -12,6 +12,6 @@ pub fn router() -> Router<AppState> {
 async fn get_status(State(state): State<AppState>) -> impl axum::response::IntoResponse {
     ok(serde_json::json!({
         "maintenanceMode": state.is_maintenance(),
-        "version": env!("CARGO_PKG_VERSION"),
+        "version": env!("GIT_VERSION"),
     }))
 }
