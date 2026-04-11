@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use axum::http::{header, HeaderName, HeaderValue};
+use axum::http::{header, HeaderName, HeaderValue, Method};
 use learning_backend::amas::config::AMASConfig;
 use learning_backend::amas::engine::AMASEngine;
 use learning_backend::config::Config;
@@ -179,7 +179,14 @@ fn build_cors_layer(config: &Config) -> CorsLayer {
             .allow_origin(origins)
             .allow_credentials(true)
             .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE, header::ACCEPT])
-            .allow_methods(Any);
+            .allow_methods([
+                Method::GET,
+                Method::POST,
+                Method::PUT,
+                Method::DELETE,
+                Method::PATCH,
+                Method::OPTIONS,
+            ]);
     }
 
     match origin_str.parse::<HeaderValue>() {
@@ -187,7 +194,14 @@ fn build_cors_layer(config: &Config) -> CorsLayer {
             .allow_origin(origin)
             .allow_credentials(true)
             .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE, header::ACCEPT])
-            .allow_methods(Any),
+            .allow_methods([
+                Method::GET,
+                Method::POST,
+                Method::PUT,
+                Method::DELETE,
+                Method::PATCH,
+                Method::OPTIONS,
+            ]),
         Err(e) => {
             panic!(
                 "FATAL: Invalid CORS_ORIGIN '{}': {}. \
