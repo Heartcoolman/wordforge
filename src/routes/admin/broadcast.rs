@@ -40,6 +40,22 @@ impl BroadcastRequest {
     }
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BroadcastUpdateRequest {
+    version: Option<String>,
+    message: Option<String>,
+}
+
+pub(crate) async fn broadcast_update(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    JsonBody(req): JsonBody<BroadcastUpdateRequest>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    state.broadcast_update(req.version.as_deref(), req.message.as_deref());
+    Ok(ok(serde_json::json!({ "broadcasted": true })))
+}
+
 async fn broadcast_message(
     admin: AdminAuthUser,
     State(state): State<AppState>,
