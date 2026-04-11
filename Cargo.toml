@@ -42,6 +42,7 @@ tokio-cron-scheduler = "0.11"
 
 reqwest = { version = "0.12", default-features = false, features = ["json", "cookies", "stream", "rustls-tls"] }
 
+dashmap = "6"
 dotenvy = "0.15"
 futures = "0.3"
 hex = "0.4"
