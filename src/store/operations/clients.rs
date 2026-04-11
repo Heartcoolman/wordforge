@@ -30,6 +30,7 @@ impl Store {
              VALUES (?1, ?2, ?3, datetime('now'), datetime('now'))
              ON CONFLICT(device_id) DO UPDATE SET
                 last_seen_at = datetime('now'),
+                platform = ?2,
                 user_id = ?3",
             params![device_id, platform, user_id],
         )?;

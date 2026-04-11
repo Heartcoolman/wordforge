@@ -161,7 +161,13 @@ fn build_cors_layer(config: &Config) -> CorsLayer {
         return CorsLayer::new()
             .allow_origin(Any)
             .allow_credentials(false)
-            .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE, header::ACCEPT])
+            .allow_headers([
+                header::AUTHORIZATION,
+                header::CONTENT_TYPE,
+                header::ACCEPT,
+                HeaderName::from_static("x-device-id"),
+                HeaderName::from_static("x-device-platform"),
+            ])
             .allow_methods(Any);
     }
 
@@ -184,7 +190,13 @@ fn build_cors_layer(config: &Config) -> CorsLayer {
         return CorsLayer::new()
             .allow_origin(origins)
             .allow_credentials(true)
-            .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE, header::ACCEPT])
+            .allow_headers([
+                header::AUTHORIZATION,
+                header::CONTENT_TYPE,
+                header::ACCEPT,
+                HeaderName::from_static("x-device-id"),
+                HeaderName::from_static("x-device-platform"),
+            ])
             .allow_methods([
                 Method::GET,
                 Method::POST,
@@ -199,7 +211,13 @@ fn build_cors_layer(config: &Config) -> CorsLayer {
         Ok(origin) => CorsLayer::new()
             .allow_origin(origin)
             .allow_credentials(true)
-            .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE, header::ACCEPT])
+            .allow_headers([
+                header::AUTHORIZATION,
+                header::CONTENT_TYPE,
+                header::ACCEPT,
+                HeaderName::from_static("x-device-id"),
+                HeaderName::from_static("x-device-platform"),
+            ])
             .allow_methods([
                 Method::GET,
                 Method::POST,

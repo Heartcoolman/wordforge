@@ -255,6 +255,7 @@ export function connectSseStream(callbacks: SseCallbacks): () => void {
         });
 
         if (!response.ok || !response.body) {
+          if (response.status === 401 || response.status === 403) return;
           throw new Error(`SSE 连接失败: ${response.status}`);
         }
 

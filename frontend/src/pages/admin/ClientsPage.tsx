@@ -66,6 +66,8 @@ export default function ClientsPage() {
     try {
       setTelemetryLoading(true);
       setTelemetryDevice(deviceId);
+      setTelemetryRecords([]);
+      setTelemetryTotal(0);
       const data = await adminApi.getTelemetry(deviceId);
       setTelemetryRecords(data.records);
       setTelemetryTotal(data.total);
@@ -167,7 +169,7 @@ export default function ClientsPage() {
                         <td class="py-2 pr-4 font-mono text-xs" title={entry.deviceId}>{truncateId(entry.deviceId)}</td>
                         <td class="py-2 pr-4">{entry.platform}</td>
                         <td class="py-2 pr-4 font-mono text-xs">{entry.userId ? truncateId(entry.userId) : '-'}</td>
-                        <td class="py-2 pr-4 text-xs">{new Date(entry.lastSeenAt).toLocaleString()}</td>
+                        <td class="py-2 pr-4 text-xs">{new Date(entry.lastSeenAt.replace(' ', 'T') + 'Z').toLocaleString()}</td>
                         <td class="py-2 pr-4">
                           <span class={`inline-block px-2 py-0.5 rounded text-xs font-medium ${entry.isBanned ? 'bg-error-light text-error' : 'bg-success-light text-success'}`}>
                             {entry.isBanned ? '已封禁' : '正常'}
@@ -205,7 +207,7 @@ export default function ClientsPage() {
                       <div class="text-xs border border-border/50 rounded p-2">
                         <div class="flex justify-between text-content-secondary mb-1">
                           <span>{record.eventType}{record.triggeredByRequestId ? ' (按需)' : ''}</span>
-                          <span>{new Date(record.serverTs).toLocaleString()}</span>
+                          <span>{new Date(record.serverTs.replace(' ', 'T') + 'Z').toLocaleString()}</span>
                         </div>
                         <pre class="text-content text-xs overflow-x-auto">{JSON.stringify(record.payload, null, 2)}</pre>
                       </div>
