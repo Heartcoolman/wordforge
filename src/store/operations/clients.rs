@@ -1,5 +1,6 @@
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 use crate::store::{Store, StoreError};
 
@@ -15,6 +16,32 @@ pub struct ClientDevice {
     pub banned_at: Option<String>,
     pub banned_by: Option<String>,
     pub ban_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DataChannelStatus {
+    pub amas: &'static str,
+    pub learning: &'static str,
+    pub telemetry: &'static str,
+}
+
+impl Default for DataChannelStatus {
+    fn default() -> Self {
+        Self {
+            amas: "none",
+            learning: "none",
+            telemetry: "none",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DataUploadSummary {
+    pub amas_by_user: HashMap<String, &'static str>,
+    pub learning_by_user: HashMap<String, &'static str>,
+    pub telemetry_by_device: HashMap<String, &'static str>,
 }
 
 impl Store {
@@ -49,7 +76,10 @@ impl Store {
         Ok(banned.unwrap_or(0) != 0)
     }
 
-    pub fn get_recently_active_clients(&self, minutes: i64) -> Result<Vec<ClientDevice>, StoreError> {
+    pub fn get_recently_active_clients(
+        &self,
+        minutes: i64,
+    ) -> Result<Vec<ClientDevice>, StoreError> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT device_id, platform, user_id, first_seen_at, last_seen_at,
@@ -108,12 +138,95 @@ impl Store {
 
     pub fn client_device_exists(&self, device_id: &str) -> Result<bool, StoreError> {
         let conn = self.conn()?;
-        let exists: bool = conn
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM client_devices WHERE device_id = ?1)",
-                params![device_id],
-                |r| r.get(0),
-            )?;
+        let exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM client_devices WHERE device_id = ?1)",
+            params![device_id],
+            |r| r.get(0),
+        )?;
         Ok(exists)
+    }
+
+    pub fn get_data_upload_status(
+        &self,
+        user_ids: &[String],
+        device_ids: &[String],
+    ) -> Result<DataUploadSummary, StoreError> {
+        let conn = self.conn()?;
+        let mut summary = DataUploadSummary::default();
+
+        if !user_ids.is_empty() {
+            let placeholders: Vec<String> = user_ids
+                .iter()
+                .enumerate()
+                .map(|(i, _)| format!("?{}", i + 1))
+                .collect();
+            let params: Vec<&dyn rusqlite::types::ToSql> = user_ids
+                .iter()
+                .map(|s| s as &dyn rusqlite::types::ToSql)
+                .collect();
+
+            let amas_sql = format!(
+                "SELECT user_id, total_event_count FROM engine_user_states WHERE user_id IN ({})",
+                placeholders.join(",")
+            );
+            let mut stmt = conn.prepare(&amas_sql)?;
+            let rows = stmt.query_map(params.as_slice(), |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            })?;
+            for row in rows {
+                let (user_id, event_count) = row?;
+                summary
+                    .amas_by_user
+                    .insert(user_id, if event_count > 0 { "uploaded" } else { "nil" });
+            }
+
+            let lr_sql = format!(
+                "SELECT user_id, COUNT(*) FROM learning_records WHERE user_id IN ({}) GROUP BY user_id",
+                placeholders.join(",")
+            );
+            let mut stmt = conn.prepare(&lr_sql)?;
+            let lr_params: Vec<&dyn rusqlite::types::ToSql> = user_ids
+                .iter()
+                .map(|s| s as &dyn rusqlite::types::ToSql)
+                .collect();
+            let rows = stmt.query_map(lr_params.as_slice(), |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            })?;
+            for row in rows {
+                let (user_id, cnt) = row?;
+                summary
+                    .learning_by_user
+                    .insert(user_id, if cnt > 0 { "uploaded" } else { "nil" });
+            }
+        }
+
+        if !device_ids.is_empty() {
+            let placeholders: Vec<String> = device_ids
+                .iter()
+                .enumerate()
+                .map(|(i, _)| format!("?{}", i + 1))
+                .collect();
+            let params: Vec<&dyn rusqlite::types::ToSql> = device_ids
+                .iter()
+                .map(|s| s as &dyn rusqlite::types::ToSql)
+                .collect();
+
+            let sql = format!(
+                "SELECT device_id, COUNT(*) FROM telemetry_events WHERE device_id IN ({}) GROUP BY device_id",
+                placeholders.join(",")
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(params.as_slice(), |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            })?;
+            for row in rows {
+                let (device_id, cnt) = row?;
+                summary
+                    .telemetry_by_device
+                    .insert(device_id, if cnt > 0 { "uploaded" } else { "nil" });
+            }
+        }
+
+        Ok(summary)
     }
 }
