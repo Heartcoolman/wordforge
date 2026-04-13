@@ -2,8 +2,42 @@ import { createSignal, onMount, Show, For } from 'solid-js';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Spinner } from '@/components/ui/Spinner';
-import { adminApi, type SseLiveEntry, type RecentlyActiveEntry, type TelemetryRecord } from '@/api/admin';
+import { adminApi, type SseLiveEntry, type RecentlyActiveEntry, type TelemetryRecord, type DataChannelValue } from '@/api/admin';
 import { uiStore } from '@/stores/ui';
+
+const CHANNEL_LABELS: Record<string, string> = {
+  amas: 'AMAS',
+  learning: '学习',
+  telemetry: '遥测',
+};
+
+const STATUS_COLORS: Record<DataChannelValue, string> = {
+  uploaded: 'bg-success-light text-success',
+  nil: 'bg-warning-light text-warning',
+  none: 'bg-error-light text-error',
+};
+
+const STATUS_TEXT: Record<DataChannelValue, string> = {
+  uploaded: '已上传',
+  nil: '空数据',
+  none: '未上传',
+};
+
+function DataChannelBadge(props: { channel: string; status: DataChannelValue }) {
+  return (
+    <span
+      class={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium ${STATUS_COLORS[props.status]}`}
+      title={`${CHANNEL_LABELS[props.channel]}: ${STATUS_TEXT[props.status]}`}
+    >
+      <span class="w-1.5 h-1.5 rounded-full" classList={{
+        'bg-success': props.status === 'uploaded',
+        'bg-warning': props.status === 'nil',
+        'bg-error': props.status === 'none',
+      }} />
+      {CHANNEL_LABELS[props.channel]}
+    </span>
+  );
+}
 
 export default function ClientsPage() {
   const [sseLive, setSseLive] = createSignal<SseLiveEntry[]>([]);
@@ -115,14 +149,15 @@ export default function ClientsPage() {
             <div class="overflow-x-auto">
               <table class="w-full text-sm">
                 <thead>
-                  <tr class="border-b border-border text-left text-content-secondary">
-                    <th class="py-2 pr-4">设备 ID</th>
-                    <th class="py-2 pr-4">平台</th>
-                    <th class="py-2 pr-4">用户</th>
-                    <th class="py-2 pr-4">连接时长</th>
-                    <th class="py-2 pr-4">连接数</th>
-                    <th class="py-2">操作</th>
-                  </tr>
+<tr class="border-b border-border text-left text-content-secondary">
+                     <th class="py-2 pr-4">设备 ID</th>
+                     <th class="py-2 pr-4">平台</th>
+                     <th class="py-2 pr-4">用户</th>
+                     <th class="py-2 pr-4">连接时长</th>
+                     <th class="py-2 pr-4">连接数</th>
+                     <th class="py-2 pr-4">数据状态</th>
+                     <th class="py-2">操作</th>
+                   </tr>
                 </thead>
                 <tbody>
                   <For each={sseLive()}>
@@ -132,8 +167,15 @@ export default function ClientsPage() {
                         <td class="py-2 pr-4">{entry.platform}</td>
                         <td class="py-2 pr-4 font-mono text-xs">{truncateId(entry.userId)}</td>
                         <td class="py-2 pr-4">{Math.floor(entry.connectedSecs / 60)}m</td>
-                        <td class="py-2 pr-4">{entry.connectionCount}</td>
-                        <td class="py-2 flex gap-1">
+<td class="py-2 pr-4">{entry.connectionCount}</td>
+                         <td class="py-2 pr-4">
+                           <div class="flex gap-1">
+                             <DataChannelBadge channel="amas" status={entry.dataChannels.amas} />
+                             <DataChannelBadge channel="learning" status={entry.dataChannels.learning} />
+                             <DataChannelBadge channel="telemetry" status={entry.dataChannels.telemetry} />
+                           </div>
+                         </td>
+                         <td class="py-2 flex gap-1">
                           <Show when={entry.isBanned} fallback={
                             <Button size="xs" variant="danger" onClick={() => setBanTarget({ id: entry.deviceId, action: 'ban' })}>封禁</Button>
                           }>
@@ -157,14 +199,15 @@ export default function ClientsPage() {
             <div class="overflow-x-auto">
               <table class="w-full text-sm">
                 <thead>
-                  <tr class="border-b border-border text-left text-content-secondary">
-                    <th class="py-2 pr-4">设备 ID</th>
-                    <th class="py-2 pr-4">平台</th>
-                    <th class="py-2 pr-4">用户</th>
-                    <th class="py-2 pr-4">最后活跃</th>
-                    <th class="py-2 pr-4">状态</th>
-                    <th class="py-2">操作</th>
-                  </tr>
+<tr class="border-b border-border text-left text-content-secondary">
+                     <th class="py-2 pr-4">设备 ID</th>
+                     <th class="py-2 pr-4">平台</th>
+                     <th class="py-2 pr-4">用户</th>
+                     <th class="py-2 pr-4">最后活跃</th>
+                     <th class="py-2 pr-4">状态</th>
+                     <th class="py-2 pr-4">数据状态</th>
+                     <th class="py-2">操作</th>
+                   </tr>
                 </thead>
                 <tbody>
                   <For each={recentlyActive()}>
@@ -174,12 +217,19 @@ export default function ClientsPage() {
                         <td class="py-2 pr-4">{entry.platform}</td>
                         <td class="py-2 pr-4 font-mono text-xs">{entry.userId ? truncateId(entry.userId) : '-'}</td>
                         <td class="py-2 pr-4 text-xs">{new Date(entry.lastSeenAt.replace(' ', 'T') + 'Z').toLocaleString()}</td>
-                        <td class="py-2 pr-4">
-                          <span class={`inline-block px-2 py-0.5 rounded text-xs font-medium ${entry.isBanned ? 'bg-error-light text-error' : 'bg-success-light text-success'}`}>
-                            {entry.isBanned ? '已封禁' : '正常'}
-                          </span>
-                        </td>
-                        <td class="py-2 flex gap-1">
+<td class="py-2 pr-4">
+                           <span class={`inline-block px-2 py-0.5 rounded text-xs font-medium ${entry.isBanned ? 'bg-error-light text-error' : 'bg-success-light text-success'}`}>
+                             {entry.isBanned ? '已封禁' : '正常'}
+                           </span>
+                         </td>
+                         <td class="py-2 pr-4">
+                           <div class="flex gap-1">
+                             <DataChannelBadge channel="amas" status={entry.dataChannels.amas} />
+                             <DataChannelBadge channel="learning" status={entry.dataChannels.learning} />
+                             <DataChannelBadge channel="telemetry" status={entry.dataChannels.telemetry} />
+                           </div>
+                         </td>
+                         <td class="py-2 flex gap-1">
                           <Show when={entry.isBanned} fallback={
                             <Button size="xs" variant="danger" onClick={() => setBanTarget({ id: entry.deviceId, action: 'ban' })}>封禁</Button>
                           }>

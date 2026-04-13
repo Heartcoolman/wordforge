@@ -9,6 +9,14 @@ import type {
 import type { AmasConfig } from '@/types/amas';
 import type { BrowseItem, WordbookPreview, ImportResult, UpdateInfo, SyncResult } from '@/types/wordbookCenter';
 
+export type DataChannelValue = 'uploaded' | 'nil' | 'none';
+
+export interface DataChannelStatus {
+  amas: DataChannelValue;
+  learning: DataChannelValue;
+  telemetry: DataChannelValue;
+}
+
 export interface SseLiveEntry {
   deviceId: string;
   platform: string;
@@ -16,6 +24,7 @@ export interface SseLiveEntry {
   connectedSecs: number;
   connectionCount: number;
   isBanned: boolean;
+  dataChannels: DataChannelStatus;
 }
 
 export interface RecentlyActiveEntry {
@@ -24,6 +33,7 @@ export interface RecentlyActiveEntry {
   userId: string | null;
   lastSeenAt: string;
   isBanned: boolean;
+  dataChannels: DataChannelStatus;
 }
 
 export interface TelemetryRecord {
