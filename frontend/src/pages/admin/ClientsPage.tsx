@@ -2,7 +2,7 @@ import { createSignal, onMount, Show, For } from 'solid-js';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Spinner } from '@/components/ui/Spinner';
-import { adminApi, type SseLiveEntry, type RecentlyActiveEntry, type TelemetryRecord, type DataChannelValue } from '@/api/admin';
+import { adminApi, type SseLiveEntry, type RecentlyActiveEntry, type TelemetrySummary, type DataChannelValue } from '@/api/admin';
 import { uiStore } from '@/stores/ui';
 
 const CHANNEL_LABELS: Record<string, string> = {
@@ -51,7 +51,7 @@ export default function ClientsPage() {
 
   // Telemetry
   const [telemetryDevice, setTelemetryDevice] = createSignal<string | null>(null);
-  const [telemetryRecords, setTelemetryRecords] = createSignal<TelemetryRecord[]>([]);
+  const [telemetryRecords, setTelemetryRecords] = createSignal<TelemetrySummary[]>([]);
   const [telemetryTotal, setTelemetryTotal] = createSignal(0);
   const [telemetryLoading, setTelemetryLoading] = createSignal(false);
 
@@ -258,12 +258,76 @@ export default function ClientsPage() {
                 <div class="space-y-2 max-h-80 overflow-y-auto">
                   <For each={telemetryRecords()}>
                     {(record) => (
-                      <div class="text-xs border border-border/50 rounded p-2">
-                        <div class="flex justify-between text-content-secondary mb-1">
-                          <span>{record.eventType}{record.triggeredByRequestId ? ' (按需)' : ''}</span>
+                      <div class="text-xs border border-border/50 rounded p-2 space-y-2">
+                        <div class="flex justify-between text-content-secondary">
+                          <span class="font-medium">{record.eventType}</span>
                           <span>{new Date(record.serverTs.replace(' ', 'T') + 'Z').toLocaleString()}</span>
                         </div>
-                        <pre class="text-content text-xs overflow-x-auto">{JSON.stringify(record.payload, null, 2)}</pre>
+                        {/* 设备信息 */}
+                        <Show when={record.deviceProfile.osName || record.deviceProfile.browserName}>
+                          <div class="bg-surface-secondary rounded p-1.5 space-y-0.5">
+                            <div class="font-semibold text-content-secondary mb-1">设备信息</div>
+                            <Show when={record.deviceProfile.osName}>
+                              <div class="flex gap-2"><span class="text-content-tertiary w-12">系统</span><span>{record.deviceProfile.osName}</span></div>
+                            </Show>
+                            <Show when={record.deviceProfile.browserName}>
+                              <div class="flex gap-2"><span class="text-content-tertiary w-12">浏览器</span><span>{record.deviceProfile.browserName} {record.deviceProfile.browserVersion}</span></div>
+                            </Show>
+                            <Show when={record.deviceProfile.cpuCores !== null}>
+                              <div class="flex gap-2"><span class="text-content-tertiary w-12">CPU</span><span>{record.deviceProfile.cpuCores} 核{record.deviceProfile.memoryGb ? ` / ${record.deviceProfile.memoryGb}GB` : ''}</span></div>
+                            </Show>
+                            <Show when={record.deviceProfile.screenWidth !== null}>
+                              <div class="flex gap-2"><span class="text-content-tertiary w-12">分辨率</span><span>{record.deviceProfile.screenWidth}×{record.deviceProfile.screenHeight} @{record.deviceProfile.pixelRatio}x</span></div>
+                            </Show>
+                            <Show when={record.deviceProfile.timezone}>
+                              <div class="flex gap-2"><span class="text-content-tertiary w-12">时区</span><span>{record.deviceProfile.timezone} / {record.deviceProfile.language}</span></div>
+                            </Show>
+                          </div>
+                        </Show>
+                        {/* 会话统计 */}
+                        <div class="bg-surface-secondary rounded p-1.5 space-y-0.5">
+                          <div class="font-semibold text-content-secondary mb-1">会话统计</div>
+                          <div class="flex gap-4 flex-wrap">
+                            <span><span class="text-content-tertiary">时长 </span>{record.sessionStats.sessionDurationSecs}s</span>
+                            <span><span class="text-content-tertiary">操作/分 </span>{record.sessionStats.actionsPerMin.toFixed(1)}</span>
+                            <span><span class="text-content-tertiary">错误 </span>{record.sessionStats.errorCount}</span>
+                            <span><span class="text-content-tertiary">响应 </span>{record.sessionStats.avgResponseTimeMs.toFixed(0)}ms</span>
+                          </div>
+                        </div>
+                        {/* 行为摘要 */}
+                        <Show when={record.behaviorSummary.currentRoute !== null}>
+                          <div class="bg-surface-secondary rounded p-1.5 space-y-0.5">
+                            <div class="font-semibold text-content-secondary mb-1">行为摘要</div>
+                            <Show when={record.behaviorSummary.currentRoute}>
+                              <div class="flex gap-2"><span class="text-content-tertiary w-12">路由</span><span class="font-mono">{record.behaviorSummary.currentRoute}</span></div>
+                            </Show>
+                            <div class="flex gap-4 flex-wrap">
+                              <Show when={record.behaviorSummary.clickCount !== null}>
+                                <span><span class="text-content-tertiary">点击 </span>{record.behaviorSummary.clickCount}</span>
+                              </Show>
+                              <Show when={record.behaviorSummary.scrollDepthPct !== null}>
+                                <span><span class="text-content-tertiary">滚动 </span>{record.behaviorSummary.scrollDepthPct!.toFixed(0)}%</span>
+                              </Show>
+                              <Show when={record.behaviorSummary.routeChanges !== null}>
+                                <span><span class="text-content-tertiary">跳转 </span>{record.behaviorSummary.routeChanges}</span>
+                              </Show>
+                              <Show when={record.behaviorSummary.visibilityChanges !== null}>
+                                <span><span class="text-content-tertiary">焦点变更 </span>{record.behaviorSummary.visibilityChanges}</span>
+                              </Show>
+                            </div>
+                          </div>
+                        </Show>
+                        {/* 功能使用 */}
+                        <Show when={Object.keys(record.featureUsage).length > 0}>
+                          <div class="bg-surface-secondary rounded p-1.5">
+                            <div class="font-semibold text-content-secondary mb-1">功能使用</div>
+                            <div class="flex gap-3 flex-wrap">
+                              <For each={Object.entries(record.featureUsage)}>
+                                {([k, v]) => <span><span class="text-content-tertiary">{k} </span>{v}</span>}
+                              </For>
+                            </div>
+                          </div>
+                        </Show>
                       </div>
                     )}
                   </For>
