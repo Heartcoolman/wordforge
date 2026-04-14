@@ -33,6 +33,8 @@ pub enum SseEvent {
     Banned,
     #[serde(rename = "unbanned")]
     Unbanned,
+    #[serde(rename = "data_corrupted")]
+    DataCorrupted,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -56,6 +58,8 @@ pub struct AppState {
     maintenance_tx: broadcast::Sender<bool>,
     update_tx: broadcast::Sender<UpdatePayload>,
     active_sse: Arc<DashMap<String, Vec<SseClientInfo>>>,
+    last_heartbeat: Arc<DashMap<String, Instant>>,
+    heartbeat_miss_count: Arc<DashMap<String, u8>>,
 }
 
 pub struct RuntimeConfig {
@@ -97,6 +101,8 @@ impl AppState {
             maintenance_tx,
             update_tx,
             active_sse: Arc::new(DashMap::new()),
+            last_heartbeat: Arc::new(DashMap::new()),
+            heartbeat_miss_count: Arc::new(DashMap::new()),
         }
     }
 
@@ -171,6 +177,14 @@ impl AppState {
 
     pub fn active_sse(&self) -> &DashMap<String, Vec<SseClientInfo>> {
         &self.active_sse
+    }
+
+    pub fn last_heartbeat(&self) -> &DashMap<String, Instant> {
+        &self.last_heartbeat
+    }
+
+    pub fn heartbeat_miss_count(&self) -> &DashMap<String, u8> {
+        &self.heartbeat_miss_count
     }
 }
 

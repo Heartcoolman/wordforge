@@ -68,6 +68,11 @@ async fn main() {
         initial_maintenance,
     );
 
+    tokio::spawn(learning_backend::workers::heartbeat_watchdog::run(
+        state.clone(),
+        shutdown_tx.subscribe(),
+    ));
+
     tokio::spawn(rate_limit_cleanup_loop(
         state.rate_limit().clone(),
         config.rate_limit.window_secs,
