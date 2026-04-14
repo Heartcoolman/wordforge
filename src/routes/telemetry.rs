@@ -8,6 +8,7 @@ use crate::auth::AuthUser;
 use crate::extractors::JsonBody;
 use crate::response::{ok, AppError};
 use crate::state::AppState;
+use crate::store::operations::telemetry::TelemetrySummaryInput;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -42,7 +43,6 @@ async fn submit_telemetry(
         ));
     }
 
-    // Validate non-negative values
     if let Some(obj) = body.payload.as_object() {
         for key in ["sessionDurationSecs", "errorCount"] {
             if let Some(v) = obj.get(key).and_then(|v| v.as_i64()) {
@@ -74,7 +74,9 @@ async fn submit_telemetry(
     let payload_json = serde_json::to_string(&body.payload)
         .map_err(|e| AppError::internal(&format!("payload serialization: {e}")))?;
 
-    state.store().insert_telemetry(
+    let summary = extract_summary(&body.payload);
+
+    state.store().insert_telemetry_and_summary(
         &id,
         device_id,
         &auth.user_id,
@@ -82,7 +84,51 @@ async fn submit_telemetry(
         body.request_id.as_deref(),
         &payload_json,
         &body.client_ts,
+        &summary,
     )?;
 
+    state
+        .last_heartbeat()
+        .insert(device_id.to_string(), std::time::Instant::now());
+    state
+        .heartbeat_miss_count()
+        .insert(device_id.to_string(), 0);
+
     Ok(ok(serde_json::json!({ "id": id })))
+}
+
+fn extract_summary(payload: &serde_json::Value) -> TelemetrySummaryInput {
+    let device = payload.get("device");
+    let behavior = payload.get("behavior");
+
+    TelemetrySummaryInput {
+        cpu_cores: device.and_then(|d| d.get("cpuCores")).and_then(|v| v.as_i64()),
+        memory_gb: device.and_then(|d| d.get("memoryGb")).and_then(|v| v.as_f64()),
+        screen_width: device.and_then(|d| d.get("screenWidth")).and_then(|v| v.as_i64()),
+        screen_height: device.and_then(|d| d.get("screenHeight")).and_then(|v| v.as_i64()),
+        pixel_ratio: device.and_then(|d| d.get("pixelRatio")).and_then(|v| v.as_f64()),
+        os_name: device.and_then(|d| d.get("osName")).and_then(|v| v.as_str()).map(str::to_string),
+        browser_name: device.and_then(|d| d.get("browserName")).and_then(|v| v.as_str()).map(str::to_string),
+        browser_version: device.and_then(|d| d.get("browserVersion")).and_then(|v| v.as_str()).map(str::to_string),
+        timezone: device.and_then(|d| d.get("timezone")).and_then(|v| v.as_str()).map(str::to_string),
+        language: device.and_then(|d| d.get("language")).and_then(|v| v.as_str()).map(str::to_string),
+        touch_support: device.and_then(|d| d.get("touchSupport")).and_then(|v| v.as_bool()),
+        online_status: device.and_then(|d| d.get("onlineStatus")).and_then(|v| v.as_bool()),
+        session_duration_secs: payload.get("sessionDurationSecs").and_then(|v| v.as_i64()).unwrap_or(0),
+        actions_per_min: payload.get("actionsPerMin").and_then(|v| v.as_f64()).unwrap_or(0.0),
+        error_count: payload.get("errorCount").and_then(|v| v.as_i64()).unwrap_or(0),
+        avg_response_time_ms: payload.get("avgResponseTimeMs").and_then(|v| v.as_f64()).unwrap_or(0.0),
+        current_route: behavior.and_then(|b| b.get("currentRoute")).and_then(|v| v.as_str()).map(str::to_string),
+        click_count: behavior.and_then(|b| b.get("clickCount")).and_then(|v| v.as_i64()),
+        click_targets_json: behavior
+            .and_then(|b| b.get("clickTargets"))
+            .and_then(|v| serde_json::to_string(v).ok()),
+        scroll_depth_pct: behavior.and_then(|b| b.get("scrollDepthPct")).and_then(|v| v.as_f64()),
+        visibility_changes: behavior.and_then(|b| b.get("visibilityChanges")).and_then(|v| v.as_i64()),
+        route_changes: behavior.and_then(|b| b.get("routeChanges")).and_then(|v| v.as_i64()),
+        feature_usage_json: payload
+            .get("featureUsage")
+            .and_then(|v| serde_json::to_string(v).ok())
+            .unwrap_or_else(|| "{}".to_string()),
+    }
 }

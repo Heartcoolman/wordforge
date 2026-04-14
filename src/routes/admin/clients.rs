@@ -234,7 +234,7 @@ async fn get_telemetry(
     let offset = q.offset.unwrap_or(0);
     let (records, total) = state
         .store()
-        .get_telemetry_by_device(&device_id, limit, offset)?;
+        .get_telemetry_summaries_by_device(&device_id, limit, offset)?;
 
     Ok(ok(serde_json::json!({ "records": records, "total": total })))
 }
