@@ -68,7 +68,7 @@ function onScroll() {
   const scrolled = window.scrollY + window.innerHeight;
   const total = document.documentElement.scrollHeight;
   if (total > 0) {
-    const pct = (scrolled / total) * 100;
+    const pct = Math.min((scrolled / total) * 100, 100);
     if (pct > behavior.scrollDepthPct) behavior.scrollDepthPct = pct;
   }
 }
@@ -109,6 +109,7 @@ async function sendTelemetry(
 ) {
   if (!tokenManager.getToken() || !getDeviceId()) {
     resetLegacyCounters();
+    behavior = newBuffer();
     return;
   }
 

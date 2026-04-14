@@ -20,14 +20,16 @@ fn scan(state: &AppState) {
     let device_ids: Vec<String> = state.active_sse().iter().map(|e| e.key().clone()).collect();
 
     for device_id in device_ids {
-        // Device may have disconnected between the keys snapshot and now
         if state.active_sse().get(&device_id).map(|c| c.is_empty()).unwrap_or(true) {
             state.last_heartbeat().remove(&device_id);
             state.heartbeat_miss_count().remove(&device_id);
             continue;
         }
 
-        // If no heartbeat entry exists, treat as missed (unwrap_or(true))
+        if state.store().is_device_banned(&device_id).unwrap_or(false) {
+            continue;
+        }
+
         let missed = state
             .last_heartbeat()
             .get(&device_id)

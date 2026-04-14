@@ -3,7 +3,7 @@ use axum::routing::get;
 use axum::Router;
 use serde::Deserialize;
 
-use crate::response::ok;
+use crate::response::{ok, AppError};
 use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
@@ -28,7 +28,7 @@ struct DeviceBanQuery {
 async fn get_device_ban(
     Query(q): Query<DeviceBanQuery>,
     State(state): State<AppState>,
-) -> impl axum::response::IntoResponse {
-    let banned = state.store().is_device_banned(&q.device_id).unwrap_or(false);
-    ok(serde_json::json!({ "banned": banned }))
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let banned = state.store().is_device_banned(&q.device_id)?;
+    Ok(ok(serde_json::json!({ "banned": banned })))
 }

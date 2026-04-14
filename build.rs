@@ -13,4 +13,5 @@ fn main() {
     println!("cargo:rustc-env=GIT_VERSION={version}");
     println!("cargo:rerun-if-changed=.git/HEAD");
     println!("cargo:rerun-if-changed=.git/refs/tags");
+    println!("cargo:rerun-if-changed=.git/packed-refs");
 }
