@@ -41,30 +41,67 @@ POST /api/telemetry
 
 - 认证：用户 JWT
 - 必需请求头：`X-Device-Id`
+- 上报间隔：**5 秒**（原 5 分钟）
 - Body 大小限制：64 KB
 
 **请求体：**
 
 ```json
 {
-  "eventType": "heartbeat",
+  "eventType": "session_start",
   "requestId": null,
   "clientTs": "2026-04-11T10:00:00Z",
   "payload": {
+    "device": {
+      "cpuCores": 8,
+      "memoryGb": 4.0,
+      "screenWidth": 390,
+      "screenHeight": 844,
+      "pixelRatio": 3.0,
+      "osName": "iOS 17.4",
+      "browserName": "Safari",
+      "browserVersion": "17.4",
+      "timezone": "Asia/Shanghai",
+      "language": "zh-CN",
+      "touchSupport": true,
+      "onlineStatus": true
+    },
+    "behavior": {
+      "currentRoute": "/learn",
+      "clickCount": 3,
+      "clickTargets": [{ "label": "开始学习", "tag": "button" }],
+      "scrollDepthPct": 42.5,
+      "visibilityChanges": 0,
+      "routeChanges": 1
+    },
     "sessionDurationSecs": 120,
     "errorCount": 0,
     "actionsPerMin": 5.2,
-    "avgResponseTimeMs": 230.5
+    "avgResponseTimeMs": 230.5,
+    "featureUsage": { "flashcard": 3 }
   }
 }
 ```
 
+**`eventType` 取值：**
+
+| 值 | 触发时机 | `device` 字段 |
+|---|---|---|
+| `session_start` | SSE 连接建立后**立即**发送一次 | **必填**，包含完整设备指纹 |
+| `periodic` | 此后每 5 秒发送 | 可省略 |
+| `on_demand` | 收到 SSE `telemetry_request` 事件后发送 | 可省略 |
+
+> `session_start` 的 `device` 对象用于服务端建立设备指纹档案，后续 `periodic` 事件中可省略。
+
+**其他字段说明：**
+
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| `eventType` | string | 事件类型，如 `heartbeat`、`on_demand` |
-| `requestId` | string? | 可选；`eventType` 为 `on_demand` 时**必填**（值来自 SSE `telemetry_request` 事件） |
-| `clientTs` | string | 客户端时间戳（ISO 8601） |
-| `payload` | object | 自由结构，其中 `sessionDurationSecs`/`errorCount` 不可为负整数，`actionsPerMin`/`avgResponseTimeMs` 不可为负浮点 |
+| `requestId` | string? | 仅 `on_demand` 时必填（来自 SSE `telemetry_request` 事件） |
+| `clientTs` | string | 客户端时间戳（ISO 8601 UTC） |
+| `payload.behavior` | object? | 自上次上报以来的行为增量，`session_start` 时可填零值 |
+| `payload.sessionDurationSecs` / `errorCount` | integer | 不可为负数 |
+| `payload.actionsPerMin` / `avgResponseTimeMs` | float | 不可为负数 |
 
 **响应 200：**
 
@@ -110,6 +147,22 @@ SSE 通道 `GET /api/realtime/events` 新增以下三种事件：
 
 客户端收到后应采集当前状态数据，调用 `POST /api/telemetry`，`eventType` 填 `on_demand`，`requestId` 填此处的值。
 
+### `data_corrupted` — 客户端心跳超时锁定 ⚠️
+
+```json
+{ "type": "data_corrupted" }
+```
+
+**触发条件**：服务端连续 5 次（约 50 秒）未收到该设备的遥测心跳。
+
+**客户端必须实现：**
+1. 展示**全屏不可关闭**弹窗，标题「数据损坏」，正文「客户端数据已损坏，请重启应用后再试。」
+2. 禁止所有用户交互（不可导航、不可点击、不可关闭弹窗）
+3. SSE 连接与遥测上报继续运行（UI 仍锁定）
+4. 用户重启应用/刷新后锁定自然解除；若遥测恢复正常，下一个 50 秒周期内服务端不会重复推送
+
+> 注意：`data_corrupted` 事件本身无附加字段。若设备持续无心跳，服务端每 50 秒重复发送一次。
+
 ---
 
 ## 四、新增错误响应
@@ -147,8 +200,14 @@ SSE 通道 `GET /api/realtime/events` 新增以下三种事件：
 
 ## 五、iOS 端接入清单
 
+**基础接入（原有）：**
 - [ ] 所有请求添加 `X-Device-Id` 和 `X-Device-Platform: ios` 请求头
 - [ ] 全局拦截器处理 `403 CLIENT_BANNED` 和 `503 MAINTENANCE` 响应
 - [ ] 启动时调用 `GET /api/status` 判断维护状态
 - [ ] SSE 监听 `maintenance`、`update_available`、`telemetry_request` 事件
-- [ ] 实现 `POST /api/telemetry` 上报逻辑（含被动响应 `telemetry_request`）
+
+**遥测增强（新增）：**
+- [ ] SSE 建立连接后立即发送一次 `session_start` 事件，`payload.device` 携带完整设备指纹
+- [ ] 此后每 **5 秒**发送一次 `periodic` 事件（含 `behavior` 增量）
+- [ ] 收到 `telemetry_request` 时发送 `on_demand` 事件
+- [ ] SSE 监听 `data_corrupted` 事件，触发后展示全屏锁定提示，禁止所有交互

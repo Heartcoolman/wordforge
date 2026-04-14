@@ -14,7 +14,7 @@ export const STORAGE_KEYS = {
 /** Type-safe storage wrapper */
 
 const PREFIX = 'eng_';
-const SESSION_BACKED_KEYS = new Set<string>([]);
+const SESSION_BACKED_KEYS = new Set<string>([STORAGE_KEYS.ADMIN_TOKEN]);
 
 function isSessionBackedKey(key: string): boolean {
   return SESSION_BACKED_KEYS.has(key);

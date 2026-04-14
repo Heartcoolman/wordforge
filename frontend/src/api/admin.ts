@@ -9,12 +9,22 @@ import type {
 import type { AmasConfig } from '@/types/amas';
 import type { BrowseItem, WordbookPreview, ImportResult, UpdateInfo, SyncResult } from '@/types/wordbookCenter';
 
+export type DataChannelValue = 'uploaded' | 'nil' | 'none';
+
+export interface DataChannelStatus {
+  amas: DataChannelValue;
+  learning: DataChannelValue;
+  telemetry: DataChannelValue;
+}
+
 export interface SseLiveEntry {
   deviceId: string;
   platform: string;
   userId: string;
   connectedSecs: number;
   connectionCount: number;
+  isBanned: boolean;
+  dataChannels: DataChannelStatus;
 }
 
 export interface RecentlyActiveEntry {
@@ -23,17 +33,44 @@ export interface RecentlyActiveEntry {
   userId: string | null;
   lastSeenAt: string;
   isBanned: boolean;
+  dataChannels: DataChannelStatus;
 }
 
-export interface TelemetryRecord {
+export interface TelemetrySummary {
   id: string;
   deviceId: string;
   userId: string | null;
   eventType: string;
-  triggeredByRequestId: string | null;
-  payload: Record<string, unknown>;
-  clientTs: string;
   serverTs: string;
+  deviceProfile: {
+    cpuCores: number | null;
+    memoryGb: number | null;
+    screenWidth: number | null;
+    screenHeight: number | null;
+    pixelRatio: number | null;
+    osName: string | null;
+    browserName: string | null;
+    browserVersion: string | null;
+    timezone: string | null;
+    language: string | null;
+    touchSupport: boolean | null;
+    onlineStatus: boolean | null;
+  };
+  sessionStats: {
+    sessionDurationSecs: number;
+    actionsPerMin: number;
+    errorCount: number;
+    avgResponseTimeMs: number;
+  };
+  behaviorSummary: {
+    currentRoute: string | null;
+    clickCount: number | null;
+    clickTargets: Array<{ label: string; tag: string }> | null;
+    scrollDepthPct: number | null;
+    visibilityChanges: number | null;
+    routeChanges: number | null;
+  };
+  featureUsage: Record<string, number>;
 }
 
 export const adminApi = {
@@ -82,7 +119,7 @@ export const adminApi = {
   requestTelemetry: (id: string) =>
     api.post<{ requestId: string }>(`/api/admin/clients/${id}/request-telemetry`, undefined, { useAdminToken: true }),
   getTelemetry: (deviceId: string, params?: { limit?: number; offset?: number }) =>
-    api.get<{ records: TelemetryRecord[]; total: number }>(`/api/admin/telemetry/${deviceId}`, params as Record<string, string | number | boolean | undefined>, { useAdminToken: true }),
+    api.get<{ records: TelemetrySummary[]; total: number }>(`/api/admin/telemetry/${deviceId}`, params as Record<string, string | number | boolean | undefined>, { useAdminToken: true }),
 
   // Wordbook Center
   wbCenterBrowse: () =>

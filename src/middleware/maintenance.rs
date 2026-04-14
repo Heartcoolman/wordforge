@@ -12,11 +12,10 @@ pub async fn maintenance_middleware(
 ) -> Response {
     if state.is_maintenance() {
         let path = req.uri().path();
-        let exempt = path.starts_with("/api/admin/")
-            || path == "/api/status"
-            || path.starts_with("/api/realtime/")
-            || path == "/api/telemetry"
-            || path.starts_with("/health");
+        let exempt = path.starts_with("/admin/")
+            || path == "/status"
+            || path.starts_with("/realtime/")
+            || path == "/telemetry";
 
         if !exempt {
             return (

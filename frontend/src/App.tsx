@@ -11,6 +11,8 @@ import { api, maintenanceActive, setMaintenanceActive, setUpdateInfo, connectSse
 import { startTelemetryWorker, stopTelemetryWorker, handleTelemetryRequest } from '@/workers/telemetry';
 import MaintenancePage from '@/pages/MaintenancePage';
 import { UpdateBanner } from '@/components/ui/UpdateBanner';
+import { SystemLockedModal } from '@/components/SystemLockedModal';
+import { Portal } from 'solid-js/web';
 
 const NotFoundPage = lazy(() => import('@/pages/NotFoundPage'));
 
@@ -48,6 +50,8 @@ function PageSpinner() {
   );
 }
 
+const [systemLocked, setSystemLocked] = createSignal(false);
+
 function MaintenanceProvider(props: { children: any }) {
   let pollTimer: ReturnType<typeof setInterval> | undefined;
   let disconnectSse: (() => void) | undefined;
@@ -76,6 +80,7 @@ function MaintenanceProvider(props: { children: any }) {
     startTelemetryWorker();
     disconnectSse = connectSseStream({
       onTelemetryRequest: handleTelemetryRequest,
+      onDataCorrupted: () => setSystemLocked(true),
     });
   });
 
@@ -100,6 +105,11 @@ function MaintenanceProvider(props: { children: any }) {
 export default function App() {
   return (
     <AppErrorBoundary>
+      <Show when={systemLocked()}>
+        <Portal mount={document.body}>
+          <SystemLockedModal />
+        </Portal>
+      </Show>
       <MaintenanceProvider>
       <Router>
         <Route path="/" component={PageLayout}>

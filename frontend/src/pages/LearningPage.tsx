@@ -12,6 +12,7 @@ import { recordsApi } from '@/api/records';
 import { learningStore } from '@/stores/learning';
 import { uiStore } from '@/stores/ui';
 import { tokenManager } from '@/lib/token';
+import { generateUUID } from '@/lib/device';
 import { createWordQueueManager, type QueuedWord } from '@/lib/WordQueueManager';
 import { fatigueStore } from '@/stores/fatigue';
 import { useFatigueDetection } from '@/hooks/useFatigueDetection';
@@ -316,7 +317,7 @@ export default function LearningPage() {
 
     // Submit record to backend (async, don't block UI)
     recordsApi.create({
-      clientRecordId: crypto.randomUUID(),
+      clientRecordId: generateUUID(),
       wordId: cw.word.id,
       isCorrect: correct,
       responseTimeMs: responseTime,

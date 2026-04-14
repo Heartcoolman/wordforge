@@ -6,6 +6,7 @@ fn migrations() -> Vec<(&'static str, MigrationFn)> {
     vec![
         ("001_initial_sqlite", m001_initial),
         ("002_client_management", m002_client_management),
+        ("003_telemetry_enhanced", m003_telemetry_enhanced),
     ]
 }
 
@@ -92,6 +93,46 @@ fn m002_client_management(store: &Store) -> Result<(), StoreError> {
         );
         CREATE INDEX IF NOT EXISTS idx_telemetry_device ON telemetry_events(device_id, server_ts DESC);
         CREATE INDEX IF NOT EXISTS idx_telemetry_server_ts ON telemetry_events(server_ts DESC);",
+    )?;
+    Ok(())
+}
+
+fn m003_telemetry_enhanced(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS telemetry_summaries (
+            id TEXT NOT NULL,
+            device_id TEXT NOT NULL,
+            user_id TEXT,
+            event_type TEXT NOT NULL,
+            server_ts TEXT NOT NULL,
+            cpu_cores INTEGER,
+            memory_gb REAL,
+            screen_width INTEGER,
+            screen_height INTEGER,
+            pixel_ratio REAL,
+            os_name TEXT,
+            browser_name TEXT,
+            browser_version TEXT,
+            timezone TEXT,
+            language TEXT,
+            touch_support INTEGER,
+            online_status INTEGER,
+            session_duration_secs INTEGER NOT NULL DEFAULT 0,
+            actions_per_min REAL NOT NULL DEFAULT 0,
+            error_count INTEGER NOT NULL DEFAULT 0,
+            avg_response_time_ms REAL NOT NULL DEFAULT 0,
+            current_route TEXT,
+            click_count INTEGER,
+            click_targets_json TEXT,
+            scroll_depth_pct REAL,
+            visibility_changes INTEGER,
+            route_changes INTEGER,
+            feature_usage_json TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY (id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_telemetry_summaries_device
+            ON telemetry_summaries(device_id, server_ts DESC);",
     )?;
     Ok(())
 }

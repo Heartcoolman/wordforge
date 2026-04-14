@@ -32,7 +32,10 @@ impl Drop for SseGuard {
                 }
             }
             if remove_key {
-                self.state.active_sse().remove(did);
+                if self.state.active_sse().remove_if(did, |_, conns| conns.is_empty()).is_some() {
+                    self.state.last_heartbeat().remove(did);
+                    self.state.heartbeat_miss_count().remove(did);
+                }
             }
         }
     }
@@ -96,6 +99,11 @@ pub async fn sse_handler(
             .entry(did.clone())
             .or_default()
             .push(info);
+        // Initialize heartbeat timestamp to prevent cold-start miss accumulation
+        state
+            .last_heartbeat()
+            .insert(did.clone(), Instant::now());
+        state.heartbeat_miss_count().insert(did.clone(), 0);
     }
 
     let mut shutdown_rx = state.shutdown_rx();
@@ -156,6 +164,9 @@ pub async fn sse_handler(
                                 let event_name = match &event {
                                     crate::state::SseEvent::Maintenance { .. } => "maintenance",
                                     crate::state::SseEvent::TelemetryRequest { .. } => "telemetry_request",
+                                    crate::state::SseEvent::Banned => "banned",
+                                    crate::state::SseEvent::Unbanned => "unbanned",
+                                    crate::state::SseEvent::DataCorrupted => "data_corrupted",
                                 };
                                 yield Ok(Event::default().event(event_name).data(json));
                             }

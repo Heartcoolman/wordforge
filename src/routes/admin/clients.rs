@@ -8,6 +8,7 @@ use crate::auth::AdminAuthUser;
 use crate::extractors::JsonBody;
 use crate::response::{ok, AppError};
 use crate::state::{AppState, SseEvent};
+use crate::store::operations::clients::DataChannelStatus;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -29,6 +30,8 @@ struct SseLiveEntry {
     user_id: String,
     connected_secs: u64,
     connection_count: usize,
+    is_banned: bool,
+    data_channels: DataChannelStatus,
 }
 
 #[derive(Serialize)]
@@ -39,6 +42,7 @@ struct RecentlyActiveEntry {
     user_id: Option<String>,
     last_seen_at: String,
     is_banned: bool,
+    data_channels: DataChannelStatus,
 }
 
 async fn list_clients(
@@ -53,29 +57,75 @@ async fn list_clients(
             let device_id = entry.key().clone();
             let conns = entry.value();
             let first = conns.first()?;
+            let is_banned = state.store().is_device_banned(&device_id).unwrap_or(false);
             Some(SseLiveEntry {
-                device_id,
+                device_id: device_id.clone(),
                 platform: first.platform.clone(),
                 user_id: first.user_id.clone(),
                 connected_secs: first.connected_at.elapsed().as_secs(),
                 connection_count: conns.len(),
+                is_banned,
+                data_channels: DataChannelStatus::default(),
             })
         })
         .collect();
 
     // Recently active (last 15 minutes)
-    let recently_active: Vec<RecentlyActiveEntry> = state
-        .store()
-        .get_recently_active_clients(15)?
-        .into_iter()
+    let recently_active_devices = state.store().get_recently_active_clients(15)?;
+    let recently_active: Vec<RecentlyActiveEntry> = recently_active_devices
+        .iter()
         .map(|d| RecentlyActiveEntry {
-            device_id: d.device_id,
-            platform: d.platform,
-            user_id: d.user_id,
-            last_seen_at: d.last_seen_at,
+            device_id: d.device_id.clone(),
+            platform: d.platform.clone(),
+            user_id: d.user_id.clone(),
+            last_seen_at: d.last_seen_at.clone(),
             is_banned: d.is_banned,
+            data_channels: DataChannelStatus::default(),
         })
         .collect();
+
+    // Collect unique user_ids and device_ids for batch data status query
+    let mut user_ids: Vec<String> = sse_live.iter().map(|e| e.user_id.clone()).collect();
+    for e in &recently_active {
+        if let Some(ref uid) = e.user_id {
+            if !user_ids.contains(uid) {
+                user_ids.push(uid.clone());
+            }
+        }
+    }
+    let device_ids: Vec<String> = sse_live.iter().map(|e| e.device_id.clone())
+        .chain(recently_active.iter().map(|e| e.device_id.clone()))
+        .collect();
+
+    let status = state.store().get_data_upload_status(&user_ids, &device_ids)?;
+
+    let mut sse_live = sse_live;
+    for entry in &mut sse_live {
+        let amas = status.amas_by_user.get(&entry.user_id).copied().unwrap_or("none");
+        // AMAS exists but no events means learning is also "nil"
+        let learning = status.learning_by_user.get(&entry.user_id).copied().unwrap_or_else(|| {
+            if amas != "none" { "nil" } else { "none" }
+        });
+        let telemetry = status.telemetry_by_device.get(&entry.device_id).copied().unwrap_or("none");
+        entry.data_channels = DataChannelStatus { amas, learning, telemetry };
+    }
+
+    let mut recently_active = recently_active;
+    for entry in &mut recently_active {
+        let (amas, learning) = match &entry.user_id {
+            Some(uid) => {
+                let a = status.amas_by_user.get(uid).copied().unwrap_or("none");
+                // AMAS exists but no events means learning is also "nil"
+                let l = status.learning_by_user.get(uid).copied().unwrap_or_else(|| {
+                    if a != "none" { "nil" } else { "none" }
+                });
+                (a, l)
+            }
+            None => ("none", "none"),
+        };
+        let telemetry = status.telemetry_by_device.get(&entry.device_id).copied().unwrap_or("none");
+        entry.data_channels = DataChannelStatus { amas, learning, telemetry };
+    }
 
     Ok(ok(serde_json::json!({
         "sseLive": sse_live,
@@ -108,10 +158,10 @@ async fn ban_client(
         .store()
         .ban_client_device(&id, &admin.admin_id, reason.as_deref())?;
 
-    // Drop active SSE connections for this device
-    if let Some((_, conns)) = state.active_sse().remove(&id) {
-        for conn in conns {
-            drop(conn.tx);
+    // Notify via SSE but keep connection alive for instant unban
+    if let Some(conns) = state.active_sse().get(&id) {
+        for conn in conns.value() {
+            let _ = conn.tx.send(SseEvent::Banned);
         }
     }
 
@@ -128,6 +178,14 @@ async fn unban_client(
         return Err(AppError::not_found("设备不存在"));
     }
     state.store().unban_client_device(&id)?;
+
+    // Notify via existing SSE connection for instant unban
+    if let Some(conns) = state.active_sse().get(&id) {
+        for conn in conns.value() {
+            let _ = conn.tx.send(SseEvent::Unbanned);
+        }
+    }
+
     tracing::info!(admin_id = %admin.admin_id, device_id = %id, "管理员解封设备");
     Ok(ok(serde_json::json!({ "banned": false, "deviceId": id })))
 }
@@ -176,7 +234,7 @@ async fn get_telemetry(
     let offset = q.offset.unwrap_or(0);
     let (records, total) = state
         .store()
-        .get_telemetry_by_device(&device_id, limit, offset)?;
+        .get_telemetry_summaries_by_device(&device_id, limit, offset)?;
 
     Ok(ok(serde_json::json!({ "records": records, "total": total })))
 }

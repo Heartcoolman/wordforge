@@ -8,6 +8,7 @@ import { cn } from '@/utils/cn';
 import { learningApi } from '@/api/learning';
 import { recordsApi } from '@/api/records';
 import { uiStore } from '@/stores/ui';
+import { generateUUID } from '@/lib/device';
 import type { Word } from '@/types/word';
 import { fatigueStore } from '@/stores/fatigue';
 import { useFatigueDetection } from '@/hooks/useFatigueDetection';
@@ -81,7 +82,7 @@ export default function FlashcardPage() {
         setErrorWordIds((ids) => [...ids, w.id]);
       }
       recordsApi.create({
-        clientRecordId: crypto.randomUUID(),
+        clientRecordId: generateUUID(),
         wordId: w.id,
         isCorrect: correct,
         responseTimeMs: responseTime,

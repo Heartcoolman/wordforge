@@ -30,7 +30,7 @@ async fn system_health(
         "storeProbeOk": store_probe_ok,
         "dbSizeBytes": size_on_disk,
         "uptimeSecs": uptime_secs,
-        "version": env!("CARGO_PKG_VERSION"),
+        "version": env!("GIT_VERSION"),
     })))
 }
 
@@ -63,9 +63,10 @@ async fn check_update(
         }
     }
 
-    let current_version = env!("CARGO_PKG_VERSION");
+    let git_version = env!("GIT_VERSION");
+    let current_version = git_version.trim_start_matches('v');
 
-    match fetch_latest_release(current_version).await {
+    match fetch_latest_release(git_version, current_version).await {
         Ok(data) => {
             *state.update_cache().write().await = Some((Instant::now(), data.clone()));
             Ok(ok(data))
@@ -73,7 +74,7 @@ async fn check_update(
         Err(e) => {
             tracing::warn!("Failed to check for updates: {e}");
             let fallback = serde_json::json!({
-                "currentVersion": current_version,
+                "currentVersion": git_version,
                 "latestVersion": current_version,
                 "hasUpdate": false,
                 "releaseUrl": null,
@@ -86,6 +87,7 @@ async fn check_update(
 }
 
 async fn fetch_latest_release(
+    git_version: &str,
     current_version: &str,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
     let client = reqwest::Client::builder()
@@ -108,7 +110,7 @@ async fn fetch_latest_release(
     let has_update = is_newer(latest_version, current_version);
 
     Ok(serde_json::json!({
-        "currentVersion": current_version,
+        "currentVersion": git_version,
         "latestVersion": latest_version,
         "hasUpdate": has_update,
         "releaseUrl": body["html_url"].as_str(),

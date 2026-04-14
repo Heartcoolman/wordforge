@@ -21,7 +21,7 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
 
-const CSP_HEADER: &str = "default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self' https: capacitor: ionic:; img-src 'self' data: blob:; worker-src 'self' blob:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
+const CSP_HEADER: &str = "default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; connect-src 'self' https: capacitor: ionic:; img-src 'self' data: blob:; worker-src 'self' blob:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
 const HSTS_HEADER: &str = "max-age=31536000; includeSubDomains";
 
 #[tokio::main]
@@ -67,6 +67,11 @@ async fn main() {
         shutdown_tx.clone(),
         initial_maintenance,
     );
+
+    tokio::spawn(learning_backend::workers::heartbeat_watchdog::run(
+        state.clone(),
+        shutdown_tx.subscribe(),
+    ));
 
     tokio::spawn(rate_limit_cleanup_loop(
         state.rate_limit().clone(),

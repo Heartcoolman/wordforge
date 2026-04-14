@@ -225,6 +225,7 @@ export interface SseCallbacks {
   onMaintenance?: (active: boolean) => void;
   onTelemetryRequest?: (requestId: string) => void;
   onUpdateAvailable?: (payload: { version: string; message: string }) => void;
+  onDataCorrupted?: () => void;
 }
 
 export function connectSseStream(callbacks: SseCallbacks): () => void {
@@ -301,6 +302,8 @@ export function connectSseStream(callbacks: SseCallbacks): () => void {
                 } else if (eventType === 'update_available' && data.version) {
                   setUpdateInfo({ version: data.version, message: data.message || '' });
                   callbacks.onUpdateAvailable?.({ version: data.version, message: data.message || '' });
+                } else if (eventType === 'data_corrupted') {
+                  callbacks.onDataCorrupted?.();
                 }
               } catch {
                 // 忽略格式错误的事件数据
