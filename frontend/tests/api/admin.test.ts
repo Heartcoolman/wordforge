@@ -35,7 +35,7 @@ describe('adminApi', () => {
   });
 
   it('setup sends email and password', async () => {
-    const mockResponse = { token: 'admin-token-123' };
+    const mockResponse = { token: 'admin-token-123', admin: { id: 'admin-1', email: 'admin@test.com' } };
     server.use(
       http.post(`${BASE}/api/admin/auth/setup`, async ({ request }) => {
         const body = await request.json() as Record<string, unknown>;
@@ -48,7 +48,7 @@ describe('adminApi', () => {
   });
 
   it('login sends credentials and returns auth response', async () => {
-    const mockResponse = { token: 'login-token-456' };
+    const mockResponse = { token: 'login-token-456', admin: { id: 'admin-1', email: 'admin@test.com' } };
     server.use(
       http.post(`${BASE}/api/admin/auth/login`, async ({ request }) => {
         const body = await request.json() as Record<string, unknown>;
@@ -70,7 +70,13 @@ describe('adminApi', () => {
   });
 
   it('getUsers returns list of admin users', async () => {
-    const users = [{ id: 'u1', email: 'user@test.com', banned: false }];
+    const users = {
+      data: [{ id: 'u1', email: 'user@test.com', username: 'tester', isBanned: false, failedLoginCount: 0, lockedUntil: null, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' }],
+      total: 1,
+      page: 1,
+      perPage: 20,
+      totalPages: 1,
+    };
     server.use(
       http.get(`${BASE}/api/admin/users`, () =>
         HttpResponse.json({ success: true, data: users })),
@@ -98,7 +104,7 @@ describe('adminApi', () => {
   });
 
   it('getStats returns admin statistics', async () => {
-    const stats = { totalUsers: 100, activeUsers: 50, totalWords: 5000 };
+    const stats = { users: 100, words: 5000, records: 8000, trend: { users: { value: 10, label: '较昨日' } } };
     server.use(
       http.get(`${BASE}/api/admin/stats`, () =>
         HttpResponse.json({ success: true, data: stats })),
@@ -108,7 +114,7 @@ describe('adminApi', () => {
   });
 
   it('getEngagement returns engagement analytics', async () => {
-    const engagement = { dailyActiveUsers: 30, weeklyActiveUsers: 80 };
+    const engagement = { totalUsers: 100, activeToday: 30, retentionRate: 0.3, trend: { activeToday: { value: 5, label: '较昨日' } } };
     server.use(
       http.get(`${BASE}/api/admin/analytics/engagement`, () =>
         HttpResponse.json({ success: true, data: engagement })),
@@ -118,7 +124,7 @@ describe('adminApi', () => {
   });
 
   it('getLearningAnalytics returns learning analytics', async () => {
-    const analytics = { avgAccuracy: 0.85, avgSessionTime: 120 };
+    const analytics = { totalWords: 5000, totalRecords: 10000, totalCorrect: 8500, overallAccuracy: 0.85, trend: { totalRecords: { value: 5, label: '较昨日' } } };
     server.use(
       http.get(`${BASE}/api/admin/analytics/learning`, () =>
         HttpResponse.json({ success: true, data: analytics })),
@@ -128,7 +134,7 @@ describe('adminApi', () => {
   });
 
   it('getHealth returns system health info', async () => {
-    const health = { status: 'healthy', uptime: 86400 };
+    const health = { status: 'healthy', dbSizeBytes: 1048576, uptimeSecs: 86400, version: '1.0.0' };
     server.use(
       http.get(`${BASE}/api/admin/monitoring/health`, () =>
         HttpResponse.json({ success: true, data: health })),
@@ -138,7 +144,7 @@ describe('adminApi', () => {
   });
 
   it('getDatabase returns database info', async () => {
-    const db = { size: '1.2GB', tables: 15 };
+    const db = { sizeOnDisk: 123456, tableCount: 15, tables: ['users'], pageSize: 4096, pageCount: 30, walEnabled: true };
     server.use(
       http.get(`${BASE}/api/admin/monitoring/database`, () =>
         HttpResponse.json({ success: true, data: db })),
@@ -160,7 +166,7 @@ describe('adminApi', () => {
   });
 
   it('getSettings returns system settings', async () => {
-    const settings = { registrationOpen: true, maxUsersPerDay: 100 };
+    const settings = { maxUsers: 1000, registrationEnabled: true, maintenanceMode: false, defaultDailyWords: 20 };
     server.use(
       http.get(`${BASE}/api/admin/settings`, () =>
         HttpResponse.json({ success: true, data: settings })),
@@ -170,15 +176,15 @@ describe('adminApi', () => {
   });
 
   it('updateSettings sends partial settings and returns updated settings', async () => {
-    const updated = { registrationOpen: false, maxUsersPerDay: 100 };
+    const updated = { maxUsers: 1000, registrationEnabled: false, maintenanceMode: false, defaultDailyWords: 20 };
     server.use(
       http.put(`${BASE}/api/admin/settings`, async ({ request }) => {
         const body = await request.json() as Record<string, unknown>;
-        expect(body).toEqual({ registrationOpen: false });
+        expect(body).toEqual({ registrationEnabled: false });
         return HttpResponse.json({ success: true, data: updated });
       }),
     );
-    const result = await adminApi.updateSettings({ registrationOpen: false } as any);
+    const result = await adminApi.updateSettings({ registrationEnabled: false } as any);
     expect(result).toEqual(updated);
   });
 

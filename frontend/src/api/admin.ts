@@ -4,7 +4,7 @@ import type {
   AdminUsersPage, AdminUsersQuery,
   EngagementAnalytics, LearningAnalytics,
   SystemHealth, DatabaseInfo, SystemSettings,
-  UpdateCheck,
+  UpdateCheck, DailyActiveUsersEntry, DailyRecordsEntry,
 } from '@/types/admin';
 import type { AmasConfig } from '@/types/amas';
 import type { BrowseItem, WordbookPreview, ImportResult, UpdateInfo, SyncResult } from '@/types/wordbookCenter';
@@ -95,6 +95,10 @@ export const adminApi = {
   // Analytics
   getEngagement: () => api.get<EngagementAnalytics>('/api/admin/analytics/engagement', undefined, { useAdminToken: true }),
   getLearningAnalytics: () => api.get<LearningAnalytics>('/api/admin/analytics/learning', undefined, { useAdminToken: true }),
+  getDailyActiveUsers: (days?: number) =>
+    api.get<DailyActiveUsersEntry[]>('/api/admin/analytics/daily-active-users', days ? { days } : undefined, { useAdminToken: true }),
+  getDailyRecords: (days?: number) =>
+    api.get<DailyRecordsEntry[]>('/api/admin/analytics/daily-records', days ? { days } : undefined, { useAdminToken: true }),
 
   // Monitoring
   getHealth: () => api.get<SystemHealth>('/api/admin/monitoring/health', undefined, { useAdminToken: true }),

@@ -55,8 +55,8 @@ describe('userProfileApi', () => {
     expect(result).toEqual(data);
   });
 
-  it('getLearningStyle returns learning style with nested scores', async () => {
-    const data = { style: 'visual', scores: { visual: 0.8, auditory: 0.2, reading: 0.5, kinesthetic: 0.3 } };
+  it('getLearningStyle returns cognitive-style summary', async () => {
+    const data = { processingSpeed: 0.8, memoryCapacity: 0.6, stability: 0.7 };
     server.use(
       http.get(`${BASE}/api/user-profile/learning-style`, () =>
         HttpResponse.json({ success: true, data })),

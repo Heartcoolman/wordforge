@@ -200,10 +200,10 @@
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| preferred_hours | number[] | 偏好学习时段 |
-| median_session_length_mins | number | 单次学习时长中位数（分钟） |
-| sessions_per_day | number | 每日学习次数 |
-| temporal_performance | object | 时段表现统计（仅 AMAS 计算值包含） |
+| preferredHours | number[] | 偏好学习时段 |
+| medianSessionLengthMins | number | 单次学习时长中位数（分钟） |
+| sessionsPerDay | number | 每日学习次数 |
+| temporalPerformance | object | 时段表现统计（仅 AMAS 计算值包含） |
 
 ---
 
@@ -221,7 +221,7 @@
 | medianSessionLengthMins | number | 否 | 单次学习时长（分钟），1-480 |
 | sessionsPerDay | number | 否 | 每日学习次数，1-20 |
 
-**响应体** (200 OK): 存储后的习惯画像对象（使用 snake_case 键名）。
+**响应体** (200 OK): 存储后的习惯画像对象（使用 camelCase 键名）。
 
 **错误码**:
 - `INVALID_PREFERRED_HOURS` — 偏好时段的值必须在 0 到 23 之间

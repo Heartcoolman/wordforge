@@ -25,16 +25,28 @@ export interface AdminAuthResponse {
   admin: { id: string; email: string };
 }
 
+export interface TrendField {
+  value: number;
+  label: string;
+}
+
 export interface AdminStats {
   users: number;
   words: number;
   records: number;
+  trend?: {
+    users?: TrendField;
+    records?: TrendField;
+  };
 }
 
 export interface EngagementAnalytics {
   totalUsers: number;
   activeToday: number;
   retentionRate: number;
+  trend?: {
+    activeToday?: TrendField;
+  };
 }
 
 export interface LearningAnalytics {
@@ -42,6 +54,10 @@ export interface LearningAnalytics {
   totalRecords: number;
   totalCorrect: number;
   overallAccuracy: number;
+  trend?: {
+    totalRecords?: TrendField;
+    overallAccuracy?: TrendField;
+  };
 }
 
 export interface SystemHealth {
@@ -53,8 +69,11 @@ export interface SystemHealth {
 
 export interface DatabaseInfo {
   sizeOnDisk: number;
-  treeCount: number;
-  trees: string[];
+  tableCount: number;
+  tables: string[];
+  pageSize: number;
+  pageCount: number;
+  walEnabled: boolean;
 }
 
 export interface UpdateCheck {
@@ -71,4 +90,15 @@ export interface SystemSettings {
   maintenanceMode: boolean;
   defaultDailyWords: number;
   wordbookCenterUrl?: string;
+}
+
+export interface DailyActiveUsersEntry {
+  date: string;
+  count: number;
+}
+
+export interface DailyRecordsEntry {
+  date: string;
+  correct: number;
+  total: number;
 }

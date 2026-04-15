@@ -375,6 +375,22 @@ impl Store {
         Ok(page_count * page_size)
     }
 
+    pub fn db_page_size(&self) -> Result<i64, StoreError> {
+        let conn = self.conn()?;
+        Ok(conn.query_row("PRAGMA page_size", [], |r| r.get(0))?)
+    }
+
+    pub fn db_page_count(&self) -> Result<i64, StoreError> {
+        let conn = self.conn()?;
+        Ok(conn.query_row("PRAGMA page_count", [], |r| r.get(0))?)
+    }
+
+    pub fn db_wal_enabled(&self) -> Result<bool, StoreError> {
+        let conn = self.conn()?;
+        let mode: String = conn.query_row("PRAGMA journal_mode", [], |r| r.get(0))?;
+        Ok(mode.eq_ignore_ascii_case("wal"))
+    }
+
     pub fn db_table_list(&self) -> Result<Vec<String>, StoreError> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(

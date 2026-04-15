@@ -329,6 +329,68 @@ impl Store {
         let rows = stmt.query_map(params![user_id, word_id, limit as i64], record_from_row)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
     }
+
+    pub fn daily_active_users(&self, days: u32) -> Result<Vec<(String, i64)>, StoreError> {
+        let conn = self.conn()?;
+        let since = (chrono::Utc::now() - chrono::Duration::days(days as i64)).date_naive();
+        let since_str = since.format("%Y-%m-%d").to_string();
+        let mut stmt = conn.prepare(
+            "SELECT DATE(created_at) as d, COUNT(DISTINCT user_id)
+             FROM learning_records
+             WHERE DATE(created_at) >= ?1
+             GROUP BY d ORDER BY d",
+        )?;
+        let rows = stmt.query_map(params![&since_str], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
+    }
+
+    pub fn daily_records(&self, days: u32) -> Result<Vec<(String, i64, i64)>, StoreError> {
+        let conn = self.conn()?;
+        let since = (chrono::Utc::now() - chrono::Duration::days(days as i64)).date_naive();
+        let since_str = since.format("%Y-%m-%d").to_string();
+        let mut stmt = conn.prepare(
+            "SELECT DATE(created_at) as d, COUNT(*), COALESCE(SUM(CASE WHEN is_correct=1 THEN 1 ELSE 0 END), 0)
+             FROM learning_records
+             WHERE DATE(created_at) >= ?1
+             GROUP BY d ORDER BY d",
+        )?;
+        let rows = stmt.query_map(params![&since_str], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
+    }
+
+    pub fn count_records_on_date(&self, date_str: &str) -> Result<usize, StoreError> {
+        let conn = self.conn()?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM learning_records WHERE DATE(created_at) = ?1",
+            params![date_str],
+            |r| r.get(0),
+        )?;
+        Ok(count as usize)
+    }
+
+    pub fn count_correct_records_on_date(&self, date_str: &str) -> Result<usize, StoreError> {
+        let conn = self.conn()?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM learning_records WHERE DATE(created_at) = ?1 AND is_correct=1",
+            params![date_str],
+            |r| r.get(0),
+        )?;
+        Ok(count as usize)
+    }
+
+    pub fn count_active_users_on_date(&self, date_str: &str) -> Result<usize, StoreError> {
+        let conn = self.conn()?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(DISTINCT user_id) FROM learning_records WHERE DATE(created_at) = ?1",
+            params![date_str],
+            |r| r.get(0),
+        )?;
+        Ok(count as usize)
+    }
 }
 
 #[cfg(test)]

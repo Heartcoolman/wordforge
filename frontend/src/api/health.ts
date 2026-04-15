@@ -4,8 +4,11 @@ import type { AmasMetrics } from '@/types/amas';
 export interface PublicHealthStatus {
   status: string;
   uptimeSecs: number;
-  store: {
-    healthy: boolean;
+  services: {
+    store: { healthy: boolean };
+    amas: { healthy: boolean };
+    sse: { healthy: boolean };
+    wordbookCenter: { healthy: boolean; url: string | null };
   };
 }
 

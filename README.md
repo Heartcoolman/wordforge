@@ -1,6 +1,8 @@
 # WordForge — 智能英语学习系统
 
-一个基于自适应算法驱动的全栈英语学习平台，采用 **Rust Axum** 后端 + **SolidJS** 前端架构，内置 AMAS（Adaptive Mastery Acquisition System）自适应掌握度习得系统。
+一个基于自适应算法驱动的英语学习平台，采用 **Rust Axum** 后端 + **SolidJS** 管理后台架构，内置 AMAS（Adaptive Mastery Acquisition System）自适应掌握度习得系统。
+
+> 当前仓库内的前端构建产物主要是管理后台。用户学习端 Web 已拆分至独立项目 `wordforge-web`；本仓库保留完整 API 服务，并对历史用户路径提供过渡页。
 
 **[在线文档](https://heartcoolman.github.io/wordforge/)**
 
@@ -14,6 +16,7 @@
 - **词书中心** — 在线浏览、导入、同步词书资源，支持自定义词本
 - **数据洞察** — 学习统计、历史回溯、遗忘预警
 - **管理后台** — 用户管理、系统监控、AMAS 配置、全局广播
+- **API 服务** — 为用户学习端、管理后台和移动端提供统一接口
 
 ---
 

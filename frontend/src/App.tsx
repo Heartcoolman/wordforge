@@ -13,6 +13,7 @@ import { SystemLockedModal } from '@/components/SystemLockedModal';
 import { Portal } from 'solid-js/web';
 
 const NotFoundPage = lazy(() => import('@/pages/NotFoundPage'));
+const LegacyUserFrontendPage = lazy(() => import('@/pages/LegacyUserFrontendPage'));
 
 const AdminLoginPage = lazy(() => import('@/pages/admin/AdminLoginPage'));
 const AdminSetupPage = lazy(() => import('@/pages/admin/AdminSetupPage'));
@@ -95,6 +96,18 @@ export default function App() {
       </Show>
       <MaintenanceProvider>
       <Router>
+        <Route path="/" component={() => (<Suspense fallback={<PageSpinner />}><LegacyUserFrontendPage /></Suspense>)} />
+        <Route path="/login" component={() => (<Suspense fallback={<PageSpinner />}><LegacyUserFrontendPage /></Suspense>)} />
+        <Route path="/register" component={() => (<Suspense fallback={<PageSpinner />}><LegacyUserFrontendPage /></Suspense>)} />
+        <Route path="/learning" component={() => (<Suspense fallback={<PageSpinner />}><LegacyUserFrontendPage /></Suspense>)} />
+        <Route path="/flashcard" component={() => (<Suspense fallback={<PageSpinner />}><LegacyUserFrontendPage /></Suspense>)} />
+        <Route path="/vocabulary" component={() => (<Suspense fallback={<PageSpinner />}><LegacyUserFrontendPage /></Suspense>)} />
+        <Route path="/wordbooks" component={() => (<Suspense fallback={<PageSpinner />}><LegacyUserFrontendPage /></Suspense>)} />
+        <Route path="/wordbook-center" component={() => (<Suspense fallback={<PageSpinner />}><LegacyUserFrontendPage /></Suspense>)} />
+        <Route path="/statistics" component={() => (<Suspense fallback={<PageSpinner />}><LegacyUserFrontendPage /></Suspense>)} />
+        <Route path="/history" component={() => (<Suspense fallback={<PageSpinner />}><LegacyUserFrontendPage /></Suspense>)} />
+        <Route path="/profile" component={() => (<Suspense fallback={<PageSpinner />}><LegacyUserFrontendPage /></Suspense>)} />
+        <Route path="/notifications" component={() => (<Suspense fallback={<PageSpinner />}><LegacyUserFrontendPage /></Suspense>)} />
         <Route path="/admin">
           <Route path="/login" component={() => (<Suspense fallback={<PageSpinner />}><AdminLoginPage /></Suspense>)} />
           <Route path="/setup" component={() => (<Suspense fallback={<PageSpinner />}><AdminSetupPage /></Suspense>)} />

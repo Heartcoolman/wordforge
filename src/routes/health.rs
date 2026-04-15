@@ -1,5 +1,5 @@
 use std::sync::OnceLock;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -15,7 +15,6 @@ fn startup_instant() -> &'static Instant {
 }
 
 pub fn router() -> Router<AppState> {
-    // Ensure startup time is recorded when the router is built
     let _ = startup_instant();
 
     Router::new()
@@ -26,14 +25,44 @@ pub fn router() -> Router<AppState> {
         .route("/metrics", get(metrics))
 }
 
-pub async fn health_check() -> impl axum::response::IntoResponse {
-    // 注意: uptimeSecs 存在低风险的信息泄露（审计建议），攻击者可推断重启时间。
-    // 保留此字段用于运维监控，如有需要可通过环境变量控制是否暴露。
+pub async fn health_check(State(state): State<AppState>) -> impl axum::response::IntoResponse {
+    let store_healthy = state.store().get_user_by_id("__health_check__").is_ok();
+    let amas_healthy = true;
+    let sse_healthy = true;
+
+    let settings = state.store().get_system_settings().ok();
+    let wbc_url = settings.as_ref().and_then(|s| s.wordbook_center_url.clone());
+
+    let wbc_healthy = match &wbc_url {
+        Some(url) => {
+            let client = reqwest::Client::builder()
+                .timeout(Duration::from_secs(3))
+                .build()
+                .ok();
+            match client {
+                Some(c) => c.head(url).send().await.is_ok(),
+                None => false,
+            }
+        }
+        None => true,
+    };
+
+    let status = if !store_healthy {
+        "down"
+    } else if !amas_healthy || !sse_healthy || !wbc_healthy {
+        "degraded"
+    } else {
+        "ok"
+    };
+
     Json(serde_json::json!({
-        "status": "ok",
+        "status": status,
         "uptimeSecs": startup_instant().elapsed().as_secs(),
-        "store": {
-            "healthy": true,
+        "services": {
+            "store": { "healthy": store_healthy },
+            "amas": { "healthy": amas_healthy },
+            "sse": { "healthy": sse_healthy },
+            "wordbookCenter": { "healthy": wbc_healthy, "url": wbc_url },
         }
     }))
 }

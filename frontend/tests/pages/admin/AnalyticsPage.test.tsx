@@ -6,7 +6,11 @@ vi.mock('@/api/admin', () => ({
   adminApi: {
     getEngagement: vi.fn(),
     getLearningAnalytics: vi.fn(),
+    getDailyRecords: vi.fn(),
   },
+}));
+vi.mock('@/components/ui/EChart', () => ({
+  EChart: () => <div data-testid="chart" />,
 }));
 
 vi.mock('@/stores/ui', () => ({
@@ -19,34 +23,42 @@ const mockAdminApi = adminApi as unknown as Record<string, ReturnType<typeof vi.
 
 const mockEngagement = { totalUsers: 500, activeToday: 42, retentionRate: 0.75 };
 const mockLearning = { totalWords: 8000, totalRecords: 50000, totalCorrect: 40000, overallAccuracy: 0.8 };
+const mockDailyRecords = [{ date: '2026-04-15', correct: 10, total: 12 }];
 
 describe('AnalyticsPage', () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
+  function primeMocks() {
+    mockAdminApi.getEngagement.mockResolvedValue(mockEngagement);
+    mockAdminApi.getLearningAnalytics.mockResolvedValue(mockLearning);
+    mockAdminApi.getDailyRecords.mockResolvedValue(mockDailyRecords);
+  }
+
   async function renderPage() {
     const { default: AnalyticsPage } = await import('@/pages/admin/AnalyticsPage');
     return renderWithProviders(() => <AnalyticsPage />);
   }
 
-  it('shows "数据分析" heading', async () => {
-    mockAdminApi.getEngagement.mockResolvedValue(mockEngagement);
-    mockAdminApi.getLearningAnalytics.mockResolvedValue(mockLearning);
+  it('renders analytics sections after loading', async () => {
+    primeMocks();
     await renderPage();
-    expect(screen.getByText('数据分析')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByText('用户活跃度')).toBeInTheDocument();
+    });
   });
 
   it('shows loading spinner initially', async () => {
     mockAdminApi.getEngagement.mockReturnValue(new Promise(() => {}));
     mockAdminApi.getLearningAnalytics.mockReturnValue(new Promise(() => {}));
+    mockAdminApi.getDailyRecords.mockReturnValue(new Promise(() => {}));
     await renderPage();
     expect(screen.getByRole('status')).toBeInTheDocument();
   });
 
   it('shows "用户活跃度" section after loading', async () => {
-    mockAdminApi.getEngagement.mockResolvedValue(mockEngagement);
-    mockAdminApi.getLearningAnalytics.mockResolvedValue(mockLearning);
+    primeMocks();
     await renderPage();
     await waitFor(() => {
       expect(screen.getByText('用户活跃度')).toBeInTheDocument();
@@ -54,19 +66,17 @@ describe('AnalyticsPage', () => {
   });
 
   it('shows engagement stats values after loading', async () => {
-    mockAdminApi.getEngagement.mockResolvedValue(mockEngagement);
-    mockAdminApi.getLearningAnalytics.mockResolvedValue(mockLearning);
+    primeMocks();
     await renderPage();
     await waitFor(() => {
       expect(screen.getByText('总用户')).toBeInTheDocument();
     });
     expect(screen.getByText('今日活跃')).toBeInTheDocument();
-    expect(screen.getByText('留存率')).toBeInTheDocument();
+    expect(screen.getByText('日活跃率')).toBeInTheDocument();
   });
 
   it('shows "学习数据" section after loading', async () => {
-    mockAdminApi.getEngagement.mockResolvedValue(mockEngagement);
-    mockAdminApi.getLearningAnalytics.mockResolvedValue(mockLearning);
+    primeMocks();
     await renderPage();
     await waitFor(() => {
       expect(screen.getByText('学习数据')).toBeInTheDocument();
@@ -74,8 +84,7 @@ describe('AnalyticsPage', () => {
   });
 
   it('shows learning stats labels after loading', async () => {
-    mockAdminApi.getEngagement.mockResolvedValue(mockEngagement);
-    mockAdminApi.getLearningAnalytics.mockResolvedValue(mockLearning);
+    primeMocks();
     await renderPage();
     await waitFor(() => {
       expect(screen.getByText('总单词')).toBeInTheDocument();

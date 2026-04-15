@@ -12,19 +12,11 @@ export interface CognitiveProfile {
   stability: number;
 }
 
-// 后端 learning-style 返回: { style, scores: { visual, auditory, reading, kinesthetic } }
-export interface LearningStyleScores {
-  visual: number;
-  auditory: number;
-  reading: number;
-  kinesthetic: number;
-}
-
-export type LearningStyleType = 'visual' | 'auditory' | 'reading' | 'kinesthetic';
-
+// 后端 learning-style 返回: { processingSpeed, memoryCapacity, stability }
 export interface LearningStyle {
-  style: LearningStyleType;
-  scores: LearningStyleScores;
+  processingSpeed: number;
+  memoryCapacity: number;
+  stability: number;
 }
 
 // 后端 chronotype 返回: { chronotype, preferredHours }
