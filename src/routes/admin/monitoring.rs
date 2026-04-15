@@ -22,7 +22,7 @@ async fn system_health(
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     let size_on_disk = state.store().db_size_bytes().unwrap_or(0);
     let uptime_secs = state.uptime_secs();
-    let store_probe_ok = state.store().get_user_by_id("__health_check__").is_ok();
+    let store_probe_ok = state.store().db_ping().is_ok();
     let status = if store_probe_ok { "healthy" } else { "degraded" };
 
     Ok(ok(serde_json::json!({
@@ -73,7 +73,9 @@ async fn check_update(
     let api_url = state.config().update_check.api_url.trim();
 
     if api_url.is_empty() {
-        return Ok(ok(update_check_fallback(git_version, current_version)));
+        let fallback = update_check_fallback(git_version, current_version);
+        *state.update_cache().write().await = Some((Instant::now(), fallback.clone()));
+        return Ok(ok(fallback));
     }
 
     match fetch_latest_release(api_url, git_version, current_version).await {
@@ -84,6 +86,7 @@ async fn check_update(
         Err(e) => {
             tracing::warn!("Failed to check for updates: {e}");
             let fallback = update_check_fallback(git_version, current_version);
+            *state.update_cache().write().await = Some((Instant::now(), fallback.clone()));
             Ok(ok(fallback))
         }
     }

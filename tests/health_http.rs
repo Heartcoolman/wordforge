@@ -37,3 +37,15 @@ async fn it_health_database_is_ok() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["healthy"], true);
 }
+
+#[tokio::test]
+async fn it_public_health_hides_upstream_url_and_reports_store() {
+    let app = spawn_test_server().await;
+
+    let response = request(&app.app, Method::GET, "/health", None, &[]).await;
+    let (status, _, body) = response_json(response).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["services"]["store"]["healthy"], true);
+    assert!(body["services"]["wordbookCenter"]["healthy"].is_boolean());
+    assert!(body["services"]["wordbookCenter"].get("url").is_none());
+}

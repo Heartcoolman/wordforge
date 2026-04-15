@@ -375,6 +375,12 @@ impl Store {
         Ok(page_count * page_size)
     }
 
+    pub fn db_ping(&self) -> Result<(), StoreError> {
+        let conn = self.conn()?;
+        conn.query_row("SELECT 1", [], |r| r.get::<_, i64>(0))?;
+        Ok(())
+    }
+
     pub fn db_page_size(&self) -> Result<i64, StoreError> {
         let conn = self.conn()?;
         Ok(conn.query_row("PRAGMA page_size", [], |r| r.get(0))?)
