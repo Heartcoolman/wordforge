@@ -73,10 +73,12 @@ function MaintenanceProvider(props: { children: any }) {
     disconnectSse?.();
   });
 
+  const isAdminPath = () => window.location.pathname.startsWith('/admin');
+
   return (
     <>
       <UpdateBanner />
-      <Show when={!maintenanceActive()} fallback={<MaintenancePage />}>
+      <Show when={!maintenanceActive() || isAdminPath()} fallback={<MaintenancePage />}>
         {props.children}
       </Show>
     </>

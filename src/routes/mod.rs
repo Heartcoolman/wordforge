@@ -88,7 +88,7 @@ pub fn build_router(state: AppState) -> Router {
         .nest("/health", health::router());
 
     if !state.config().api_only {
-        let static_files = ServeDir::new("static");
+        let static_files = ServeDir::new("static").append_index_html_on_directories(false);
         let admin_spa =
             ServeDir::new("static").fallback(ServeFile::new("static/index.html"));
         app = app
