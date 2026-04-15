@@ -455,14 +455,15 @@ fn delayed_reward_counts_only_overdue_non_mastered_words() {
 
 #[test]
 fn it_exercises_memory_models_and_metrics_registry() {
+    let evm_cfg = learning_backend::amas::config::EvmConfig::default();
     let mut evm_state = evm::EvmState::default();
-    assert_eq!(evm::context_diversity_bonus(&evm_state), 0.0);
-    evm::record_context(&mut evm_state, true);
-    evm::record_context(&mut evm_state, false);
-    let evm_bonus = evm::context_diversity_bonus(&evm_state);
+    assert_eq!(evm::context_diversity_bonus(&evm_state, &evm_cfg), 0.0);
+    evm::record_context(&mut evm_state, true, &evm_cfg);
+    evm::record_context(&mut evm_state, false, &evm_cfg);
+    let evm_bonus = evm::context_diversity_bonus(&evm_state, &evm_cfg);
     assert!(evm_bonus > 0.0);
     assert!(evm_bonus <= 0.3);
-    assert!(evm::interval_modifier(&evm_state) >= 1.0);
+    assert!(evm::interval_modifier(&evm_state, &evm_cfg) >= 1.0);
 
     let mut iad_state = iad::IadState::default();
     let iad_config = learning_backend::amas::config::IadConfig::default();
