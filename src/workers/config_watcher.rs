@@ -17,7 +17,9 @@ pub async fn run(path: String, amas: Arc<AMASEngine>) {
 
     let mut watcher = match RecommendedWatcher::new(
         move |res| {
-            let _ = tx.blocking_send(res);
+            // try_send：channel 满时丢弃事件而非阻塞 watcher 线程；
+            // 防抖逻辑会在接收端清空积压，多余事件可安全丢弃。
+            let _ = tx.try_send(res);
         },
         notify::Config::default(),
     ) {

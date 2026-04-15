@@ -1098,8 +1098,12 @@ impl AMASConfig {
     pub fn write_to_toml(&self, path: &str) -> Result<(), String> {
         let content = toml::to_string_pretty(self)
             .map_err(|e| format!("序列化 TOML 配置失败: {e}"))?;
-        std::fs::write(path, content)
-            .map_err(|e| format!("写入配置文件失败: {e}"))
+        // 先写临时文件再原子 rename，避免 watcher 读到不完整内容
+        let tmp = format!("{path}.tmp");
+        std::fs::write(&tmp, &content)
+            .map_err(|e| format!("写入临时配置文件失败: {e}"))?;
+        std::fs::rename(&tmp, path)
+            .map_err(|e| format!("原子重命名配置文件失败: {e}"))
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -1330,6 +1334,42 @@ impl AMASConfig {
         }
         if self.memory_model.mastery_window_size == 0 {
             return Err("memory_model.mastery_window_size must be > 0".to_string());
+        }
+        if !(0.0..=1.0).contains(&self.memory_model.alpha_min)
+            || !(0.0..=1.0).contains(&self.memory_model.alpha_max)
+        {
+            return Err("memory_model.alpha_min/alpha_max must be in [0,1]".to_string());
+        }
+        if self.memory_model.alpha_min >= self.memory_model.alpha_max {
+            return Err("memory_model.alpha_min must be < alpha_max".to_string());
+        }
+        if !(0.0..=1.0).contains(&self.memory_model.forgetting_threshold) {
+            return Err("memory_model.forgetting_threshold must be in [0,1]".to_string());
+        }
+        if !(0.0..=1.0).contains(&self.memory_model.retention_min)
+            || !(0.0..=1.0).contains(&self.memory_model.retention_max)
+        {
+            return Err("memory_model.retention_min/retention_max must be in [0,1]".to_string());
+        }
+        if self.memory_model.retention_min >= self.memory_model.retention_max {
+            return Err("memory_model.retention_min must be < retention_max".to_string());
+        }
+        if self.memory_model.max_interval_days <= 0.0 {
+            return Err("memory_model.max_interval_days must be > 0".to_string());
+        }
+        if self.memory_model.min_interval_secs <= 0 {
+            return Err("memory_model.min_interval_secs must be > 0".to_string());
+        }
+
+        // EvmConfig — diversity_log_divisor 必须 > 1，否则 ln() 产生 NaN/Inf
+        if self.evm.diversity_log_divisor <= 1.0 {
+            return Err("evm.diversity_log_divisor must be > 1".to_string());
+        }
+        if self.evm.diversity_bonus_cap < 0.0 {
+            return Err("evm.diversity_bonus_cap must be >= 0".to_string());
+        }
+        if self.evm.diversity_growth_rate <= 0.0 {
+            return Err("evm.diversity_growth_rate must be > 0".to_string());
         }
 
         // IadConfig
