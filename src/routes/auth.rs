@@ -434,7 +434,7 @@ fn set_token_cookie(response: &mut Response, token: &str) -> Result<(), AppError
 
 fn set_refresh_token_cookie(response: &mut Response, refresh_token: &str) -> Result<(), AppError> {
     let cookie =
-        format!("refresh_token={refresh_token}; Path=/; SameSite=Strict; HttpOnly; Secure");
+        format!("refresh_token={refresh_token}; Path=/; SameSite=None; HttpOnly; Secure");
     append_set_cookie(response, &cookie, "refresh token cookie set failed")?;
     Ok(())
 }
@@ -447,7 +447,7 @@ fn clear_auth_cookies(response: &mut Response) -> Result<(), AppError> {
     )?;
     append_set_cookie(
         response,
-        "refresh_token=; Path=/; Max-Age=0; SameSite=Strict; HttpOnly; Secure",
+        "refresh_token=; Path=/; Max-Age=0; SameSite=None; HttpOnly; Secure",
         "refresh token cookie clear failed",
     )?;
     Ok(())
