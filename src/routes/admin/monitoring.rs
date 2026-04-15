@@ -40,24 +40,29 @@ async fn database_stats(
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     let size = state.store().db_size_bytes().unwrap_or(0);
     let tables = state.store().db_table_list().unwrap_or_default();
+    let page_size = state.store().db_page_size().unwrap_or(0);
+    let page_count = state.store().db_page_count().unwrap_or(0);
+    let wal_enabled = state.store().db_wal_enabled().unwrap_or(false);
 
     Ok(ok(serde_json::json!({
         "sizeOnDisk": size,
         "tableCount": tables.len(),
         "tables": tables,
+        "pageSize": page_size,
+        "pageCount": page_count,
+        "walEnabled": wal_enabled,
     })))
 }
-
-const CACHE_TTL: Duration = Duration::from_secs(3600);
 
 async fn check_update(
     _admin: AdminAuthUser,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
+    let cache_ttl = Duration::from_secs(state.config().update_check.cache_ttl_secs);
     {
         let cache = state.update_cache().read().await;
         if let Some((cached_at, ref data)) = *cache {
-            if cached_at.elapsed() < CACHE_TTL {
+            if cached_at.elapsed() < cache_ttl {
                 return Ok(ok(data.clone()));
             }
         }
@@ -65,28 +70,37 @@ async fn check_update(
 
     let git_version = env!("GIT_VERSION");
     let current_version = git_version.trim_start_matches('v');
+    let api_url = state.config().update_check.api_url.trim();
 
-    match fetch_latest_release(git_version, current_version).await {
+    if api_url.is_empty() {
+        return Ok(ok(update_check_fallback(git_version, current_version)));
+    }
+
+    match fetch_latest_release(api_url, git_version, current_version).await {
         Ok(data) => {
             *state.update_cache().write().await = Some((Instant::now(), data.clone()));
             Ok(ok(data))
         }
         Err(e) => {
             tracing::warn!("Failed to check for updates: {e}");
-            let fallback = serde_json::json!({
-                "currentVersion": git_version,
-                "latestVersion": current_version,
-                "hasUpdate": false,
-                "releaseUrl": null,
-                "releaseNotes": null,
-            });
-            *state.update_cache().write().await = Some((Instant::now(), fallback.clone()));
+            let fallback = update_check_fallback(git_version, current_version);
             Ok(ok(fallback))
         }
     }
 }
 
+fn update_check_fallback(git_version: &str, current_version: &str) -> serde_json::Value {
+    serde_json::json!({
+        "currentVersion": git_version,
+        "latestVersion": current_version,
+        "hasUpdate": false,
+        "releaseUrl": null,
+        "releaseNotes": null,
+    })
+}
+
 async fn fetch_latest_release(
+    api_url: &str,
     git_version: &str,
     current_version: &str,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
@@ -96,7 +110,7 @@ async fn fetch_latest_release(
         .build()?;
 
     let resp = client
-        .get("https://api.github.com/repos/Heartcoolman/wordforge/releases/latest")
+        .get(api_url)
         .send()
         .await?;
 

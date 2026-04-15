@@ -18,10 +18,16 @@ import { adminApi } from '@/api/admin';
 
 const mockAdminApi = adminApi as unknown as Record<string, ReturnType<typeof vi.fn>>;
 
-const mockUsers = [
-  { id: '1', username: 'alice', email: 'alice@test.com', isBanned: false },
-  { id: '2', username: 'bob', email: 'bob@test.com', isBanned: true },
-];
+const mockUsers = {
+  data: [
+    { id: '1', username: 'alice', email: 'alice@test.com', isBanned: false, failedLoginCount: 0, lockedUntil: null, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' },
+    { id: '2', username: 'bob', email: 'bob@test.com', isBanned: true, failedLoginCount: 0, lockedUntil: null, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' },
+  ],
+  total: 2,
+  page: 1,
+  perPage: 20,
+  totalPages: 1,
+};
 
 describe('UserManagementPage', () => {
   beforeEach(() => {
@@ -33,10 +39,12 @@ describe('UserManagementPage', () => {
     return renderWithProviders(() => <UserManagementPage />);
   }
 
-  it('shows "用户管理" heading', async () => {
+  it('renders user table after loading', async () => {
     mockAdminApi.getUsers.mockResolvedValue(mockUsers);
     await renderPage();
-    expect(screen.getByText('用户管理')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByText('用户名')).toBeInTheDocument();
+    });
   });
 
   it('shows loading spinner initially', async () => {

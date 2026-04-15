@@ -40,7 +40,7 @@ describe('AdminLayout', () => {
   it('renders header', async () => {
     const { AdminLayout } = await import('@/components/layout/AdminLayout');
     renderWithProviders(() => <AdminLayout>Content</AdminLayout>);
-    expect(screen.getByText('管理后台')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '管理后台' })).toBeInTheDocument();
   });
 
   it('calls admin logout api when clicking exit', async () => {
@@ -48,7 +48,7 @@ describe('AdminLayout', () => {
     const { AdminLayout } = await import('@/components/layout/AdminLayout');
     renderWithProviders(() => <AdminLayout>Content</AdminLayout>);
 
-    await userEvent.click(screen.getByRole('button', { name: '退出' }));
+    await userEvent.click(screen.getByRole('button', { name: '退出登录' }));
     expect(logoutMock).toHaveBeenCalledTimes(1);
   });
 });

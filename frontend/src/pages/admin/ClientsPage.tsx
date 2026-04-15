@@ -121,8 +121,7 @@ export default function ClientsPage() {
 
   return (
     <div class="space-y-6">
-      <div class="flex items-center justify-between">
-        <h2 class="text-xl font-bold text-content">客户端管理</h2>
+      <div class="flex justify-end">
         <Button size="sm" variant="outline" onClick={loadClients}>刷新</Button>
       </div>
 
@@ -162,7 +161,7 @@ export default function ClientsPage() {
                 <tbody>
                   <For each={sseLive()}>
                     {(entry) => (
-                      <tr class="border-b border-border/50">
+                      <tr class="border-b border-border/50 hover:bg-surface-secondary/50 transition-colors">
                         <td class="py-2 pr-4 font-mono text-xs" title={entry.deviceId}>{truncateId(entry.deviceId)}</td>
                         <td class="py-2 pr-4">{entry.platform}</td>
                         <td class="py-2 pr-4 font-mono text-xs">{truncateId(entry.userId)}</td>
@@ -212,7 +211,7 @@ export default function ClientsPage() {
                 <tbody>
                   <For each={recentlyActive()}>
                     {(entry) => (
-                      <tr class="border-b border-border/50">
+                      <tr class="border-b border-border/50 hover:bg-surface-secondary/50 transition-colors">
                         <td class="py-2 pr-4 font-mono text-xs" title={entry.deviceId}>{truncateId(entry.deviceId)}</td>
                         <td class="py-2 pr-4">{entry.platform}</td>
                         <td class="py-2 pr-4 font-mono text-xs">{entry.userId ? truncateId(entry.userId) : '-'}</td>
@@ -266,7 +265,12 @@ export default function ClientsPage() {
                         {/* 设备信息 */}
                         <Show when={record.deviceProfile.osName || record.deviceProfile.browserName}>
                           <div class="bg-surface-secondary rounded p-1.5 space-y-0.5">
-                            <div class="font-semibold text-content-secondary mb-1">设备信息</div>
+                            <div class="font-semibold text-info mb-1 flex items-center gap-1.5">
+                              <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+                              </svg>
+                              设备信息
+                            </div>
                             <Show when={record.deviceProfile.osName}>
                               <div class="flex gap-2"><span class="text-content-tertiary w-12">系统</span><span>{record.deviceProfile.osName}</span></div>
                             </Show>
@@ -286,7 +290,12 @@ export default function ClientsPage() {
                         </Show>
                         {/* 会话统计 */}
                         <div class="bg-surface-secondary rounded p-1.5 space-y-0.5">
-                          <div class="font-semibold text-content-secondary mb-1">会话统计</div>
+                          <div class="font-semibold text-accent mb-1 flex items-center gap-1.5">
+                            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                              <path stroke-linecap="round" stroke-linejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                            </svg>
+                            会话统计
+                          </div>
                           <div class="flex gap-4 flex-wrap">
                             <span><span class="text-content-tertiary">时长 </span>{record.sessionStats.sessionDurationSecs}s</span>
                             <span><span class="text-content-tertiary">操作/分 </span>{record.sessionStats.actionsPerMin.toFixed(1)}</span>
@@ -297,7 +306,12 @@ export default function ClientsPage() {
                         {/* 行为摘要 */}
                         <Show when={record.behaviorSummary.currentRoute !== null}>
                           <div class="bg-surface-secondary rounded p-1.5 space-y-0.5">
-                            <div class="font-semibold text-content-secondary mb-1">行为摘要</div>
+                            <div class="font-semibold text-success mb-1 flex items-center gap-1.5">
+                              <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M15 15l-2 5L9 9l11 4-5 2zm0 0l5 5M7.188 2.239l.777 2.897M5.136 7.965l-2.898-.777M13.95 4.05l-2.122 2.122m-5.657 5.656l-2.12 2.122" />
+                              </svg>
+                              行为摘要
+                            </div>
                             <Show when={record.behaviorSummary.currentRoute}>
                               <div class="flex gap-2"><span class="text-content-tertiary w-12">路由</span><span class="font-mono">{record.behaviorSummary.currentRoute}</span></div>
                             </Show>
@@ -320,7 +334,12 @@ export default function ClientsPage() {
                         {/* 功能使用 */}
                         <Show when={Object.keys(record.featureUsage).length > 0}>
                           <div class="bg-surface-secondary rounded p-1.5">
-                            <div class="font-semibold text-content-secondary mb-1">功能使用</div>
+                            <div class="font-semibold text-warning mb-1 flex items-center gap-1.5">
+                              <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M11 4a2 2 0 114 0v1a1 1 0 001 1h3a1 1 0 011 1v3a1 1 0 01-1 1h-1a2 2 0 100 4h1a1 1 0 011 1v3a1 1 0 01-1 1h-3a1 1 0 01-1-1v-1a2 2 0 10-4 0v1a1 1 0 01-1 1H7a1 1 0 01-1-1v-3a1 1 0 00-1-1H4a2 2 0 110-4h1a1 1 0 001-1V7a1 1 0 011-1h3a1 1 0 001-1V4z" />
+                              </svg>
+                              功能使用
+                            </div>
                             <div class="flex gap-3 flex-wrap">
                               <For each={Object.entries(record.featureUsage)}>
                                 {([k, v]) => <span><span class="text-content-tertiary">{k} </span>{v}</span>}

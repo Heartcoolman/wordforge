@@ -1,4 +1,4 @@
-import { createSignal, Show, onMount } from 'solid-js';
+import { createSignal, Show, For, onMount } from 'solid-js';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Spinner } from '@/components/ui/Spinner';
@@ -69,7 +69,6 @@ export default function AmasConfigPage() {
 
   return (
     <div class="space-y-6 animate-fade-in-up">
-      <h1 class="text-2xl font-bold text-content">AMAS 配置</h1>
 
       <Show when={!loading()} fallback={<div class="flex justify-center py-12"><Spinner size="lg" /></div>}>
         <Card variant="elevated">
@@ -88,12 +87,44 @@ export default function AmasConfigPage() {
         </Card>
 
         <Show when={metrics()}>
-          <Card variant="elevated">
-            <h2 class="text-lg font-semibold text-content mb-3">算法指标</h2>
-            <pre class="text-xs font-mono text-content-secondary bg-surface-secondary p-4 rounded-lg overflow-x-auto">
-              {JSON.stringify(metrics(), null, 2)}
-            </pre>
-          </Card>
+          {(m) => {
+            const entries = () => Object.entries(m() as Record<string, { callCount: number; totalLatencyUs: number; errorCount: number }>);
+            return (
+              <Card variant="elevated">
+                <h2 class="text-lg font-semibold text-content mb-3">算法指标</h2>
+                <Show when={entries().length > 0} fallback={<p class="text-sm text-content-secondary">暂无指标数据</p>}>
+                  <div class="overflow-x-auto">
+                    <table class="w-full text-sm">
+                      <thead>
+                        <tr class="bg-surface-secondary border-b border-border">
+                          <th class="px-4 py-2 text-left font-medium text-content-secondary">算法名称</th>
+                          <th class="px-4 py-2 text-right font-medium text-content-secondary">调用次数</th>
+                          <th class="px-4 py-2 text-right font-medium text-content-secondary">平均延迟</th>
+                          <th class="px-4 py-2 text-right font-medium text-content-secondary">错误次数</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <For each={entries()}>
+                          {([name, snapshot]) => (
+                            <tr class="border-b border-border/50 hover:bg-surface-secondary/50 transition-colors">
+                              <td class="px-4 py-2 font-mono text-sm">{name}</td>
+                              <td class="px-4 py-2 text-right">{snapshot.callCount}</td>
+                              <td class="px-4 py-2 text-right">
+                                {snapshot.callCount > 0 ? `${(snapshot.totalLatencyUs / snapshot.callCount / 1000).toFixed(2)} ms` : '–'}
+                              </td>
+                              <td class={`px-4 py-2 text-right ${snapshot.errorCount > 0 ? 'text-error' : ''}`}>
+                                {snapshot.errorCount}
+                              </td>
+                            </tr>
+                          )}
+                        </For>
+                      </tbody>
+                    </table>
+                  </div>
+                </Show>
+              </Card>
+            );
+          }}
         </Show>
       </Show>
     </div>

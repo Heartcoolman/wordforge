@@ -30,6 +30,7 @@ pub struct Config {
     pub amas: AMASEnvConfig,
     pub amas_config_file: Option<String>,
     pub llm: LLMConfig,
+    pub update_check: UpdateCheckConfig,
     pub pagination: PaginationConfig,
     pub limits: LimitsConfig,
 }
@@ -123,6 +124,12 @@ pub struct LLMConfig {
     pub timeout_secs: u64,
 }
 
+#[derive(Debug, Clone)]
+pub struct UpdateCheckConfig {
+    pub api_url: String,
+    pub cache_ttl_secs: u64,
+}
+
 impl fmt::Debug for Config {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Config")
@@ -154,6 +161,7 @@ impl fmt::Debug for Config {
             .field("worker", &self.worker)
             .field("amas", &self.amas)
             .field("llm", &self.llm)
+            .field("update_check", &self.update_check)
             .field("pagination", &self.pagination)
             .field("limits", &self.limits)
             .finish()
@@ -238,6 +246,13 @@ impl Config {
                 api_url: env_or("LLM_API_URL", ""),
                 api_key: env_or("LLM_API_KEY", ""),
                 timeout_secs: env_or_parse("LLM_TIMEOUT_SECS", 30_u64),
+            },
+            update_check: UpdateCheckConfig {
+                api_url: env_or(
+                    "UPDATE_CHECK_API_URL",
+                    "https://api.github.com/repos/Heartcoolman/wordforge/releases/latest",
+                ),
+                cache_ttl_secs: env_or_parse("UPDATE_CHECK_CACHE_TTL_SECS", 3600_u64),
             },
             pagination: PaginationConfig {
                 default_page_size: env_or_parse("PAGINATION_DEFAULT_SIZE", 20_u64),
@@ -414,6 +429,8 @@ mod tests {
             "LLM_ENABLED",
             "LLM_TIMEOUT_SECS",
             "LLM_MOCK",
+            "UPDATE_CHECK_API_URL",
+            "UPDATE_CHECK_CACHE_TTL_SECS",
             "JWT_SECRET",
             "ADMIN_JWT_SECRET",
             "REFRESH_JWT_SECRET",

@@ -26,7 +26,7 @@ afterAll(() => server.close());
 
 describe('authApi', () => {
   it('login sends credentials and returns auth response', async () => {
-    const authRes = { accessToken: 'tok', refreshToken: 'ref', user: { id: '1', email: 'a@b.com', username: 'test', isBanned: false } };
+    const authRes = { accessToken: 'tok', user: { id: '1', email: 'a@b.com', username: 'test', isBanned: false } };
     server.use(
       http.post(`${BASE}/api/auth/login`, () =>
         HttpResponse.json({ success: true, data: authRes })),
@@ -36,7 +36,7 @@ describe('authApi', () => {
   });
 
   it('register sends registration data', async () => {
-    const authRes = { accessToken: 'tok', refreshToken: 'ref', user: { id: '2', email: 'b@c.com', username: 'user2', isBanned: false } };
+    const authRes = { accessToken: 'tok', user: { id: '2', email: 'b@c.com', username: 'user2', isBanned: false } };
     server.use(
       http.post(`${BASE}/api/auth/register`, () =>
         HttpResponse.json({ success: true, data: authRes })),
@@ -46,7 +46,7 @@ describe('authApi', () => {
   });
 
   it('refresh returns new tokens', async () => {
-    const data = { accessToken: 'new-tok', refreshToken: 'new-ref', user: { id: '1', email: 'a@b.com', username: 'test', isBanned: false } };
+    const data = { accessToken: 'new-tok', user: { id: '1', email: 'a@b.com', username: 'test', isBanned: false } };
     server.use(
       http.post(`${BASE}/api/auth/refresh`, () =>
         HttpResponse.json({ success: true, data })),
@@ -67,18 +67,27 @@ describe('authApi', () => {
   it('forgotPassword sends email', async () => {
     server.use(
       http.post(`${BASE}/api/auth/forgot-password`, () =>
-        HttpResponse.json({ success: true, data: { success: true } })),
+        HttpResponse.json({ success: true, data: { emailSent: true, message: 'sent' } })),
     );
     const result = await authApi.forgotPassword('user@test.com');
-    expect(result).toEqual({ success: true });
+    expect(result).toEqual({ emailSent: true, message: 'sent' });
   });
 
   it('resetPassword sends token and new password', async () => {
     server.use(
       http.post(`${BASE}/api/auth/reset-password`, () =>
-        HttpResponse.json({ success: true, data: { success: true } })),
+        HttpResponse.json({ success: true, data: {} })),
     );
     const result = await authApi.resetPassword('reset-token-123', 'newpass123');
-    expect(result).toEqual({ success: true });
+    expect(result).toEqual({});
+  });
+
+  it('verifyResetToken returns valid state', async () => {
+    server.use(
+      http.post(`${BASE}/api/auth/verify-reset-token`, () =>
+        HttpResponse.json({ success: true, data: { valid: true } })),
+    );
+    const result = await authApi.verifyResetToken('reset-token-123');
+    expect(result).toEqual({ valid: true });
   });
 });

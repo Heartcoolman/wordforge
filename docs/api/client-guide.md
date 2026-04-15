@@ -1,5 +1,7 @@
 # 客户端对接指南
 
+> 说明：当前仓库内置的 Web 前端是管理后台。用户学习端 Web 已拆分到独立项目 `wordforge-web`，但本仓库仍然提供完整用户 API，因此本指南继续以客户端/API 对接为准。
+
 ## 认证
 
 WordForge 使用 JWT 认证，采用 access/refresh token 轮换机制。

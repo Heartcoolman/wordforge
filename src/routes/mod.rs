@@ -21,6 +21,7 @@ use axum::extract::DefaultBodyLimit;
 use axum::http::{header, HeaderValue, Request};
 use axum::middleware::Next;
 use axum::response::Response;
+use axum::routing::get_service;
 use axum::Router;
 use tower_http::services::{ServeDir, ServeFile};
 
@@ -29,6 +30,20 @@ use crate::state::AppState;
 
 /// Maximum request body size: 2 MiB.
 const MAX_BODY_SIZE: usize = 2 * 1024 * 1024;
+const LEGACY_USER_SPA_PATHS: &[&str] = &[
+    "/",
+    "/login",
+    "/register",
+    "/learning",
+    "/flashcard",
+    "/vocabulary",
+    "/wordbooks",
+    "/wordbook-center",
+    "/statistics",
+    "/history",
+    "/profile",
+    "/notifications",
+];
 
 pub fn build_router(state: AppState) -> Router {
     // 认证路由组添加专用速率限制
@@ -91,6 +106,9 @@ pub fn build_router(state: AppState) -> Router {
         let static_files = ServeDir::new("static").append_index_html_on_directories(false);
         let admin_spa =
             ServeDir::new("static").fallback(ServeFile::new("static/index.html"));
+        app = LEGACY_USER_SPA_PATHS.iter().fold(app, |router, path| {
+            router.route_service(path, get_service(ServeFile::new("static/index.html")))
+        });
         app = app
             .nest_service("/admin", admin_spa)
             .fallback_service(static_files)

@@ -1,19 +1,8 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render } from '@solidjs/testing-library';
 
-// Mock all lazy-loaded pages to avoid heavy imports
 vi.mock('@/pages/NotFoundPage', () => ({ default: () => <div>NotFound</div> }));
-vi.mock('@/pages/HomePage', () => ({ default: () => <div>Home</div> }));
-vi.mock('@/pages/LoginPage', () => ({ default: () => <div>Login</div> }));
-vi.mock('@/pages/RegisterPage', () => ({ default: () => <div>Register</div> }));
-vi.mock('@/pages/LearningPage', () => ({ default: () => <div>Learning</div> }));
-vi.mock('@/pages/FlashcardPage', () => ({ default: () => <div>Flashcard</div> }));
-vi.mock('@/pages/VocabularyPage', () => ({ default: () => <div>Vocabulary</div> }));
-vi.mock('@/pages/WordbookPage', () => ({ default: () => <div>Wordbook</div> }));
-vi.mock('@/pages/StatisticsPage', () => ({ default: () => <div>Statistics</div> }));
-vi.mock('@/pages/HistoryPage', () => ({ default: () => <div>History</div> }));
-vi.mock('@/pages/ProfilePage', () => ({ default: () => <div>Profile</div> }));
-vi.mock('@/pages/NotificationsPage', () => ({ default: () => <div>Notifications</div> }));
+vi.mock('@/pages/LegacyUserFrontendPage', () => ({ default: () => <div>LegacyUserFrontend</div> }));
 vi.mock('@/pages/admin/AdminLoginPage', () => ({ default: () => <div>AdminLogin</div> }));
 vi.mock('@/pages/admin/AdminSetupPage', () => ({ default: () => <div>AdminSetup</div> }));
 vi.mock('@/pages/admin/AdminDashboard', () => ({ default: () => <div>AdminDashboard</div> }));
@@ -22,30 +11,46 @@ vi.mock('@/pages/admin/AmasConfigPage', () => ({ default: () => <div>AmasConfig<
 vi.mock('@/pages/admin/MonitoringPage', () => ({ default: () => <div>Monitoring</div> }));
 vi.mock('@/pages/admin/AnalyticsPage', () => ({ default: () => <div>Analytics</div> }));
 vi.mock('@/pages/admin/SettingsPage', () => ({ default: () => <div>Settings</div> }));
+vi.mock('@/pages/admin/ClientsPage', () => ({ default: () => <div>Clients</div> }));
+vi.mock('@/pages/admin/AdminWordbookCenterPage', () => ({ default: () => <div>AdminWordbookCenter</div> }));
 
-vi.mock('@/stores/auth', () => ({
-  authStore: {
-    isAuthenticated: vi.fn(() => true),
-    user: vi.fn(() => ({ id: '1', email: 'a@b.com', username: 'test', isBanned: false })),
-    loading: vi.fn(() => false),
-    initialized: vi.fn(() => true),
-    init: vi.fn(),
-  },
-}));
 vi.mock('@/stores/ui', () => ({
-  uiStore: { toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() } },
+  uiStore: {
+    toasts: vi.fn(() => []),
+    addToast: vi.fn(),
+    removeToast: vi.fn(),
+    toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() },
+  },
 }));
 vi.mock('@/lib/token', () => ({
   tokenManager: {
-    getToken: () => 'fake',
+    getToken: () => null,
     getAdminToken: () => 'fake-admin',
     setTokens: vi.fn(),
     clearTokens: vi.fn(),
     needsRefresh: () => false,
-    isAuthenticated: () => true,
+    isAuthenticated: () => false,
     setAdminToken: vi.fn(),
     clearAdminToken: vi.fn(),
   },
+}));
+vi.mock('@/api/admin', () => ({
+  adminApi: {
+    verifyToken: vi.fn().mockResolvedValue({ id: 'admin-1', email: 'admin@test.com' }),
+  },
+}));
+vi.mock('@/api/client', () => ({
+  api: { get: vi.fn().mockResolvedValue({ maintenanceMode: false, version: 'test' }) },
+  maintenanceActive: () => false,
+  updateInfo: () => null,
+  setMaintenanceActive: vi.fn(),
+  setUpdateInfo: vi.fn(),
+  connectSseStream: vi.fn(() => () => undefined),
+}));
+vi.mock('@/workers/telemetry', () => ({
+  startTelemetryWorker: vi.fn(),
+  stopTelemetryWorker: vi.fn(),
+  handleTelemetryRequest: vi.fn(),
 }));
 
 import App from '@/App';

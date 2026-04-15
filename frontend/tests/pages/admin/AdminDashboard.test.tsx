@@ -6,7 +6,12 @@ vi.mock('@/api/admin', () => ({
   adminApi: {
     getStats: vi.fn(),
     getHealth: vi.fn(),
+    checkUpdate: vi.fn(),
+    getDailyActiveUsers: vi.fn(),
   },
+}));
+vi.mock('@/components/ui/EChart', () => ({
+  EChart: () => <div data-testid="chart" />,
 }));
 
 vi.mock('@/stores/ui', () => ({
@@ -27,23 +32,32 @@ describe('AdminDashboard', () => {
     return renderWithProviders(() => <AdminDashboard />);
   }
 
-  it('shows "仪表盘" heading', async () => {
-    mockAdminApi.getStats.mockResolvedValue({ users: 100, words: 5000, records: 10000 });
-    mockAdminApi.getHealth.mockResolvedValue({ status: 'ok', dbSizeBytes: 1048576, uptime: 7200, version: '1.0.0' });
+  function primeSuccessMocks() {
+    mockAdminApi.getStats.mockResolvedValue({ users: 100, words: 5000, records: 10000, trend: {} });
+    mockAdminApi.getHealth.mockResolvedValue({ status: 'healthy', dbSizeBytes: 1048576, uptimeSecs: 7200, version: '1.0.0' });
+    mockAdminApi.checkUpdate.mockResolvedValue({ currentVersion: '1.0.0', latestVersion: '1.0.0', hasUpdate: false, releaseUrl: null, releaseNotes: null });
+    mockAdminApi.getDailyActiveUsers.mockResolvedValue([{ date: '2026-04-15', count: 12 }]);
+  }
+
+  it('renders key dashboard sections after loading', async () => {
+    primeSuccessMocks();
     await renderPage();
-    expect(screen.getByText('仪表盘')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByText('系统状态')).toBeInTheDocument();
+    });
   });
 
   it('shows loading spinner initially', async () => {
     mockAdminApi.getStats.mockReturnValue(new Promise(() => {}));
     mockAdminApi.getHealth.mockReturnValue(new Promise(() => {}));
+    mockAdminApi.checkUpdate.mockReturnValue(new Promise(() => {}));
+    mockAdminApi.getDailyActiveUsers.mockReturnValue(new Promise(() => {}));
     await renderPage();
     expect(screen.getByRole('status')).toBeInTheDocument();
   });
 
   it('shows stat cards with correct values after loading', async () => {
-    mockAdminApi.getStats.mockResolvedValue({ users: 100, words: 5000, records: 10000 });
-    mockAdminApi.getHealth.mockResolvedValue({ status: 'ok', dbSizeBytes: 1048576, uptime: 7200, version: '1.0.0' });
+    primeSuccessMocks();
     await renderPage();
     await waitFor(() => {
       expect(screen.getByText('注册用户')).toBeInTheDocument();
@@ -53,8 +67,7 @@ describe('AdminDashboard', () => {
   });
 
   it('shows "系统状态" section after loading', async () => {
-    mockAdminApi.getStats.mockResolvedValue({ users: 100, words: 5000, records: 10000 });
-    mockAdminApi.getHealth.mockResolvedValue({ status: 'ok', dbSizeBytes: 1048576, uptime: 7200, version: '1.0.0' });
+    primeSuccessMocks();
     await renderPage();
     await waitFor(() => {
       expect(screen.getByText('系统状态')).toBeInTheDocument();
@@ -62,13 +75,12 @@ describe('AdminDashboard', () => {
   });
 
   it('shows health status details after loading', async () => {
-    mockAdminApi.getStats.mockResolvedValue({ users: 100, words: 5000, records: 10000 });
-    mockAdminApi.getHealth.mockResolvedValue({ status: 'ok', dbSizeBytes: 1048576, uptime: 7200, version: '1.0.0' });
+    primeSuccessMocks();
     await renderPage();
     await waitFor(() => {
-      expect(screen.getByText('ok')).toBeInTheDocument();
+      expect(screen.getByText('运行正常')).toBeInTheDocument();
     });
     expect(screen.getByText('1.0.0')).toBeInTheDocument();
-    expect(screen.getByText('2 小时')).toBeInTheDocument();
+    expect(screen.getByText('0d 2h 0m')).toBeInTheDocument();
   });
 });

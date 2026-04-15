@@ -136,7 +136,6 @@ export default function UserManagementPage() {
 
   return (
     <div class="space-y-6 animate-fade-in-up">
-      <h1 class="text-2xl font-bold text-content">用户管理</h1>
 
       {/* 确认弹窗 */}
       <Show when={confirmTarget()}>
@@ -179,7 +178,7 @@ export default function UserManagementPage() {
                 <tbody>
                   <For each={users()}>
                     {(user) => (
-                      <tr class="border-b border-border last:border-b-0">
+                      <tr class="border-b border-border last:border-b-0 hover:bg-surface-secondary/40 transition-colors">
                         <td class="px-4 py-3 font-medium text-content">{user.username}</td>
                         <td class="px-4 py-3 text-content-secondary">{maskEmail(user.email)}</td>
                         <td class="px-4 py-3">
@@ -187,17 +186,15 @@ export default function UserManagementPage() {
                             {user.isBanned ? '已封禁' : '正常'}
                           </Badge>
                         </td>
-                        <td class="px-4 py-3 text-right space-x-2">
-                          <Button size="xs" variant="outline" onClick={() => { closeResetModal(); setResetTarget(user); }}>
-                            重置密码
-                          </Button>
-                          <Button
-                            size="xs"
-                            variant={user.isBanned ? 'success' : 'danger'}
-                            onClick={() => handleBanClick(user)}
-                          >
-                            {user.isBanned ? '解封' : '封禁'}
-                          </Button>
+                        <td class="px-4 py-3">
+                          <div class="flex items-center justify-end gap-2">
+                            <Button size="xs" variant="outline" onClick={() => { closeResetModal(); setResetTarget(user); }}>
+                              重置密码
+                            </Button>
+                            <Button size="xs" variant={user.isBanned ? 'success' : 'danger'} onClick={() => handleBanClick(user)}>
+                              {user.isBanned ? '解封' : '封禁'}
+                            </Button>
+                          </div>
                         </td>
                       </tr>
                     )}

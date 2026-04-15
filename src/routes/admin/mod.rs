@@ -179,10 +179,34 @@ async fn admin_stats(
     let word_count = state.store().count_words()?;
     let record_count = state.store().count_all_records()?;
 
+    let today_str = chrono::Utc::now()
+        .date_naive()
+        .format("%Y-%m-%d")
+        .to_string();
+    let yesterday_str = (chrono::Utc::now().date_naive() - chrono::Duration::days(1))
+        .format("%Y-%m-%d")
+        .to_string();
+
+    let users_today = state.store().count_users_registered_on_date(&today_str)?;
+    let users_yesterday = state.store().count_users_registered_on_date(&yesterday_str)?;
+    let records_today = state.store().count_records_on_date(&today_str)?;
+    let records_yesterday = state.store().count_records_on_date(&yesterday_str)?;
+
+    let calc_trend = |today: usize, yesterday: usize| -> i64 {
+        if yesterday == 0 {
+            return 0;
+        }
+        ((today as f64 - yesterday as f64) / yesterday as f64 * 100.0).round() as i64
+    };
+
     Ok(ok(serde_json::json!({
         "users": user_count,
         "words": word_count,
         "records": record_count,
+        "trend": {
+            "users": { "value": calc_trend(users_today, users_yesterday), "label": "较昨日" },
+            "records": { "value": calc_trend(records_today, records_yesterday), "label": "较昨日" }
+        }
     })))
 }
 

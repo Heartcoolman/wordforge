@@ -65,6 +65,10 @@ async fn spawn_with_limits(api_limit: u64) -> TestApp {
             api_key: String::new(),
             timeout_secs: 30,
         },
+        update_check: learning_backend::config::UpdateCheckConfig {
+            api_url: String::new(),
+            cache_ttl_secs: 3600,
+        },
         pagination: Default::default(),
         limits: Default::default(),
     };

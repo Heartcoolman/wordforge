@@ -31,11 +31,13 @@ describe('AmasConfigPage', () => {
     return renderWithProviders(() => <AmasConfigPage />);
   }
 
-  it('shows "AMAS 配置" heading', async () => {
+  it('renders editor content after loading', async () => {
     mockAmasApi.getConfig.mockResolvedValue(mockConfig);
     mockAmasApi.getMetrics.mockResolvedValue(mockMetrics);
     await renderPage();
-    expect(screen.getByText('AMAS 配置')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByText('配置编辑器')).toBeInTheDocument();
+    });
   });
 
   it('shows loading spinner initially', async () => {

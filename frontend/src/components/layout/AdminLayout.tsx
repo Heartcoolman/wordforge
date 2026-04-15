@@ -1,9 +1,10 @@
-import { type ParentProps, Show, createSignal, For } from 'solid-js';
+import { type ParentProps, Show, createSignal, For, onMount } from 'solid-js';
 import { A, useLocation, useNavigate } from '@solidjs/router';
 import { cn } from '@/utils/cn';
 import { adminApi } from '@/api/admin';
 import { tokenManager } from '@/lib/token';
 import { uiStore } from '@/stores/ui';
+import { Skeleton } from '@/components/ui/Skeleton';
 
 const sidebarLinks = [
   { href: '/admin', label: '仪表盘', icon: 'M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zm10 0a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zm10 0a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z', exact: true },
@@ -20,9 +21,27 @@ export function AdminLayout(props: ParentProps) {
   const location = useLocation();
   const navigate = useNavigate();
   const [collapsed, setCollapsed] = createSignal(false);
+  const [adminEmail, setAdminEmail] = createSignal<string | null>(null);
+  const [emailLoading, setEmailLoading] = createSignal(true);
 
   const isActive = (href: string, exact?: boolean) =>
     exact ? location.pathname === href : location.pathname.startsWith(href);
+
+  const pageTitle = () => {
+    const path = location.pathname;
+    const match = sidebarLinks.find(link =>
+      link.exact ? path === link.href : path.startsWith(link.href)
+    );
+    return match?.label ?? '管理后台';
+  };
+
+  onMount(async () => {
+    try {
+      const res = await adminApi.verifyToken();
+      setAdminEmail(res.email);
+    } catch { /* silent */ }
+    finally { setEmailLoading(false); }
+  });
 
   return (
     <div class="min-h-screen flex bg-surface-secondary">
@@ -70,36 +89,31 @@ export function AdminLayout(props: ParentProps) {
             )}
           </For>
         </nav>
-
-        <div class="border-t border-border p-3">
-          <button
-            onClick={async () => {
-              try {
-                await adminApi.logout();
-              } catch {
-                uiStore.toast.warning('退出请求失败，已清理本地登录状态');
-              } finally {
-                tokenManager.clearAdminToken();
-                navigate('/admin/login', { replace: true });
-              }
-            }}
-            class={cn(
-              'flex items-center gap-2 w-full px-3 py-2 rounded-lg text-sm text-content-secondary hover:text-error hover:bg-error-light transition-colors cursor-pointer',
-              collapsed() && 'justify-center px-2',
-            )}
-          >
-            <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
-            </svg>
-            <Show when={!collapsed()}>退出</Show>
-          </button>
-        </div>
       </aside>
 
       {/* Main */}
       <div class={cn('flex-1 transition-all duration-200', collapsed() ? 'ml-16' : 'ml-56')}>
-        <header class="h-14 bg-surface border-b border-border flex items-center px-6">
-          <h1 class="text-lg font-semibold text-content">管理后台</h1>
+        <header class="h-14 bg-surface border-b border-border flex items-center justify-between px-6">
+          <h1 class="text-lg font-semibold text-content">{pageTitle()}</h1>
+          <div class="flex items-center gap-3">
+            <Show when={!emailLoading()} fallback={<Skeleton width="120px" />}>
+              <Show when={adminEmail()}>
+                <span class="text-sm text-content-secondary">{adminEmail()}</span>
+              </Show>
+            </Show>
+            <button
+              onClick={async () => {
+                try { await adminApi.logout(); } catch { uiStore.toast.warning('退出请求失败，已清理本地登录状态'); }
+                finally { tokenManager.clearAdminToken(); navigate('/admin/login', { replace: true }); }
+              }}
+              class="p-1.5 rounded-lg text-content-tertiary hover:text-error hover:bg-error-light transition-colors cursor-pointer"
+              title="退出登录"
+            >
+              <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+              </svg>
+            </button>
+          </div>
         </header>
         <main class="p-6">{props.children}</main>
       </div>

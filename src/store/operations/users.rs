@@ -318,6 +318,16 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
+
+    pub fn count_users_registered_on_date(&self, date_str: &str) -> Result<usize, StoreError> {
+        let conn = self.conn()?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM users WHERE DATE(created_at) = ?1",
+            params![date_str],
+            |r| r.get(0),
+        )?;
+        Ok(count as usize)
+    }
 }
 
 #[cfg(test)]

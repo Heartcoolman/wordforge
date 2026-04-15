@@ -117,6 +117,142 @@ struct HabitProfileRequest {
     sessions_per_day: Option<f64>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HabitProfileResponse {
+    preferred_hours: Vec<u8>,
+    median_session_length_mins: f64,
+    sessions_per_day: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temporal_performance: Option<TemporalPerformanceResponse>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TemporalPerformanceResponse {
+    hourly_stats: Vec<HourlyStatsResponse>,
+    total_sessions: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HourlyStatsResponse {
+    session_count: u32,
+    avg_accuracy: f64,
+    avg_response_time_ms: f64,
+    mastery_efficiency: f64,
+}
+
+fn value_u8_array(value: Option<&serde_json::Value>) -> Option<Vec<u8>> {
+    value.and_then(|items| items.as_array()).map(|items| {
+        items
+            .iter()
+            .filter_map(|item| item.as_u64())
+            .filter_map(|item| u8::try_from(item).ok())
+            .collect()
+    })
+}
+
+fn habit_profile_from_value(value: &serde_json::Value) -> HabitProfileResponse {
+    let preferred_hours = value_u8_array(
+        value
+            .get("preferredHours")
+            .or_else(|| value.get("preferred_hours")),
+    )
+    .unwrap_or_else(|| DEFAULT_PREFERRED_HOURS.to_vec());
+    let median_session_length_mins = value
+        .get("medianSessionLengthMins")
+        .or_else(|| value.get("median_session_length_mins"))
+        .and_then(|v| v.as_f64())
+        .unwrap_or(15.0);
+    let sessions_per_day = value
+        .get("sessionsPerDay")
+        .or_else(|| value.get("sessions_per_day"))
+        .and_then(|v| v.as_f64())
+        .unwrap_or(1.0);
+
+    let temporal_performance = if let Some(tp) = value.get("temporalPerformance") {
+        let hourly_stats = tp
+            .get("hourlyStats")
+            .and_then(|v| v.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .map(|item| HourlyStatsResponse {
+                        session_count: item
+                            .get("sessionCount")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0) as u32,
+                        avg_accuracy: item
+                            .get("avgAccuracy")
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(0.0),
+                        avg_response_time_ms: item
+                            .get("avgResponseTimeMs")
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(0.0),
+                        mastery_efficiency: item
+                            .get("masteryEfficiency")
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(0.0),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Some(TemporalPerformanceResponse {
+            hourly_stats,
+            total_sessions: tp
+                .get("totalSessions")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u32,
+        })
+    } else if value.get("temporal_hourly_stats").is_some() || value.get("temporal_total_sessions").is_some() {
+        let hourly_stats = value
+            .get("temporal_hourly_stats")
+            .and_then(|v| v.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .map(|item| HourlyStatsResponse {
+                        session_count: item
+                            .get("session_count")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0) as u32,
+                        avg_accuracy: item
+                            .get("avg_accuracy")
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(0.0),
+                        avg_response_time_ms: item
+                            .get("avg_response_time_ms")
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(0.0),
+                        mastery_efficiency: item
+                            .get("mastery_efficiency")
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(0.0),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Some(TemporalPerformanceResponse {
+            hourly_stats,
+            total_sessions: value
+                .get("temporal_total_sessions")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u32,
+        })
+    } else {
+        None
+    };
+
+    HabitProfileResponse {
+        preferred_hours,
+        median_session_length_mins,
+        sessions_per_day,
+        temporal_performance,
+    }
+}
+
 async fn get_habit_profile(
     auth: AuthUser,
     State(state): State<AppState>,
@@ -128,7 +264,7 @@ async fn get_habit_profile(
             serde_json::to_value(&user_state.habit_profile).unwrap_or(serde_json::json!({}))
         }
     };
-    Ok(ok(profile))
+    Ok(ok(habit_profile_from_value(&profile)))
 }
 
 async fn set_habit_profile(
@@ -167,7 +303,7 @@ async fn set_habit_profile(
         "sessions_per_day": req.sessions_per_day.unwrap_or(1.0),
     });
     state.store().set_habit_profile(&auth.user_id, &profile)?;
-    Ok(ok(profile))
+    Ok(ok(habit_profile_from_value(&profile)))
 }
 
 fn resolve_avatar_dir() -> PathBuf {
