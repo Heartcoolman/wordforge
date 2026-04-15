@@ -427,14 +427,14 @@ async fn verify_reset_token(
 }
 
 fn set_token_cookie(response: &mut Response, token: &str) -> Result<(), AppError> {
-    let cookie = format!("token={token}; Path=/; SameSite=Strict; HttpOnly; Secure");
+    let cookie = format!("token={token}; Path=/; SameSite=None; HttpOnly; Secure");
     append_set_cookie(response, &cookie, "token cookie set failed")?;
     Ok(())
 }
 
 fn set_refresh_token_cookie(response: &mut Response, refresh_token: &str) -> Result<(), AppError> {
     let cookie =
-        format!("refresh_token={refresh_token}; Path=/; SameSite=Strict; HttpOnly; Secure");
+        format!("refresh_token={refresh_token}; Path=/; SameSite=None; HttpOnly; Secure");
     append_set_cookie(response, &cookie, "refresh token cookie set failed")?;
     Ok(())
 }
@@ -442,12 +442,12 @@ fn set_refresh_token_cookie(response: &mut Response, refresh_token: &str) -> Res
 fn clear_auth_cookies(response: &mut Response) -> Result<(), AppError> {
     append_set_cookie(
         response,
-        "token=; Path=/; Max-Age=0; SameSite=Strict; HttpOnly; Secure",
+        "token=; Path=/; Max-Age=0; SameSite=None; HttpOnly; Secure",
         "token cookie clear failed",
     )?;
     append_set_cookie(
         response,
-        "refresh_token=; Path=/; Max-Age=0; SameSite=Strict; HttpOnly; Secure",
+        "refresh_token=; Path=/; Max-Age=0; SameSite=None; HttpOnly; Secure",
         "refresh token cookie clear failed",
     )?;
     Ok(())

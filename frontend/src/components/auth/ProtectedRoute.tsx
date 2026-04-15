@@ -1,62 +1,10 @@
 import { type ParentProps, Show, createSignal, onMount, onCleanup } from 'solid-js';
 import { Navigate, useNavigate } from '@solidjs/router';
-import { authStore } from '@/stores/auth';
 import { tokenManager } from '@/lib/token';
 import { adminApi } from '@/api/admin';
 import { Spinner } from '@/components/ui/Spinner';
 
 const VALIDATION_THROTTLE_MS = 30_000;
-
-export function ProtectedRoute(props: ParentProps) {
-  const navigate = useNavigate();
-  const [verified, setVerified] = createSignal(false);
-  const [checking, setChecking] = createSignal(true);
-  let lastValidated = 0;
-
-  onMount(async () => {
-    if (!authStore.initialized) {
-      await authStore.init();
-    }
-
-    if (!authStore.isAuthenticated()) {
-      setChecking(false);
-      return;
-    }
-
-    if (Date.now() - lastValidated < VALIDATION_THROTTLE_MS && authStore.user()) {
-      setVerified(true);
-      setChecking(false);
-      return;
-    }
-
-    try {
-      const { usersApi } = await import('@/api/users');
-      await usersApi.getMe();
-      setVerified(true);
-      lastValidated = Date.now();
-    } catch {
-      tokenManager.clearTokens();
-      navigate('/login', { replace: true });
-    } finally {
-      setChecking(false);
-    }
-  });
-
-  return (
-    <Show
-      when={!authStore.loading() && !checking()}
-      fallback={
-        <div class="flex items-center justify-center min-h-[60vh]">
-          <Spinner size="lg" />
-        </div>
-      }
-    >
-      <Show when={verified()} fallback={<Navigate href="/login" />}>
-        {props.children}
-      </Show>
-    </Show>
-  );
-}
 
 export function AdminProtectedRoute(props: ParentProps) {
   const navigate = useNavigate();
