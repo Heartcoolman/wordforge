@@ -243,14 +243,15 @@ fn test_adaptive_desired_retention_adjusts() {
     let base = 0.85;
 
     // High accuracy, low fatigue, positive motivation => retention >= base
-    let high_perf = adaptive_desired_retention(base, 0.95, 0.2, 0.5);
+    let cfg = learning_backend::amas::config::MemoryModelConfig::default();
+    let high_perf = adaptive_desired_retention(base, 0.95, 0.2, 0.5, &cfg);
     assert!(
         high_perf >= base,
         "high performance retention {high_perf:.3} < base {base}"
     );
 
     // Low accuracy, high fatigue, negative motivation => retention < base
-    let fatigued = adaptive_desired_retention(base, 0.5, 0.8, -0.5);
+    let fatigued = adaptive_desired_retention(base, 0.5, 0.8, -0.5, &cfg);
     assert!(
         fatigued < base,
         "fatigued retention {fatigued:.3} >= base {base}"
