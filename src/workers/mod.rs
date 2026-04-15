@@ -1,4 +1,5 @@
 pub mod algorithm_optimization;
+pub mod config_watcher;
 pub mod heartbeat_watchdog;
 pub mod cache_cleanup;
 pub mod confusion_pair_cache;

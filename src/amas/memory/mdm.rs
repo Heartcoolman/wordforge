@@ -2,16 +2,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::amas::config::MemoryModelConfig;
 
-const HIGH_ACCURACY_THRESHOLD: f64 = 0.9;
-const HIGH_ACCURACY_RETENTION_BOOST: f64 = 0.02;
-const HIGH_FATIGUE_THRESHOLD: f64 = 0.6;
-const HIGH_FATIGUE_RETENTION_DROP: f64 = 0.05;
-const LOW_MOTIVATION_THRESHOLD: f64 = -0.2;
-const LOW_MOTIVATION_RETENTION_DROP: f64 = 0.03;
-const RETENTION_MIN: f64 = 0.70;
-const RETENTION_MAX: f64 = 0.95;
-const MAX_INTERVAL_DAYS: f64 = 90.0;
-const MIN_INTERVAL_SECS: i64 = 60;
 
 /// AMAS v2: DSR (Difficulty-Stability-Retrievability) architecture
 /// Uses FSRS-5 formulas for state transitions with AMAS-unique scheduling.
@@ -167,18 +157,20 @@ pub fn adaptive_desired_retention(
     accuracy: f64,
     fatigue: f64,
     motivation: f64,
+    config: &MemoryModelConfig,
 ) -> f64 {
     let mut retention = base_retention;
 
     let sigmoid = |x: f64| 1.0 / (1.0 + (-x).exp());
 
-    retention +=
-        HIGH_ACCURACY_RETENTION_BOOST * sigmoid((accuracy - HIGH_ACCURACY_THRESHOLD) * 10.0);
-    retention -= HIGH_FATIGUE_RETENTION_DROP * sigmoid((fatigue - HIGH_FATIGUE_THRESHOLD) * 10.0);
-    retention -=
-        LOW_MOTIVATION_RETENTION_DROP * sigmoid((LOW_MOTIVATION_THRESHOLD - motivation) * 10.0);
+    retention += config.high_accuracy_retention_boost
+        * sigmoid((accuracy - config.high_accuracy_threshold) * 10.0);
+    retention -= config.high_fatigue_retention_drop
+        * sigmoid((fatigue - config.high_fatigue_threshold) * 10.0);
+    retention -= config.low_motivation_retention_drop
+        * sigmoid((config.low_motivation_threshold - motivation) * 10.0);
 
-    retention.clamp(RETENTION_MIN, RETENTION_MAX)
+    retention.clamp(config.retention_min, config.retention_max)
 }
 
 /// Backward-compatible composite strength (normalized to [0,1])
@@ -215,8 +207,8 @@ pub fn compute_interval(
     let interval_days = s / config.forgetting_curve_factor
         * (adjusted_target.powf(1.0 / config.forgetting_curve_decay) - 1.0);
     let interval_secs = interval_days * 86400.0;
-    ((interval_secs * interval_scale.max(0.1)).min(MAX_INTERVAL_DAYS * 86400.0) as i64)
-        .max(MIN_INTERVAL_SECS)
+    ((interval_secs * interval_scale.max(0.1)).min(config.max_interval_days * 86400.0) as i64)
+        .max(config.min_interval_secs)
 }
 
 #[cfg(test)]

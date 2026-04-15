@@ -572,6 +572,36 @@ pub struct MemoryModelConfig {
     // === FSRS-5 DSR parameters (19 weights in array form) ===
     #[serde(default = "default_w")]
     pub w: [f64; 19],
+    // === 原 mastery.rs 模块级常量 ===
+    #[serde(default = "default_alpha_scale")]
+    pub alpha_scale: f64,
+    #[serde(default = "default_alpha_min")]
+    pub alpha_min: f64,
+    #[serde(default = "default_alpha_max")]
+    pub alpha_max: f64,
+    #[serde(default = "default_forgetting_threshold")]
+    pub forgetting_threshold: f64,
+    // === 原 mdm.rs 模块级常量 ===
+    #[serde(default = "default_retention_min")]
+    pub retention_min: f64,
+    #[serde(default = "default_retention_max")]
+    pub retention_max: f64,
+    #[serde(default = "default_max_interval_days")]
+    pub max_interval_days: f64,
+    #[serde(default = "default_min_interval_secs")]
+    pub min_interval_secs: i64,
+    #[serde(default = "default_high_accuracy_threshold")]
+    pub high_accuracy_threshold: f64,
+    #[serde(default = "default_high_accuracy_retention_boost")]
+    pub high_accuracy_retention_boost: f64,
+    #[serde(default = "default_high_fatigue_threshold")]
+    pub high_fatigue_threshold: f64,
+    #[serde(default = "default_high_fatigue_retention_drop")]
+    pub high_fatigue_retention_drop: f64,
+    #[serde(default = "default_low_motivation_threshold")]
+    pub low_motivation_threshold: f64,
+    #[serde(default = "default_low_motivation_retention_drop")]
+    pub low_motivation_retention_drop: f64,
 }
 
 fn default_base_desired_retention() -> f64 {
@@ -601,6 +631,21 @@ fn default_forgetting_curve_decay() -> f64 {
 fn default_forgetting_curve_floor() -> f64 {
     0.10
 }
+
+fn default_alpha_scale() -> f64 { 0.3 }
+fn default_alpha_min() -> f64 { 0.1 }
+fn default_alpha_max() -> f64 { 0.5 }
+fn default_forgetting_threshold() -> f64 { 0.2 }
+fn default_retention_min() -> f64 { 0.70 }
+fn default_retention_max() -> f64 { 0.95 }
+fn default_max_interval_days() -> f64 { 90.0 }
+fn default_min_interval_secs() -> i64 { 60 }
+fn default_high_accuracy_threshold() -> f64 { 0.9 }
+fn default_high_accuracy_retention_boost() -> f64 { 0.02 }
+fn default_high_fatigue_threshold() -> f64 { 0.6 }
+fn default_high_fatigue_retention_drop() -> f64 { 0.05 }
+fn default_low_motivation_threshold() -> f64 { -0.2 }
+fn default_low_motivation_retention_drop() -> f64 { 0.03 }
 
 // FSRS-5 default parameters (same as test baseline for fair comparison)
 fn default_w() -> [f64; 19] {
@@ -653,6 +698,45 @@ impl Default for MemoryModelConfig {
             forgetting_curve_decay: -0.5,
             forgetting_curve_floor: 0.0,
             w: default_w(),
+            alpha_scale: 0.3,
+            alpha_min: 0.1,
+            alpha_max: 0.5,
+            forgetting_threshold: 0.2,
+            retention_min: 0.70,
+            retention_max: 0.95,
+            max_interval_days: 90.0,
+            min_interval_secs: 60,
+            high_accuracy_threshold: 0.9,
+            high_accuracy_retention_boost: 0.02,
+            high_fatigue_threshold: 0.6,
+            high_fatigue_retention_drop: 0.05,
+            low_motivation_threshold: -0.2,
+            low_motivation_retention_drop: 0.03,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EvmConfig {
+    #[serde(default = "default_evm_diversity_log_divisor")]
+    pub diversity_log_divisor: f64,
+    #[serde(default = "default_evm_diversity_bonus_cap")]
+    pub diversity_bonus_cap: f64,
+    #[serde(default = "default_evm_diversity_growth_rate")]
+    pub diversity_growth_rate: f64,
+}
+
+fn default_evm_diversity_log_divisor() -> f64 { 5.0 }
+fn default_evm_diversity_bonus_cap() -> f64 { 0.3 }
+fn default_evm_diversity_growth_rate() -> f64 { 0.2 }
+
+impl Default for EvmConfig {
+    fn default() -> Self {
+        Self {
+            diversity_log_divisor: 5.0,
+            diversity_bonus_cap: 0.3,
+            diversity_growth_rate: 0.2,
         }
     }
 }
@@ -992,6 +1076,8 @@ pub struct AMASConfig {
     pub classifier: ClassifierConfig,
     #[serde(default)]
     pub ssp: SspConfig,
+    #[serde(default)]
+    pub evm: EvmConfig,
 }
 
 impl AMASConfig {
@@ -1000,6 +1086,20 @@ impl AMASConfig {
         config.feature_flags.ensemble_enabled = env_config.ensemble_enabled;
         config.monitoring.sample_rate = env_config.monitor_sample_rate;
         config
+    }
+
+    pub fn load_from_toml(path: &str) -> Result<Self, String> {
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| format!("读取配置文件失败: {e}"))?;
+        toml::from_str(&content)
+            .map_err(|e| format!("解析 TOML 配置失败: {e}"))
+    }
+
+    pub fn write_to_toml(&self, path: &str) -> Result<(), String> {
+        let content = toml::to_string_pretty(self)
+            .map_err(|e| format!("序列化 TOML 配置失败: {e}"))?;
+        std::fs::write(path, content)
+            .map_err(|e| format!("写入配置文件失败: {e}"))
     }
 
     pub fn validate(&self) -> Result<(), String> {

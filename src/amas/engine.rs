@@ -871,8 +871,8 @@ impl AMASEngine {
                 .session_id
                 .as_deref()
                 .is_some_and(|sid| !sid.is_empty());
-            evm::record_context(&mut evm_state, is_new_context);
-            adjusted_interval_scale *= evm::interval_modifier(&evm_state);
+            evm::record_context(&mut evm_state, is_new_context, &config.evm);
+            adjusted_interval_scale *= evm::interval_modifier(&evm_state, &config.evm);
 
             if let Ok(val) = serde_json::to_value(&evm_state) {
                 if let Err(e) = self.store.set_engine_algo_state(user_id, &evm_key, &val) {
@@ -887,6 +887,7 @@ impl AMASEngine {
             feature.accuracy,
             user_state.fatigue,
             user_state.motivation,
+            &config.memory_model,
         );
 
         let decision = mastery::update_mastery(

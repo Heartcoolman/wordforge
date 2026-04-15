@@ -28,6 +28,7 @@ pub struct Config {
     pub auth_rate_limit: AuthRateLimitConfig,
     pub worker: WorkerConfig,
     pub amas: AMASEnvConfig,
+    pub amas_config_file: Option<String>,
     pub llm: LLMConfig,
     pub pagination: PaginationConfig,
     pub limits: LimitsConfig,
@@ -230,6 +231,7 @@ impl Config {
                 ensemble_enabled: env_or_bool("AMAS_ENSEMBLE_ENABLED", true),
                 monitor_sample_rate: env_or_parse("AMAS_MONITOR_SAMPLE_RATE", 0.05_f64),
             },
+            amas_config_file: env::var("AMAS_CONFIG_FILE").ok().filter(|s| !s.is_empty()),
             llm: LLMConfig {
                 enabled: env_or_bool("LLM_ENABLED", false),
                 mock: env_or_bool("LLM_MOCK", true),
