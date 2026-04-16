@@ -1,6 +1,3 @@
-use std::collections::HashMap;
-use std::sync::Mutex;
-
 use serde::{Deserialize, Serialize};
 
 use crate::amas::config::AMASConfig;
@@ -45,24 +42,6 @@ pub struct UserStateSnapshot {
     pub total_event_count: u64,
 }
 
-struct CacheEntry {
-    similarities: Vec<f64>,
-    created_at: i64,
-}
-
-static SIMILARITY_CACHE: std::sync::LazyLock<Mutex<HashMap<u64, CacheEntry>>> =
-    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
-
-fn state_cache_key(user_state: &UserState) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::hash::DefaultHasher::new();
-    user_state.attention.to_bits().hash(&mut hasher);
-    user_state.fatigue.to_bits().hash(&mut hasher);
-    user_state.motivation.to_bits().hash(&mut hasher);
-    user_state.total_event_count.hash(&mut hasher);
-    hasher.finish()
-}
-
 pub fn generate(
     user_state: &UserState,
     swd_state: &SwdState,
@@ -75,38 +54,11 @@ pub fn generate(
     }
 
     let now_ms = chrono::Utc::now().timestamp_millis();
-    let cache_key = state_cache_key(user_state);
-    let ttl_ms = swd.similarity_cache_ttl_secs as i64 * 1000;
-
-    let cached_sims = SIMILARITY_CACHE.lock().ok().and_then(|cache| {
-        cache.get(&cache_key).and_then(|entry| {
-            if now_ms - entry.created_at < ttl_ms
-                && entry.similarities.len() == swd_state.strategy_history.len()
-            {
-                Some(entry.similarities.clone())
-            } else {
-                None
-            }
-        })
-    });
-
-    let similarities = cached_sims.unwrap_or_else(|| {
-        let sims: Vec<f64> = swd_state
-            .strategy_history
-            .iter()
-            .map(|e| similarity(user_state, &e.user_state_snapshot))
-            .collect();
-        if let Ok(mut cache) = SIMILARITY_CACHE.lock() {
-            cache.insert(
-                cache_key,
-                CacheEntry {
-                    similarities: sims.clone(),
-                    created_at: now_ms,
-                },
-            );
-        }
-        sims
-    });
+    let similarities: Vec<f64> = swd_state
+        .strategy_history
+        .iter()
+        .map(|e| similarity(user_state, &e.user_state_snapshot))
+        .collect();
 
     let mut difficulty_sum = 0.0;
     let mut batch_size_sum: f64 = 0.0;
@@ -206,5 +158,184 @@ fn fallback_candidate(confidence: f64) -> DecisionCandidate {
         strategy: StrategyParams::default(),
         confidence,
         explanation: "SWD fallback".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_user_state() -> UserState {
+        UserState {
+            attention: 0.7,
+            fatigue: 0.2,
+            motivation: 0.4,
+            total_event_count: 42,
+            ..UserState::default()
+        }
+    }
+
+    fn entry(
+        snapshot: UserStateSnapshot,
+        strategy: StrategyParams,
+        reward: f64,
+        timestamp: i64,
+    ) -> StrategyRewardEntry {
+        StrategyRewardEntry {
+            user_state_snapshot: snapshot,
+            strategy,
+            reward,
+            timestamp,
+        }
+    }
+
+    fn expected_strategy(
+        current: &UserState,
+        state: &SwdState,
+        config: &AMASConfig,
+        now_ms: i64,
+    ) -> StrategyParams {
+        let mut difficulty_sum = 0.0;
+        let mut batch_size_sum = 0.0;
+        let mut new_ratio_sum = 0.0;
+        let mut interval_scale_sum = 0.0;
+        let mut total_weight = 0.0;
+        let mut review_votes_for = 0.0;
+        let mut review_votes_against = 0.0;
+
+        for item in &state.strategy_history {
+            let sim = similarity(current, &item.user_state_snapshot);
+            let age_ms = (now_ms - item.timestamp).max(0) as f64;
+            let half_life_ms = DECAY_HALF_LIFE_DAYS * 24.0 * 3600.0 * 1000.0;
+            let time_decay = (-age_ms * LN2 / half_life_ms).exp();
+            let mut weight = sim * time_decay;
+
+            if item.reward <= config.swd.history_filter_threshold {
+                weight *= NEGATIVE_EXPERIENCE_WEIGHT;
+            }
+
+            total_weight += weight;
+            difficulty_sum += item.strategy.difficulty * weight;
+            batch_size_sum += item.strategy.batch_size as f64 * weight;
+            new_ratio_sum += item.strategy.new_ratio * weight;
+            interval_scale_sum += item.strategy.interval_scale * weight;
+
+            if item.strategy.review_mode {
+                review_votes_for += weight;
+            } else {
+                review_votes_against += weight;
+            }
+        }
+
+        StrategyParams {
+            difficulty: (difficulty_sum / total_weight).clamp(0.0, 1.0),
+            batch_size: (batch_size_sum / total_weight).round().max(1.0) as u32,
+            new_ratio: (new_ratio_sum / total_weight).clamp(0.0, 1.0),
+            interval_scale: (interval_scale_sum / total_weight).max(0.1),
+            review_mode: review_votes_for > review_votes_against,
+        }
+    }
+
+    fn assert_strategy_close(actual: &StrategyParams, expected: &StrategyParams) {
+        assert!((actual.difficulty - expected.difficulty).abs() < 1e-9);
+        assert_eq!(actual.batch_size, expected.batch_size);
+        assert!((actual.new_ratio - expected.new_ratio).abs() < 1e-9);
+        assert!((actual.interval_scale - expected.interval_scale).abs() < 1e-9);
+        assert_eq!(actual.review_mode, expected.review_mode);
+    }
+
+    #[test]
+    fn generate_uses_actual_history_even_when_lengths_match() {
+        let config = AMASConfig::default();
+        let current = sample_user_state();
+        let now_ms = chrono::Utc::now().timestamp_millis();
+
+        let state_a = SwdState {
+            strategy_history: vec![
+                entry(
+                    UserStateSnapshot {
+                        attention: 0.7,
+                        fatigue: 0.2,
+                        motivation: 0.4,
+                        total_event_count: 42,
+                    },
+                    StrategyParams {
+                        difficulty: 0.2,
+                        batch_size: 6,
+                        new_ratio: 0.2,
+                        interval_scale: 0.8,
+                        review_mode: false,
+                    },
+                    0.8,
+                    now_ms,
+                ),
+                entry(
+                    UserStateSnapshot {
+                        attention: 0.2,
+                        fatigue: 0.8,
+                        motivation: -0.2,
+                        total_event_count: 400,
+                    },
+                    StrategyParams {
+                        difficulty: 0.9,
+                        batch_size: 16,
+                        new_ratio: 0.8,
+                        interval_scale: 1.6,
+                        review_mode: true,
+                    },
+                    0.8,
+                    now_ms,
+                ),
+            ],
+            ..SwdState::default()
+        };
+        let state_b = SwdState {
+            strategy_history: vec![
+                entry(
+                    UserStateSnapshot {
+                        attention: 0.2,
+                        fatigue: 0.8,
+                        motivation: -0.2,
+                        total_event_count: 400,
+                    },
+                    StrategyParams {
+                        difficulty: 0.15,
+                        batch_size: 5,
+                        new_ratio: 0.1,
+                        interval_scale: 0.7,
+                        review_mode: false,
+                    },
+                    0.8,
+                    now_ms,
+                ),
+                entry(
+                    UserStateSnapshot {
+                        attention: 0.7,
+                        fatigue: 0.2,
+                        motivation: 0.4,
+                        total_event_count: 42,
+                    },
+                    StrategyParams {
+                        difficulty: 0.85,
+                        batch_size: 18,
+                        new_ratio: 0.9,
+                        interval_scale: 1.7,
+                        review_mode: true,
+                    },
+                    0.8,
+                    now_ms,
+                ),
+            ],
+            ..SwdState::default()
+        };
+
+        let expected_a = expected_strategy(&current, &state_a, &config, now_ms);
+        let expected_b = expected_strategy(&current, &state_b, &config, now_ms);
+        let actual_a = generate(&current, &state_a, &config).strategy;
+        let actual_b = generate(&current, &state_b, &config).strategy;
+
+        assert_strategy_close(&actual_a, &expected_a);
+        assert_strategy_close(&actual_b, &expected_b);
+        assert_ne!(actual_a, actual_b);
     }
 }
