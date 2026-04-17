@@ -84,6 +84,9 @@ fn sign_jwt(
     secret: &str,
     expires_in_hours: u64,
 ) -> Result<String, AppError> {
+    if expires_in_hours == 0 {
+        return Err(AppError::internal("JWT expiry cannot be zero hours"));
+    }
     let now = Utc::now();
     let exp = now + Duration::hours(expires_in_hours as i64);
     let claims = Claims {
