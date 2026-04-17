@@ -508,13 +508,22 @@ async fn complete_session(
     let accuracy = if session.total_count > 0 {
         session.correct_count as f64 / session.total_count as f64
     } else if session.total_questions > 0 {
-        // Fallback for sessions created before incremental counters
-        let session_records = state.store().get_user_records(&auth.user_id, 5000)?;
-        let correct_in_session = session_records
+        // Fallback for sessions created before incremental counters:
+        // filter by session_id and compute from matching records
+        let session_records = state.store().get_user_records(&auth.user_id, 10000)?;
+        let total_in_session = session_records
             .iter()
-            .filter(|r| r.session_id.as_deref() == Some(&req.session_id) && r.is_correct)
+            .filter(|r| r.session_id.as_deref() == Some(&req.session_id))
             .count();
-        correct_in_session as f64 / session.total_questions as f64
+        if total_in_session > 0 {
+            let correct_in_session = session_records
+                .iter()
+                .filter(|r| r.session_id.as_deref() == Some(&req.session_id) && r.is_correct)
+                .count();
+            correct_in_session as f64 / total_in_session as f64
+        } else {
+            session.correct_count as f64 / session.total_questions as f64
+        }
     } else {
         0.0
     };
@@ -713,11 +722,24 @@ async fn generate_options(
     distractors.shuffle(&mut rng);
     distractors.truncate(3);
 
+    if distractors.len() < 3 {
+        let fallback_words = state.store().list_words(100, 0)?;
+        let mut fallback_distractors: Vec<String> = fallback_words
+            .iter()
+            .filter(|w| w.id != req.word_id)
+            .map(|w| match req.mode.as_str() {
+                "meaning-to-word" => w.text.clone(),
+                _ => w.meaning.clone(),
+            })
+            .filter(|s| s != &correct_answer)
+            .collect();
+        fallback_distractors.shuffle(&mut rng);
+        while distractors.len() < 3 && !fallback_distractors.is_empty() {
+            distractors.push(fallback_distractors.pop().unwrap());
+        }
+    }
     while distractors.len() < 3 {
-        distractors.push(match req.mode.as_str() {
-            "meaning-to-word" => "(未知)".to_string(),
-            _ => "(无释义)".to_string(),
-        });
+        distractors.push("—".to_string());
     }
 
     let mut options = vec![correct_answer.clone()];

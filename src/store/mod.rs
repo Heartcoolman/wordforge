@@ -87,6 +87,26 @@ impl Store {
         self.connection()
     }
 
+    /// Execute a function within a database transaction.
+    /// On success, the transaction is committed; on failure, it is rolled back.
+    pub fn with_transaction<T>(
+        &self,
+        f: impl FnOnce(&rusqlite::Connection) -> Result<T, StoreError>,
+    ) -> Result<T, StoreError> {
+        let conn = self.conn()?;
+        conn.execute_batch("BEGIN")?;
+        match f(&conn) {
+            Ok(result) => {
+                conn.execute_batch("COMMIT")?;
+                Ok(result)
+            }
+            Err(e) => {
+                conn.execute_batch("ROLLBACK").ok();
+                Err(e)
+            }
+        }
+    }
+
     pub(crate) fn serialize_json<T: Serialize>(value: &T) -> Result<String, StoreError> {
         Ok(serde_json::to_string(value)?)
     }
