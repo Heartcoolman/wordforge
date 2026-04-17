@@ -30,8 +30,10 @@ async fn get_word_state(
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     let wls = state
-        .store()
-        .get_word_learning_state(&auth.user_id, &word_id)?;
+        .run_store_task("word_states.get", move |store| {
+            store.get_word_learning_state(&auth.user_id, &word_id)
+        })
+        .await??;
 
     match wls {
         Some(s) => Ok(ok(s)),
@@ -60,8 +62,10 @@ async fn batch_query(
         ));
     }
     let states = state
-        .store()
-        .get_word_states_batch(&auth.user_id, &req.word_ids)?;
+        .run_store_task("word_states.batch_query", move |store| {
+            store.get_word_states_batch(&auth.user_id, &req.word_ids)
+        })
+        .await??;
     Ok(ok(states))
 }
 
@@ -77,7 +81,11 @@ async fn due_list(
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     let limit = q.limit.unwrap_or(50).clamp(1, 200);
-    let due = state.store().get_due_words(&auth.user_id, limit)?;
+    let due = state
+        .run_store_task("word_states.due_list", move |store| {
+            store.get_due_words(&auth.user_id, limit)
+        })
+        .await??;
     Ok(ok(due))
 }
 
@@ -85,7 +93,11 @@ async fn stats_overview(
     auth: AuthUser,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let stats = state.store().get_word_state_stats(&auth.user_id)?;
+    let stats = state
+        .run_store_task("word_states.stats_overview", move |store| {
+            store.get_word_state_stats(&auth.user_id)
+        })
+        .await??;
     Ok(ok(stats))
 }
 
@@ -94,29 +106,36 @@ async fn mark_mastered(
     Path(word_id): Path<String>,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    if state.store().get_word(&word_id)?.is_none() {
-        return Err(AppError::not_found("单词不存在"));
-    }
+    let wls = state
+        .run_store_task(
+            "word_states.mark_mastered",
+            move |store| -> Result<_, AppError> {
+                if store.get_word(&word_id)?.is_none() {
+                    return Err(AppError::not_found("单词不存在"));
+                }
 
-    let mut wls = state
-        .store()
-        .get_word_learning_state(&auth.user_id, &word_id)?
-        .unwrap_or_else(|| WordLearningState {
-            user_id: auth.user_id.clone(),
-            word_id: word_id.clone(),
-            state: WordState::New,
-            mastery_level: 0.0,
-            next_review_date: None,
-            half_life: DEFAULT_HALF_LIFE_HOURS,
-            correct_streak: 0,
-            total_attempts: 0,
-            updated_at: Utc::now(),
-        });
+                let mut wls = store
+                    .get_word_learning_state(&auth.user_id, &word_id)?
+                    .unwrap_or_else(|| WordLearningState {
+                        user_id: auth.user_id.clone(),
+                        word_id: word_id.clone(),
+                        state: WordState::New,
+                        mastery_level: 0.0,
+                        next_review_date: None,
+                        half_life: DEFAULT_HALF_LIFE_HOURS,
+                        correct_streak: 0,
+                        total_attempts: 0,
+                        updated_at: Utc::now(),
+                    });
 
-    wls.state = WordState::Mastered;
-    wls.mastery_level = 1.0;
-    wls.updated_at = Utc::now();
-    state.store().set_word_learning_state(&wls)?;
+                wls.state = WordState::Mastered;
+                wls.mastery_level = 1.0;
+                wls.updated_at = Utc::now();
+                store.set_word_learning_state(&wls)?;
+                Ok(wls)
+            },
+        )
+        .await??;
 
     Ok(ok(wls))
 }
@@ -126,23 +145,28 @@ async fn reset_word(
     Path(word_id): Path<String>,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    if state.store().get_word(&word_id)?.is_none() {
-        return Err(AppError::not_found("单词不存在"));
-    }
+    let wls = state
+        .run_store_task("word_states.reset", move |store| -> Result<_, AppError> {
+            if store.get_word(&word_id)?.is_none() {
+                return Err(AppError::not_found("单词不存在"));
+            }
 
-    let wls = WordLearningState {
-        user_id: auth.user_id,
-        word_id,
-        state: WordState::New,
-        mastery_level: 0.0,
-        next_review_date: None,
-        half_life: 24.0,
-        correct_streak: 0,
-        total_attempts: 0,
-        updated_at: Utc::now(),
-    };
+            let wls = WordLearningState {
+                user_id: auth.user_id,
+                word_id,
+                state: WordState::New,
+                mastery_level: 0.0,
+                next_review_date: None,
+                half_life: 24.0,
+                correct_streak: 0,
+                total_attempts: 0,
+                updated_at: Utc::now(),
+            };
 
-    state.store().set_word_learning_state(&wls)?;
+            store.set_word_learning_state(&wls)?;
+            Ok(wls)
+        })
+        .await??;
     Ok(ok(wls))
 }
 
@@ -171,48 +195,61 @@ async fn batch_update(
             &format!("批量更新数量上限为{}", state.config().limits.max_batch_size),
         ));
     }
-    let word_ids: Vec<String> = req.updates.iter().map(|u| u.word_id.clone()).collect();
-    let existing_words = state.store().get_words_by_ids(&word_ids)?;
-    let missing: Vec<&str> = word_ids
-        .iter()
-        .filter(|id| !existing_words.contains_key(id.as_str()))
-        .map(|id| id.as_str())
-        .collect();
-    if !missing.is_empty() {
-        return Err(AppError::bad_request(
-            "WORD_NOT_FOUND",
-            &format!("以下单词不存在：{}", missing.join(", ")),
-        ));
-    }
+    let result = state
+        .run_store_task(
+            "word_states.batch_update",
+            move |store| -> Result<_, AppError> {
+                let word_ids: Vec<String> = req.updates.iter().map(|u| u.word_id.clone()).collect();
+                let existing_words = store.get_words_by_ids(&word_ids)?;
+                let missing: Vec<&str> = word_ids
+                    .iter()
+                    .filter(|id| !existing_words.contains_key(id.as_str()))
+                    .map(|id| id.as_str())
+                    .collect();
+                if !missing.is_empty() {
+                    return Err(AppError::bad_request(
+                        "WORD_NOT_FOUND",
+                        &format!("以下单词不存在：{}", missing.join(", ")),
+                    ));
+                }
 
-    let result = state.store().with_transaction(|conn| {
-        let mut updated = 0usize;
-        for item in &req.updates {
-            let mut wls = Store::get_word_learning_state_conn(conn, &auth.user_id, &item.word_id)?
-                .unwrap_or_else(|| WordLearningState {
-                    user_id: auth.user_id.clone(),
-                    word_id: item.word_id.clone(),
-                    state: WordState::New,
-                    mastery_level: 0.0,
-                    next_review_date: None,
-                    half_life: DEFAULT_HALF_LIFE_HOURS,
-                    correct_streak: 0,
-                    total_attempts: 0,
-                    updated_at: Utc::now(),
-                });
+                let result = store.with_transaction(|conn| {
+                    let mut updated = 0usize;
+                    for item in &req.updates {
+                        let mut wls = Store::get_word_learning_state_conn(
+                            conn,
+                            &auth.user_id,
+                            &item.word_id,
+                        )?
+                        .unwrap_or_else(|| WordLearningState {
+                            user_id: auth.user_id.clone(),
+                            word_id: item.word_id.clone(),
+                            state: WordState::New,
+                            mastery_level: 0.0,
+                            next_review_date: None,
+                            half_life: DEFAULT_HALF_LIFE_HOURS,
+                            correct_streak: 0,
+                            total_attempts: 0,
+                            updated_at: Utc::now(),
+                        });
 
-            if let Some(ref s) = item.state {
-                wls.state = s.clone();
-            }
-            if let Some(level) = item.mastery_level {
-                wls.mastery_level = level.clamp(0.0, 1.0);
-            }
-            wls.updated_at = Utc::now();
-            Store::set_word_learning_state_conn(conn, &wls)?;
-            updated += 1;
-        }
-        Ok(updated)
-    })?;
+                        if let Some(ref s) = item.state {
+                            wls.state = s.clone();
+                        }
+                        if let Some(level) = item.mastery_level {
+                            wls.mastery_level = level.clamp(0.0, 1.0);
+                        }
+                        wls.updated_at = Utc::now();
+                        Store::set_word_learning_state_conn(conn, &wls)?;
+                        updated += 1;
+                    }
+                    Ok(updated)
+                })?;
+
+                Ok(result)
+            },
+        )
+        .await??;
 
     Ok(ok(serde_json::json!({"updated": result})))
 }

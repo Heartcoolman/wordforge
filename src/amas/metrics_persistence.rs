@@ -15,8 +15,15 @@ pub fn flush_metrics(
     registry: &MetricsRegistry,
     store: &Store,
 ) -> Result<(), crate::store::StoreError> {
-    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
     let snapshot = registry.snapshot_and_reset();
+    flush_metrics_snapshot(snapshot, store)
+}
+
+pub fn flush_metrics_snapshot(
+    snapshot: std::collections::HashMap<String, MetricsSnapshot>,
+    store: &Store,
+) -> Result<(), crate::store::StoreError> {
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
 
     let mut batch_entries: Vec<(String, serde_json::Value)> = Vec::with_capacity(snapshot.len());
 

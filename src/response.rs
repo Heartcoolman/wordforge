@@ -152,6 +152,12 @@ impl From<crate::store::StoreError> for AppError {
     }
 }
 
+impl From<crate::blocking::BlockingTaskError> for AppError {
+    fn from(value: crate::blocking::BlockingTaskError) -> Self {
+        AppError::internal(&value.to_string())
+    }
+}
+
 pub fn ok<T: Serialize>(data: T) -> impl IntoResponse {
     (
         StatusCode::OK,

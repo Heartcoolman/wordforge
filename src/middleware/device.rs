@@ -22,8 +22,17 @@ pub async fn device_middleware(
         .map(String::from);
 
     if let Some(ref did) = device_id {
-        match state.store().is_device_banned(did) {
-            Ok(true) => {
+        let banned_check = {
+            let did = did.clone();
+            state
+                .run_store_task("middleware.device.is_device_banned", move |store| {
+                    store.is_device_banned(&did)
+                })
+                .await
+        };
+
+        match banned_check {
+            Ok(Ok(true)) => {
                 return (
                     StatusCode::FORBIDDEN,
                     axum::Json(serde_json::json!({
@@ -33,9 +42,12 @@ pub async fn device_middleware(
                 )
                     .into_response();
             }
-            Ok(false) => {}
-            Err(e) => {
+            Ok(Ok(false)) => {}
+            Ok(Err(e)) => {
                 tracing::error!(error = %e, device_id = %did, "Failed to check device ban");
+            }
+            Err(e) => {
+                tracing::error!(error = %e, device_id = %did, "Device ban task failed");
             }
         }
 
@@ -52,8 +64,25 @@ pub async fn device_middleware(
             .map(|c| c.sub);
 
         if let Some(ref uid) = user_id {
-            if let Err(e) = state.store().upsert_client_device(did, platform, uid) {
-                tracing::error!(error = %e, "Failed to upsert client device");
+            let upsert = {
+                let did = did.clone();
+                let platform = platform.to_string();
+                let uid = uid.clone();
+                state
+                    .run_store_task("middleware.device.upsert_client_device", move |store| {
+                        store.upsert_client_device(&did, &platform, &uid)
+                    })
+                    .await
+            };
+
+            match upsert {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    tracing::error!(error = %e, "Failed to upsert client device");
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "Client device upsert task failed");
+                }
             }
         }
     }

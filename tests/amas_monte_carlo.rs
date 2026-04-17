@@ -1550,16 +1550,17 @@ fn monte_carlo_mdm_multi_timescale() {
         let mut rng = StdRng::seed_from_u64(trial as u64 + 42);
         let mut state = MdmState::default();
 
-        // 10天高质量复习
-        for day in 0..10 {
-            let now_ms = BASE_TS + day * DAY_MS;
+        // 模拟膨胀间隔的间距重复节奏，让 R 在复习前充分衰减
+        let intervals: [i64; 8] = [1, 2, 4, 7, 12, 20, 33, 54];
+        let mut now_ms = BASE_TS;
+        for gap_days in intervals {
+            now_ms += gap_days * DAY_MS;
             let quality = 0.85 + rng.gen_range(-0.05..0.05);
             let alpha = 0.3_f64.clamp(0.1, 0.5);
             update_strength(&mut state, quality, alpha, now_ms, &config);
         }
 
-        // DSR: 验证 stability 在持续学习后增长到合理值
-        // 10天高质量复习后 stability 应显著大于初始值 0.4
+        // DSR: 验证 stability 在膨胀间隔复习后增长到合理值
         if state.stability > 2.0 {
             short_faster_count += 1;
         }
@@ -1570,14 +1571,13 @@ fn monte_carlo_mdm_multi_timescale() {
         }
 
         // 验证 passive decay
-        let _strength_before = state.memory_strength;
-        let recall_before = recall_probability(&state, BASE_TS + 10 * DAY_MS + 1000, &config);
-        let recall_after_30d = recall_probability(&state, BASE_TS + 40 * DAY_MS, &config);
+        let recall_before = recall_probability(&state, now_ms + 1000, &config);
+        let recall_after_30d = recall_probability(&state, now_ms + 30 * DAY_MS, &config);
         if recall_after_30d < recall_before {
             decay_works_count += 1;
         }
 
-        // 验证 composite_strength 在持续学习后趋近较高值
+        // 验证 composite_strength 在膨胀间隔复习后趋近较高值
         let comp = composite_strength(&state, &config);
         if comp > 0.3 {
             composite_converges_count += 1;

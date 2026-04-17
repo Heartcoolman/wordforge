@@ -637,20 +637,48 @@ fn default_forgetting_curve_floor() -> f64 {
     0.10
 }
 
-fn default_alpha_scale() -> f64 { 0.3 }
-fn default_alpha_min() -> f64 { 0.1 }
-fn default_alpha_max() -> f64 { 0.5 }
-fn default_forgetting_threshold() -> f64 { 0.2 }
-fn default_retention_min() -> f64 { 0.70 }
-fn default_retention_max() -> f64 { 0.95 }
-fn default_max_interval_days() -> f64 { 90.0 }
-fn default_min_interval_secs() -> i64 { 60 }
-fn default_high_accuracy_threshold() -> f64 { 0.9 }
-fn default_high_accuracy_retention_boost() -> f64 { 0.02 }
-fn default_high_fatigue_threshold() -> f64 { 0.6 }
-fn default_high_fatigue_retention_drop() -> f64 { 0.05 }
-fn default_low_motivation_threshold() -> f64 { -0.2 }
-fn default_low_motivation_retention_drop() -> f64 { 0.03 }
+fn default_alpha_scale() -> f64 {
+    0.3
+}
+fn default_alpha_min() -> f64 {
+    0.1
+}
+fn default_alpha_max() -> f64 {
+    0.5
+}
+fn default_forgetting_threshold() -> f64 {
+    0.2
+}
+fn default_retention_min() -> f64 {
+    0.70
+}
+fn default_retention_max() -> f64 {
+    0.95
+}
+fn default_max_interval_days() -> f64 {
+    90.0
+}
+fn default_min_interval_secs() -> i64 {
+    60
+}
+fn default_high_accuracy_threshold() -> f64 {
+    0.9
+}
+fn default_high_accuracy_retention_boost() -> f64 {
+    0.02
+}
+fn default_high_fatigue_threshold() -> f64 {
+    0.6
+}
+fn default_high_fatigue_retention_drop() -> f64 {
+    0.05
+}
+fn default_low_motivation_threshold() -> f64 {
+    -0.2
+}
+fn default_low_motivation_retention_drop() -> f64 {
+    0.03
+}
 
 // FSRS-5 default parameters (same as test baseline for fair comparison)
 fn default_w() -> [f64; 19] {
@@ -733,9 +761,15 @@ pub struct EvmConfig {
     pub diversity_growth_rate: f64,
 }
 
-fn default_evm_diversity_log_divisor() -> f64 { 5.0 }
-fn default_evm_diversity_bonus_cap() -> f64 { 0.3 }
-fn default_evm_diversity_growth_rate() -> f64 { 0.2 }
+fn default_evm_diversity_log_divisor() -> f64 {
+    5.0
+}
+fn default_evm_diversity_bonus_cap() -> f64 {
+    0.3
+}
+fn default_evm_diversity_growth_rate() -> f64 {
+    0.2
+}
 
 impl Default for EvmConfig {
     fn default() -> Self {
@@ -1095,21 +1129,18 @@ impl AMASConfig {
     }
 
     pub fn load_from_toml(path: &str) -> Result<Self, String> {
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| format!("读取配置文件失败: {e}"))?;
-        toml::from_str(&content)
-            .map_err(|e| format!("解析 TOML 配置失败: {e}"))
+        let content =
+            std::fs::read_to_string(path).map_err(|e| format!("读取配置文件失败: {e}"))?;
+        toml::from_str(&content).map_err(|e| format!("解析 TOML 配置失败: {e}"))
     }
 
     pub fn write_to_toml(&self, path: &str) -> Result<(), String> {
-        let content = toml::to_string_pretty(self)
-            .map_err(|e| format!("序列化 TOML 配置失败: {e}"))?;
+        let content =
+            toml::to_string_pretty(self).map_err(|e| format!("序列化 TOML 配置失败: {e}"))?;
         // 先写临时文件再原子 rename，避免 watcher 读到不完整内容
         let tmp = format!("{path}.tmp");
-        std::fs::write(&tmp, &content)
-            .map_err(|e| format!("写入临时配置文件失败: {e}"))?;
-        std::fs::rename(&tmp, path)
-            .map_err(|e| format!("原子重命名配置文件失败: {e}"))
+        std::fs::write(&tmp, &content).map_err(|e| format!("写入临时配置文件失败: {e}"))?;
+        std::fs::rename(&tmp, path).map_err(|e| format!("原子重命名配置文件失败: {e}"))
     }
 
     pub fn validate(&self) -> Result<(), String> {

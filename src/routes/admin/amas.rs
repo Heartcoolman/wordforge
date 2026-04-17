@@ -141,7 +141,10 @@ async fn update_config(
         .map_err(|e| AppError::bad_request("AMAS_INVALID_CONFIG", &e))?;
 
     // 写回 TOML 文件，保持文件与内存状态一致
-    let toml_path = state.config().amas_config_file.clone()
+    let toml_path = state
+        .config()
+        .amas_config_file
+        .clone()
         .unwrap_or_else(|| "amas_config.toml".to_string());
     if let Err(e) = cfg.write_to_toml(&toml_path) {
         tracing::warn!(path = %toml_path, error = %e, "写回 AMAS 配置文件失败");
@@ -175,7 +178,11 @@ async fn get_monitoring_events(
     Query(query): Query<MonitoringQuery>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     let limit = query.limit.unwrap_or(50).clamp(1, 500);
-    let events = state.store().get_recent_monitoring_events(limit)?;
+    let events = state
+        .run_store_task("admin.amas.monitoring_events", move |store| {
+            store.get_recent_monitoring_events(limit)
+        })
+        .await??;
     Ok(ok(events))
 }
 
@@ -208,7 +215,7 @@ async fn get_amas_state(
     auth: AuthUser,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let user_state = state.amas().get_user_state(&auth.user_id)?;
+    let user_state = state.amas().get_user_state_async(&auth.user_id).await?;
     Ok(ok(user_state))
 }
 
@@ -217,7 +224,7 @@ async fn get_strategy(
     auth: AuthUser,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let user_state = state.amas().get_user_state(&auth.user_id)?;
+    let user_state = state.amas().get_user_state_async(&auth.user_id).await?;
     let strategy = state.amas().compute_strategy_from_state(&user_state);
     Ok(ok(strategy))
 }
@@ -236,7 +243,11 @@ async fn get_learning_curve(
     auth: AuthUser,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let records = state.store().get_user_records(&auth.user_id, 1000)?;
+    let records = state
+        .run_store_task("admin.amas.learning_curve", move |store| {
+            store.get_user_records(&auth.user_id, 1000)
+        })
+        .await??;
 
     // Aggregate by day
     let mut daily: std::collections::BTreeMap<String, (usize, usize)> =
@@ -270,7 +281,7 @@ async fn get_intervention(
     auth: AuthUser,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let user_state = state.amas().get_user_state(&auth.user_id)?;
+    let user_state = state.amas().get_user_state_async(&auth.user_id).await?;
     let amas_config = state.amas().get_config().await;
     let iv = &amas_config.intervention;
     let mut suggestions = Vec::new();
@@ -312,7 +323,7 @@ async fn reset_state(
     auth: AuthUser,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    state.amas().reset_user_state(&auth.user_id)?;
+    state.amas().reset_user_state_async(&auth.user_id).await?;
     Ok(ok(serde_json::json!({"reset": true})))
 }
 
@@ -328,9 +339,12 @@ async fn evaluate_mastery(
     Query(q): Query<EvaluateMasteryQuery>,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
+    let word_id = q.word_id.clone();
     let word_state = state
-        .store()
-        .get_word_learning_state(&auth.user_id, &q.word_id)?;
+        .run_store_task("admin.amas.evaluate_mastery", move |store| {
+            store.get_word_learning_state(&auth.user_id, &word_id)
+        })
+        .await??;
 
     let mastery_info = match word_state {
         Some(ws) => serde_json::json!({

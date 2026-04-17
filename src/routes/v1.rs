@@ -44,9 +44,15 @@ async fn list_words(
         .clamp(1, state.config().pagination.max_page_size);
     let limit = per_page as usize;
     let offset = ((page - 1) * per_page) as usize;
-    let items = state.store().list_words(limit, offset)?;
+    let (items, total) = state
+        .run_store_task("v1.list_words", move |store| {
+            Ok::<_, crate::store::StoreError>((
+                store.list_words(limit, offset)?,
+                store.count_words()?,
+            ))
+        })
+        .await??;
     let items: Vec<WordPublic> = items.iter().map(WordPublic::from).collect();
-    let total = state.store().count_words()?;
     Ok(paginated(items, total, page, per_page))
 }
 
@@ -56,8 +62,8 @@ async fn get_word(
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     let word = state
-        .store()
-        .get_word(&id)?
+        .run_store_task("v1.get_word", move |store| store.get_word(&id))
+        .await??
         .ok_or_else(|| AppError::not_found("单词不存在"))?;
     Ok(ok(WordPublic::from(&word)))
 }
@@ -74,10 +80,14 @@ async fn list_records(
         .clamp(1, state.config().pagination.max_page_size);
     let limit = per_page as usize;
     let offset = ((page - 1) * per_page) as usize;
-    let records = state
-        .store()
-        .get_user_records_with_offset(&auth.user_id, limit, offset)?;
-    let total = state.store().count_user_records(&auth.user_id)? as u64;
+    let (records, total) = state
+        .run_store_task("v1.list_records", move |store| {
+            Ok::<_, crate::store::StoreError>((
+                store.get_user_records_with_offset(&auth.user_id, limit, offset)?,
+                store.count_user_records(&auth.user_id)? as u64,
+            ))
+        })
+        .await??;
     Ok(paginated(records, total, page, per_page))
 }
 
@@ -97,26 +107,31 @@ async fn create_record(
     // 幂等性检查：同一用户对同一单词在 5 秒内的重复提交视为幂等请求
     const DEDUP_WINDOW_MS: i64 = 5_000;
     let now = chrono::Utc::now();
-    let recent_records = state.store().get_user_records(&auth.user_id, 50)?;
-    for r in &recent_records {
-        if r.word_id == req.word_id
-            && r.is_correct == req.is_correct
-            && (now - r.created_at).num_milliseconds().abs() < DEDUP_WINDOW_MS
-        {
-            return Ok(ok(r.clone()));
-        }
-    }
+    let record = state
+        .run_store_task("v1.create_record", move |store| -> Result<_, AppError> {
+            let recent_records = store.get_user_records(&auth.user_id, 50)?;
+            for r in &recent_records {
+                if r.word_id == req.word_id
+                    && r.is_correct == req.is_correct
+                    && (now - r.created_at).num_milliseconds().abs() < DEDUP_WINDOW_MS
+                {
+                    return Ok(r.clone());
+                }
+            }
 
-    let record = crate::store::operations::records::LearningRecord {
-        id: uuid::Uuid::new_v4().to_string(),
-        user_id: auth.user_id.clone(),
-        word_id: req.word_id.clone(),
-        is_correct: req.is_correct,
-        response_time_ms: req.response_time_ms,
-        session_id: None,
-        created_at: now,
-    };
-    state.store().create_record(&record)?;
+            let record = crate::store::operations::records::LearningRecord {
+                id: uuid::Uuid::new_v4().to_string(),
+                user_id: auth.user_id.clone(),
+                word_id: req.word_id.clone(),
+                is_correct: req.is_correct,
+                response_time_ms: req.response_time_ms,
+                session_id: None,
+                created_at: now,
+            };
+            store.create_record(&record)?;
+            Ok(record)
+        })
+        .await??;
     Ok(ok(record))
 }
 
@@ -124,7 +139,11 @@ async fn get_study_config(
     auth: AuthUser,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let config = state.store().get_study_config(&auth.user_id)?;
+    let config = state
+        .run_store_task("v1.get_study_config", move |store| {
+            store.get_study_config(&auth.user_id)
+        })
+        .await??;
     Ok(ok(config))
 }
 
@@ -132,7 +151,13 @@ async fn create_session(
     auth: AuthUser,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let active = state.store().get_active_sessions_for_user(&auth.user_id)?;
+    let user_id = auth.user_id;
+    let user_id_for_active = user_id.clone();
+    let active = state
+        .run_store_task("v1.create_session.active", move |store| {
+            store.get_active_sessions_for_user(&user_id_for_active)
+        })
+        .await??;
     if let Some(existing) = active.into_iter().next() {
         return Ok(ok(serde_json::json!({
             "sessionId": existing.id,
@@ -140,11 +165,16 @@ async fn create_session(
         })));
     }
 
-    let config = state.store().get_study_config(&auth.user_id)?;
+    let config = state
+        .run_store_task("v1.create_session.config", {
+            let user_id = user_id.clone();
+            move |store| store.get_study_config(&user_id)
+        })
+        .await??;
 
     let session = crate::store::operations::learning_sessions::LearningSession {
         id: uuid::Uuid::new_v4().to_string(),
-        user_id: auth.user_id,
+        user_id: user_id.clone(),
         status: crate::store::operations::learning_sessions::SessionStatus::Active,
         target_mastery_count: config.daily_mastery_target,
         total_questions: 0,
@@ -156,10 +186,15 @@ async fn create_session(
         correct_count: 0,
         total_count: 0,
     };
+    let session_id = session.id.clone();
 
-    state.store().create_learning_session(&session)?;
+    state
+        .run_store_task("v1.create_session.persist", move |store| {
+            store.create_learning_session(&session)
+        })
+        .await??;
     Ok(ok(serde_json::json!({
-        "sessionId": session.id,
+        "sessionId": session_id,
         "resumed": false,
     })))
 }

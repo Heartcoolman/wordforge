@@ -87,14 +87,25 @@ async fn list_words(
     // B15: search support
     if let Some(ref search) = query.search {
         if !search.trim().is_empty() {
-            let (items, total) = state.store().search_words(search, limit, offset)?;
+            let search = search.clone();
+            let (items, total) = state
+                .run_store_task("words.list.search", move |store| {
+                    store.search_words(&search, limit, offset)
+                })
+                .await??;
             let items: Vec<WordPublic> = items.iter().map(WordPublic::from).collect();
             return Ok(paginated(items, total, page, per_page));
         }
     }
 
-    let total = state.store().count_words()?;
-    let items = state.store().list_words(limit, offset)?;
+    let (total, items) = state
+        .run_store_task("words.list", move |store| {
+            Ok::<_, crate::store::StoreError>((
+                store.count_words()?,
+                store.list_words(limit, offset)?,
+            ))
+        })
+        .await??;
     let items: Vec<WordPublic> = items.iter().map(WordPublic::from).collect();
     Ok(paginated(items, total, page, per_page))
 }
@@ -104,7 +115,9 @@ async fn count_words(
     _user: AuthUser,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let total = state.store().count_words()?;
+    let total = state
+        .run_store_task("words.count", |store| store.count_words())
+        .await??;
     Ok(ok(serde_json::json!({"total": total})))
 }
 
@@ -128,7 +141,12 @@ async fn batch_get_words(
             ),
         ));
     }
-    let words_map = state.store().get_words_by_ids(&req.ids)?;
+    let ids_for_lookup = req.ids.clone();
+    let words_map = state
+        .run_store_task("words.batch_get", move |store| {
+            store.get_words_by_ids(&ids_for_lookup)
+        })
+        .await??;
     let words: Vec<WordPublic> = req
         .ids
         .iter()
@@ -143,11 +161,16 @@ async fn delete_word(
     Path(id): Path<String>,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let _ = state
-        .store()
-        .get_word(&id)?
-        .ok_or_else(|| AppError::not_found("单词不存在"))?;
-    state.store().delete_word(&id)?;
+    let delete_id = id.clone();
+    state
+        .run_store_task("words.delete", move |store| -> Result<_, AppError> {
+            let _ = store
+                .get_word(&delete_id)?
+                .ok_or_else(|| AppError::not_found("单词不存在"))?;
+            store.delete_word(&delete_id)?;
+            Ok(())
+        })
+        .await??;
     Ok(ok(serde_json::json!({"deleted": true, "id": id})))
 }
 
@@ -157,8 +180,8 @@ async fn get_word(
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     let word = state
-        .store()
-        .get_word(&id)?
+        .run_store_task("words.get", move |store| store.get_word(&id))
+        .await??
         .ok_or_else(|| AppError::not_found("单词不存在"))?;
     Ok(ok(WordPublic::from(&word)))
 }
@@ -200,9 +223,12 @@ async fn create_word(
         embedding: None,
         created_at: Utc::now(),
     };
+    let response = WordPublic::from(&word);
 
-    state.store().upsert_word(&word)?;
-    Ok(created(WordPublic::from(&word)))
+    state
+        .run_store_task("words.create", move |store| store.upsert_word(&word))
+        .await??;
+    Ok(created(response))
 }
 
 async fn update_word(
@@ -211,9 +237,10 @@ async fn update_word(
     State(state): State<AppState>,
     JsonBody(req): JsonBody<UpsertWordRequest>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
+    let lookup_id = id.clone();
     let existing = state
-        .store()
-        .get_word(&id)?
+        .run_store_task("words.update.load", move |store| store.get_word(&lookup_id))
+        .await??
         .ok_or_else(|| AppError::not_found("单词不存在"))?;
 
     let word = Word {
@@ -239,9 +266,11 @@ async fn update_word(
         embedding: existing.embedding,
         created_at: existing.created_at,
     };
-
-    state.store().upsert_word(&word)?;
-    Ok(ok(WordPublic::from(&word)))
+    let response = WordPublic::from(&word);
+    state
+        .run_store_task("words.update", move |store| store.upsert_word(&word))
+        .await??;
+    Ok(ok(response))
 }
 
 #[derive(Debug, Deserialize)]
@@ -264,29 +293,35 @@ async fn batch_create_words(
             ),
         ));
     }
-    let mut created_words: Vec<WordPublic> = Vec::new();
-    let mut skipped_indices = Vec::new();
+    let (created_words, skipped_indices) = state
+        .run_store_task("words.batch_create", move |store| -> Result<_, AppError> {
+            let mut created_words: Vec<WordPublic> = Vec::new();
+            let mut skipped_indices = Vec::new();
 
-    for (i, item) in req.words.into_iter().enumerate() {
-        if item.text.trim().is_empty() || item.meaning.trim().is_empty() {
-            skipped_indices.push(i);
-            continue;
-        }
-        let word = Word {
-            id: item.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
-            text: item.text.trim().to_string(),
-            meaning: item.meaning.trim().to_string(),
-            pronunciation: item.pronunciation,
-            part_of_speech: item.part_of_speech,
-            difficulty: item.difficulty.unwrap_or(0.5).clamp(0.0, 1.0),
-            examples: item.examples.unwrap_or_default(),
-            tags: item.tags.unwrap_or_default(),
-            embedding: None,
-            created_at: Utc::now(),
-        };
-        state.store().upsert_word(&word)?;
-        created_words.push(WordPublic::from(&word));
-    }
+            for (i, item) in req.words.into_iter().enumerate() {
+                if item.text.trim().is_empty() || item.meaning.trim().is_empty() {
+                    skipped_indices.push(i);
+                    continue;
+                }
+                let word = Word {
+                    id: item.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                    text: item.text.trim().to_string(),
+                    meaning: item.meaning.trim().to_string(),
+                    pronunciation: item.pronunciation,
+                    part_of_speech: item.part_of_speech,
+                    difficulty: item.difficulty.unwrap_or(0.5).clamp(0.0, 1.0),
+                    examples: item.examples.unwrap_or_default(),
+                    tags: item.tags.unwrap_or_default(),
+                    embedding: None,
+                    created_at: Utc::now(),
+                };
+                store.upsert_word(&word)?;
+                created_words.push(WordPublic::from(&word));
+            }
+
+            Ok((created_words, skipped_indices))
+        })
+        .await??;
 
     Ok(created(serde_json::json!({
         "count": created_words.len(),
@@ -365,13 +400,13 @@ async fn import_from_url(
     let content = String::from_utf8_lossy(&body_bytes);
 
     // Parse lines as "word\tmeaning" or "word - meaning"
-    let mut imported: Vec<WordPublic> = Vec::new();
+    let mut words_to_import: Vec<Word> = Vec::new();
     for line in content.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        if imported.len() >= state.config().limits.max_import_words {
+        if words_to_import.len() >= state.config().limits.max_import_words {
             break;
         }
 
@@ -411,9 +446,21 @@ async fn import_from_url(
             embedding: None,
             created_at: Utc::now(),
         };
-        state.store().upsert_word(&word)?;
-        imported.push(WordPublic::from(&word));
+        words_to_import.push(word);
     }
+    let imported = state
+        .run_store_task(
+            "words.import_from_url",
+            move |store| -> Result<_, AppError> {
+                let mut imported: Vec<WordPublic> = Vec::with_capacity(words_to_import.len());
+                for word in words_to_import {
+                    store.upsert_word(&word)?;
+                    imported.push(WordPublic::from(&word));
+                }
+                Ok(imported)
+            },
+        )
+        .await??;
 
     Ok(created(serde_json::json!({
         "imported": imported.len(),

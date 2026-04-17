@@ -20,9 +20,19 @@ async fn system_health(
     _admin: AdminAuthUser,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let size_on_disk = state.store().db_size_bytes().unwrap_or(0);
+    let size_on_disk = state
+        .run_store_task("admin.monitoring.db_size_bytes", |store| {
+            store.db_size_bytes()
+        })
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or(0);
     let uptime_secs = state.uptime_secs();
-    let store_probe_ok = state.store().db_ping().is_ok();
+    let store_probe_ok = state
+        .run_store_task("admin.monitoring.db_ping", |store| store.db_ping())
+        .await
+        .is_ok_and(|result| result.is_ok());
     let status = if store_probe_ok {
         "healthy"
     } else {
@@ -42,11 +52,21 @@ async fn database_stats(
     _admin: AdminAuthUser,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let size = state.store().db_size_bytes().unwrap_or(0);
-    let tables = state.store().db_table_list().unwrap_or_default();
-    let page_size = state.store().db_page_size().unwrap_or(0);
-    let page_count = state.store().db_page_count().unwrap_or(0);
-    let wal_enabled = state.store().db_wal_enabled().unwrap_or(false);
+    let size = state
+        .run_store_task("admin.monitoring.database_stats", |store| {
+            Ok::<_, crate::store::StoreError>((
+                store.db_size_bytes()?,
+                store.db_table_list()?,
+                store.db_page_size()?,
+                store.db_page_count()?,
+                store.db_wal_enabled()?,
+            ))
+        })
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or((0, Vec::new(), 0, 0, false));
+    let (size, tables, page_size, page_count, wal_enabled) = size;
 
     Ok(ok(serde_json::json!({
         "sizeOnDisk": size,

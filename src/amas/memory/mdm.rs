@@ -2,7 +2,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::amas::config::MemoryModelConfig;
 
-
 /// AMAS v2: DSR (Difficulty-Stability-Retrievability) architecture
 /// Uses FSRS-5 formulas for state transitions with AMAS-unique scheduling.
 #[derive(Debug, Clone, Serialize, Deserialize)]

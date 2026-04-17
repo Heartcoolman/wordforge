@@ -112,14 +112,14 @@ pub async fn sse_handler(
         let mut interval = tokio::time::interval(Duration::from_secs(5));
         let mut last_event_count: u64 = 0;
 
-        if let Ok(user_state) = state.amas().get_user_state(&user_id) {
+        if let Ok(user_state) = state.amas().get_user_state_async(&user_id).await {
             last_event_count = user_state.total_event_count;
         }
 
         loop {
             tokio::select! {
                 _ = interval.tick() => {
-                    if let Ok(user_state) = state.amas().get_user_state(&user_id) {
+                    if let Ok(user_state) = state.amas().get_user_state_async(&user_id).await {
                         if user_state.total_event_count > last_event_count {
                             let event_data = serde_json::json!({
                                 "type": "state_change",

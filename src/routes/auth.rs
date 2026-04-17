@@ -94,49 +94,56 @@ pub struct AuthResponse {
 const MAX_SESSIONS_PER_USER: usize = 10;
 
 /// Issue an access + refresh token pair and persist the access session.
-fn issue_token_pair(user_id: &str, state: &AppState) -> Result<(String, String), AppError> {
-    // 清理超出限制的旧会话
-    if let Err(e) = state
-        .store()
-        .cleanup_oldest_user_sessions(user_id, MAX_SESSIONS_PER_USER)
-    {
-        tracing::warn!(user_id, error = %e, "清理多余会话失败");
-    }
-
+async fn issue_token_pair(user_id: &str, state: &AppState) -> Result<(String, String), AppError> {
+    let user_id = user_id.to_string();
     let access_token = sign_jwt_for_user(
-        user_id,
+        &user_id,
         &state.config().jwt_secret,
         state.config().jwt_expires_in_hours,
     )?;
 
     let refresh_token = sign_refresh_token_for_user(
-        user_id,
+        &user_id,
         &state.config().refresh_jwt_secret,
         state.config().refresh_token_expires_in_hours,
     )?;
 
-    // Persist the access token session
-    let token_hash = hash_token(&access_token);
-    state.store().create_session(&Session {
-        token_hash,
-        user_id: user_id.to_string(),
+    let access_session = Session {
+        token_hash: hash_token(&access_token),
+        user_id: user_id.clone(),
         token_type: "user".to_string(),
         created_at: Utc::now(),
         expires_at: Utc::now() + Duration::hours(state.config().jwt_expires_in_hours as i64),
         revoked: false,
-    })?;
+    };
 
-    // Persist the refresh token session (longer expiry)
-    let refresh_hash = hash_token(&refresh_token);
-    state.store().create_session(&Session {
-        token_hash: refresh_hash,
-        user_id: user_id.to_string(),
+    let refresh_session = Session {
+        token_hash: hash_token(&refresh_token),
+        user_id: user_id.clone(),
         token_type: "refresh".to_string(),
         created_at: Utc::now(),
         expires_at: Utc::now()
             + Duration::hours(state.config().refresh_token_expires_in_hours as i64),
         revoked: false,
-    })?;
+    };
+
+    let cleanup_user_id = user_id.clone();
+    state
+        .run_store_task(
+            "auth.issue_token_pair",
+            move |store| -> Result<(), AppError> {
+                if let Err(e) =
+                    store.cleanup_oldest_user_sessions(&cleanup_user_id, MAX_SESSIONS_PER_USER)
+                {
+                    tracing::warn!(user_id = %cleanup_user_id, error = %e, "清理多余会话失败");
+                }
+
+                store.create_session(&access_session)?;
+                store.create_session(&refresh_session)?;
+                Ok(())
+            },
+        )
+        .await??;
 
     Ok((access_token, refresh_token))
 }
@@ -145,50 +152,57 @@ async fn register(
     State(state): State<AppState>,
     JsonBody(req): JsonBody<RegisterRequest>,
 ) -> Result<Response, AppError> {
-    let system_settings = state.store().get_system_settings()?;
-    if !system_settings.registration_enabled {
-        return Err(AppError::forbidden("注册功能已关闭"));
-    }
-    if system_settings.maintenance_mode {
-        return Err(AppError::forbidden("系统正在维护中"));
-    }
-
     let email = req.email.trim().to_lowercase();
     if !is_valid_email(&email) {
         return Err(AppError::bad_request("AUTH_INVALID_EMAIL", "邮箱格式无效"));
     }
-    let username = req.username.trim();
-    if let Err(msg) = validate_username(username) {
+    let username = req.username.trim().to_string();
+    if let Err(msg) = validate_username(&username) {
         return Err(AppError::bad_request("AUTH_INVALID_USERNAME", msg));
     }
     if let Err(msg) = validate_password(&req.password) {
         return Err(AppError::bad_request("AUTH_WEAK_PASSWORD", msg));
     }
 
-    if state.store().get_user_by_email(&email)?.is_some() {
-        return Err(AppError::conflict("AUTH_EMAIL_EXISTS", "该邮箱已被注册"));
-    }
+    let password = req.password;
+    let email_for_lookup = email.clone();
+    let user = state
+        .run_store_task(
+            "auth.register.create_user",
+            move |store| -> Result<User, AppError> {
+                let system_settings = store.get_system_settings()?;
+                if !system_settings.registration_enabled {
+                    return Err(AppError::forbidden("注册功能已关闭"));
+                }
+                if system_settings.maintenance_mode {
+                    return Err(AppError::forbidden("系统正在维护中"));
+                }
+                if store.get_user_by_email(&email_for_lookup)?.is_some() {
+                    return Err(AppError::conflict("AUTH_EMAIL_EXISTS", "该邮箱已被注册"));
+                }
+                if store.count_users()? >= system_settings.max_users as usize {
+                    return Err(AppError::forbidden("用户注册数量已达上限"));
+                }
+                let password_hash = hash_password(&password)?;
+                let now = Utc::now();
+                let user = User {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    email: email_for_lookup,
+                    username: username,
+                    password_hash,
+                    is_banned: false,
+                    created_at: now,
+                    updated_at: now,
+                    failed_login_count: 0,
+                    locked_until: None,
+                };
+                store.create_user(&user)?;
+                Ok(user)
+            },
+        )
+        .await??;
 
-    if state.store().count_users()? >= system_settings.max_users as usize {
-        return Err(AppError::forbidden("用户注册数量已达上限"));
-    }
-
-    let now = Utc::now();
-    let user = User {
-        id: uuid::Uuid::new_v4().to_string(),
-        email: email.clone(),
-        username: username.to_string(),
-        password_hash: hash_password(&req.password)?,
-        is_banned: false,
-        created_at: now,
-        updated_at: now,
-        failed_login_count: 0,
-        locked_until: None,
-    };
-
-    state.store().create_user(&user)?;
-
-    let (access_token, refresh_token) = issue_token_pair(&user.id, &state)?;
+    let (access_token, refresh_token) = issue_token_pair(&user.id, &state).await?;
 
     tracing::info!(
         user_id = %user.id,
@@ -222,46 +236,82 @@ async fn login(
     State(state): State<AppState>,
     JsonBody(req): JsonBody<LoginRequest>,
 ) -> Result<Response, AppError> {
-    if state.store().get_system_settings()?.maintenance_mode {
-        return Err(AppError::forbidden("系统正在维护中"));
-    }
+    let email = req.email.trim().to_lowercase();
+    let (user, is_locked) = state
+        .run_store_task("auth.login.lookup", move |store| -> Result<_, AppError> {
+            if store.get_system_settings()?.maintenance_mode {
+                return Err(AppError::forbidden("系统正在维护中"));
+            }
 
-    let (user, stored_hash) = match state.store().get_user_by_email(&req.email)? {
-        Some(user) => {
-            let hash = user.password_hash.clone();
-            (Some(user), hash)
-        }
-        None => (None, generate_dummy_argon2_hash()),
-    };
+            let user = store.get_user_by_email(&email)?;
+            let is_locked = if let Some(ref user) = user {
+                store.is_account_locked(&user.id)?
+            } else {
+                false
+            };
+            Ok((user, is_locked))
+        })
+        .await??;
 
     // Check ban and lockout status BEFORE password verification to prevent timing attacks
     if let Some(ref u) = user {
         if u.is_banned {
             return Err(AppError::forbidden("用户已被封禁"));
         }
-
-        if state.store().is_account_locked(&u.id)? {
-            return Err(AppError::too_many_requests(
-                "账户因多次登录失败已被临时锁定，请稍后再试",
-            ));
-        }
+    }
+    if is_locked {
+        return Err(AppError::too_many_requests(
+            "账户因多次登录失败已被临时锁定，请稍后再试",
+        ));
     }
 
-    let verified = verify_password(&req.password, &stored_hash)?;
+    let stored_hash = user
+        .as_ref()
+        .map(|user| user.password_hash.clone())
+        .unwrap_or_else(generate_dummy_argon2_hash);
+    let password = req.password;
+    let verified = crate::blocking::run_blocking("auth.login.verify_password", move || {
+        verify_password(&password, &stored_hash)
+    })
+    .await??;
     if !verified || user.is_none() {
         if let Some(ref u) = user {
-            let _ = state.store().record_failed_login(&u.id);
+            let user_id = u.id.clone();
+            match state
+                .run_store_task("auth.login.record_failed_login", move |store| {
+                    store.record_failed_login(&user_id)
+                })
+                .await
+            {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => {
+                    tracing::warn!(user_id = %u.id, error = %e, "Failed to record login failure")
+                }
+                Err(e) => tracing::warn!(user_id = %u.id, error = %e, "Login failure task failed"),
+            }
         }
         return Err(AppError::unauthorized("邮箱或密码错误"));
     }
 
     let user = user.unwrap();
 
-    if let Err(e) = state.store().reset_login_attempts(&user.id) {
-        tracing::warn!(user_id = %user.id, error = %e, "Failed to reset login attempts");
+    let user_id = user.id.clone();
+    match state
+        .run_store_task("auth.login.reset_login_attempts", move |store| {
+            store.reset_login_attempts(&user_id)
+        })
+        .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            tracing::warn!(user_id = %user.id, error = %e, "Failed to reset login attempts")
+        }
+        Err(e) => {
+            tracing::warn!(user_id = %user.id, error = %e, "Reset login attempts task failed")
+        }
     }
 
-    let (access_token, refresh_token) = issue_token_pair(&user.id, &state)?;
+    let (access_token, refresh_token) = issue_token_pair(&user.id, &state).await?;
 
     tracing::info!(
         user_id = %user.id,
@@ -303,9 +353,12 @@ async fn refresh(State(state): State<AppState>, headers: HeaderMap) -> Result<Re
 
     // Verify the refresh session exists in the store
     let old_hash = hash_token(&old_token);
+    let old_hash_for_lookup = old_hash.clone();
     let session = state
-        .store()
-        .get_session(&old_hash)?
+        .run_store_task("auth.refresh.get_session", move |store| {
+            store.get_session(&old_hash_for_lookup)
+        })
+        .await??
         .ok_or_else(|| AppError::unauthorized("刷新会话不存在或已过期"))?;
 
     if session.user_id != claims.sub {
@@ -313,7 +366,12 @@ async fn refresh(State(state): State<AppState>, headers: HeaderMap) -> Result<Re
     }
 
     // 原子性删除旧的 refresh 会话，防止 token 重放攻击
-    let was_deleted = state.store().delete_session_if_exists(&old_hash)?;
+    let old_hash_for_delete = old_hash.clone();
+    let was_deleted = state
+        .run_store_task("auth.refresh.delete_session", move |store| {
+            store.delete_session_if_exists(&old_hash_for_delete)
+        })
+        .await??;
     if !was_deleted {
         // token 已被使用（可能是重放攻击），拒绝请求
         return Err(AppError::unauthorized("刷新令牌已被使用"));
@@ -321,8 +379,11 @@ async fn refresh(State(state): State<AppState>, headers: HeaderMap) -> Result<Re
 
     // 在签发新 token 前检查用户状态（封禁检查）
     let user = state
-        .store()
-        .get_user_by_id(&claims.sub)?
+        .run_store_task("auth.refresh.get_user", {
+            let user_id = claims.sub.clone();
+            move |store| store.get_user_by_id(&user_id)
+        })
+        .await??
         .ok_or_else(|| AppError::unauthorized("用户不存在"))?;
 
     if user.is_banned {
@@ -330,7 +391,7 @@ async fn refresh(State(state): State<AppState>, headers: HeaderMap) -> Result<Re
     }
 
     // Issue a new token pair
-    let (access_token, refresh_token) = issue_token_pair(&claims.sub, &state)?;
+    let (access_token, refresh_token) = issue_token_pair(&claims.sub, &state).await?;
 
     let secure = state.config().cookie_secure;
     let mut response = ok(AuthResponse {
@@ -354,7 +415,12 @@ async fn refresh(State(state): State<AppState>, headers: HeaderMap) -> Result<Re
 }
 
 async fn logout(auth_user: AuthUser, State(state): State<AppState>) -> Result<Response, AppError> {
-    state.store().delete_user_sessions(&auth_user.user_id)?;
+    let user_id = auth_user.user_id.clone();
+    state
+        .run_store_task("auth.logout.delete_user_sessions", move |store| {
+            store.delete_user_sessions(&user_id)
+        })
+        .await??;
 
     let mut response = ok(serde_json::json!({"loggedOut": true})).into_response();
     clear_auth_cookies(&mut response, state.config().cookie_secure)?;
@@ -365,14 +431,22 @@ async fn forgot_password(
     State(state): State<AppState>,
     JsonBody(req): JsonBody<ForgotPasswordRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    if let Some(user) = state.store().get_user_by_email(&req.email)? {
+    let email = req.email.trim().to_lowercase();
+    if let Some(user) = state
+        .run_store_task("auth.forgot_password.get_user_by_email", move |store| {
+            store.get_user_by_email(&email)
+        })
+        .await??
+    {
         let raw_token = uuid::Uuid::new_v4().simple().to_string();
         let token_hash = hash_token(&raw_token);
         let expires_at = (Utc::now() + Duration::hours(1)).to_rfc3339();
 
         state
-            .store()
-            .create_password_reset_token(&token_hash, &user.id, &expires_at)?;
+            .run_store_task("auth.forgot_password.create_token", move |store| {
+                store.create_password_reset_token(&token_hash, &user.id, &expires_at)
+            })
+            .await??;
 
         // 仅通过日志输出 token，绝不在响应中返回
         tracing::trace!(
@@ -404,8 +478,10 @@ async fn reset_password(
 
     // 原子删除+返回，确保同一 token 只能使用一次
     let entry = state
-        .store()
-        .take_password_reset_token(&token_hash)?
+        .run_store_task("auth.reset_password.take_token", move |store| {
+            store.take_password_reset_token(&token_hash)
+        })
+        .await??
         .ok_or_else(|| AppError::bad_request("AUTH_INVALID_RESET_TOKEN", "重置令牌无效"))?;
 
     let expires_at =
@@ -424,15 +500,37 @@ async fn reset_password(
         .ok_or_else(|| AppError::internal("reset token missing user_id"))?;
 
     let mut user = state
-        .store()
-        .get_user_by_id(user_id)?
+        .run_store_task("auth.reset_password.get_user", {
+            let user_id = user_id.to_string();
+            move |store| store.get_user_by_id(&user_id)
+        })
+        .await??
         .ok_or_else(|| AppError::bad_request("AUTH_INVALID_RESET_TOKEN", "重置令牌无效"))?;
 
-    user.password_hash = hash_password(&req.new_password)?;
+    let new_password = req.new_password;
+    user.password_hash =
+        crate::blocking::run_blocking("auth.reset_password.hash_password", move || {
+            hash_password(&new_password)
+        })
+        .await??;
     user.updated_at = Utc::now();
-    state.store().update_user(&user)?;
-
-    let _ = state.store().delete_user_sessions(&user.id);
+    let user_for_update = user.clone();
+    let user_id = user.id.clone();
+    match state
+        .run_store_task(
+            "auth.reset_password.update_user",
+            move |store| -> Result<(), AppError> {
+                store.update_user(&user_for_update)?;
+                let _ = store.delete_user_sessions(&user_id);
+                Ok(())
+            },
+        )
+        .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => return Err(e),
+        Err(e) => return Err(e.into()),
+    }
 
     Ok(ok(serde_json::json!({})))
 }
@@ -444,8 +542,10 @@ async fn verify_reset_token(
     let token_hash = hash_token(&req.token);
 
     let entry = state
-        .store()
-        .get_password_reset_token(&token_hash)?
+        .run_store_task("auth.verify_reset_token.get_token", move |store| {
+            store.get_password_reset_token(&token_hash)
+        })
+        .await??
         .ok_or_else(|| AppError::bad_request("AUTH_INVALID_RESET_TOKEN", "重置令牌无效"))?;
 
     let expires_at =

@@ -11,11 +11,21 @@ pub async fn run(store: &Store, engine: &Arc<AMASEngine>) {
 
     let now = chrono::Utc::now();
     let yesterday = now - chrono::Duration::days(1);
+    let store_for_aggregate = store.clone();
 
-    let (total_records, total_correct) = match store.aggregate_records_since(yesterday) {
-        Ok(stats) => stats,
-        Err(e) => {
+    let (total_records, total_correct) = match crate::blocking::run_blocking(
+        "worker.algorithm_optimization.aggregate_records",
+        move || store_for_aggregate.aggregate_records_since(yesterday),
+    )
+    .await
+    {
+        Ok(Ok(stats)) => stats,
+        Ok(Err(e)) => {
             tracing::warn!(error = %e, "Algorithm optimization: failed to aggregate records");
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "Algorithm optimization aggregate task failed");
             return;
         }
     };
@@ -80,7 +90,14 @@ pub async fn run(store: &Store, engine: &Arc<AMASEngine>) {
         "optimizationRun": true,
     });
 
-    if let Err(e) = store.upsert_metrics_daily(&date, "optimization", &metrics) {
-        tracing::warn!(error = %e, "Failed to store optimization metrics");
+    let store_for_metrics = store.clone();
+    match crate::blocking::run_blocking("worker.algorithm_optimization.store_metrics", move || {
+        store_for_metrics.upsert_metrics_daily(&date, "optimization", &metrics)
+    })
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::warn!(error = %e, "Failed to store optimization metrics"),
+        Err(e) => tracing::warn!(error = %e, "Algorithm optimization metrics task failed"),
     }
 }

@@ -46,10 +46,7 @@ pub async fn run(path: String, amas: Arc<AMASEngine>) {
             }
         };
 
-        let is_modify = matches!(
-            event.kind,
-            EventKind::Modify(_) | EventKind::Create(_)
-        );
+        let is_modify = matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_));
         if !is_modify {
             continue;
         }
@@ -65,9 +62,13 @@ pub async fn run(path: String, amas: Arc<AMASEngine>) {
                     Ok(()) => tracing::info!(path = %path, "AMAS 配置热重载成功"),
                     Err(e) => tracing::warn!(path = %path, error = %e, "AMAS 配置热重载失败"),
                 },
-                Err(e) => tracing::warn!(path = %path, error = %e, "AMAS 配置校验失败，已跳过本次重载"),
+                Err(e) => {
+                    tracing::warn!(path = %path, error = %e, "AMAS 配置校验失败，已跳过本次重载")
+                }
             },
-            Err(e) => tracing::warn!(path = %path, error = %e, "读取/解析 TOML 失败，已跳过本次重载"),
+            Err(e) => {
+                tracing::warn!(path = %path, error = %e, "读取/解析 TOML 失败，已跳过本次重载")
+            }
         }
     }
 }

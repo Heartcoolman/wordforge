@@ -25,6 +25,7 @@ fn sanitize_float(value: f64, default: f64) -> f64 {
     }
 }
 
+#[derive(Clone)]
 pub struct AMASEngine {
     config: Arc<RwLock<Arc<AMASConfig>>>,
     config_hash: Arc<RwLock<String>>,
@@ -107,11 +108,9 @@ impl AMASEngine {
         &self.metrics_registry
     }
 
-    async fn acquire_user_lock(&self, user_id: &str) -> Arc<Mutex<()>> {
-        let mut locks = self.user_locks.lock().await;
+    fn acquire_user_lock_blocking(&self, user_id: &str) -> Arc<Mutex<()>> {
+        let mut locks = self.user_locks.blocking_lock();
 
-        // 定期清理不再持有的用户锁。
-        // Arc::strong_count == 1 表示只有 HashMap 持有引用，锁处于空闲状态，可安全移除。
         if locks.len() > USER_LOCK_CLEANUP_THRESHOLD {
             let before = locks.len();
             locks.retain(|_, v| Arc::strong_count(v) > 1);
@@ -137,12 +136,28 @@ impl AMASEngine {
         user_id: &str,
         raw_event: RawEvent,
     ) -> Result<ProcessResult, AppError> {
+        let engine = self.clone();
+        let user_id = user_id.to_string();
+        crate::blocking::run_blocking("amas.process_event", move || {
+            engine.process_event_blocking(&user_id, raw_event)
+        })
+        .await?
+    }
+
+    fn process_event_blocking(
+        &self,
+        user_id: &str,
+        raw_event: RawEvent,
+    ) -> Result<ProcessResult, AppError> {
         let start = std::time::Instant::now();
 
-        let user_lock = self.acquire_user_lock(user_id).await;
-        let _guard = user_lock.lock().await;
+        let user_lock = self.acquire_user_lock_blocking(user_id);
+        let _guard = user_lock.blocking_lock();
 
-        let config = Arc::clone(&*self.config.read().await);
+        let config = {
+            let guard = self.config.blocking_read();
+            Arc::clone(&guard)
+        };
         let now = chrono::Utc::now();
 
         let mut user_state = self.load_or_init_state(user_id)?;
@@ -157,7 +172,7 @@ impl AMASEngine {
         let (final_strategy, weights) =
             self.ensemble_or_fallback(&candidates, &user_state, &algo_states, &config);
 
-        let ssp_arc = self.ssp_policy.read().await.clone();
+        let ssp_arc = self.ssp_policy.blocking_read().clone();
         let ssp_ref = ssp_arc.as_deref();
         let word_mastery = self.update_memory(
             user_id,
@@ -228,7 +243,7 @@ impl AMASEngine {
         };
 
         let latency_ms = start.elapsed().as_millis() as i64;
-        let config_version = self.config_hash.read().await.clone();
+        let config_version = self.config_hash.blocking_read().clone();
         drop(_guard);
         self.emit_monitoring(
             user_id,
@@ -248,10 +263,26 @@ impl AMASEngine {
         user_id: &str,
         visual_score: f64,
     ) -> Result<UserState, AppError> {
-        let user_lock = self.acquire_user_lock(user_id).await;
-        let _guard = user_lock.lock().await;
+        let engine = self.clone();
+        let user_id = user_id.to_string();
+        crate::blocking::run_blocking("amas.update_visual_fatigue", move || {
+            engine.update_visual_fatigue_blocking(&user_id, visual_score)
+        })
+        .await?
+    }
 
-        let config = Arc::clone(&*self.config.read().await);
+    fn update_visual_fatigue_blocking(
+        &self,
+        user_id: &str,
+        visual_score: f64,
+    ) -> Result<UserState, AppError> {
+        let user_lock = self.acquire_user_lock_blocking(user_id);
+        let _guard = user_lock.blocking_lock();
+
+        let config = {
+            let guard = self.config.blocking_read();
+            Arc::clone(&guard)
+        };
         let mut user_state = self.load_or_init_state(user_id)?;
 
         let visual_fatigue = (visual_score / 100.0).clamp(0.0, 1.0);
@@ -275,6 +306,15 @@ impl AMASEngine {
 
     pub fn get_user_state(&self, user_id: &str) -> Result<UserState, AppError> {
         self.load_or_init_state(user_id)
+    }
+
+    pub async fn get_user_state_async(&self, user_id: &str) -> Result<UserState, AppError> {
+        let engine = self.clone();
+        let user_id = user_id.to_string();
+        crate::blocking::run_blocking("amas.get_user_state", move || {
+            engine.load_or_init_state(&user_id)
+        })
+        .await?
     }
 
     pub fn compute_strategy_from_state(&self, user_state: &UserState) -> StrategyParams {
@@ -313,9 +353,17 @@ impl AMASEngine {
     }
 
     pub async fn get_phase(&self, user_id: &str) -> Result<Option<ColdStartPhase>, AppError> {
-        let state = self.load_or_init_state(user_id)?;
-        let config = Arc::clone(&*self.config.read().await);
-        Ok(self.determine_cold_start_phase(&state, &config))
+        let engine = self.clone();
+        let user_id = user_id.to_string();
+        crate::blocking::run_blocking("amas.get_phase", move || {
+            let state = engine.load_or_init_state(&user_id)?;
+            let config = {
+                let guard = engine.config.blocking_read();
+                Arc::clone(&guard)
+            };
+            Ok(engine.determine_cold_start_phase(&state, &config))
+        })
+        .await?
     }
 
     pub fn reset_user_state(&self, user_id: &str) -> Result<(), AppError> {
@@ -337,6 +385,15 @@ impl AMASEngine {
         Ok(())
     }
 
+    pub async fn reset_user_state_async(&self, user_id: &str) -> Result<(), AppError> {
+        let engine = self.clone();
+        let user_id = user_id.to_string();
+        crate::blocking::run_blocking("amas.reset_user_state", move || {
+            engine.reset_user_state(&user_id)
+        })
+        .await?
+    }
+
     pub async fn update_temporal_profile(
         &self,
         user_id: &str,
@@ -345,10 +402,35 @@ impl AMASEngine {
         avg_response_time_ms: f64,
         mastery_efficiency: f64,
     ) -> Result<(), AppError> {
-        let user_lock = self.acquire_user_lock(user_id).await;
-        let _guard = user_lock.lock().await;
+        let engine = self.clone();
+        let user_id = user_id.to_string();
+        crate::blocking::run_blocking("amas.update_temporal_profile", move || {
+            engine.update_temporal_profile_blocking(
+                &user_id,
+                hour,
+                accuracy,
+                avg_response_time_ms,
+                mastery_efficiency,
+            )
+        })
+        .await?
+    }
 
-        let config = Arc::clone(&*self.config.read().await);
+    fn update_temporal_profile_blocking(
+        &self,
+        user_id: &str,
+        hour: u8,
+        accuracy: f64,
+        avg_response_time_ms: f64,
+        mastery_efficiency: f64,
+    ) -> Result<(), AppError> {
+        let user_lock = self.acquire_user_lock_blocking(user_id);
+        let _guard = user_lock.blocking_lock();
+
+        let config = {
+            let guard = self.config.blocking_read();
+            Arc::clone(&guard)
+        };
         let mut user_state = self.load_or_init_state(user_id)?;
         let stats = &mut user_state.habit_profile.temporal_performance;
         let idx = (hour as usize).min(23);
@@ -397,6 +479,15 @@ impl AMASEngine {
         let f = &config.feature;
         let boost = f.temporal_boost_base + h.mastery_efficiency * f.temporal_boost_scale;
         Ok(boost.clamp(f.temporal_boost_min, f.temporal_boost_max))
+    }
+
+    pub async fn get_temporal_boost_async(&self, user_id: &str, hour: u8) -> Result<f64, AppError> {
+        let engine = self.clone();
+        let user_id = user_id.to_string();
+        crate::blocking::run_blocking("amas.get_temporal_boost", move || {
+            engine.get_temporal_boost(&user_id, hour)
+        })
+        .await?
     }
 
     fn load_or_init_state(&self, user_id: &str) -> Result<UserState, AppError> {
@@ -623,6 +714,18 @@ impl AMASEngine {
         } else {
             Ok(LearnerType::Cautious)
         }
+    }
+
+    pub async fn classify_learner_type_async(
+        &self,
+        user_id: &str,
+    ) -> Result<LearnerType, AppError> {
+        let engine = self.clone();
+        let user_id = user_id.to_string();
+        crate::blocking::run_blocking("amas.classify_learner_type", move || {
+            engine.classify_learner_type(&user_id)
+        })
+        .await?
     }
 
     fn generate_candidates(

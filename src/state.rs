@@ -110,6 +110,19 @@ impl AppState {
         &self.store
     }
 
+    pub async fn run_store_task<T, F>(
+        &self,
+        task_name: &'static str,
+        f: F,
+    ) -> Result<T, crate::blocking::BlockingTaskError>
+    where
+        F: FnOnce(Store) -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        let store = self.store().clone();
+        crate::blocking::run_blocking(task_name, move || f(store)).await
+    }
+
     pub fn amas(&self) -> &AMASEngine {
         &self.amas_engine
     }

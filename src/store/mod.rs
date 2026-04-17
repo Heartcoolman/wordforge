@@ -8,7 +8,7 @@ use r2d2_sqlite::SqliteConnectionManager;
 use serde::{de::DeserializeOwned, Serialize};
 use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Store {
     pool: Pool<SqliteConnectionManager>,
 }

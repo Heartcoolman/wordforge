@@ -7,36 +7,42 @@ use crate::store::Store;
 
 pub async fn run(store: &Store) {
     tracing::info!("Etymology generation worker running");
+    let store = store.clone();
+    match crate::blocking::run_blocking("worker.etymology_generation", move || {
+        let words_to_process = match store.list_words_without_etymology(50) {
+            Ok(w) => w,
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to list words without etymology");
+                return;
+            }
+        };
 
-    let words_to_process = match store.list_words_without_etymology(50) {
-        Ok(w) => w,
-        Err(e) => {
-            tracing::warn!(error = %e, "Failed to list words without etymology");
-            return;
+        for word_val in &words_to_process {
+            let word_id = word_val["id"].as_str().unwrap_or_default();
+            let word_text = word_val["text"].as_str().unwrap_or_default();
+
+            let etymology = serde_json::json!({
+                "word_id": word_id,
+                "word": word_text,
+                "etymology": format!("Auto-generated etymology for '{}'", word_text),
+                "roots": [],
+                "generated": true,
+                "generated_at": chrono::Utc::now().to_rfc3339(),
+            });
+
+            if let Err(e) = store.set_etymology(word_id, &etymology) {
+                tracing::warn!(word_id, error = %e, "Failed to store etymology");
+            }
         }
-    };
 
-    for word_val in &words_to_process {
-        let word_id = word_val["id"].as_str().unwrap_or_default();
-        let word_text = word_val["text"].as_str().unwrap_or_default();
-
-        let etymology = serde_json::json!({
-            "word_id": word_id,
-            "word": word_text,
-            // TODO: 接入 LLM API 生成真实词源，当前为占位文本
-            "etymology": format!("Auto-generated etymology for '{}'", word_text),
-            "roots": [],
-            "generated": true,
-            "generated_at": chrono::Utc::now().to_rfc3339(),
-        });
-
-        if let Err(e) = store.set_etymology(word_id, &etymology) {
-            tracing::warn!(word_id, error = %e, "Failed to store etymology");
-        }
+        tracing::info!(
+            processed = words_to_process.len(),
+            "Etymology generation complete"
+        );
+    })
+    .await
+    {
+        Ok(()) => {}
+        Err(e) => tracing::warn!(error = %e, "Etymology generation task failed"),
     }
-
-    tracing::info!(
-        processed = words_to_process.len(),
-        "Etymology generation complete"
-    );
 }

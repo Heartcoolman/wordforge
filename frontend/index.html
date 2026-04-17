@@ -6,8 +6,6 @@
   <meta name="description" content="智能英语词汇学习平台" />
   <title>英语词汇学习</title>
   <script>
-    // 防止 FOUC：在首次渲染前同步应用主题
-    // "eng_" 前缀与 storage.ts 中的 STORAGE_PREFIX 保持一致，确保读取同一份存储
     (function() {
       var raw = localStorage.getItem('eng_theme');
       var t = null;

@@ -52,7 +52,11 @@ async fn get_settings(
     _admin: AdminAuthUser,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let settings = state.store().get_system_settings()?;
+    let settings = state
+        .run_store_task("admin.settings.get_settings", |store| {
+            store.get_system_settings()
+        })
+        .await??;
     Ok(ok(settings))
 }
 
@@ -62,28 +66,37 @@ async fn update_settings(
     JsonBody(req): JsonBody<UpdateSystemSettings>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     req.validate()?;
+    let maintenance_mode_changed = req.maintenance_mode.is_some();
+    let settings = state
+        .run_store_task(
+            "admin.settings.update_settings",
+            move |store| -> Result<_, AppError> {
+                let mut settings = store.get_system_settings()?;
 
-    let mut settings = state.store().get_system_settings()?;
+                if let Some(v) = req.max_users {
+                    settings.max_users = v;
+                }
+                if let Some(v) = req.registration_enabled {
+                    settings.registration_enabled = v;
+                }
+                if let Some(v) = req.maintenance_mode {
+                    settings.maintenance_mode = v;
+                }
+                if let Some(v) = req.default_daily_words {
+                    settings.default_daily_words = v;
+                }
+                if let Some(ref v) = req.wordbook_center_url {
+                    settings.wordbook_center_url =
+                        if v.is_empty() { None } else { Some(v.clone()) };
+                }
 
-    if let Some(v) = req.max_users {
-        settings.max_users = v;
-    }
-    if let Some(v) = req.registration_enabled {
-        settings.registration_enabled = v;
-    }
-    if let Some(v) = req.maintenance_mode {
-        settings.maintenance_mode = v;
-    }
-    if let Some(v) = req.default_daily_words {
-        settings.default_daily_words = v;
-    }
-    if let Some(ref v) = req.wordbook_center_url {
-        settings.wordbook_center_url = if v.is_empty() { None } else { Some(v.clone()) };
-    }
+                store.save_system_settings(&settings)?;
+                Ok(settings)
+            },
+        )
+        .await??;
 
-    state.store().save_system_settings(&settings)?;
-
-    if req.maintenance_mode.is_some() {
+    if maintenance_mode_changed {
         state.set_maintenance(settings.maintenance_mode);
     }
 
