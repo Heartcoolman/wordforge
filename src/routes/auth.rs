@@ -201,16 +201,19 @@ async fn register(
         user: UserProfile::from(&user),
     };
 
+    let secure = state.config().cookie_secure;
     let mut response = created(payload).into_response();
     set_token_cookie(
         &mut response,
         &access_token,
         state.config().jwt_expires_in_hours * 3600,
+        secure,
     )?;
     set_refresh_token_cookie(
         &mut response,
         &refresh_token,
         state.config().refresh_token_expires_in_hours * 3600,
+        secure,
     )?;
     Ok(response)
 }
@@ -271,16 +274,19 @@ async fn login(
         user: UserProfile::from(&user),
     };
 
+    let secure = state.config().cookie_secure;
     let mut response = ok(payload).into_response();
     set_token_cookie(
         &mut response,
         &access_token,
         state.config().jwt_expires_in_hours * 3600,
+        secure,
     )?;
     set_refresh_token_cookie(
         &mut response,
         &refresh_token,
         state.config().refresh_token_expires_in_hours * 3600,
+        secure,
     )?;
     Ok(response)
 }
@@ -326,6 +332,7 @@ async fn refresh(State(state): State<AppState>, headers: HeaderMap) -> Result<Re
     // Issue a new token pair
     let (access_token, refresh_token) = issue_token_pair(&claims.sub, &state)?;
 
+    let secure = state.config().cookie_secure;
     let mut response = ok(AuthResponse {
         access_token: access_token.clone(),
         user: UserProfile::from(&user),
@@ -335,11 +342,13 @@ async fn refresh(State(state): State<AppState>, headers: HeaderMap) -> Result<Re
         &mut response,
         &access_token,
         state.config().jwt_expires_in_hours * 3600,
+        secure,
     )?;
     set_refresh_token_cookie(
         &mut response,
         &refresh_token,
         state.config().refresh_token_expires_in_hours * 3600,
+        secure,
     )?;
     Ok(response)
 }
@@ -348,7 +357,7 @@ async fn logout(auth_user: AuthUser, State(state): State<AppState>) -> Result<Re
     state.store().delete_user_sessions(&auth_user.user_id)?;
 
     let mut response = ok(serde_json::json!({"loggedOut": true})).into_response();
-    clear_auth_cookies(&mut response)?;
+    clear_auth_cookies(&mut response, state.config().cookie_secure)?;
     Ok(response)
 }
 
@@ -457,9 +466,12 @@ fn set_token_cookie(
     response: &mut Response,
     token: &str,
     max_age_secs: u64,
+    secure: bool,
 ) -> Result<(), AppError> {
-    let cookie =
-        format!("token={token}; Path=/; Max-Age={max_age_secs}; SameSite=None; HttpOnly; Secure");
+    let secure_flag = if secure { "; Secure" } else { "" };
+    let cookie = format!(
+        "token={token}; Path=/; Max-Age={max_age_secs}; SameSite=None; HttpOnly{secure_flag}"
+    );
     append_set_cookie(response, &cookie, "token cookie set failed")?;
     Ok(())
 }
@@ -468,22 +480,26 @@ fn set_refresh_token_cookie(
     response: &mut Response,
     refresh_token: &str,
     max_age_secs: u64,
+    secure: bool,
 ) -> Result<(), AppError> {
-    let cookie =
-        format!("refresh_token={refresh_token}; Path=/; Max-Age={max_age_secs}; SameSite=None; HttpOnly; Secure");
+    let secure_flag = if secure { "; Secure" } else { "" };
+    let cookie = format!(
+        "refresh_token={refresh_token}; Path=/; Max-Age={max_age_secs}; SameSite=None; HttpOnly{secure_flag}"
+    );
     append_set_cookie(response, &cookie, "refresh token cookie set failed")?;
     Ok(())
 }
 
-fn clear_auth_cookies(response: &mut Response) -> Result<(), AppError> {
+fn clear_auth_cookies(response: &mut Response, secure: bool) -> Result<(), AppError> {
+    let secure_flag = if secure { "; Secure" } else { "" };
     append_set_cookie(
         response,
-        "token=; Path=/; Max-Age=0; SameSite=None; HttpOnly; Secure",
+        &format!("token=; Path=/; Max-Age=0; SameSite=None; HttpOnly{secure_flag}"),
         "token cookie clear failed",
     )?;
     append_set_cookie(
         response,
-        "refresh_token=; Path=/; Max-Age=0; SameSite=None; HttpOnly; Secure",
+        &format!("refresh_token=; Path=/; Max-Age=0; SameSite=None; HttpOnly{secure_flag}"),
         "refresh token cookie clear failed",
     )?;
     Ok(())

@@ -24,6 +24,7 @@ pub struct Config {
     pub admin_jwt_expires_in_hours: u64,
     pub cors_origin: String,
     pub trust_proxy: bool,
+    pub cookie_secure: bool,
     pub rate_limit: RateLimitConfig,
     pub auth_rate_limit: AuthRateLimitConfig,
     pub worker: WorkerConfig,
@@ -155,6 +156,7 @@ impl fmt::Debug for Config {
             )
             .field("cors_origin", &self.cors_origin)
             .field("trust_proxy", &self.trust_proxy)
+            .field("cookie_secure", &self.cookie_secure)
             .field("rate_limit", &self.rate_limit)
             .field("auth_rate_limit", &self.auth_rate_limit)
             .field("worker", &self.worker)
@@ -221,6 +223,7 @@ impl Config {
             admin_jwt_expires_in_hours: env_or_parse("ADMIN_JWT_EXPIRES_IN_HOURS", 2_u64),
             cors_origin: env_or("CORS_ORIGIN", "http://localhost:5173"),
             trust_proxy: env_or_bool("TRUST_PROXY", false),
+            cookie_secure: env_or_bool("COOKIE_SECURE", false),
             rate_limit: RateLimitConfig {
                 window_secs: env_or_parse("RATE_LIMIT_WINDOW_SECS", 900_u64),
                 max_requests: env_or_parse("RATE_LIMIT_MAX", 500_u64),
