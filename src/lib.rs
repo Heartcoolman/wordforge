@@ -1,5 +1,6 @@
 pub mod amas;
 pub mod auth;
+pub mod blocking;
 pub mod config;
 pub mod constants;
 pub mod extractors;
