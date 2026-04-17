@@ -57,21 +57,61 @@ async fn list_clients(
             let device_id = entry.key().clone();
             let conns = entry.value();
             let first = conns.first()?;
-            let is_banned = state.store().is_device_banned(&device_id).unwrap_or(false);
             Some(SseLiveEntry {
                 device_id: device_id.clone(),
                 platform: first.platform.clone(),
                 user_id: first.user_id.clone(),
                 connected_secs: first.connected_at.elapsed().as_secs(),
                 connection_count: conns.len(),
-                is_banned,
+                is_banned: false,
                 data_channels: DataChannelStatus::default(),
             })
         })
         .collect();
 
-    // Recently active (last 15 minutes)
-    let recently_active_devices = state.store().get_recently_active_clients(15)?;
+    let live_user_ids: Vec<String> = sse_live.iter().map(|entry| entry.user_id.clone()).collect();
+    let live_device_ids: Vec<String> = sse_live
+        .iter()
+        .map(|entry| entry.device_id.clone())
+        .collect();
+    let (banned_by_device, recently_active_devices, status) = state
+        .run_store_task("admin.clients.list", move |store| -> Result<_, AppError> {
+            let banned_by_device = live_device_ids
+                .iter()
+                .map(|device_id| Ok((device_id.clone(), store.is_device_banned(device_id)?)))
+                .collect::<Result<std::collections::HashMap<String, bool>, crate::store::StoreError>>()?;
+
+            let recently_active_devices = store.get_recently_active_clients(15)?;
+            let user_ids: Vec<String> = live_user_ids
+                .into_iter()
+                .chain(
+                    recently_active_devices
+                        .iter()
+                        .filter_map(|entry| entry.user_id.clone()),
+                )
+                .collect();
+            let device_ids: Vec<String> = live_device_ids
+                .iter()
+                .cloned()
+                .chain(
+                    recently_active_devices
+                        .iter()
+                        .map(|entry| entry.device_id.clone()),
+                )
+                .collect();
+            let status = store.get_data_upload_status(&user_ids, &device_ids)?;
+            Ok((banned_by_device, recently_active_devices, status))
+        })
+        .await??;
+
+    let mut sse_live = sse_live;
+    for entry in &mut sse_live {
+        entry.is_banned = banned_by_device
+            .get(&entry.device_id)
+            .copied()
+            .unwrap_or(false);
+    }
+
     let recently_active: Vec<RecentlyActiveEntry> = recently_active_devices
         .iter()
         .map(|d| RecentlyActiveEntry {
@@ -84,26 +124,6 @@ async fn list_clients(
         })
         .collect();
 
-    // Collect unique user_ids and device_ids for batch data status query
-    let mut user_ids: Vec<String> = sse_live.iter().map(|e| e.user_id.clone()).collect();
-    for e in &recently_active {
-        if let Some(ref uid) = e.user_id {
-            if !user_ids.contains(uid) {
-                user_ids.push(uid.clone());
-            }
-        }
-    }
-    let device_ids: Vec<String> = sse_live
-        .iter()
-        .map(|e| e.device_id.clone())
-        .chain(recently_active.iter().map(|e| e.device_id.clone()))
-        .collect();
-
-    let status = state
-        .store()
-        .get_data_upload_status(&user_ids, &device_ids)?;
-
-    let mut sse_live = sse_live;
     for entry in &mut sse_live {
         let amas = status
             .amas_by_user
@@ -172,19 +192,23 @@ async fn ban_client(
     State(state): State<AppState>,
     body: Option<JsonBody<BanRequest>>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    if !state.store().client_device_exists(&id)? {
-        return Err(AppError::not_found("设备不存在"));
-    }
-
     let reason = body.and_then(|JsonBody(b)| {
         b.reason
             .filter(|r| !r.is_empty())
             .map(|r| r.chars().take(500).collect::<String>())
     });
+    let device_id_for_store = id.clone();
+    let admin_id = admin.admin_id.clone();
 
     state
-        .store()
-        .ban_client_device(&id, &admin.admin_id, reason.as_deref())?;
+        .run_store_task("admin.clients.ban", move |store| -> Result<_, AppError> {
+            if !store.client_device_exists(&device_id_for_store)? {
+                return Err(AppError::not_found("设备不存在"));
+            }
+            store.ban_client_device(&device_id_for_store, &admin_id, reason.as_deref())?;
+            Ok(())
+        })
+        .await??;
 
     // Notify via SSE but keep connection alive for instant unban
     if let Some(conns) = state.active_sse().get(&id) {
@@ -202,10 +226,16 @@ async fn unban_client(
     Path(id): Path<String>,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    if !state.store().client_device_exists(&id)? {
-        return Err(AppError::not_found("设备不存在"));
-    }
-    state.store().unban_client_device(&id)?;
+    let device_id_for_store = id.clone();
+    state
+        .run_store_task("admin.clients.unban", move |store| -> Result<_, AppError> {
+            if !store.client_device_exists(&device_id_for_store)? {
+                return Err(AppError::not_found("设备不存在"));
+            }
+            store.unban_client_device(&device_id_for_store)?;
+            Ok(())
+        })
+        .await??;
 
     // Notify via existing SSE connection for instant unban
     if let Some(conns) = state.active_sse().get(&id) {
@@ -258,15 +288,20 @@ async fn get_telemetry(
     Query(q): Query<TelemetryQuery>,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    if !state.store().client_device_exists(&device_id)? {
-        return Err(AppError::not_found("设备不存在"));
-    }
-
     let limit = q.limit.unwrap_or(50).min(200);
     let offset = q.offset.unwrap_or(0);
     let (records, total) = state
-        .store()
-        .get_telemetry_summaries_by_device(&device_id, limit, offset)?;
+        .run_store_task(
+            "admin.clients.get_telemetry",
+            move |store| -> Result<_, AppError> {
+                if !store.client_device_exists(&device_id)? {
+                    return Err(AppError::not_found("设备不存在"));
+                }
+
+                Ok(store.get_telemetry_summaries_by_device(&device_id, limit, offset)?)
+            },
+        )
+        .await??;
 
     Ok(ok(
         serde_json::json!({ "records": records, "total": total }),

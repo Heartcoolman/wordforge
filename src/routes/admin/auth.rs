@@ -66,7 +66,11 @@ struct AdminProfile {
 async fn auth_status(
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let initialized = state.store().any_admin_exists()?;
+    let initialized = state
+        .run_store_task("admin_auth.status.any_admin_exists", |store| {
+            store.any_admin_exists()
+        })
+        .await??;
     Ok(ok(AuthStatusResponse { initialized }))
 }
 
@@ -81,10 +85,16 @@ async fn setup(
         return Err(AppError::bad_request("ADMIN_WEAK_PASSWORD", msg));
     }
 
+    let password = req.password;
+    let password_hash =
+        crate::blocking::run_blocking("admin_auth.setup.hash_password", move || {
+            hash_password(&password)
+        })
+        .await??;
     let admin = Admin {
         id: uuid::Uuid::new_v4().to_string(),
         email: req.email.trim().to_lowercase(),
-        password_hash: hash_password(&req.password)?,
+        password_hash,
         created_at: Utc::now(),
         updated_at: Utc::now(),
         failed_login_count: 0,
@@ -92,13 +102,20 @@ async fn setup(
     };
 
     // 使用 create_first_admin 在事务内部原子性检查是否已有 admin，防止 TOCTOU
-    state.store().create_first_admin(&admin).map_err(|e| {
-        if matches!(e, crate::store::StoreError::Conflict { .. }) {
-            AppError::conflict("ADMIN_ALREADY_EXISTS", "管理员账户已存在")
-        } else {
-            AppError::from(e)
-        }
-    })?;
+    let admin_for_create = admin.clone();
+    state
+        .run_store_task("admin_auth.setup.create_first_admin", move |store| {
+            store.create_first_admin(&admin_for_create)
+        })
+        .await
+        .map_err(AppError::from)?
+        .map_err(|e| {
+            if matches!(e, crate::store::StoreError::Conflict { .. }) {
+                AppError::conflict("ADMIN_ALREADY_EXISTS", "管理员账户已存在")
+            } else {
+                AppError::from(e)
+            }
+        })?;
 
     let token = sign_jwt_for_admin(
         &admin.id,
@@ -106,15 +123,19 @@ async fn setup(
         state.config().admin_jwt_expires_in_hours,
     )?;
 
-    let token_hash = hash_token(&token);
-    state.store().create_admin_session(&Session {
-        token_hash,
+    let session = Session {
+        token_hash: hash_token(&token),
         user_id: admin.id.clone(),
         token_type: "admin".to_string(),
         created_at: Utc::now(),
         expires_at: Utc::now() + Duration::hours(state.config().admin_jwt_expires_in_hours as i64),
         revoked: false,
-    })?;
+    };
+    state
+        .run_store_task("admin_auth.setup.create_admin_session", move |store| {
+            store.create_admin_session(&session)
+        })
+        .await??;
 
     Ok(created(AdminAuthResponse {
         token,
@@ -129,33 +150,59 @@ async fn login(
     State(state): State<AppState>,
     JsonBody(req): JsonBody<LoginRequest>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let (admin, stored_hash) = match state.store().get_admin_by_email(&req.email)? {
-        Some(admin) => {
-            let hash = admin.password_hash.clone();
-            (Some(admin), hash)
-        }
-        None => (None, generate_dummy_argon2_hash()),
-    };
+    let email = req.email.trim().to_lowercase();
+    let (admin, is_locked) = state
+        .run_store_task(
+            "admin_auth.login.lookup",
+            move |store| -> Result<_, AppError> {
+                let admin = store.get_admin_by_email(&email)?;
+                let is_locked = if let Some(ref admin) = admin {
+                    store.is_admin_account_locked(&admin.id)?
+                } else {
+                    false
+                };
+                Ok((admin, is_locked))
+            },
+        )
+        .await??;
 
     // 检查账户是否因多次登录失败而被锁定
-    if let Some(ref a) = admin {
-        if state.store().is_admin_account_locked(&a.id)? {
-            return Err(AppError::too_many_requests(
-                "账户因多次登录失败已被临时锁定，请稍后再试",
-            ));
-        }
+    if is_locked {
+        return Err(AppError::too_many_requests(
+            "账户因多次登录失败已被临时锁定，请稍后再试",
+        ));
     }
 
-    let verified = verify_password(&req.password, &stored_hash)?;
+    let stored_hash = admin
+        .as_ref()
+        .map(|admin| admin.password_hash.clone())
+        .unwrap_or_else(generate_dummy_argon2_hash);
+    let password = req.password;
+    let verified = crate::blocking::run_blocking("admin_auth.login.verify_password", move || {
+        verify_password(&password, &stored_hash)
+    })
+    .await??;
     if !verified || admin.is_none() {
         // 记录登录失败，可能触发锁定
         if let Some(ref a) = admin {
-            if let Err(e) = state.store().record_admin_failed_login(&a.id) {
-                tracing::error!(
+            let admin_id = a.id.clone();
+            match state
+                .run_store_task("admin_auth.login.record_failed_login", move |store| {
+                    store.record_admin_failed_login(&admin_id)
+                })
+                .await
+            {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => tracing::error!(
                     admin_id = %a.id,
                     error = %e,
                     "记录管理员登录失败次数时出错"
-                );
+                ),
+                Err(e) => tracing::error!(
+                    admin_id = %a.id,
+                    error = %e,
+                    "记录管理员登录失败任务失败"
+                ),
             }
         }
         return Err(AppError::unauthorized("邮箱或密码错误"));
@@ -164,12 +211,24 @@ async fn login(
     let admin = admin.unwrap();
 
     // 登录成功，重置失败计数
-    if let Err(e) = state.store().reset_admin_login_attempts(&admin.id) {
-        tracing::error!(
+    let admin_id = admin.id.clone();
+    match state
+        .run_store_task("admin_auth.login.reset_attempts", move |store| {
+            store.reset_admin_login_attempts(&admin_id)
+        })
+        .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::error!(
             admin_id = %admin.id,
             error = %e,
             "重置管理员登录失败计数时出错"
-        );
+        ),
+        Err(e) => tracing::error!(
+            admin_id = %admin.id,
+            error = %e,
+            "重置管理员登录失败计数任务失败"
+        ),
     }
 
     let token = sign_jwt_for_admin(
@@ -178,15 +237,19 @@ async fn login(
         state.config().admin_jwt_expires_in_hours,
     )?;
 
-    let token_hash = hash_token(&token);
-    state.store().create_admin_session(&Session {
-        token_hash,
+    let session = Session {
+        token_hash: hash_token(&token),
         user_id: admin.id.clone(),
         token_type: "admin".to_string(),
         created_at: Utc::now(),
         expires_at: Utc::now() + Duration::hours(state.config().admin_jwt_expires_in_hours as i64),
         revoked: false,
-    })?;
+    };
+    state
+        .run_store_task("admin_auth.login.create_admin_session", move |store| {
+            store.create_admin_session(&session)
+        })
+        .await??;
 
     Ok(ok(AdminAuthResponse {
         token,
@@ -203,8 +266,10 @@ async fn verify(
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     let admin_record = state
-        .store()
-        .get_admin_by_id(&admin.admin_id)?
+        .run_store_task("admin_auth.verify.get_admin_by_id", move |store| {
+            store.get_admin_by_id(&admin.admin_id)
+        })
+        .await??
         .ok_or_else(|| AppError::unauthorized("管理员不存在"))?;
     Ok(ok(AdminProfile {
         id: admin_record.id,
@@ -219,6 +284,10 @@ async fn logout(
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     let token = extract_token_from_headers(&headers)?;
     let token_hash = hash_token(&token);
-    state.store().delete_admin_session(&token_hash)?;
+    state
+        .run_store_task("admin_auth.logout.delete_admin_session", move |store| {
+            store.delete_admin_session(&token_hash)
+        })
+        .await??;
     Ok(ok(serde_json::json!({"loggedOut": true})))
 }

@@ -26,9 +26,12 @@ async fn get_profile(
     auth: AuthUser,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
+    let user_id = auth.user_id.clone();
     let user = state
-        .store()
-        .get_user_by_id(&auth.user_id)?
+        .run_store_task("users.get_profile", move |store| {
+            store.get_user_by_id(&user_id)
+        })
+        .await??
         .ok_or_else(|| AppError::not_found("用户不存在"))?;
     Ok(ok(UserProfile::from(&user)))
 }
@@ -44,22 +47,41 @@ async fn update_profile(
     State(state): State<AppState>,
     JsonBody(req): JsonBody<UpdateProfileRequest>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let mut user = state
-        .store()
-        .get_user_by_id(&auth.user_id)?
-        .ok_or_else(|| AppError::not_found("用户不存在"))?;
-
     if let Some(username) = req.username {
         let trimmed = username.trim();
         if let Err(msg) = validate_username(trimmed) {
             return Err(AppError::bad_request("USER_INVALID_USERNAME", msg));
         }
-        user.username = trimmed.to_string();
+        let user_id = auth.user_id.clone();
+        let username = trimmed.to_string();
+        let user = state
+            .run_store_task(
+                "users.update_profile",
+                move |store| -> Result<_, AppError> {
+                    let mut user = store
+                        .get_user_by_id(&user_id)?
+                        .ok_or_else(|| AppError::not_found("用户不存在"))?;
+                    user.username = username;
+                    user.updated_at = Utc::now();
+                    store.update_user(&user)?;
+                    Ok(user)
+                },
+            )
+            .await??;
+        return Ok(ok(UserProfile::from(&user)));
     }
 
-    user.updated_at = Utc::now();
-    state.store().update_user(&user)?;
-
+    let user_id = auth.user_id.clone();
+    let user = state
+        .run_store_task(
+            "users.get_profile_passthrough",
+            move |store| -> Result<_, AppError> {
+                store
+                    .get_user_by_id(&user_id)?
+                    .ok_or_else(|| AppError::not_found("用户不存在"))
+            },
+        )
+        .await??;
     Ok(ok(UserProfile::from(&user)))
 }
 
@@ -78,20 +100,26 @@ async fn change_password(
     if let Err(msg) = validate_password(&req.new_password) {
         return Err(AppError::bad_request("AUTH_WEAK_PASSWORD", msg));
     }
+    let store = state.store().clone();
+    let user_id = auth.user_id.clone();
+    let current_password = req.current_password;
+    let new_password = req.new_password;
+    crate::blocking::run_blocking("users.change_password", move || -> Result<(), AppError> {
+        let mut user = store
+            .get_user_by_id(&user_id)?
+            .ok_or_else(|| AppError::not_found("用户不存在"))?;
 
-    let mut user = state
-        .store()
-        .get_user_by_id(&auth.user_id)?
-        .ok_or_else(|| AppError::not_found("用户不存在"))?;
+        if !verify_password(&current_password, &user.password_hash)? {
+            return Err(AppError::unauthorized("当前密码不正确"));
+        }
 
-    if !verify_password(&req.current_password, &user.password_hash)? {
-        return Err(AppError::unauthorized("当前密码不正确"));
-    }
-
-    user.password_hash = hash_password(&req.new_password)?;
-    user.updated_at = Utc::now();
-    state.store().update_user(&user)?;
-    let _ = state.store().delete_user_sessions(&auth.user_id)?;
+        user.password_hash = hash_password(&new_password)?;
+        user.updated_at = Utc::now();
+        store.update_user(&user)?;
+        let _ = store.delete_user_sessions(&user_id)?;
+        Ok(())
+    })
+    .await??;
 
     Ok(ok(serde_json::json!({"passwordChanged": true})))
 }
@@ -110,54 +138,50 @@ async fn get_stats(
     auth: AuthUser,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let agg = state.store().get_user_stats_agg(&auth.user_id)?;
+    let user_id = auth.user_id.clone();
+    let max_records_fetch = state.config().limits.max_records_fetch;
+    let stats = state
+        .run_store_task("users.get_stats", move |store| -> Result<_, AppError> {
+            let agg = store.get_user_stats_agg(&user_id)?;
+            if agg.total_records > 0 {
+                let accuracy_rate = agg.correct_records as f64 / agg.total_records as f64;
+                let records = store.get_user_records(&user_id, max_records_fetch)?;
+                return Ok(UserStats {
+                    total_words_learned: agg.word_ids.len() as u64,
+                    total_sessions: agg.session_ids.len() as u64,
+                    total_records: agg.total_records,
+                    streak_days: compute_streak_days(&records),
+                    accuracy_rate,
+                });
+            }
 
-    if agg.total_records > 0 {
-        // Use pre-aggregated stats
-        let accuracy_rate = agg.correct_records as f64 / agg.total_records as f64;
+            let records = store.get_user_records(&user_id, max_records_fetch)?;
+            let total_records = records.len() as u64;
+            let correct = records.iter().filter(|r| r.is_correct).count() as u64;
+            let accuracy_rate = if total_records == 0 {
+                0.0
+            } else {
+                correct as f64 / total_records as f64
+            };
 
-        // Streak still requires date-based scan (lightweight: just keys, not full deser)
-        let records = state
-            .store()
-            .get_user_records(&auth.user_id, state.config().limits.max_records_fetch)?;
-
-        Ok(ok(UserStats {
-            total_words_learned: agg.word_ids.len() as u64,
-            total_sessions: agg.session_ids.len() as u64,
-            total_records: agg.total_records,
-            streak_days: compute_streak_days(&records),
-            accuracy_rate,
-        }))
-    } else {
-        // Fallback for users without aggregated stats (pre-migration data)
-        let records = state
-            .store()
-            .get_user_records(&auth.user_id, state.config().limits.max_records_fetch)?;
-        let total_records = records.len() as u64;
-        let correct = records.iter().filter(|r| r.is_correct).count() as u64;
-
-        let accuracy_rate = if total_records == 0 {
-            0.0
-        } else {
-            correct as f64 / total_records as f64
-        };
-
-        Ok(ok(UserStats {
-            total_words_learned: records
-                .iter()
-                .map(|r| r.word_id.clone())
-                .collect::<std::collections::HashSet<_>>()
-                .len() as u64,
-            total_sessions: records
-                .iter()
-                .filter_map(|r| r.session_id.clone())
-                .collect::<std::collections::HashSet<_>>()
-                .len() as u64,
-            total_records,
-            streak_days: compute_streak_days(&records),
-            accuracy_rate,
-        }))
-    }
+            Ok(UserStats {
+                total_words_learned: records
+                    .iter()
+                    .map(|r| r.word_id.clone())
+                    .collect::<std::collections::HashSet<_>>()
+                    .len() as u64,
+                total_sessions: records
+                    .iter()
+                    .filter_map(|r| r.session_id.clone())
+                    .collect::<std::collections::HashSet<_>>()
+                    .len() as u64,
+                total_records,
+                streak_days: compute_streak_days(&records),
+                accuracy_rate,
+            })
+        })
+        .await??;
+    Ok(ok(stats))
 }
 
 pub fn compute_streak_days(records: &[LearningRecord]) -> u32 {

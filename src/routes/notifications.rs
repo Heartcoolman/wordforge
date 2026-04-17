@@ -40,8 +40,10 @@ async fn list_notifications(
     let unread_only = q.unread_only.unwrap_or(false);
 
     let notifications = state
-        .store()
-        .list_notifications(&auth.user_id, limit, unread_only)?;
+        .run_store_task("notifications.list", move |store| {
+            store.list_notifications(&auth.user_id, limit, unread_only)
+        })
+        .await??;
 
     Ok(ok(notifications))
 }
@@ -50,7 +52,11 @@ async fn get_unread_count(
     auth: AuthUser,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let unread_count = state.store().count_unread_notifications(&auth.user_id)?;
+    let unread_count = state
+        .run_store_task("notifications.unread_count", move |store| {
+            store.count_unread_notifications(&auth.user_id)
+        })
+        .await??;
     Ok(ok(serde_json::json!({"unreadCount": unread_count})))
 }
 
@@ -59,7 +65,11 @@ async fn mark_read(
     Path(id): Path<String>,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let notification = state.store().mark_notification_read(&auth.user_id, &id)?;
+    let notification = state
+        .run_store_task("notifications.mark_read", move |store| {
+            store.mark_notification_read(&auth.user_id, &id)
+        })
+        .await??;
 
     match notification {
         Some(notification) => Ok(ok(notification)),
@@ -71,7 +81,11 @@ async fn mark_all_read(
     auth: AuthUser,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let count = state.store().mark_all_notifications_read(&auth.user_id)?;
+    let count = state
+        .run_store_task("notifications.mark_all_read", move |store| {
+            store.mark_all_notifications_read(&auth.user_id)
+        })
+        .await??;
 
     Ok(ok(serde_json::json!({"markedRead": count})))
 }
@@ -92,114 +106,119 @@ async fn list_badges(
     auth: AuthUser,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let store = state.store();
+    let max_records_fetch = state.config().limits.max_records_fetch;
+    let user_id = auth.user_id;
+    let badges = state
+        .run_store_task(
+            "notifications.list_badges",
+            move |store| -> Result<_, AppError> {
+                let record_count = store
+                    .count_user_records(&user_id)
+                    .map_err(|e| AppError::internal(&e.to_string()))?;
+                let first_word_unlocked = record_count > 0;
 
-    // first_word: check if user has any learning records
-    let record_count = store
-        .count_user_records(&auth.user_id)
-        .map_err(|e| AppError::internal(&e.to_string()))?;
-    let first_word_unlocked = record_count > 0;
+                let records = store
+                    .get_user_records(&user_id, max_records_fetch)
+                    .map_err(|e| AppError::internal(&e.to_string()))?;
+                let streak = compute_streak_days(&records);
+                let streak_progress = (streak as f64 / 7.0).min(1.0);
+                let streak_unlocked = streak >= 7;
 
-    // streak_7: compute streak days from records
-    let records = store
-        .get_user_records(&auth.user_id, state.config().limits.max_records_fetch)
-        .map_err(|e| AppError::internal(&e.to_string()))?;
-    let streak = compute_streak_days(&records);
-    let streak_progress = (streak as f64 / 7.0).min(1.0);
-    let streak_unlocked = streak >= 7;
+                let word_stats = store
+                    .get_word_state_stats(&user_id)
+                    .map_err(|e| AppError::internal(&e.to_string()))?;
+                let mastered = word_stats.mastered;
+                let mastered_progress = (mastered as f64 / 100.0).min(1.0);
+                let mastered_unlocked = mastered >= 100;
 
-    // mastered_100: count mastered words
-    let word_stats = store
-        .get_word_state_stats(&auth.user_id)
-        .map_err(|e| AppError::internal(&e.to_string()))?;
-    let mastered = word_stats.mastered;
-    let mastered_progress = (mastered as f64 / 100.0).min(1.0);
-    let mastered_unlocked = mastered >= 100;
+                let now = Utc::now();
+                let load_badge = |badge_id: &str| -> Option<StoreBadge> {
+                    store.get_badge(&user_id, badge_id).ok()?
+                };
 
-    let now = Utc::now();
+                let persisted_first = load_badge("first_word");
+                let persisted_streak = load_badge("streak_7");
+                let persisted_mastered = load_badge("mastered_100");
 
-    // Load persisted unlock timestamps
-    let load_badge =
-        |badge_id: &str| -> Option<StoreBadge> { store.get_badge(&auth.user_id, badge_id).ok()? };
+                let make_badge = |id: &str,
+                                  name: &str,
+                                  desc: &str,
+                                  computed_unlocked: bool,
+                                  progress: f64,
+                                  persisted: &Option<StoreBadge>| {
+                    let unlocked =
+                        computed_unlocked || persisted.as_ref().is_some_and(|b| b.unlocked);
+                    let unlocked_at: Option<chrono::DateTime<Utc>> = if unlocked {
+                        persisted
+                            .as_ref()
+                            .and_then(|b| b.unlocked_at.as_deref())
+                            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                            .map(|dt| dt.with_timezone(&Utc))
+                            .or(Some(now))
+                    } else {
+                        None
+                    };
+                    Badge {
+                        id: id.to_string(),
+                        name: name.to_string(),
+                        description: desc.to_string(),
+                        unlocked,
+                        progress: if computed_unlocked {
+                            progress.max(1.0)
+                        } else {
+                            progress
+                        },
+                        unlocked_at,
+                    }
+                };
 
-    let persisted_first = load_badge("first_word");
-    let persisted_streak = load_badge("streak_7");
-    let persisted_mastered = load_badge("mastered_100");
+                let badges = vec![
+                    make_badge(
+                        "first_word",
+                        "First Word",
+                        "Learn your first word",
+                        first_word_unlocked,
+                        if first_word_unlocked { 1.0 } else { 0.0 },
+                        &persisted_first,
+                    ),
+                    make_badge(
+                        "streak_7",
+                        "Week Streak",
+                        "Study for 7 consecutive days",
+                        streak_unlocked,
+                        streak_progress,
+                        &persisted_streak,
+                    ),
+                    make_badge(
+                        "mastered_100",
+                        "Century Club",
+                        "Master 100 words",
+                        mastered_unlocked,
+                        mastered_progress,
+                        &persisted_mastered,
+                    ),
+                ];
 
-    let make_badge = |id: &str,
-                      name: &str,
-                      desc: &str,
-                      computed_unlocked: bool,
-                      progress: f64,
-                      persisted: &Option<StoreBadge>| {
-        let unlocked = computed_unlocked || persisted.as_ref().is_some_and(|b| b.unlocked);
-        let unlocked_at: Option<chrono::DateTime<Utc>> = if unlocked {
-            persisted
-                .as_ref()
-                .and_then(|b| b.unlocked_at.as_deref())
-                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-                .map(|dt| dt.with_timezone(&Utc))
-                .or(Some(now))
-        } else {
-            None
-        };
-        Badge {
-            id: id.to_string(),
-            name: name.to_string(),
-            description: desc.to_string(),
-            unlocked,
-            progress: if computed_unlocked {
-                progress.max(1.0)
-            } else {
-                progress
+                for badge in &badges {
+                    if badge.unlocked {
+                        store
+                            .save_badge(&StoreBadge {
+                                user_id: user_id.clone(),
+                                id: badge.id.clone(),
+                                name: badge.name.clone(),
+                                description: badge.description.clone(),
+                                unlocked: badge.unlocked,
+                                progress: badge.progress,
+                                unlocked_at: badge.unlocked_at.map(|dt| dt.to_rfc3339()),
+                            })
+                            .map_err(|e| AppError::internal(&e.to_string()))?;
+                    }
+                }
+
+                Ok(badges)
             },
-            unlocked_at,
-        }
-    };
-
-    let badges = vec![
-        make_badge(
-            "first_word",
-            "First Word",
-            "Learn your first word",
-            first_word_unlocked,
-            if first_word_unlocked { 1.0 } else { 0.0 },
-            &persisted_first,
-        ),
-        make_badge(
-            "streak_7",
-            "Week Streak",
-            "Study for 7 consecutive days",
-            streak_unlocked,
-            streak_progress,
-            &persisted_streak,
-        ),
-        make_badge(
-            "mastered_100",
-            "Century Club",
-            "Master 100 words",
-            mastered_unlocked,
-            mastered_progress,
-            &persisted_mastered,
-        ),
-    ];
-
-    // Persist newly unlocked badges
-    for badge in &badges {
-        if badge.unlocked {
-            store
-                .save_badge(&StoreBadge {
-                    user_id: auth.user_id.clone(),
-                    id: badge.id.clone(),
-                    name: badge.name.clone(),
-                    description: badge.description.clone(),
-                    unlocked: badge.unlocked,
-                    progress: badge.progress,
-                    unlocked_at: badge.unlocked_at.map(|dt| dt.to_rfc3339()),
-                })
-                .map_err(|e| AppError::internal(&e.to_string()))?;
-        }
-    }
+        )
+        .await??;
 
     Ok(ok(badges))
 }
@@ -264,9 +283,12 @@ async fn get_preferences(
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     let prefs = match state
-        .store()
-        .get_user_preferences(&auth.user_id)
-        .map_err(|e| AppError::internal(&e.to_string()))?
+        .run_store_task("notifications.get_preferences", move |store| {
+            store
+                .get_user_preferences(&auth.user_id)
+                .map_err(|e| AppError::internal(&e.to_string()))
+        })
+        .await??
     {
         Some(val) => UserPreferences {
             theme: val["theme"].as_str().unwrap_or(DEFAULT_THEME).to_string(),
@@ -343,8 +365,11 @@ async fn set_preferences(
         "wordbook_center_url": existing_wbc_url,
     });
     state
-        .store()
-        .set_user_preferences(&auth.user_id, &prefs_val)
-        .map_err(|e| AppError::internal(&e.to_string()))?;
+        .run_store_task("notifications.set_preferences", move |store| {
+            store
+                .set_user_preferences(&auth.user_id, &prefs_val)
+                .map_err(|e| AppError::internal(&e.to_string()))
+        })
+        .await??;
     Ok(ok(prefs))
 }

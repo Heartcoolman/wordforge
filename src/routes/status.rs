@@ -29,6 +29,11 @@ async fn get_device_ban(
     Query(q): Query<DeviceBanQuery>,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let banned = state.store().is_device_banned(&q.device_id)?;
+    let device_id = q.device_id;
+    let banned = state
+        .run_store_task("status.get_device_ban", move |store| {
+            store.is_device_banned(&device_id)
+        })
+        .await??;
     Ok(ok(serde_json::json!({ "banned": banned })))
 }

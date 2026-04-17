@@ -9,7 +9,18 @@ pub async fn run(store: &Store) {
     tracing::debug!("Delayed reward worker tick");
 
     let now_ms = chrono::Utc::now().timestamp_millis().max(0);
-    let evaluated = count_overdue_words(store, now_ms);
+    let store = store.clone();
+    let evaluated = match crate::blocking::run_blocking("worker.delayed_reward", move || {
+        count_overdue_words(&store, now_ms)
+    })
+    .await
+    {
+        Ok(count) => count,
+        Err(e) => {
+            tracing::warn!(error = %e, "Delayed reward task failed");
+            return;
+        }
+    };
 
     if evaluated > 0 {
         tracing::info!(evaluated, "Delayed reward: evaluated overdue words");

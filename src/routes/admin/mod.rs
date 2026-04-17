@@ -103,27 +103,32 @@ async fn list_users(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_ascii_lowercase);
-    let has_filter = search.is_some() || q.banned.is_some();
+    let banned = q.banned;
+    let has_filter = search.is_some() || banned.is_some();
 
-    let (users, total) = if has_filter {
-        let mut all = state.store().list_users(10_000, 0)?;
-        // TODO: Push search/filter to SQL layer for better performance at scale
-        all.retain(|user| {
-            let banned_match = q.banned.map(|v| user.is_banned == v).unwrap_or(true);
-            let search_match = search.as_ref().map_or(true, |needle| {
-                user.username.to_ascii_lowercase().contains(needle)
-                    || user.email.to_ascii_lowercase().contains(needle)
-            });
-            banned_match && search_match
-        });
-        let total = all.len() as u64;
-        let page_slice: Vec<_> = all.into_iter().skip(offset).take(limit).collect();
-        (page_slice, total)
-    } else {
-        let page_slice = state.store().list_users(limit, offset)?;
-        let total = state.store().count_users()? as u64;
-        (page_slice, total)
-    };
+    let (users, total) = state
+        .run_store_task("admin.list_users", move |store| {
+            if has_filter {
+                let mut all = store.list_users(10_000, 0)?;
+                // TODO: Push search/filter to SQL layer for better performance at scale
+                all.retain(|user| {
+                    let banned_match = banned.map(|v| user.is_banned == v).unwrap_or(true);
+                    let search_match = search.as_ref().map_or(true, |needle| {
+                        user.username.to_ascii_lowercase().contains(needle)
+                            || user.email.to_ascii_lowercase().contains(needle)
+                    });
+                    banned_match && search_match
+                });
+                let total = all.len() as u64;
+                let page_slice: Vec<_> = all.into_iter().skip(offset).take(limit).collect();
+                Ok::<_, crate::store::StoreError>((page_slice, total))
+            } else {
+                let page_slice = store.list_users(limit, offset)?;
+                let total = store.count_users()? as u64;
+                Ok((page_slice, total))
+            }
+        })
+        .await??;
 
     let safe_users: Vec<AdminUserView> = users.iter().map(AdminUserView::from).collect();
     Ok(crate::response::paginated(
@@ -136,12 +141,16 @@ async fn ban_user(
     Path(id): Path<String>,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    if state.store().get_user_by_id(&id)?.is_none() {
-        return Err(AppError::not_found("用户不存在"));
-    }
-    state.store().ban_user(&id)?;
-    // 封禁用户后撤销其所有活跃会话，防止已登录用户继续操作
-    let revoked = state.store().delete_user_sessions(&id)?;
+    let user_id_for_store = id.clone();
+    let revoked = state
+        .run_store_task("admin.ban_user", move |store| -> Result<_, AppError> {
+            if store.get_user_by_id(&user_id_for_store)?.is_none() {
+                return Err(AppError::not_found("用户不存在"));
+            }
+            store.ban_user(&user_id_for_store)?;
+            Ok(store.delete_user_sessions(&user_id_for_store)?)
+        })
+        .await??;
     tracing::info!(
         admin_id = %admin.admin_id,
         action = "ban_user",
@@ -159,10 +168,16 @@ async fn unban_user(
     Path(id): Path<String>,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    if state.store().get_user_by_id(&id)?.is_none() {
-        return Err(AppError::not_found("用户不存在"));
-    }
-    state.store().unban_user(&id)?;
+    let user_id_for_store = id.clone();
+    state
+        .run_store_task("admin.unban_user", move |store| -> Result<_, AppError> {
+            if store.get_user_by_id(&user_id_for_store)?.is_none() {
+                return Err(AppError::not_found("用户不存在"));
+            }
+            store.unban_user(&user_id_for_store)?;
+            Ok(())
+        })
+        .await??;
     tracing::info!(
         admin_id = %admin.admin_id,
         action = "unban_user",
@@ -176,10 +191,6 @@ async fn admin_stats(
     _admin: AdminAuthUser,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let user_count = state.store().count_users()?;
-    let word_count = state.store().count_words()?;
-    let record_count = state.store().count_all_records()?;
-
     let today_str = chrono::Utc::now()
         .date_naive()
         .format("%Y-%m-%d")
@@ -187,13 +198,27 @@ async fn admin_stats(
     let yesterday_str = (chrono::Utc::now().date_naive() - chrono::Duration::days(1))
         .format("%Y-%m-%d")
         .to_string();
-
-    let users_today = state.store().count_users_registered_on_date(&today_str)?;
-    let users_yesterday = state
-        .store()
-        .count_users_registered_on_date(&yesterday_str)?;
-    let records_today = state.store().count_records_on_date(&today_str)?;
-    let records_yesterday = state.store().count_records_on_date(&yesterday_str)?;
+    let (
+        user_count,
+        word_count,
+        record_count,
+        users_today,
+        users_yesterday,
+        records_today,
+        records_yesterday,
+    ) = state
+        .run_store_task("admin.stats", move |store| {
+            Ok::<_, crate::store::StoreError>((
+                store.count_users()?,
+                store.count_words()?,
+                store.count_all_records()?,
+                store.count_users_registered_on_date(&today_str)?,
+                store.count_users_registered_on_date(&yesterday_str)?,
+                store.count_records_on_date(&today_str)?,
+                store.count_records_on_date(&yesterday_str)?,
+            ))
+        })
+        .await??;
 
     let calc_trend = |today: usize, yesterday: usize| -> i64 {
         if yesterday == 0 {
@@ -218,19 +243,26 @@ async fn admin_reset_user_password(
     Path(id): Path<String>,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    if state.store().get_user_by_id(&id)?.is_none() {
-        return Err(AppError::not_found("用户不存在"));
-    }
-
     let raw_token = uuid::Uuid::new_v4().simple().to_string();
     let token_hash = hash_token(&raw_token);
 
     let expires_at = (chrono::Utc::now() + chrono::Duration::hours(4)).to_rfc3339();
+    let user_id_for_store = id.clone();
 
     state
-        .store()
-        .create_password_reset_token(&token_hash, &id, &expires_at)
-        .map_err(|e| AppError::internal(&e.to_string()))?;
+        .run_store_task(
+            "admin.reset_user_password",
+            move |store| -> Result<_, AppError> {
+                if store.get_user_by_id(&user_id_for_store)?.is_none() {
+                    return Err(AppError::not_found("用户不存在"));
+                }
+                store
+                    .create_password_reset_token(&token_hash, &user_id_for_store, &expires_at)
+                    .map_err(|e| AppError::internal(&e.to_string()))?;
+                Ok(())
+            },
+        )
+        .await??;
 
     tracing::info!(
         admin_id = %admin.admin_id,
@@ -263,16 +295,21 @@ async fn admin_set_user_password(
         return Err(AppError::bad_request("AUTH_WEAK_PASSWORD", msg));
     }
 
-    let mut user = state
-        .store()
-        .get_user_by_id(&id)?
-        .ok_or_else(|| AppError::not_found("用户不存在"))?;
+    let store = state.store().clone();
+    let user_id_for_store = id.clone();
+    let revoked =
+        crate::blocking::run_blocking("admin.set_user_password", move || -> Result<_, AppError> {
+            let mut user = store
+                .get_user_by_id(&user_id_for_store)?
+                .ok_or_else(|| AppError::not_found("用户不存在"))?;
 
-    user.password_hash = hash_password(&req.new_password)?;
-    user.updated_at = chrono::Utc::now();
-    state.store().update_user(&user)?;
+            user.password_hash = hash_password(&req.new_password)?;
+            user.updated_at = chrono::Utc::now();
+            store.update_user(&user)?;
 
-    let revoked = state.store().delete_user_sessions(&id)?;
+            Ok(store.delete_user_sessions(&user_id_for_store)?)
+        })
+        .await??;
 
     tracing::info!(
         admin_id = %admin.admin_id,

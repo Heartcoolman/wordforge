@@ -4,21 +4,28 @@ use crate::store::Store;
 
 pub async fn run(store: &Store) {
     tracing::debug!("Embedding generation worker tick");
+    let store = store.clone();
+    match crate::blocking::run_blocking("worker.embedding_generation", move || {
+        let words = match store.get_words_without_embedding(20) {
+            Ok(w) => w,
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to get words without embeddings");
+                return;
+            }
+        };
 
-    let words = match store.get_words_without_embedding(20) {
-        Ok(w) => w,
-        Err(e) => {
-            tracing::warn!(error = %e, "Failed to get words without embeddings");
+        if words.is_empty() {
             return;
         }
-    };
 
-    if words.is_empty() {
-        return;
+        tracing::info!(
+            count = words.len(),
+            "Found words without embeddings (embedding service integration pending)"
+        );
+    })
+    .await
+    {
+        Ok(()) => {}
+        Err(e) => tracing::warn!(error = %e, "Embedding generation task failed"),
     }
-
-    tracing::info!(
-        count = words.len(),
-        "Found words without embeddings (embedding service integration pending)"
-    );
 }

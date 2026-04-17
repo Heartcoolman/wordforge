@@ -6,7 +6,6 @@ use crate::amas::types::*;
 use super::mdm::MdmState;
 use super::ssp::SspPolicy;
 
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WordMasteryState {
     pub word_id: String,
@@ -79,7 +78,8 @@ pub fn update_mastery_at(
         state.correct_streak = 0;
     }
 
-    let base_alpha = (interval_scale * config.alpha_scale).clamp(config.alpha_min, config.alpha_max);
+    let base_alpha =
+        (interval_scale * config.alpha_scale).clamp(config.alpha_min, config.alpha_max);
     let streak_bonus = 1.0 + (state.correct_streak.min(5) as f64) * 0.1;
     let alpha = (base_alpha * streak_bonus).clamp(config.alpha_min, config.alpha_max);
 
@@ -97,7 +97,8 @@ pub fn update_mastery_at(
     let recall = super::mdm::recall_probability(&state.mdm, now, config);
     let interval = if let Some(policy) = ssp_policy {
         let optimal_days = policy.optimal_interval(state.mdm.stability, state.mdm.difficulty);
-        let secs = (optimal_days * 86400.0 * interval_scale).min(config.max_interval_days * 86400.0) as i64;
+        let secs = (optimal_days * 86400.0 * interval_scale).min(config.max_interval_days * 86400.0)
+            as i64;
         secs.max(config.min_interval_secs)
     } else {
         super::mdm::compute_interval(&state.mdm, desired_retention, interval_scale, config)

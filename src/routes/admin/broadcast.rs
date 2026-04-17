@@ -70,9 +70,15 @@ async fn broadcast_message(
     let batch_size = 100;
     let mut offset = 0;
     let mut total_sent = 0usize;
+    let title = req.title;
+    let message = req.message;
 
     loop {
-        let users = state.store().list_users(batch_size, offset)?;
+        let users = state
+            .run_store_task("admin.broadcast.load_users", move |store| {
+                store.list_users(batch_size, offset)
+            })
+            .await??;
         if users.is_empty() {
             break;
         }
@@ -85,8 +91,8 @@ async fn broadcast_message(
                     "id": notification_id,
                     "userId": user.id,
                     "type": "broadcast",
-                    "title": req.title,
-                    "message": req.message,
+                    "title": title,
+                    "message": message,
                     "read": false,
                     "createdAt": Utc::now().to_rfc3339(),
                 });
@@ -96,9 +102,12 @@ async fn broadcast_message(
 
         total_sent += entries.len();
         state
-            .store()
-            .batch_create_notifications(&entries)
-            .map_err(|e| AppError::internal(&e.to_string()))?;
+            .run_store_task("admin.broadcast.persist", move |store| {
+                store
+                    .batch_create_notifications(&entries)
+                    .map_err(|e| AppError::internal(&e.to_string()))
+            })
+            .await??;
 
         offset += users.len();
         tracing::info!("广播进度: 已发送 {} 条通知", total_sent);

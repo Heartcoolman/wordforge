@@ -4,30 +4,36 @@ use crate::store::Store;
 
 pub async fn run(store: &Store) {
     tracing::debug!("Log export worker tick");
+    let store = store.clone();
+    match crate::blocking::run_blocking("worker.log_export", move || {
+        let events = match store.get_recent_monitoring_events(100) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to get monitoring events for export");
+                return;
+            }
+        };
 
-    // Export recent monitoring events to metrics daily
-    let events = match store.get_recent_monitoring_events(100) {
-        Ok(e) => e,
-        Err(e) => {
-            tracing::warn!(error = %e, "Failed to get monitoring events for export");
+        if events.is_empty() {
             return;
         }
-    };
 
-    if events.is_empty() {
-        return;
+        let date = chrono::Utc::now().format("%Y-%m-%d-%H").to_string();
+        let export = serde_json::json!({
+            "exportDate": date,
+            "eventCount": events.len(),
+            "exported": true,
+        });
+
+        if let Err(e) = store.upsert_metrics_daily(&date, "log_export", &export) {
+            tracing::warn!(error = %e, "Failed to store log export metrics");
+        }
+
+        tracing::debug!(count = events.len(), "Log export complete");
+    })
+    .await
+    {
+        Ok(()) => {}
+        Err(e) => tracing::warn!(error = %e, "Log export task failed"),
     }
-
-    let date = chrono::Utc::now().format("%Y-%m-%d-%H").to_string();
-    let export = serde_json::json!({
-        "exportDate": date,
-        "eventCount": events.len(),
-        "exported": true,
-    });
-
-    if let Err(e) = store.upsert_metrics_daily(&date, "log_export", &export) {
-        tracing::warn!(error = %e, "Failed to store log export metrics");
-    }
-
-    tracing::debug!(count = events.len(), "Log export complete");
 }

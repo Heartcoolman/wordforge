@@ -21,7 +21,7 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
 
-const CSP_HEADER: &str = "default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; connect-src 'self' https: capacitor: ionic:; img-src 'self' data: blob:; worker-src 'self' blob:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
+const CSP_HEADER: &str = "default-src 'self'; script-src 'self' 'sha256-wEjozNdwHz/9ujnOuYJi4PZ89BSuTa/abtYO9C7bcNw='; style-src 'self'; font-src 'self'; connect-src 'self' https: capacitor: ionic:; img-src 'self' data: blob:; worker-src 'self' blob:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
 const HSTS_HEADER: &str = "max-age=31536000; includeSubDomains";
 
 #[tokio::main]
@@ -69,7 +69,9 @@ async fn main() {
                     tracing::info!(path = %default_path, "从默认路径加载 AMAS 配置");
                     amas_config = cfg;
                 }
-                Err(e) => tracing::warn!(path = %default_path, error = %e, "加载默认 TOML 配置失败，使用内置默认值"),
+                Err(e) => {
+                    tracing::warn!(path = %default_path, error = %e, "加载默认 TOML 配置失败，使用内置默认值")
+                }
             }
         } else if let Err(e) = amas_config.write_to_toml(default_path) {
             tracing::warn!(error = %e, "写出默认 TOML 配置失败");
@@ -93,7 +95,9 @@ async fn main() {
     );
 
     {
-        let watch_path = config.amas_config_file.clone()
+        let watch_path = config
+            .amas_config_file
+            .clone()
             .unwrap_or_else(|| "amas_config.toml".to_string());
         tokio::spawn(learning_backend::workers::config_watcher::run(
             watch_path,

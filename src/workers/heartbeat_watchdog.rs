@@ -9,14 +9,14 @@ pub async fn run(state: AppState, mut shutdown_rx: broadcast::Receiver<()>) {
     loop {
         tokio::select! {
             _ = interval.tick() => {
-                scan(&state);
+                scan(&state).await;
             }
             _ = shutdown_rx.recv() => break,
         }
     }
 }
 
-fn scan(state: &AppState) {
+async fn scan(state: &AppState) {
     let device_ids: Vec<String> = state.active_sse().iter().map(|e| e.key().clone()).collect();
 
     for device_id in device_ids {
@@ -31,7 +31,25 @@ fn scan(state: &AppState) {
             continue;
         }
 
-        if state.store().is_device_banned(&device_id).unwrap_or(false) {
+        let is_banned = match state
+            .run_store_task("worker.heartbeat_watchdog.is_device_banned", {
+                let device_id = device_id.clone();
+                move |store| store.is_device_banned(&device_id)
+            })
+            .await
+        {
+            Ok(Ok(value)) => value,
+            Ok(Err(e)) => {
+                tracing::warn!(device_id = %device_id, error = %e, "Heartbeat watchdog ban check failed");
+                false
+            }
+            Err(e) => {
+                tracing::warn!(device_id = %device_id, error = %e, "Heartbeat watchdog ban check task failed");
+                false
+            }
+        };
+
+        if is_banned {
             continue;
         }
 

@@ -76,16 +76,27 @@ async fn submit_telemetry(
 
     let summary = extract_summary(&body.payload);
 
-    state.store().insert_telemetry_and_summary(
-        &id,
-        device_id,
-        &auth.user_id,
-        &body.event_type,
-        body.request_id.as_deref(),
-        &payload_json,
-        &body.client_ts,
-        &summary,
-    )?;
+    let insert_id = id.clone();
+    let device_id = device_id.to_string();
+    let device_id_for_store = device_id.clone();
+    let user_id = auth.user_id.clone();
+    let event_type = body.event_type;
+    let request_id = body.request_id;
+    let client_ts = body.client_ts;
+    state
+        .run_store_task("telemetry.submit", move |store| {
+            store.insert_telemetry_and_summary(
+                &insert_id,
+                &device_id_for_store,
+                &user_id,
+                &event_type,
+                request_id.as_deref(),
+                &payload_json,
+                &client_ts,
+                &summary,
+            )
+        })
+        .await??;
 
     state
         .last_heartbeat()

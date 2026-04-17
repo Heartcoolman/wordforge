@@ -28,67 +28,70 @@ async fn get_etymology(
     Path(word_id): Path<String>,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    // Check cache first
-    if let Some(cached) = state.store().get_etymology(&word_id)? {
-        let is_pending_llm = cached
-            .get("status")
-            .and_then(|status| status.as_str())
-            .map(|status| status == "pending_llm")
-            .unwrap_or(false);
+    let etymology = state
+        .run_store_task(
+            "content.get_etymology",
+            move |store| -> Result<_, AppError> {
+                if let Some(cached) = store.get_etymology(&word_id)? {
+                    let is_pending_llm = cached
+                        .get("status")
+                        .and_then(|status| status.as_str())
+                        .map(|status| status == "pending_llm")
+                        .unwrap_or(false);
 
-        if !is_pending_llm {
-            return Ok(ok(cached));
-        }
+                    if !is_pending_llm {
+                        return Ok(cached);
+                    }
 
-        state.store().delete_etymology(&word_id)?;
-    }
+                    store.delete_etymology(&word_id)?;
+                }
 
-    // Look up the word
-    let word = state
-        .store()
-        .get_word(&word_id)?
-        .ok_or_else(|| AppError::not_found("单词不存在"))?;
+                let word = store
+                    .get_word(&word_id)?
+                    .ok_or_else(|| AppError::not_found("单词不存在"))?;
 
-    // 优先读取词素缓存，生成可用的规则化词源说明，避免返回 pending 占位信息。
-    let roots = match state.store().get_word_morphemes(&word_id)? {
-        Some(serde_json::Value::Array(arr)) => arr
-            .iter()
-            .filter_map(|item| item.get("text").and_then(|t| t.as_str()))
-            .map(|s| s.to_string())
-            .filter(|s| !s.trim().is_empty())
-            .collect::<Vec<String>>(),
-        _ => Vec::new(),
-    };
+                let roots = match store.get_word_morphemes(&word_id)? {
+                    Some(serde_json::Value::Array(arr)) => arr
+                        .iter()
+                        .filter_map(|item| item.get("text").and_then(|t| t.as_str()))
+                        .map(|s| s.to_string())
+                        .filter(|s| !s.trim().is_empty())
+                        .collect::<Vec<String>>(),
+                    _ => Vec::new(),
+                };
 
-    let etymology_text = if !roots.is_empty() {
-        format!(
-            "'{}' 可拆分为 {}。该解释基于词素规则推断，后续可由 LLM 结果覆盖。",
-            word.text,
-            roots.join(" + ")
+                let etymology_text = if !roots.is_empty() {
+                    format!(
+                        "'{}' 可拆分为 {}。该解释基于词素规则推断，后续可由 LLM 结果覆盖。",
+                        word.text,
+                        roots.join(" + ")
+                    )
+                } else if !word.examples.is_empty() {
+                    format!(
+                        "'{}' 当前缺少词素拆分，已使用词条示例生成基础词源说明（非 LLM）。",
+                        word.text
+                    )
+                } else {
+                    format!(
+                        "'{}' 当前暂无可用词素数据，已返回基础词源说明（非 LLM）。",
+                        word.text
+                    )
+                };
+
+                let etymology = serde_json::json!({
+                    "wordId": word_id,
+                    "word": word.text,
+                    "etymology": etymology_text,
+                    "roots": roots,
+                    "generated": false,
+                    "source": "rule_based_fallback",
+                });
+
+                store.set_etymology(&word_id, &etymology)?;
+                Ok(etymology)
+            },
         )
-    } else if !word.examples.is_empty() {
-        format!(
-            "'{}' 当前缺少词素拆分，已使用词条示例生成基础词源说明（非 LLM）。",
-            word.text
-        )
-    } else {
-        format!(
-            "'{}' 当前暂无可用词素数据，已返回基础词源说明（非 LLM）。",
-            word.text
-        )
-    };
-
-    let etymology = serde_json::json!({
-        "wordId": word_id,
-        "word": word.text,
-        "etymology": etymology_text,
-        "roots": roots,
-        "generated": false,
-        "source": "rule_based_fallback",
-    });
-
-    state.store().set_etymology(&word_id, &etymology)?;
-
+        .await??;
     Ok(ok(etymology))
 }
 
@@ -105,14 +108,17 @@ async fn semantic_search(
     Query(q): Query<SemanticSearchQuery>,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let query = q.query.trim();
+    let query = q.query.trim().to_string();
     if query.is_empty() {
         return Err(AppError::bad_request("INVALID_QUERY", "搜索内容不能为空"));
     }
     let limit = q.limit.unwrap_or(10).clamp(1, 50);
-
-    // TODO: 接入向量数据库实现真正的语义搜索，当前 fallback 到文本匹配
-    let (items, total) = state.store().search_words(query, limit, 0)?;
+    let query_for_search = query.clone();
+    let (items, total) = state
+        .run_store_task("content.semantic_search", move |store| {
+            store.search_words(&query_for_search, limit, 0)
+        })
+        .await??;
     let items: Vec<WordPublic> = items.iter().map(WordPublic::from).collect();
 
     Ok(ok(serde_json::json!({
@@ -130,9 +136,12 @@ async fn get_word_contexts(
     Path(word_id): Path<String>,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
+    let lookup_word_id = word_id.clone();
     let word = state
-        .store()
-        .get_word(&word_id)?
+        .run_store_task("content.get_word_contexts", move |store| {
+            store.get_word(&lookup_word_id)
+        })
+        .await??
         .ok_or_else(|| AppError::not_found("单词不存在"))?;
 
     // 从 word.examples 生成基本上下文数据
@@ -179,7 +188,13 @@ async fn get_morphemes(
     Path(word_id): Path<String>,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let morphemes = match state.store().get_word_morphemes(&word_id)? {
+    let lookup_word_id = word_id.clone();
+    let morphemes = match state
+        .run_store_task("content.get_morphemes", move |store| {
+            store.get_word_morphemes(&lookup_word_id)
+        })
+        .await??
+    {
         Some(serde_json::Value::Array(arr)) => {
             let items: Vec<Morpheme> = arr
                 .iter()
@@ -215,9 +230,12 @@ async fn set_morphemes(
         .iter()
         .map(|m| serde_json::to_value(m).unwrap_or_default())
         .collect();
+    let word_id_for_update = word_id.clone();
     state
-        .store()
-        .set_word_morphemes(&word_id, &morphemes_json)?;
+        .run_store_task("content.set_morphemes", move |store| {
+            store.set_word_morphemes(&word_id_for_update, &morphemes_json)
+        })
+        .await??;
     let data = WordMorphemes {
         word_id,
         morphemes: req.morphemes,
@@ -248,24 +266,30 @@ async fn get_confusion_pairs(
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     let limit = q.limit.unwrap_or(20).clamp(1, MAX_CONFUSION_PAIRS);
-
-    let raw_pairs = state
-        .store()
-        .get_confusion_pairs_for_word(&word_id, limit)?;
-    let mut pairs = Vec::new();
-    for (other_word_id, score) in raw_pairs {
-        if let Some(word) = state.store().get_word(&other_word_id)? {
-            pairs.push(ConfusionPair {
-                word_id: other_word_id,
-                word: word.text.clone(),
-                meaning: word.meaning.clone(),
-                similarity: score.clamp(0.0, 1.0),
-            });
-        }
-    }
+    let response_word_id = word_id.clone();
+    let pairs = state
+        .run_store_task(
+            "content.get_confusion_pairs",
+            move |store| -> Result<_, AppError> {
+                let raw_pairs = store.get_confusion_pairs_for_word(&word_id, limit)?;
+                let mut pairs = Vec::new();
+                for (other_word_id, score) in raw_pairs {
+                    if let Some(word) = store.get_word(&other_word_id)? {
+                        pairs.push(ConfusionPair {
+                            word_id: other_word_id,
+                            word: word.text.clone(),
+                            meaning: word.meaning.clone(),
+                            similarity: score.clamp(0.0, 1.0),
+                        });
+                    }
+                }
+                Ok(pairs)
+            },
+        )
+        .await??;
 
     Ok(ok(serde_json::json!({
-        "wordId": word_id,
+        "wordId": response_word_id,
         "confusionPairs": pairs,
     })))
 }

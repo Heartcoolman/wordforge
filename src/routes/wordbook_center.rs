@@ -249,7 +249,7 @@ fn map_remote_word(rw: &RemoteWord, remote_id: &str) -> Word {
 }
 
 fn import_words_to_store(
-    state: &AppState,
+    store: &crate::store::Store,
     wordbook_id: &str,
     remote_id: &str,
     words: &[RemoteWord],
@@ -263,8 +263,8 @@ fn import_words_to_store(
         }
         let word = map_remote_word(rw, remote_id);
         let word_id = word.id.clone();
-        if state.store().upsert_word(&word).is_ok() {
-            let _ = state.store().add_word_to_wordbook(wordbook_id, &word_id);
+        if store.upsert_word(&word).is_ok() {
+            let _ = store.add_word_to_wordbook(wordbook_id, &word_id);
             imported += 1;
         } else {
             skipped += 1;
@@ -273,16 +273,15 @@ fn import_words_to_store(
     Ok((imported, skipped))
 }
 
-async fn do_import(
-    state: &AppState,
-    base_url: &str,
-    remote_id: &str,
+fn persist_remote_wordbook_import(
+    store: &crate::store::Store,
+    source_url: &str,
+    remote: RemoteWordbook,
     book_type: WordbookType,
     user_id: Option<String>,
 ) -> Result<serde_json::Value, AppError> {
-    if state
-        .store()
-        .get_wb_center_import(base_url, remote_id)?
+    if store
+        .get_wb_center_import(source_url, &remote.id)?
         .is_some()
     {
         return Err(AppError::conflict(
@@ -290,9 +289,6 @@ async fn do_import(
             "该词书已被导入",
         ));
     }
-
-    let remote: RemoteWordbook =
-        fetch_remote_json(base_url, &format!("wordbooks/{}.json", remote_id)).await?;
 
     let wordbook_id = uuid::Uuid::new_v4().to_string();
     let book = Wordbook {
@@ -304,43 +300,29 @@ async fn do_import(
         word_count: 0,
         created_at: Utc::now(),
     };
-    state.store().upsert_wordbook(&book)?;
+    store.upsert_wordbook(&book)?;
 
     let (imported, skipped) =
-        import_words_to_store(state, &wordbook_id, &remote.id, &remote.words)?;
+        import_words_to_store(store, &wordbook_id, &remote.id, &remote.words)?;
 
-    if let Some(mut wb) = state.store().get_wordbook(&wordbook_id)? {
+    if let Some(mut wb) = store.get_wordbook(&wordbook_id)? {
         wb.word_count = imported;
-        state.store().upsert_wordbook(&wb)?;
+        store.upsert_wordbook(&wb)?;
     }
 
     let import_record = WordbookCenterImport {
         remote_id: remote.id.clone(),
         local_wordbook_id: wordbook_id.clone(),
-        source_url: base_url.to_string(),
-        version: remote.version.clone(),
+        source_url: source_url.to_string(),
+        version: remote.version,
         user_id,
         imported_at: Utc::now(),
         updated_at: Utc::now(),
         word_count: imported,
     };
-    state.store().upsert_wb_center_import(&import_record)?;
+    store.upsert_wb_center_import(&import_record)?;
 
-    // Fire-and-forget download counter
-    let counter_url = format!(
-        "{}/wordbooks/{}/download",
-        base_url.trim_end_matches('/'),
-        remote.id
-    );
-    tokio::spawn(async move {
-        let _ = reqwest::Client::new()
-            .post(&counter_url)
-            .timeout(std::time::Duration::from_secs(5))
-            .send()
-            .await;
-    });
-
-    let wb = state.store().get_wordbook(&wordbook_id)?;
+    let wb = store.get_wordbook(&wordbook_id)?;
     Ok(serde_json::json!({
         "wordbook": wb,
         "wordsImported": imported,
@@ -348,22 +330,15 @@ async fn do_import(
     }))
 }
 
-async fn do_sync(
-    state: &AppState,
-    base_url: &str,
+fn sync_remote_wordbook_import(
+    store: &crate::store::Store,
     import_record: &WordbookCenterImport,
+    remote: RemoteWordbook,
 ) -> Result<serde_json::Value, AppError> {
-    let remote: RemoteWordbook = fetch_remote_json(
-        base_url,
-        &format!("wordbooks/{}.json", import_record.remote_id),
-    )
-    .await?;
-
     let wb_id = import_record.local_wordbook_id.clone();
 
-    // Build local word index: text -> Word
-    let local_word_ids = state.store().list_wordbook_words(&wb_id, 100_000, 0)?;
-    let local_words = state.store().get_words_by_ids(&local_word_ids)?;
+    let local_word_ids = store.list_wordbook_words(&wb_id, 100_000, 0)?;
+    let local_words = store.get_words_by_ids(&local_word_ids)?;
     let mut text_to_word: HashMap<String, Word> = HashMap::new();
     for w in local_words.values() {
         text_to_word.insert(w.text.to_lowercase(), w.clone());
@@ -388,47 +363,98 @@ async fn do_sync(
                 let mut w = existing.clone();
                 w.meaning = new_meaning;
                 w.pronunciation = rw.phonetic.clone();
-                let _ = state.store().upsert_word(&w);
+                let _ = store.upsert_word(&w);
                 words_updated += 1;
             }
         } else {
             let word = map_remote_word(rw, &import_record.remote_id);
             let word_id = word.id.clone();
-            if state.store().upsert_word(&word).is_ok() {
-                let _ = state.store().add_word_to_wordbook(&wb_id, &word_id);
+            if store.upsert_word(&word).is_ok() {
+                let _ = store.add_word_to_wordbook(&wb_id, &word_id);
                 words_added += 1;
             }
         }
     }
 
-    // Remove words no longer in remote
     let mut words_removed = 0u64;
     for (text_lower, word) in &text_to_word {
         if !remote_texts.contains(text_lower) {
-            let _ = state.store().remove_word_from_wordbook(&wb_id, &word.id);
+            let _ = store.remove_word_from_wordbook(&wb_id, &word.id);
             words_removed += 1;
         }
     }
 
-    // Update import record
     let mut updated_import = import_record.clone();
     updated_import.version = remote.version;
     updated_import.updated_at = Utc::now();
-    updated_import.word_count = state.store().count_wordbook_words(&wb_id)?;
-    state.store().upsert_wb_center_import(&updated_import)?;
+    updated_import.word_count = store.count_wordbook_words(&wb_id)?;
+    store.upsert_wb_center_import(&updated_import)?;
 
-    if let Some(mut wb) = state.store().get_wordbook(&wb_id)? {
+    if let Some(mut wb) = store.get_wordbook(&wb_id)? {
         wb.word_count = updated_import.word_count;
-        state.store().upsert_wordbook(&wb)?;
+        store.upsert_wordbook(&wb)?;
     }
 
-    let wb = state.store().get_wordbook(&wb_id)?;
+    let wb = store.get_wordbook(&wb_id)?;
     Ok(serde_json::json!({
         "wordbook": wb,
         "wordsAdded": words_added,
         "wordsUpdated": words_updated,
         "wordsRemoved": words_removed,
     }))
+}
+
+async fn do_import(
+    state: &AppState,
+    base_url: &str,
+    remote_id: &str,
+    book_type: WordbookType,
+    user_id: Option<String>,
+) -> Result<serde_json::Value, AppError> {
+    let remote: RemoteWordbook =
+        fetch_remote_json(base_url, &format!("wordbooks/{}.json", remote_id)).await?;
+    let downloaded_remote_id = remote.id.clone();
+    let source_url = base_url.to_string();
+    let store = state.store().clone();
+
+    let result = crate::blocking::run_blocking("wordbook_center.import", move || {
+        persist_remote_wordbook_import(&store, &source_url, remote, book_type, user_id)
+    })
+    .await??;
+
+    // Fire-and-forget download counter
+    let counter_url = format!(
+        "{}/wordbooks/{}/download",
+        base_url.trim_end_matches('/'),
+        downloaded_remote_id
+    );
+    tokio::spawn(async move {
+        let _ = reqwest::Client::new()
+            .post(&counter_url)
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .await;
+    });
+
+    Ok(result)
+}
+
+async fn do_sync(
+    state: &AppState,
+    base_url: &str,
+    import_record: &WordbookCenterImport,
+) -> Result<serde_json::Value, AppError> {
+    let remote: RemoteWordbook = fetch_remote_json(
+        base_url,
+        &format!("wordbooks/{}.json", import_record.remote_id),
+    )
+    .await?;
+    let store = state.store().clone();
+    let import_record = import_record.clone();
+    crate::blocking::run_blocking("wordbook_center.sync", move || {
+        sync_remote_wordbook_import(&store, &import_record, remote)
+    })
+    .await?
 }
 
 fn paginated_words(
@@ -462,13 +488,22 @@ async fn admin_browse(
     _admin: AdminAuthUser,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let settings = state.store().get_system_settings()?;
+    let settings = state
+        .run_store_task("wordbook_center.admin_browse.settings", |store| {
+            store.get_system_settings()
+        })
+        .await??;
     let base_url = settings
         .wordbook_center_url
         .ok_or_else(|| AppError::bad_request("WB_CENTER_NOT_CONFIGURED", "词书中心URL未配置"))?;
 
     let catalog: RemoteCatalog = fetch_remote_json(&base_url, "index.json").await?;
-    let imports = state.store().list_wb_center_imports_by_source(&base_url)?;
+    let imports = state
+        .run_store_task("wordbook_center.admin_browse.imports", {
+            let base_url = base_url.clone();
+            move |store| store.list_wb_center_imports_by_source(&base_url)
+        })
+        .await??;
     let items = build_browse_items(catalog.data, &imports);
     Ok(ok(items))
 }
@@ -479,7 +514,11 @@ async fn admin_preview(
     Query(q): Query<PreviewQuery>,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let settings = state.store().get_system_settings()?;
+    let settings = state
+        .run_store_task("wordbook_center.admin_preview.settings", |store| {
+            store.get_system_settings()
+        })
+        .await??;
     let base_url = settings
         .wordbook_center_url
         .ok_or_else(|| AppError::bad_request("WB_CENTER_NOT_CONFIGURED", "词书中心URL未配置"))?;
@@ -520,7 +559,11 @@ async fn admin_import(
     Path(id): Path<String>,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let settings = state.store().get_system_settings()?;
+    let settings = state
+        .run_store_task("wordbook_center.admin_import.settings", |store| {
+            store.get_system_settings()
+        })
+        .await??;
     let base_url = settings
         .wordbook_center_url
         .ok_or_else(|| AppError::bad_request("WB_CENTER_NOT_CONFIGURED", "词书中心URL未配置"))?;
@@ -533,13 +576,21 @@ async fn admin_updates(
     _admin: AdminAuthUser,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let settings = state.store().get_system_settings()?;
+    let settings = state
+        .run_store_task("wordbook_center.admin_updates.settings", |store| {
+            store.get_system_settings()
+        })
+        .await??;
     let base_url = match settings.wordbook_center_url {
         Some(url) => url,
         None => return Ok(ok(Vec::<UpdateInfo>::new())),
     };
 
-    let imports = state.store().list_wb_center_imports_by_user(None)?;
+    let imports = state
+        .run_store_task("wordbook_center.admin_updates.imports", |store| {
+            store.list_wb_center_imports_by_user(None)
+        })
+        .await??;
     if imports.is_empty() {
         return Ok(ok(Vec::<UpdateInfo>::new()));
     }
@@ -574,14 +625,22 @@ async fn admin_sync(
     Path(id): Path<String>,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let settings = state.store().get_system_settings()?;
+    let settings = state
+        .run_store_task("wordbook_center.admin_sync.settings", |store| {
+            store.get_system_settings()
+        })
+        .await??;
     let base_url = settings
         .wordbook_center_url
         .ok_or_else(|| AppError::bad_request("WB_CENTER_NOT_CONFIGURED", "词书中心URL未配置"))?;
 
     let import_record = state
-        .store()
-        .get_wb_center_import(&base_url, &id)?
+        .run_store_task("wordbook_center.admin_sync.import_record", {
+            let base_url = base_url.clone();
+            let id = id.clone();
+            move |store| store.get_wb_center_import(&base_url, &id)
+        })
+        .await??
         .ok_or_else(|| AppError::not_found("导入记录不存在"))?;
 
     let result = do_sync(&state, &base_url, &import_record).await?;
@@ -590,51 +649,70 @@ async fn admin_sync(
 
 // ════════════════════ User endpoints ════════════════════
 
-fn get_user_wb_center_url(state: &AppState, user_id: &str) -> Result<Option<String>, AppError> {
-    match state.store().get_user_preferences(user_id)? {
-        Some(val) => Ok(val
-            .get("wordbook_center_url")
-            .or(val.get("wordbookCenterUrl"))
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())),
-        None => Ok(None),
-    }
+async fn get_user_wb_center_url(
+    state: &AppState,
+    user_id: &str,
+) -> Result<Option<String>, AppError> {
+    let user_id = user_id.to_string();
+    state
+        .run_store_task(
+            "wordbook_center.get_user_url",
+            move |store| -> Result<_, AppError> {
+                match store.get_user_preferences(&user_id)? {
+                    Some(val) => Ok(val
+                        .get("wordbook_center_url")
+                        .or(val.get("wordbookCenterUrl"))
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.to_string())),
+                    None => Ok(None),
+                }
+            },
+        )
+        .await?
 }
 
-fn set_user_wb_center_url(
+async fn set_user_wb_center_url(
     state: &AppState,
     user_id: &str,
     url: Option<&str>,
 ) -> Result<(), AppError> {
-    let mut prefs = state
-        .store()
-        .get_user_preferences(user_id)?
-        .unwrap_or(serde_json::json!({}));
+    let user_id = user_id.to_string();
+    let url = url.map(str::to_string);
+    state
+        .run_store_task(
+            "wordbook_center.set_user_url",
+            move |store| -> Result<_, AppError> {
+                let mut prefs = store
+                    .get_user_preferences(&user_id)?
+                    .unwrap_or(serde_json::json!({}));
 
-    if let Some(obj) = prefs.as_object_mut() {
-        match url {
-            Some(u) if !u.is_empty() => {
-                obj.insert(
-                    "wordbook_center_url".to_string(),
-                    serde_json::Value::String(u.to_string()),
-                );
-            }
-            _ => {
-                obj.remove("wordbook_center_url");
-            }
-        }
-    }
+                if let Some(obj) = prefs.as_object_mut() {
+                    match url.as_deref() {
+                        Some(u) if !u.is_empty() => {
+                            obj.insert(
+                                "wordbook_center_url".to_string(),
+                                serde_json::Value::String(u.to_string()),
+                            );
+                        }
+                        _ => {
+                            obj.remove("wordbook_center_url");
+                        }
+                    }
+                }
 
-    state.store().set_user_preferences(user_id, &prefs)?;
-    Ok(())
+                store.set_user_preferences(&user_id, &prefs)?;
+                Ok(())
+            },
+        )
+        .await?
 }
 
 async fn user_get_settings(
     auth: AuthUser,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let url = get_user_wb_center_url(&state, &auth.user_id)?;
+    let url = get_user_wb_center_url(&state, &auth.user_id).await?;
     Ok(ok(serde_json::json!({ "wordbookCenterUrl": url })))
 }
 
@@ -654,8 +732,8 @@ async fn user_set_settings(
             validate_import_url(url)?;
         }
     }
-    set_user_wb_center_url(&state, &auth.user_id, req.wordbook_center_url.as_deref())?;
-    let url = get_user_wb_center_url(&state, &auth.user_id)?;
+    set_user_wb_center_url(&state, &auth.user_id, req.wordbook_center_url.as_deref()).await?;
+    let url = get_user_wb_center_url(&state, &auth.user_id).await?;
     Ok(ok(serde_json::json!({ "wordbookCenterUrl": url })))
 }
 
@@ -663,13 +741,18 @@ async fn user_browse(
     auth: AuthUser,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let base_url = match get_user_wb_center_url(&state, &auth.user_id)? {
+    let base_url = match get_user_wb_center_url(&state, &auth.user_id).await? {
         Some(url) => url,
         None => return Ok(ok(Vec::<BrowseItem>::new())),
     };
 
     let catalog: RemoteCatalog = fetch_remote_json(&base_url, "index.json").await?;
-    let all_imports = state.store().list_wb_center_imports_by_source(&base_url)?;
+    let all_imports = state
+        .run_store_task("wordbook_center.user_browse.imports", {
+            let base_url = base_url.clone();
+            move |store| store.list_wb_center_imports_by_source(&base_url)
+        })
+        .await??;
     let user_imports: Vec<WordbookCenterImport> = all_imports
         .into_iter()
         .filter(|i| i.user_id.as_deref() == Some(&auth.user_id))
@@ -684,9 +767,11 @@ async fn user_preview(
     Query(q): Query<PreviewQuery>,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let base_url = get_user_wb_center_url(&state, &auth.user_id)?.ok_or_else(|| {
-        AppError::bad_request("WB_CENTER_NOT_CONFIGURED", "个人词书中心URL未配置")
-    })?;
+    let base_url = get_user_wb_center_url(&state, &auth.user_id)
+        .await?
+        .ok_or_else(|| {
+            AppError::bad_request("WB_CENTER_NOT_CONFIGURED", "个人词书中心URL未配置")
+        })?;
 
     let remote: RemoteWordbook =
         fetch_remote_json(&base_url, &format!("wordbooks/{}.json", id)).await?;
@@ -724,9 +809,11 @@ async fn user_import(
     Path(id): Path<String>,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let base_url = get_user_wb_center_url(&state, &auth.user_id)?.ok_or_else(|| {
-        AppError::bad_request("WB_CENTER_NOT_CONFIGURED", "个人词书中心URL未配置")
-    })?;
+    let base_url = get_user_wb_center_url(&state, &auth.user_id)
+        .await?
+        .ok_or_else(|| {
+            AppError::bad_request("WB_CENTER_NOT_CONFIGURED", "个人词书中心URL未配置")
+        })?;
 
     let result = do_import(
         &state,
@@ -759,70 +846,31 @@ async fn user_import_url(
 
     // Use the full URL as source for dedup
     let source_url = req.url.clone();
+    let store = state.store().clone();
+    let user_id = Some(auth.user_id);
+    let result = crate::blocking::run_blocking("wordbook_center.user_import_url", move || {
+        persist_remote_wordbook_import(&store, &source_url, remote, WordbookType::User, user_id)
+    })
+    .await??;
 
-    if state
-        .store()
-        .get_wb_center_import(&source_url, &remote.id)?
-        .is_some()
-    {
-        return Err(AppError::conflict(
-            "WB_CENTER_ALREADY_IMPORTED",
-            "该词书已被导入",
-        ));
-    }
-
-    let wordbook_id = uuid::Uuid::new_v4().to_string();
-    let book = Wordbook {
-        id: wordbook_id.clone(),
-        name: remote.name.clone(),
-        description: remote.description.clone(),
-        book_type: WordbookType::User,
-        user_id: Some(auth.user_id.clone()),
-        word_count: 0,
-        created_at: Utc::now(),
-    };
-    state.store().upsert_wordbook(&book)?;
-
-    let (imported, skipped) =
-        import_words_to_store(&state, &wordbook_id, &remote.id, &remote.words)?;
-
-    if let Some(mut wb) = state.store().get_wordbook(&wordbook_id)? {
-        wb.word_count = imported;
-        state.store().upsert_wordbook(&wb)?;
-    }
-
-    let import_record = WordbookCenterImport {
-        remote_id: remote.id.clone(),
-        local_wordbook_id: wordbook_id.clone(),
-        source_url,
-        version: remote.version,
-        user_id: Some(auth.user_id),
-        imported_at: Utc::now(),
-        updated_at: Utc::now(),
-        word_count: imported,
-    };
-    state.store().upsert_wb_center_import(&import_record)?;
-
-    let wb = state.store().get_wordbook(&wordbook_id)?;
-    Ok(created(serde_json::json!({
-        "wordbook": wb,
-        "wordsImported": imported,
-        "wordsSkipped": skipped,
-    })))
+    Ok(created(result))
 }
 
 async fn user_updates(
     auth: AuthUser,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let base_url = match get_user_wb_center_url(&state, &auth.user_id)? {
+    let base_url = match get_user_wb_center_url(&state, &auth.user_id).await? {
         Some(url) => url,
         None => return Ok(ok(Vec::<UpdateInfo>::new())),
     };
 
     let imports = state
-        .store()
-        .list_wb_center_imports_by_user(Some(&auth.user_id))?;
+        .run_store_task("wordbook_center.user_updates.imports", {
+            let user_id = auth.user_id.clone();
+            move |store| store.list_wb_center_imports_by_user(Some(&user_id))
+        })
+        .await??;
     if imports.is_empty() {
         return Ok(ok(Vec::<UpdateInfo>::new()));
     }
@@ -857,13 +905,19 @@ async fn user_sync(
     Path(id): Path<String>,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let base_url = get_user_wb_center_url(&state, &auth.user_id)?.ok_or_else(|| {
-        AppError::bad_request("WB_CENTER_NOT_CONFIGURED", "个人词书中心URL未配置")
-    })?;
+    let base_url = get_user_wb_center_url(&state, &auth.user_id)
+        .await?
+        .ok_or_else(|| {
+            AppError::bad_request("WB_CENTER_NOT_CONFIGURED", "个人词书中心URL未配置")
+        })?;
 
     let import_record = state
-        .store()
-        .get_wb_center_import(&base_url, &id)?
+        .run_store_task("wordbook_center.user_sync.import_record", {
+            let base_url = base_url.clone();
+            let id = id.clone();
+            move |store| store.get_wb_center_import(&base_url, &id)
+        })
+        .await??
         .ok_or_else(|| AppError::not_found("导入记录不存在"))?;
 
     if import_record.user_id.as_deref() != Some(&auth.user_id) {

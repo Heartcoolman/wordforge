@@ -34,7 +34,12 @@ async fn get_reward_preference(
     auth: AuthUser,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let pref = match state.store().get_reward_preference(&auth.user_id)? {
+    let pref = match state
+        .run_store_task("user_profile.get_reward_preference", move |store| {
+            store.get_reward_preference(&auth.user_id)
+        })
+        .await??
+    {
         Some(val) => RewardPreference {
             reward_type: val
                 .get("reward_type")
@@ -63,7 +68,11 @@ async fn set_reward_preference(
     }
 
     let val = serde_json::json!({"reward_type": req.reward_type});
-    state.store().set_reward_preference(&auth.user_id, &val)?;
+    state
+        .run_store_task("user_profile.set_reward_preference", move |store| {
+            store.set_reward_preference(&auth.user_id, &val)
+        })
+        .await??;
     Ok(ok(req))
 }
 
@@ -71,7 +80,7 @@ async fn get_cognitive_profile(
     auth: AuthUser,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let user_state = state.amas().get_user_state(&auth.user_id)?;
+    let user_state = state.amas().get_user_state_async(&auth.user_id).await?;
     Ok(ok(user_state.cognitive_profile))
 }
 
@@ -79,7 +88,7 @@ async fn get_learning_style(
     auth: AuthUser,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let user_state = state.amas().get_user_state(&auth.user_id)?;
+    let user_state = state.amas().get_user_state_async(&auth.user_id).await?;
     let cp = &user_state.cognitive_profile;
     Ok(ok(serde_json::json!({
         "processingSpeed": cp.processing_speed,
@@ -92,7 +101,7 @@ async fn get_chronotype(
     auth: AuthUser,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let user_state = state.amas().get_user_state(&auth.user_id)?;
+    let user_state = state.amas().get_user_state_async(&auth.user_id).await?;
     let preferred = &user_state.habit_profile.preferred_hours;
 
     let chronotype = if preferred.iter().any(|h| *h < 10) {
@@ -259,10 +268,16 @@ async fn get_habit_profile(
     auth: AuthUser,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let profile = match state.store().get_habit_profile(&auth.user_id)? {
+    let user_id = auth.user_id.clone();
+    let profile = match state
+        .run_store_task("user_profile.get_habit_profile", move |store| {
+            store.get_habit_profile(&user_id)
+        })
+        .await??
+    {
         Some(val) => val,
         None => {
-            let user_state = state.amas().get_user_state(&auth.user_id)?;
+            let user_state = state.amas().get_user_state_async(&auth.user_id).await?;
             serde_json::to_value(&user_state.habit_profile).unwrap_or(serde_json::json!({}))
         }
     };
@@ -304,7 +319,12 @@ async fn set_habit_profile(
         "median_session_length_mins": req.median_session_length_mins.unwrap_or(15.0),
         "sessions_per_day": req.sessions_per_day.unwrap_or(1.0),
     });
-    state.store().set_habit_profile(&auth.user_id, &profile)?;
+    let profile_for_store = profile.clone();
+    state
+        .run_store_task("user_profile.set_habit_profile", move |store| {
+            store.set_habit_profile(&auth.user_id, &profile_for_store)
+        })
+        .await??;
     Ok(ok(habit_profile_from_value(&profile)))
 }
 
@@ -369,9 +389,12 @@ async fn upload_avatar(
         "extension": extension,
         "sizeBytes": body.len(),
     });
+    let avatar_metadata_for_store = avatar_metadata.clone();
     state
-        .store()
-        .set_user_avatar(&auth.user_id, &avatar_metadata)?;
+        .run_store_task("user_profile.upload_avatar", move |store| {
+            store.set_user_avatar(&auth.user_id, &avatar_metadata_for_store)
+        })
+        .await??;
 
     Ok(ok(serde_json::json!({
         "avatarUrl": avatar_metadata["avatarUrl"],

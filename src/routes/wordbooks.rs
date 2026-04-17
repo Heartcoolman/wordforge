@@ -25,7 +25,11 @@ async fn list_system_wordbooks(
     _user: AuthUser,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let books = state.store().list_system_wordbooks()?;
+    let books = state
+        .run_store_task("wordbooks.list_system", |store| {
+            store.list_system_wordbooks()
+        })
+        .await??;
     Ok(ok(books))
 }
 
@@ -33,7 +37,12 @@ async fn list_user_wordbooks(
     auth: AuthUser,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let books = state.store().list_user_wordbooks(&auth.user_id)?;
+    let user_id = auth.user_id.clone();
+    let books = state
+        .run_store_task("wordbooks.list_user", move |store| {
+            store.list_user_wordbooks(&user_id)
+        })
+        .await??;
     Ok(ok(books))
 }
 
@@ -66,7 +75,12 @@ async fn create_wordbook(
         created_at: Utc::now(),
     };
 
-    state.store().upsert_wordbook(&book)?;
+    let book_for_save = book.clone();
+    state
+        .run_store_task("wordbooks.create", move |store| {
+            store.upsert_wordbook(&book_for_save)
+        })
+        .await??;
     Ok(created(book))
 }
 
@@ -83,16 +97,6 @@ async fn list_wordbook_words(
     Query(q): Query<ListWordbookWordsQuery>,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let book = state
-        .store()
-        .get_wordbook(&id)?
-        .ok_or_else(|| AppError::not_found("词书不存在"))?;
-
-    // User wordbooks require ownership; system wordbooks are readable by anyone
-    if book.user_id.is_some() && book.user_id.as_deref() != Some(&auth.user_id) {
-        return Err(AppError::forbidden("您没有该词书的操作权限"));
-    }
-
     let page = q.page.unwrap_or(1).clamp(1, u64::MAX);
     let per_page = q
         .per_page
@@ -100,10 +104,26 @@ async fn list_wordbook_words(
         .clamp(1, state.config().pagination.max_page_size);
     let limit = per_page as usize;
     let offset = ((page - 1) * per_page) as usize;
-    let total = state.store().count_wordbook_words(&id)?;
-    let word_ids = state.store().list_wordbook_words(&id, limit, offset)?;
+    let user_id = auth.user_id.clone();
+    let id_for_lookup = id.clone();
+    let (total, word_ids, words_by_id) = state
+        .run_store_task(
+            "wordbooks.list_words",
+            move |store| -> Result<_, AppError> {
+                let book = store
+                    .get_wordbook(&id_for_lookup)?
+                    .ok_or_else(|| AppError::not_found("词书不存在"))?;
+                if book.user_id.is_some() && book.user_id.as_deref() != Some(&user_id) {
+                    return Err(AppError::forbidden("您没有该词书的操作权限"));
+                }
 
-    let words_by_id = state.store().get_words_by_ids(&word_ids)?;
+                let total = store.count_wordbook_words(&id_for_lookup)?;
+                let word_ids = store.list_wordbook_words(&id_for_lookup, limit, offset)?;
+                let words_by_id = store.get_words_by_ids(&word_ids)?;
+                Ok((total, word_ids, words_by_id))
+            },
+        )
+        .await??;
     let items: Vec<WordPublic> = word_ids
         .iter()
         .filter_map(|wid| words_by_id.get(wid).map(WordPublic::from))
@@ -124,19 +144,6 @@ async fn add_words(
     State(state): State<AppState>,
     JsonBody(req): JsonBody<AddWordsRequest>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let book = state
-        .store()
-        .get_wordbook(&id)?
-        .ok_or_else(|| AppError::not_found("词书不存在"))?;
-
-    // System wordbooks (user_id is None) cannot be modified by regular users
-    if book.user_id.is_none() {
-        return Err(AppError::forbidden("无法修改系统词书"));
-    }
-    if book.user_id.as_deref() != Some(&auth.user_id) {
-        return Err(AppError::forbidden("您没有该词书的操作权限"));
-    }
-
     if req.word_ids.len() > state.config().limits.max_batch_size {
         return Err(AppError::bad_request(
             "WORDBOOK_TOO_MANY_WORDS",
@@ -146,13 +153,30 @@ async fn add_words(
             ),
         ));
     }
+    let user_id = auth.user_id.clone();
+    let id_for_update = id.clone();
+    let word_ids = req.word_ids;
+    let added = state
+        .run_store_task("wordbooks.add_words", move |store| -> Result<_, AppError> {
+            let book = store
+                .get_wordbook(&id_for_update)?
+                .ok_or_else(|| AppError::not_found("词书不存在"))?;
+            if book.user_id.is_none() {
+                return Err(AppError::forbidden("无法修改系统词书"));
+            }
+            if book.user_id.as_deref() != Some(&user_id) {
+                return Err(AppError::forbidden("您没有该词书的操作权限"));
+            }
 
-    let mut added = 0usize;
-    for word_id in &req.word_ids {
-        if state.store().add_word_to_wordbook(&id, word_id)? {
-            added += 1;
-        }
-    }
+            let mut added = 0usize;
+            for word_id in &word_ids {
+                if store.add_word_to_wordbook(&id_for_update, word_id)? {
+                    added += 1;
+                }
+            }
+            Ok(added)
+        })
+        .await??;
 
     Ok(ok(serde_json::json!({"added": added})))
 }
@@ -162,19 +186,27 @@ async fn remove_word(
     Path((id, word_id)): Path<(String, String)>,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let book = state
-        .store()
-        .get_wordbook(&id)?
-        .ok_or_else(|| AppError::not_found("词书不存在"))?;
-
-    // System wordbooks (user_id is None) cannot be modified by regular users
-    if book.user_id.is_none() {
-        return Err(AppError::forbidden("无法修改系统词书"));
-    }
-    if book.user_id.as_deref() != Some(&auth.user_id) {
-        return Err(AppError::forbidden("您没有该词书的操作权限"));
-    }
-
-    let removed = state.store().remove_word_from_wordbook(&id, &word_id)?;
+    let user_id = auth.user_id.clone();
+    let id_for_update = id.clone();
+    let word_id_for_update = word_id.clone();
+    let removed = state
+        .run_store_task(
+            "wordbooks.remove_word",
+            move |store| -> Result<_, AppError> {
+                let book = store
+                    .get_wordbook(&id_for_update)?
+                    .ok_or_else(|| AppError::not_found("词书不存在"))?;
+                if book.user_id.is_none() {
+                    return Err(AppError::forbidden("无法修改系统词书"));
+                }
+                if book.user_id.as_deref() != Some(&user_id) {
+                    return Err(AppError::forbidden("您没有该词书的操作权限"));
+                }
+                store
+                    .remove_word_from_wordbook(&id_for_update, &word_id_for_update)
+                    .map_err(AppError::from)
+            },
+        )
+        .await??;
     Ok(ok(serde_json::json!({"removed": removed})))
 }
