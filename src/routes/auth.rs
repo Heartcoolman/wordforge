@@ -156,8 +156,8 @@ async fn register(
     if !is_valid_email(&email) {
         return Err(AppError::bad_request("AUTH_INVALID_EMAIL", "邮箱格式无效"));
     }
-    let username = req.username.trim();
-    if let Err(msg) = validate_username(username) {
+    let username = req.username.trim().to_string();
+    if let Err(msg) = validate_username(&username) {
         return Err(AppError::bad_request("AUTH_INVALID_USERNAME", msg));
     }
     if let Err(msg) = validate_password(&req.password) {
@@ -165,29 +165,11 @@ async fn register(
     }
 
     let password = req.password;
-    let password_hash = crate::blocking::run_blocking("auth.register.hash_password", move || {
-        hash_password(&password)
-    })
-    .await??;
-    let now = Utc::now();
-    let user = User {
-        id: uuid::Uuid::new_v4().to_string(),
-        email: email.clone(),
-        username: username.to_string(),
-        password_hash,
-        is_banned: false,
-        created_at: now,
-        updated_at: now,
-        failed_login_count: 0,
-        locked_until: None,
-    };
-
-    let user_for_create = user.clone();
     let email_for_lookup = email.clone();
-    state
+    let user = state
         .run_store_task(
             "auth.register.create_user",
-            move |store| -> Result<(), AppError> {
+            move |store| -> Result<User, AppError> {
                 let system_settings = store.get_system_settings()?;
                 if !system_settings.registration_enabled {
                     return Err(AppError::forbidden("注册功能已关闭"));
@@ -201,8 +183,21 @@ async fn register(
                 if store.count_users()? >= system_settings.max_users as usize {
                     return Err(AppError::forbidden("用户注册数量已达上限"));
                 }
-                store.create_user(&user_for_create)?;
-                Ok(())
+                let password_hash = hash_password(&password)?;
+                let now = Utc::now();
+                let user = User {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    email: email_for_lookup,
+                    username: username,
+                    password_hash,
+                    is_banned: false,
+                    created_at: now,
+                    updated_at: now,
+                    failed_login_count: 0,
+                    locked_until: None,
+                };
+                store.create_user(&user)?;
+                Ok(user)
             },
         )
         .await??;
