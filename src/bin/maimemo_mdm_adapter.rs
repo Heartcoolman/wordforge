@@ -1,8 +1,6 @@
 use std::io::{self, BufRead, Read, Write};
 
-use learning_backend::amas::memory::benchmark_adapter::{
-    evaluate_batch, BenchmarkAdapterRequest,
-};
+use learning_backend::amas::memory::benchmark_adapter::{evaluate_batch, BenchmarkAdapterRequest};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -31,8 +29,8 @@ fn run_oneshot() -> Result<(), String> {
     let request: BenchmarkAdapterRequest =
         serde_json::from_str(&buffer).map_err(|err| format!("invalid request json: {err}"))?;
     let response = evaluate_batch(request)?;
-    let json =
-        serde_json::to_string(&response).map_err(|err| format!("failed to encode response: {err}"))?;
+    let json = serde_json::to_string(&response)
+        .map_err(|err| format!("failed to encode response: {err}"))?;
     println!("{json}");
     Ok(())
 }
@@ -50,14 +48,15 @@ fn run_server() -> Result<(), String> {
             break;
         }
 
-        let request: BenchmarkAdapterRequest = serde_json::from_str(trimmed)
-            .map_err(|err| format!("invalid request json: {err}"))?;
+        let request: BenchmarkAdapterRequest =
+            serde_json::from_str(trimmed).map_err(|err| format!("invalid request json: {err}"))?;
         let response = evaluate_batch(request)?;
         let json = serde_json::to_string(&response)
             .map_err(|err| format!("failed to encode response: {err}"))?;
-        writeln!(stdout, "{json}")
-            .map_err(|e| format!("stdout write error: {e}"))?;
-        stdout.flush().map_err(|e| format!("stdout flush error: {e}"))?;
+        writeln!(stdout, "{json}").map_err(|e| format!("stdout write error: {e}"))?;
+        stdout
+            .flush()
+            .map_err(|e| format!("stdout flush error: {e}"))?;
     }
 
     Ok(())

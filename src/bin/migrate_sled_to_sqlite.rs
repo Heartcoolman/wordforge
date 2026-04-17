@@ -33,8 +33,10 @@ mod sled_migrate {
 
     pub fn run() {
         let args: Vec<String> = std::env::args().collect();
-        let sled_path = get_arg(&args, "--sled-path").unwrap_or_else(|| "./data/learning.sled".into());
-        let sqlite_path = get_arg(&args, "--sqlite-path").unwrap_or_else(|| "./data/learning.db".into());
+        let sled_path =
+            get_arg(&args, "--sled-path").unwrap_or_else(|| "./data/learning.sled".into());
+        let sqlite_path =
+            get_arg(&args, "--sqlite-path").unwrap_or_else(|| "./data/learning.db".into());
 
         println!("Migrating: {} -> {}", sled_path, sqlite_path);
 
@@ -58,7 +60,9 @@ mod sled_migrate {
         let mut stats: HashMap<String, usize> = HashMap::new();
 
         for tree_name in &tree_names {
-            if INDEX_TREES.iter().any(|idx: &&str| tree_name.starts_with(idx))
+            if INDEX_TREES
+                .iter()
+                .any(|idx: &&str| tree_name.starts_with(idx))
                 || SKIP_TREES.contains(&tree_name.as_str())
             {
                 println!("  SKIP {}", tree_name);
@@ -86,7 +90,11 @@ mod sled_migrate {
             .cloned()
     }
 
-    fn migrate_tree(store: &learning_backend::store::Store, tree_name: &str, tree: &sled::Tree) -> usize {
+    fn migrate_tree(
+        store: &learning_backend::store::Store,
+        tree_name: &str,
+        tree: &sled::Tree,
+    ) -> usize {
         let conn = store.connection().expect("get connection");
         let mut count = 0;
 
@@ -110,7 +118,9 @@ mod sled_migrate {
                 continue;
             }
             // Skip user index entries in sessions/learning_sessions
-            if (tree_name == "sessions" || tree_name == "admin_sessions" || tree_name == "learning_sessions")
+            if (tree_name == "sessions"
+                || tree_name == "admin_sessions"
+                || tree_name == "learning_sessions")
                 && key_str.starts_with("user:")
             {
                 continue;
@@ -239,24 +249,45 @@ mod sled_migrate {
                 }
             }
             // Simple JSON blob tables
-            "notifications" | "badges" | "word_learning_states" | "study_configs"
-            | "wordbooks" | "wordbook_words" | "password_reset_tokens" | "learning_sessions"
-            | "user_profiles" | "habit_profiles" | "user_preferences" | "etymologies"
-            | "word_morphemes" | "confusion_pairs" | "wb_center_imports"
-            | "engine_monitoring" | "algo_metrics_daily" => {
+            "notifications"
+            | "badges"
+            | "word_learning_states"
+            | "study_configs"
+            | "wordbooks"
+            | "wordbook_words"
+            | "password_reset_tokens"
+            | "learning_sessions"
+            | "user_profiles"
+            | "habit_profiles"
+            | "user_preferences"
+            | "etymologies"
+            | "word_morphemes"
+            | "confusion_pairs"
+            | "wb_center_imports"
+            | "engine_monitoring"
+            | "algo_metrics_daily" => {
                 // For remaining trees, store as JSON in the appropriate table
                 // This is a best-effort migration; specific table mapping may need manual adjustment
-                eprintln!("    WARN: tree '{}' needs manual migration mapping for key '{}'", tree_name, key);
+                eprintln!(
+                    "    WARN: tree '{}' needs manual migration mapping for key '{}'",
+                    tree_name, key
+                );
             }
             _ => {
-                eprintln!("    WARN: unknown tree '{}', skipping key '{}'", tree_name, key);
+                eprintln!(
+                    "    WARN: unknown tree '{}', skipping key '{}'",
+                    tree_name, key
+                );
             }
         }
         Ok(())
     }
 
     fn s(v: &serde_json::Value, key: &str) -> String {
-        v.get(key).and_then(|v| v.as_str()).unwrap_or("").to_string()
+        v.get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
     }
     fn os(v: &serde_json::Value, key: &str) -> Option<String> {
         v.get(key).and_then(|v| v.as_str()).map(|s| s.to_string())
@@ -268,9 +299,15 @@ mod sled_migrate {
         v.get(key).and_then(|v| v.as_f64()).unwrap_or(0.0)
     }
     fn b(v: &serde_json::Value, key: &str) -> i64 {
-        if v.get(key).and_then(|v| v.as_bool()).unwrap_or(false) { 1 } else { 0 }
+        if v.get(key).and_then(|v| v.as_bool()).unwrap_or(false) {
+            1
+        } else {
+            0
+        }
     }
     fn json_arr(v: &serde_json::Value, key: &str) -> String {
-        v.get(key).map(|v| v.to_string()).unwrap_or_else(|| "[]".to_string())
+        v.get(key)
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "[]".to_string())
     }
 }
