@@ -16,7 +16,9 @@ fn c23_config() -> impl Strategy<Value = MemoryModelConfig> {
     )
         .prop_map(|(mut w, factor, decay, floor)| {
             // Clamp w to C23 search bounds
-            for i in 0..4 { w[i] = w[i].clamp(0.1, 20.0); }
+            for i in 0..4 {
+                w[i] = w[i].clamp(0.1, 20.0);
+            }
             w[4] = w[4].clamp(3.0, 12.0);
             w[5] = w[5].clamp(0.1, 2.0);
             w[6] = w[6].clamp(0.3, 4.0);

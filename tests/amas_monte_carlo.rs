@@ -93,7 +93,8 @@ fn do_review(
     } else {
         difficulty
     };
-    let (is_correct, mut quality) = simulate_answer(effective_difficulty.clamp(0.05, 0.95), rp, rng);
+    let (is_correct, mut quality) =
+        simulate_answer(effective_difficulty.clamp(0.05, 0.95), rp, rng);
 
     // 难测试答对 = 更高质量
     if is_correct && state.review_count >= 3 && state.stability > 2.0 {
@@ -233,10 +234,7 @@ fn run_amas_sim(
                 (i, score, recall)
             })
             .collect();
-        candidates.sort_by(|a, b| {
-            b.1.partial_cmp(&a.1)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         let mut reviewed = 0;
         for (idx, score, _) in &candidates {
@@ -323,7 +321,7 @@ fn run_amas_sim(
 
 #[derive(Debug, Clone)]
 struct SimpleMemoryState {
-    strength: f64,        // 记忆强度 [0, 1]
+    strength: f64, // 记忆强度 [0, 1]
     last_review_at: Option<i64>,
     review_count: u32,
 }
@@ -405,11 +403,7 @@ fn do_simple_review(
     is_correct
 }
 
-fn run_leitner_sim(
-    words: &[f64],
-    seed: u64,
-    scenario: SimScenario,
-) -> SimResult {
+fn run_leitner_sim(words: &[f64], seed: u64, scenario: SimScenario) -> SimResult {
     let mut rng = StdRng::seed_from_u64(seed);
     let n = words.len();
     let mut states: Vec<SimpleMemoryState> = (0..n).map(|_| SimpleMemoryState::default()).collect();
@@ -424,11 +418,7 @@ fn run_leitner_sim(
     for day in 0..scenario.sim_days {
         let now_ms = BASE_TS + day * DAY_MS + 9 * 3_600_000;
 
-        let avg: f64 = states
-            .iter()
-            .map(|s| sm2_recall(s, now_ms))
-            .sum::<f64>()
-            / n as f64;
+        let avg: f64 = states.iter().map(|s| sm2_recall(s, now_ms)).sum::<f64>() / n as f64;
         daily_avg_recall.push(avg);
 
         let mut due: Vec<usize> = (0..n).filter(|&i| next_review_day[i] <= day).collect();
@@ -441,9 +431,8 @@ fn run_leitner_sim(
                 break;
             }
             let recall = sm2_recall(&states[idx], now_ms);
-            let is_correct = do_simple_review(
-                &mut states[idx], words[idx], recall, true, &mut rng, now_ms,
-            );
+            let is_correct =
+                do_simple_review(&mut states[idx], words[idx], recall, true, &mut rng, now_ms);
 
             if is_correct {
                 streaks[idx] += 1;
@@ -467,7 +456,9 @@ fn run_leitner_sim(
     let mastered_count = (0..n)
         .filter(|&i| {
             let recent = &recent_results[i];
-            if recent.len() < 3 { return false; }
+            if recent.len() < 3 {
+                return false;
+            }
             let recent_acc = recent.iter().filter(|&&r| r).count() as f64 / recent.len() as f64;
             states[i].strength > 0.5 && recent_acc > 0.65 && streaks[i] >= 1
         })
@@ -482,11 +473,7 @@ fn run_leitner_sim(
     }
 }
 
-fn run_random_sim(
-    words: &[f64],
-    seed: u64,
-    scenario: SimScenario,
-) -> SimResult {
+fn run_random_sim(words: &[f64], seed: u64, scenario: SimScenario) -> SimResult {
     let mut rng = StdRng::seed_from_u64(seed);
     let n = words.len();
     let mut states: Vec<SimpleMemoryState> = (0..n).map(|_| SimpleMemoryState::default()).collect();
@@ -498,11 +485,7 @@ fn run_random_sim(
     for day in 0..scenario.sim_days {
         let now_ms = BASE_TS + day * DAY_MS + 9 * 3_600_000;
 
-        let avg: f64 = states
-            .iter()
-            .map(|s| basic_recall(s, now_ms))
-            .sum::<f64>()
-            / n as f64;
+        let avg: f64 = states.iter().map(|s| basic_recall(s, now_ms)).sum::<f64>() / n as f64;
         daily_avg_recall.push(avg);
 
         let mut indices: Vec<usize> = (0..n).collect();
@@ -512,7 +495,12 @@ fn run_random_sim(
         for &idx in indices.iter().take(scenario.max_reviews_per_day) {
             let recall = basic_recall(&states[idx], now_ms);
             let is_correct = do_simple_review(
-                &mut states[idx], words[idx], recall, false, &mut rng, now_ms,
+                &mut states[idx],
+                words[idx],
+                recall,
+                false,
+                &mut rng,
+                now_ms,
             );
 
             if is_correct {
@@ -532,7 +520,9 @@ fn run_random_sim(
     let mastered_count = (0..n)
         .filter(|&i| {
             let recent = &recent_results[i];
-            if recent.len() < 3 { return false; }
+            if recent.len() < 3 {
+                return false;
+            }
             let recent_acc = recent.iter().filter(|&&r| r).count() as f64 / recent.len() as f64;
             states[i].strength > 0.5 && recent_acc > 0.65 && streaks[i] >= 1
         })
@@ -552,15 +542,20 @@ fn run_random_sim(
 
 #[derive(Debug, Clone)]
 struct Sm18State {
-    stability: f64,   // 记忆稳定性（天）
-    difficulty: f64,  // 难度 [1-10]
+    stability: f64,  // 记忆稳定性（天）
+    difficulty: f64, // 难度 [1-10]
     last_review_at: Option<i64>,
     reps: u32,
 }
 
 impl Default for Sm18State {
     fn default() -> Self {
-        Self { stability: 0.5, difficulty: 5.0, last_review_at: None, reps: 0 }
+        Self {
+            stability: 0.5,
+            difficulty: 5.0,
+            last_review_at: None,
+            reps: 0,
+        }
     }
 }
 
@@ -569,7 +564,9 @@ fn sm18_recall(state: &Sm18State, now_ms: i64) -> f64 {
         None => 0.0,
         Some(last) => {
             let elapsed_days = (now_ms - last) as f64 / 86_400_000.0;
-            (-0.693 * elapsed_days / state.stability.max(0.1)).exp().clamp(0.0, 1.0)
+            (-0.693 * elapsed_days / state.stability.max(0.1))
+                .exp()
+                .clamp(0.0, 1.0)
         }
     }
 }
@@ -577,10 +574,14 @@ fn sm18_recall(state: &Sm18State, now_ms: i64) -> f64 {
 fn sm18_update(state: &mut Sm18State, is_correct: bool) {
     if is_correct {
         let d_factor = state.difficulty.powf(-0.3);
-        let s_factor = 1.0 + (0.08_f64).exp() * state.stability.max(0.1).powf(-0.2)
-            * (0.05 * state.reps as f64).exp().min(3.0);
+        let s_factor = 1.0
+            + (0.08_f64).exp()
+                * state.stability.max(0.1).powf(-0.2)
+                * (0.05 * state.reps as f64).exp().min(3.0);
         state.stability = (state.stability * d_factor * s_factor).min(365.0);
-        if state.difficulty > 1.0 { state.difficulty -= 0.2; }
+        if state.difficulty > 1.0 {
+            state.difficulty -= 0.2;
+        }
     } else {
         state.stability = (state.stability * 0.3).max(0.5);
         state.difficulty = (state.difficulty + 1.0).min(10.0);
@@ -603,45 +604,64 @@ fn run_sm18_sim(words: &[f64], seed: u64, scenario: SimScenario) -> SimResult {
         daily_avg_recall.push(avg);
 
         // SM-18 调度: 按 stability 计算 due, 优先 overdue
-        let mut candidates: Vec<(usize, f64)> = (0..n).map(|i| {
-            let elapsed_ms = match states[i].last_review_at {
-                Some(last) => now_ms - last,
-                None => DAY_MS * 2,
-            };
-            let due_ms = (states[i].stability * 86_400_000.0) as i64;
-            let overdue = elapsed_ms as f64 / due_ms.max(1) as f64;
-            (i, overdue)
-        }).collect();
+        let mut candidates: Vec<(usize, f64)> = (0..n)
+            .map(|i| {
+                let elapsed_ms = match states[i].last_review_at {
+                    Some(last) => now_ms - last,
+                    None => DAY_MS * 2,
+                };
+                let due_ms = (states[i].stability * 86_400_000.0) as i64;
+                let overdue = elapsed_ms as f64 / due_ms.max(1) as f64;
+                (i, overdue)
+            })
+            .collect();
         candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         let mut reviewed = 0;
         for (idx, overdue) in &candidates {
-            if reviewed >= scenario.max_reviews_per_day { break; }
-            if *overdue < 0.5 && states[*idx].last_review_at.is_some() { break; }
+            if reviewed >= scenario.max_reviews_per_day {
+                break;
+            }
+            if *overdue < 0.5 && states[*idx].last_review_at.is_some() {
+                break;
+            }
             let recall = sm18_recall(&states[*idx], now_ms);
             let (is_correct, _) = simulate_answer(words[*idx], recall, &mut rng);
             sm18_update(&mut states[*idx], is_correct);
             states[*idx].last_review_at = Some(now_ms);
-            if is_correct { streaks[*idx] += 1; } else { streaks[*idx] = 0; }
+            if is_correct {
+                streaks[*idx] += 1;
+            } else {
+                streaks[*idx] = 0;
+            }
             recent_results[*idx].push(is_correct);
-            if recent_results[*idx].len() > 20 { recent_results[*idx].remove(0); }
+            if recent_results[*idx].len() > 20 {
+                recent_results[*idx].remove(0);
+            }
             reviewed += 1;
             total_reviews += 1;
         }
     }
 
     let final_test = BASE_TS + scenario.sim_days * DAY_MS + 9 * 3_600_000;
-    let mastered_count = (0..n).filter(|&i| {
-        let recent = &recent_results[i];
-        if recent.len() < 3 { return false; }
-        let acc = recent.iter().filter(|&&r| r).count() as f64 / recent.len() as f64;
-        states[i].stability > 5.0 && acc > 0.65 && streaks[i] >= 1
-    }).count();
+    let mastered_count = (0..n)
+        .filter(|&i| {
+            let recent = &recent_results[i];
+            if recent.len() < 3 {
+                return false;
+            }
+            let acc = recent.iter().filter(|&&r| r).count() as f64 / recent.len() as f64;
+            states[i].stability > 5.0 && acc > 0.65 && streaks[i] >= 1
+        })
+        .count();
 
     SimResult {
         daily_avg_recall,
         final_recall: states.iter().map(|s| sm18_recall(s, final_test)).collect(),
-        memory_strengths: states.iter().map(|s| (s.stability / 30.0).min(1.0)).collect(),
+        memory_strengths: states
+            .iter()
+            .map(|s| (s.stability / 30.0).min(1.0))
+            .collect(),
         mastered_count,
         total_reviews,
     }
@@ -655,21 +675,21 @@ fn run_sm18_sim(words: &[f64], seed: u64, scenario: SimScenario) -> SimResult {
 // FSRS-5 default parameters (19 weights, ML-optimized)
 const FSRS_W: [f64; 19] = [
     0.40255, 1.18385, 3.173, 15.69105, // w0-w3: initial stability for Again/Hard/Good/Easy
-    7.1949,  // w4: initial difficulty when first rating is Good
-    0.5345,  // w5: difficulty scaling for first rating
-    1.4604,  // w6: difficulty change per grade delta
-    0.0046,  // w7: mean reversion weight
-    1.54575, // w8: stability increase base
-    0.1192,  // w9: stability power (higher S → slower growth)
-    1.01925, // w10: spacing effect (lower R → bigger SInc)
-    1.9395,  // w11: post-lapse stability base
-    0.11,    // w12: post-lapse difficulty power
-    0.29605, // w13: post-lapse stability power
-    2.2698,  // w14: post-lapse R scaling
-    0.2315,  // w15: Hard bonus multiplier
-    2.9898,  // w16: Easy bonus multiplier
-    0.51655, // w17: same-day review scaling
-    0.6621,  // w18: same-day review offset
+    7.1949,   // w4: initial difficulty when first rating is Good
+    0.5345,   // w5: difficulty scaling for first rating
+    1.4604,   // w6: difficulty change per grade delta
+    0.0046,   // w7: mean reversion weight
+    1.54575,  // w8: stability increase base
+    0.1192,   // w9: stability power (higher S → slower growth)
+    1.01925,  // w10: spacing effect (lower R → bigger SInc)
+    1.9395,   // w11: post-lapse stability base
+    0.11,     // w12: post-lapse difficulty power
+    0.29605,  // w13: post-lapse stability power
+    2.2698,   // w14: post-lapse R scaling
+    0.2315,   // w15: Hard bonus multiplier
+    2.9898,   // w16: Easy bonus multiplier
+    0.51655,  // w17: same-day review scaling
+    0.6621,   // w18: same-day review offset
 ];
 
 const FSRS_DECAY: f64 = -0.5;
@@ -677,15 +697,20 @@ const FSRS_FACTOR: f64 = 19.0 / 81.0; // = 0.2346...
 
 #[derive(Debug, Clone)]
 struct FsrsState {
-    stability: f64,   // S: days until R drops to 90%
-    difficulty: f64,  // D: [1, 10]
+    stability: f64,  // S: days until R drops to 90%
+    difficulty: f64, // D: [1, 10]
     last_review_at: Option<i64>,
     review_count: u32,
 }
 
 impl Default for FsrsState {
     fn default() -> Self {
-        Self { stability: 0.0, difficulty: 5.0, last_review_at: None, review_count: 0 }
+        Self {
+            stability: 0.0,
+            difficulty: 5.0,
+            last_review_at: None,
+            review_count: 0,
+        }
     }
 }
 
@@ -695,8 +720,12 @@ fn fsrs_recall(state: &FsrsState, now_ms: i64) -> f64 {
         None => 0.0,
         Some(last) => {
             let elapsed_days = (now_ms - last) as f64 / 86_400_000.0;
-            if state.stability < 0.01 { return 0.0; }
-            (1.0 + FSRS_FACTOR * elapsed_days / state.stability).powf(FSRS_DECAY).clamp(0.0, 1.0)
+            if state.stability < 0.01 {
+                return 0.0;
+            }
+            (1.0 + FSRS_FACTOR * elapsed_days / state.stability)
+                .powf(FSRS_DECAY)
+                .clamp(0.0, 1.0)
         }
     }
 }
@@ -713,7 +742,8 @@ fn fsrs_update(state: &mut FsrsState, grade: u32, recall: f64) {
         let g = (grade as usize).clamp(1, 4) - 1;
         state.stability = FSRS_W[g];
         // Initial difficulty: D0(G) = w4 - e^{w5*(G-1)} + 1
-        state.difficulty = (FSRS_W[4] - (FSRS_W[5] * (grade as f64 - 1.0)).exp() + 1.0).clamp(1.0, 10.0);
+        state.difficulty =
+            (FSRS_W[4] - (FSRS_W[5] * (grade as f64 - 1.0)).exp() + 1.0).clamp(1.0, 10.0);
     } else {
         // Update difficulty: D' = D - w6*(G-3), then mean reversion
         let delta_d = -FSRS_W[6] * (grade as f64 - 3.0);
@@ -724,9 +754,17 @@ fn fsrs_update(state: &mut FsrsState, grade: u32, recall: f64) {
 
         if grade >= 2 {
             // Successful recall: S'_r = S * (e^w8 * (11-D) * S^{-w9} * (e^{w10*(1-R)} - 1) * bonus + 1)
-            let bonus = if grade == 2 { FSRS_W[15] } // Hard
-                else if grade == 4 { FSRS_W[16] } // Easy
-                else { 1.0 }; // Good
+            let bonus = if grade == 2 {
+                FSRS_W[15]
+            }
+            // Hard
+            else if grade == 4 {
+                FSRS_W[16]
+            }
+            // Easy
+            else {
+                1.0
+            }; // Good
             let s_inc = (FSRS_W[8].exp()
                 * (11.0 - state.difficulty)
                 * state.stability.max(0.01).powf(-FSRS_W[9])
@@ -740,7 +778,7 @@ fn fsrs_update(state: &mut FsrsState, grade: u32, recall: f64) {
                 * state.difficulty.powf(-FSRS_W[12])
                 * ((state.stability + 1.0).powf(FSRS_W[13]) - 1.0)
                 * (FSRS_W[14] * (1.0 - recall)).exp())
-                .clamp(0.01, state.stability); // post-lapse S should not exceed pre-lapse S
+            .clamp(0.01, state.stability); // post-lapse S should not exceed pre-lapse S
         }
     }
     state.review_count += 1;
@@ -767,8 +805,11 @@ fn run_fsrs_sim(words: &[f64], seed: u64, scenario: SimScenario) -> SimResult {
             .filter(|&i| next_review_day[i] <= day)
             .map(|i| {
                 let recall = fsrs_recall(&states[i], now_ms);
-                let urgency = if states[i].last_review_at.is_none() { 10.0 }
-                    else { (1.0 - recall).max(0.01) };
+                let urgency = if states[i].last_review_at.is_none() {
+                    10.0
+                } else {
+                    (1.0 - recall).max(0.01)
+                };
                 (i, urgency)
             })
             .collect();
@@ -776,26 +817,44 @@ fn run_fsrs_sim(words: &[f64], seed: u64, scenario: SimScenario) -> SimResult {
 
         let mut reviewed = 0;
         for (idx, _) in &candidates {
-            if reviewed >= scenario.max_reviews_per_day { break; }
+            if reviewed >= scenario.max_reviews_per_day {
+                break;
+            }
             let idx = *idx;
             let recall = fsrs_recall(&states[idx], now_ms);
             let (is_correct, quality) = simulate_answer(words[idx], recall, &mut rng);
 
             // Map to FSRS grade: Again(1), Hard(2), Good(3), Easy(4)
-            let grade = if !is_correct { 1 }
-                else if quality < 0.5 { 2 }  // Hard
-                else if quality < 0.85 { 3 } // Good
-                else { 4 };                   // Easy
+            let grade = if !is_correct {
+                1
+            } else if quality < 0.5 {
+                2
+            }
+            // Hard
+            else if quality < 0.85 {
+                3
+            }
+            // Good
+            else {
+                4
+            }; // Easy
 
             fsrs_update(&mut states[idx], grade, recall);
             states[idx].last_review_at = Some(now_ms);
 
-            if is_correct { streaks[idx] += 1; } else { streaks[idx] = 0; }
+            if is_correct {
+                streaks[idx] += 1;
+            } else {
+                streaks[idx] = 0;
+            }
             recent_results[idx].push(is_correct);
-            if recent_results[idx].len() > 20 { recent_results[idx].remove(0); }
+            if recent_results[idx].len() > 20 {
+                recent_results[idx].remove(0);
+            }
 
             // Schedule next review based on FSRS interval
-            let interval_days = fsrs_interval(states[idx].stability, desired_retention).ceil() as i64;
+            let interval_days =
+                fsrs_interval(states[idx].stability, desired_retention).ceil() as i64;
             next_review_day[idx] = day + interval_days.max(1);
 
             reviewed += 1;
@@ -804,17 +863,24 @@ fn run_fsrs_sim(words: &[f64], seed: u64, scenario: SimScenario) -> SimResult {
     }
 
     let final_test = BASE_TS + scenario.sim_days * DAY_MS + 9 * 3_600_000;
-    let mastered_count = (0..n).filter(|&i| {
-        let recent = &recent_results[i];
-        if recent.len() < 3 { return false; }
-        let acc = recent.iter().filter(|&&r| r).count() as f64 / recent.len() as f64;
-        states[i].stability > 7.0 && acc > 0.65 && streaks[i] >= 1
-    }).count();
+    let mastered_count = (0..n)
+        .filter(|&i| {
+            let recent = &recent_results[i];
+            if recent.len() < 3 {
+                return false;
+            }
+            let acc = recent.iter().filter(|&&r| r).count() as f64 / recent.len() as f64;
+            states[i].stability > 7.0 && acc > 0.65 && streaks[i] >= 1
+        })
+        .count();
 
     SimResult {
         daily_avg_recall,
         final_recall: states.iter().map(|s| fsrs_recall(s, final_test)).collect(),
-        memory_strengths: states.iter().map(|s| (s.stability / 30.0).min(1.0)).collect(),
+        memory_strengths: states
+            .iter()
+            .map(|s| (s.stability / 30.0).min(1.0))
+            .collect(),
         mastered_count,
         total_reviews,
     }
@@ -833,7 +899,11 @@ struct EbbinghausState {
 
 impl Default for EbbinghausState {
     fn default() -> Self {
-        Self { box_level: 0, last_review_at: None, review_count: 0 }
+        Self {
+            box_level: 0,
+            last_review_at: None,
+            review_count: 0,
+        }
     }
 }
 
@@ -862,7 +932,11 @@ fn run_ebbinghaus_sim(words: &[f64], seed: u64, scenario: SimScenario) -> SimRes
 
     for day in 0..scenario.sim_days {
         let now_ms = BASE_TS + day * DAY_MS + 9 * 3_600_000;
-        let avg: f64 = states.iter().map(|s| ebbinghaus_recall(s, now_ms)).sum::<f64>() / n as f64;
+        let avg: f64 = states
+            .iter()
+            .map(|s| ebbinghaus_recall(s, now_ms))
+            .sum::<f64>()
+            / n as f64;
         daily_avg_recall.push(avg);
 
         let mut due: Vec<usize> = (0..n).filter(|&i| next_review_day[i] <= day).collect();
@@ -871,13 +945,16 @@ fn run_ebbinghaus_sim(words: &[f64], seed: u64, scenario: SimScenario) -> SimRes
 
         let mut reviewed = 0;
         for idx in due {
-            if reviewed >= scenario.max_reviews_per_day { break; }
+            if reviewed >= scenario.max_reviews_per_day {
+                break;
+            }
             let recall = ebbinghaus_recall(&states[idx], now_ms);
             let (is_correct, _) = simulate_answer(words[idx], recall, &mut rng);
 
             if is_correct {
                 streaks[idx] += 1;
-                states[idx].box_level = (states[idx].box_level + 1).min(EBBINGHAUS_INTERVALS.len() - 1);
+                states[idx].box_level =
+                    (states[idx].box_level + 1).min(EBBINGHAUS_INTERVALS.len() - 1);
             } else {
                 streaks[idx] = 0;
                 states[idx].box_level = 0;
@@ -887,23 +964,32 @@ fn run_ebbinghaus_sim(words: &[f64], seed: u64, scenario: SimScenario) -> SimRes
             let interval_days = EBBINGHAUS_INTERVALS[states[idx].box_level];
             next_review_day[idx] = day + interval_days.ceil() as i64;
             recent_results[idx].push(is_correct);
-            if recent_results[idx].len() > 20 { recent_results[idx].remove(0); }
+            if recent_results[idx].len() > 20 {
+                recent_results[idx].remove(0);
+            }
             reviewed += 1;
             total_reviews += 1;
         }
     }
 
     let final_test = BASE_TS + scenario.sim_days * DAY_MS + 9 * 3_600_000;
-    let mastered_count = (0..n).filter(|&i| {
-        let recent = &recent_results[i];
-        if recent.len() < 3 { return false; }
-        let acc = recent.iter().filter(|&&r| r).count() as f64 / recent.len() as f64;
-        states[i].box_level >= 5 && acc > 0.65 && streaks[i] >= 1
-    }).count();
+    let mastered_count = (0..n)
+        .filter(|&i| {
+            let recent = &recent_results[i];
+            if recent.len() < 3 {
+                return false;
+            }
+            let acc = recent.iter().filter(|&&r| r).count() as f64 / recent.len() as f64;
+            states[i].box_level >= 5 && acc > 0.65 && streaks[i] >= 1
+        })
+        .count();
 
     SimResult {
         daily_avg_recall,
-        final_recall: states.iter().map(|s| ebbinghaus_recall(s, final_test)).collect(),
+        final_recall: states
+            .iter()
+            .map(|s| ebbinghaus_recall(s, final_test))
+            .collect(),
         memory_strengths: states.iter().map(|s| s.box_level as f64 / 7.0).collect(),
         mastered_count,
         total_reviews,
@@ -916,7 +1002,7 @@ fn run_ebbinghaus_sim(words: &[f64], seed: u64, scenario: SimScenario) -> SimRes
 
 #[derive(Debug, Clone)]
 struct HlrState {
-    half_life: f64,   // 半衰期（天）
+    half_life: f64, // 半衰期（天）
     correct: u32,
     incorrect: u32,
     last_review_at: Option<i64>,
@@ -924,7 +1010,12 @@ struct HlrState {
 
 impl Default for HlrState {
     fn default() -> Self {
-        Self { half_life: 0.5, correct: 0, incorrect: 0, last_review_at: None }
+        Self {
+            half_life: 0.5,
+            correct: 0,
+            incorrect: 0,
+            last_review_at: None,
+        }
     }
 }
 
@@ -933,7 +1024,9 @@ fn hlr_recall(state: &HlrState, now_ms: i64) -> f64 {
         None => 0.0,
         Some(last) => {
             let elapsed_days = (now_ms - last) as f64 / 86_400_000.0;
-            2.0_f64.powf(-elapsed_days / state.half_life.max(0.01)).clamp(0.0, 1.0)
+            2.0_f64
+                .powf(-elapsed_days / state.half_life.max(0.01))
+                .clamp(0.0, 1.0)
         }
     }
 }
@@ -941,9 +1034,9 @@ fn hlr_recall(state: &HlrState, now_ms: i64) -> f64 {
 fn hlr_update_half_life(state: &mut HlrState, difficulty: f64) {
     // HLR: h = 2^(θ₀ + θ₁*correct + θ₂*incorrect + θ₃*difficulty)
     let theta_0 = 0.0;
-    let theta_1 = 0.7;     // correct reviews extend half-life
-    let theta_2 = -1.0;    // incorrect reviews reduce half-life
-    let theta_3 = -0.3;    // harder words have shorter half-life
+    let theta_1 = 0.7; // correct reviews extend half-life
+    let theta_2 = -1.0; // incorrect reviews reduce half-life
+    let theta_3 = -0.3; // harder words have shorter half-life
     let exponent = theta_0
         + theta_1 * state.correct as f64
         + theta_2 * state.incorrect as f64
@@ -966,47 +1059,67 @@ fn run_hlr_sim(words: &[f64], seed: u64, scenario: SimScenario) -> SimResult {
         daily_avg_recall.push(avg);
 
         // HLR 调度: review when elapsed >= half_life (recall ≈ 50%)
-        let mut candidates: Vec<(usize, f64)> = (0..n).map(|i| {
-            let elapsed_ms = match states[i].last_review_at {
-                Some(last) => (now_ms - last) as f64,
-                None => DAY_MS as f64 * 2.0,
-            };
-            let due_ms = states[i].half_life * 86_400_000.0;
-            (i, elapsed_ms / due_ms.max(1.0))
-        }).collect();
+        let mut candidates: Vec<(usize, f64)> = (0..n)
+            .map(|i| {
+                let elapsed_ms = match states[i].last_review_at {
+                    Some(last) => (now_ms - last) as f64,
+                    None => DAY_MS as f64 * 2.0,
+                };
+                let due_ms = states[i].half_life * 86_400_000.0;
+                (i, elapsed_ms / due_ms.max(1.0))
+            })
+            .collect();
         candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         let mut reviewed = 0;
         for (idx, overdue) in &candidates {
-            if reviewed >= scenario.max_reviews_per_day { break; }
-            if *overdue < 0.5 && states[*idx].last_review_at.is_some() { break; }
+            if reviewed >= scenario.max_reviews_per_day {
+                break;
+            }
+            if *overdue < 0.5 && states[*idx].last_review_at.is_some() {
+                break;
+            }
             let recall = hlr_recall(&states[*idx], now_ms);
             let (is_correct, _) = simulate_answer(words[*idx], recall, &mut rng);
 
-            if is_correct { states[*idx].correct += 1; streaks[*idx] += 1; }
-            else { states[*idx].incorrect += 1; streaks[*idx] = 0; }
+            if is_correct {
+                states[*idx].correct += 1;
+                streaks[*idx] += 1;
+            } else {
+                states[*idx].incorrect += 1;
+                streaks[*idx] = 0;
+            }
             hlr_update_half_life(&mut states[*idx], words[*idx]);
             states[*idx].last_review_at = Some(now_ms);
 
             recent_results[*idx].push(is_correct);
-            if recent_results[*idx].len() > 20 { recent_results[*idx].remove(0); }
+            if recent_results[*idx].len() > 20 {
+                recent_results[*idx].remove(0);
+            }
             reviewed += 1;
             total_reviews += 1;
         }
     }
 
     let final_test = BASE_TS + scenario.sim_days * DAY_MS + 9 * 3_600_000;
-    let mastered_count = (0..n).filter(|&i| {
-        let recent = &recent_results[i];
-        if recent.len() < 3 { return false; }
-        let acc = recent.iter().filter(|&&r| r).count() as f64 / recent.len() as f64;
-        states[i].half_life > 7.0 && acc > 0.65 && streaks[i] >= 1
-    }).count();
+    let mastered_count = (0..n)
+        .filter(|&i| {
+            let recent = &recent_results[i];
+            if recent.len() < 3 {
+                return false;
+            }
+            let acc = recent.iter().filter(|&&r| r).count() as f64 / recent.len() as f64;
+            states[i].half_life > 7.0 && acc > 0.65 && streaks[i] >= 1
+        })
+        .count();
 
     SimResult {
         daily_avg_recall,
         final_recall: states.iter().map(|s| hlr_recall(s, final_test)).collect(),
-        memory_strengths: states.iter().map(|s| (s.half_life / 30.0).min(1.0)).collect(),
+        memory_strengths: states
+            .iter()
+            .map(|s| (s.half_life / 30.0).min(1.0))
+            .collect(),
         mastered_count,
         total_reviews,
     }
@@ -1018,14 +1131,18 @@ fn run_hlr_sim(words: &[f64], seed: u64, scenario: SimScenario) -> SimResult {
 
 #[derive(Debug, Clone)]
 struct MemriseState {
-    level: usize,     // 0-5
+    level: usize, // 0-5
     last_review_at: Option<i64>,
     review_count: u32,
 }
 
 impl Default for MemriseState {
     fn default() -> Self {
-        Self { level: 0, last_review_at: None, review_count: 0 }
+        Self {
+            level: 0,
+            last_review_at: None,
+            review_count: 0,
+        }
     }
 }
 
@@ -1037,7 +1154,9 @@ fn memrise_recall(state: &MemriseState, now_ms: i64) -> f64 {
         Some(last) => {
             let elapsed_hours = (now_ms - last) as f64 / 3_600_000.0;
             let half_life_hours = MEMRISE_INTERVALS_HOURS[state.level] * 1.5;
-            (-0.693 * elapsed_hours / half_life_hours).exp().clamp(0.0, 1.0)
+            (-0.693 * elapsed_hours / half_life_hours)
+                .exp()
+                .clamp(0.0, 1.0)
         }
     }
 }
@@ -1054,7 +1173,11 @@ fn run_memrise_sim(words: &[f64], seed: u64, scenario: SimScenario) -> SimResult
 
     for day in 0..scenario.sim_days {
         let now_ms = BASE_TS + day * DAY_MS + 9 * 3_600_000;
-        let avg: f64 = states.iter().map(|s| memrise_recall(s, now_ms)).sum::<f64>() / n as f64;
+        let avg: f64 = states
+            .iter()
+            .map(|s| memrise_recall(s, now_ms))
+            .sum::<f64>()
+            / n as f64;
         daily_avg_recall.push(avg);
 
         let mut due: Vec<usize> = (0..n).filter(|&i| next_review_day[i] <= day).collect();
@@ -1063,7 +1186,9 @@ fn run_memrise_sim(words: &[f64], seed: u64, scenario: SimScenario) -> SimResult
 
         let mut reviewed = 0;
         for idx in due {
-            if reviewed >= scenario.max_reviews_per_day { break; }
+            if reviewed >= scenario.max_reviews_per_day {
+                break;
+            }
             let recall = memrise_recall(&states[idx], now_ms);
             let (is_correct, _) = simulate_answer(words[idx], recall, &mut rng);
 
@@ -1079,23 +1204,32 @@ fn run_memrise_sim(words: &[f64], seed: u64, scenario: SimScenario) -> SimResult
             let interval_days = (MEMRISE_INTERVALS_HOURS[states[idx].level] / 24.0).ceil() as i64;
             next_review_day[idx] = day + interval_days.max(1);
             recent_results[idx].push(is_correct);
-            if recent_results[idx].len() > 20 { recent_results[idx].remove(0); }
+            if recent_results[idx].len() > 20 {
+                recent_results[idx].remove(0);
+            }
             reviewed += 1;
             total_reviews += 1;
         }
     }
 
     let final_test = BASE_TS + scenario.sim_days * DAY_MS + 9 * 3_600_000;
-    let mastered_count = (0..n).filter(|&i| {
-        let recent = &recent_results[i];
-        if recent.len() < 3 { return false; }
-        let acc = recent.iter().filter(|&&r| r).count() as f64 / recent.len() as f64;
-        states[i].level >= 4 && acc > 0.65 && streaks[i] >= 1
-    }).count();
+    let mastered_count = (0..n)
+        .filter(|&i| {
+            let recent = &recent_results[i];
+            if recent.len() < 3 {
+                return false;
+            }
+            let acc = recent.iter().filter(|&&r| r).count() as f64 / recent.len() as f64;
+            states[i].level >= 4 && acc > 0.65 && streaks[i] >= 1
+        })
+        .count();
 
     SimResult {
         daily_avg_recall,
-        final_recall: states.iter().map(|s| memrise_recall(s, final_test)).collect(),
+        final_recall: states
+            .iter()
+            .map(|s| memrise_recall(s, final_test))
+            .collect(),
         memory_strengths: states.iter().map(|s| s.level as f64 / 5.0).collect(),
         mastered_count,
         total_reviews,
@@ -1170,16 +1304,8 @@ fn monte_carlo_amas_vs_baselines() {
             &config,
             &selector_config,
         ));
-        leitner_results.push(run_leitner_sim(
-            &words,
-            trial as u64 * 10000 + 2,
-            scenario,
-        ));
-        random_results.push(run_random_sim(
-            &words,
-            trial as u64 * 10000 + 3,
-            scenario,
-        ));
+        leitner_results.push(run_leitner_sim(&words, trial as u64 * 10000 + 2, scenario));
+        random_results.push(run_random_sim(&words, trial as u64 * 10000 + 3, scenario));
     }
 
     // ---- 打印隔夜 recall 趋势 ----
@@ -1459,10 +1585,7 @@ fn monte_carlo_mdm_multi_timescale() {
     }
 
     println!("\n=== MDM DSR 验证 ({} trials) ===", num_trials);
-    println!(
-        "  stability > 2.0: {}/{}",
-        short_faster_count, num_trials
-    );
+    println!("  stability > 2.0: {}/{}", short_faster_count, num_trials);
     println!(
         "  consolidation > 0: {}/{}",
         consolidation_grows_count, num_trials
@@ -2015,8 +2138,10 @@ fn monte_carlo_high_pressure_scenario() {
     let t_recall_random = welch_t(&amas_recall, &random_recall);
 
     println!("\n{}", "=".repeat(70));
-    println!("  高压力场景: {}词 × {}天 × 每天最多{}轮 × {}次试验",
-        num_words_hp, 30, 15, num_trials);
+    println!(
+        "  高压力场景: {}词 × {}天 × 每天最多{}轮 × {}次试验",
+        num_words_hp, 30, 15, num_trials
+    );
     println!("  覆盖率: {:.1}%", 15.0 / num_words_hp as f64 * 100.0);
     println!("{}", "=".repeat(70));
 
@@ -2025,8 +2150,13 @@ fn monte_carlo_high_pressure_scenario() {
     println!("│  天  │   AMAS   │  Leitner │   随机   │");
     println!("├──────┼──────────┼──────────┼──────────┤");
     for &d in &[1usize, 5, 10, 15, 20, 29] {
-        println!("│  {:2}  │  {:5.1}%  │  {:5.1}%  │  {:5.1}%  │",
-            d, amas_daily[d] * 100.0, leitner_daily[d] * 100.0, random_daily[d] * 100.0);
+        println!(
+            "│  {:2}  │  {:5.1}%  │  {:5.1}%  │  {:5.1}%  │",
+            d,
+            amas_daily[d] * 100.0,
+            leitner_daily[d] * 100.0,
+            random_daily[d] * 100.0
+        );
     }
     println!("└──────┴──────────┴──────────┴──────────┘");
 
@@ -2034,31 +2164,69 @@ fn monte_carlo_high_pressure_scenario() {
     println!("┌────────────────────────────┬──────────┬──────────┬──────────┐");
     println!("│ 指标                       │   AMAS   │  Leitner │   随机   │");
     println!("├────────────────────────────┼──────────┼──────────┼──────────┤");
-    println!("│ 24h后 recall               │ {:5.1}%  │ {:5.1}%  │ {:5.1}%  │", a_r, l_r, r_r);
-    println!("│ mastery 词数 (/{})        │ {:5.1}   │ {:5.1}   │ {:5.1}   │", num_words_hp, a_m, l_m, r_m);
-    println!("│ 总复习次数                 │ {:5.0}   │ {:5.0}   │ {:5.0}   │", a_rev, l_rev, r_rev);
+    println!(
+        "│ 24h后 recall               │ {:5.1}%  │ {:5.1}%  │ {:5.1}%  │",
+        a_r, l_r, r_r
+    );
+    println!(
+        "│ mastery 词数 (/{})        │ {:5.1}   │ {:5.1}   │ {:5.1}   │",
+        num_words_hp, a_m, l_m, r_m
+    );
+    println!(
+        "│ 总复习次数                 │ {:5.0}   │ {:5.0}   │ {:5.0}   │",
+        a_rev, l_rev, r_rev
+    );
     println!("└────────────────────────────┴──────────┴──────────┴──────────┘");
 
     println!("\n统计检验:");
-    println!("  AMAS vs Leitner: t={:.3}  差值 {:.1}%", t_recall_leitner, a_r - l_r);
-    println!("  AMAS vs Random:  t={:.3}  差值 {:.1}%", t_recall_random, a_r - r_r);
+    println!(
+        "  AMAS vs Leitner: t={:.3}  差值 {:.1}%",
+        t_recall_leitner,
+        a_r - l_r
+    );
+    println!(
+        "  AMAS vs Random:  t={:.3}  差值 {:.1}%",
+        t_recall_random,
+        a_r - r_r
+    );
 
     let checks = [
-        ("AMAS recall > Leitner", a_r > l_r, format!("{:.1}% vs {:.1}%", a_r, l_r)),
-        ("AMAS recall > Random", a_r > r_r, format!("{:.1}% vs {:.1}%", a_r, r_r)),
-        ("AMAS vs Leitner 显著", t_recall_leitner > 1.96, format!("t={:.3}", t_recall_leitner)),
-        ("AMAS vs Random 显著", t_recall_random > 1.96, format!("t={:.3}", t_recall_random)),
+        (
+            "AMAS recall > Leitner",
+            a_r > l_r,
+            format!("{:.1}% vs {:.1}%", a_r, l_r),
+        ),
+        (
+            "AMAS recall > Random",
+            a_r > r_r,
+            format!("{:.1}% vs {:.1}%", a_r, r_r),
+        ),
+        (
+            "AMAS vs Leitner 显著",
+            t_recall_leitner > 1.96,
+            format!("t={:.3}", t_recall_leitner),
+        ),
+        (
+            "AMAS vs Random 显著",
+            t_recall_random > 1.96,
+            format!("t={:.3}", t_recall_random),
+        ),
     ];
 
     let mut all_pass = true;
     for (name, passed, detail) in &checks {
         let icon = if *passed { "✅" } else { "❌" };
         println!("  {} {}: {}", icon, name, detail);
-        if !*passed { all_pass = false; }
+        if !*passed {
+            all_pass = false;
+        }
     }
 
-    if all_pass { println!("\n  🎉 高压力场景全部通过！"); }
-    else { println!("\n  ⚠️ 部分未通过"); }
+    if all_pass {
+        println!("\n  🎉 高压力场景全部通过！");
+    } else {
+        println!("\n  ⚠️ 部分未通过");
+    }
 
     assert!(a_r > l_r, "HP: AMAS {:.1}% <= Leitner {:.1}%", a_r, l_r);
     assert!(a_r > r_r, "HP: AMAS {:.1}% <= Random {:.1}%", a_r, r_r);
@@ -2088,22 +2256,26 @@ fn monte_carlo_multi_algorithm_comparison() {
     let num_trials = 100;
 
     let algo_names: [(&str, &str); 7] = [
-        ("AMAS",       "wordforge"),
-        ("SM-18",      "SuperMemo"),
-        ("FSRS",       "墨墨"),
+        ("AMAS", "wordforge"),
+        ("SM-18", "SuperMemo"),
+        ("FSRS", "墨墨"),
         ("Ebbinghaus", "百词斩"),
-        ("HLR",        "Duolingo"),
-        ("Memrise",    "Memrise"),
-        ("SM-2",       "Anki"),
+        ("HLR", "Duolingo"),
+        ("Memrise", "Memrise"),
+        ("SM-2", "Anki"),
     ];
 
-    let mut results: Vec<AlgoResult> = algo_names.iter().map(|(name, app)| AlgoResult {
-        name, app,
-        recall_trials: Vec::with_capacity(num_trials),
-        mastery_trials: Vec::with_capacity(num_trials),
-        review_trials: Vec::with_capacity(num_trials),
-        daily: vec![0.0; SIM_DAYS as usize],
-    }).collect();
+    let mut results: Vec<AlgoResult> = algo_names
+        .iter()
+        .map(|(name, app)| AlgoResult {
+            name,
+            app,
+            recall_trials: Vec::with_capacity(num_trials),
+            mastery_trials: Vec::with_capacity(num_trials),
+            review_trials: Vec::with_capacity(num_trials),
+            daily: vec![0.0; SIM_DAYS as usize],
+        })
+        .collect();
 
     for trial in 0..num_trials {
         let mut word_rng = StdRng::seed_from_u64(trial as u64 + 70000);
@@ -2112,7 +2284,13 @@ fn monte_carlo_multi_algorithm_comparison() {
             .collect();
 
         let sims: Vec<SimResult> = vec![
-            run_amas_sim(&words, trial as u64 * 10000 + 100, scenario, &config, &selector_config),
+            run_amas_sim(
+                &words,
+                trial as u64 * 10000 + 100,
+                scenario,
+                &config,
+                &selector_config,
+            ),
             run_sm18_sim(&words, trial as u64 * 10000 + 200, scenario),
             run_fsrs_sim(&words, trial as u64 * 10000 + 300, scenario),
             run_ebbinghaus_sim(&words, trial as u64 * 10000 + 400, scenario),
@@ -2141,20 +2319,28 @@ fn monte_carlo_multi_algorithm_comparison() {
     // ---- Print Results ----
     println!("\n{}", "=".repeat(90));
     println!("  全面多算法对比 — 7 种背单词方法蒙特卡洛模拟");
-    println!("  {}词 × {}天 × 每天最多{}轮 × {}次试验",
-        NUM_WORDS, SIM_DAYS, MAX_REVIEWS_PER_DAY, num_trials);
+    println!(
+        "  {}词 × {}天 × 每天最多{}轮 × {}次试验",
+        NUM_WORDS, SIM_DAYS, MAX_REVIEWS_PER_DAY, num_trials
+    );
     println!("{}", "=".repeat(90));
 
     // Daily trends
     println!("\n隔夜 recall 趋势:");
     print!("┌──────");
-    for _ in &results { print!("┬──────────"); }
+    for _ in &results {
+        print!("┬──────────");
+    }
     println!("┐");
     print!("│  天  ");
-    for r in &results { print!("│{:^10}", r.name); }
+    for r in &results {
+        print!("│{:^10}", r.name);
+    }
     println!("│");
     print!("├──────");
-    for _ in &results { print!("┼──────────"); }
+    for _ in &results {
+        print!("┼──────────");
+    }
     println!("┤");
     for &d in &[1usize, 5, 10, 15, 20, 29] {
         print!("│  {:2}  ", d);
@@ -2164,61 +2350,99 @@ fn monte_carlo_multi_algorithm_comparison() {
         println!("│");
     }
     print!("└──────");
-    for _ in &results { print!("┴──────────"); }
+    for _ in &results {
+        print!("┴──────────");
+    }
     println!("┘");
 
     // Summary table
     println!("\n综合指标:");
     print!("┌────────────────");
-    for _ in &results { print!("┬──────────"); }
+    for _ in &results {
+        print!("┬──────────");
+    }
     println!("┐");
     print!("│ 指标           ");
-    for r in &results { print!("│{:^10}", r.name); }
+    for r in &results {
+        print!("│{:^10}", r.name);
+    }
     println!("│");
     print!("│ (对应 App)     ");
-    for r in &results { print!("│{:^10}", r.app); }
+    for r in &results {
+        print!("│{:^10}", r.app);
+    }
     println!("│");
     print!("├────────────────");
-    for _ in &results { print!("┼──────────"); }
+    for _ in &results {
+        print!("┼──────────");
+    }
     println!("┤");
 
     // Recall row
     print!("│ 24h recall     ");
-    for r in &results { print!("│  {:5.1}%  ", mean(&r.recall_trials) * 100.0); }
+    for r in &results {
+        print!("│  {:5.1}%  ", mean(&r.recall_trials) * 100.0);
+    }
     println!("│");
 
     // Mastery row
     print!("│ mastery (/{:2})  ", NUM_WORDS);
-    for r in &results { print!("│  {:5.1}   ", mean(&r.mastery_trials)); }
+    for r in &results {
+        print!("│  {:5.1}   ", mean(&r.mastery_trials));
+    }
     println!("│");
 
     // Reviews row
     print!("│ 总复习次数     ");
-    for r in &results { print!("│  {:5.0}   ", mean(&r.review_trials)); }
+    for r in &results {
+        print!("│  {:5.0}   ", mean(&r.review_trials));
+    }
     println!("│");
 
     print!("└────────────────");
-    for _ in &results { print!("┴──────────"); }
+    for _ in &results {
+        print!("┴──────────");
+    }
     println!("┘");
 
     // Ranking
-    let mut ranking: Vec<(usize, f64)> = results.iter().enumerate()
+    let mut ranking: Vec<(usize, f64)> = results
+        .iter()
+        .enumerate()
         .map(|(i, r)| (i, mean(&r.recall_trials)))
         .collect();
     ranking.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
 
     println!("\n🏆 Recall 排名:");
     for (rank, (idx, recall)) in ranking.iter().enumerate() {
-        let medal = match rank { 0 => "🥇", 1 => "🥈", 2 => "🥉", _ => "  " };
+        let medal = match rank {
+            0 => "🥇",
+            1 => "🥈",
+            2 => "🥉",
+            _ => "  ",
+        };
         let t = welch_t(&results[0].recall_trials, &results[*idx].recall_trials);
         let gap = (mean(&results[0].recall_trials) - recall) * 100.0;
         if *idx == 0 {
-            println!("  {} #{} {} ({}) — {:.1}%",
-                medal, rank + 1, results[*idx].name, results[*idx].app, recall * 100.0);
+            println!(
+                "  {} #{} {} ({}) — {:.1}%",
+                medal,
+                rank + 1,
+                results[*idx].name,
+                results[*idx].app,
+                recall * 100.0
+            );
         } else {
-            println!("  {} #{} {} ({}) — {:.1}% (vs AMAS: {:.1}%, t={:.1})",
-                medal, rank + 1, results[*idx].name, results[*idx].app,
-                recall * 100.0, -gap, t);
+            println!(
+                "  {} #{} {} ({}) — {:.1}% (vs AMAS: {:.1}%, t={:.1})",
+                medal,
+                rank + 1,
+                results[*idx].name,
+                results[*idx].app,
+                recall * 100.0,
+                -gap,
+                t
+            );
         }
     }
 
@@ -2231,20 +2455,38 @@ fn monte_carlo_multi_algorithm_comparison() {
         let t = welch_t(&results[0].recall_trials, &results[i].recall_trials);
         let passed = amas_recall > other_recall;
         let icon = if passed { "✅" } else { "❌" };
-        println!("  {} AMAS > {} ({:.1}% vs {:.1}%, t={:.1})",
-            icon, results[i].name, amas_recall * 100.0, other_recall * 100.0, t);
-        if !passed { all_pass = false; }
+        println!(
+            "  {} AMAS > {} ({:.1}% vs {:.1}%, t={:.1})",
+            icon,
+            results[i].name,
+            amas_recall * 100.0,
+            other_recall * 100.0,
+            t
+        );
+        if !passed {
+            all_pass = false;
+        }
     }
 
-    if all_pass { println!("\n  🎉 AMAS 在所有算法中排名第一！"); }
-    else { println!("\n  ⚠️ AMAS 未能超越所有算法（FSRS 使用 ML 优化参数）"); }
+    if all_pass {
+        println!("\n  🎉 AMAS 在所有算法中排名第一！");
+    } else {
+        println!("\n  ⚠️ AMAS 未能超越所有算法（FSRS 使用 ML 优化参数）");
+    }
 
     // Assert AMAS beats all non-ML-optimized algorithms
     // FSRS uses 19 ML-optimized parameters from millions of users, so it's expected to be strong
     for i in 1..results.len() {
-        if results[i].name == "FSRS" { continue; } // FSRS is ML-optimized, skip assertion
+        if results[i].name == "FSRS" {
+            continue;
+        } // FSRS is ML-optimized, skip assertion
         let other = mean(&results[i].recall_trials);
-        assert!(amas_recall > other,
-            "AMAS {:.1}% <= {} {:.1}%", amas_recall * 100.0, results[i].name, other * 100.0);
+        assert!(
+            amas_recall > other,
+            "AMAS {:.1}% <= {} {:.1}%",
+            amas_recall * 100.0,
+            results[i].name,
+            other * 100.0
+        );
     }
 }

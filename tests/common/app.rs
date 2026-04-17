@@ -31,7 +31,11 @@ async fn spawn_with_limits(api_limit: u64) -> TestApp {
         log_level: "info".to_string(),
         enable_file_logs: false,
         log_dir: "./logs".to_string(),
-        database_url: temp_dir.path().join("test.db").to_string_lossy().to_string(),
+        database_url: temp_dir
+            .path()
+            .join("test.db")
+            .to_string_lossy()
+            .to_string(),
         api_only: false,
         sqlite_busy_timeout_ms: 5000,
         sqlite_pool_size: 2,
@@ -73,8 +77,12 @@ async fn spawn_with_limits(api_limit: u64) -> TestApp {
     };
 
     let store = Arc::new(
-        Store::open(&config.database_url, config.sqlite_busy_timeout_ms, config.sqlite_pool_size)
-            .expect("open store"),
+        Store::open(
+            &config.database_url,
+            config.sqlite_busy_timeout_ms,
+            config.sqlite_pool_size,
+        )
+        .expect("open store"),
     );
     store.run_migrations().expect("run migrations");
 

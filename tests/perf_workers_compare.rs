@@ -94,7 +94,9 @@ fn baseline_delayed_reward_count(store: &Store, now: DateTime<Utc>) -> u32 {
     let user_ids = store.list_user_ids().expect("list users");
 
     for user_id in &user_ids {
-        let states = store.list_user_word_states(user_id, 100_000, 0).expect("list wls");
+        let states = store
+            .list_user_word_states(user_id, 100_000, 0)
+            .expect("list wls");
         for state in &states {
             if let Some(review_date) = state.next_review_date {
                 if review_date <= now && state.state != WordState::Mastered {
@@ -258,7 +260,8 @@ where
 #[ignore]
 fn compare_workers_before_after_latency() {
     let dir = tempdir().expect("tempdir");
-    let store = Store::open(dir.path().join("db").to_str().expect("db path"), 5000, 1).expect("open");
+    let store =
+        Store::open(dir.path().join("db").to_str().expect("db path"), 5000, 1).expect("open");
 
     let now = seed_perf_data(&store);
 

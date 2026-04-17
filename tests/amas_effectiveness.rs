@@ -105,8 +105,11 @@ fn test_amas_beats_fixed_interval() {
     // With power-law forgetting curve, AMAS optimizes for efficiency (fewer reviews, high recall)
     // rather than brute-force maximum recall. Verify AMAS recall exceeds desired retention.
     let final_test = BASE_TS + 30 * DAY_MS + 9 * 3_600_000;
-    let amas_avg_recall: f64 =
-        amas_states.iter().map(|s| recall_probability(s, final_test, &config)).sum::<f64>() / num_words as f64;
+    let amas_avg_recall: f64 = amas_states
+        .iter()
+        .map(|s| recall_probability(s, final_test, &config))
+        .sum::<f64>()
+        / num_words as f64;
 
     assert!(
         amas_avg_recall >= 0.85,
@@ -151,7 +154,11 @@ fn test_mastery_rate_after_30_days() {
             let now_ms = base_ms + day as i64 * 86_400_000;
             let effective_quality = 0.85;
             learning_backend::amas::memory::mdm::update_strength(
-                &mut state.mdm, effective_quality, 0.5, now_ms, &config
+                &mut state.mdm,
+                effective_quality,
+                0.5,
+                now_ms,
+                &config,
             );
             state.total_attempts += 1;
             state.total_correct += 1;
