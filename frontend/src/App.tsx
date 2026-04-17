@@ -1,4 +1,4 @@
-import { Router, Route } from '@solidjs/router';
+import { Router, Route, useLocation } from '@solidjs/router';
 import { lazy, Suspense, Show, createSignal, onMount, onCleanup } from 'solid-js';
 import { Toaster } from '@/components/ui/Toast';
 import { AppErrorBoundary } from '@/components/ErrorBoundary';
@@ -40,6 +40,8 @@ function MaintenanceProvider(props: { children: any }) {
   let pollTimer: ReturnType<typeof setInterval> | undefined;
   let disconnectSse: (() => void) | undefined;
   let initialVersion: string | undefined;
+  const location = useLocation();
+  const isAdminPath = () => location.pathname.startsWith('/admin');
 
   const checkStatus = async () => {
     try {
@@ -73,8 +75,6 @@ function MaintenanceProvider(props: { children: any }) {
     stopTelemetryWorker();
     disconnectSse?.();
   });
-
-  const isAdminPath = () => window.location.pathname.startsWith('/admin');
 
   return (
     <>

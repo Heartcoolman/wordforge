@@ -36,7 +36,7 @@ export function Table<T extends Record<string, unknown>>(props: TableProps<T>) {
         </thead>
         <tbody>
           <Show when={props.loading}>
-            <For each={Array(props.loadingRows ?? 3)}>
+            <For each={Array.from({ length: props.loadingRows ?? 3 }, (_, i) => i)}>
               {() => (
                 <tr class="border-b border-border last:border-b-0">
                   <For each={props.columns}>
