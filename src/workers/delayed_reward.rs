@@ -91,7 +91,12 @@ mod tests {
     #[test]
     fn count_overdue_words_ignores_future_and_mastered() {
         let dir = tempdir().unwrap();
-        let store = Store::open(dir.path().join("db-delayed-reward").to_str().unwrap(), 5000, 1).unwrap();
+        let store = Store::open(
+            dir.path().join("db-delayed-reward").to_str().unwrap(),
+            5000,
+            1,
+        )
+        .unwrap();
 
         let user = sample_user("u1", "u1@example.com");
         store.create_user(&user).unwrap();

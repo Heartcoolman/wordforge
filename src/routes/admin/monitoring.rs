@@ -23,7 +23,11 @@ async fn system_health(
     let size_on_disk = state.store().db_size_bytes().unwrap_or(0);
     let uptime_secs = state.uptime_secs();
     let store_probe_ok = state.store().db_ping().is_ok();
-    let status = if store_probe_ok { "healthy" } else { "degraded" };
+    let status = if store_probe_ok {
+        "healthy"
+    } else {
+        "degraded"
+    };
 
     Ok(ok(serde_json::json!({
         "status": status,
@@ -112,10 +116,7 @@ async fn fetch_latest_release(
         .timeout(Duration::from_secs(10))
         .build()?;
 
-    let resp = client
-        .get(api_url)
-        .send()
-        .await?;
+    let resp = client.get(api_url).send().await?;
 
     if !resp.status().is_success() {
         return Err(format!("GitHub API returned {}", resp.status()).into());

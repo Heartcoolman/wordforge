@@ -27,12 +27,15 @@ pub struct UserStatsAgg {
     pub session_ids: HashSet<String>,
 }
 
-const RECORD_COLS: &str = "user_id, id, word_id, is_correct, response_time_ms, session_id, created_at";
+const RECORD_COLS: &str =
+    "user_id, id, word_id, is_correct, response_time_ms, session_id, created_at";
 
 fn parse_dt(s: String) -> rusqlite::Result<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(&s)
         .map(|dt| dt.with_timezone(&Utc))
-        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))
+        .map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+        })
 }
 
 fn record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LearningRecord> {
@@ -157,12 +160,10 @@ impl Store {
 
         if let Some(session) = learning_session {
             let summary = session.summary.as_ref();
-            let summary_mastered = Self::serialize_json(
-                &summary.map(|s| &s.mastered_word_ids).unwrap_or(&vec![]),
-            )?;
-            let summary_error = Self::serialize_json(
-                &summary.map(|s| &s.error_prone_word_ids).unwrap_or(&vec![]),
-            )?;
+            let summary_mastered =
+                Self::serialize_json(&summary.map(|s| &s.mastered_word_ids).unwrap_or(&vec![]))?;
+            let summary_error =
+                Self::serialize_json(&summary.map(|s| &s.error_prone_word_ids).unwrap_or(&vec![]))?;
             tx.execute(
                 "UPDATE learning_sessions SET
                     status=?1, total_questions=?2, actual_mastery_count=?3, context_shifts=?4,
@@ -258,7 +259,8 @@ impl Store {
             "SELECT {RECORD_COLS} FROM learning_records WHERE user_id=?1 ORDER BY created_at DESC LIMIT ?2"
         ))?;
         let rows = stmt.query_map(params![user_id, limit as i64], record_from_row)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
     }
 
     pub fn get_user_records_with_offset(
@@ -272,8 +274,12 @@ impl Store {
         let mut stmt = conn.prepare(&format!(
             "SELECT {RECORD_COLS} FROM learning_records WHERE user_id=?1 ORDER BY created_at DESC LIMIT ?2 OFFSET ?3"
         ))?;
-        let rows = stmt.query_map(params![user_id, limit as i64, offset as i64], record_from_row)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
+        let rows = stmt.query_map(
+            params![user_id, limit as i64, offset as i64],
+            record_from_row,
+        )?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
     }
 
     pub fn count_user_records_stats(&self, user_id: &str) -> Result<(usize, usize), StoreError> {
@@ -300,7 +306,8 @@ impl Store {
 
     pub fn count_all_records(&self) -> Result<usize, StoreError> {
         let conn = self.conn()?;
-        let count: i64 = conn.query_row("SELECT COUNT(*) FROM learning_records", [], |r| r.get(0))?;
+        let count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM learning_records", [], |r| r.get(0))?;
         Ok(count as usize)
     }
 
@@ -327,7 +334,8 @@ impl Store {
             "SELECT {RECORD_COLS} FROM learning_records WHERE user_id=?1 AND word_id=?2 ORDER BY created_at DESC LIMIT ?3"
         ))?;
         let rows = stmt.query_map(params![user_id, word_id, limit as i64], record_from_row)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
     }
 
     pub fn daily_active_users(&self, days: u32) -> Result<Vec<(String, i64)>, StoreError> {
@@ -343,7 +351,8 @@ impl Store {
         let rows = stmt.query_map(params![&since_str], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
         })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
     }
 
     pub fn daily_records(&self, days: u32) -> Result<Vec<(String, i64, i64)>, StoreError> {
@@ -357,9 +366,14 @@ impl Store {
              GROUP BY d ORDER BY d",
         )?;
         let rows = stmt.query_map(params![&since_str], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
         })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
     }
 
     pub fn count_records_on_date(&self, date_str: &str) -> Result<usize, StoreError> {
@@ -403,7 +417,12 @@ mod tests {
         Store::open(":memory:", 5000, 1).unwrap()
     }
 
-    fn sample_record(id: &str, user_id: &str, word_id: &str, created_at: DateTime<Utc>) -> LearningRecord {
+    fn sample_record(
+        id: &str,
+        user_id: &str,
+        word_id: &str,
+        created_at: DateTime<Utc>,
+    ) -> LearningRecord {
         LearningRecord {
             id: id.into(),
             user_id: user_id.into(),
@@ -419,8 +438,17 @@ mod tests {
     fn records_returned_desc_order() {
         let store = test_store();
         let now = Utc::now();
-        store.create_record(&sample_record("r1", "u1", "w1", now - Duration::seconds(30))).unwrap();
-        store.create_record(&sample_record("r2", "u1", "w1", now)).unwrap();
+        store
+            .create_record(&sample_record(
+                "r1",
+                "u1",
+                "w1",
+                now - Duration::seconds(30),
+            ))
+            .unwrap();
+        store
+            .create_record(&sample_record("r2", "u1", "w1", now))
+            .unwrap();
         let list = store.get_user_records("u1", 10).unwrap();
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].id, "r2");
@@ -431,8 +459,12 @@ mod tests {
     fn count_records_works() {
         let store = test_store();
         let now = Utc::now();
-        store.create_record(&sample_record("r1", "u1", "w1", now)).unwrap();
-        store.create_record(&sample_record("r2", "u1", "w2", now)).unwrap();
+        store
+            .create_record(&sample_record("r1", "u1", "w1", now))
+            .unwrap();
+        store
+            .create_record(&sample_record("r2", "u1", "w2", now))
+            .unwrap();
         assert_eq!(store.count_user_records("u1").unwrap(), 2);
         assert_eq!(store.count_all_records().unwrap(), 2);
     }

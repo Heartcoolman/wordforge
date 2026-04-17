@@ -32,10 +32,7 @@ struct DaysQuery {
     days: u32,
 }
 
-fn fill_dates_active(
-    data: &[(String, i64)],
-    days: u32,
-) -> Vec<serde_json::Value> {
+fn fill_dates_active(data: &[(String, i64)], days: u32) -> Vec<serde_json::Value> {
     let mut map = std::collections::HashMap::new();
     for (date, count) in data {
         map.insert(date.as_str(), *count);
@@ -51,10 +48,7 @@ fn fill_dates_active(
         .collect()
 }
 
-fn fill_dates_records(
-    data: &[(String, i64, i64)],
-    days: u32,
-) -> Vec<serde_json::Value> {
+fn fill_dates_records(data: &[(String, i64, i64)], days: u32) -> Vec<serde_json::Value> {
     let mut map = std::collections::HashMap::new();
     for (date, total, correct) in data {
         map.insert(date.as_str(), (*total, *correct));
@@ -115,7 +109,10 @@ async fn user_engagement(
         .unwrap_or_else(chrono::Utc::now);
     let active_today = state.store().count_active_users_since(day_start)?;
 
-    let today_str = chrono::Utc::now().date_naive().format("%Y-%m-%d").to_string();
+    let today_str = chrono::Utc::now()
+        .date_naive()
+        .format("%Y-%m-%d")
+        .to_string();
     let yesterday_str = (chrono::Utc::now().date_naive() - chrono::Duration::days(1))
         .format("%Y-%m-%d")
         .to_string();
@@ -140,7 +137,10 @@ async fn learning_metrics(
     let total_records = state.store().count_all_records()? as u64;
     let total_correct = state.store().count_all_correct_records()? as u64;
 
-    let today_str = chrono::Utc::now().date_naive().format("%Y-%m-%d").to_string();
+    let today_str = chrono::Utc::now()
+        .date_naive()
+        .format("%Y-%m-%d")
+        .to_string();
     let yesterday_str = (chrono::Utc::now().date_naive() - chrono::Duration::days(1))
         .format("%Y-%m-%d")
         .to_string();
@@ -148,7 +148,9 @@ async fn learning_metrics(
     let records_today = state.store().count_records_on_date(&today_str)?;
     let records_yesterday = state.store().count_records_on_date(&yesterday_str)?;
     let correct_today = state.store().count_correct_records_on_date(&today_str)?;
-    let correct_yesterday = state.store().count_correct_records_on_date(&yesterday_str)?;
+    let correct_yesterday = state
+        .store()
+        .count_correct_records_on_date(&yesterday_str)?;
 
     let acc_today = if records_today > 0 {
         (correct_today as f64 / records_today as f64 * 100.0).round() as usize

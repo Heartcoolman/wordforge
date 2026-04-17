@@ -24,19 +24,16 @@ impl Drop for SseGuard {
     fn drop(&mut self) {
         SSE_CONNECTION_COUNT.fetch_sub(1, Ordering::SeqCst);
         if let Some(ref did) = self.device_id {
-            let mut remove_key = false;
             if let Some(mut conns) = self.state.active_sse().get_mut(did) {
                 conns.retain(|c| c.conn_id != self.conn_id);
                 if conns.is_empty() {
-                    remove_key = true;
+                    self.state
+                        .active_sse()
+                        .remove_if(did, |_, conns| conns.is_empty());
                 }
             }
-            if remove_key {
-                if self.state.active_sse().remove_if(did, |_, conns| conns.is_empty()).is_some() {
-                    self.state.last_heartbeat().remove(did);
-                    self.state.heartbeat_miss_count().remove(did);
-                }
-            }
+            self.state.last_heartbeat().remove(did);
+            self.state.heartbeat_miss_count().remove(did);
         }
     }
 }
@@ -100,9 +97,7 @@ pub async fn sse_handler(
             .or_default()
             .push(info);
         // Initialize heartbeat timestamp to prevent cold-start miss accumulation
-        state
-            .last_heartbeat()
-            .insert(did.clone(), Instant::now());
+        state.last_heartbeat().insert(did.clone(), Instant::now());
         state.heartbeat_miss_count().insert(did.clone(), 0);
     }
 

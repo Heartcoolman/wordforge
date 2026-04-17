@@ -222,8 +222,14 @@ mod tests {
     async fn runtime_config_switch_is_atomic() {
         let cfg = Config::from_env();
         let tmp = tempfile::tempdir().expect("tempdir");
-        let store =
-            Arc::new(Store::open(tmp.path().join("state_atomic.db").to_str().unwrap(), 5000, 4).unwrap());
+        let store = Arc::new(
+            Store::open(
+                tmp.path().join("state_atomic.db").to_str().unwrap(),
+                5000,
+                4,
+            )
+            .unwrap(),
+        );
         let amas = Arc::new(AMASEngine::new(AMASConfig::default(), store.clone()));
         let (tx, _) = broadcast::channel(4);
         let state = AppState::new(store, amas, &cfg, tx, false);
@@ -237,7 +243,12 @@ mod tests {
         let cfg = Config::from_env();
         let tmp = tempfile::tempdir().expect("tempdir");
         let store = Arc::new(
-            Store::open(tmp.path().join("state_shutdown.db").to_str().unwrap(), 5000, 4).unwrap(),
+            Store::open(
+                tmp.path().join("state_shutdown.db").to_str().unwrap(),
+                5000,
+                4,
+            )
+            .unwrap(),
         );
         let amas = Arc::new(AMASEngine::new(AMASConfig::default(), store.clone()));
         let (tx, _) = broadcast::channel(4);

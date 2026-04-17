@@ -106,7 +106,8 @@ async fn list_users(
     let has_filter = search.is_some() || q.banned.is_some();
 
     let (users, total) = if has_filter {
-        let mut all = state.store().list_users(usize::MAX, 0)?;
+        let mut all = state.store().list_users(10_000, 0)?;
+        // TODO: Push search/filter to SQL layer for better performance at scale
         all.retain(|user| {
             let banned_match = q.banned.map(|v| user.is_banned == v).unwrap_or(true);
             let search_match = search.as_ref().map_or(true, |needle| {
@@ -188,7 +189,9 @@ async fn admin_stats(
         .to_string();
 
     let users_today = state.store().count_users_registered_on_date(&today_str)?;
-    let users_yesterday = state.store().count_users_registered_on_date(&yesterday_str)?;
+    let users_yesterday = state
+        .store()
+        .count_users_registered_on_date(&yesterday_str)?;
     let records_today = state.store().count_records_on_date(&today_str)?;
     let records_yesterday = state.store().count_records_on_date(&yesterday_str)?;
 
@@ -237,8 +240,9 @@ async fn admin_reset_user_password(
     );
 
     Ok(ok(serde_json::json!({
-        "resetKey": raw_token,
+        "resetCreated": true,
         "expiresInHours": 4,
+        "message": "密码重置令牌已创建，请通过安全渠道通知用户",
     })))
 }
 

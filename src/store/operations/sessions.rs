@@ -30,11 +30,7 @@ fn parse_dt(s: String) -> rusqlite::Result<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(&s)
         .map(|dt| dt.with_timezone(&Utc))
         .map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(
-                0,
-                rusqlite::types::Type::Text,
-                Box::new(e),
-            )
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
         })
 }
 
@@ -44,11 +40,7 @@ const INSERT_SQL: &str =
     "INSERT INTO {T} (token_hash, user_id, token_type, created_at, expires_at, revoked) \
      VALUES (?1, ?2, ?3, ?4, ?5, ?6)";
 
-fn insert_session(
-    conn: &rusqlite::Connection,
-    table: &str,
-    s: &Session,
-) -> Result<(), StoreError> {
+fn insert_session(conn: &rusqlite::Connection, table: &str, s: &Session) -> Result<(), StoreError> {
     conn.execute(
         &INSERT_SQL.replace("{T}", table),
         params![
@@ -72,7 +64,11 @@ fn get_active_session(
         "SELECT {COLS} FROM {table} WHERE token_hash = ?1 AND revoked = 0 AND expires_at > ?2"
     );
     Ok(conn
-        .query_row(&sql, params![token_hash, Utc::now().to_rfc3339()], session_from_row)
+        .query_row(
+            &sql,
+            params![token_hash, Utc::now().to_rfc3339()],
+            session_from_row,
+        )
         .optional()?)
 }
 
@@ -115,10 +111,7 @@ impl Store {
 
     pub fn delete_user_sessions(&self, user_id: &str) -> Result<u32, StoreError> {
         let conn = self.conn()?;
-        let deleted = conn.execute(
-            "DELETE FROM sessions WHERE user_id = ?1",
-            params![user_id],
-        )?;
+        let deleted = conn.execute("DELETE FROM sessions WHERE user_id = ?1", params![user_id])?;
         Ok(deleted as u32)
     }
 

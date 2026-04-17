@@ -141,11 +141,7 @@ fn build_dual_grid_stability_list(config: &SspConfig) -> Vec<f64> {
 }
 
 /// 从 (S, R) 计算间隔天数（FSRS-5 幂律遗忘曲线的反函数）
-fn fsrs5_next_interval(
-    s: f64,
-    r: f64,
-    config: &crate::amas::config::MemoryModelConfig,
-) -> f64 {
+fn fsrs5_next_interval(s: f64, r: f64, config: &crate::amas::config::MemoryModelConfig) -> f64 {
     let factor = config.forgetting_curve_factor;
     let decay = config.forgetting_curve_decay;
     let ivl = s / factor * (r.powf(1.0 / decay) - 1.0);
@@ -179,7 +175,9 @@ pub fn precompute(
         build_dual_grid_stability_list(config)
     } else {
         let index_len = (config.max_index - config.min_index) as usize;
-        (0..index_len).map(|i| base.powi(i as i32 + min_idx)).collect()
+        (0..index_len)
+            .map(|i| base.powi(i as i32 + min_idx))
+            .collect()
     };
     let s_len = stability_list.len();
 
@@ -333,8 +331,8 @@ fn fsrs5_recall(
     config: &crate::amas::config::MemoryModelConfig,
 ) -> f64 {
     let s = stability.max(0.01);
-    let power_law =
-        (1.0 + config.forgetting_curve_factor * elapsed_days / s).powf(config.forgetting_curve_decay);
+    let power_law = (1.0 + config.forgetting_curve_factor * elapsed_days / s)
+        .powf(config.forgetting_curve_decay);
     let floor = config.forgetting_curve_floor;
     (floor + (1.0 - floor) * power_law).clamp(0.0, 1.0)
 }
@@ -415,7 +413,10 @@ mod tests {
         let policy = SspPolicy::from_tables(result.tables, &ssp_config);
 
         let ivl = policy.optimal_interval(1.0, 5.0);
-        assert!(ivl >= 1.0, "interval for S=1, D=5 should be >= 1, got {ivl}");
+        assert!(
+            ivl >= 1.0,
+            "interval for S=1, D=5 should be >= 1, got {ivl}"
+        );
 
         // 高 stability 应给出更长间隔
         let ivl_low_s = policy.optimal_interval(5.0, 5.0);
@@ -476,9 +477,13 @@ mod tests {
         let policy = SspPolicy::from_tables(result.tables, &ssp_config);
 
         println!("\n=== SSP 策略表全览 ===");
-        println!("{:<6} {:<10} {:<10} {:<10} {:<10} {:<10} {:<10} {:<10} {:<10} {:<10} {:<10}",
-            "S(天)", "D=1", "D=2", "D=3", "D=4", "D=5", "D=6", "D=7", "D=8", "D=9", "D=10");
-        for s in [0.3, 0.5, 1.0, 2.0, 3.0, 5.0, 8.0, 12.0, 20.0, 30.0, 50.0, 80.0, 120.0, 200.0, 300.0] {
+        println!(
+            "{:<6} {:<10} {:<10} {:<10} {:<10} {:<10} {:<10} {:<10} {:<10} {:<10} {:<10}",
+            "S(天)", "D=1", "D=2", "D=3", "D=4", "D=5", "D=6", "D=7", "D=8", "D=9", "D=10"
+        );
+        for s in [
+            0.3, 0.5, 1.0, 2.0, 3.0, 5.0, 8.0, 12.0, 20.0, 30.0, 50.0, 80.0, 120.0, 200.0, 300.0,
+        ] {
             print!("{:<6.1}", s);
             for d in 1..=10 {
                 print!(" {:<9.0}", policy.optimal_interval(s, d as f64));
@@ -487,7 +492,10 @@ mod tests {
         }
 
         println!("\n=== SSP vs MDM 间隔对比 ===");
-        println!("{:<6} {:<12} {:<15} {:<15} {:<10}", "D", "S(days)", "MDM(days)", "SSP(days)", "Δ%");
+        println!(
+            "{:<6} {:<12} {:<15} {:<15} {:<10}",
+            "D", "S(days)", "MDM(days)", "SSP(days)", "Δ%"
+        );
 
         for d in [1.0, 3.0, 5.0, 7.0, 10.0] {
             for s in [0.5, 1.0, 3.0, 8.0, 20.0, 50.0, 100.0, 200.0] {
@@ -496,8 +504,7 @@ mod tests {
                 mdm_state.difficulty = d;
                 mdm_state.last_review_at = Some(0);
 
-                let mdm_interval_secs =
-                    mdm::compute_interval(&mdm_state, 0.9, 1.0, &mem_config);
+                let mdm_interval_secs = mdm::compute_interval(&mdm_state, 0.9, 1.0, &mem_config);
                 let mdm_days = mdm_interval_secs as f64 / 86400.0;
 
                 let ssp_days = policy.optimal_interval(s, d);
@@ -535,8 +542,7 @@ mod tests {
         assert!(result.dual_grid);
         assert_eq!(result.tables.len(), 10);
 
-        let policy =
-            SspPolicy::from_tables_with_bins(result.tables, result.stability_list.clone());
+        let policy = SspPolicy::from_tables_with_bins(result.tables, result.stability_list.clone());
 
         // 基本有效性
         let ivl = policy.optimal_interval(5.0, 5.0);
@@ -566,26 +572,35 @@ mod tests {
 
         // 采样点
         let sample_points: Vec<(f64, f64)> = vec![
-            (1.0, 3.0), (1.0, 7.0),
-            (5.0, 3.0), (5.0, 7.0),
-            (15.0, 3.0), (15.0, 7.0),
-            (30.0, 3.0), (30.0, 7.0),
-            (60.0, 3.0), (60.0, 7.0),
+            (1.0, 3.0),
+            (1.0, 7.0),
+            (5.0, 3.0),
+            (5.0, 7.0),
+            (15.0, 3.0),
+            (15.0, 7.0),
+            (30.0, 3.0),
+            (30.0, 7.0),
+            (60.0, 3.0),
+            (60.0, 7.0),
             (100.0, 5.0),
             (150.0, 5.0),
-            (200.0, 3.0), (200.0, 7.0),
+            (200.0, 3.0),
+            (200.0, 7.0),
             (300.0, 5.0),
         ];
 
         // MDM 基线 (R=0.90)
-        let mdm_intervals: Vec<f64> = sample_points.iter().map(|&(s, d)| {
-            let mut state = mdm::MdmState::default();
-            state.stability = s;
-            state.difficulty = d;
-            state.last_review_at = Some(0);
-            let secs = mdm::compute_interval(&state, 0.90, 1.0, &mem_config);
-            secs as f64 / 86400.0
-        }).collect();
+        let mdm_intervals: Vec<f64> = sample_points
+            .iter()
+            .map(|&(s, d)| {
+                let mut state = mdm::MdmState::default();
+                state.stability = s;
+                state.difficulty = d;
+                state.last_review_at = Some(0);
+                let secs = mdm::compute_interval(&state, 0.90, 1.0, &mem_config);
+                secs as f64 / 86400.0
+            })
+            .collect();
 
         // === Phase 1: sweep forget_cost/recall_cost 比值 ===
         let ratios: Vec<f64> = vec![1.5, 2.0, 3.0, 5.0, 8.0, 12.0, 20.0, 30.0];
@@ -618,7 +633,11 @@ mod tests {
                     count += 1;
                 }
             }
-            let score = if count > 0 { score_sum / count as f64 } else { 0.0 };
+            let score = if count > 0 {
+                score_sum / count as f64
+            } else {
+                0.0
+            };
 
             println!("{:<8.1} {:<10.4}", ratio, score);
 
@@ -644,8 +663,10 @@ mod tests {
         let result = precompute(&ssp_config, &mem_config);
         let policy = SspPolicy::from_tables(result.tables, &ssp_config);
 
-        println!("\n{:<8} {:<8} {:<10} {:<10} {:<10}",
-            "S(天)", "D", "SSP(天)", "MDM(天)", "SSP/MDM");
+        println!(
+            "\n{:<8} {:<8} {:<10} {:<10} {:<10}",
+            "S(天)", "D", "SSP(天)", "MDM(天)", "SSP/MDM"
+        );
         for &(s, d) in &sample_points {
             let ssp = policy.optimal_interval(s, d);
             let mut state = mdm::MdmState::default();
@@ -654,7 +675,10 @@ mod tests {
             state.last_review_at = Some(0);
             let mdm = mdm::compute_interval(&state, 0.90, 1.0, &mem_config) as f64 / 86400.0;
             let ratio_val = if mdm > 0.01 { ssp / mdm } else { 0.0 };
-            println!("{:<8.1} {:<8.0} {:<10.1} {:<10.1} {:<10.2}", s, d, ssp, mdm, ratio_val);
+            println!(
+                "{:<8.1} {:<8.0} {:<10.1} {:<10.1} {:<10.2}",
+                s, d, ssp, mdm, ratio_val
+            );
         }
 
         // === Phase 3: 在最佳比值基础上 sweep cost_params ===
@@ -703,7 +727,11 @@ mod tests {
                     count += 1;
                 }
             }
-            let score = if count > 0 { score_sum / count as f64 } else { 0.0 };
+            let score = if count > 0 {
+                score_sum / count as f64
+            } else {
+                0.0
+            };
             println!("{:<25} {:<10.4}", name, score);
 
             if score > best_params_score {
@@ -714,7 +742,10 @@ mod tests {
             }
         }
 
-        println!("\n最佳 cost_params: {} (分数: {best_params_score:.4})", best_params_name);
+        println!(
+            "\n最佳 cost_params: {} (分数: {best_params_score:.4})",
+            best_params_name
+        );
         println!("\n=== 推荐配置 ===");
         println!("recall_cost: 3.0");
         println!("forget_cost: {:.1}", 3.0 * best_ratio);

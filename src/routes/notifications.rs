@@ -119,44 +119,69 @@ async fn list_badges(
     let now = Utc::now();
 
     // Load persisted unlock timestamps
-    let load_badge = |badge_id: &str| -> Option<StoreBadge> {
-        store.get_badge(&auth.user_id, badge_id).ok()?
-    };
+    let load_badge =
+        |badge_id: &str| -> Option<StoreBadge> { store.get_badge(&auth.user_id, badge_id).ok()? };
 
     let persisted_first = load_badge("first_word");
     let persisted_streak = load_badge("streak_7");
     let persisted_mastered = load_badge("mastered_100");
 
-    let make_badge =
-        |id: &str, name: &str, desc: &str, computed_unlocked: bool, progress: f64, persisted: &Option<StoreBadge>| {
-            let unlocked = computed_unlocked || persisted.as_ref().is_some_and(|b| b.unlocked);
-            let unlocked_at: Option<chrono::DateTime<Utc>> = if unlocked {
-                persisted
-                    .as_ref()
-                    .and_then(|b| b.unlocked_at.as_deref())
-                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-                    .map(|dt| dt.with_timezone(&Utc))
-                    .or(Some(now))
-            } else {
-                None
-            };
-            Badge {
-                id: id.to_string(),
-                name: name.to_string(),
-                description: desc.to_string(),
-                unlocked,
-                progress: if computed_unlocked { progress.max(1.0) } else { progress },
-                unlocked_at,
-            }
+    let make_badge = |id: &str,
+                      name: &str,
+                      desc: &str,
+                      computed_unlocked: bool,
+                      progress: f64,
+                      persisted: &Option<StoreBadge>| {
+        let unlocked = computed_unlocked || persisted.as_ref().is_some_and(|b| b.unlocked);
+        let unlocked_at: Option<chrono::DateTime<Utc>> = if unlocked {
+            persisted
+                .as_ref()
+                .and_then(|b| b.unlocked_at.as_deref())
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| dt.with_timezone(&Utc))
+                .or(Some(now))
+        } else {
+            None
         };
+        Badge {
+            id: id.to_string(),
+            name: name.to_string(),
+            description: desc.to_string(),
+            unlocked,
+            progress: if computed_unlocked {
+                progress.max(1.0)
+            } else {
+                progress
+            },
+            unlocked_at,
+        }
+    };
 
     let badges = vec![
-        make_badge("first_word", "First Word", "Learn your first word",
-            first_word_unlocked, if first_word_unlocked { 1.0 } else { 0.0 }, &persisted_first),
-        make_badge("streak_7", "Week Streak", "Study for 7 consecutive days",
-            streak_unlocked, streak_progress, &persisted_streak),
-        make_badge("mastered_100", "Century Club", "Master 100 words",
-            mastered_unlocked, mastered_progress, &persisted_mastered),
+        make_badge(
+            "first_word",
+            "First Word",
+            "Learn your first word",
+            first_word_unlocked,
+            if first_word_unlocked { 1.0 } else { 0.0 },
+            &persisted_first,
+        ),
+        make_badge(
+            "streak_7",
+            "Week Streak",
+            "Study for 7 consecutive days",
+            streak_unlocked,
+            streak_progress,
+            &persisted_streak,
+        ),
+        make_badge(
+            "mastered_100",
+            "Century Club",
+            "Master 100 words",
+            mastered_unlocked,
+            mastered_progress,
+            &persisted_mastered,
+        ),
     ];
 
     // Persist newly unlocked badges
@@ -245,7 +270,10 @@ async fn get_preferences(
     {
         Some(val) => UserPreferences {
             theme: val["theme"].as_str().unwrap_or(DEFAULT_THEME).to_string(),
-            language: val["language"].as_str().unwrap_or(DEFAULT_LANGUAGE).to_string(),
+            language: val["language"]
+                .as_str()
+                .unwrap_or(DEFAULT_LANGUAGE)
+                .to_string(),
             notification_enabled: val["notification_enabled"].as_bool().unwrap_or(true),
             sound_enabled: val["sound_enabled"].as_bool().unwrap_or(true),
         },
@@ -270,7 +298,10 @@ async fn set_preferences(
     let mut prefs = match existing {
         Some(val) => UserPreferences {
             theme: val["theme"].as_str().unwrap_or(DEFAULT_THEME).to_string(),
-            language: val["language"].as_str().unwrap_or(DEFAULT_LANGUAGE).to_string(),
+            language: val["language"]
+                .as_str()
+                .unwrap_or(DEFAULT_LANGUAGE)
+                .to_string(),
             notification_enabled: val["notification_enabled"].as_bool().unwrap_or(true),
             sound_enabled: val["sound_enabled"].as_bool().unwrap_or(true),
         },

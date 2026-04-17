@@ -93,16 +93,10 @@ fn session_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LearningSession
     let summary_accuracy: Option<f64> = row.get(9)?;
     let summary = summary_accuracy.map(|accuracy| {
         let avg_response_time_ms: i64 = row.get::<_, Option<i64>>(10).ok().flatten().unwrap_or(0);
-        let mastered: Vec<String> =
-            serde_json::from_str(&mastered_json).unwrap_or_default();
-        let error_prone: Vec<String> =
-            serde_json::from_str(&error_prone_json).unwrap_or_default();
+        let mastered: Vec<String> = serde_json::from_str(&mastered_json).unwrap_or_default();
+        let error_prone: Vec<String> = serde_json::from_str(&error_prone_json).unwrap_or_default();
         let duration_secs: i64 = row.get::<_, Option<i64>>(13).ok().flatten().unwrap_or(0);
-        let hour_of_day: u8 = row
-            .get::<_, Option<i64>>(14)
-            .ok()
-            .flatten()
-            .unwrap_or(0) as u8;
+        let hour_of_day: u8 = row.get::<_, Option<i64>>(14).ok().flatten().unwrap_or(0) as u8;
         let final_difficulty: f64 = row.get::<_, Option<f64>>(15).ok().flatten().unwrap_or(0.0);
         SessionSummary {
             accuracy,

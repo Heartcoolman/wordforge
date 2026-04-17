@@ -97,7 +97,7 @@ async fn create_record(
     // 幂等性检查：同一用户对同一单词在 5 秒内的重复提交视为幂等请求
     const DEDUP_WINDOW_MS: i64 = 5_000;
     let now = chrono::Utc::now();
-    let recent_records = state.store().get_user_records(&auth.user_id, 10)?;
+    let recent_records = state.store().get_user_records(&auth.user_id, 50)?;
     for r in &recent_records {
         if r.word_id == req.word_id
             && r.is_correct == req.is_correct

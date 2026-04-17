@@ -40,11 +40,7 @@ fn parse_dt(s: String) -> rusqlite::Result<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(&s)
         .map(|dt| dt.with_timezone(&Utc))
         .map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(
-                0,
-                rusqlite::types::Type::Text,
-                Box::new(e),
-            )
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
         })
 }
 
@@ -56,7 +52,10 @@ fn is_unique_violation(err: &rusqlite::Error) -> bool {
     )
 }
 
-fn get_admin_conn(conn: &rusqlite::Connection, admin_id: &str) -> Result<Option<Admin>, StoreError> {
+fn get_admin_conn(
+    conn: &rusqlite::Connection,
+    admin_id: &str,
+) -> Result<Option<Admin>, StoreError> {
     Ok(conn
         .query_row(
             &format!("SELECT {ADMIN_COLS} FROM admins WHERE id = ?1"),
@@ -165,8 +164,11 @@ impl Store {
                 "UPDATE admins SET failed_login_count=?1, locked_until=?2, updated_at=?3
                  WHERE id=?4 AND updated_at=?5",
                 params![
-                    new_count as i64, locked_until.as_deref(), Utc::now().to_rfc3339(),
-                    admin_id, admin.updated_at.to_rfc3339(),
+                    new_count as i64,
+                    locked_until.as_deref(),
+                    Utc::now().to_rfc3339(),
+                    admin_id,
+                    admin.updated_at.to_rfc3339(),
                 ],
             ) {
                 Ok(1) => return Ok(locked),
@@ -196,7 +198,11 @@ impl Store {
             match conn.execute(
                 "UPDATE admins SET failed_login_count=0, locked_until=NULL, updated_at=?1
                  WHERE id=?2 AND updated_at=?3",
-                params![Utc::now().to_rfc3339(), admin_id, admin.updated_at.to_rfc3339()],
+                params![
+                    Utc::now().to_rfc3339(),
+                    admin_id,
+                    admin.updated_at.to_rfc3339()
+                ],
             ) {
                 Ok(1) => return Ok(()),
                 Ok(0) => continue,
@@ -266,15 +272,21 @@ mod tests {
     #[test]
     fn duplicate_email_conflicts() {
         let store = test_store();
-        store.create_admin(&sample_admin("a1", "dup@test.com")).unwrap();
-        let err = store.create_admin(&sample_admin("a2", "dup@test.com")).unwrap_err();
+        store
+            .create_admin(&sample_admin("a1", "dup@test.com"))
+            .unwrap();
+        let err = store
+            .create_admin(&sample_admin("a2", "dup@test.com"))
+            .unwrap_err();
         assert!(matches!(err, StoreError::Conflict { .. }));
     }
 
     #[test]
     fn get_admin_by_email_case_insensitive() {
         let store = test_store();
-        store.create_admin(&sample_admin("a1", "Admin@Test.COM")).unwrap();
+        store
+            .create_admin(&sample_admin("a1", "Admin@Test.COM"))
+            .unwrap();
         let admin = store.get_admin_by_email("admin@test.com").unwrap();
         assert!(admin.is_some());
     }
@@ -282,8 +294,12 @@ mod tests {
     #[test]
     fn create_first_admin_blocks_second() {
         let store = test_store();
-        store.create_first_admin(&sample_admin("a1", "first@test.com")).unwrap();
-        let err = store.create_first_admin(&sample_admin("a2", "second@test.com")).unwrap_err();
+        store
+            .create_first_admin(&sample_admin("a1", "first@test.com"))
+            .unwrap();
+        let err = store
+            .create_first_admin(&sample_admin("a2", "second@test.com"))
+            .unwrap_err();
         assert!(matches!(err, StoreError::Conflict { .. }));
     }
 
@@ -296,14 +312,18 @@ mod tests {
     #[test]
     fn any_admin_exists_after_create() {
         let store = test_store();
-        store.create_admin(&sample_admin("a1", "a1@test.com")).unwrap();
+        store
+            .create_admin(&sample_admin("a1", "a1@test.com"))
+            .unwrap();
         assert!(store.any_admin_exists().unwrap());
     }
 
     #[test]
     fn record_failed_login_locks_account() {
         let store = test_store();
-        store.create_admin(&sample_admin("a1", "a1@test.com")).unwrap();
+        store
+            .create_admin(&sample_admin("a1", "a1@test.com"))
+            .unwrap();
         for i in 0..MAX_FAILED_LOGIN_ATTEMPTS {
             let locked = store.record_admin_failed_login("a1").unwrap();
             assert_eq!(locked, i + 1 >= MAX_FAILED_LOGIN_ATTEMPTS);
@@ -314,7 +334,9 @@ mod tests {
     #[test]
     fn reset_login_attempts_unlocks() {
         let store = test_store();
-        store.create_admin(&sample_admin("a1", "a1@test.com")).unwrap();
+        store
+            .create_admin(&sample_admin("a1", "a1@test.com"))
+            .unwrap();
         for _ in 0..MAX_FAILED_LOGIN_ATTEMPTS {
             store.record_admin_failed_login("a1").unwrap();
         }

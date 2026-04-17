@@ -144,14 +144,27 @@ impl Store {
         keys::validate_id(user_id)?;
         let conn = self.conn()?;
         let preferred_hours = Self::serialize_json(
-            &profile.get("preferred_hours").unwrap_or(&serde_json::json!([9, 14, 20])),
+            &profile
+                .get("preferred_hours")
+                .unwrap_or(&serde_json::json!([9, 14, 20])),
         )?;
-        let median = profile.get("median_session_length_mins").and_then(|v| v.as_f64()).unwrap_or(15.0);
-        let sessions = profile.get("sessions_per_day").and_then(|v| v.as_f64()).unwrap_or(1.0);
+        let median = profile
+            .get("median_session_length_mins")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(15.0);
+        let sessions = profile
+            .get("sessions_per_day")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(1.0);
         let hourly = Self::serialize_json(
-            &profile.get("temporal_hourly_stats").unwrap_or(&serde_json::json!([])),
+            &profile
+                .get("temporal_hourly_stats")
+                .unwrap_or(&serde_json::json!([])),
         )?;
-        let total_sessions = profile.get("temporal_total_sessions").and_then(|v| v.as_i64()).unwrap_or(0);
+        let total_sessions = profile
+            .get("temporal_total_sessions")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
         conn.execute(
             "INSERT INTO habit_profiles (user_id, preferred_hours_json, median_session_length_mins,
              sessions_per_day, temporal_hourly_stats_json, temporal_total_sessions)
@@ -159,7 +172,14 @@ impl Store {
              ON CONFLICT(user_id) DO UPDATE SET
                 preferred_hours_json=?2, median_session_length_mins=?3, sessions_per_day=?4,
                 temporal_hourly_stats_json=?5, temporal_total_sessions=?6",
-            params![user_id, preferred_hours, median, sessions, hourly, total_sessions],
+            params![
+                user_id,
+                preferred_hours,
+                median,
+                sessions,
+                hourly,
+                total_sessions
+            ],
         )?;
         Ok(())
     }
@@ -197,10 +217,22 @@ impl Store {
     ) -> Result<(), StoreError> {
         keys::validate_id(user_id)?;
         let conn = self.conn()?;
-        let theme = prefs.get("theme").and_then(|v| v.as_str()).unwrap_or("light");
-        let language = prefs.get("language").and_then(|v| v.as_str()).unwrap_or("en");
-        let notif = prefs.get("notification_enabled").and_then(|v| v.as_bool()).unwrap_or(true) as i64;
-        let sound = prefs.get("sound_enabled").and_then(|v| v.as_bool()).unwrap_or(true) as i64;
+        let theme = prefs
+            .get("theme")
+            .and_then(|v| v.as_str())
+            .unwrap_or("light");
+        let language = prefs
+            .get("language")
+            .and_then(|v| v.as_str())
+            .unwrap_or("en");
+        let notif = prefs
+            .get("notification_enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true) as i64;
+        let sound = prefs
+            .get("sound_enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true) as i64;
         let wbc_url = prefs.get("wordbook_center_url").and_then(|v| v.as_str());
         conn.execute(
             "INSERT INTO user_preferences (user_id, theme, language, notification_enabled, sound_enabled, wordbook_center_url)
@@ -213,13 +245,29 @@ impl Store {
 
     // -- User Avatars (Routes layer) --
 
-    pub fn set_user_avatar(&self, user_id: &str, avatar: &serde_json::Value) -> Result<(), StoreError> {
+    pub fn set_user_avatar(
+        &self,
+        user_id: &str,
+        avatar: &serde_json::Value,
+    ) -> Result<(), StoreError> {
         keys::validate_id(user_id)?;
         let conn = self.conn()?;
-        let url = avatar.get("avatarUrl").and_then(|v| v.as_str()).unwrap_or("");
-        let filename = avatar.get("filename").and_then(|v| v.as_str()).unwrap_or("");
-        let ext = avatar.get("extension").and_then(|v| v.as_str()).unwrap_or("");
-        let size = avatar.get("sizeBytes").and_then(|v| v.as_i64()).unwrap_or(0);
+        let url = avatar
+            .get("avatarUrl")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let filename = avatar
+            .get("filename")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let ext = avatar
+            .get("extension")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let size = avatar
+            .get("sizeBytes")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
         conn.execute(
             "INSERT INTO user_avatars (user_id, avatar_url, filename, extension, size_bytes) VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(user_id) DO UPDATE SET avatar_url=?2, filename=?3, extension=?4, size_bytes=?5",
@@ -259,7 +307,10 @@ impl Store {
         let word = data.get("word").and_then(|v| v.as_str()).unwrap_or("");
         let etymology = data.get("etymology").and_then(|v| v.as_str()).unwrap_or("");
         let roots = Self::serialize_json(&data.get("roots").unwrap_or(&serde_json::json!([])))?;
-        let generated = data.get("generated").and_then(|v| v.as_bool()).unwrap_or(false) as i64;
+        let generated = data
+            .get("generated")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false) as i64;
         let source = data.get("source").and_then(|v| v.as_str());
         let generated_at = data.get("generated_at").and_then(|v| v.as_str());
         conn.execute(
@@ -295,7 +346,10 @@ impl Store {
         Ok(())
     }
 
-    pub fn cleanup_old_monitoring_events(&self, before_timestamp: &str) -> Result<usize, StoreError> {
+    pub fn cleanup_old_monitoring_events(
+        &self,
+        before_timestamp: &str,
+    ) -> Result<usize, StoreError> {
         let conn = self.conn()?;
         let deleted = conn.execute(
             "DELETE FROM engine_monitoring_events WHERE timestamp < ?1",
@@ -314,7 +368,10 @@ impl Store {
         Ok(deleted)
     }
 
-    pub fn list_words_without_etymology(&self, limit: usize) -> Result<Vec<serde_json::Value>, StoreError> {
+    pub fn list_words_without_etymology(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<serde_json::Value>, StoreError> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT w.id, w.text FROM words w
@@ -327,7 +384,8 @@ impl Store {
                 "text": r.get::<_, String>(1)?,
             }))
         })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
     }
 
     pub fn list_all_words(&self) -> Result<Vec<serde_json::Value>, StoreError> {
@@ -340,7 +398,8 @@ impl Store {
                 "difficulty": r.get::<_, f64>(2)?,
             }))
         })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
     }
 
     pub fn get_alert_dedup(&self, user_id: &str, word_id: &str) -> Result<Option<i64>, StoreError> {
@@ -356,7 +415,12 @@ impl Store {
         .map_err(StoreError::from)
     }
 
-    pub fn set_alert_dedup(&self, user_id: &str, word_id: &str, ts_ms: i64) -> Result<(), StoreError> {
+    pub fn set_alert_dedup(
+        &self,
+        user_id: &str,
+        word_id: &str,
+        ts_ms: i64,
+    ) -> Result<(), StoreError> {
         keys::validate_id(user_id)?;
         keys::validate_id(word_id)?;
         let conn = self.conn()?;
@@ -399,11 +463,11 @@ impl Store {
 
     pub fn db_table_list(&self) -> Result<Vec<String>, StoreError> {
         let conn = self.conn()?;
-        let mut stmt = conn.prepare(
-            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name",
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")?;
         let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
     }
 
     pub fn get_confusion_pairs_for_word(
@@ -425,7 +489,8 @@ impl Store {
             let other = if a == word_id { b } else { a };
             Ok((other, score))
         })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
     }
 
     pub fn set_confusion_pair(
@@ -515,10 +580,17 @@ impl Store {
         keys::validate_id(word_id)?;
         let mut conn = self.conn()?;
         let tx = conn.transaction()?;
-        tx.execute("DELETE FROM word_morphemes WHERE word_id=?1", params![word_id])?;
+        tx.execute(
+            "DELETE FROM word_morphemes WHERE word_id=?1",
+            params![word_id],
+        )?;
         for (i, m) in morphemes.iter().enumerate() {
             let text = m.get("text").and_then(|v| v.as_str()).unwrap_or("");
-            let mtype = m.get("type").or(m.get("morpheme_type")).and_then(|v| v.as_str()).unwrap_or("");
+            let mtype = m
+                .get("type")
+                .or(m.get("morpheme_type"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let meaning = m.get("meaning").and_then(|v| v.as_str()).unwrap_or("");
             tx.execute(
                 "INSERT INTO word_morphemes (word_id, position, text, morpheme_type, meaning)
@@ -568,7 +640,12 @@ impl Store {
             params![&since_str],
             |r| r.get(0),
         )?;
-        Ok((total as u64, correct as u64, unique_users as u64, unique_words as u64))
+        Ok((
+            total as u64,
+            correct as u64,
+            unique_users as u64,
+            unique_words as u64,
+        ))
     }
 
     /// Create a single notification.
@@ -602,7 +679,8 @@ impl Store {
             let tags: Vec<String> = serde_json::from_str(&tags_json).unwrap_or_default();
             Ok((id, difficulty, tags))
         })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
     }
 
     /// Get user records with minimal fields for confusion analysis.
@@ -620,12 +698,16 @@ impl Store {
         let rows = stmt.query_map(params![user_id, limit as i64], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? != 0))
         })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
     }
 
     // -- AMAS layer --
 
-    pub fn get_word_morphemes(&self, word_id: &str) -> Result<Option<serde_json::Value>, StoreError> {
+    pub fn get_word_morphemes(
+        &self,
+        word_id: &str,
+    ) -> Result<Option<serde_json::Value>, StoreError> {
         keys::validate_id(word_id)?;
         let conn = self.conn()?;
         let mut stmt = conn.prepare(

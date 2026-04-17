@@ -68,7 +68,9 @@ pub async fn health_check(State(state): State<AppState>) -> impl axum::response:
     let sse_healthy = true;
 
     let settings = state.store().get_system_settings().ok();
-    let wbc_url = settings.as_ref().and_then(|s| s.wordbook_center_url.clone());
+    let wbc_url = settings
+        .as_ref()
+        .and_then(|s| s.wordbook_center_url.clone());
     let wbc_healthy = wordbook_center_healthy(wbc_url.as_deref()).await;
 
     let status = if !store_healthy {

@@ -206,7 +206,9 @@ fn habit_profile_from_value(value: &serde_json::Value) -> HabitProfileResponse {
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0) as u32,
         })
-    } else if value.get("temporal_hourly_stats").is_some() || value.get("temporal_total_sessions").is_some() {
+    } else if value.get("temporal_hourly_stats").is_some()
+        || value.get("temporal_total_sessions").is_some()
+    {
         let hourly_stats = value
             .get("temporal_hourly_stats")
             .and_then(|v| v.as_array())
@@ -298,9 +300,9 @@ async fn set_habit_profile(
     }
 
     let profile = serde_json::json!({
-        "preferred_hours": req.preferred_hours.unwrap_or_else(|| DEFAULT_PREFERRED_HOURS.to_vec()),
-        "median_session_length_mins": req.median_session_length_mins.unwrap_or(15.0),
-        "sessions_per_day": req.sessions_per_day.unwrap_or(1.0),
+        "preferredHours": req.preferred_hours.unwrap_or_else(|| DEFAULT_PREFERRED_HOURS.to_vec()),
+        "medianSessionLengthMins": req.median_session_length_mins.unwrap_or(15.0),
+        "sessionsPerDay": req.sessions_per_day.unwrap_or(1.0),
     });
     state.store().set_habit_profile(&auth.user_id, &profile)?;
     Ok(ok(habit_profile_from_value(&profile)))
@@ -337,7 +339,9 @@ async fn upload_avatar(
         Some(b"\x89PNG") => "png",
         Some(b"\xFF\xD8\xFF\xE0") | Some(b"\xFF\xD8\xFF\xE1") | Some(b"\xFF\xD8\xFF\xDB") => "jpg",
         Some(bytes) if bytes.starts_with(b"GIF8") => "gif",
-        Some(bytes) if bytes.starts_with(b"RIFF") && body.len() > 12 && &body[8..12] == b"WEBP" => "webp",
+        Some(bytes) if bytes.starts_with(b"RIFF") && body.len() > 12 && &body[8..12] == b"WEBP" => {
+            "webp"
+        }
         _ => {
             return Err(AppError::bad_request(
                 "AVATAR_INVALID_TYPE",
@@ -365,7 +369,9 @@ async fn upload_avatar(
         "extension": extension,
         "sizeBytes": body.len(),
     });
-    state.store().set_user_avatar(&auth.user_id, &avatar_metadata)?;
+    state
+        .store()
+        .set_user_avatar(&auth.user_id, &avatar_metadata)?;
 
     Ok(ok(serde_json::json!({
         "avatarUrl": avatar_metadata["avatarUrl"],
