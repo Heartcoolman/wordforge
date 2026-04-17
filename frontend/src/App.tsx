@@ -1,16 +1,13 @@
 import { Router, Route, useLocation } from '@solidjs/router';
-import { lazy, Suspense, Show, createSignal, onMount, onCleanup } from 'solid-js';
+import { lazy, Suspense, Show, onMount, onCleanup } from 'solid-js';
 import { Toaster } from '@/components/ui/Toast';
 import { AppErrorBoundary } from '@/components/ErrorBoundary';
 import { AdminLayout } from '@/components/layout/AdminLayout';
 import { AdminProtectedRoute } from '@/components/auth/ProtectedRoute';
 import { Spinner } from '@/components/ui/Spinner';
-import { api, maintenanceActive, setMaintenanceActive, setUpdateInfo, connectSseStream } from '@/api/client';
-import { startTelemetryWorker, stopTelemetryWorker, handleTelemetryRequest } from '@/workers/telemetry';
+import { api, maintenanceActive, setMaintenanceActive, setUpdateInfo } from '@/api/client';
 import MaintenancePage from '@/pages/MaintenancePage';
 import { UpdateBanner } from '@/components/ui/UpdateBanner';
-import { SystemLockedModal } from '@/components/SystemLockedModal';
-import { Portal } from 'solid-js/web';
 
 const NotFoundPage = lazy(() => import('@/pages/NotFoundPage'));
 const LegacyUserFrontendPage = lazy(() => import('@/pages/LegacyUserFrontendPage'));
@@ -34,11 +31,8 @@ function PageSpinner() {
   );
 }
 
-const [systemLocked, setSystemLocked] = createSignal(false);
-
 function MaintenanceProvider(props: { children: any }) {
   let pollTimer: ReturnType<typeof setInterval> | undefined;
-  let disconnectSse: (() => void) | undefined;
   let initialVersion: string | undefined;
   const location = useLocation();
   const isAdminPath = () => location.pathname.startsWith('/admin');
@@ -63,17 +57,10 @@ function MaintenanceProvider(props: { children: any }) {
   onMount(() => {
     checkStatus();
     pollTimer = setInterval(checkStatus, 30_000);
-    startTelemetryWorker();
-    disconnectSse = connectSseStream({
-      onTelemetryRequest: handleTelemetryRequest,
-      onDataCorrupted: () => setSystemLocked(true),
-    });
   });
 
   onCleanup(() => {
     if (pollTimer) clearInterval(pollTimer);
-    stopTelemetryWorker();
-    disconnectSse?.();
   });
 
   return (
@@ -89,14 +76,8 @@ function MaintenanceProvider(props: { children: any }) {
 export default function App() {
   return (
     <AppErrorBoundary>
-      <Show when={systemLocked()}>
-        <Portal mount={document.body}>
-          <SystemLockedModal />
-        </Portal>
-      </Show>
-      <MaintenanceProvider>
-      <Router>
-        <Route path="/" component={() => (<Suspense fallback={<PageSpinner />}><LegacyUserFrontendPage /></Suspense>)} />
+      <Router root={MaintenanceProvider}>
+        <Route path="/" component={() => { window.location.replace('/admin/login'); return null; }} />
         <Route path="/login" component={() => (<Suspense fallback={<PageSpinner />}><LegacyUserFrontendPage /></Suspense>)} />
         <Route path="/register" component={() => (<Suspense fallback={<PageSpinner />}><LegacyUserFrontendPage /></Suspense>)} />
         <Route path="/learning" component={() => (<Suspense fallback={<PageSpinner />}><LegacyUserFrontendPage /></Suspense>)} />
@@ -125,7 +106,6 @@ export default function App() {
         </Route>
         <Route path="*" component={() => (<Suspense fallback={<PageSpinner />}><NotFoundPage /></Suspense>)} />
       </Router>
-      </MaintenanceProvider>
       <Toaster />
     </AppErrorBoundary>
   );
