@@ -6,10 +6,6 @@ use crate::amas::types::*;
 use super::mdm::MdmState;
 use super::ssp::SspPolicy;
 
-const ALPHA_SCALE: f64 = 0.3;
-const ALPHA_MIN: f64 = 0.1;
-const ALPHA_MAX: f64 = 0.5;
-const FORGETTING_THRESHOLD: f64 = 0.2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WordMasteryState {
@@ -83,9 +79,9 @@ pub fn update_mastery_at(
         state.correct_streak = 0;
     }
 
-    let base_alpha = (interval_scale * ALPHA_SCALE).clamp(ALPHA_MIN, ALPHA_MAX);
+    let base_alpha = (interval_scale * config.alpha_scale).clamp(config.alpha_min, config.alpha_max);
     let streak_bonus = 1.0 + (state.correct_streak.min(5) as f64) * 0.1;
-    let alpha = (base_alpha * streak_bonus).clamp(ALPHA_MIN, ALPHA_MAX);
+    let alpha = (base_alpha * streak_bonus).clamp(config.alpha_min, config.alpha_max);
 
     super::mdm::update_strength(&mut state.mdm, quality, alpha, now, config);
 
@@ -101,8 +97,8 @@ pub fn update_mastery_at(
     let recall = super::mdm::recall_probability(&state.mdm, now, config);
     let interval = if let Some(policy) = ssp_policy {
         let optimal_days = policy.optimal_interval(state.mdm.stability, state.mdm.difficulty);
-        let secs = (optimal_days * 86400.0 * interval_scale).min(90.0 * 86400.0) as i64;
-        secs.max(60)
+        let secs = (optimal_days * 86400.0 * interval_scale).min(config.max_interval_days * 86400.0) as i64;
+        secs.max(config.min_interval_secs)
     } else {
         super::mdm::compute_interval(&state.mdm, desired_retention, interval_scale, config)
     };
@@ -138,7 +134,7 @@ fn determine_level(
         MasteryLevel::Mastered
     } else {
         let recall = super::mdm::recall_probability(&state.mdm, now_ms, config);
-        if recall < FORGETTING_THRESHOLD {
+        if recall < config.forgetting_threshold {
             MasteryLevel::Forgotten
         } else if composite > config.reviewing_threshold {
             MasteryLevel::Reviewing

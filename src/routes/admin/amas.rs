@@ -131,15 +131,21 @@ async fn update_config(
     State(state): State<AppState>,
     JsonBody(cfg): JsonBody<crate::amas::config::AMASConfig>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    // 先进行配置验证
     cfg.validate()
         .map_err(|e| AppError::bad_request("AMAS_INVALID_CONFIG", &e))?;
 
     state
         .amas()
-        .reload_config(cfg)
+        .reload_config(cfg.clone())
         .await
         .map_err(|e| AppError::bad_request("AMAS_INVALID_CONFIG", &e))?;
+
+    // 写回 TOML 文件，保持文件与内存状态一致
+    let toml_path = state.config().amas_config_file.clone()
+        .unwrap_or_else(|| "amas_config.toml".to_string());
+    if let Err(e) = cfg.write_to_toml(&toml_path) {
+        tracing::warn!(path = %toml_path, error = %e, "写回 AMAS 配置文件失败");
+    }
 
     tracing::info!(
         admin_id = %admin.admin_id,

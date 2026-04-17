@@ -31,7 +31,7 @@ pub struct AMASEngine {
     store: Arc<Store>,
     user_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     metrics_registry: Arc<metrics::MetricsRegistry>,
-    ssp_policy: Arc<std::sync::RwLock<Option<Arc<ssp::SspPolicy>>>>,
+    ssp_policy: Arc<RwLock<Option<Arc<ssp::SspPolicy>>>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -68,15 +68,15 @@ impl AMASEngine {
             store,
             user_locks: Arc::new(Mutex::new(HashMap::new())),
             metrics_registry: Arc::new(metrics::MetricsRegistry::new()),
-            ssp_policy: Arc::new(std::sync::RwLock::new(ssp_policy)),
+            ssp_policy: Arc::new(RwLock::new(ssp_policy)),
         }
     }
 
     pub async fn reload_config(&self, new_config: AMASConfig) -> Result<(), String> {
         new_config.validate()?;
         let hash = monitoring::compute_config_hash(&new_config);
-
-        let new_ssp_policy = if new_config.feature_flags.ssp_enabled {
+        // 重建 SSP 策略表（SSP 配置或 memory_model 参数可能已变）
+        let new_ssp = if new_config.feature_flags.ssp_enabled {
             let result = ssp::precompute(&new_config.ssp, &new_config.memory_model);
             Some(Arc::new(if result.dual_grid {
                 ssp::SspPolicy::from_tables_with_bins(result.tables, result.stability_list)
@@ -86,22 +86,17 @@ impl AMASEngine {
         } else {
             None
         };
-
         let mut cfg = self.config.write().await;
         *cfg = Arc::new(new_config);
         let mut h = self.config_hash.write().await;
         *h = hash;
-
-        if let Ok(mut ssp) = self.ssp_policy.write() {
-            *ssp = new_ssp_policy;
-        }
-
+        *self.ssp_policy.write().await = new_ssp;
         tracing::info!("AMAS config reloaded");
         Ok(())
     }
 
-    pub fn ssp_policy(&self) -> Option<Arc<ssp::SspPolicy>> {
-        self.ssp_policy.read().ok().and_then(|g| g.clone())
+    pub async fn ssp_policy(&self) -> Option<Arc<ssp::SspPolicy>> {
+        self.ssp_policy.read().await.clone()
     }
 
     pub async fn get_config(&self) -> AMASConfig {
@@ -162,18 +157,19 @@ impl AMASEngine {
         let (final_strategy, weights) =
             self.ensemble_or_fallback(&candidates, &user_state, &algo_states, &config);
 
-        let ssp_arc = self.ssp_policy();
-        let memory_feedback = self.update_memory(
+        let ssp_arc = self.ssp_policy.read().await.clone();
+        let ssp_ref = ssp_arc.as_deref();
+        let word_mastery = self.update_memory(
             user_id,
             &raw_event,
             &feature,
             &final_strategy,
             &user_state,
             &config,
-            ssp_arc.as_deref(),
+            ssp_ref,
         )?;
 
-        let retention_signal = memory_feedback
+        let retention_signal = word_mastery
             .as_ref()
             .map(|feedback| feedback.scheduled_recall)
             .unwrap_or(0.0);
@@ -224,7 +220,7 @@ impl AMASEngine {
             strategy: constrained_strategy,
             explanation,
             state: user_state.clone(),
-            word_mastery: memory_feedback
+            word_mastery: word_mastery
                 .as_ref()
                 .map(|feedback| feedback.decision.clone()),
             reward: reward.clone(),
@@ -902,8 +898,8 @@ impl AMASEngine {
                 .session_id
                 .as_deref()
                 .is_some_and(|sid| !sid.is_empty());
-            evm::record_context(&mut evm_state, is_new_context);
-            adjusted_interval_scale *= evm::interval_modifier(&evm_state);
+            evm::record_context(&mut evm_state, is_new_context, &config.evm);
+            adjusted_interval_scale *= evm::interval_modifier(&evm_state, &config.evm);
 
             if let Ok(val) = serde_json::to_value(&evm_state) {
                 if let Err(e) = self.store.set_engine_algo_state(user_id, &evm_key, &val) {
@@ -918,6 +914,7 @@ impl AMASEngine {
             feature.accuracy,
             user_state.fatigue,
             user_state.motivation,
+            &config.memory_model,
         );
         let now_ms = chrono::Utc::now().timestamp_millis();
 

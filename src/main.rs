@@ -52,7 +52,31 @@ async fn main() {
 
     let (shutdown_tx, _) = broadcast::channel::<()>(8);
 
-    let amas_config = AMASConfig::from_env(&config.amas);
+    let mut amas_config = AMASConfig::from_env(&config.amas);
+    if let Some(ref path) = config.amas_config_file {
+        match AMASConfig::load_from_toml(path) {
+            Ok(cfg) => {
+                tracing::info!(path = %path, "从 TOML 文件加载 AMAS 配置");
+                amas_config = cfg;
+            }
+            Err(e) => tracing::warn!(path = %path, error = %e, "加载 TOML 配置失败，使用默认值"),
+        }
+    } else {
+        let default_path = "amas_config.toml";
+        if std::path::Path::new(default_path).exists() {
+            match AMASConfig::load_from_toml(default_path) {
+                Ok(cfg) => {
+                    tracing::info!(path = %default_path, "从默认路径加载 AMAS 配置");
+                    amas_config = cfg;
+                }
+                Err(e) => tracing::warn!(path = %default_path, error = %e, "加载默认 TOML 配置失败，使用内置默认值"),
+            }
+        } else if let Err(e) = amas_config.write_to_toml(default_path) {
+            tracing::warn!(error = %e, "写出默认 TOML 配置失败");
+        } else {
+            tracing::info!(path = %default_path, "已生成默认 AMAS 配置文件");
+        }
+    }
     let amas_engine = Arc::new(AMASEngine::new(amas_config, store.clone()));
 
     let initial_maintenance = store
@@ -67,6 +91,15 @@ async fn main() {
         shutdown_tx.clone(),
         initial_maintenance,
     );
+
+    {
+        let watch_path = config.amas_config_file.clone()
+            .unwrap_or_else(|| "amas_config.toml".to_string());
+        tokio::spawn(learning_backend::workers::config_watcher::run(
+            watch_path,
+            amas_engine.clone(),
+        ));
+    }
 
     tokio::spawn(learning_backend::workers::heartbeat_watchdog::run(
         state.clone(),

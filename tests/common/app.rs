@@ -61,6 +61,7 @@ async fn spawn_with_limits(api_limit: u64) -> TestApp {
             ensemble_enabled: true,
             monitor_sample_rate: 0.05,
         },
+        amas_config_file: None,
         llm: learning_backend::config::LLMConfig {
             enabled: false,
             mock: true,
