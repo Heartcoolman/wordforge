@@ -50,7 +50,9 @@ fn book_type_from_str(s: &str) -> WordbookType {
 fn parse_dt(s: String) -> rusqlite::Result<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(&s)
         .map(|dt| dt.with_timezone(&Utc))
-        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))
+        .map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+        })
 }
 
 fn wordbook_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Wordbook> {
@@ -107,9 +109,9 @@ impl Store {
 
     pub fn list_system_wordbooks(&self) -> Result<Vec<Wordbook>, StoreError> {
         let conn = self.conn()?;
-        let mut stmt = conn.prepare(
-            &format!("SELECT {WB_COLS} FROM wordbooks WHERE book_type = 'system' ORDER BY name"),
-        )?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {WB_COLS} FROM wordbooks WHERE book_type = 'system' ORDER BY name"
+        ))?;
         let books = stmt
             .query_map([], wordbook_from_row)?
             .collect::<Result<Vec<_>, _>>()?;
@@ -205,7 +207,9 @@ impl Store {
             "SELECT word_id FROM wordbook_words WHERE wordbook_id = ?1 LIMIT ?2 OFFSET ?3",
         )?;
         let ids = stmt
-            .query_map(params![wordbook_id, limit as i64, offset as i64], |r| r.get(0))?
+            .query_map(params![wordbook_id, limit as i64, offset as i64], |r| {
+                r.get(0)
+            })?
             .collect::<Result<Vec<String>, _>>()?;
         Ok(ids)
     }
@@ -261,9 +265,15 @@ mod tests {
     #[test]
     fn list_system_wordbooks_sorted_by_name() {
         let store = test_store();
-        store.upsert_wordbook(&sample_wordbook("wb2", WordbookType::System, None)).unwrap();
-        store.upsert_wordbook(&sample_wordbook("wb1", WordbookType::System, None)).unwrap();
-        store.upsert_wordbook(&sample_wordbook("wb3", WordbookType::User, Some("u1"))).unwrap();
+        store
+            .upsert_wordbook(&sample_wordbook("wb2", WordbookType::System, None))
+            .unwrap();
+        store
+            .upsert_wordbook(&sample_wordbook("wb1", WordbookType::System, None))
+            .unwrap();
+        store
+            .upsert_wordbook(&sample_wordbook("wb3", WordbookType::User, Some("u1")))
+            .unwrap();
         let books = store.list_system_wordbooks().unwrap();
         assert_eq!(books.len(), 2);
         assert_eq!(books[0].id, "wb1");
@@ -272,8 +282,12 @@ mod tests {
     #[test]
     fn list_user_wordbooks_filters_by_user() {
         let store = test_store();
-        store.upsert_wordbook(&sample_wordbook("wb1", WordbookType::User, Some("u1"))).unwrap();
-        store.upsert_wordbook(&sample_wordbook("wb2", WordbookType::User, Some("u2"))).unwrap();
+        store
+            .upsert_wordbook(&sample_wordbook("wb1", WordbookType::User, Some("u1")))
+            .unwrap();
+        store
+            .upsert_wordbook(&sample_wordbook("wb2", WordbookType::User, Some("u2")))
+            .unwrap();
         let books = store.list_user_wordbooks("u1").unwrap();
         assert_eq!(books.len(), 1);
         assert_eq!(books[0].id, "wb1");
@@ -282,7 +296,9 @@ mod tests {
     #[test]
     fn add_and_remove_word() {
         let store = test_store();
-        store.upsert_wordbook(&sample_wordbook("wb1", WordbookType::System, None)).unwrap();
+        store
+            .upsert_wordbook(&sample_wordbook("wb1", WordbookType::System, None))
+            .unwrap();
         assert!(store.add_word_to_wordbook("wb1", "w1").unwrap());
         assert!(!store.add_word_to_wordbook("wb1", "w1").unwrap()); // duplicate
         assert_eq!(store.get_wordbook("wb1").unwrap().unwrap().word_count, 1);
@@ -302,7 +318,9 @@ mod tests {
     #[test]
     fn list_and_count_wordbook_words() {
         let store = test_store();
-        store.upsert_wordbook(&sample_wordbook("wb1", WordbookType::System, None)).unwrap();
+        store
+            .upsert_wordbook(&sample_wordbook("wb1", WordbookType::System, None))
+            .unwrap();
         store.add_word_to_wordbook("wb1", "w1").unwrap();
         store.add_word_to_wordbook("wb1", "w2").unwrap();
         store.add_word_to_wordbook("wb1", "w3").unwrap();

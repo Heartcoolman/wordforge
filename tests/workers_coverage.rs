@@ -20,7 +20,8 @@ use learning_backend::workers;
 fn setup_store(db_name: &str) -> (tempfile::TempDir, Arc<Store>) {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let db_path = temp_dir.path().join(db_name);
-    let store = Arc::new(Store::open(db_path.to_str().expect("db path"), 5000, 1).expect("open store"));
+    let store =
+        Arc::new(Store::open(db_path.to_str().expect("db path"), 5000, 1).expect("open store"));
     (temp_dir, store)
 }
 

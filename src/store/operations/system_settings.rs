@@ -50,9 +50,8 @@ impl Store {
             .optional()?;
         let mut settings = result.unwrap_or_default();
         if settings.wordbook_center_url.is_none() {
-            settings.wordbook_center_url = Some(
-                "https://cdn.jsdelivr.net/gh/Heartcoolman/wordbook-center@main".into(),
-            );
+            settings.wordbook_center_url =
+                Some("https://cdn.jsdelivr.net/gh/Heartcoolman/wordbook-center@main".into());
         }
         Ok(settings)
     }

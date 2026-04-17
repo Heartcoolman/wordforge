@@ -3,18 +3,19 @@ import { Show } from 'solid-js';
 
 const USER_APP_URL = (import.meta.env.VITE_USER_APP_URL as string | undefined)?.trim();
 
-function buildUserAppHref(pathname: string): string | null {
+function buildUserAppHref(targetPath: string): string | null {
   if (!USER_APP_URL) return null;
   try {
-    return new URL(pathname, USER_APP_URL).toString();
+    return new URL(targetPath, USER_APP_URL).toString();
   } catch {
     return USER_APP_URL;
   }
 }
 
 export default function LegacyUserFrontendPage() {
+  const currentPath = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+  const userAppHref = buildUserAppHref(currentPath);
   const pathname = window.location.pathname;
-  const userAppHref = buildUserAppHref(pathname);
   const isHome = pathname === '/';
 
   return (
@@ -30,7 +31,7 @@ export default function LegacyUserFrontendPage() {
             `wordforge-web`。
           </p>
           <p class="mt-3 text-sm leading-6 text-slate-500">
-            {isHome ? '如果你是管理员，可以直接进入后台。' : `你访问的旧路径是 ${pathname}。`}
+            {isHome ? '如果你是管理员，可以直接进入后台。' : `你访问的旧路径是 ${currentPath}。`}
           </p>
 
           <div class="mt-8 flex flex-wrap gap-3">

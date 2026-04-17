@@ -44,7 +44,10 @@ impl Store {
     pub fn delete_engine_user_state(&self, user_id: &str) -> Result<(), StoreError> {
         keys::validate_id(user_id)?;
         let conn = self.conn()?;
-        conn.execute("DELETE FROM engine_user_states WHERE user_id=?1", params![user_id])?;
+        conn.execute(
+            "DELETE FROM engine_user_states WHERE user_id=?1",
+            params![user_id],
+        )?;
         Ok(())
     }
 
@@ -102,9 +105,20 @@ impl Store {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        let user_id = event.get("userId").or(event.get("user_id")).and_then(|v| v.as_str()).unwrap_or("");
-        let session_id = event.get("sessionId").or(event.get("session_id")).and_then(|v| v.as_str()).unwrap_or("");
-        let timestamp = event.get("timestamp").and_then(|v| v.as_str()).unwrap_or("");
+        let user_id = event
+            .get("userId")
+            .or(event.get("user_id"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let session_id = event
+            .get("sessionId")
+            .or(event.get("session_id"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let timestamp = event
+            .get("timestamp")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         let json = Self::serialize_json(event)?;
 
         let conn = self.conn()?;
@@ -240,8 +254,13 @@ mod tests {
     fn algo_state_round_trip() {
         let store = Store::open(":memory:", 5000, 1).unwrap();
         let state = serde_json::json!({"level": 0.8});
-        store.set_engine_algo_state("u1", "mastery:w1", &state).unwrap();
-        let got = store.get_engine_algo_state("u1", "mastery:w1").unwrap().unwrap();
+        store
+            .set_engine_algo_state("u1", "mastery:w1", &state)
+            .unwrap();
+        let got = store
+            .get_engine_algo_state("u1", "mastery:w1")
+            .unwrap()
+            .unwrap();
         assert_eq!(got["level"], 0.8);
     }
 }

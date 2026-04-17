@@ -5,6 +5,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::get;
 use axum::{Json, Router};
+use reqwest::StatusCode as ReqwestStatusCode;
 
 use crate::auth::AdminAuthUser;
 use crate::state::AppState;
@@ -25,27 +26,52 @@ pub fn router() -> Router<AppState> {
         .route("/metrics", get(metrics))
 }
 
+fn store_probe_ok(state: &AppState) -> bool {
+    state.store().db_ping().is_ok()
+}
+
+async fn wordbook_center_healthy(url: Option<&str>) -> bool {
+    let Some(url) = url else {
+        return true;
+    };
+
+    let Ok(client) = reqwest::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+    else {
+        return false;
+    };
+
+    match client.head(url).send().await {
+        Ok(resp) if resp.status().is_success() => true,
+        Ok(resp)
+            if matches!(
+                resp.status(),
+                ReqwestStatusCode::METHOD_NOT_ALLOWED | ReqwestStatusCode::NOT_IMPLEMENTED
+            ) =>
+        {
+            client
+                .get(url)
+                .send()
+                .await
+                .map(|resp| resp.status().is_success())
+                .unwrap_or(false)
+        }
+        Ok(_) => false,
+        Err(_) => false,
+    }
+}
+
 pub async fn health_check(State(state): State<AppState>) -> impl axum::response::IntoResponse {
-    let store_healthy = state.store().get_user_by_id("__health_check__").is_ok();
+    let store_healthy = store_probe_ok(&state);
     let amas_healthy = true;
     let sse_healthy = true;
 
     let settings = state.store().get_system_settings().ok();
-    let wbc_url = settings.as_ref().and_then(|s| s.wordbook_center_url.clone());
-
-    let wbc_healthy = match &wbc_url {
-        Some(url) => {
-            let client = reqwest::Client::builder()
-                .timeout(Duration::from_secs(3))
-                .build()
-                .ok();
-            match client {
-                Some(c) => c.head(url).send().await.is_ok(),
-                None => false,
-            }
-        }
-        None => true,
-    };
+    let wbc_url = settings
+        .as_ref()
+        .and_then(|s| s.wordbook_center_url.clone());
+    let wbc_healthy = wordbook_center_healthy(wbc_url.as_deref()).await;
 
     let status = if !store_healthy {
         "down"
@@ -62,7 +88,7 @@ pub async fn health_check(State(state): State<AppState>) -> impl axum::response:
             "store": { "healthy": store_healthy },
             "amas": { "healthy": amas_healthy },
             "sse": { "healthy": sse_healthy },
-            "wordbookCenter": { "healthy": wbc_healthy, "url": wbc_url },
+            "wordbookCenter": { "healthy": wbc_healthy },
         }
     }))
 }
@@ -72,7 +98,7 @@ pub async fn liveness() -> StatusCode {
 }
 
 pub async fn readiness(State(state): State<AppState>) -> StatusCode {
-    if state.store().get_user_by_id("__health_check__").is_ok() {
+    if store_probe_ok(&state) {
         StatusCode::OK
     } else {
         StatusCode::SERVICE_UNAVAILABLE
@@ -84,7 +110,7 @@ pub async fn database_health(
     State(state): State<AppState>,
 ) -> impl axum::response::IntoResponse {
     let start = Instant::now();
-    let healthy = state.store().get_user_by_id("__health_check__").is_ok();
+    let healthy = store_probe_ok(&state);
     let latency_us = start.elapsed().as_micros() as u64;
 
     Json(serde_json::json!({

@@ -1,6 +1,5 @@
 pub mod algorithm_optimization;
 pub mod config_watcher;
-pub mod heartbeat_watchdog;
 pub mod cache_cleanup;
 pub mod confusion_pair_cache;
 pub mod daily_aggregation;
@@ -9,6 +8,7 @@ pub mod embedding_generation;
 pub mod etymology_generation;
 pub mod forgetting_alert;
 pub mod health_analysis;
+pub mod heartbeat_watchdog;
 pub mod llm_advisor;
 pub mod log_export;
 pub mod metrics_flush;
@@ -483,8 +483,9 @@ mod tests {
     async fn leader_switch_controls_job_registration() {
         let cfg = Config::from_env();
         let tmp = tempfile::tempdir().expect("tempdir");
-        let store =
-            Arc::new(Store::open(tmp.path().join("worker_test.db").to_str().unwrap(), 5000, 1).unwrap());
+        let store = Arc::new(
+            Store::open(tmp.path().join("worker_test.db").to_str().unwrap(), 5000, 1).unwrap(),
+        );
         let amas = Arc::new(AMASEngine::new(AMASConfig::default(), store.clone()));
         let (tx, _) = broadcast::channel(2);
 
@@ -499,8 +500,14 @@ mod tests {
     async fn shutdown_path_is_non_panicking() {
         let cfg = Config::from_env();
         let tmp = tempfile::tempdir().expect("tempdir");
-        let store =
-            Arc::new(Store::open(tmp.path().join("worker_test_2.db").to_str().unwrap(), 5000, 1).unwrap());
+        let store = Arc::new(
+            Store::open(
+                tmp.path().join("worker_test_2.db").to_str().unwrap(),
+                5000,
+                1,
+            )
+            .unwrap(),
+        );
         let amas = Arc::new(AMASEngine::new(AMASConfig::default(), store.clone()));
         let (tx, _) = broadcast::channel(2);
 
@@ -521,8 +528,14 @@ mod tests {
     async fn stub_workers_disabled_by_default() {
         let cfg = Config::from_env();
         let tmp = tempfile::tempdir().expect("tempdir");
-        let store =
-            Arc::new(Store::open(tmp.path().join("worker_test_3.db").to_str().unwrap(), 5000, 1).unwrap());
+        let store = Arc::new(
+            Store::open(
+                tmp.path().join("worker_test_3.db").to_str().unwrap(),
+                5000,
+                1,
+            )
+            .unwrap(),
+        );
         let amas = Arc::new(AMASEngine::new(AMASConfig::default(), store.clone()));
         let (tx, _) = broadcast::channel(2);
 

@@ -54,6 +54,7 @@ export default function ClientsPage() {
   const [telemetryRecords, setTelemetryRecords] = createSignal<TelemetrySummary[]>([]);
   const [telemetryTotal, setTelemetryTotal] = createSignal(0);
   const [telemetryLoading, setTelemetryLoading] = createSignal(false);
+  let telemetryRequestId = 0;
 
   const loadClients = async () => {
     try {
@@ -97,18 +98,23 @@ export default function ClientsPage() {
   };
 
   const loadTelemetry = async (deviceId: string) => {
+    const requestId = ++telemetryRequestId;
     try {
       setTelemetryLoading(true);
       setTelemetryDevice(deviceId);
       setTelemetryRecords([]);
       setTelemetryTotal(0);
       const data = await adminApi.getTelemetry(deviceId);
+      if (requestId !== telemetryRequestId) return;
       setTelemetryRecords(data.records);
       setTelemetryTotal(data.total);
     } catch (e: any) {
+      if (requestId !== telemetryRequestId) return;
       uiStore.toast.error('加载遥测数据失败', e.message);
     } finally {
-      setTelemetryLoading(false);
+      if (requestId === telemetryRequestId) {
+        setTelemetryLoading(false);
+      }
     }
   };
 

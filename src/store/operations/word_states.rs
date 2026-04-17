@@ -101,9 +101,19 @@ impl Store {
         keys::validate_id(user_id)?;
         keys::validate_id(word_id)?;
         let conn = self.conn()?;
+        Self::get_word_learning_state_conn(&conn, user_id, word_id)
+    }
+
+    pub(crate) fn get_word_learning_state_conn(
+        conn: &rusqlite::Connection,
+        user_id: &str,
+        word_id: &str,
+    ) -> Result<Option<WordLearningState>, StoreError> {
         Ok(conn
             .query_row(
-                &format!("SELECT {WLS_COLS} FROM word_learning_states WHERE user_id=?1 AND word_id=?2"),
+                &format!(
+                    "SELECT {WLS_COLS} FROM word_learning_states WHERE user_id=?1 AND word_id=?2"
+                ),
                 params![user_id, word_id],
                 wls_from_row,
             )
@@ -114,6 +124,13 @@ impl Store {
         keys::validate_id(&wls.user_id)?;
         keys::validate_id(&wls.word_id)?;
         let conn = self.conn()?;
+        Self::set_word_learning_state_conn(&conn, wls)
+    }
+
+    pub(crate) fn set_word_learning_state_conn(
+        conn: &rusqlite::Connection,
+        wls: &WordLearningState,
+    ) -> Result<(), StoreError> {
         let next_review = wls.next_review_date.map(|d| d.to_rfc3339());
         conn.execute(
             "INSERT OR REPLACE INTO word_learning_states
@@ -145,19 +162,22 @@ impl Store {
         }
 
         let conn = self.conn()?;
-        let placeholders: Vec<String> = (0..word_ids.len()).map(|i| format!("?{}", i + 2)).collect();
+        let placeholders: Vec<String> =
+            (0..word_ids.len()).map(|i| format!("?{}", i + 2)).collect();
         let sql = format!(
             "SELECT {WLS_COLS} FROM word_learning_states WHERE user_id=?1 AND word_id IN ({})",
             placeholders.join(",")
         );
         let mut stmt = conn.prepare(&sql)?;
 
-        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::with_capacity(word_ids.len() + 1);
+        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> =
+            Vec::with_capacity(word_ids.len() + 1);
         param_values.push(Box::new(user_id.to_string()));
         for wid in word_ids {
             param_values.push(Box::new(wid.clone()));
         }
-        let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            param_values.iter().map(|p| p.as_ref()).collect();
 
         let rows: std::collections::HashMap<String, WordLearningState> = stmt
             .query_map(param_refs.as_slice(), wls_from_row)?
@@ -296,7 +316,10 @@ mod tests {
     #[test]
     fn get_missing_returns_none() {
         let store = test_store();
-        assert!(store.get_word_learning_state("u1", "missing").unwrap().is_none());
+        assert!(store
+            .get_word_learning_state("u1", "missing")
+            .unwrap()
+            .is_none());
     }
 
     #[test]

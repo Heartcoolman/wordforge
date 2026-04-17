@@ -58,20 +58,19 @@ impl Store {
     pub fn get_study_config(&self, user_id: &str) -> Result<UserStudyConfig, StoreError> {
         keys::validate_id(user_id)?;
         let conn = self.conn()?;
-        let row = conn
-            .query_row(
-                "SELECT selected_wordbook_ids_json, daily_word_count, study_mode, daily_mastery_target
+        let row = conn.query_row(
+            "SELECT selected_wordbook_ids_json, daily_word_count, study_mode, daily_mastery_target
                  FROM study_configs WHERE user_id = ?1",
-                params![user_id],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, i64>(3)?,
-                    ))
-                },
-            );
+            params![user_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        );
         match row {
             Ok((ids_json, daily, mode, target)) => Ok(UserStudyConfig {
                 user_id: user_id.to_string(),

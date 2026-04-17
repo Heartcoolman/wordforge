@@ -41,6 +41,14 @@ pub struct AlgoStates {
     pub trust_scores: ensemble::TrustScores,
 }
 
+#[derive(Debug, Clone)]
+struct MemoryFeedback {
+    decision: WordMasteryDecision,
+    scheduled_recall: f64,
+    #[allow(dead_code)]
+    desired_retention: f64,
+}
+
 impl AMASEngine {
     pub fn new(config: AMASConfig, store: Arc<Store>) -> Self {
         let hash = monitoring::compute_config_hash(&config);
@@ -163,7 +171,7 @@ impl AMASEngine {
 
         let retention_signal = word_mastery
             .as_ref()
-            .map(|wm| wm.recall_probability)
+            .map(|feedback| feedback.scheduled_recall)
             .unwrap_or(0.0);
         let reward = self.compute_reward(&feature, &user_state, retention_signal, &config);
         let objective = self.evaluate_objective(&reward, retention_signal, &config);
@@ -212,7 +220,9 @@ impl AMASEngine {
             strategy: constrained_strategy,
             explanation,
             state: user_state.clone(),
-            word_mastery,
+            word_mastery: word_mastery
+                .as_ref()
+                .map(|feedback| feedback.decision.clone()),
             reward: reward.clone(),
             cold_start_phase,
         };
@@ -681,12 +691,13 @@ impl AMASEngine {
 
         let chosen = candidates
             .iter()
+            .filter(|c| c.confidence.is_finite())
             .max_by(|a, b| {
                 a.confidence
                     .partial_cmp(&b.confidence)
                     .unwrap_or(std::cmp::Ordering::Equal)
             })
-            .unwrap();
+            .unwrap_or_else(|| candidates.first().unwrap());
         let mut weights = HashMap::new();
         weights.insert(chosen.algorithm_id, 1.0);
         (chosen.strategy.clone(), weights)
@@ -714,7 +725,10 @@ impl AMASEngine {
         };
         let expected_forget_cost = (1.0 - recall_prob) * r.expected_forget_cost_weight;
 
-        let value = accuracy_reward + speed_reward - fatigue_penalty - frustration_penalty - expected_forget_cost;
+        let value = accuracy_reward + speed_reward
+            - fatigue_penalty
+            - frustration_penalty
+            - expected_forget_cost;
 
         Reward {
             value: value.clamp(-1.0, 1.0),
@@ -760,7 +774,7 @@ impl AMASEngine {
         user_state: &UserState,
         config: &AMASConfig,
         ssp_policy: Option<&ssp::SspPolicy>,
-    ) -> Result<Option<WordMasteryDecision>, AppError> {
+    ) -> Result<Option<MemoryFeedback>, AppError> {
         if raw_event.word_id.is_empty() {
             return Ok(None);
         }
@@ -902,16 +916,22 @@ impl AMASEngine {
             user_state.motivation,
             &config.memory_model,
         );
+        let now_ms = chrono::Utc::now().timestamp_millis();
 
-        let decision = mastery::update_mastery(
+        let decision = mastery::update_mastery_at(
             &mut state,
             raw_event.is_correct,
             feature.quality,
             adjusted_interval_scale,
             desired_retention,
+            now_ms,
             &config.memory_model,
             ssp_policy,
         );
+        let scheduled_at =
+            now_ms.saturating_add(decision.next_review_interval_secs.saturating_mul(1000));
+        let scheduled_recall =
+            mdm::recall_probability(&state.mdm, scheduled_at, &config.memory_model);
 
         self.store
             .set_engine_algo_state(
@@ -921,7 +941,11 @@ impl AMASEngine {
             )
             .map_err(|e| AppError::internal(&e.to_string()))?;
 
-        Ok(Some(decision))
+        Ok(Some(MemoryFeedback {
+            decision,
+            scheduled_recall,
+            desired_retention,
+        }))
     }
 
     fn apply_constraints(
@@ -972,6 +996,10 @@ impl AMASEngine {
 
         for candidate in candidates {
             let weight = weights.get(&candidate.algorithm_id).copied().unwrap_or(0.0);
+            if weight <= 0.0 {
+                continue;
+            }
+
             let lr = config.feature.trust_base_learning_rate * (weight / max_weight).max(0.1);
             ensemble::update_trust(
                 &mut algo_states.trust_scores,
@@ -1154,5 +1182,156 @@ impl AMASEngine {
             pre_constraint_strategy,
             config_version,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_engine(config: AMASConfig) -> AMASEngine {
+        let store = Arc::new(Store::open(":memory:", 5000, 1).unwrap());
+        store.run_migrations().unwrap();
+        AMASEngine::new(config, store)
+    }
+
+    fn sample_feature() -> FeatureVector {
+        FeatureVector {
+            accuracy: 1.0,
+            response_speed: 0.9,
+            quality: 0.9,
+            engagement: 0.8,
+            hint_penalty: 0.0,
+            time_since_last_event_secs: 60.0,
+            session_event_count: 1,
+            is_quit: false,
+        }
+    }
+
+    fn sample_event(word_id: &str) -> RawEvent {
+        RawEvent {
+            word_id: word_id.to_string(),
+            is_correct: true,
+            response_time_ms: 800,
+            session_id: Some("session-1".to_string()),
+            ..RawEvent::default()
+        }
+    }
+
+    #[test]
+    fn scheduled_recall_changes_reward_and_objective_with_interval_scale() {
+        let config = AMASConfig::default();
+        let engine = test_engine(config.clone());
+        let feature = sample_feature();
+        let user_state = UserState::default();
+        let short_strategy = StrategyParams {
+            interval_scale: 0.5,
+            ..StrategyParams::default()
+        };
+        let long_strategy = StrategyParams {
+            interval_scale: 2.0,
+            ..StrategyParams::default()
+        };
+
+        let short_feedback = engine
+            .update_memory(
+                "user-short",
+                &sample_event("word-short"),
+                &feature,
+                &short_strategy,
+                &user_state,
+                &config,
+                None,
+            )
+            .unwrap()
+            .expect("short feedback");
+        let long_feedback = engine
+            .update_memory(
+                "user-long",
+                &sample_event("word-long"),
+                &feature,
+                &long_strategy,
+                &user_state,
+                &config,
+                None,
+            )
+            .unwrap()
+            .expect("long feedback");
+
+        assert!(short_feedback.decision.recall_probability > 0.99);
+        assert!(long_feedback.decision.recall_probability > 0.99);
+        assert!(short_feedback.scheduled_recall > long_feedback.scheduled_recall);
+
+        let short_reward = engine.compute_reward(
+            &feature,
+            &user_state,
+            short_feedback.scheduled_recall,
+            &config,
+        );
+        let long_reward = engine.compute_reward(
+            &feature,
+            &user_state,
+            long_feedback.scheduled_recall,
+            &config,
+        );
+        let short_objective =
+            engine.evaluate_objective(&short_reward, short_feedback.scheduled_recall, &config);
+        let long_objective =
+            engine.evaluate_objective(&long_reward, long_feedback.scheduled_recall, &config);
+
+        assert!(
+            short_reward.components.expected_forget_cost
+                < long_reward.components.expected_forget_cost
+        );
+        assert!(short_objective.score > long_objective.score);
+    }
+
+    #[test]
+    fn update_trust_scores_ignores_zero_weight_candidates() {
+        let engine = test_engine(AMASConfig::default());
+        let mut algo_states = AlgoStates::default();
+        let original_ige_trust = algo_states.trust_scores.ige;
+        let original_swd_trust = algo_states.trust_scores.swd;
+        let candidates = vec![
+            DecisionCandidate {
+                algorithm_id: AlgorithmId::Ige,
+                strategy: StrategyParams {
+                    difficulty: 0.8,
+                    new_ratio: 0.7,
+                    ..StrategyParams::default()
+                },
+                confidence: 1.0,
+                explanation: "ige".to_string(),
+            },
+            DecisionCandidate {
+                algorithm_id: AlgorithmId::Swd,
+                strategy: StrategyParams {
+                    difficulty: 0.3,
+                    new_ratio: 0.2,
+                    review_mode: true,
+                    ..StrategyParams::default()
+                },
+                confidence: 1.0,
+                explanation: "swd".to_string(),
+            },
+        ];
+        let mut weights = HashMap::new();
+        weights.insert(AlgorithmId::Ige, 0.0);
+        weights.insert(AlgorithmId::Swd, 1.0);
+
+        engine.update_trust_scores(
+            &mut algo_states,
+            &candidates,
+            0.6,
+            0.6,
+            &UserState::default(),
+            &weights,
+            &AMASConfig::default(),
+        );
+
+        assert_eq!(algo_states.trust_scores.ige, original_ige_trust);
+        assert_ne!(algo_states.trust_scores.swd, original_swd_trust);
+        assert_eq!(algo_states.ige.total_explorations, 0);
+        assert_eq!(algo_states.swd.strategy_history.len(), 1);
     }
 }

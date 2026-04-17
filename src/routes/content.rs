@@ -1,9 +1,9 @@
-use axum::extract::{Path, Query, State};
-use axum::routing::get;
-use axum::Router;
 use crate::auth::{AdminAuthUser, AuthUser};
 use crate::constants::MAX_CONFUSION_PAIRS;
 use crate::extractors::JsonBody;
+use axum::extract::{Path, Query, State};
+use axum::routing::get;
+use axum::Router;
 use serde::{Deserialize, Serialize};
 
 use crate::response::{ok, AppError};
@@ -249,7 +249,9 @@ async fn get_confusion_pairs(
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     let limit = q.limit.unwrap_or(20).clamp(1, MAX_CONFUSION_PAIRS);
 
-    let raw_pairs = state.store().get_confusion_pairs_for_word(&word_id, limit)?;
+    let raw_pairs = state
+        .store()
+        .get_confusion_pairs_for_word(&word_id, limit)?;
     let mut pairs = Vec::new();
     for (other_word_id, score) in raw_pairs {
         if let Some(word) = state.store().get_word(&other_word_id)? {

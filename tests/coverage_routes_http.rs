@@ -620,10 +620,7 @@ async fn it_user_profile_notifications_content_and_v1_flow() {
         progress: 1.0,
         unlocked_at: Some(Utc::now().to_rfc3339()),
     };
-    app.state
-        .store()
-        .save_badge(&badge)
-        .expect("insert badge");
+    app.state.store().save_badge(&badge).expect("insert badge");
 
     let list_notifications = request(
         &app.app,

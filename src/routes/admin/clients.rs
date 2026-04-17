@@ -93,21 +93,39 @@ async fn list_clients(
             }
         }
     }
-    let device_ids: Vec<String> = sse_live.iter().map(|e| e.device_id.clone())
+    let device_ids: Vec<String> = sse_live
+        .iter()
+        .map(|e| e.device_id.clone())
         .chain(recently_active.iter().map(|e| e.device_id.clone()))
         .collect();
 
-    let status = state.store().get_data_upload_status(&user_ids, &device_ids)?;
+    let status = state
+        .store()
+        .get_data_upload_status(&user_ids, &device_ids)?;
 
     let mut sse_live = sse_live;
     for entry in &mut sse_live {
-        let amas = status.amas_by_user.get(&entry.user_id).copied().unwrap_or("none");
+        let amas = status
+            .amas_by_user
+            .get(&entry.user_id)
+            .copied()
+            .unwrap_or("none");
         // AMAS exists but no events means learning is also "nil"
-        let learning = status.learning_by_user.get(&entry.user_id).copied().unwrap_or_else(|| {
-            if amas != "none" { "nil" } else { "none" }
-        });
-        let telemetry = status.telemetry_by_device.get(&entry.device_id).copied().unwrap_or("none");
-        entry.data_channels = DataChannelStatus { amas, learning, telemetry };
+        let learning = status
+            .learning_by_user
+            .get(&entry.user_id)
+            .copied()
+            .unwrap_or_else(|| if amas != "none" { "nil" } else { "none" });
+        let telemetry = status
+            .telemetry_by_device
+            .get(&entry.device_id)
+            .copied()
+            .unwrap_or("none");
+        entry.data_channels = DataChannelStatus {
+            amas,
+            learning,
+            telemetry,
+        };
     }
 
     let mut recently_active = recently_active;
@@ -116,15 +134,25 @@ async fn list_clients(
             Some(uid) => {
                 let a = status.amas_by_user.get(uid).copied().unwrap_or("none");
                 // AMAS exists but no events means learning is also "nil"
-                let l = status.learning_by_user.get(uid).copied().unwrap_or_else(|| {
-                    if a != "none" { "nil" } else { "none" }
-                });
+                let l = status
+                    .learning_by_user
+                    .get(uid)
+                    .copied()
+                    .unwrap_or_else(|| if a != "none" { "nil" } else { "none" });
                 (a, l)
             }
             None => ("none", "none"),
         };
-        let telemetry = status.telemetry_by_device.get(&entry.device_id).copied().unwrap_or("none");
-        entry.data_channels = DataChannelStatus { amas, learning, telemetry };
+        let telemetry = status
+            .telemetry_by_device
+            .get(&entry.device_id)
+            .copied()
+            .unwrap_or("none");
+        entry.data_channels = DataChannelStatus {
+            amas,
+            learning,
+            telemetry,
+        };
     }
 
     Ok(ok(serde_json::json!({
@@ -195,12 +223,16 @@ async fn request_telemetry(
     Path(id): Path<String>,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let conns = state.active_sse().get(&id).filter(|c| !c.is_empty()).ok_or_else(|| AppError {
-        status: StatusCode::UNPROCESSABLE_ENTITY,
-        code: "DEVICE_OFFLINE".into(),
-        message: "设备当前无活跃 SSE 连接".into(),
-        is_operational: true,
-    })?;
+    let conns = state
+        .active_sse()
+        .get(&id)
+        .filter(|c| !c.is_empty())
+        .ok_or_else(|| AppError {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            code: "DEVICE_OFFLINE".into(),
+            message: "设备当前无活跃 SSE 连接".into(),
+            is_operational: true,
+        })?;
 
     let request_id = uuid::Uuid::new_v4().to_string();
     let event = SseEvent::TelemetryRequest {
@@ -236,5 +268,7 @@ async fn get_telemetry(
         .store()
         .get_telemetry_summaries_by_device(&device_id, limit, offset)?;
 
-    Ok(ok(serde_json::json!({ "records": records, "total": total })))
+    Ok(ok(
+        serde_json::json!({ "records": records, "total": total }),
+    ))
 }

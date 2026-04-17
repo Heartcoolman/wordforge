@@ -29,8 +29,12 @@ pub struct MdmState {
     pub consolidation: f64,
 }
 
-fn default_stability() -> f64 { 0.4 }
-fn default_difficulty() -> f64 { 5.0 }
+fn default_stability() -> f64 {
+    0.4
+}
+fn default_difficulty() -> f64 {
+    5.0
+}
 
 impl Default for MdmState {
     fn default() -> Self {
@@ -65,9 +69,8 @@ impl MdmState {
             && self.review_count > 0
         {
             // Old formula: stability_days = (memory_strength + epsilon)^power * base
-            let migrated = (self.memory_strength + HALF_LIFE_EPSILON)
-                .powf(HALF_LIFE_POWER)
-                * STABILITY_BASE;
+            let migrated =
+                (self.memory_strength + HALF_LIFE_EPSILON).powf(HALF_LIFE_POWER) * STABILITY_BASE;
             self.stability = migrated.clamp(0.01, 365.0);
         }
     }
@@ -81,62 +84,85 @@ impl MdmState {
 pub fn update_strength(
     state: &mut MdmState,
     quality: f64,
-    _alpha: f64, // kept for API compat
+    alpha: f64,
     now_ms: i64,
     config: &MemoryModelConfig,
 ) {
     let quality = quality.clamp(0.0, 1.0);
+    let alpha = alpha.clamp(0.0, 1.0);
     // Map quality to FSRS grade
-    let grade: u32 = if quality <= 0.15 { 1 }
-        else if quality <= 0.5 { 2 }
-        else if quality <= 0.85 { 3 }
-        else { 4 };
+    let grade: u32 = if quality <= 0.15 {
+        1
+    } else if quality <= 0.5 {
+        2
+    } else if quality <= 0.85 {
+        3
+    } else {
+        4
+    };
 
     if state.review_count == 0 {
         // First review: initial stability from w0-w3
         let g = (grade as usize).clamp(1, 4) - 1;
         state.stability = config.w[g];
         // Initial difficulty: D0(G) = w4 - e^{w5*(G-1)} + 1
-        state.difficulty = (config.w[4] - (config.w[5] * (grade as f64 - 1.0)).exp() + 1.0).clamp(1.0, 10.0);
+        state.difficulty =
+            (config.w[4] - (config.w[5] * (grade as f64 - 1.0)).exp() + 1.0).clamp(1.0, 10.0);
     } else {
         // Compute current R
         let r = recall_probability(state, now_ms, config);
+        let prev_stability = state.stability.max(0.01);
+        let prev_difficulty = state.difficulty;
 
         // Update difficulty: D' = D - w6*(G-3), then mean reversion
         let delta_d = -config.w[6] * (grade as f64 - 3.0);
-        let d_prime = state.difficulty + delta_d * (10.0 - state.difficulty) / 9.0;
+        let d_prime = prev_difficulty + delta_d * (10.0 - prev_difficulty) / 9.0;
         let d0_4 = (config.w[4] - (config.w[5] * 3.0).exp() + 1.0).clamp(1.0, 10.0);
-        state.difficulty = (config.w[7] * d0_4 + (1.0 - config.w[7]) * d_prime).clamp(1.0, 10.0);
+        let target_difficulty =
+            (config.w[7] * d0_4 + (1.0 - config.w[7]) * d_prime).clamp(1.0, 10.0);
 
-        let elapsed_days = state.last_review_at
+        let elapsed_days = state
+            .last_review_at
             .map(|last| ((now_ms - last) as f64 / 86_400_000.0).max(0.0))
             .unwrap_or(1.0);
 
-        if elapsed_days < 1.0 {
+        let target_stability = if elapsed_days < 1.0 {
             // Same-day review: FSRS-5 short-term stability formula
             let grade_f = grade as f64;
             let exponent = (config.w[17] * (grade_f - 3.0 + config.w[18])).clamp(-20.0, 20.0);
-            state.stability = (state.stability * exponent.exp()).max(0.01);
+            (prev_stability * exponent.exp()).max(0.01)
         } else if grade >= 2 {
             // Successful recall: S'_r = S * (e^w8 * (11-D) * S^{-w9} * (e^{w10*(1-R)} - 1) * bonus + 1)
-            let bonus = if grade == 2 { config.w[15] }      // Hard
-                else if grade == 4 { config.w[16] }           // Easy
-                else { 1.0 };                                  // Good
+            let bonus = if grade == 2 {
+                config.w[15]
+            }
+            // Hard
+            else if grade == 4 {
+                config.w[16]
+            }
+            // Easy
+            else {
+                1.0
+            }; // Good
             let s_inc = (config.w[8].exp()
-                * (11.0 - state.difficulty)
-                * state.stability.max(0.01).powf(-config.w[9])
+                * (11.0 - prev_difficulty)
+                * prev_stability.powf(-config.w[9])
                 * ((config.w[10] * (1.0 - r)).exp() - 1.0)
                 * bonus)
                 .max(0.0);
-            state.stability = (state.stability * (s_inc + 1.0)).max(0.01);
+            (prev_stability * (s_inc + 1.0)).max(0.01)
         } else {
             // Forgetting (Again): S'_f = w11 * D^{-w12} * ((S+1)^w13 - 1) * e^{w14*(1-R)}
-            state.stability = (config.w[11]
-                * state.difficulty.powf(-config.w[12])
-                * ((state.stability + 1.0).powf(config.w[13]) - 1.0)
+            (config.w[11]
+                * prev_difficulty.powf(-config.w[12])
+                * ((prev_stability + 1.0).powf(config.w[13]) - 1.0)
                 * (config.w[14] * (1.0 - r)).exp())
-                .clamp(0.01, state.stability.max(0.01));
-        }
+            .clamp(0.01, prev_stability)
+        };
+
+        state.difficulty =
+            (prev_difficulty + (target_difficulty - prev_difficulty) * alpha).clamp(1.0, 10.0);
+        state.stability = (prev_stability + (target_stability - prev_stability) * alpha).max(0.01);
     }
 
     // Sync backward-compatible fields
@@ -203,7 +229,9 @@ pub fn compute_interval(
 ) -> i64 {
     let s = state.stability.max(0.01);
     let floor = config.forgetting_curve_floor;
-    let adjusted_target = ((target_recall - floor) / (1.0 - floor).max(1e-9)).max(1e-6).min(1.0);
+    let adjusted_target = ((target_recall - floor) / (1.0 - floor).max(1e-9))
+        .max(1e-6)
+        .min(1.0);
     let interval_days = s / config.forgetting_curve_factor
         * (adjusted_target.powf(1.0 / config.forgetting_curve_decay) - 1.0);
     let interval_secs = interval_days * 86400.0;
@@ -251,7 +279,12 @@ mod tests {
         let later = now + 86_400_000;
         update_strength(&mut state, 0.9, 0.3, later, &config);
         let s2 = state.stability;
-        assert!(s2 > s1, "Stability should grow after successful recall: {} > {}", s2, s1);
+        assert!(
+            s2 > s1,
+            "Stability should grow after successful recall: {} > {}",
+            s2,
+            s1
+        );
     }
 
     #[test]
@@ -264,6 +297,27 @@ mod tests {
         let later = now + 86_400_000;
         update_strength(&mut state, 0.0, 0.3, later, &config);
         let s2 = state.stability;
-        assert!(s2 < s1, "Stability should decrease after forgetting: {} < {}", s2, s1);
+        assert!(
+            s2 < s1,
+            "Stability should decrease after forgetting: {} < {}",
+            s2,
+            s1
+        );
+    }
+
+    #[test]
+    fn larger_alpha_produces_stronger_post_review_update() {
+        let config = MemoryModelConfig::default();
+        let now = chrono::Utc::now().timestamp_millis();
+        let later = now + 86_400_000;
+
+        let mut low_alpha = MdmState::default();
+        update_strength(&mut low_alpha, 0.9, 0.3, now, &config);
+        let mut high_alpha = low_alpha.clone();
+
+        update_strength(&mut low_alpha, 0.9, 0.1, later, &config);
+        update_strength(&mut high_alpha, 0.9, 0.9, later, &config);
+
+        assert!(high_alpha.stability > low_alpha.stability);
     }
 }

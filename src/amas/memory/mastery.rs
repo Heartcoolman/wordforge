@@ -42,13 +42,39 @@ pub fn update_mastery(
     config: &MemoryModelConfig,
     ssp_policy: Option<&SspPolicy>,
 ) -> WordMasteryDecision {
-    let now = chrono::Utc::now().timestamp_millis();
+    update_mastery_at(
+        state,
+        is_correct,
+        quality,
+        interval_scale,
+        desired_retention,
+        chrono::Utc::now().timestamp_millis(),
+        config,
+        ssp_policy,
+    )
+}
 
-    // post-increment: update streak before computing alpha
+pub fn update_mastery_at(
+    state: &mut WordMasteryState,
+    is_correct: bool,
+    quality: f64,
+    interval_scale: f64,
+    desired_retention: f64,
+    now: i64,
+    config: &MemoryModelConfig,
+    ssp_policy: Option<&SspPolicy>,
+) -> WordMasteryDecision {
+    let prev_last_review = state.mdm.last_review_at;
+
     state.total_attempts += 1;
     if is_correct {
         state.total_correct += 1;
-        state.correct_streak += 1;
+        let gap_ok = prev_last_review
+            .map(|last| now.saturating_sub(last) >= config.streak_min_gap_ms)
+            .unwrap_or(true);
+        if gap_ok {
+            state.correct_streak += 1;
+        }
     } else {
         state.correct_streak = 0;
     }
@@ -57,8 +83,7 @@ pub fn update_mastery(
     let streak_bonus = 1.0 + (state.correct_streak.min(5) as f64) * 0.1;
     let alpha = (base_alpha * streak_bonus).clamp(config.alpha_min, config.alpha_max);
 
-    let effective_quality = if is_correct { quality } else { quality * 0.1 };
-    super::mdm::update_strength(&mut state.mdm, effective_quality, alpha, now, config);
+    super::mdm::update_strength(&mut state.mdm, quality, alpha, now, config);
 
     state.recent_results.push(is_correct);
     let window = config.mastery_window_size as usize;
@@ -123,16 +148,88 @@ fn determine_level(
 mod tests {
     use super::*;
 
+    fn rewind_last_review(state: &mut WordMasteryState, delta_ms: i64) {
+        state.mdm.last_review_at = Some(chrono::Utc::now().timestamp_millis() - delta_ms);
+    }
+
+    fn reviewed_state(config: &MemoryModelConfig) -> WordMasteryState {
+        let mut state = WordMasteryState::new("w1");
+        let _ = update_mastery(&mut state, true, 0.95, 1.0, 0.9, config, None);
+        rewind_last_review(&mut state, 3_600_000);
+        state
+    }
+
     #[test]
     fn level_up_after_correct_streak() {
         let config = MemoryModelConfig::default();
         let mut state = WordMasteryState::new("w1");
         for _ in 0..5 {
             let _ = update_mastery(&mut state, true, 0.95, 1.0, 0.9, &config, None);
+            rewind_last_review(&mut state, config.streak_min_gap_ms + 1);
         }
         assert!(matches!(
             state.mastery_level,
             MasteryLevel::Reviewing | MasteryLevel::Mastered
         ));
+    }
+
+    #[test]
+    fn incorrect_answer_preserves_quality_signal() {
+        let config = MemoryModelConfig::default();
+        let base = reviewed_state(&config);
+        let mut hard_lapse = base.clone();
+        let mut again_lapse = base;
+
+        let hard_before = hard_lapse.mdm.stability;
+        let again_before = again_lapse.mdm.stability;
+
+        let _ = update_mastery(&mut hard_lapse, false, 0.2, 1.0, 0.9, &config, None);
+        let _ = update_mastery(&mut again_lapse, false, 0.02, 1.0, 0.9, &config, None);
+
+        assert!(hard_lapse.mdm.stability < hard_before);
+        assert!(again_lapse.mdm.stability < again_before);
+        assert!(hard_lapse.mdm.stability > again_lapse.mdm.stability);
+        assert!(hard_lapse.mdm.difficulty < again_lapse.mdm.difficulty);
+    }
+
+    #[test]
+    fn incorrect_and_correct_answers_move_stability_in_opposite_directions() {
+        let config = MemoryModelConfig::default();
+        let base = reviewed_state(&config);
+        let mut correct_state = base.clone();
+        let mut incorrect_state = base;
+
+        let correct_before = correct_state.mdm.stability;
+        let incorrect_before = incorrect_state.mdm.stability;
+
+        let _ = update_mastery(&mut correct_state, true, 0.8, 1.0, 0.9, &config, None);
+        let _ = update_mastery(&mut incorrect_state, false, 0.02, 1.0, 0.9, &config, None);
+
+        assert!(correct_state.mdm.stability > correct_before);
+        assert!(incorrect_state.mdm.stability < incorrect_before);
+    }
+
+    #[test]
+    fn streak_requires_time_gap() {
+        let config = MemoryModelConfig::default();
+        let mut state = WordMasteryState::new("w1");
+
+        let _ = update_mastery(&mut state, true, 0.95, 1.0, 0.9, &config, None);
+        rewind_last_review(&mut state, 60_000);
+        let _ = update_mastery(&mut state, true, 0.95, 1.0, 0.9, &config, None);
+
+        assert_eq!(state.correct_streak, 1);
+    }
+
+    #[test]
+    fn streak_accumulates_with_gap() {
+        let config = MemoryModelConfig::default();
+        let mut state = WordMasteryState::new("w1");
+
+        let _ = update_mastery(&mut state, true, 0.95, 1.0, 0.9, &config, None);
+        rewind_last_review(&mut state, 3_600_000);
+        let _ = update_mastery(&mut state, true, 0.95, 1.0, 0.9, &config, None);
+
+        assert_eq!(state.correct_streak, 2);
     }
 }

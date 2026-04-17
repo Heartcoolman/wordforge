@@ -558,6 +558,8 @@ pub struct MemoryModelConfig {
     pub passive_decay_power: f64,
     #[serde(default = "default_mastery_window_size")]
     pub mastery_window_size: u32,
+    #[serde(default = "default_streak_min_gap_ms")]
+    pub streak_min_gap_ms: i64,
     /// FSRS-style power-law forgetting curve: R = (1 + factor * t/S)^decay
     #[serde(default = "default_stability_base_days")]
     pub stability_base_days: f64,
@@ -618,6 +620,9 @@ fn default_passive_decay_power() -> f64 {
 }
 fn default_mastery_window_size() -> u32 {
     20
+}
+fn default_streak_min_gap_ms() -> i64 {
+    1_800_000
 }
 fn default_stability_base_days() -> f64 {
     20.0
@@ -693,6 +698,7 @@ impl Default for MemoryModelConfig {
             passive_decay_half_life_days: 30.0,
             passive_decay_power: 0.30,
             mastery_window_size: 20,
+            streak_min_gap_ms: 1_800_000,
             stability_base_days: 20.0,
             forgetting_curve_factor: 0.30,
             forgetting_curve_decay: -0.5,
@@ -1335,6 +1341,9 @@ impl AMASConfig {
         if self.memory_model.mastery_window_size == 0 {
             return Err("memory_model.mastery_window_size must be > 0".to_string());
         }
+        if self.memory_model.streak_min_gap_ms < 0 {
+            return Err("memory_model.streak_min_gap_ms must be >= 0".to_string());
+        }
         if !(0.0..=1.0).contains(&self.memory_model.alpha_min)
             || !(0.0..=1.0).contains(&self.memory_model.alpha_max)
         {
@@ -1466,6 +1475,13 @@ mod tests {
     fn invalid_config_is_rejected() {
         let mut cfg = AMASConfig::default();
         cfg.monitoring.sample_rate = 2.0;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn negative_streak_gap_is_rejected() {
+        let mut cfg = AMASConfig::default();
+        cfg.memory_model.streak_min_gap_ms = -1;
         assert!(cfg.validate().is_err());
     }
 }

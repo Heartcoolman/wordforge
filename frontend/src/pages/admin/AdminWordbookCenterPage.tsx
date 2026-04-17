@@ -37,6 +37,8 @@ export default function AdminWordbookCenterPage() {
       setItems(data);
     } catch {
       setItems([]);
+      setConfigured(false);
+      setUpdates([]);
     } finally {
       setLoading(false);
     }

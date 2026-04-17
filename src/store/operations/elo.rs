@@ -1,4 +1,5 @@
 use crate::amas::elo::EloRating;
+use crate::amas::memory::mastery::WordMasteryState;
 use crate::amas::memory::mdm::MdmState;
 use crate::store::keys;
 use crate::store::{Store, StoreError};
@@ -6,6 +7,16 @@ use rusqlite::{params, OptionalExtension};
 use std::collections::HashMap;
 
 impl Store {
+    fn decode_mastery_mdm_state(value: serde_json::Value) -> Option<MdmState> {
+        serde_json::from_value::<MdmState>(value.clone())
+            .ok()
+            .or_else(|| {
+                serde_json::from_value::<WordMasteryState>(value)
+                    .ok()
+                    .map(|state| state.mdm)
+            })
+    }
+
     pub fn get_user_elo(&self, user_id: &str) -> Result<EloRating, StoreError> {
         keys::validate_id(user_id)?;
         let conn = self.conn()?;
@@ -13,7 +24,12 @@ impl Store {
             .query_row(
                 "SELECT rating, games FROM user_elo WHERE user_id=?1",
                 params![user_id],
-                |r| Ok(EloRating { rating: r.get(0)?, games: r.get(1)? }),
+                |r| {
+                    Ok(EloRating {
+                        rating: r.get(0)?,
+                        games: r.get(1)?,
+                    })
+                },
             )
             .optional()?;
         Ok(result.unwrap_or_default())
@@ -37,7 +53,12 @@ impl Store {
             .query_row(
                 "SELECT rating, games FROM word_elo WHERE word_id=?1",
                 params![word_id],
-                |r| Ok(EloRating { rating: r.get(0)?, games: r.get(1)? }),
+                |r| {
+                    Ok(EloRating {
+                        rating: r.get(0)?,
+                        games: r.get(1)?,
+                    })
+                },
             )
             .optional()?;
         Ok(result.unwrap_or_default())
@@ -107,10 +128,9 @@ impl Store {
         let map = self.batch_get_mastery_values(user_id, word_ids)?;
         let mut results = HashMap::with_capacity(map.len());
         for (word_id, state) in map {
-            let mdm = state
-                .and_then(|v| serde_json::from_value::<MdmState>(v).ok())
-                .unwrap_or_default();
-            results.insert(word_id, mdm);
+            if let Some(mdm) = state.and_then(Self::decode_mastery_mdm_state) {
+                results.insert(word_id, mdm);
+            }
         }
         Ok(results)
     }
@@ -118,7 +138,10 @@ impl Store {
 
 #[cfg(test)]
 mod tests {
+    use crate::amas::config::MemoryModelConfig;
     use crate::amas::elo::EloRating;
+    use crate::amas::memory::mastery::{update_mastery_at, WordMasteryState};
+    use crate::amas::memory::mdm::MdmState;
     use crate::store::Store;
 
     #[test]
@@ -132,7 +155,10 @@ mod tests {
     #[test]
     fn user_elo_round_trip() {
         let store = Store::open(":memory:", 5000, 1).unwrap();
-        let elo = EloRating { rating: 1350.5, games: 10 };
+        let elo = EloRating {
+            rating: 1350.5,
+            games: 10,
+        };
         store.set_user_elo("u1", &elo).unwrap();
         let got = store.get_user_elo("u1").unwrap();
         assert_eq!(got.rating, 1350.5);
@@ -142,7 +168,10 @@ mod tests {
     #[test]
     fn word_elo_round_trip() {
         let store = Store::open(":memory:", 5000, 1).unwrap();
-        let elo = EloRating { rating: 1100.0, games: 5 };
+        let elo = EloRating {
+            rating: 1100.0,
+            games: 5,
+        };
         store.set_word_elo("w1", &elo).unwrap();
         let got = store.get_word_elo("w1").unwrap();
         assert_eq!(got.rating, 1100.0);
@@ -153,10 +182,58 @@ mod tests {
     fn batch_mastery_states() {
         let store = Store::open(":memory:", 5000, 1).unwrap();
         let state = serde_json::json!({"level": 0.8});
-        store.set_engine_algo_state("u1", "mastery:w1", &state).unwrap();
-        let results = store.batch_get_engine_mastery_states("u1", &["w1".into(), "w2".into()]).unwrap();
+        store
+            .set_engine_algo_state("u1", "mastery:w1", &state)
+            .unwrap();
+        let results = store
+            .batch_get_engine_mastery_states("u1", &["w1".into(), "w2".into()])
+            .unwrap();
         assert_eq!(results.len(), 2);
         assert!(results[0].1.is_some());
         assert!(results[1].1.is_none());
+    }
+
+    #[test]
+    fn batch_get_engine_mastery_mdm_states_extracts_nested_mastery_state() {
+        let store = Store::open(":memory:", 5000, 1).unwrap();
+        store.run_migrations().unwrap();
+
+        let mut mastery = WordMasteryState::new("w1");
+        let config = MemoryModelConfig::default();
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let _ = update_mastery_at(&mut mastery, true, 0.9, 1.0, 0.9, now_ms, &config, None);
+
+        store
+            .set_engine_algo_state("u1", "mastery:w1", &serde_json::to_value(&mastery).unwrap())
+            .unwrap();
+
+        let results = store
+            .batch_get_engine_mastery_mdm_states("u1", &["w1".into(), "w2".into()])
+            .unwrap();
+
+        let mdm = results.get("w1").expect("decoded mastery state");
+        assert!(mdm.review_count > 0);
+        assert!(results.get("w2").is_none());
+    }
+
+    #[test]
+    fn batch_get_engine_mastery_mdm_states_still_supports_raw_mdm_state() {
+        let store = Store::open(":memory:", 5000, 1).unwrap();
+        store.run_migrations().unwrap();
+
+        let mut mdm = MdmState::default();
+        mdm.review_count = 3;
+        mdm.last_review_at = Some(123);
+
+        store
+            .set_engine_algo_state("u1", "mastery:w1", &serde_json::to_value(&mdm).unwrap())
+            .unwrap();
+
+        let results = store
+            .batch_get_engine_mastery_mdm_states("u1", &["w1".into()])
+            .unwrap();
+
+        assert_eq!(results["w1"].review_count, 3);
+        assert_eq!(results["w1"].last_review_at, Some(123));
     }
 }

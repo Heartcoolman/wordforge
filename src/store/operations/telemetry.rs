@@ -150,20 +150,38 @@ impl Store {
                 ?25, ?26, ?27
              )",
             params![
-                id, device_id, user_id, event_type,
-                summary.cpu_cores, summary.memory_gb, summary.screen_width, summary.screen_height, summary.pixel_ratio,
-                summary.os_name.as_deref(), summary.browser_name.as_deref(), summary.browser_version.as_deref(),
-                summary.timezone.as_deref(), summary.language.as_deref(),
-                summary.touch_support.map(|b| b as i64), summary.online_status.map(|b| b as i64),
-                summary.session_duration_secs, summary.actions_per_min, summary.error_count, summary.avg_response_time_ms,
-                summary.current_route.as_deref(), summary.click_count, summary.click_targets_json.as_deref(),
-                summary.scroll_depth_pct, summary.visibility_changes, summary.route_changes, summary.feature_usage_json,
+                id,
+                device_id,
+                user_id,
+                event_type,
+                summary.cpu_cores,
+                summary.memory_gb,
+                summary.screen_width,
+                summary.screen_height,
+                summary.pixel_ratio,
+                summary.os_name.as_deref(),
+                summary.browser_name.as_deref(),
+                summary.browser_version.as_deref(),
+                summary.timezone.as_deref(),
+                summary.language.as_deref(),
+                summary.touch_support.map(|b| b as i64),
+                summary.online_status.map(|b| b as i64),
+                summary.session_duration_secs,
+                summary.actions_per_min,
+                summary.error_count,
+                summary.avg_response_time_ms,
+                summary.current_route.as_deref(),
+                summary.click_count,
+                summary.click_targets_json.as_deref(),
+                summary.scroll_depth_pct,
+                summary.visibility_changes,
+                summary.route_changes,
+                summary.feature_usage_json,
             ],
         )?;
         tx.commit()?;
         Ok(())
     }
-
 
     pub fn get_telemetry_summaries_by_device(
         &self,
@@ -272,7 +290,8 @@ impl Store {
         )?;
         let rows = stmt.query_map(params![device_id, limit, offset], |r| {
             let payload_str: String = r.get(5)?;
-            let payload = serde_json::from_str(&payload_str).unwrap_or(serde_json::Value::Object(Default::default()));
+            let payload = serde_json::from_str(&payload_str)
+                .unwrap_or(serde_json::Value::Object(Default::default()));
             Ok(TelemetryRecord {
                 id: r.get(0)?,
                 device_id: r.get(1)?,

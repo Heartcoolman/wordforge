@@ -21,7 +21,9 @@ pub struct WordbookCenterImport {
 fn parse_dt(s: String) -> rusqlite::Result<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(&s)
         .map(|dt| dt.with_timezone(&Utc))
-        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))
+        .map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+        })
 }
 
 fn import_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WordbookCenterImport> {
@@ -91,9 +93,9 @@ impl Store {
         source_url: &str,
     ) -> Result<Vec<WordbookCenterImport>, StoreError> {
         let conn = self.conn()?;
-        let mut stmt = conn.prepare(
-            &format!("SELECT {COLS} FROM wb_center_imports WHERE source_url = ?1"),
-        )?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {COLS} FROM wb_center_imports WHERE source_url = ?1"
+        ))?;
         let imports = stmt
             .query_map(params![source_url], import_from_row)?
             .collect::<Result<Vec<_>, _>>()?;
@@ -143,7 +145,11 @@ mod tests {
         Store::open(":memory:", 5000, 1).unwrap()
     }
 
-    fn sample_import(remote_id: &str, source_url: &str, user_id: Option<&str>) -> WordbookCenterImport {
+    fn sample_import(
+        remote_id: &str,
+        source_url: &str,
+        user_id: Option<&str>,
+    ) -> WordbookCenterImport {
         WordbookCenterImport {
             remote_id: remote_id.into(),
             local_wordbook_id: format!("local_{remote_id}"),
@@ -161,23 +167,35 @@ mod tests {
         let store = test_store();
         let imp = sample_import("r1", "https://example.com", None);
         store.upsert_wb_center_import(&imp).unwrap();
-        let got = store.get_wb_center_import("https://example.com", "r1").unwrap().unwrap();
+        let got = store
+            .get_wb_center_import("https://example.com", "r1")
+            .unwrap()
+            .unwrap();
         assert_eq!(got.local_wordbook_id, "local_r1");
     }
 
     #[test]
     fn get_nonexistent_returns_none() {
         let store = test_store();
-        assert!(store.get_wb_center_import("https://x.com", "nope").unwrap().is_none());
+        assert!(store
+            .get_wb_center_import("https://x.com", "nope")
+            .unwrap()
+            .is_none());
     }
 
     #[test]
     fn list_by_source() {
         let store = test_store();
         let url = "https://example.com";
-        store.upsert_wb_center_import(&sample_import("r1", url, None)).unwrap();
-        store.upsert_wb_center_import(&sample_import("r2", url, None)).unwrap();
-        store.upsert_wb_center_import(&sample_import("r3", "https://other.com", None)).unwrap();
+        store
+            .upsert_wb_center_import(&sample_import("r1", url, None))
+            .unwrap();
+        store
+            .upsert_wb_center_import(&sample_import("r2", url, None))
+            .unwrap();
+        store
+            .upsert_wb_center_import(&sample_import("r3", "https://other.com", None))
+            .unwrap();
         let imports = store.list_wb_center_imports_by_source(url).unwrap();
         assert_eq!(imports.len(), 2);
     }
@@ -185,8 +203,12 @@ mod tests {
     #[test]
     fn list_by_user_none() {
         let store = test_store();
-        store.upsert_wb_center_import(&sample_import("r1", "https://a.com", None)).unwrap();
-        store.upsert_wb_center_import(&sample_import("r2", "https://b.com", Some("u1"))).unwrap();
+        store
+            .upsert_wb_center_import(&sample_import("r1", "https://a.com", None))
+            .unwrap();
+        store
+            .upsert_wb_center_import(&sample_import("r2", "https://b.com", Some("u1")))
+            .unwrap();
         let imports = store.list_wb_center_imports_by_user(None).unwrap();
         assert_eq!(imports.len(), 1);
         assert_eq!(imports[0].remote_id, "r1");
@@ -195,8 +217,12 @@ mod tests {
     #[test]
     fn list_by_user_some() {
         let store = test_store();
-        store.upsert_wb_center_import(&sample_import("r1", "https://a.com", Some("u1"))).unwrap();
-        store.upsert_wb_center_import(&sample_import("r2", "https://b.com", Some("u2"))).unwrap();
+        store
+            .upsert_wb_center_import(&sample_import("r1", "https://a.com", Some("u1")))
+            .unwrap();
+        store
+            .upsert_wb_center_import(&sample_import("r2", "https://b.com", Some("u2")))
+            .unwrap();
         let imports = store.list_wb_center_imports_by_user(Some("u1")).unwrap();
         assert_eq!(imports.len(), 1);
     }
@@ -205,7 +231,9 @@ mod tests {
     fn delete() {
         let store = test_store();
         let url = "https://example.com";
-        store.upsert_wb_center_import(&sample_import("r1", url, None)).unwrap();
+        store
+            .upsert_wb_center_import(&sample_import("r1", url, None))
+            .unwrap();
         assert!(store.delete_wb_center_import(url, "r1").unwrap());
         assert!(!store.delete_wb_center_import(url, "r1").unwrap());
         assert!(store.get_wb_center_import(url, "r1").unwrap().is_none());

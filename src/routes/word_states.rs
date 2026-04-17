@@ -11,6 +11,7 @@ use crate::constants::DEFAULT_HALF_LIFE_HOURS;
 use crate::response::{ok, AppError};
 use crate::state::AppState;
 use crate::store::operations::word_states::{WordLearningState, WordState};
+use crate::store::Store;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -184,33 +185,34 @@ async fn batch_update(
         ));
     }
 
-    let mut updated = 0usize;
-    for item in &req.updates {
-        let mut wls = state
-            .store()
-            .get_word_learning_state(&auth.user_id, &item.word_id)?
-            .unwrap_or_else(|| WordLearningState {
-                user_id: auth.user_id.clone(),
-                word_id: item.word_id.clone(),
-                state: WordState::New,
-                mastery_level: 0.0,
-                next_review_date: None,
-                half_life: DEFAULT_HALF_LIFE_HOURS,
-                correct_streak: 0,
-                total_attempts: 0,
-                updated_at: Utc::now(),
-            });
+    let result = state.store().with_transaction(|conn| {
+        let mut updated = 0usize;
+        for item in &req.updates {
+            let mut wls = Store::get_word_learning_state_conn(conn, &auth.user_id, &item.word_id)?
+                .unwrap_or_else(|| WordLearningState {
+                    user_id: auth.user_id.clone(),
+                    word_id: item.word_id.clone(),
+                    state: WordState::New,
+                    mastery_level: 0.0,
+                    next_review_date: None,
+                    half_life: DEFAULT_HALF_LIFE_HOURS,
+                    correct_streak: 0,
+                    total_attempts: 0,
+                    updated_at: Utc::now(),
+                });
 
-        if let Some(ref s) = item.state {
-            wls.state = s.clone();
+            if let Some(ref s) = item.state {
+                wls.state = s.clone();
+            }
+            if let Some(level) = item.mastery_level {
+                wls.mastery_level = level.clamp(0.0, 1.0);
+            }
+            wls.updated_at = Utc::now();
+            Store::set_word_learning_state_conn(conn, &wls)?;
+            updated += 1;
         }
-        if let Some(level) = item.mastery_level {
-            wls.mastery_level = level.clamp(0.0, 1.0);
-        }
-        wls.updated_at = Utc::now();
-        state.store().set_word_learning_state(&wls)?;
-        updated += 1;
-    }
+        Ok(updated)
+    })?;
 
-    Ok(ok(serde_json::json!({"updated": updated})))
+    Ok(ok(serde_json::json!({"updated": result})))
 }

@@ -62,7 +62,9 @@ fn user_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<User> {
 fn parse_dt(s: String) -> rusqlite::Result<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(&s)
         .map(|dt| dt.with_timezone(&Utc))
-        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))
+        .map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+        })
 }
 
 fn is_unique_violation(err: &rusqlite::Error) -> bool {
@@ -144,10 +146,16 @@ impl Store {
                  created_at=?5, updated_at=?6, failed_login_count=?7, locked_until=?8
                  WHERE id=?9 AND updated_at=?10",
                 params![
-                    &user.email, &user.username, &user.password_hash,
-                    user.is_banned as i64, user.created_at.to_rfc3339(), user.updated_at.to_rfc3339(),
-                    user.failed_login_count as i64, locked.as_deref(),
-                    &user.id, existing.updated_at.to_rfc3339(),
+                    &user.email,
+                    &user.username,
+                    &user.password_hash,
+                    user.is_banned as i64,
+                    user.created_at.to_rfc3339(),
+                    user.updated_at.to_rfc3339(),
+                    user.failed_login_count as i64,
+                    locked.as_deref(),
+                    &user.id,
+                    existing.updated_at.to_rfc3339(),
                 ],
             ) {
                 Ok(1) => return Ok(()),
@@ -182,7 +190,12 @@ impl Store {
             }
             match conn.execute(
                 "UPDATE users SET is_banned=?1, updated_at=?2 WHERE id=?3 AND updated_at=?4",
-                params![banned as i64, Utc::now().to_rfc3339(), user_id, user.updated_at.to_rfc3339()],
+                params![
+                    banned as i64,
+                    Utc::now().to_rfc3339(),
+                    user_id,
+                    user.updated_at.to_rfc3339()
+                ],
             ) {
                 Ok(1) => return Ok(()),
                 Ok(0) => continue,
@@ -208,15 +221,16 @@ impl Store {
     pub fn list_user_ids(&self) -> Result<Vec<String>, StoreError> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare("SELECT id FROM users")?;
-        let ids = stmt.query_map([], |r| r.get(0))?.collect::<Result<Vec<String>, _>>()?;
+        let ids = stmt
+            .query_map([], |r| r.get(0))?
+            .collect::<Result<Vec<String>, _>>()?;
         Ok(ids)
     }
 
     pub fn list_users(&self, limit: usize, offset: usize) -> Result<Vec<User>, StoreError> {
         let conn = self.conn()?;
-        let sql = format!(
-            "SELECT {USER_COLS} FROM users ORDER BY created_at DESC LIMIT ?1 OFFSET ?2"
-        );
+        let sql =
+            format!("SELECT {USER_COLS} FROM users ORDER BY created_at DESC LIMIT ?1 OFFSET ?2");
         let mut stmt = conn.prepare(&sql)?;
         let users = stmt
             .query_map(params![limit as i64, offset as i64], user_from_row)?
@@ -243,8 +257,11 @@ impl Store {
                 "UPDATE users SET failed_login_count=?1, locked_until=?2, updated_at=?3
                  WHERE id=?4 AND updated_at=?5",
                 params![
-                    new_count as i64, locked_until.as_deref(), Utc::now().to_rfc3339(),
-                    user_id, user.updated_at.to_rfc3339(),
+                    new_count as i64,
+                    locked_until.as_deref(),
+                    Utc::now().to_rfc3339(),
+                    user_id,
+                    user.updated_at.to_rfc3339(),
                 ],
             ) {
                 Ok(1) => return Ok(locked),
@@ -274,7 +291,11 @@ impl Store {
             match conn.execute(
                 "UPDATE users SET failed_login_count=0, locked_until=NULL, updated_at=?1
                  WHERE id=?2 AND updated_at=?3",
-                params![Utc::now().to_rfc3339(), user_id, user.updated_at.to_rfc3339()],
+                params![
+                    Utc::now().to_rfc3339(),
+                    user_id,
+                    user.updated_at.to_rfc3339()
+                ],
             ) {
                 Ok(1) => return Ok(()),
                 Ok(0) => continue,
@@ -293,10 +314,17 @@ impl Store {
         keys::validate_id(user_id)?;
         let conn = self.conn()?;
         let locked_until: Option<Option<String>> = conn
-            .query_row("SELECT locked_until FROM users WHERE id=?1", params![user_id], |r| r.get(0))
+            .query_row(
+                "SELECT locked_until FROM users WHERE id=?1",
+                params![user_id],
+                |r| r.get(0),
+            )
             .optional()?;
         let Some(locked_until) = locked_until else {
-            return Err(StoreError::NotFound { entity: "user".into(), key: user_id.into() });
+            return Err(StoreError::NotFound {
+                entity: "user".into(),
+                key: user_id.into(),
+            });
         };
         match locked_until {
             Some(s) => Ok(parse_dt(s)? > Utc::now()),
@@ -309,11 +337,17 @@ impl Store {
         let mut conn = self.conn()?;
         let tx = conn.transaction()?;
         for table in USER_SCOPED_TABLES {
-            tx.execute(&format!("DELETE FROM {table} WHERE user_id=?1"), params![user_id])?;
+            tx.execute(
+                &format!("DELETE FROM {table} WHERE user_id=?1"),
+                params![user_id],
+            )?;
         }
         let deleted = tx.execute("DELETE FROM users WHERE id=?1", params![user_id])?;
         if deleted == 0 {
-            return Err(StoreError::NotFound { entity: "user".into(), key: user_id.into() });
+            return Err(StoreError::NotFound {
+                entity: "user".into(),
+                key: user_id.into(),
+            });
         }
         tx.commit()?;
         Ok(())
@@ -364,16 +398,24 @@ mod tests {
     #[test]
     fn duplicate_email_conflicts() {
         let store = test_store();
-        store.create_user(&sample_user("u1", "dup@test.com")).unwrap();
-        let err = store.create_user(&sample_user("u2", "dup@test.com")).unwrap_err();
+        store
+            .create_user(&sample_user("u1", "dup@test.com"))
+            .unwrap();
+        let err = store
+            .create_user(&sample_user("u2", "dup@test.com"))
+            .unwrap_err();
         assert!(matches!(err, StoreError::Conflict { .. }));
     }
 
     #[test]
     fn list_user_ids_works() {
         let store = test_store();
-        store.create_user(&sample_user("u1", "u1@test.com")).unwrap();
-        store.create_user(&sample_user("u2", "u2@test.com")).unwrap();
+        store
+            .create_user(&sample_user("u1", "u1@test.com"))
+            .unwrap();
+        store
+            .create_user(&sample_user("u2", "u2@test.com"))
+            .unwrap();
         let mut ids = store.list_user_ids().unwrap();
         ids.sort();
         assert_eq!(ids, vec!["u1", "u2"]);
@@ -382,7 +424,9 @@ mod tests {
     #[test]
     fn get_user_by_email_case_insensitive() {
         let store = test_store();
-        store.create_user(&sample_user("u1", "Test@Example.COM")).unwrap();
+        store
+            .create_user(&sample_user("u1", "Test@Example.COM"))
+            .unwrap();
         let user = store.get_user_by_email("test@example.com").unwrap();
         assert!(user.is_some());
     }
@@ -390,7 +434,9 @@ mod tests {
     #[test]
     fn delete_user_removes_all() {
         let store = test_store();
-        store.create_user(&sample_user("u1", "u1@test.com")).unwrap();
+        store
+            .create_user(&sample_user("u1", "u1@test.com"))
+            .unwrap();
         store.delete_user("u1").unwrap();
         assert!(store.get_user_by_id("u1").unwrap().is_none());
     }

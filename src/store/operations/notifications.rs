@@ -55,7 +55,9 @@ fn notification_type_from_str(s: &str) -> NotificationType {
 fn parse_dt(s: String) -> rusqlite::Result<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(&s)
         .map(|dt| dt.with_timezone(&Utc))
-        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))
+        .map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+        })
 }
 
 fn notification_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Notification> {
@@ -95,8 +97,15 @@ impl Store {
             let read = value["read"].as_bool().unwrap_or(false);
             let created_at = value["createdAt"].as_str().unwrap_or_default();
             stmt.execute(params![
-                user_id, id, ntype, title, message, word_id, overdue_hours,
-                read as i64, created_at,
+                user_id,
+                id,
+                ntype,
+                title,
+                message,
+                word_id,
+                overdue_hours,
+                read as i64,
+                created_at,
             ])?;
         }
         Ok(())
@@ -239,7 +248,10 @@ mod tests {
         insert_notification(&store, "u1", "n1", "T", false);
         let notif = store.mark_notification_read("u1", "n1").unwrap().unwrap();
         assert!(notif.read);
-        assert!(store.mark_notification_read("u1", "nope").unwrap().is_none());
+        assert!(store
+            .mark_notification_read("u1", "nope")
+            .unwrap()
+            .is_none());
     }
 
     #[test]

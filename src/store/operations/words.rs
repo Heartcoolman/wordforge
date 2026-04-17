@@ -26,11 +26,7 @@ fn word_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Word> {
     let created_at = DateTime::parse_from_rfc3339(&created_at_str)
         .map(|dt| dt.with_timezone(&Utc))
         .map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(
-                9,
-                rusqlite::types::Type::Text,
-                Box::new(e),
-            )
+            rusqlite::Error::FromSqlConversionFailure(9, rusqlite::types::Type::Text, Box::new(e))
         })?;
 
     let examples_json: String = row.get(6)?;
@@ -192,10 +188,7 @@ impl Store {
         let mut stmt = conn.prepare(&format!(
             "SELECT {WORD_COLS} FROM words WHERE text LIKE ?1 OR meaning LIKE ?1 ORDER BY text LIMIT ?2 OFFSET ?3"
         ))?;
-        let rows = stmt.query_map(
-            params![pattern, limit as i64, offset as i64],
-            word_from_row,
-        )?;
+        let rows = stmt.query_map(params![pattern, limit as i64, offset as i64], word_from_row)?;
         let words: Vec<Word> = rows.collect::<Result<Vec<_>, _>>()?;
         Ok((words, total as u64))
     }

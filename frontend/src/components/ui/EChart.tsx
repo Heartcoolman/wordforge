@@ -14,12 +14,14 @@ interface EChartProps {
 }
 
 export function EChart(props: EChartProps) {
-  let containerRef!: HTMLDivElement;
+  let containerRef: HTMLDivElement | undefined;
   let instance: echarts.ECharts | null = null;
   let resizeOb: ResizeObserver | null = null;
   let mutationOb: MutationObserver | null = null;
 
   onMount(() => {
+    if (!containerRef) return;
+
     instance = echarts.init(containerRef);
     instance.setOption(props.option());
 
@@ -48,7 +50,7 @@ export function EChart(props: EChartProps) {
 
   return (
     <div
-      ref={containerRef!}
+      ref={(el) => { containerRef = el; }}
       class={props.class}
       style={{ height: props.height ?? '320px' }}
     />

@@ -49,10 +49,10 @@ export default function UserManagementPage() {
     setKeyLoading(false);
   }
 
-  async function load() {
+  async function load(p?: number) {
     setLoading(true);
     try {
-      const res = await adminApi.getUsers({ page: page(), perPage: pageSize });
+      const res = await adminApi.getUsers({ page: p ?? page(), perPage: pageSize });
       setUsers(res.data);
       setTotal(res.total);
     } catch (err: unknown) {
@@ -131,7 +131,7 @@ export default function UserManagementPage() {
 
   function handlePageChange(nextPage: number) {
     setPage(nextPage);
-    load();
+    load(nextPage);
   }
 
   return (

@@ -201,9 +201,20 @@ async fn register(
         user: UserProfile::from(&user),
     };
 
+    let secure = state.config().cookie_secure;
     let mut response = created(payload).into_response();
-    set_token_cookie(&mut response, &access_token)?;
-    set_refresh_token_cookie(&mut response, &refresh_token)?;
+    set_token_cookie(
+        &mut response,
+        &access_token,
+        state.config().jwt_expires_in_hours * 3600,
+        secure,
+    )?;
+    set_refresh_token_cookie(
+        &mut response,
+        &refresh_token,
+        state.config().refresh_token_expires_in_hours * 3600,
+        secure,
+    )?;
     Ok(response)
 }
 
@@ -223,6 +234,19 @@ async fn login(
         None => (None, generate_dummy_argon2_hash()),
     };
 
+    // Check ban and lockout status BEFORE password verification to prevent timing attacks
+    if let Some(ref u) = user {
+        if u.is_banned {
+            return Err(AppError::forbidden("用户已被封禁"));
+        }
+
+        if state.store().is_account_locked(&u.id)? {
+            return Err(AppError::too_many_requests(
+                "账户因多次登录失败已被临时锁定，请稍后再试",
+            ));
+        }
+    }
+
     let verified = verify_password(&req.password, &stored_hash)?;
     if !verified || user.is_none() {
         if let Some(ref u) = user {
@@ -233,17 +257,9 @@ async fn login(
 
     let user = user.unwrap();
 
-    if user.is_banned {
-        return Err(AppError::forbidden("用户已被封禁"));
+    if let Err(e) = state.store().reset_login_attempts(&user.id) {
+        tracing::warn!(user_id = %user.id, error = %e, "Failed to reset login attempts");
     }
-
-    if state.store().is_account_locked(&user.id)? {
-        return Err(AppError::too_many_requests(
-            "账户因多次登录失败已被临时锁定，请稍后再试",
-        ));
-    }
-
-    let _ = state.store().reset_login_attempts(&user.id);
 
     let (access_token, refresh_token) = issue_token_pair(&user.id, &state)?;
 
@@ -258,9 +274,20 @@ async fn login(
         user: UserProfile::from(&user),
     };
 
+    let secure = state.config().cookie_secure;
     let mut response = ok(payload).into_response();
-    set_token_cookie(&mut response, &access_token)?;
-    set_refresh_token_cookie(&mut response, &refresh_token)?;
+    set_token_cookie(
+        &mut response,
+        &access_token,
+        state.config().jwt_expires_in_hours * 3600,
+        secure,
+    )?;
+    set_refresh_token_cookie(
+        &mut response,
+        &refresh_token,
+        state.config().refresh_token_expires_in_hours * 3600,
+        secure,
+    )?;
     Ok(response)
 }
 
@@ -305,13 +332,24 @@ async fn refresh(State(state): State<AppState>, headers: HeaderMap) -> Result<Re
     // Issue a new token pair
     let (access_token, refresh_token) = issue_token_pair(&claims.sub, &state)?;
 
+    let secure = state.config().cookie_secure;
     let mut response = ok(AuthResponse {
         access_token: access_token.clone(),
         user: UserProfile::from(&user),
     })
     .into_response();
-    set_token_cookie(&mut response, &access_token)?;
-    set_refresh_token_cookie(&mut response, &refresh_token)?;
+    set_token_cookie(
+        &mut response,
+        &access_token,
+        state.config().jwt_expires_in_hours * 3600,
+        secure,
+    )?;
+    set_refresh_token_cookie(
+        &mut response,
+        &refresh_token,
+        state.config().refresh_token_expires_in_hours * 3600,
+        secure,
+    )?;
     Ok(response)
 }
 
@@ -319,7 +357,7 @@ async fn logout(auth_user: AuthUser, State(state): State<AppState>) -> Result<Re
     state.store().delete_user_sessions(&auth_user.user_id)?;
 
     let mut response = ok(serde_json::json!({"loggedOut": true})).into_response();
-    clear_auth_cookies(&mut response)?;
+    clear_auth_cookies(&mut response, state.config().cookie_secure)?;
     Ok(response)
 }
 
@@ -370,10 +408,9 @@ async fn reset_password(
         .take_password_reset_token(&token_hash)?
         .ok_or_else(|| AppError::bad_request("AUTH_INVALID_RESET_TOKEN", "重置令牌无效"))?;
 
-    let expires_at = chrono::DateTime::parse_from_rfc3339(
-        entry["expires_at"].as_str().unwrap_or_default(),
-    )
-    .map_err(|e| AppError::internal(&format!("reset token expires_at parse error: {e}")))?;
+    let expires_at =
+        chrono::DateTime::parse_from_rfc3339(entry["expires_at"].as_str().unwrap_or_default())
+            .map_err(|e| AppError::internal(&format!("reset token expires_at parse error: {e}")))?;
 
     if expires_at <= Utc::now() {
         return Err(AppError::bad_request(
@@ -411,10 +448,9 @@ async fn verify_reset_token(
         .get_password_reset_token(&token_hash)?
         .ok_or_else(|| AppError::bad_request("AUTH_INVALID_RESET_TOKEN", "重置令牌无效"))?;
 
-    let expires_at = chrono::DateTime::parse_from_rfc3339(
-        entry["expires_at"].as_str().unwrap_or_default(),
-    )
-    .map_err(|e| AppError::internal(&format!("reset token expires_at parse error: {e}")))?;
+    let expires_at =
+        chrono::DateTime::parse_from_rfc3339(entry["expires_at"].as_str().unwrap_or_default())
+            .map_err(|e| AppError::internal(&format!("reset token expires_at parse error: {e}")))?;
 
     if expires_at <= Utc::now() {
         return Err(AppError::bad_request(
@@ -426,28 +462,49 @@ async fn verify_reset_token(
     Ok(ok(serde_json::json!({"valid": true})))
 }
 
-fn set_token_cookie(response: &mut Response, token: &str) -> Result<(), AppError> {
-    let cookie = format!("token={token}; Path=/; SameSite=None; HttpOnly; Secure");
+fn cookie_same_site_flags(secure: bool) -> &'static str {
+    if secure {
+        "SameSite=None; Secure"
+    } else {
+        "SameSite=Lax"
+    }
+}
+
+fn set_token_cookie(
+    response: &mut Response,
+    token: &str,
+    max_age_secs: u64,
+    secure: bool,
+) -> Result<(), AppError> {
+    let flags = cookie_same_site_flags(secure);
+    let cookie = format!("token={token}; Path=/; Max-Age={max_age_secs}; {flags}; HttpOnly");
     append_set_cookie(response, &cookie, "token cookie set failed")?;
     Ok(())
 }
 
-fn set_refresh_token_cookie(response: &mut Response, refresh_token: &str) -> Result<(), AppError> {
+fn set_refresh_token_cookie(
+    response: &mut Response,
+    refresh_token: &str,
+    max_age_secs: u64,
+    secure: bool,
+) -> Result<(), AppError> {
+    let flags = cookie_same_site_flags(secure);
     let cookie =
-        format!("refresh_token={refresh_token}; Path=/; SameSite=None; HttpOnly; Secure");
+        format!("refresh_token={refresh_token}; Path=/; Max-Age={max_age_secs}; {flags}; HttpOnly");
     append_set_cookie(response, &cookie, "refresh token cookie set failed")?;
     Ok(())
 }
 
-fn clear_auth_cookies(response: &mut Response) -> Result<(), AppError> {
+fn clear_auth_cookies(response: &mut Response, secure: bool) -> Result<(), AppError> {
+    let flags = cookie_same_site_flags(secure);
     append_set_cookie(
         response,
-        "token=; Path=/; Max-Age=0; SameSite=None; HttpOnly; Secure",
+        &format!("token=; Path=/; Max-Age=0; {flags}; HttpOnly"),
         "token cookie clear failed",
     )?;
     append_set_cookie(
         response,
-        "refresh_token=; Path=/; Max-Age=0; SameSite=None; HttpOnly; Secure",
+        &format!("refresh_token=; Path=/; Max-Age=0; {flags}; HttpOnly"),
         "refresh token cookie clear failed",
     )?;
     Ok(())
