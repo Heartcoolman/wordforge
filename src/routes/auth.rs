@@ -462,16 +462,22 @@ async fn verify_reset_token(
     Ok(ok(serde_json::json!({"valid": true})))
 }
 
+fn cookie_same_site_flags(secure: bool) -> &'static str {
+    if secure {
+        "SameSite=None; Secure"
+    } else {
+        "SameSite=Lax"
+    }
+}
+
 fn set_token_cookie(
     response: &mut Response,
     token: &str,
     max_age_secs: u64,
     secure: bool,
 ) -> Result<(), AppError> {
-    let secure_flag = if secure { "; Secure" } else { "" };
-    let cookie = format!(
-        "token={token}; Path=/; Max-Age={max_age_secs}; SameSite=None; HttpOnly{secure_flag}"
-    );
+    let flags = cookie_same_site_flags(secure);
+    let cookie = format!("token={token}; Path=/; Max-Age={max_age_secs}; {flags}; HttpOnly");
     append_set_cookie(response, &cookie, "token cookie set failed")?;
     Ok(())
 }
@@ -482,24 +488,23 @@ fn set_refresh_token_cookie(
     max_age_secs: u64,
     secure: bool,
 ) -> Result<(), AppError> {
-    let secure_flag = if secure { "; Secure" } else { "" };
-    let cookie = format!(
-        "refresh_token={refresh_token}; Path=/; Max-Age={max_age_secs}; SameSite=None; HttpOnly{secure_flag}"
-    );
+    let flags = cookie_same_site_flags(secure);
+    let cookie =
+        format!("refresh_token={refresh_token}; Path=/; Max-Age={max_age_secs}; {flags}; HttpOnly");
     append_set_cookie(response, &cookie, "refresh token cookie set failed")?;
     Ok(())
 }
 
 fn clear_auth_cookies(response: &mut Response, secure: bool) -> Result<(), AppError> {
-    let secure_flag = if secure { "; Secure" } else { "" };
+    let flags = cookie_same_site_flags(secure);
     append_set_cookie(
         response,
-        &format!("token=; Path=/; Max-Age=0; SameSite=None; HttpOnly{secure_flag}"),
+        &format!("token=; Path=/; Max-Age=0; {flags}; HttpOnly"),
         "token cookie clear failed",
     )?;
     append_set_cookie(
         response,
-        &format!("refresh_token=; Path=/; Max-Age=0; SameSite=None; HttpOnly{secure_flag}"),
+        &format!("refresh_token=; Path=/; Max-Age=0; {flags}; HttpOnly"),
         "refresh token cookie clear failed",
     )?;
     Ok(())

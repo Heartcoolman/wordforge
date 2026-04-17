@@ -47,6 +47,7 @@ async fn spawn_with_limits(api_limit: u64) -> TestApp {
         admin_jwt_expires_in_hours: 2,
         cors_origin: "http://localhost:5173".to_string(),
         trust_proxy: false,
+        cookie_secure: false,
         rate_limit: learning_backend::config::RateLimitConfig {
             window_secs: 60,
             max_requests: api_limit,

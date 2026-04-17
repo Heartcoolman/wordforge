@@ -30,10 +30,10 @@ impl Drop for SseGuard {
                     self.state
                         .active_sse()
                         .remove_if(did, |_, conns| conns.is_empty());
+                    self.state.last_heartbeat().remove(did);
+                    self.state.heartbeat_miss_count().remove(did);
                 }
             }
-            self.state.last_heartbeat().remove(did);
-            self.state.heartbeat_miss_count().remove(did);
         }
     }
 }

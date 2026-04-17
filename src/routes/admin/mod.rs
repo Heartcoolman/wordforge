@@ -241,6 +241,7 @@ async fn admin_reset_user_password(
 
     Ok(ok(serde_json::json!({
         "resetCreated": true,
+        "resetKey": raw_token,
         "expiresInHours": 4,
         "message": "密码重置令牌已创建，请通过安全渠道通知用户",
     })))
