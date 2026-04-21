@@ -58,7 +58,7 @@ pub async fn run(path: String, amas: Arc<AMASEngine>) {
 
         match AMASConfig::load_from_toml(&path) {
             Ok(cfg) => match cfg.validate() {
-                Ok(()) => match amas.reload_config(cfg).await {
+                Ok(()) => match amas.reload_config(cfg) {
                     Ok(()) => tracing::info!(path = %path, "AMAS 配置热重载成功"),
                     Err(e) => tracing::warn!(path = %path, error = %e, "AMAS 配置热重载失败"),
                 },

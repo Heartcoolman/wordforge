@@ -115,7 +115,7 @@ async fn create_or_resume_session(
                 (acc, vec![], vec![])
             };
 
-        let amas_config = state.amas().get_config().await;
+        let amas_config = state.amas().get_config();
         let ls = &amas_config.learning_strategy;
         let suggested_difficulty = if prev_accuracy >= ls.cross_session_high_accuracy {
             ls.cross_session_high_difficulty
@@ -203,7 +203,7 @@ async fn get_study_words(
     let new_ratio = strategy_params.new_ratio;
     let difficulty = strategy_params.difficulty;
     let pool_size = state.config().limits.candidate_word_pool_size;
-    let amas_config = state.amas().get_config().await;
+    let amas_config = state.amas().get_config();
     let selected_wordbook_ids = config.selected_wordbook_ids.clone();
     let words = state
         .run_store_task(
@@ -303,7 +303,7 @@ async fn next_words(
     let mut strategy_params = state.amas().compute_strategy_from_state(&amas_state);
 
     // 获取 AMAS 配置用于动态调整和选词
-    let amas_config = state.amas().get_config().await;
+    let amas_config = state.amas().get_config();
     let ls = &amas_config.learning_strategy;
 
     // 根据 session_performance 动态调整策略
@@ -431,7 +431,7 @@ async fn adjust_words(
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     let amas_state = state.amas().get_user_state_async(&auth.user_id).await?;
     let mut strategy = state.amas().compute_strategy_from_state(&amas_state);
-    let amas_config = state.amas().get_config().await;
+    let amas_config = state.amas().get_config();
     let ls = &amas_config.learning_strategy;
 
     if let Some(recent_performance) = req.recent_performance {

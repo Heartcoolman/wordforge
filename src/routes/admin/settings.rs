@@ -121,9 +121,8 @@ async fn reload_amas_config(
     state
         .amas()
         .reload_config(new_config)
-        .await
         .map_err(|e| AppError::bad_request("INVALID_AMAS_CONFIG", &e))?;
-    let config = state.amas().get_config().await;
+    let config = state.amas().get_config();
 
     tracing::info!(
         admin_id = %admin.admin_id,

@@ -1,7 +1,5 @@
 use std::collections::HashMap;
-use std::sync::Arc;
-
-use tokio::sync::{Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use crate::amas::config::AMASConfig;
 use crate::amas::decision::{ensemble, heuristic, ige, swd};
@@ -16,7 +14,6 @@ const USER_LOCK_CLEANUP_THRESHOLD: usize = 500;
 const SIGNAL_THRESHOLD: f64 = 0.5;
 const TREND_BASELINE: f64 = 0.5;
 
-/// 清理浮点数，将 NaN 和 Infinity 替换为安全默认值
 fn sanitize_float(value: f64, default: f64) -> f64 {
     if value.is_finite() {
         value
@@ -73,10 +70,9 @@ impl AMASEngine {
         }
     }
 
-    pub async fn reload_config(&self, new_config: AMASConfig) -> Result<(), String> {
+    pub fn reload_config(&self, new_config: AMASConfig) -> Result<(), String> {
         new_config.validate()?;
         let hash = monitoring::compute_config_hash(&new_config);
-        // 重建 SSP 策略表（SSP 配置或 memory_model 参数可能已变）
         let new_ssp = if new_config.feature_flags.ssp_enabled {
             let result = ssp::precompute(&new_config.ssp, &new_config.memory_model);
             Some(Arc::new(if result.dual_grid {
@@ -87,21 +83,19 @@ impl AMASEngine {
         } else {
             None
         };
-        let mut cfg = self.config.write().await;
-        *cfg = Arc::new(new_config);
-        let mut h = self.config_hash.write().await;
-        *h = hash;
-        *self.ssp_policy.write().await = new_ssp;
+        *self.config.write().unwrap() = Arc::new(new_config);
+        *self.config_hash.write().unwrap() = hash;
+        *self.ssp_policy.write().unwrap() = new_ssp;
         tracing::info!("AMAS config reloaded");
         Ok(())
     }
 
-    pub async fn ssp_policy(&self) -> Option<Arc<ssp::SspPolicy>> {
-        self.ssp_policy.read().await.clone()
+    pub fn ssp_policy(&self) -> Option<Arc<ssp::SspPolicy>> {
+        self.ssp_policy.read().unwrap().clone()
     }
 
-    pub async fn get_config(&self) -> AMASConfig {
-        self.config.read().await.as_ref().clone()
+    pub fn get_config(&self) -> AMASConfig {
+        self.config.read().unwrap().as_ref().clone()
     }
 
     pub fn metrics_registry(&self) -> &Arc<metrics::MetricsRegistry> {
@@ -109,7 +103,7 @@ impl AMASEngine {
     }
 
     fn acquire_user_lock_blocking(&self, user_id: &str) -> Arc<Mutex<()>> {
-        let mut locks = self.user_locks.blocking_lock();
+        let mut locks = self.user_locks.lock().unwrap();
 
         if locks.len() > USER_LOCK_CLEANUP_THRESHOLD {
             let before = locks.len();
@@ -152,10 +146,10 @@ impl AMASEngine {
         let start = std::time::Instant::now();
 
         let user_lock = self.acquire_user_lock_blocking(user_id);
-        let _guard = user_lock.blocking_lock();
+        let _guard = user_lock.lock().unwrap();
 
         let config = {
-            let guard = self.config.blocking_read();
+            let guard = self.config.read().unwrap();
             Arc::clone(&guard)
         };
         let now = chrono::Utc::now();
@@ -172,7 +166,7 @@ impl AMASEngine {
         let (final_strategy, weights) =
             self.ensemble_or_fallback(&candidates, &user_state, &algo_states, &config);
 
-        let ssp_arc = self.ssp_policy.blocking_read().clone();
+        let ssp_arc = self.ssp_policy.read().unwrap().clone();
         let ssp_ref = ssp_arc.as_deref();
         let word_mastery = self.update_memory(
             user_id,
@@ -243,7 +237,7 @@ impl AMASEngine {
         };
 
         let latency_ms = start.elapsed().as_millis() as i64;
-        let config_version = self.config_hash.blocking_read().clone();
+        let config_version = self.config_hash.read().unwrap().clone();
         drop(_guard);
         self.emit_monitoring(
             user_id,
@@ -277,10 +271,10 @@ impl AMASEngine {
         visual_score: f64,
     ) -> Result<UserState, AppError> {
         let user_lock = self.acquire_user_lock_blocking(user_id);
-        let _guard = user_lock.blocking_lock();
+        let _guard = user_lock.lock().unwrap();
 
         let config = {
-            let guard = self.config.blocking_read();
+            let guard = self.config.read().unwrap();
             Arc::clone(&guard)
         };
         let mut user_state = self.load_or_init_state(user_id)?;
@@ -358,7 +352,7 @@ impl AMASEngine {
         crate::blocking::run_blocking("amas.get_phase", move || {
             let state = engine.load_or_init_state(&user_id)?;
             let config = {
-                let guard = engine.config.blocking_read();
+                let guard = engine.config.read().unwrap();
                 Arc::clone(&guard)
             };
             Ok(engine.determine_cold_start_phase(&state, &config))
@@ -425,10 +419,10 @@ impl AMASEngine {
         mastery_efficiency: f64,
     ) -> Result<(), AppError> {
         let user_lock = self.acquire_user_lock_blocking(user_id);
-        let _guard = user_lock.blocking_lock();
+        let _guard = user_lock.lock().unwrap();
 
         let config = {
-            let guard = self.config.blocking_read();
+            let guard = self.config.read().unwrap();
             Arc::clone(&guard)
         };
         let mut user_state = self.load_or_init_state(user_id)?;

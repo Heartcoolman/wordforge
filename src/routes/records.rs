@@ -290,7 +290,7 @@ async fn process_single_record(
             },
         )
         .await?;
-    let amas_config = state.amas().get_config().await;
+    let amas_config = state.amas().get_config();
     let amas_result_for_store = amas_result.clone();
 
     state
@@ -562,7 +562,7 @@ async fn process_batch_record(
             },
         )
         .await?;
-    let amas_config = state.amas().get_config().await;
+    let amas_config = state.amas().get_config();
     let amas_result_for_store = amas_result.clone();
 
     state

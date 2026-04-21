@@ -45,7 +45,7 @@ pub async fn run(store: &Store, engine: &Arc<AMASEngine>) {
 
     // E4: Simple parameter adjustment based on overall accuracy
     if total_records >= 50 {
-        let mut config = engine.get_config().await;
+        let mut config = engine.get_config();
         let mut adjusted = false;
 
         if overall_accuracy < 0.4 {
@@ -75,7 +75,7 @@ pub async fn run(store: &Store, engine: &Arc<AMASEngine>) {
         }
 
         if adjusted {
-            if let Err(e) = engine.reload_config(config).await {
+            if let Err(e) = engine.reload_config(config) {
                 tracing::warn!(error = %e, "Algorithm optimization: failed to update config");
             }
         }

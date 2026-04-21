@@ -50,6 +50,8 @@ async fn main() {
     );
     store.run_migrations().expect("Failed to run migrations");
 
+    learning_backend::blocking::init_blocking_semaphore(config.sqlite_pool_size as usize * 2);
+
     let (shutdown_tx, _) = broadcast::channel::<()>(8);
 
     let mut amas_config = AMASConfig::from_env(&config.amas);

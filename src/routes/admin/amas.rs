@@ -122,7 +122,7 @@ async fn get_config(
     _admin: AdminAuthUser,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let cfg = state.amas().get_config().await;
+    let cfg = state.amas().get_config();
     Ok(ok(cfg))
 }
 
@@ -137,7 +137,6 @@ async fn update_config(
     state
         .amas()
         .reload_config(cfg.clone())
-        .await
         .map_err(|e| AppError::bad_request("AMAS_INVALID_CONFIG", &e))?;
 
     // 写回 TOML 文件，保持文件与内存状态一致
@@ -282,7 +281,7 @@ async fn get_intervention(
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     let user_state = state.amas().get_user_state_async(&auth.user_id).await?;
-    let amas_config = state.amas().get_config().await;
+    let amas_config = state.amas().get_config();
     let iv = &amas_config.intervention;
     let mut suggestions = Vec::new();
 
