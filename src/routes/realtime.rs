@@ -12,7 +12,7 @@ use crate::auth::AuthUser;
 use crate::response::AppError;
 use crate::state::{AppState, SseClientInfo};
 
-static SSE_CONNECTION_COUNT: AtomicUsize = AtomicUsize::new(0);
+pub(crate) static SSE_CONNECTION_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 struct SseGuard {
     state: AppState,
