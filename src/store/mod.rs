@@ -3,10 +3,14 @@ pub mod migrate;
 pub mod operations;
 pub mod schema;
 
+use std::time::Duration;
+
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use serde::{de::DeserializeOwned, Serialize};
 use thiserror::Error;
+
+pub const DEFAULT_POOL_CONNECTION_TIMEOUT_MS: u64 = 250;
 
 #[derive(Debug, Clone)]
 pub struct Store {
@@ -39,6 +43,20 @@ pub enum StoreError {
 
 impl Store {
     pub fn open(db_path: &str, busy_timeout_ms: u64, pool_size: u32) -> Result<Self, StoreError> {
+        Self::open_with_connection_timeout(
+            db_path,
+            busy_timeout_ms,
+            pool_size,
+            DEFAULT_POOL_CONNECTION_TIMEOUT_MS,
+        )
+    }
+
+    pub fn open_with_connection_timeout(
+        db_path: &str,
+        busy_timeout_ms: u64,
+        pool_size: u32,
+        connection_timeout_ms: u64,
+    ) -> Result<Self, StoreError> {
         let manager = SqliteConnectionManager::file(db_path).with_init(move |conn| {
             conn.execute_batch(&format!(
                 "PRAGMA journal_mode = WAL;
@@ -51,7 +69,7 @@ impl Store {
 
         let pool = Pool::builder()
             .max_size(pool_size)
-            .connection_timeout(std::time::Duration::from_millis(busy_timeout_ms))
+            .connection_timeout(Duration::from_millis(connection_timeout_ms.max(1)))
             .build(manager)?;
 
         let store = Self { pool };
@@ -113,5 +131,32 @@ impl Store {
 
     pub(crate) fn deserialize_json<T: DeserializeOwned>(s: &str) -> Result<T, StoreError> {
         Ok(serde_json::from_str(s)?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use super::{Store, StoreError};
+
+    #[test]
+    fn pool_connection_timeout_is_independent_from_sqlite_busy_timeout() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("pool-timeout.db");
+        let store =
+            Store::open_with_connection_timeout(db_path.to_str().expect("db path"), 5000, 1, 25)
+                .expect("open store");
+        let _held_conn = store.connection().expect("hold only pooled connection");
+
+        let started = Instant::now();
+        let result = store.connection();
+        let elapsed = started.elapsed();
+
+        assert!(matches!(result, Err(StoreError::Pool(_))));
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "pool acquisition waited for {elapsed:?}, which suggests it is still tied to busy_timeout"
+        );
     }
 }

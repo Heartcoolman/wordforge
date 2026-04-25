@@ -1,0 +1,294 @@
+[featureFlags]
+ensembleEnabled = true
+heuristicEnabled = true
+igeEnabled = true
+swdEnabled = true
+mdmEnabled = true
+iadEnabled = false
+mtpEnabled = false
+sspEnabled = false
+
+[ensemble]
+baseWeightHeuristic = 0.4
+baseWeightIge = 0.3
+baseWeightSwd = 0.3
+warmupSamples = 20
+blendScale = 100.0
+blendMax = 0.5
+minWeight = 0.15
+warmupHeuristicBoost = 0.2
+
+[modeling]
+attentionSmoothing = 0.3
+confidenceDecay = 0.99
+minConfidence = 0.1
+fatigueIncreaseRate = 0.02
+fatigueRecoveryRate = 0.001
+motivationMomentum = 0.1
+visualFatigueWeight = 0.4
+responseSpeedMaxMs = 10000.0
+fatigueQuitIncrease = 0.2
+engagementPausePenalty = 0.05
+engagementPausePenaltyMax = 0.3
+engagementSwitchPenalty = 0.1
+engagementSwitchPenaltyMax = 0.3
+engagementFocusLossBaseMs = 30000.0
+engagementFocusLossPenaltyMax = 0.3
+cognitiveProfileAlpha = 0.1
+trendAlpha = 0.05
+
+[constraints]
+highFatigueThreshold = 0.9
+lowAttentionThreshold = 0.3
+lowMotivationThreshold = -0.5
+maxBatchSizeWhenFatigued = 5
+maxNewRatioWhenFatigued = 0.2
+maxDifficultyWhenFatigued = 0.55
+lowMotivationDifficultyDrop = 0.1
+lowMotivationRatioDrop = 0.1
+minDifficulty = 0.1
+
+[monitoring]
+sampleRate = 0.05
+metricsFlushIntervalSecs = 300
+
+[coldStart]
+classifyToExploreEvents = 20
+classifyToExploreConfidence = 0.6
+exploreToExploitEvents = 80
+
+[objectiveWeights]
+retention = 0.35
+accuracy = 0.25
+speed = 0.15
+fatigue = 0.15
+frustration = 0.1
+
+[reward]
+speedRewardScale = 0.5
+fatiguePenaltyThreshold = 0.7
+fatiguePenaltyScale = 0.3
+frustrationPenaltyThreshold = -0.3
+frustrationPenaltyScale = 0.2
+expectedForgetCostWeight = 0.3
+
+[feature]
+hintPenalty = 0.3
+qualityAccuracyWeight = 0.6
+qualitySpeedWeight = 0.4
+motivationPositiveSignal = 0.1
+motivationNegativeSignal = -0.15
+confidencePositiveSignal = 0.02
+confidenceNegativeSignal = -0.02
+temporalProfileAlpha = 0.3
+temporalBoostBase = 0.7
+temporalBoostScale = 0.6
+temporalBoostMin = 0.5
+temporalBoostMax = 1.5
+trustBaseLearningRate = 0.05
+trustWeightBlend = 0.5
+incorrectQualityScale = 0.1
+
+[elo]
+kFactor = 32.0
+noviceKMultiplier = 2.0
+noviceGameThreshold = 30
+defaultElo = 1200.0
+zpdOptimalOffset = 100.0
+zpdGaussianSigma = 150.0
+minElo = 400.0
+maxElo = 2400.0
+wordKFactorRatio = 0.5
+
+[fatigueDecay]
+fullResetThresholdSecs = 1800.0
+decayStartThresholdSecs = 300.0
+decayTimeConstantSecs = 600.0
+
+[heuristic]
+coldStartEventThreshold = 10
+coldStartDifficulty = 0.3
+coldStartBatchSize = 5
+coldStartNewRatio = 0.5
+accuracySpeedDifficultyBoost = 0.1
+lowAccuracyDifficultyDrop = 0.15
+lowAccuracyRatioDrop = 0.1
+lowMotivationDifficultyDrop = 0.1
+lowMotivationMaxBatch = 8
+confidenceBase = 0.7
+confidenceDecayCap = 0.5
+confidenceMin = 0.2
+confidenceDecayScale = 200.0
+
+[ige]
+batchSize = 10
+intervalScale = 1.0
+ucbConfidenceCoeff = 2.0
+defaultConfidence = 0.6
+difficultyBinCount = 20
+ratioBinCount = 16
+
+[swd]
+maxHistorySize = 200
+historyFilterThreshold = -0.5
+fallbackConfidence = 0.2
+similarityCacheTtlSecs = 300
+
+[memoryModel]
+shortTermLearningRate = 0.85
+mediumTermLearningRate = 0.3
+longTermLearningRate = 0.12
+compositeWeightShort = 0.2
+compositeWeightMedium = 0.3
+compositeWeightLong = 0.5
+consolidationRateScale = 0.25
+consolidationBonus = 1.5
+masteryCompositeThreshold = 0.3
+masteryAccuracyThreshold = 0.65
+masteryStreakThreshold = 1
+reviewingThreshold = 0.4
+halfLifeBaseEpsilon = 0.3
+halfLifeTimeUnitSecs = 1296000.0
+halfLifePower = 1.5
+recallRiskBonus = 0.2
+recallRiskThreshold = 0.55
+baseDesiredRetention = 0.92
+passiveDecayHalfLifeDays = 30.0
+passiveDecayPower = 0.3
+masteryWindowSize = 20
+streakMinGapMs = 1800000
+stabilityBaseDays = 20.0
+forgettingCurveFactor = 0.3
+forgettingCurveDecay = -0.5
+forgettingCurveFloor = 0.0
+w = [
+    0.2,
+    0.6,
+    1.6,
+    6.0,
+    7.1949,
+    0.5345,
+    1.4604,
+    0.0046,
+    0.9,
+    0.18,
+    0.6,
+    1.2,
+    0.08,
+    0.2,
+    1.3,
+    0.2315,
+    2.9898,
+    0.51655,
+    0.6621,
+]
+alphaScale = 0.3
+alphaMin = 0.1
+alphaMax = 0.5
+forgettingThreshold = 0.2
+retentionMin = 0.7
+retentionMax = 0.95
+maxIntervalDays = 90.0
+minIntervalSecs = 60
+highAccuracyThreshold = 0.9
+highAccuracyRetentionBoost = 0.02
+highFatigueThreshold = 0.6
+highFatigueRetentionDrop = 0.05
+lowMotivationThreshold = -0.2
+lowMotivationRetentionDrop = 0.03
+
+[iad]
+interferencePenaltyFactor = 0.1
+interferencePenaltyCap = 0.3
+maxConfusionPairs = 20
+newConfusionInitialScore = 0.2
+confusionUpdateIncrement = 0.2
+intervalShorteningFactor = 0.5
+confusionDecayRate = 0.05
+
+[mtp]
+morphemeTransferCoeff = 0.15
+morphemeBonusCap = 0.3
+knownMorphemeDecay = 0.9
+newMorphemeInitialCoeff = 0.5
+maxKnownMorphemes = 500
+
+[wordSelector]
+reviewUcbWeight = 0.12
+reviewUcbMaxBonus = 0.35
+newWordGaussianSigma = 0.3
+errorProneBonus = 0.3
+recentlyMasteredBonus = 0.15
+recallMasteredThreshold = 0.7
+sigmoidSteepness = 8.0
+spacingCooldownSecs = 300.0
+optimalRecallCenter = 0.5
+optimalRecallSigma = 0.3
+
+[intervention]
+fatigueAlertThreshold = 0.7
+motivationAlertThreshold = -0.3
+attentionAlertThreshold = 0.3
+
+[learningStrategy]
+crossSessionHighAccuracy = 0.8
+crossSessionMediumAccuracy = 0.5
+crossSessionHighDifficulty = 0.6
+crossSessionMediumDifficulty = 0.5
+crossSessionLowDifficulty = 0.35
+sessionBoostAccuracy = 0.8
+sessionDropAccuracy = 0.4
+difficultyBoostStep = 0.1
+difficultyDropStep = 0.15
+ratioBoostStep = 0.15
+ratioDropStep = 0.15
+sprintMasteryRatio = 0.8
+sprintNewRatio = 0.9
+confidenceBoostThreshold = 0.5
+confidenceDifficultyBoost = 0.1
+motivationRatioThreshold = 0.3
+motivationRatioBoost = 0.1
+fatigueReductionThreshold = 0.5
+fatigueBatchScale = 0.7
+fatigueDifficultyDrop = 0.15
+
+[classifier]
+fastLearnerThreshold = 0.7
+stableLearnerThreshold = 0.4
+processingSpeedWeight = 0.4
+memoryCapacityWeight = 0.4
+stabilityWeight = 0.2
+
+[ssp]
+recallCost = 3.0
+forgetCost = 9.0
+targetStabilityDays = 360.0
+base = 1.05
+minIndex = -30
+maxIndex = 122
+difficultyOffsetOnLapse = 1.0
+maxIterations = 200000
+convergenceThreshold = 0.1
+discountFactor = 1.0
+dualGridEnabled = true
+dualGridThresholdDays = 10.0
+linearStepDays = 5.0
+rMin = 0.7
+rMax = 0.99
+rStep = 0.01
+reviewRatingProbs = [
+    0.224,
+    0.631,
+    0.145,
+]
+
+[ssp.costParams]
+recallSCoeff = 0.0
+recallDCoeff = 0.0
+forgetSCoeff = 0.0
+forgetDCoeff = 0.0
+
+[evm]
+diversityLogDivisor = 5.0
+diversityBonusCap = 0.3
+diversityGrowthRate = 0.2

@@ -1,0 +1,2254 @@
+# API 接口对接文档
+
+> 所有接口路径均以 `/api` 为前缀（健康检查除外）。
+> 认证方式、响应结构、错误码等全局约定请参见《API 对接规范文档》。
+> **注意：** 服务器维护期间（503）的响应不包含 `success` 字段，结构为 `{"code":"MAINTENANCE","message":"服务器维护中，请稍后重试"}`，客户端应优先识别 HTTP 状态码 503。详见规范文档 §9。
+
+---
+
+## 目录
+
+1. [认证模块 `/api/auth`](#1-认证模块)
+2. [用户模块 `/api/users`](#2-用户模块)
+3. [用户档案 `/api/user-profile`](#3-用户档案)
+4. [单词模块 `/api/words`](#4-单词模块)
+5. [学习记录 `/api/records`](#5-学习记录)
+6. [学习会话 `/api/learning`](#6-学习会话)
+7. [单词学习状态 `/api/word-states`](#7-单词学习状态)
+8. [单词本 `/api/wordbooks`](#8-单词本)
+9. [单词本中心 `/api/wordbook-center`](#9-单词本中心)
+10. [学习配置 `/api/study-config`](#10-学习配置)
+11. [通知与偏好 `/api/notifications`](#11-通知与偏好)
+12. [内容增强 `/api/content`](#12-内容增强)
+13. [AMAS 自适应引擎 `/api/amas`](#13-amas-自适应引擎)
+14. [实时推送 `/api/realtime`](#14-实时推送)
+15. [遥测 `/api/telemetry`](#15-遥测)
+16. [状态 `/api/status`](#16-状态)
+17. [健康检查 `/health`](#17-健康检查)
+18. [V1 兼容层 `/api/v1`](#18-v1-兼容层)
+
+---
+
+## 1. 认证模块
+
+**路径前缀：** `/api/auth`
+**限流：** 专用认证限流（60 秒 10 次），适用于 `/register`、`/login`、`/refresh`、`/forgot-password`、`/reset-password`、`/verify-reset-token`
+
+---
+
+### POST /api/auth/register
+
+注册新账号。
+
+**认证：** 无
+
+**请求体：**
+```json
+{
+  "email": "user@example.com",
+  "username": "Alice",
+  "password": "SecurePass1"
+}
+```
+
+**成功响应 201：**
+```json
+{
+  "success": true,
+  "data": {
+    "accessToken": "<jwt>",
+    "user": {
+      "id": "<uuid>",
+      "email": "user@example.com",
+      "username": "Alice",
+      "isBanned": false
+    }
+  }
+}
+```
+
+同时写入 Cookie：`token`（access token）、`refresh_token`（HttpOnly）
+
+**错误码：**
+
+| 错误码 | 说明 |
+|---|---|
+| `AUTH_INVALID_EMAIL` | 邮箱格式不合法 |
+| `AUTH_INVALID_USERNAME` | 用户名格式不合法 |
+| `AUTH_WEAK_PASSWORD` | 密码强度不足 |
+| `AUTH_EMAIL_EXISTS` | 邮箱已注册 |
+| `FORBIDDEN` | 注册功能已关闭或系统维护 |
+
+---
+
+### POST /api/auth/login
+
+用户登录。
+
+**认证：** 无
+
+**请求体：**
+```json
+{
+  "email": "user@example.com",
+  "password": "SecurePass1"
+}
+```
+
+**成功响应 200：**
+```json
+{
+  "success": true,
+  "data": {
+    "accessToken": "<jwt>",
+    "user": {
+      "id": "<uuid>",
+      "email": "user@example.com",
+      "username": "Alice",
+      "isBanned": false
+    }
+  }
+}
+```
+
+**错误码：**
+
+| HTTP | 错误码 | 说明 |
+|---|---|---|
+| 401 | `AUTH_UNAUTHORIZED` | 邮箱或密码错误 |
+| 403 | `FORBIDDEN` | 账号被管理员封禁，或系统处于维护中 |
+| 429 | `RATE_LIMITED` | 账号因连续登录失败被临时锁定 |
+| 429 | `AUTH_RATE_LIMITED` | 认证端点请求过于频繁（IP 级限流） |
+
+> 连续登录失败 5 次后，账号将被锁定 15 分钟（返回 `429 RATE_LIMITED`，而非 `FORBIDDEN`）。
+
+---
+
+### POST /api/auth/refresh
+
+使用 Refresh Token 换取新的 Access Token。
+
+**认证：** 携带 Refresh Token（`Authorization: Bearer <refreshToken>` 或 Cookie `refresh_token`）
+
+**请求体：** 空
+
+**成功响应 200：**
+```json
+{
+  "success": true,
+  "data": {
+    "accessToken": "<newJwt>",
+    "user": { ... }
+  }
+}
+```
+
+> Refresh Token 一次性使用，刷新后旧 token 立即失效。
+
+---
+
+### POST /api/auth/logout
+
+登出，撤销当前用户所有 session。
+
+**认证：** Bearer Token（必须）
+
+**请求体：** 空
+
+**成功响应 200：**
+```json
+{
+  "success": true,
+  "data": { "loggedOut": true }
+}
+```
+
+---
+
+### POST /api/auth/forgot-password
+
+发起密码重置流程（向邮箱发送重置链接）。
+
+**认证：** 无
+
+**请求体：**
+```json
+{
+  "email": "user@example.com"
+}
+```
+
+**成功响应 200：** 无论邮箱是否存在，均返回成功（防止邮箱枚举）：
+```json
+{
+  "success": true,
+  "data": {
+    "emailSent": true,
+    "message": "如果该邮箱已注册，将会发送密码重置链接"
+  }
+}
+```
+
+---
+
+### POST /api/auth/verify-reset-token
+
+验证密码重置 token 是否有效（不消耗 token）。
+
+**认证：** 无
+
+**请求体：**
+```json
+{
+  "token": "<resetToken>"
+}
+```
+
+**成功响应 200：**
+```json
+{
+  "success": true,
+  "data": { "valid": true }
+}
+```
+
+---
+
+### POST /api/auth/reset-password
+
+使用重置 token 设置新密码。
+
+**认证：** 无
+
+**请求体：**
+```json
+{
+  "token": "<resetToken>",
+  "newPassword": "NewPass123"
+}
+```
+
+**成功响应 200：**
+```json
+{
+  "success": true,
+  "data": {}
+}
+```
+
+**错误码：**
+
+| 错误码 | 说明 |
+|---|---|
+| `AUTH_INVALID_RESET_TOKEN` | token 无效或已使用 |
+| `AUTH_EXPIRED_RESET_TOKEN` | token 已过期（有效期 1 小时） |
+| `AUTH_WEAK_PASSWORD` | 新密码强度不足 |
+
+---
+
+## 2. 用户模块
+
+**路径前缀：** `/api/users`
+**认证：** Bearer Token（必须）
+
+---
+
+### GET /api/users/me
+
+获取当前登录用户信息。
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": {
+    "id": "<uuid>",
+    "email": "user@example.com",
+    "username": "Alice",
+    "isBanned": false
+  }
+}
+```
+
+---
+
+### PUT /api/users/me
+
+更新用户基本信息。
+
+**请求体：**
+```json
+{
+  "username": "NewName"
+}
+```
+
+**响应 200：** 返回更新后的用户对象（同 GET /api/users/me）
+
+---
+
+### PUT /api/users/me/password
+
+修改密码。修改后所有 session 立即失效。
+
+**请求体：**
+```json
+{
+  "currentPassword": "OldPass1",
+  "newPassword": "NewPass1"
+}
+```
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": { "passwordChanged": true }
+}
+```
+
+---
+
+### GET /api/users/me/stats
+
+获取用户学习统计数据。
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": {
+    "totalWordsLearned": 320,
+    "totalSessions": 45,
+    "totalRecords": 1200,
+    "streakDays": 7,
+    "accuracyRate": 0.82
+  }
+}
+```
+
+---
+
+## 3. 用户档案
+
+**路径前缀：** `/api/user-profile`
+**认证：** Bearer Token（必须）
+
+---
+
+### GET /api/user-profile/reward
+
+获取奖励偏好设置。
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": { "rewardType": "standard" }
+}
+```
+
+`rewardType` 枚举：`standard` / `explorer` / `achiever` / `social`
+
+---
+
+### PUT /api/user-profile/reward
+
+设置奖励偏好。
+
+**请求体：**
+```json
+{
+  "rewardType": "achiever"
+}
+```
+
+---
+
+### GET /api/user-profile/cognitive
+
+获取 AMAS 自适应认知档案（处理速度、记忆容量、稳定性）。
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": {
+    "processingSpeed": 0.6,
+    "memoryCapacity": 0.7,
+    "stability": 0.5
+  }
+}
+```
+
+---
+
+### GET /api/user-profile/learning-style
+
+获取学习风格指标（同认知档案，来自 AMAS 引擎）。
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": {
+    "visual": 0.7,
+    "auditory": 0.3,
+    "kinesthetic": 0.5
+  }
+}
+```
+
+> 字段由 AMAS 引擎计算，具体字段可能随引擎版本扩展。
+
+---
+
+### GET /api/user-profile/chronotype
+
+获取用户学习时型偏好。
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": {
+    "chronotype": "morning",
+    "preferredHours": [8, 9, 10]
+  }
+}
+```
+
+`chronotype` 枚举：`morning` / `evening` / `neutral`
+
+---
+
+### GET /api/user-profile/habit
+
+获取用户学习习惯档案。
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": {
+    "preferredHours": [9, 14, 20],
+    "medianSessionLengthMins": 15.0,
+    "sessionsPerDay": 2.0,
+    "temporalPerformance": {
+      "hourlyStats": [
+        {
+          "sessionCount": 5,
+          "avgAccuracy": 0.85,
+          "avgResponseTimeMs": 1200,
+          "masteryEfficiency": 0.7
+        }
+      ],
+      "totalSessions": 45
+    }
+  }
+}
+```
+
+---
+
+### POST /api/user-profile/habit
+
+更新学习习惯偏好。
+
+**请求体（字段均可选）：**
+```json
+{
+  "preferredHours": [9, 14, 20],
+  "medianSessionLengthMins": 20,
+  "sessionsPerDay": 2
+}
+```
+
+**字段约束：**
+- `preferredHours`：数组元素范围 0–23
+- `medianSessionLengthMins`：1–480
+- `sessionsPerDay`：1–20
+
+---
+
+### POST /api/user-profile/avatar
+
+上传用户头像。
+
+**Content-Type：** 直接上传二进制图片（非 multipart）
+
+**约束：**
+- 最大 512 KB
+- 支持格式：PNG / JPEG / GIF / WebP
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": { "avatarUrl": "/avatars/<userId>.png" }
+}
+```
+
+**错误码：**
+
+| 错误码 | 说明 |
+|---|---|
+| `AVATAR_EMPTY` | 未上传内容 |
+| `AVATAR_TOO_LARGE` | 超过 512 KB |
+| `AVATAR_INVALID_TYPE` | 格式不支持 |
+
+---
+
+## 4. 单词模块
+
+**路径前缀：** `/api/words`
+**认证：** Bearer Token（必须）；写操作需 Admin Token
+
+**WordPublic 结构：**
+```json
+{
+  "id": "<uuid>",
+  "text": "abandon",
+  "meaning": "放弃；遗弃",
+  "pronunciation": "/əˈbændən/",
+  "partOfSpeech": "verb",
+  "difficulty": 0.45,
+  "examples": ["He abandoned the project."],
+  "tags": ["GRE", "common"],
+  "createdAt": "2024-01-15T08:00:00Z"
+}
+```
+
+---
+
+### GET /api/words
+
+分页列举单词，支持搜索。
+
+**查询参数：**
+
+| 参数 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `page` | number | 1 | 页码 |
+| `perPage` | number | 20 | 每页条数 |
+| `search` | string | — | 搜索词 |
+
+**响应 200：** 分页结构，`data` 为 `WordPublic[]`
+
+---
+
+### GET /api/words/count
+
+获取单词总数。
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": { "total": 5000 }
+}
+```
+
+---
+
+### GET /api/words/:id
+
+获取单个单词。404 若不存在。
+
+---
+
+### POST /api/words
+
+创建单词（Admin）。
+
+**请求体：**
+```json
+{
+  "id": null,
+  "text": "serendipity",
+  "meaning": "意外发现好事的运气",
+  "pronunciation": "/ˌserənˈdɪpɪti/",
+  "partOfSpeech": "noun",
+  "difficulty": 0.7,
+  "examples": ["A serendipitous discovery."],
+  "tags": ["advanced"]
+}
+```
+
+**响应 201：** WordPublic 对象
+
+---
+
+### PUT /api/words/:id
+
+更新单词（Admin）。请求体字段同 POST，均为可选。
+
+---
+
+### DELETE /api/words/:id
+
+删除单词（Admin）。
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": { "deleted": true, "id": "<uuid>" }
+}
+```
+
+---
+
+### POST /api/words/batch
+
+批量创建单词（Admin）。
+
+**请求体：**
+```json
+{
+  "words": [
+    { "text": "apple", "meaning": "苹果", ... },
+    { "text": "banana", "meaning": "香蕉", ... }
+  ]
+}
+```
+
+**响应 201/200：**
+```json
+{
+  "success": true,
+  "data": {
+    "count": 2,
+    "skipped": [],
+    "items": [ ... ]
+  }
+}
+```
+
+---
+
+### POST /api/words/batch-get
+
+批量按 ID 获取单词。
+
+**请求体：**
+```json
+{
+  "ids": ["<id1>", "<id2>"]
+}
+```
+
+**响应 200：** `WordPublic[]`（保持请求顺序）
+
+---
+
+### POST /api/words/import-url
+
+从公网 URL 导入单词列表（Admin）。
+
+**请求体：**
+```json
+{
+  "url": "https://example.com/wordlist.txt"
+}
+```
+
+文件格式支持：
+- `word\tmeaning`（制表符分隔）
+- `word - meaning`（破折号分隔）
+- `#` 开头为注释行
+
+**限制：** 最大 10 MB，超时 30 秒，禁止内网/localhost 地址（SSRF 防护）
+
+**响应 201：**
+```json
+{
+  "success": true,
+  "data": { "imported": 300, "items": [ ... ] }
+}
+```
+
+---
+
+## 5. 学习记录
+
+**路径前缀：** `/api/records`
+**认证：** Bearer Token（必须）
+
+**LearningRecord 结构：**
+```json
+{
+  "id": "<uuid>",
+  "userId": "<uuid>",
+  "wordId": "<uuid>",
+  "isCorrect": true,
+  "responseTimeMs": 1500,
+  "sessionId": "<uuid>",
+  "createdAt": "2024-01-15T08:00:00Z"
+}
+```
+
+---
+
+### GET /api/records
+
+获取当前用户的学习记录（分页）。
+
+**查询参数：** `page`、`perPage`
+
+---
+
+### POST /api/records
+
+创建单条学习记录，同时触发 AMAS 自适应引擎更新。
+
+**请求体：**
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `wordId` | string | ✓ | 单词 ID |
+| `isCorrect` | boolean | ✓ | 答题是否正确 |
+| `responseTimeMs` | number | ✓ | 响应时间（毫秒） |
+| `clientRecordId` | string | — | 客户端幂等 ID，防止重复提交 |
+| `sessionId` | string | — | 所属会话 ID |
+| `isQuit` | boolean | — | 是否中途退出，默认 false |
+| `dwellTimeMs` | number | — | 总停留时间（毫秒） |
+| `pauseCount` | number | — | 暂停次数 |
+| `switchCount` | number | — | 切换次数 |
+| `retryCount` | number | — | 重试次数 |
+| `focusLossDurationMs` | number | — | 失去焦点总时长（毫秒） |
+| `interactionDensity` | number | — | 交互密度 |
+| `pausedTimeMs` | number | — | 暂停总时长（毫秒） |
+| `hintUsed` | boolean | — | 是否使用了提示，默认 false |
+
+**响应 201（新记录）/ 200（重复）：**
+```json
+{
+  "success": true,
+  "data": {
+    "record": { ... },
+    "amasResult": { ... },
+    "duplicate": false
+  }
+}
+```
+
+> **幂等行为**：服务端基于 `(userId, clientRecordId)` 持久去重，任意时刻再次提交相同 `clientRecordId` 都会返回已有记录（`duplicate: true`），**无 5 秒窗口限制**。若未指定 `clientRecordId`，每次调用都会写入新记录。
+
+---
+
+### POST /api/records/batch
+
+批量创建学习记录。
+
+**请求体：**
+```json
+{
+  "records": [ { ...同 POST /api/records 的请求体... } ]
+}
+```
+
+**响应：**
+- `201 Created`：全部写入成功（`partial: false`）
+- `200 OK`：部分失败（`partial: true`）
+
+```json
+{
+  "success": true,
+  "data": {
+    "count": 10,
+    "failed": 0,
+    "partial": false,
+    "items": [ ... ],
+    "errors": []
+  }
+}
+```
+
+`errors` 数组元素结构：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `index` | number | 失败条目在 `records` 入参数组中的位置（从 0 开始） |
+| `code` | string | 业务错误码 |
+| `message` | string | 错误描述 |
+
+> 同一 `clientRecordId` 的重复提交在 `items` 中表现为 `duplicate: true`，不计入 `failed`。
+
+---
+
+### GET /api/records/statistics
+
+获取基础统计。
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": {
+    "total": 1200,
+    "correct": 984,
+    "accuracy": 0.82
+  }
+}
+```
+
+---
+
+### GET /api/records/statistics/enhanced
+
+获取包含每日明细和连续天数的增强统计。
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": {
+    "total": 1200,
+    "correct": 984,
+    "accuracy": 0.82,
+    "streak": 7,
+    "daily": [
+      {
+        "date": "2024-01-15",
+        "total": 50,
+        "correct": 42,
+        "accuracy": 0.84
+      }
+    ]
+  }
+}
+```
+
+---
+
+## 6. 学习会话
+
+**路径前缀：** `/api/learning`
+**认证：** Bearer Token（必须）
+
+---
+
+### POST /api/learning/session
+
+创建或恢复学习会话。
+
+**请求体：**
+```json
+{
+  "targetMasteryCount": 10
+}
+```
+
+`targetMasteryCount`：可选，本次会话目标掌握词数；若不传则取学习配置中的 `dailyMasteryTarget`。
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": {
+    "sessionId": "<uuid>",
+    "status": "Active",
+    "resumed": false,
+    "targetMasteryCount": 10,
+    "crossSessionHint": {
+      "prevAccuracy": 0.8,
+      "prevMasteredCount": 8,
+      "gapMinutes": 120,
+      "suggestedDifficulty": 0.55,
+      "errorProneWordIds": ["<id1>"],
+      "recentlyMasteredWordIds": ["<id2>"]
+    }
+  }
+}
+```
+
+> 若已有进行中的会话，`resumed=true` 并返回已有 `sessionId`；`crossSessionHint` 仅在上次会话结束于 2 小时内时出现。
+
+---
+
+### GET /api/learning/study-words
+
+获取当前会话的学习单词集（由 AMAS 自适应算法筛选）。
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": {
+    "words": [ ...WordPublic... ],
+    "strategy": {
+      "difficultyRange": [0.3, 0.7],
+      "newRatio": 0.4,
+      "batchSize": 10
+    }
+  }
+}
+```
+
+---
+
+### POST /api/learning/next-words
+
+根据当前会话进度动态获取下一批单词。
+
+**请求体：**
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `excludeWordIds` | string[] | ✓ | 当前轮次已显示的单词 ID，排除重复 |
+| `masteredWordIds` | string[] | — | 本轮已掌握的单词 ID，触发状态更新 |
+| `sessionPerformance` | object | — | 本次会话实时表现，用于策略动态调整 |
+
+`sessionPerformance` 结构：
+```json
+{
+  "recentAccuracy": 0.75,
+  "masteredCount": 5,
+  "targetMasteryCount": 10,
+  "errorProneWordIds": ["<id1>"]
+}
+```
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": {
+    "words": [ ...WordPublic... ],
+    "batchSize": 8
+  }
+}
+```
+
+---
+
+### POST /api/learning/adjust-words
+
+根据用户状态调整学习策略。
+
+**请求体：**
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `recentPerformance` | number (0–1) | 最近几题的准确率 |
+| `userState` | string | 用户状态枚举（见下） |
+
+`userState` 枚举：
+
+| 值 | 效果 |
+|---|---|
+| `focused` / `engaged` / `confident` | 提高难度和新词比例 |
+| `tired` / `fatigued` / `frustrated` / `distracted` | 降低难度、减少批次大小 |
+| `review` | 切换为复习模式，新词比例为 0 |
+| `sprint` | 冲刺模式，新词比例最大化 |
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": {
+    "adjustedStrategy": {
+      "difficulty": 0.6,
+      "batchSize": 8,
+      "newRatio": 0.5,
+      "intervalScale": 1.0,
+      "reviewMode": false
+    }
+  }
+}
+```
+
+---
+
+### POST /api/learning/sync-progress
+
+同步会话进度指标到服务端。
+
+**请求体：**
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `sessionId` | string | ✓ | 会话 ID |
+| `totalQuestions` | number | — | 总答题数 |
+| `contextShifts` | number | — | 上下文切换次数 |
+
+**响应 200：** 更新后的 LearningSession 对象
+
+---
+
+### POST /api/learning/complete-session
+
+完成并关闭当前学习会话。
+
+**请求体：**
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `sessionId` | string | ✓ | 会话 ID |
+| `masteredWordIds` | string[] | ✓ | 本次已掌握的单词 ID 列表 |
+| `errorProneWordIds` | string[] | ✓ | 本次易错单词 ID 列表 |
+| `avgResponseTimeMs` | number | ✓ | 平均响应时间（毫秒） |
+
+**响应 200：** 已完成的 LearningSession 对象
+
+---
+
+### POST /api/learning/pick-next-word
+
+从活跃单词集中选取下一个要显示的单词（考虑错词优先策略）。
+
+**请求体：**
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `activeWordIds` | string[] | ✓ | 当前活跃单词集（非空） |
+| `errorWordIds` | string[] | ✓ | 易错单词集 |
+| `lastShownMap` | object | — | `{wordId: timestamp}` 各词上次展示时间 |
+| `priorityMap` | object | — | `{wordId: priority}` 各词优先级 |
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": {
+    "word": { ...WordPublic... },
+    "priority": "error_review"
+  }
+}
+```
+
+`priority`：`"error_review"` 或 `"normal"`
+
+---
+
+### POST /api/learning/generate-options
+
+为指定单词生成多选题选项（1 个正确 + 3 个干扰项）。
+
+**请求体：**
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `wordId` | string | ✓ | 目标单词 ID |
+| `mode` | string | ✓ | `"word-to-meaning"` 或 `"meaning-to-word"` |
+| `poolWordIds` | string[] | ✓ | 干扰项候选单词池 |
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": {
+    "options": ["放弃", "探索", "坚持", "逃避"],
+    "correctIndex": 0
+  }
+}
+```
+
+---
+
+## 7. 单词学习状态
+
+**路径前缀：** `/api/word-states`
+**认证：** Bearer Token（必须）
+
+**WordLearningState 结构：**
+```json
+{
+  "userId": "<uuid>",
+  "wordId": "<uuid>",
+  "state": "Mastered",
+  "masteryLevel": 0.95,
+  "nextReviewDate": "2024-01-20T08:00:00Z",
+  "halfLife": 72.0,
+  "correctStreak": 5,
+  "totalAttempts": 12,
+  "updatedAt": "2024-01-15T08:00:00Z"
+}
+```
+
+---
+
+### GET /api/word-states/:wordId
+
+获取某单词的学习状态。404 若尚无记录。
+
+---
+
+### POST /api/word-states/batch
+
+批量查询学习状态。
+
+**请求体：**
+```json
+{
+  "wordIds": ["<id1>", "<id2>"]
+}
+```
+
+**响应 200：** `WordLearningState[]`（仅返回已有记录的条目）
+
+---
+
+### GET /api/word-states/due/list
+
+获取到期需复习的单词。
+
+**查询参数：** `limit`（默认 50，范围 1–200）
+
+**响应 200：** `WordLearningState[]`
+
+---
+
+### GET /api/word-states/stats/overview
+
+获取各学习状态分布统计。
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": {
+    "New": 120,
+    "Learning": 85,
+    "Reviewing": 60,
+    "Mastered": 200,
+    "Forgotten": 15
+  }
+}
+```
+
+---
+
+### POST /api/word-states/:wordId/mark-mastered
+
+将指定单词标记为已掌握（masteryLevel=1.0）。若记录不存在则自动创建。
+
+---
+
+### POST /api/word-states/:wordId/reset
+
+重置指定单词的学习进度（回到 New 状态）。
+
+---
+
+### POST /api/word-states/batch-update
+
+批量更新学习状态。
+
+**请求体：**
+```json
+{
+  "updates": [
+    {
+      "wordId": "<id>",
+      "state": "Reviewing",
+      "masteryLevel": 0.6
+    }
+  ]
+}
+```
+
+`state` 和 `masteryLevel` 均为可选；所有 `wordId` 必须已存在。
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": { "updated": 3 }
+}
+```
+
+---
+
+## 8. 单词本
+
+**路径前缀：** `/api/wordbooks`
+**认证：** Bearer Token（必须）
+
+**Wordbook 结构：**
+```json
+{
+  "id": "<uuid>",
+  "name": "GRE 核心词汇",
+  "description": "3000 个 GRE 高频词",
+  "bookType": "System",
+  "userId": null,
+  "wordCount": 3000,
+  "createdAt": "2024-01-01T00:00:00Z"
+}
+```
+
+---
+
+### GET /api/wordbooks/system
+
+获取所有系统单词本列表。
+
+---
+
+### GET /api/wordbooks/user
+
+获取当前用户创建的自定义单词本列表。
+
+---
+
+### POST /api/wordbooks
+
+创建自定义单词本。
+
+**请求体：**
+```json
+{
+  "name": "我的错题本",
+  "description": "收集做错的单词"
+}
+```
+
+**响应 201：** Wordbook 对象
+
+---
+
+### GET /api/wordbooks/:id/words
+
+获取指定单词本内的单词（分页）。用户只能访问自己的或系统单词本。
+
+**查询参数：** `page`、`perPage`
+
+---
+
+### POST /api/wordbooks/:id/words
+
+向单词本添加单词（仅限自定义单词本所有者）。
+
+**请求体：**
+```json
+{
+  "wordIds": ["<id1>", "<id2>"]
+}
+```
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": { "added": 2 }
+}
+```
+
+---
+
+### DELETE /api/wordbooks/:id/words/:wordId
+
+从单词本移除单词。
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": { "removed": true }
+}
+```
+
+---
+
+## 9. 单词本中心
+
+**路径前缀：** `/api/wordbook-center`
+**认证：** Bearer Token（必须）
+
+单词本中心允许用户从配置的远程 URL 浏览并导入词库。
+
+---
+
+### GET /api/wordbook-center/settings
+
+获取用户的单词本中心 URL 配置。
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": { "wordbookCenterUrl": "https://..." }
+}
+```
+
+---
+
+### PUT /api/wordbook-center/settings
+
+设置单词本中心 URL。
+
+**请求体：**
+```json
+{
+  "wordbookCenterUrl": "https://cdn.example.com/wordbook-center"
+}
+```
+
+`wordbookCenterUrl`：公网 HTTP/HTTPS URL；传 `null` 可清空配置。
+
+---
+
+### GET /api/wordbook-center/browse
+
+浏览远程词库列表。
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "id": "gre-core",
+      "name": "GRE 核心词汇",
+      "description": "...",
+      "wordCount": 3000,
+      "coverImage": null,
+      "tags": ["GRE"],
+      "version": "1.2.0",
+      "author": "WordForge",
+      "downloadCount": 5000,
+      "imported": false,
+      "localWordbookId": null,
+      "localVersion": null,
+      "hasUpdate": false
+    }
+  ]
+}
+```
+
+---
+
+### GET /api/wordbook-center/browse/:id
+
+预览远程词库内容（分页）。
+
+**查询参数：** `page`、`perPage`
+
+---
+
+### POST /api/wordbook-center/import/:id
+
+从单词本中心导入词库为用户自定义单词本。
+
+**请求体：** 空
+
+**响应 201：**
+```json
+{
+  "success": true,
+  "data": {
+    "wordbook": { ...Wordbook... },
+    "wordsImported": 3000,
+    "wordsSkipped": 0
+  }
+}
+```
+
+---
+
+### POST /api/wordbook-center/import-url
+
+从任意公网 URL 导入词库。SSRF 防护规则同 `/api/words/import-url`。
+
+**请求体：**
+```json
+{
+  "url": "https://example.com/my-wordbook.json"
+}
+```
+
+---
+
+### GET /api/wordbook-center/updates
+
+获取用户已导入词库的可用更新列表。
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "remoteId": "gre-core",
+      "name": "GRE 核心词汇",
+      "localVersion": "1.1.0",
+      "remoteVersion": "1.2.0",
+      "localWordbookId": "<uuid>"
+    }
+  ]
+}
+```
+
+---
+
+### POST /api/wordbook-center/updates/:id/sync
+
+同步指定词库到最新版本。
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": {
+    "wordbook": { ... },
+    "wordsAdded": 50,
+    "wordsUpdated": 10,
+    "wordsRemoved": 5
+  }
+}
+```
+
+---
+
+## 10. 学习配置
+
+**路径前缀：** `/api/study-config`
+**认证：** Bearer Token（必须）
+
+---
+
+### GET /api/study-config
+
+获取学习配置。
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": {
+    "selectedWordbookIds": ["<id1>"],
+    "dailyWordCount": 20,
+    "studyMode": "normal",
+    "dailyMasteryTarget": 10
+  }
+}
+```
+
+`studyMode` 枚举：`normal` / `intensive` / `review` / `casual`
+
+---
+
+### PUT /api/study-config
+
+更新学习配置（字段均可选）。
+
+**请求体：**
+```json
+{
+  "selectedWordbookIds": ["<id1>", "<id2>"],
+  "dailyWordCount": 30,
+  "studyMode": "intensive",
+  "dailyMasteryTarget": 15
+}
+```
+
+**字段约束：**
+- `dailyWordCount`：1–200
+- `dailyMasteryTarget`：1–100
+- `selectedWordbookIds`：需为已存在的系统单词本 ID
+
+---
+
+### GET /api/study-config/today-words
+
+获取今日待学单词。
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": {
+    "words": [ ...WordPublic... ],
+    "target": 20
+  }
+}
+```
+
+---
+
+### GET /api/study-config/progress
+
+获取今日学习进度。
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": {
+    "studied": 8,
+    "target": 15,
+    "new": 3,
+    "learning": 5,
+    "reviewing": 4,
+    "mastered": 8
+  }
+}
+```
+
+---
+
+## 11. 通知与偏好
+
+**路径前缀：** `/api/notifications`
+**认证：** Bearer Token（必须）
+
+---
+
+### GET /api/notifications
+
+获取通知列表。
+
+**查询参数：**
+
+| 参数 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `limit` | number | 50 | 最多返回数量，范围 1–200 |
+| `unreadOnly` | boolean | false | 仅返回未读 |
+
+---
+
+### GET /api/notifications/unread-count
+
+获取未读通知数量。
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": { "unreadCount": 3 }
+}
+```
+
+---
+
+### PUT /api/notifications/:id/read
+
+将指定通知标为已读。
+
+---
+
+### POST /api/notifications/read-all
+
+将所有通知标为已读。
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": { "markedRead": 5 }
+}
+```
+
+---
+
+### GET /api/notifications/badges
+
+获取徽章列表及进度。
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "id": "first_word",
+      "name": "First Word",
+      "description": "Learn your first word",
+      "unlocked": true,
+      "progress": 1.0,
+      "unlockedAt": "2024-01-15T08:00:00Z"
+    },
+    {
+      "id": "streak_7",
+      "name": "Week Streak",
+      "description": "Study for 7 consecutive days",
+      "unlocked": false,
+      "progress": 0.43,
+      "unlockedAt": null
+    },
+    {
+      "id": "mastered_100",
+      "name": "Century Club",
+      "description": "Master 100 words",
+      "unlocked": false,
+      "progress": 0.32,
+      "unlockedAt": null
+    }
+  ]
+}
+```
+
+---
+
+### GET /api/notifications/preferences
+
+获取用户 UI 偏好。
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": {
+    "theme": "light",
+    "language": "en",
+    "notificationEnabled": true,
+    "soundEnabled": true
+  }
+}
+```
+
+---
+
+### PUT /api/notifications/preferences
+
+更新 UI 偏好（字段均可选）。
+
+**请求体：**
+```json
+{
+  "theme": "dark",
+  "language": "zh",
+  "notificationEnabled": true,
+  "soundEnabled": false
+}
+```
+
+**字段约束：**
+- `theme`：`light` / `dark` / `system`
+- `language`：`en` / `zh` / `ja` / `ko` / `fr` / `de` / `es`
+
+---
+
+## 12. 内容增强
+
+**路径前缀：** `/api/content`
+**认证：** Bearer Token（必须）；写操作（`POST /api/content/morphemes/:wordId`）需 Admin Token
+
+---
+
+### GET /api/content/etymology/:wordId
+
+获取单词词源解析。
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": {
+    "wordId": "<uuid>",
+    "word": "abandon",
+    "etymology": "源自古法语 abandoner，含义为...",
+    "roots": ["a-", "bandon"],
+    "generated": true,
+    "source": "llm"
+  }
+}
+```
+
+---
+
+### GET /api/content/semantic/search
+
+语义搜索单词（当前为关键词回退实现）。
+
+**查询参数：**
+
+| 参数 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `query` | string | ✓ | 搜索词 |
+| `limit` | number | — | 返回数量，默认 10，最大 50 |
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": {
+    "query": "forgiveness",
+    "results": [ ...WordPublic... ],
+    "total": 5,
+    "method": "keyword_fallback",
+    "degraded": true
+  }
+}
+```
+
+---
+
+### GET /api/content/word-contexts/:wordId
+
+获取单词的使用语境和例句。
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": {
+    "wordId": "<uuid>",
+    "word": "abandon",
+    "examples": ["He abandoned the project."],
+    "contexts": [
+      {
+        "id": "<wordId>-ctx-0",
+        "sentence": "He abandoned the project.",
+        "source": "word_examples"
+      }
+    ]
+  }
+}
+```
+
+---
+
+### GET /api/content/morphemes/:wordId
+
+获取单词词素拆解。
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": {
+    "wordId": "<uuid>",
+    "morphemes": [
+      { "text": "un-", "type": "prefix", "meaning": "不、非" },
+      { "text": "forgiv", "type": "root", "meaning": "宽恕" },
+      { "text": "-able", "type": "suffix", "meaning": "能够…的" }
+    ]
+  }
+}
+```
+
+---
+
+### GET /api/content/confusion-pairs/:wordId
+
+获取易混淆单词（按相似度排序）。
+
+**查询参数：** `limit`（默认 20，范围 1–100）
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": {
+    "wordId": "<uuid>",
+    "confusionPairs": [
+      {
+        "wordId": "<otherId>",
+        "word": "affect",
+        "meaning": "影响",
+        "similarity": 0.87
+      }
+    ]
+  }
+}
+```
+
+---
+
+## 13. AMAS 自适应引擎
+
+**路径前缀：** `/api/amas`
+**认证：** Bearer Token（必须）
+
+AMAS（Adaptive Multi-level Adjustment System）是服务端自适应学习引擎，负责根据用户答题行为计算用户状态（注意力、疲劳、动机、自信）、生成学习策略、评估单词掌握度等。本组接口面向普通用户，返回内容均属于当前登录用户自身的状态。
+
+---
+
+### GET /api/amas/state
+
+获取当前用户的 AMAS 状态向量。
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": {
+    "attention": 0.72,
+    "fatigue": 0.28,
+    "motivation": 0.65,
+    "confidence": 0.54,
+    "lastActiveAt": "2024-01-15T08:00:00Z",
+    "sessionEventCount": 12,
+    "totalEventCount": 834,
+    "createdAt": "2024-01-01T00:00:00Z"
+  }
+}
+```
+
+> 结构由 AMAS 引擎定义，除上述关键字段外可能包含 `cognitiveProfile`、`trendState`、`habitProfile` 等扩展字段。
+
+---
+
+### GET /api/amas/strategy
+
+根据当前用户状态计算推荐的学习策略参数。
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": {
+    "difficulty": 0.55,
+    "batchSize": 8,
+    "newRatio": 0.4,
+    "intervalScale": 1.0,
+    "reviewMode": false
+  }
+}
+```
+
+---
+
+### GET /api/amas/phase
+
+获取当前用户所处的冷启动阶段。
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": { "phase": "Classify" }
+}
+```
+
+`phase` 可能值：`"Classify"`（分类期）/ `"Explore"`（探索期）/ `null`（已进入稳定期）
+
+---
+
+### GET /api/amas/learning-curve
+
+获取按日聚合的学习曲线（最近 1000 条记录）。
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": {
+    "curve": [
+      { "date": "2024-01-13", "total": 50, "correct": 42, "accuracy": 0.84 },
+      { "date": "2024-01-14", "total": 60, "correct": 54, "accuracy": 0.90 }
+    ]
+  }
+}
+```
+
+---
+
+### GET /api/amas/intervention
+
+获取针对当前用户状态的干预建议（疲劳提醒、专注建议、鼓励等）。
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": {
+    "interventions": [
+      {
+        "type": "rest",
+        "message": "您似乎有些疲劳，建议休息一下",
+        "severity": "warning"
+      }
+    ]
+  }
+}
+```
+
+`type`：`"rest"`（疲劳过高）/ `"encouragement"`（动机过低）/ `"focus"`（注意力下降）/ `"continue"`（表现良好）
+`severity`：`"warning"` / `"info"` / `"success"`
+
+---
+
+### GET /api/amas/mastery/evaluate
+
+评估指定单词的掌握度。
+
+**查询参数：** `wordId`（必填）
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": {
+    "wordId": "<uuid>",
+    "state": "Reviewing",
+    "masteryLevel": 0.72,
+    "correctStreak": 3,
+    "totalAttempts": 8,
+    "nextReviewDate": "2024-01-20T08:00:00Z"
+  }
+}
+```
+
+> 若用户对该单词尚无学习记录，返回 `state: "NEW"`、`masteryLevel: 0.0`、`correctStreak: 0`、`totalAttempts: 0`、`nextReviewDate: null`。
+
+---
+
+### POST /api/amas/process-event
+
+上报一条学习事件并触发 AMAS 状态更新（不写入 `learning_records` 表）。通常由底层 SDK 使用；应用层应优先调用 `POST /api/records`。
+
+**请求体：**
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `wordId` | string | ✓ | 单词 ID |
+| `isCorrect` | boolean | ✓ | 是否答对 |
+| `responseTime` | number | ✓ | 响应时间（毫秒），亦可使用 `response_time` snake_case |
+| `sessionId` | string | — | 所属会话 ID |
+| `isQuit` | boolean | — | 是否中途退出，默认 false |
+| `dwellTime` | number | — | 停留时长（毫秒） |
+| `pauseCount` | number | — | 暂停次数 |
+| `switchCount` | number | — | 切换次数 |
+| `retryCount` | number | — | 重试次数 |
+| `focusLossDuration` | number | — | 失去焦点累计时长（毫秒） |
+| `interactionDensity` | number | — | 交互密度 |
+| `pausedTimeMs` | number | — | 暂停累计时长（毫秒） |
+| `hintUsed` | boolean | — | 是否使用提示，默认 false |
+
+**响应 200：** `ProcessResult` 对象（含 `sessionId`、`strategy`、`state`、`wordMastery`、`reward`、`coldStartPhase`）
+
+---
+
+### POST /api/amas/batch-process
+
+批量上报学习事件。
+
+**请求体：**
+```json
+{
+  "events": [ { ...同 process-event 请求体... } ]
+}
+```
+
+**约束：** `events` 长度上限受 `max_batch_size` 限制（默认 500），超限返回 `BATCH_TOO_LARGE`。
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": {
+    "count": 3,
+    "items": [ ...ProcessResult[]... ]
+  }
+}
+```
+
+---
+
+### POST /api/amas/reset
+
+重置当前用户的 AMAS 状态（恢复到默认值）。
+
+**请求体：** 空
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": { "reset": true }
+}
+```
+
+---
+
+### POST /api/amas/visual-fatigue
+
+上报客户端计算的视觉疲劳分数，触发 AMAS 状态更新。
+
+**请求体：**
+
+| 字段 | 类型 | 必填 | 约束 |
+|---|---|---|---|
+| `score` | number | ✓ | 视觉疲劳分数，范围 0–100 |
+
+**响应 200：** 更新后的 AMAS `UserState` 对象（同 `GET /api/amas/state`）
+
+**错误码：**
+
+| 错误码 | 说明 |
+|---|---|
+| `INVALID_SCORE` | 分数不在 0–100 范围内 |
+
+---
+
+## 14. 实时推送
+
+**路径前缀：** `/api/realtime`
+**认证：** Bearer Token（必须）
+
+---
+
+### GET /api/realtime/events
+
+Server-Sent Events（SSE）持久连接，用于接收服务端实时推送。
+
+**可选请求头：**
+- `x-device-id`：设备 ID
+- `x-device-platform`：设备平台
+
+**事件类型：**
+
+| 事件名 (`event:`) | 说明 | `data` JSON 结构 |
+|---|---|---|
+| `amas_state` | AMAS 引擎状态变化（服务端每 5 秒轮询，仅当 `totalEventCount` 增长时推送） | `{"type": "state_change", "attention": <f64>, "fatigue": <f64>, "motivation": <f64>, "confidence": <f64>, "sessionEventCount": <u32>, "totalEventCount": <u64>}` |
+| `maintenance` | 维护模式变化 | `{"type": "maintenance", "active": <bool>}` |
+| `update_available` | 新版本可用 | 更新信息载荷 |
+| `telemetry_request` | 服务器请求遥测上报 | `{"type": "telemetry_request", "requestId": "<uuid>"}` |
+| `banned` | 账号被封禁 | `{"type": "banned"}` |
+| `unbanned` | 账号解封 | `{"type": "unbanned"}` |
+| `data_corrupted` | 数据异常通知 | `{"type": "data_corrupted"}` |
+
+> 服务端 SSE Keep-alive 文本行 `: keepalive` 每 15 秒发送一次。连接数达到服务器上限（默认 1000）时返回 `429 RATE_LIMITED`。
+
+---
+
+## 15. 遥测
+
+**路径前缀：** `/api/telemetry`
+**认证：** Bearer Token（必须）
+**请求体上限：** 64 KB
+
+---
+
+### POST /api/telemetry
+
+提交客户端遥测数据。
+
+**必须包含的请求头：** `x-device-id`
+
+**请求体：**
+```json
+{
+  "eventType": "periodic",
+  "requestId": null,
+  "clientTs": "2024-01-15T08:00:00Z",
+  "payload": {
+    "device": {
+      "cpuCores": 8,
+      "memoryGb": 16.0,
+      "screenWidth": 1920,
+      "screenHeight": 1080,
+      "pixelRatio": 2.0,
+      "osName": "macOS",
+      "browserName": "Chrome",
+      "browserVersion": "120.0",
+      "timezone": "Asia/Shanghai",
+      "language": "zh-CN",
+      "touchSupport": false,
+      "onlineStatus": true
+    },
+    "sessionDurationSecs": 300,
+    "actionsPerMin": 12.5,
+    "errorCount": 0,
+    "avgResponseTimeMs": 1200.0,
+    "behavior": {
+      "currentRoute": "/learning",
+      "clickCount": 45,
+      "scrollDepthPct": 0.8,
+      "visibilityChanges": 2,
+      "routeChanges": 3
+    },
+    "featureUsage": {
+      "flashcard": 20,
+      "etymology": 3
+    }
+  }
+}
+```
+
+**字段说明：**
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `eventType` | string | ✓ | `"periodic"` 或 `"on_demand"` |
+| `requestId` | string | 条件必填 | `eventType="on_demand"` 时必须提供 |
+| `clientTs` | string | ✓ | 客户端时间（ISO 8601） |
+| `payload` | object | ✓ | 见上方结构 |
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": { "id": "<uuid>" }
+}
+```
+
+---
+
+## 16. 状态
+
+**路径前缀：** `/api/status`
+**认证：** 无
+
+---
+
+### GET /api/status
+
+获取系统状态。
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": {
+    "maintenanceMode": false,
+    "version": "v0.3.0-5-gabcdef"
+  }
+}
+```
+
+> `version` 为构建时注入的 **git describe** 字符串（如 `v0.3.0` 或 `v0.3.0-5-gabcdef`），非严格 semver。
+
+---
+
+### GET /api/status/device-ban
+
+检查设备是否被封禁。
+
+**查询参数：** `deviceId`（必填）
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": { "banned": false }
+}
+```
+
+---
+
+## 17. 健康检查
+
+**路径前缀：** `/health`（不在 `/api` 下）
+**认证：** 除 `/health/database` 和 `/health/metrics` 外无需认证
+
+---
+
+### GET /health
+
+获取综合健康状态。
+
+**响应 200：**
+```json
+{
+  "status": "ok",
+  "uptimeSecs": 86400,
+  "services": {
+    "store": { "healthy": true },
+    "amas": { "healthy": true },
+    "sse": { "healthy": true },
+    "wordbookCenter": { "healthy": true, "probeSkipped": false }
+  }
+}
+```
+
+`status`：`"ok"` / `"degraded"` / `"down"`
+
+> **探测范围说明**：目前仅 `store.healthy` 会反映数据库实际探测结果；`amas` / `sse` / `wordbookCenter` 字段为**位置占位**，当前版本恒为 `true`，客户端不应依赖它们作为真实探测结果。
+
+---
+
+### GET /health/live
+
+存活探针，始终返回 200。
+
+---
+
+### GET /health/ready
+
+就绪探针，数据库就绪返回 200，否则 503。
+
+---
+
+### GET /health/database
+
+数据库健康详情（需 Admin Token）。
+
+**响应 200：**
+```json
+{
+  "healthy": true,
+  "latencyUs": 150,
+  "consecutiveFailures": 0
+}
+```
+
+---
+
+### GET /health/metrics
+
+AMAS 算法指标快照（需 Admin Token）。
+
+---
+
+## 18. V1 兼容层
+
+**路径前缀：** `/api/v1`
+**认证：** Bearer Token（必须）
+**说明：** 不触发 AMAS 自适应引擎，适合不需要自适应功能的轻量客户端
+
+---
+
+### GET /api/v1/words
+
+分页获取单词列表。查询参数同 `/api/words`。
+
+---
+
+### GET /api/v1/words/:id
+
+获取单个单词。
+
+---
+
+### GET /api/v1/records
+
+分页获取学习记录。
+
+---
+
+### POST /api/v1/records
+
+创建学习记录（**不触发 AMAS**，不返回 AMAS 计算结果）。
+
+**请求体：**
+```json
+{
+  "wordId": "<uuid>",
+  "isCorrect": true,
+  "responseTimeMs": 1200
+}
+```
+
+**响应 200：** 直接返回 `LearningRecord` 对象（结构同 §5 头部定义），无 `amasResult` / `duplicate` 封装。
+
+> **幂等行为**：同一用户对同一 `wordId` 的相同 `isCorrect` 结果，在 **5 秒内**重复提交会被服务端去重返回既有记录（该规则仅存在于 v1，主线 `/api/records` 依赖 `clientRecordId` 持久去重）。
+
+---
+
+### GET /api/v1/study-config
+
+获取学习配置（同 `/api/study-config`）。
+
+---
+
+### POST /api/v1/learning/session
+
+创建或恢复学习会话（轻量版）。
+
+**请求体：** 空
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": {
+    "sessionId": "<uuid>",
+    "resumed": false
+  }
+}
+```

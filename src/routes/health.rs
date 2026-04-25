@@ -45,9 +45,7 @@ pub(crate) fn sse_probe_ok(state: &AppState) -> bool {
 
 pub(crate) async fn wordbook_center_probe(state: &AppState) -> (bool, bool) {
     let settings = state
-        .run_store_task("health.wbc_settings", |store| {
-            store.get_system_settings()
-        })
+        .run_store_task("health.wbc_settings", |store| store.get_system_settings())
         .await
         .ok()
         .and_then(Result::ok);

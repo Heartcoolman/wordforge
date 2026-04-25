@@ -15,6 +15,7 @@ pub struct Config {
     pub database_url: String,
     pub api_only: bool,
     pub sqlite_busy_timeout_ms: u64,
+    pub sqlite_connection_timeout_ms: u64,
     pub sqlite_pool_size: u32,
     pub jwt_secret: String,
     pub refresh_jwt_secret: String,
@@ -25,6 +26,7 @@ pub struct Config {
     pub cors_origin: String,
     pub trust_proxy: bool,
     pub cookie_secure: bool,
+    pub self_watchdog: SelfWatchdogConfig,
     pub rate_limit: RateLimitConfig,
     pub auth_rate_limit: AuthRateLimitConfig,
     pub worker: WorkerConfig,
@@ -78,6 +80,23 @@ impl Default for LimitsConfig {
             candidate_word_pool_size: 500,
             rate_limit_max_entries: 100_000,
             rate_limit_cleanup_interval_secs: 300,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SelfWatchdogConfig {
+    pub enabled: bool,
+    pub interval_secs: u64,
+    pub failure_threshold: u32,
+}
+
+impl Default for SelfWatchdogConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_secs: 15,
+            failure_threshold: 3,
         }
     }
 }
@@ -142,6 +161,10 @@ impl fmt::Debug for Config {
             .field("database_url", &self.database_url)
             .field("api_only", &self.api_only)
             .field("sqlite_busy_timeout_ms", &self.sqlite_busy_timeout_ms)
+            .field(
+                "sqlite_connection_timeout_ms",
+                &self.sqlite_connection_timeout_ms,
+            )
             .field("sqlite_pool_size", &self.sqlite_pool_size)
             .field("jwt_secret", &"***REDACTED***")
             .field("refresh_jwt_secret", &"***REDACTED***")
@@ -158,6 +181,7 @@ impl fmt::Debug for Config {
             .field("cors_origin", &self.cors_origin)
             .field("trust_proxy", &self.trust_proxy)
             .field("cookie_secure", &self.cookie_secure)
+            .field("self_watchdog", &self.self_watchdog)
             .field("rate_limit", &self.rate_limit)
             .field("auth_rate_limit", &self.auth_rate_limit)
             .field("worker", &self.worker)
@@ -215,6 +239,7 @@ impl Config {
             database_url: normalized_db_path(&env_or("DATABASE_URL", "./data/learning.db")),
             api_only: env_or_bool("API_ONLY", false),
             sqlite_busy_timeout_ms: env_or_parse("SQLITE_BUSY_TIMEOUT_MS", 5000_u64),
+            sqlite_connection_timeout_ms: env_or_parse("SQLITE_CONNECTION_TIMEOUT_MS", 250_u64),
             sqlite_pool_size: env_or_parse("SQLITE_POOL_SIZE", 4_u32),
             jwt_secret,
             refresh_jwt_secret,
@@ -225,6 +250,11 @@ impl Config {
             cors_origin: env_or("CORS_ORIGIN", "http://localhost:5173"),
             trust_proxy: env_or_bool("TRUST_PROXY", false),
             cookie_secure: env_or_bool("COOKIE_SECURE", false),
+            self_watchdog: SelfWatchdogConfig {
+                enabled: env_or_bool("ENABLE_SELF_WATCHDOG", false),
+                interval_secs: env_or_parse("SELF_WATCHDOG_INTERVAL_SECS", 15_u64),
+                failure_threshold: env_or_parse("SELF_WATCHDOG_FAILURE_THRESHOLD", 3_u32),
+            },
             rate_limit: RateLimitConfig {
                 window_secs: env_or_parse("RATE_LIMIT_WINDOW_SECS", 900_u64),
                 max_requests: env_or_parse("RATE_LIMIT_MAX", 500_u64),

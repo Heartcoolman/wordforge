@@ -93,8 +93,12 @@ Type=simple
 WorkingDirectory=${INSTALL_DIR}
 ExecStart=${INSTALL_DIR}/wordforge
 EnvironmentFile=${INSTALL_DIR}/.env
+Environment=ENABLE_SELF_WATCHDOG=true
+Environment=SELF_WATCHDOG_INTERVAL_SECS=15
+Environment=SELF_WATCHDOG_FAILURE_THRESHOLD=3
 Restart=on-failure
 RestartSec=5
+TimeoutStopSec=15
 User=${SVC_USER}
 Group=${SVC_USER}
 NoNewPrivileges=true

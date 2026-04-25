@@ -1,5 +1,6 @@
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::http::{header, HeaderName, HeaderValue, Method};
 use learning_backend::amas::config::AMASConfig;
@@ -41,16 +42,17 @@ async fn main() {
     LlmProvider::validate_config(&config.llm);
 
     let store = Arc::new(
-        Store::open(
+        Store::open_with_connection_timeout(
             &config.database_url,
             config.sqlite_busy_timeout_ms,
             config.sqlite_pool_size,
+            config.sqlite_connection_timeout_ms,
         )
         .expect("Failed to open SQLite database"),
     );
     store.run_migrations().expect("Failed to run migrations");
 
-    learning_backend::blocking::init_blocking_semaphore(config.sqlite_pool_size as usize * 2);
+    learning_backend::blocking::init_blocking_semaphore(config.sqlite_pool_size as usize);
 
     let (shutdown_tx, _) = broadcast::channel::<()>(8);
 
@@ -172,6 +174,7 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .expect("Failed to bind TCP listener");
+    spawn_self_watchdog(addr, &config.self_watchdog);
 
     let server_future = axum::serve(
         listener,
@@ -196,6 +199,85 @@ async fn main() {
     }
 
     tracing::info!("Shutdown complete");
+}
+
+fn spawn_self_watchdog(addr: SocketAddr, config: &learning_backend::config::SelfWatchdogConfig) {
+    if !config.enabled {
+        return;
+    }
+
+    let probe_addr = loopback_addr_for(addr);
+    let interval = Duration::from_secs(config.interval_secs.max(1));
+    let threshold = config.failure_threshold.max(1);
+
+    std::thread::Builder::new()
+        .name("self-watchdog".to_string())
+        .spawn(move || {
+            let mut failures = 0_u32;
+            std::thread::sleep(interval);
+
+            loop {
+                std::thread::sleep(interval);
+                if http_liveness_probe(probe_addr, Duration::from_secs(3)) {
+                    failures = 0;
+                    continue;
+                }
+
+                failures = failures.saturating_add(1);
+                tracing::error!(
+                    %probe_addr,
+                    failures,
+                    threshold,
+                    "Self watchdog liveness probe failed"
+                );
+
+                if failures >= threshold {
+                    tracing::error!(
+                        %probe_addr,
+                        "Self watchdog aborting unresponsive process"
+                    );
+                    std::process::abort();
+                }
+            }
+        })
+        .expect("failed to spawn self watchdog");
+}
+
+fn loopback_addr_for(addr: SocketAddr) -> SocketAddr {
+    let ip = match addr.ip() {
+        IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
+        IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
+        ip => ip,
+    };
+    SocketAddr::new(ip, addr.port())
+}
+
+fn http_liveness_probe(addr: SocketAddr, timeout: Duration) -> bool {
+    use std::io::{Read, Write};
+
+    let mut stream = match std::net::TcpStream::connect_timeout(&addr, timeout) {
+        Ok(stream) => stream,
+        Err(_) => return false,
+    };
+
+    let _ = stream.set_read_timeout(Some(timeout));
+    let _ = stream.set_write_timeout(Some(timeout));
+
+    if stream
+        .write_all(b"GET /health/live HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .is_err()
+    {
+        return false;
+    }
+
+    let mut buf = [0_u8; 64];
+    match stream.read(&mut buf) {
+        Ok(n) => {
+            let response = &buf[..n];
+            response.starts_with(b"HTTP/1.1 200") || response.starts_with(b"HTTP/1.0 200")
+        }
+        Err(_) => false,
+    }
 }
 
 fn build_cors_layer(config: &Config) -> CorsLayer {
