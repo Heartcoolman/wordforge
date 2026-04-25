@@ -18,6 +18,20 @@ export function getDeviceId(): string {
 }
 
 export function getDevicePlatform(): string {
+  const capacitorPlatform = (globalThis as {
+    Capacitor?: { getPlatform?: () => string };
+  }).Capacitor?.getPlatform?.();
+  if (capacitorPlatform === 'ios' || capacitorPlatform === 'android') {
+    return capacitorPlatform;
+  }
+
+  const ua = navigator.userAgent;
+  if (/iPhone|iPad|iPod/i.test(ua)) return 'ios';
+  if (/Android/i.test(ua)) return 'android';
+
+  // iPadOS 13+ may identify itself as macOS Safari while still exposing touch.
+  if (/Macintosh/i.test(ua) && navigator.maxTouchPoints > 1) return 'ios';
+
   return 'web';
 }
 
