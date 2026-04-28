@@ -301,6 +301,90 @@ impl Store {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(sessions)
     }
+
+    pub fn list_learning_sessions_for_user(
+        &self,
+        user_id: &str,
+        limit: usize,
+        offset: usize,
+        start_at: Option<DateTime<Utc>>,
+        end_before: Option<DateTime<Utc>>,
+    ) -> Result<Vec<LearningSession>, StoreError> {
+        keys::validate_id(user_id)?;
+        let conn = self.conn()?;
+        let mut sql = format!("SELECT {COLS} FROM learning_sessions WHERE user_id = ?1");
+        let mut params_boxed: Vec<Box<dyn rusqlite::types::ToSql>> =
+            vec![Box::new(user_id.to_string())];
+        if let Some(start_at) = start_at {
+            params_boxed.push(Box::new(start_at.to_rfc3339()));
+            sql.push_str(&format!(" AND created_at >= ?{}", params_boxed.len()));
+        }
+        if let Some(end_before) = end_before {
+            params_boxed.push(Box::new(end_before.to_rfc3339()));
+            sql.push_str(&format!(" AND created_at < ?{}", params_boxed.len()));
+        }
+        params_boxed.push(Box::new(limit as i64));
+        let limit_idx = params_boxed.len();
+        params_boxed.push(Box::new(offset as i64));
+        let offset_idx = params_boxed.len();
+        sql.push_str(&format!(
+            " ORDER BY created_at DESC LIMIT ?{limit_idx} OFFSET ?{offset_idx}"
+        ));
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params_boxed.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = conn.prepare(&sql)?;
+        let sessions = stmt
+            .query_map(param_refs.as_slice(), session_from_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(sessions)
+    }
+
+    pub fn count_learning_sessions_for_user(
+        &self,
+        user_id: &str,
+        start_at: Option<DateTime<Utc>>,
+        end_before: Option<DateTime<Utc>>,
+    ) -> Result<u64, StoreError> {
+        keys::validate_id(user_id)?;
+        let conn = self.conn()?;
+        let mut sql = "SELECT COUNT(*) FROM learning_sessions WHERE user_id = ?1".to_string();
+        let mut params_boxed: Vec<Box<dyn rusqlite::types::ToSql>> =
+            vec![Box::new(user_id.to_string())];
+        if let Some(start_at) = start_at {
+            params_boxed.push(Box::new(start_at.to_rfc3339()));
+            sql.push_str(&format!(" AND created_at >= ?{}", params_boxed.len()));
+        }
+        if let Some(end_before) = end_before {
+            params_boxed.push(Box::new(end_before.to_rfc3339()));
+            sql.push_str(&format!(" AND created_at < ?{}", params_boxed.len()));
+        }
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params_boxed.iter().map(|p| p.as_ref()).collect();
+        let count: i64 = conn.query_row(&sql, param_refs.as_slice(), |r| r.get(0))?;
+        Ok(count as u64)
+    }
+
+    pub fn list_learning_sessions_between(
+        &self,
+        user_id: &str,
+        start_at: DateTime<Utc>,
+        end_before: DateTime<Utc>,
+    ) -> Result<Vec<LearningSession>, StoreError> {
+        keys::validate_id(user_id)?;
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {COLS} FROM learning_sessions
+             WHERE user_id = ?1 AND created_at >= ?2 AND created_at < ?3
+             ORDER BY created_at ASC"
+        ))?;
+        let sessions = stmt
+            .query_map(
+                params![user_id, start_at.to_rfc3339(), end_before.to_rfc3339()],
+                session_from_row,
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(sessions)
+    }
 }
 
 #[cfg(test)]

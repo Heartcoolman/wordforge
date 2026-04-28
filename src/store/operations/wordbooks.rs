@@ -33,6 +33,18 @@ pub struct WordbookWordEntry {
     pub added_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WordbookProgressStats {
+    pub wordbook_id: String,
+    pub word_count: u64,
+    pub studied_words: u64,
+    pub mastered_words: u64,
+    pub reviewing_words: u64,
+    pub forgotten_words: u64,
+    pub last_studied_at: Option<DateTime<Utc>>,
+}
+
 fn book_type_to_str(t: &WordbookType) -> &'static str {
     match t {
         WordbookType::System => "system",
@@ -223,6 +235,68 @@ impl Store {
             |r| r.get(0),
         )?;
         Ok(count as u64)
+    }
+
+    pub fn get_wordbook_progress_stats(
+        &self,
+        user_id: &str,
+        wordbook_id: &str,
+    ) -> Result<WordbookProgressStats, StoreError> {
+        keys::validate_id(user_id)?;
+        keys::validate_id(wordbook_id)?;
+        let conn = self.conn()?;
+        let word_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM wordbook_words WHERE wordbook_id = ?1",
+            params![wordbook_id],
+            |r| r.get(0),
+        )?;
+        let studied_words: i64 = conn.query_row(
+            "SELECT COUNT(DISTINCT ww.word_id)
+             FROM wordbook_words ww
+             LEFT JOIN word_learning_states wls
+                ON wls.user_id = ?1 AND wls.word_id = ww.word_id
+             LEFT JOIN learning_records lr
+                ON lr.user_id = ?1 AND lr.word_id = ww.word_id
+             WHERE ww.wordbook_id = ?2
+               AND (
+                    COALESCE(wls.total_attempts, 0) > 0
+                    OR lr.id IS NOT NULL
+               )",
+            params![user_id, wordbook_id],
+            |r| r.get(0),
+        )?;
+        let (mastered_words, reviewing_words, forgotten_words): (i64, i64, i64) = conn.query_row(
+            "SELECT
+                COALESCE(SUM(CASE WHEN wls.state = 'MASTERED' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN wls.state = 'REVIEWING' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN wls.state = 'FORGOTTEN' THEN 1 ELSE 0 END), 0)
+             FROM wordbook_words ww
+             LEFT JOIN word_learning_states wls
+                ON wls.user_id = ?1 AND wls.word_id = ww.word_id
+             WHERE ww.wordbook_id = ?2",
+            params![user_id, wordbook_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
+        let last_studied_raw: Option<String> = conn.query_row(
+            "SELECT MAX(lr.created_at)
+             FROM wordbook_words ww
+             JOIN learning_records lr
+                ON lr.user_id = ?1 AND lr.word_id = ww.word_id
+             WHERE ww.wordbook_id = ?2",
+            params![user_id, wordbook_id],
+            |r| r.get(0),
+        )?;
+        let last_studied_at = last_studied_raw.map(parse_dt).transpose()?;
+
+        Ok(WordbookProgressStats {
+            wordbook_id: wordbook_id.to_string(),
+            word_count: word_count as u64,
+            studied_words: studied_words as u64,
+            mastered_words: mastered_words as u64,
+            reviewing_words: reviewing_words as u64,
+            forgotten_words: forgotten_words as u64,
+            last_studied_at,
+        })
     }
 }
 

@@ -12,6 +12,7 @@ pub mod system_settings;
 pub mod telemetry;
 pub mod users;
 pub mod wb_center;
+pub mod word_interactions;
 pub mod word_states;
 pub mod wordbooks;
 pub mod words;

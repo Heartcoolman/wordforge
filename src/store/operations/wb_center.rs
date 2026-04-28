@@ -18,6 +18,23 @@ pub struct WordbookCenterImport {
     pub word_count: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WordbookImportHistory {
+    pub id: String,
+    pub user_id: String,
+    pub source_type: String,
+    pub source_name: Option<String>,
+    pub source_url: Option<String>,
+    pub status: String,
+    pub wordbook_id: Option<String>,
+    pub wordbook_name: Option<String>,
+    pub words_imported: Option<u64>,
+    pub words_skipped: Option<u64>,
+    pub error_message: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
 fn parse_dt(s: String) -> rusqlite::Result<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(&s)
         .map(|dt| dt.with_timezone(&Utc))
@@ -41,6 +58,25 @@ fn import_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WordbookCenterIm
 
 const COLS: &str =
     "remote_id, local_wordbook_id, source_url, version, user_id, imported_at, updated_at, word_count";
+const HISTORY_COLS: &str =
+    "id, user_id, source_type, source_name, source_url, status, wordbook_id, wordbook_name, words_imported, words_skipped, error_message, created_at";
+
+fn history_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WordbookImportHistory> {
+    Ok(WordbookImportHistory {
+        id: row.get(0)?,
+        user_id: row.get(1)?,
+        source_type: row.get(2)?,
+        source_name: row.get(3)?,
+        source_url: row.get(4)?,
+        status: row.get(5)?,
+        wordbook_id: row.get(6)?,
+        wordbook_name: row.get(7)?,
+        words_imported: row.get::<_, Option<i64>>(8)?.map(|v| v as u64),
+        words_skipped: row.get::<_, Option<i64>>(9)?.map(|v| v as u64),
+        error_message: row.get(10)?,
+        created_at: parse_dt(row.get(11)?)?,
+    })
+}
 
 impl Store {
     pub fn upsert_wb_center_import(&self, import: &WordbookCenterImport) -> Result<(), StoreError> {
@@ -134,6 +170,83 @@ impl Store {
             params![&prefix, remote_id],
         )?;
         Ok(deleted > 0)
+    }
+
+    pub fn insert_wordbook_import_history(
+        &self,
+        history: &WordbookImportHistory,
+    ) -> Result<(), StoreError> {
+        keys::validate_id(&history.id)?;
+        keys::validate_id(&history.user_id)?;
+        if let Some(wordbook_id) = history.wordbook_id.as_deref() {
+            keys::validate_id(wordbook_id)?;
+        }
+        let conn = self.conn()?;
+        conn.execute(
+            "INSERT INTO wordbook_import_history
+                (id, user_id, source_type, source_name, source_url, status, wordbook_id, wordbook_name, words_imported, words_skipped, error_message, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                &history.id,
+                &history.user_id,
+                &history.source_type,
+                history.source_name.as_deref(),
+                history.source_url.as_deref(),
+                &history.status,
+                history.wordbook_id.as_deref(),
+                history.wordbook_name.as_deref(),
+                history.words_imported.map(|v| v as i64),
+                history.words_skipped.map(|v| v as i64),
+                history.error_message.as_deref(),
+                history.created_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_wordbook_import_history(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<WordbookImportHistory>, StoreError> {
+        keys::validate_id(user_id)?;
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {HISTORY_COLS} FROM wordbook_import_history
+             WHERE user_id = ?1
+             ORDER BY created_at DESC"
+        ))?;
+        let mut history = stmt
+            .query_map(params![user_id], history_from_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let known_wordbooks: std::collections::HashSet<String> = history
+            .iter()
+            .filter_map(|entry| entry.wordbook_id.clone())
+            .collect();
+
+        for import in self.list_wb_center_imports_by_user(Some(user_id))? {
+            if known_wordbooks.contains(&import.local_wordbook_id) {
+                continue;
+            }
+            let wordbook = self.get_wordbook(&import.local_wordbook_id)?;
+            history.push(WordbookImportHistory {
+                id: import.local_wordbook_id.clone(),
+                user_id: user_id.to_string(),
+                source_type: "center".to_string(),
+                source_name: None,
+                source_url: Some(import.source_url.clone()),
+                status: "success".to_string(),
+                wordbook_id: Some(import.local_wordbook_id.clone()),
+                wordbook_name: wordbook.map(|book| book.name),
+                words_imported: Some(import.word_count),
+                words_skipped: None,
+                error_message: None,
+                created_at: import.imported_at,
+            });
+        }
+
+        history.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        Ok(history)
     }
 }
 
