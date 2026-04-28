@@ -11,7 +11,7 @@ use common::http::{request, response_json};
 use learning_backend::store::operations::learning_sessions::{
     LearningSession, SessionStatus, SessionSummary,
 };
-use learning_backend::store::operations::records::LearningRecord;
+use learning_backend::store::operations::records::{LearningRecord, RecordType};
 use learning_backend::store::operations::wb_center::WordbookCenterImport;
 use learning_backend::store::operations::word_states::{WordLearningState, WordState};
 use learning_backend::store::operations::wordbooks::{Wordbook, WordbookType};
@@ -78,6 +78,7 @@ fn create_record(store: &Store, user_id: &str, word_id: &str, session_id: &str, 
             response_time_ms: 1000,
             session_id: Some(session_id.to_string()),
             created_at: Utc::now(),
+            record_type: RecordType::All,
         })
         .unwrap();
 }

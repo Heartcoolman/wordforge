@@ -9,7 +9,7 @@ use learning_backend::amas::engine::AMASEngine;
 use learning_backend::amas::memory::{evm, iad, mtp};
 use learning_backend::amas::metrics::MetricsRegistry;
 use learning_backend::amas::types::AlgorithmId;
-use learning_backend::store::operations::records::LearningRecord;
+use learning_backend::store::operations::records::{LearningRecord, RecordType};
 use learning_backend::store::operations::sessions::Session;
 use learning_backend::store::operations::users::User;
 use learning_backend::store::operations::word_states::{WordLearningState, WordState};
@@ -75,6 +75,7 @@ fn sample_record(
         response_time_ms: 900,
         session_id: Some("session-1".to_string()),
         created_at,
+        record_type: RecordType::All,
     }
 }
 

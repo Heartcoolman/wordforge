@@ -254,6 +254,8 @@ CREATE TABLE IF NOT EXISTS learning_records (
     response_time_ms INTEGER NOT NULL DEFAULT 0,
     session_id TEXT DEFAULT NULL,
     created_at TEXT NOT NULL,
+    record_type TEXT NOT NULL DEFAULT 'all'
+        CHECK (record_type IN ('learning', 'review', 'all')),
     PRIMARY KEY (user_id, id)
 );
 CREATE INDEX IF NOT EXISTS idx_learning_records_user_time
@@ -264,6 +266,8 @@ CREATE INDEX IF NOT EXISTS idx_learning_records_user_word
     ON learning_records(user_id, word_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_learning_records_word_id
     ON learning_records(word_id);
+CREATE INDEX IF NOT EXISTS idx_learning_records_user_type_time
+    ON learning_records(user_id, record_type, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS word_learning_states (
     user_id TEXT NOT NULL,
