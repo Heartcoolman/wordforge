@@ -301,9 +301,21 @@ fn build_range(
 }
 
 fn previous_range(range: &LocalDateRange, tz: Tz) -> Result<LocalDateRange, AppError> {
-    let days = (range.end_date - range.start_date).num_days() + 1;
-    let start_date = range.start_date - Duration::days(days);
-    let end_date = range.start_date - Duration::days(1);
+    let (start_date, end_date) = match range.range_type {
+        AnalyticsRange::Month => {
+            let prev_end = range.start_date - Duration::days(1);
+            let prev_start = NaiveDate::from_ymd_opt(prev_end.year(), prev_end.month(), 1)
+                .ok_or_else(|| AppError::internal("invalid previous month start"))?;
+            (prev_start, prev_end)
+        }
+        AnalyticsRange::Day | AnalyticsRange::Week => {
+            let days = (range.end_date - range.start_date).num_days() + 1;
+            (
+                range.start_date - Duration::days(days),
+                range.start_date - Duration::days(1),
+            )
+        }
+    };
     Ok(LocalDateRange {
         range_type: range.range_type,
         start_date,
