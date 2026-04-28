@@ -4,14 +4,54 @@ use axum::Router;
 
 use crate::extractors::JsonBody;
 use chrono::Utc;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::auth::AuthUser;
 use crate::constants::DEFAULT_HALF_LIFE_HOURS;
 use crate::response::{ok, AppError};
 use crate::state::AppState;
 use crate::store::operations::word_states::{WordLearningState, WordState};
-use crate::store::Store;
+use crate::store::{Store, StoreError};
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WordLearningStateResponse {
+    #[serde(flatten)]
+    base: WordLearningState,
+    bookmarked: bool,
+}
+
+fn enrich_one(
+    store: &Store,
+    user_id: &str,
+    state: WordLearningState,
+) -> Result<WordLearningStateResponse, StoreError> {
+    let word_ids = vec![state.word_id.clone()];
+    let favorites = store.get_word_favorite_statuses(user_id, &word_ids)?;
+    Ok(WordLearningStateResponse {
+        bookmarked: favorites.contains_key(&state.word_id),
+        base: state,
+    })
+}
+
+fn enrich_many(
+    store: &Store,
+    user_id: &str,
+    states: Vec<WordLearningState>,
+) -> Result<Vec<WordLearningStateResponse>, StoreError> {
+    if states.is_empty() {
+        return Ok(Vec::new());
+    }
+    let word_ids: Vec<String> = states.iter().map(|s| s.word_id.clone()).collect();
+    let favorites = store.get_word_favorite_statuses(user_id, &word_ids)?;
+    Ok(states
+        .into_iter()
+        .map(|s| WordLearningStateResponse {
+            bookmarked: favorites.contains_key(&s.word_id),
+            base: s,
+        })
+        .collect())
+}
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -29,14 +69,18 @@ async fn get_word_state(
     Path(word_id): Path<String>,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let wls = state
-        .run_store_task("word_states.get", move |store| {
-            store.get_word_learning_state(&auth.user_id, &word_id)
+    let resp = state
+        .run_store_task("word_states.get", move |store| -> Result<_, AppError> {
+            let wls = store.get_word_learning_state(&auth.user_id, &word_id)?;
+            match wls {
+                Some(s) => Ok(Some(enrich_one(&store, &auth.user_id, s)?)),
+                None => Ok(None),
+            }
         })
         .await??;
 
-    match wls {
-        Some(s) => Ok(ok(s)),
+    match resp {
+        Some(r) => Ok(ok(r)),
         None => Err(AppError::not_found("单词学习状态不存在")),
     }
 }
@@ -62,9 +106,13 @@ async fn batch_query(
         ));
     }
     let states = state
-        .run_store_task("word_states.batch_query", move |store| {
-            store.get_word_states_batch(&auth.user_id, &req.word_ids)
-        })
+        .run_store_task(
+            "word_states.batch_query",
+            move |store| -> Result<_, AppError> {
+                let raw = store.get_word_states_batch(&auth.user_id, &req.word_ids)?;
+                Ok(enrich_many(&store, &auth.user_id, raw)?)
+            },
+        )
         .await??;
     Ok(ok(states))
 }
@@ -82,20 +130,42 @@ async fn due_list(
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     let limit = q.limit.unwrap_or(50).clamp(1, 200);
     let due = state
-        .run_store_task("word_states.due_list", move |store| {
-            store.get_due_words(&auth.user_id, limit)
-        })
+        .run_store_task(
+            "word_states.due_list",
+            move |store| -> Result<_, AppError> {
+                let raw = store.get_due_words(&auth.user_id, limit)?;
+                Ok(enrich_many(&store, &auth.user_id, raw)?)
+            },
+        )
         .await??;
     Ok(ok(due))
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StatsOverviewQuery {
+    category: Option<String>,
+}
+
 async fn stats_overview(
     auth: AuthUser,
+    Query(q): Query<StatsOverviewQuery>,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
+    let category = match q.category.as_deref().unwrap_or("all") {
+        "all" => None,
+        "learning" => Some(crate::store::operations::records::RecordType::Learning),
+        "review" => Some(crate::store::operations::records::RecordType::Review),
+        other => {
+            return Err(AppError::bad_request(
+                "INVALID_CATEGORY",
+                &format!("category 必须是 all、learning 或 review，收到 {other}"),
+            ))
+        }
+    };
     let stats = state
         .run_store_task("word_states.stats_overview", move |store| {
-            store.get_word_state_stats(&auth.user_id)
+            store.get_word_state_stats_filtered(&auth.user_id, category)
         })
         .await??;
     Ok(ok(stats))
@@ -132,7 +202,7 @@ async fn mark_mastered(
                 wls.mastery_level = 1.0;
                 wls.updated_at = Utc::now();
                 store.set_word_learning_state(&wls)?;
-                Ok(wls)
+                Ok(enrich_one(&store, &auth.user_id, wls)?)
             },
         )
         .await??;
@@ -152,7 +222,7 @@ async fn reset_word(
             }
 
             let wls = WordLearningState {
-                user_id: auth.user_id,
+                user_id: auth.user_id.clone(),
                 word_id,
                 state: WordState::New,
                 mastery_level: 0.0,
@@ -164,7 +234,7 @@ async fn reset_word(
             };
 
             store.set_word_learning_state(&wls)?;
-            Ok(wls)
+            Ok(enrich_one(&store, &auth.user_id, wls)?)
         })
         .await??;
     Ok(ok(wls))
