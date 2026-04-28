@@ -64,7 +64,7 @@ pub(crate) async fn wordbook_center_probe(state: &AppState) -> (bool, bool) {
     };
 
     let probe_url = format!("{}/index.json", base_url.trim_end_matches('/'));
-    match client.head(&probe_url).send().await {
+    match client.get(&probe_url).send().await {
         Ok(resp) if resp.status().is_success() => (true, false),
         _ => (false, false),
     }
