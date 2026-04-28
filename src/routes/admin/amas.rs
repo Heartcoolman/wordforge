@@ -50,6 +50,8 @@ struct ProcessEventRequest {
     interaction_density: Option<f64>,
     paused_time_ms: Option<i64>,
     hint_used: Option<bool>,
+    #[serde(default)]
+    confused_with: Option<String>,
 }
 
 impl From<ProcessEventRequest> for RawEvent {
@@ -68,7 +70,7 @@ impl From<ProcessEventRequest> for RawEvent {
             interaction_density: value.interaction_density,
             paused_time_ms: value.paused_time_ms,
             hint_used: value.hint_used.unwrap_or(false),
-            confused_with: None,
+            confused_with: value.confused_with,
         }
     }
 }
