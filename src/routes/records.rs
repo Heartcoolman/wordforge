@@ -749,19 +749,12 @@ async fn get_enhanced_statistics(
     // 限制单次查询量，后续应改为增量聚合以支持更大数据量
     let max_stats_records = state.config().limits.max_stats_records;
     let user_id = auth.user_id.clone();
-    let (records, sessions, first_times) = state
+    let (records, first_times, daily_durations, total_duration_secs) = state
         .run_store_task(
             "records.enhanced_statistics",
             move |store| -> Result<_, AppError> {
                 let records =
                     store.get_user_records_filtered(&user_id, max_stats_records, category)?;
-                let sessions = store.list_learning_sessions_for_user(
-                    &user_id,
-                    max_stats_records,
-                    0,
-                    None,
-                    None,
-                )?;
                 let word_ids: Vec<String> = records
                     .iter()
                     .map(|r| r.word_id.clone())
@@ -769,7 +762,10 @@ async fn get_enhanced_statistics(
                     .into_iter()
                     .collect();
                 let first_times = store.first_record_times_for_words(&user_id, &word_ids)?;
-                Ok((records, sessions, first_times))
+                // 时长走无 cap 的 DB 聚合，避免被 max_stats_records 截断
+                let daily_durations = store.daily_session_durations(&user_id)?;
+                let total_duration_secs = store.total_session_duration_secs(&user_id)?;
+                Ok((records, first_times, daily_durations, total_duration_secs))
             },
         )
         .await??;
@@ -790,6 +786,7 @@ async fn get_enhanced_statistics(
         duration_secs: u64,
     }
 
+    // daily 仅基于"有记录"的日期，session-only 日期不进 daily 也不计入 streak
     let mut by_day: std::collections::BTreeMap<String, DayBucket> =
         std::collections::BTreeMap::new();
     for r in &records {
@@ -807,23 +804,11 @@ async fn get_enhanced_statistics(
             entry.new_words.insert(r.word_id.clone());
         }
     }
-
-    let mut total_duration_secs: u64 = 0;
-    for s in &sessions {
-        let day = s.created_at.format("%Y-%m-%d").to_string();
-        let secs = if let Some(summary) = &s.summary {
-            summary.duration_secs.max(0) as u64
-        } else if matches!(
-            s.status,
-            crate::store::operations::learning_sessions::SessionStatus::Completed
-        ) {
-            (s.updated_at - s.created_at).num_seconds().max(0) as u64
-        } else {
-            0
-        };
-        total_duration_secs = total_duration_secs.saturating_add(secs);
-        let entry = by_day.entry(day).or_default();
-        entry.duration_secs = entry.duration_secs.saturating_add(secs);
+    // 把当日 session 时长贴回有记录的日期
+    for (day, bucket) in by_day.iter_mut() {
+        if let Some(secs) = daily_durations.get(day) {
+            bucket.duration_secs = *secs;
+        }
     }
 
     let daily: Vec<serde_json::Value> = by_day
@@ -840,7 +825,7 @@ async fn get_enhanced_statistics(
         })
         .collect();
 
-    // Current streak (consecutive days)
+    // 仅基于 record 日期计算 streak，避免 session-only 日期虚增
     let dates: std::collections::BTreeSet<chrono::NaiveDate> = by_day
         .keys()
         .filter_map(|d| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok())
