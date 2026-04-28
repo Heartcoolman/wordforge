@@ -79,6 +79,8 @@ struct CreateRecordRequest {
     interaction_density: Option<f64>,
     paused_time_ms: Option<i64>,
     hint_used: Option<bool>,
+    #[serde(default)]
+    confused_with: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -286,7 +288,7 @@ async fn process_single_record(
                 interaction_density: req.interaction_density,
                 paused_time_ms: req.paused_time_ms,
                 hint_used: req.hint_used.unwrap_or(false),
-                confused_with: None,
+                confused_with: req.confused_with.clone(),
             },
         )
         .await?;
@@ -558,7 +560,7 @@ async fn process_batch_record(
                 interaction_density: req.interaction_density,
                 paused_time_ms: req.paused_time_ms,
                 hint_used: req.hint_used.unwrap_or(false),
-                confused_with: None,
+                confused_with: req.confused_with.clone(),
             },
         )
         .await?;

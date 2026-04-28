@@ -1,4 +1,5 @@
 pub mod admin;
+pub mod analytics;
 pub mod auth;
 pub mod content;
 pub mod health;
@@ -12,6 +13,8 @@ pub mod telemetry;
 pub mod user_profile;
 pub mod users;
 pub mod v1;
+pub mod word_favorites;
+pub mod word_notes;
 pub mod word_states;
 pub mod wordbook_center;
 pub mod wordbooks;
@@ -52,11 +55,8 @@ pub fn build_router(state: AppState) -> Router {
         rate_limit::auth_rate_limit_middleware,
     ));
 
-    // admin 认证路由：写操作添加专用速率限制
-    let admin_auth_routes = admin::auth_router().layer(axum::middleware::from_fn_with_state(
-        state.clone(),
-        rate_limit::auth_rate_limit_middleware,
-    ));
+    // 管理员后台不受速率限制
+    let admin_auth_routes = admin::auth_router();
 
     // admin 认证公开路由（如 /status）不受 auth rate limit 约束
     let admin_auth_public_routes = admin::auth_public_router();
@@ -66,6 +66,7 @@ pub fn build_router(state: AppState) -> Router {
         .nest("/users", users::router())
         .nest("/words", words::router())
         .nest("/records", records::router())
+        .nest("/analytics", analytics::router())
         .nest("/amas", admin::amas::router())
         .nest(
             "/admin/auth",
@@ -80,6 +81,8 @@ pub fn build_router(state: AppState) -> Router {
         .nest("/user-profile", user_profile::router())
         .nest("/notifications", notifications::router())
         .nest("/content", content::router())
+        .nest("/word-favorites", word_favorites::router())
+        .nest("/word-notes", word_notes::router())
         .nest("/wordbook-center", wordbook_center::user_router())
         .nest("/v1", v1::router())
         .nest("/status", status::router())

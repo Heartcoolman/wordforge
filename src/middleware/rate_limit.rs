@@ -185,6 +185,11 @@ pub async fn rate_limit_middleware(
         return Ok(next.run(req).await);
     }
 
+    // 管理员后台不受频率限制
+    if path.starts_with("/api/admin/") {
+        return Ok(next.run(req).await);
+    }
+
     let connect_ip = req
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()

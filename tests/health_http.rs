@@ -54,10 +54,10 @@ async fn it_public_health_hides_upstream_url_and_reports_store() {
 }
 
 #[tokio::test]
-async fn it_public_health_skips_slow_wordbook_center_probe() {
+async fn it_public_health_reports_unreachable_wordbook_center() {
     let app = spawn_test_server().await;
     let mut settings: SystemSettings = app.state.store().get_system_settings().unwrap();
-    settings.wordbook_center_url = Some("https://10.255.255.1/slow-health".to_string());
+    settings.wordbook_center_url = Some("https://10.255.255.1/unreachable".to_string());
     app.state.store().save_system_settings(&settings).unwrap();
 
     let started_at = tokio::time::Instant::now();
@@ -67,10 +67,10 @@ async fn it_public_health_skips_slow_wordbook_center_probe() {
 
     assert_eq!(status, StatusCode::OK);
     assert!(
-        elapsed < Duration::from_secs(1),
-        "public /health should stay fast, got {:?}",
+        elapsed < Duration::from_secs(8),
+        "health check should complete within probe timeout, got {:?}",
         elapsed
     );
-    assert_eq!(body["services"]["wordbookCenter"]["healthy"], true);
-    assert_eq!(body["services"]["wordbookCenter"]["probeSkipped"], true);
+    assert_eq!(body["services"]["wordbookCenter"]["healthy"], false);
+    assert_eq!(body["services"]["wordbookCenter"]["probeSkipped"], false);
 }

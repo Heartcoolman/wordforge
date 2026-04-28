@@ -273,6 +273,23 @@ impl Store {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(states)
     }
+
+    pub fn list_all_user_word_states(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<WordLearningState>, StoreError> {
+        keys::validate_id(user_id)?;
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {WLS_COLS} FROM word_learning_states
+             WHERE user_id=?1
+             ORDER BY updated_at DESC"
+        ))?;
+        let states = stmt
+            .query_map(params![user_id], wls_from_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(states)
+    }
 }
 
 #[cfg(test)]

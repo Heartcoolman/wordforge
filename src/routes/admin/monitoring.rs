@@ -1,3 +1,4 @@
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use axum::extract::State;
@@ -6,6 +7,8 @@ use axum::Router;
 
 use crate::auth::AdminAuthUser;
 use crate::response::{ok, AppError};
+use crate::routes::health::{sse_probe_ok, wordbook_center_probe};
+use crate::routes::realtime::SSE_CONNECTION_COUNT;
 use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
@@ -33,10 +36,16 @@ async fn system_health(
         .run_store_task("admin.monitoring.db_ping", |store| store.db_ping())
         .await
         .is_ok_and(|result| result.is_ok());
-    let status = if store_probe_ok {
-        "healthy"
-    } else {
+    let amas_healthy = state.amas().is_healthy();
+    let sse_healthy = sse_probe_ok(&state);
+    let (wbc_healthy, wbc_probe_skipped) = wordbook_center_probe(&state).await;
+
+    let status = if !store_probe_ok {
+        "down"
+    } else if !amas_healthy || !sse_healthy || !wbc_healthy {
         "degraded"
+    } else {
+        "healthy"
     };
 
     Ok(ok(serde_json::json!({
@@ -45,6 +54,18 @@ async fn system_health(
         "dbSizeBytes": size_on_disk,
         "uptimeSecs": uptime_secs,
         "version": env!("GIT_VERSION"),
+        "services": {
+            "amas": { "healthy": amas_healthy },
+            "sse": {
+                "healthy": sse_healthy,
+                "activeConnections": SSE_CONNECTION_COUNT.load(Ordering::Relaxed),
+                "activeDevices": state.active_sse().len(),
+            },
+            "wordbookCenter": {
+                "healthy": wbc_healthy,
+                "probeSkipped": wbc_probe_skipped,
+            },
+        },
     })))
 }
 

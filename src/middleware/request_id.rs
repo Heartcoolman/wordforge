@@ -4,6 +4,7 @@ use axum::http::{header, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use http_body_util::BodyExt;
+use tracing::Instrument;
 
 use crate::response::ErrorBody;
 
@@ -18,15 +19,14 @@ pub async fn request_id_middleware(req: Request, next: Next) -> Response {
 
     let span = tracing::info_span!("request", request_id = %request_id);
 
-    let mut response = {
-        let _guard = span.enter();
-        let method = req.method().clone();
-        let uri = req.uri().clone();
+    let method = req.method().clone();
+    let uri = req.uri().clone();
 
-        let start = std::time::Instant::now();
-        let response = next.run(req).await;
-        let latency_ms = start.elapsed().as_millis();
+    let start = std::time::Instant::now();
+    let mut response = next.run(req).instrument(span.clone()).await;
+    let latency_ms = start.elapsed().as_millis();
 
+    span.in_scope(|| {
         tracing::info!(
             method = %method,
             path = %uri.path(),
@@ -34,9 +34,7 @@ pub async fn request_id_middleware(req: Request, next: Next) -> Response {
             latency_ms = %latency_ms,
             "request completed"
         );
-
-        response
-    };
+    });
 
     if let Ok(value) = request_id.parse() {
         response.headers_mut().insert("x-request-id", value);

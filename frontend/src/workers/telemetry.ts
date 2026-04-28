@@ -1,10 +1,11 @@
-import { api } from '@/api/client';
+import { api, connectSseStream } from '@/api/client';
 import { collectDeviceFingerprint, getDeviceId } from '@/lib/device';
 import { tokenManager } from '@/lib/token';
 
 const INTERVAL_MS = 5000;
 
 let timer: ReturnType<typeof setInterval> | undefined;
+let stopSseStream: (() => void) | undefined;
 let sessionStart = Date.now();
 
 // Legacy counters (kept for backwards-compat fields)
@@ -160,6 +161,9 @@ export function startTelemetryWorker() {
   if (timer) return;
   sessionStart = Date.now();
   behavior = newBuffer();
+  stopSseStream = connectSseStream({
+    onTelemetryRequest: handleTelemetryRequest,
+  });
 
   document.addEventListener('click', onClickCapture, { capture: true, passive: true });
   window.addEventListener('scroll', onScroll, { passive: true });
@@ -186,6 +190,8 @@ export function stopTelemetryWorker() {
   if (!timer) return;
   clearInterval(timer);
   timer = undefined;
+  stopSseStream?.();
+  stopSseStream = undefined;
   document.removeEventListener('click', onClickCapture, { capture: true });
   window.removeEventListener('scroll', onScroll);
   document.removeEventListener('visibilitychange', onVisibilityChange);

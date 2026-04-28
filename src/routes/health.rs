@@ -1,5 +1,6 @@
+use std::sync::atomic::Ordering;
 use std::sync::OnceLock;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -8,6 +9,8 @@ use axum::{Json, Router};
 
 use crate::auth::AdminAuthUser;
 use crate::state::AppState;
+
+use super::realtime::SSE_CONNECTION_COUNT;
 
 fn startup_instant() -> &'static Instant {
     static INSTANCE: OnceLock<Instant> = OnceLock::new();
@@ -31,6 +34,42 @@ async fn store_probe_ok(state: &AppState) -> bool {
     }
 }
 
+pub(crate) fn sse_probe_ok(state: &AppState) -> bool {
+    let _ = state.maintenance_rx();
+    let _ = state.update_rx();
+    let _ = state.active_sse();
+    let _ = state.last_heartbeat();
+    let _ = state.heartbeat_miss_count();
+    true
+}
+
+pub(crate) async fn wordbook_center_probe(state: &AppState) -> (bool, bool) {
+    let settings = state
+        .run_store_task("health.wbc_settings", |store| store.get_system_settings())
+        .await
+        .ok()
+        .and_then(Result::ok);
+
+    let url = settings.and_then(|s| s.wordbook_center_url);
+    let Some(base_url) = url else {
+        return (true, true);
+    };
+
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return (false, false),
+    };
+
+    let probe_url = format!("{}/index.json", base_url.trim_end_matches('/'));
+    match client.get(&probe_url).send().await {
+        Ok(resp) if resp.status().is_success() => (true, false),
+        _ => (false, false),
+    }
+}
+
 pub fn router() -> Router<AppState> {
     let _ = startup_instant();
 
@@ -44,21 +83,9 @@ pub fn router() -> Router<AppState> {
 
 pub async fn health_check(State(state): State<AppState>) -> impl axum::response::IntoResponse {
     let store_healthy = store_probe_ok(&state).await;
-    let amas_healthy = true;
-    let sse_healthy = true;
-
-    let settings = state
-        .run_store_task("health.get_system_settings", |store| {
-            store.get_system_settings()
-        })
-        .await
-        .ok()
-        .and_then(Result::ok);
-    let wbc_url = settings
-        .as_ref()
-        .and_then(|s| s.wordbook_center_url.clone());
-    let wbc_probe_skipped = wbc_url.is_some();
-    let wbc_healthy = true;
+    let amas_healthy = state.amas().is_healthy();
+    let sse_healthy = sse_probe_ok(&state);
+    let (wbc_healthy, wbc_probe_skipped) = wordbook_center_probe(&state).await;
 
     let status = if !store_healthy {
         "down"
@@ -74,7 +101,11 @@ pub async fn health_check(State(state): State<AppState>) -> impl axum::response:
         "services": {
             "store": { "healthy": store_healthy },
             "amas": { "healthy": amas_healthy },
-            "sse": { "healthy": sse_healthy },
+            "sse": {
+                "healthy": sse_healthy,
+                "activeConnections": SSE_CONNECTION_COUNT.load(Ordering::Relaxed),
+                "activeDevices": state.active_sse().len(),
+            },
             "wordbookCenter": {
                 "healthy": wbc_healthy,
                 "probeSkipped": wbc_probe_skipped

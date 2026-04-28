@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::store::keys;
 use crate::store::{Store, StoreError};
@@ -280,6 +280,66 @@ impl Store {
         )?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(StoreError::from)
+    }
+
+    pub fn get_user_records_between(
+        &self,
+        user_id: &str,
+        start_at: DateTime<Utc>,
+        end_before: DateTime<Utc>,
+    ) -> Result<Vec<LearningRecord>, StoreError> {
+        keys::validate_id(user_id)?;
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {RECORD_COLS} FROM learning_records
+             WHERE user_id=?1 AND created_at >= ?2 AND created_at < ?3
+             ORDER BY created_at ASC"
+        ))?;
+        let rows = stmt.query_map(
+            params![user_id, start_at.to_rfc3339(), end_before.to_rfc3339()],
+            record_from_row,
+        )?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
+    pub fn first_record_times_for_words(
+        &self,
+        user_id: &str,
+        word_ids: &[String],
+    ) -> Result<HashMap<String, DateTime<Utc>>, StoreError> {
+        keys::validate_id(user_id)?;
+        if word_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let conn = self.conn()?;
+        let mut out = HashMap::new();
+        for chunk in word_ids.chunks(400) {
+            let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
+            let sql = format!(
+                "SELECT word_id, MIN(created_at)
+                 FROM learning_records
+                 WHERE user_id = ? AND word_id IN ({})
+                 GROUP BY word_id",
+                placeholders.join(",")
+            );
+            let mut values: Vec<&dyn rusqlite::types::ToSql> = Vec::with_capacity(chunk.len() + 1);
+            values.push(&user_id);
+            for word_id in chunk {
+                values.push(word_id);
+            }
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(values.as_slice(), |row| {
+                let word_id: String = row.get(0)?;
+                let first_at = parse_dt(row.get(1)?)?;
+                Ok((word_id, first_at))
+            })?;
+            for row in rows {
+                let (word_id, first_at) = row?;
+                out.insert(word_id, first_at);
+            }
+        }
+        Ok(out)
     }
 
     pub fn count_user_records_stats(&self, user_id: &str) -> Result<(usize, usize), StoreError> {

@@ -4,7 +4,7 @@ use axum::Router;
 
 use crate::extractors::JsonBody;
 use chrono::Utc;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::auth::AuthUser;
 use crate::response::{created, ok, paginated, AppError};
@@ -16,6 +16,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/system", get(list_system_wordbooks))
         .route("/user", get(list_user_wordbooks))
+        .route("/progress", get(list_wordbook_progress))
         .route("/", post(create_wordbook))
         .route("/:id/words", get(list_wordbook_words).post(add_words))
         .route("/:id/words/:word_id", delete(remove_word))
@@ -89,6 +90,102 @@ async fn create_wordbook(
 struct ListWordbookWordsQuery {
     page: Option<u64>,
     per_page: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WordbookProgressQuery {
+    wordbook_ids: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WordbookProgressResponse {
+    wordbook_id: String,
+    word_count: u64,
+    studied_words: u64,
+    mastered_words: u64,
+    reviewing_words: u64,
+    forgotten_words: u64,
+    progress: f64,
+    mastery_progress: f64,
+    last_studied_at: Option<chrono::DateTime<Utc>>,
+}
+
+fn parse_wordbook_ids(raw: Option<&str>) -> Vec<String> {
+    raw.unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+async fn list_wordbook_progress(
+    auth: AuthUser,
+    Query(q): Query<WordbookProgressQuery>,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let requested_ids = parse_wordbook_ids(q.wordbook_ids.as_deref());
+    if requested_ids.len() > state.config().limits.max_batch_size {
+        return Err(AppError::bad_request(
+            "WORDBOOK_TOO_MANY_IDS",
+            &format!("词书数量上限为{}", state.config().limits.max_batch_size),
+        ));
+    }
+    let user_id = auth.user_id.clone();
+    let progress = state
+        .run_store_task("wordbooks.progress", move |store| -> Result<_, AppError> {
+            let mut books = Vec::new();
+            if requested_ids.is_empty() {
+                books.extend(store.list_system_wordbooks()?);
+                books.extend(store.list_user_wordbooks(&user_id)?);
+            } else {
+                let mut seen = std::collections::HashSet::new();
+                for id in requested_ids {
+                    if !seen.insert(id.clone()) {
+                        continue;
+                    }
+                    let book = store
+                        .get_wordbook(&id)?
+                        .ok_or_else(|| AppError::not_found("词书不存在"))?;
+                    if book.user_id.is_some() && book.user_id.as_deref() != Some(&user_id) {
+                        return Err(AppError::forbidden("您没有该词书的访问权限"));
+                    }
+                    books.push(book);
+                }
+            }
+
+            let mut out = Vec::with_capacity(books.len());
+            for book in books {
+                let stats = store.get_wordbook_progress_stats(&user_id, &book.id)?;
+                let word_count = stats.word_count.max(book.word_count);
+                let progress = if word_count > 0 {
+                    stats.studied_words as f64 / word_count as f64
+                } else {
+                    0.0
+                };
+                let mastery_progress = if word_count > 0 {
+                    stats.mastered_words as f64 / word_count as f64
+                } else {
+                    0.0
+                };
+                out.push(WordbookProgressResponse {
+                    wordbook_id: stats.wordbook_id,
+                    word_count,
+                    studied_words: stats.studied_words,
+                    mastered_words: stats.mastered_words,
+                    reviewing_words: stats.reviewing_words,
+                    forgotten_words: stats.forgotten_words,
+                    progress,
+                    mastery_progress,
+                    last_studied_at: stats.last_studied_at,
+                });
+            }
+            Ok(out)
+        })
+        .await??;
+    Ok(ok(progress))
 }
 
 async fn list_wordbook_words(

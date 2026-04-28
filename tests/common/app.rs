@@ -38,6 +38,7 @@ async fn spawn_with_limits(api_limit: u64) -> TestApp {
             .to_string(),
         api_only: false,
         sqlite_busy_timeout_ms: 5000,
+        sqlite_connection_timeout_ms: 250,
         sqlite_pool_size: 2,
         jwt_secret: test_secret,
         refresh_jwt_secret: test_refresh_secret,
@@ -48,6 +49,7 @@ async fn spawn_with_limits(api_limit: u64) -> TestApp {
         cors_origin: "http://localhost:5173".to_string(),
         trust_proxy: false,
         cookie_secure: false,
+        self_watchdog: Default::default(),
         rate_limit: learning_backend::config::RateLimitConfig {
             window_secs: 60,
             max_requests: api_limit,
@@ -79,10 +81,11 @@ async fn spawn_with_limits(api_limit: u64) -> TestApp {
     };
 
     let store = Arc::new(
-        Store::open(
+        Store::open_with_connection_timeout(
             &config.database_url,
             config.sqlite_busy_timeout_ms,
             config.sqlite_pool_size,
+            config.sqlite_connection_timeout_ms,
         )
         .expect("open store"),
     );

@@ -7,6 +7,7 @@ fn migrations() -> Vec<(&'static str, MigrationFn)> {
         ("001_initial_sqlite", m001_initial),
         ("002_client_management", m002_client_management),
         ("003_telemetry_enhanced", m003_telemetry_enhanced),
+        ("004_user_data_interfaces", m004_user_data_interfaces),
     ]
 }
 
@@ -133,6 +134,57 @@ fn m003_telemetry_enhanced(store: &Store) -> Result<(), StoreError> {
         );
         CREATE INDEX IF NOT EXISTS idx_telemetry_summaries_device
             ON telemetry_summaries(device_id, server_ts DESC);",
+    )?;
+    Ok(())
+}
+
+fn m004_user_data_interfaces(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS word_favorites (
+            user_id TEXT NOT NULL,
+            word_id TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (user_id, word_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_word_favorites_user_created_at
+            ON word_favorites(user_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_word_favorites_word_id
+            ON word_favorites(word_id);
+
+        CREATE TABLE IF NOT EXISTS word_notes (
+            user_id TEXT NOT NULL,
+            id TEXT NOT NULL,
+            word_id TEXT NOT NULL,
+            content TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (user_id, id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_word_notes_user_word
+            ON word_notes(user_id, word_id, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_word_notes_word_id
+            ON word_notes(word_id);
+
+        CREATE TABLE IF NOT EXISTS wordbook_import_history (
+            id TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            source_type TEXT NOT NULL,
+            source_name TEXT DEFAULT NULL,
+            source_url TEXT DEFAULT NULL,
+            status TEXT NOT NULL,
+            wordbook_id TEXT DEFAULT NULL,
+            wordbook_name TEXT DEFAULT NULL,
+            words_imported INTEGER DEFAULT NULL,
+            words_skipped INTEGER DEFAULT NULL,
+            error_message TEXT DEFAULT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_wordbook_import_history_user_created_at
+            ON wordbook_import_history(user_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_wordbook_import_history_wordbook
+            ON wordbook_import_history(wordbook_id);",
     )?;
     Ok(())
 }

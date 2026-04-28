@@ -102,6 +102,17 @@ impl AMASEngine {
         &self.metrics_registry
     }
 
+    pub fn is_healthy(&self) -> bool {
+        if self.get_config().validate().is_err() {
+            return false;
+        }
+        let ssp_enabled = self.get_config().feature_flags.ssp_enabled;
+        if ssp_enabled && self.ssp_policy().is_none() {
+            return false;
+        }
+        true
+    }
+
     fn acquire_user_lock_blocking(&self, user_id: &str) -> Arc<Mutex<()>> {
         let mut locks = self.user_locks.lock().unwrap();
 

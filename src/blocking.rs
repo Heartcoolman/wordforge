@@ -13,10 +13,7 @@ pub struct BlockingTaskError {
 
 impl BlockingTaskError {
     pub fn new(task_name: &'static str, source: JoinError) -> Self {
-        Self {
-            task_name,
-            source,
-        }
+        Self { task_name, source }
     }
 }
 
@@ -44,15 +41,18 @@ static BLOCKING_SEMAPHORE: std::sync::OnceLock<Arc<Semaphore>> = std::sync::Once
 /// Initialize the global blocking semaphore with the given permits.
 /// Should be called once at startup with a value ≥ sqlite_pool_size.
 pub fn init_blocking_semaphore(permits: usize) {
-    BLOCKING_SEMAPHORE
-        .set(Arc::new(Semaphore::new(permits)))
-        .expect("blocking semaphore already initialized");
+    let _ = BLOCKING_SEMAPHORE.set(Arc::new(Semaphore::new(permits.max(1))));
 }
 
 fn blocking_semaphore() -> Arc<Semaphore> {
     BLOCKING_SEMAPHORE
-        .get()
-        .expect("blocking semaphore not initialized — call init_blocking_semaphore() first")
+        .get_or_init(|| {
+            let permits = std::thread::available_parallelism()
+                .map(|parallelism| parallelism.get().saturating_mul(2))
+                .unwrap_or(8)
+                .max(1);
+            Arc::new(Semaphore::new(permits))
+        })
         .clone()
 }
 
@@ -67,7 +67,10 @@ where
     T: Send + 'static,
 {
     let semaphore = blocking_semaphore();
-    let permit = semaphore.acquire().await.expect("blocking semaphore closed");
+    let permit = semaphore
+        .acquire()
+        .await
+        .expect("blocking semaphore closed");
     let result = tokio::task::spawn_blocking(f).await;
     drop(permit);
     result.map_err(|source| BlockingTaskError::new(task_name, source))

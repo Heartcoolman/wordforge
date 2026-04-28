@@ -3,12 +3,13 @@ use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::Router;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 use crate::auth::AdminAuthUser;
 use crate::extractors::JsonBody;
 use crate::response::{ok, AppError};
 use crate::state::{AppState, SseEvent};
-use crate::store::operations::clients::DataChannelStatus;
+use crate::store::operations::clients::{ClientDevice, DataChannelStatus};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -81,7 +82,8 @@ async fn list_clients(
                 .map(|device_id| Ok((device_id.clone(), store.is_device_banned(device_id)?)))
                 .collect::<Result<std::collections::HashMap<String, bool>, crate::store::StoreError>>()?;
 
-            let recently_active_devices = store.get_recently_active_clients(15)?;
+            let recently_active_devices =
+                exclude_live_devices(store.get_recently_active_clients(15)?, &live_device_ids);
             let user_ids: Vec<String> = live_user_ids
                 .into_iter()
                 .chain(
@@ -179,6 +181,17 @@ async fn list_clients(
         "sseLive": sse_live,
         "recentlyActive": recently_active,
     })))
+}
+
+fn exclude_live_devices(
+    devices: Vec<ClientDevice>,
+    live_device_ids: &[String],
+) -> Vec<ClientDevice> {
+    let live: HashSet<&str> = live_device_ids.iter().map(String::as_str).collect();
+    devices
+        .into_iter()
+        .filter(|device| !live.contains(device.device_id.as_str()))
+        .collect()
 }
 
 #[derive(Deserialize)]
@@ -306,4 +319,34 @@ async fn get_telemetry(
     Ok(ok(
         serde_json::json!({ "records": records, "total": total }),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn client(device_id: &str) -> ClientDevice {
+        ClientDevice {
+            device_id: device_id.to_string(),
+            platform: "ios".to_string(),
+            user_id: Some("user-1".to_string()),
+            first_seen_at: "2026-04-25 12:00:00".to_string(),
+            last_seen_at: "2026-04-25 12:01:00".to_string(),
+            is_banned: false,
+            banned_at: None,
+            banned_by: None,
+            ban_reason: None,
+        }
+    }
+
+    #[test]
+    fn recent_clients_exclude_live_devices() {
+        let devices = vec![client("live-device"), client("recent-only")];
+        let live_device_ids = vec!["live-device".to_string()];
+
+        let filtered = exclude_live_devices(devices, &live_device_ids);
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].device_id, "recent-only");
+    }
 }

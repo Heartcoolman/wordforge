@@ -139,6 +139,8 @@ impl Store {
                 "etymologies",
                 "word_morphemes",
                 "alert_dedup",
+                "word_favorites",
+                "word_notes",
             ] {
                 conn.execute(
                     &format!("DELETE FROM {table} WHERE word_id = ?1"),

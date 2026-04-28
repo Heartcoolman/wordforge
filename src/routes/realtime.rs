@@ -12,7 +12,7 @@ use crate::auth::AuthUser;
 use crate::response::AppError;
 use crate::state::{AppState, SseClientInfo};
 
-static SSE_CONNECTION_COUNT: AtomicUsize = AtomicUsize::new(0);
+pub(crate) static SSE_CONNECTION_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 struct SseGuard {
     state: AppState,
@@ -22,17 +22,27 @@ struct SseGuard {
 
 impl Drop for SseGuard {
     fn drop(&mut self) {
-        SSE_CONNECTION_COUNT.fetch_sub(1, Ordering::SeqCst);
+        let _ = SSE_CONNECTION_COUNT.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+            count.checked_sub(1)
+        });
         if let Some(ref did) = self.device_id {
-            if let Some(mut conns) = self.state.active_sse().get_mut(did) {
+            let should_remove_device = if let Some(mut conns) = self.state.active_sse().get_mut(did)
+            {
                 conns.retain(|c| c.conn_id != self.conn_id);
-                if conns.is_empty() {
-                    self.state
-                        .active_sse()
-                        .remove_if(did, |_, conns| conns.is_empty());
-                    self.state.last_heartbeat().remove(did);
-                    self.state.heartbeat_miss_count().remove(did);
-                }
+                conns.is_empty()
+            } else {
+                false
+            };
+
+            if should_remove_device
+                && self
+                    .state
+                    .active_sse()
+                    .remove_if(did, |_, conns| conns.is_empty())
+                    .is_some()
+            {
+                self.state.last_heartbeat().remove(did);
+                self.state.heartbeat_miss_count().remove(did);
             }
         }
     }
@@ -181,4 +191,123 @@ pub async fn sse_handler(
             .interval(Duration::from_secs(15))
             .text("keepalive"),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    use crate::amas::config::AMASConfig;
+    use crate::amas::engine::AMASEngine;
+    use crate::config::{
+        AMASEnvConfig, AuthRateLimitConfig, Config, LLMConfig, RateLimitConfig, UpdateCheckConfig,
+        WorkerConfig,
+    };
+    use crate::store::Store;
+
+    fn test_state() -> AppState {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config = Config {
+            host: "127.0.0.1".parse().unwrap(),
+            port: 3000,
+            log_level: "info".to_string(),
+            enable_file_logs: false,
+            log_dir: "./logs".to_string(),
+            database_url: tmp
+                .path()
+                .join("realtime_guard.db")
+                .to_string_lossy()
+                .to_string(),
+            api_only: false,
+            sqlite_busy_timeout_ms: 5000,
+            sqlite_connection_timeout_ms: 250,
+            sqlite_pool_size: 4,
+            jwt_secret: "test-jwt-secret-abcdefghijklmnopqrstuvwxyz".to_string(),
+            refresh_jwt_secret: "test-refresh-secret-abcdefghijklmnopqrstuvwxyz".to_string(),
+            jwt_expires_in_hours: 24,
+            refresh_token_expires_in_hours: 168,
+            admin_jwt_secret: "test-admin-secret-abcdefghijklmnopqrstuvwxyz".to_string(),
+            admin_jwt_expires_in_hours: 2,
+            cors_origin: "http://localhost:5173".to_string(),
+            trust_proxy: false,
+            cookie_secure: false,
+            self_watchdog: Default::default(),
+            rate_limit: RateLimitConfig {
+                window_secs: 60,
+                max_requests: 100,
+            },
+            auth_rate_limit: AuthRateLimitConfig::default(),
+            worker: WorkerConfig {
+                is_leader: false,
+                enable_llm_advisor: false,
+                enable_monitoring: false,
+            },
+            amas: AMASEnvConfig {
+                ensemble_enabled: true,
+                monitor_sample_rate: 0.05,
+            },
+            amas_config_file: None,
+            llm: LLMConfig {
+                enabled: false,
+                mock: true,
+                api_url: String::new(),
+                api_key: String::new(),
+                timeout_secs: 30,
+            },
+            update_check: UpdateCheckConfig {
+                api_url: String::new(),
+                cache_ttl_secs: 3600,
+            },
+            pagination: Default::default(),
+            limits: Default::default(),
+        };
+        let store = Arc::new(
+            Store::open(
+                &config.database_url,
+                config.sqlite_busy_timeout_ms,
+                config.sqlite_pool_size,
+            )
+            .expect("open test store"),
+        );
+        let amas = Arc::new(AMASEngine::new(AMASConfig::default(), store.clone()));
+        let (shutdown_tx, _) = tokio::sync::broadcast::channel(4);
+        AppState::new(store, amas, &config, shutdown_tx, false)
+    }
+
+    #[test]
+    fn sse_guard_drop_removes_empty_device_without_deadlocking() {
+        let state = test_state();
+        let device_id = "device-1".to_string();
+        let conn_id = "conn-1".to_string();
+        let (tx, _) = tokio::sync::mpsc::unbounded_channel();
+
+        state.active_sse().insert(
+            device_id.clone(),
+            vec![SseClientInfo {
+                conn_id: conn_id.clone(),
+                user_id: "user-1".to_string(),
+                platform: "test".to_string(),
+                connected_at: Instant::now(),
+                tx,
+            }],
+        );
+        state
+            .last_heartbeat()
+            .insert(device_id.clone(), Instant::now());
+        state.heartbeat_miss_count().insert(device_id.clone(), 0);
+        SSE_CONNECTION_COUNT.store(1, Ordering::SeqCst);
+
+        let guard = SseGuard {
+            state: state.clone(),
+            device_id: Some(device_id.clone()),
+            conn_id,
+        };
+        drop(guard);
+
+        assert_eq!(SSE_CONNECTION_COUNT.load(Ordering::SeqCst), 0);
+        assert!(state.active_sse().get(&device_id).is_none());
+        assert!(state.last_heartbeat().get(&device_id).is_none());
+        assert!(state.heartbeat_miss_count().get(&device_id).is_none());
+    }
 }
