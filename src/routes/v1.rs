@@ -127,6 +127,7 @@ async fn create_record(
                 response_time_ms: req.response_time_ms,
                 session_id: None,
                 created_at: now,
+                record_type: crate::store::operations::records::RecordType::All,
             };
             store.create_record(&record)?;
             Ok(record)

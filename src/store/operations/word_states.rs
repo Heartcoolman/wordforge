@@ -219,17 +219,46 @@ impl Store {
     }
 
     pub fn get_word_state_stats(&self, user_id: &str) -> Result<WordStateStats, StoreError> {
+        self.get_word_state_stats_filtered(user_id, None)
+    }
+
+    pub fn get_word_state_stats_filtered(
+        &self,
+        user_id: &str,
+        record_type: Option<crate::store::operations::records::RecordType>,
+    ) -> Result<WordStateStats, StoreError> {
         keys::validate_id(user_id)?;
         let conn = self.conn()?;
-        let mut stmt = conn.prepare(
-            "SELECT state, COUNT(*) FROM word_learning_states WHERE user_id=?1 GROUP BY state",
-        )?;
         let mut stats = WordStateStats::default();
-        let rows = stmt.query_map(params![user_id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-        })?;
-        for row in rows {
-            let (state, count) = row?;
+        let rows: Vec<(String, i64)> = match record_type {
+            None => {
+                let mut stmt = conn.prepare(
+                    "SELECT state, COUNT(*) FROM word_learning_states WHERE user_id=?1 GROUP BY state",
+                )?;
+                let rows = stmt
+                    .query_map(params![user_id], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                rows
+            }
+            Some(rt) => {
+                let mut stmt = conn.prepare(
+                    "SELECT wls.state, COUNT(*) FROM word_learning_states wls
+                     WHERE wls.user_id=?1 AND wls.word_id IN (
+                        SELECT DISTINCT word_id FROM learning_records WHERE user_id=?1 AND record_type=?2
+                     )
+                     GROUP BY wls.state",
+                )?;
+                let rows = stmt
+                    .query_map(params![user_id, rt.as_str()], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                rows
+            }
+        };
+        for (state, count) in rows {
             match state.as_str() {
                 "NEW" => stats.new_count = count as u64,
                 "LEARNING" => stats.learning = count as u64,

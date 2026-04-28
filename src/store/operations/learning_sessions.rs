@@ -364,6 +364,51 @@ impl Store {
         Ok(count as u64)
     }
 
+    pub fn total_session_duration_secs(&self, user_id: &str) -> Result<u64, StoreError> {
+        keys::validate_id(user_id)?;
+        let conn = self.conn()?;
+        let total: Option<i64> = conn.query_row(
+            "SELECT COALESCE(SUM(
+                CASE
+                    WHEN summary_duration_secs IS NOT NULL THEN summary_duration_secs
+                    WHEN status = 'completed' THEN
+                        CAST((julianday(updated_at) - julianday(created_at)) * 86400 AS INTEGER)
+                    ELSE 0
+                END
+             ), 0) FROM learning_sessions WHERE user_id = ?1",
+            params![user_id],
+            |r| r.get(0),
+        )?;
+        Ok(total.unwrap_or(0).max(0) as u64)
+    }
+
+    pub fn daily_session_durations(
+        &self,
+        user_id: &str,
+    ) -> Result<std::collections::HashMap<String, u64>, StoreError> {
+        keys::validate_id(user_id)?;
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT DATE(created_at) AS d, COALESCE(SUM(
+                CASE
+                    WHEN summary_duration_secs IS NOT NULL THEN summary_duration_secs
+                    WHEN status = 'completed' THEN
+                        CAST((julianday(updated_at) - julianday(created_at)) * 86400 AS INTEGER)
+                    ELSE 0
+                END
+             ), 0) FROM learning_sessions WHERE user_id = ?1 GROUP BY d",
+        )?;
+        let rows = stmt.query_map(params![user_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        })?;
+        let mut out = std::collections::HashMap::new();
+        for row in rows {
+            let (day, secs) = row?;
+            out.insert(day, secs.max(0) as u64);
+        }
+        Ok(out)
+    }
+
     pub fn list_learning_sessions_between(
         &self,
         user_id: &str,

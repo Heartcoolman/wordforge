@@ -13,7 +13,7 @@ use crate::constants::{DEFAULT_HALF_LIFE_HOURS, DEFAULT_PAGE_SIZE_RECORDS, MAX_P
 use crate::response::{created, ok, paginated, AppError};
 use crate::state::AppState;
 use crate::store::operations::learning_sessions::LearningSession;
-use crate::store::operations::records::LearningRecord;
+use crate::store::operations::records::{LearningRecord, RecordType};
 use crate::store::operations::word_states::{WordLearningState, WordState};
 
 pub fn router() -> Router<AppState> {
@@ -81,6 +81,14 @@ struct CreateRecordRequest {
     hint_used: Option<bool>,
     #[serde(default)]
     confused_with: Option<String>,
+    #[serde(default)]
+    record_type: Option<RecordType>,
+}
+
+impl CreateRecordRequest {
+    fn record_type_or_default(&self) -> RecordType {
+        self.record_type.unwrap_or_default()
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -257,6 +265,7 @@ async fn process_single_record(
         response_time_ms: req.response_time_ms,
         session_id: req.session_id.clone(),
         created_at: Utc::now(),
+        record_type: req.record_type_or_default(),
     };
     let word_id = req.word_id.clone();
     let record_for_store = record.clone();
@@ -520,6 +529,7 @@ async fn process_batch_record(
         response_time_ms: req.response_time_ms,
         session_id: req.session_id.clone(),
         created_at: Utc::now(),
+        record_type: req.record_type_or_default(),
     };
     let word_id = req.word_id.clone();
     let record_for_store = record.clone();
@@ -681,15 +691,39 @@ struct RecordStatistics {
     total: usize,
     correct: usize,
     accuracy: f64,
+    total_duration_secs: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StatsCategoryQuery {
+    category: Option<String>,
+}
+
+fn parse_category(raw: Option<&str>) -> Result<Option<RecordType>, AppError> {
+    match raw.unwrap_or("all") {
+        "all" => Ok(None),
+        "learning" => Ok(Some(RecordType::Learning)),
+        "review" => Ok(Some(RecordType::Review)),
+        other => Err(AppError::bad_request(
+            "INVALID_CATEGORY",
+            &format!("category 必须是 all、learning 或 review，收到 {other}"),
+        )),
+    }
 }
 
 async fn get_statistics(
     auth: AuthUser,
+    Query(q): Query<StatsCategoryQuery>,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let (total, correct) = state
-        .run_store_task("records.statistics", move |store| {
-            store.count_user_records_stats(&auth.user_id)
+    let category = parse_category(q.category.as_deref())?;
+    let (total, correct, total_duration_secs) = state
+        .run_store_task("records.statistics", move |store| -> Result<_, AppError> {
+            let (total, correct) =
+                store.count_user_records_stats_filtered(&auth.user_id, category)?;
+            let total_duration_secs = store.total_session_duration_secs(&auth.user_id)?;
+            Ok((total, correct, total_duration_secs))
         })
         .await??;
     let accuracy = if total > 0 {
@@ -702,20 +736,40 @@ async fn get_statistics(
         total,
         correct,
         accuracy,
+        total_duration_secs,
     }))
 }
 
 async fn get_enhanced_statistics(
     auth: AuthUser,
+    Query(q): Query<StatsCategoryQuery>,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
+    let category = parse_category(q.category.as_deref())?;
     // 限制单次查询量，后续应改为增量聚合以支持更大数据量
     let max_stats_records = state.config().limits.max_stats_records;
-    let records = state
-        .run_store_task("records.enhanced_statistics", move |store| {
-            store.get_user_records(&auth.user_id, max_stats_records)
-        })
+    let user_id = auth.user_id.clone();
+    let (records, first_times, daily_durations, total_duration_secs) = state
+        .run_store_task(
+            "records.enhanced_statistics",
+            move |store| -> Result<_, AppError> {
+                let records =
+                    store.get_user_records_filtered(&user_id, max_stats_records, category)?;
+                let word_ids: Vec<String> = records
+                    .iter()
+                    .map(|r| r.word_id.clone())
+                    .collect::<std::collections::HashSet<_>>()
+                    .into_iter()
+                    .collect();
+                let first_times = store.first_record_times_for_words(&user_id, &word_ids)?;
+                // 时长走无 cap 的 DB 聚合，避免被 max_stats_records 截断
+                let daily_durations = store.daily_session_durations(&user_id)?;
+                let total_duration_secs = store.total_session_duration_secs(&user_id)?;
+                Ok((records, first_times, daily_durations, total_duration_secs))
+            },
+        )
         .await??;
+
     let total = records.len();
     let correct = records.iter().filter(|r| r.is_correct).count();
     let accuracy = if total > 0 {
@@ -724,31 +778,54 @@ async fn get_enhanced_statistics(
         0.0
     };
 
-    // By-day breakdown
-    let mut by_day: std::collections::BTreeMap<String, (usize, usize)> =
+    #[derive(Default)]
+    struct DayBucket {
+        total: usize,
+        correct: usize,
+        new_words: std::collections::HashSet<String>,
+        duration_secs: u64,
+    }
+
+    // daily 仅基于"有记录"的日期，session-only 日期不进 daily 也不计入 streak
+    let mut by_day: std::collections::BTreeMap<String, DayBucket> =
         std::collections::BTreeMap::new();
     for r in &records {
         let day = r.created_at.format("%Y-%m-%d").to_string();
-        let entry = by_day.entry(day).or_insert((0, 0));
-        entry.0 += 1;
+        let entry = by_day.entry(day.clone()).or_default();
+        entry.total += 1;
         if r.is_correct {
-            entry.1 += 1;
+            entry.correct += 1;
+        }
+        let first_at = first_times
+            .get(&r.word_id)
+            .copied()
+            .unwrap_or(r.created_at);
+        if first_at.format("%Y-%m-%d").to_string() == day {
+            entry.new_words.insert(r.word_id.clone());
+        }
+    }
+    // 把当日 session 时长贴回有记录的日期
+    for (day, bucket) in by_day.iter_mut() {
+        if let Some(secs) = daily_durations.get(day) {
+            bucket.duration_secs = *secs;
         }
     }
 
     let daily: Vec<serde_json::Value> = by_day
         .iter()
-        .map(|(day, (total, correct))| {
+        .map(|(day, b)| {
             serde_json::json!({
                 "date": day,
-                "total": total,
-                "correct": correct,
-                "accuracy": if *total > 0 { *correct as f64 / *total as f64 } else { 0.0 },
+                "total": b.total,
+                "correct": b.correct,
+                "accuracy": if b.total > 0 { b.correct as f64 / b.total as f64 } else { 0.0 },
+                "newWords": b.new_words.len() as u64,
+                "durationSecs": b.duration_secs,
             })
         })
         .collect();
 
-    // Current streak (consecutive days)
+    // 仅基于 record 日期计算 streak，避免 session-only 日期虚增
     let dates: std::collections::BTreeSet<chrono::NaiveDate> = by_day
         .keys()
         .filter_map(|d| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok())
@@ -760,6 +837,7 @@ async fn get_enhanced_statistics(
         "correct": correct,
         "accuracy": accuracy,
         "streak": streak,
+        "totalDurationSecs": total_duration_secs,
         "daily": daily,
     })))
 }

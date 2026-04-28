@@ -19,6 +19,7 @@ pub fn router() -> Router<AppState> {
         .route("/strategy", get(get_strategy))
         .route("/phase", get(get_phase))
         .route("/learning-curve", get(get_learning_curve))
+        .route("/retention-curve", get(get_retention_curve))
         .route("/intervention", get(get_intervention))
         .route("/reset", post(reset_state))
         .route("/mastery/evaluate", get(evaluate_mastery))
@@ -275,6 +276,108 @@ async fn get_learning_curve(
         .collect();
 
     Ok(ok(serde_json::json!({"curve": curve})))
+}
+
+const RETENTION_BUCKETS: &[u32] = &[1, 2, 4, 7, 15, 30];
+
+fn assign_retention_bucket(days_since_learn: f64) -> Option<u32> {
+    // 取最近的桶；要求至少有半天的间隔，否则视为太新不计入
+    if days_since_learn < 0.5 {
+        return None;
+    }
+    let mut best: Option<(u32, f64)> = None;
+    for &b in RETENTION_BUCKETS {
+        let dist = (days_since_learn - b as f64).abs();
+        if best.map(|(_, bd)| dist < bd).unwrap_or(true) {
+            best = Some((b, dist));
+        }
+    }
+    best.map(|(b, _)| b)
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RetentionPoint {
+    days_since_learn: u32,
+    retention: Option<f64>,
+    sample_size: u64,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RetentionCurveResponse {
+    points: Vec<RetentionPoint>,
+    average_retention: Option<f64>,
+}
+
+// GET /api/amas/retention-curve - 按距首次学习天数 1/2/4/7/15/30 聚合保持率
+async fn get_retention_curve(
+    auth: AuthUser,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let memory_config = state.amas().get_config().memory_model;
+    let user_id = auth.user_id.clone();
+    let now = chrono::Utc::now();
+
+    let response = state
+        .run_store_task(
+            "amas.retention_curve",
+            move |store| -> Result<_, AppError> {
+                let states = store.list_all_user_word_states(&user_id)?;
+                let word_ids: Vec<String> = states.iter().map(|s| s.word_id.clone()).collect();
+                let mdm_states = store.batch_get_engine_mastery_mdm_states(&user_id, &word_ids)?;
+                let first_times = store.first_record_times_for_words(&user_id, &word_ids)?;
+
+                let mut sums: std::collections::HashMap<u32, (f64, u64)> =
+                    std::collections::HashMap::new();
+                let mut total_sum = 0.0;
+                let mut total_count: u64 = 0;
+                for s in &states {
+                    let Some(first_at) = first_times.get(&s.word_id) else {
+                        continue;
+                    };
+                    let days = (now - *first_at).num_seconds().max(0) as f64 / 86_400.0;
+                    let Some(bucket) = assign_retention_bucket(days) else {
+                        continue;
+                    };
+                    let retention = crate::routes::analytics::estimated_retention(
+                        s,
+                        mdm_states.get(&s.word_id),
+                        now,
+                        &memory_config,
+                    );
+                    let entry = sums.entry(bucket).or_insert((0.0, 0));
+                    entry.0 += retention;
+                    entry.1 += 1;
+                    total_sum += retention;
+                    total_count += 1;
+                }
+
+                let points: Vec<RetentionPoint> = RETENTION_BUCKETS
+                    .iter()
+                    .map(|&b| {
+                        let (sum, count) = sums.get(&b).copied().unwrap_or((0.0, 0));
+                        RetentionPoint {
+                            days_since_learn: b,
+                            retention: if count > 0 { Some(sum / count as f64) } else { None },
+                            sample_size: count,
+                        }
+                    })
+                    .collect();
+
+                Ok(RetentionCurveResponse {
+                    points,
+                    average_retention: if total_count > 0 {
+                        Some(total_sum / total_count as f64)
+                    } else {
+                        None
+                    },
+                })
+            },
+        )
+        .await??;
+
+    Ok(ok(response))
 }
 
 // B22: GET /api/amas/intervention

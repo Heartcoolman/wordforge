@@ -6,6 +6,34 @@ use std::collections::{HashMap, HashSet};
 use crate::store::keys;
 use crate::store::{Store, StoreError};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RecordType {
+    Learning,
+    Review,
+    #[default]
+    All,
+}
+
+impl RecordType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Learning => "learning",
+            Self::Review => "review",
+            Self::All => "all",
+        }
+    }
+
+    pub fn parse(s: &str) -> Result<Self, StoreError> {
+        match s {
+            "learning" => Ok(Self::Learning),
+            "review" => Ok(Self::Review),
+            "all" => Ok(Self::All),
+            _ => Err(StoreError::Validation(format!("invalid record_type: {s}"))),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LearningRecord {
@@ -16,6 +44,8 @@ pub struct LearningRecord {
     pub response_time_ms: i64,
     pub session_id: Option<String>,
     pub created_at: DateTime<Utc>,
+    #[serde(default)]
+    pub record_type: RecordType,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -28,7 +58,7 @@ pub struct UserStatsAgg {
 }
 
 const RECORD_COLS: &str =
-    "user_id, id, word_id, is_correct, response_time_ms, session_id, created_at";
+    "user_id, id, word_id, is_correct, response_time_ms, session_id, created_at, record_type";
 
 fn parse_dt(s: String) -> rusqlite::Result<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(&s)
@@ -39,6 +69,10 @@ fn parse_dt(s: String) -> rusqlite::Result<DateTime<Utc>> {
 }
 
 fn record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LearningRecord> {
+    let record_type_str: String = row.get(7)?;
+    let record_type = RecordType::parse(&record_type_str).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(7, rusqlite::types::Type::Text, Box::new(e))
+    })?;
     Ok(LearningRecord {
         user_id: row.get(0)?,
         id: row.get(1)?,
@@ -47,6 +81,7 @@ fn record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LearningRecord> 
         response_time_ms: row.get(4)?,
         session_id: row.get(5)?,
         created_at: parse_dt(row.get(6)?)?,
+        record_type,
     })
 }
 
@@ -111,12 +146,13 @@ impl Store {
         keys::validate_id(&record.user_id)?;
         let conn = self.conn()?;
         conn.execute(
-            "INSERT INTO learning_records (user_id, id, word_id, is_correct, response_time_ms, session_id, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO learning_records (user_id, id, word_id, is_correct, response_time_ms, session_id, created_at, record_type)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 &record.user_id, &record.id, &record.word_id,
                 record.is_correct as i64, record.response_time_ms,
                 record.session_id.as_deref(), record.created_at.to_rfc3339(),
+                record.record_type.as_str(),
             ],
         )?;
         Ok(())
@@ -133,12 +169,13 @@ impl Store {
         let tx = conn.transaction()?;
 
         tx.execute(
-            "INSERT INTO learning_records (user_id, id, word_id, is_correct, response_time_ms, session_id, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO learning_records (user_id, id, word_id, is_correct, response_time_ms, session_id, created_at, record_type)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 &record.user_id, &record.id, &record.word_id,
                 record.is_correct as i64, record.response_time_ms,
                 record.session_id.as_deref(), record.created_at.to_rfc3339(),
+                record.record_type.as_str(),
             ],
         )?;
 
@@ -343,14 +380,76 @@ impl Store {
     }
 
     pub fn count_user_records_stats(&self, user_id: &str) -> Result<(usize, usize), StoreError> {
+        self.count_user_records_stats_filtered(user_id, None)
+    }
+
+    pub fn count_user_records_stats_filtered(
+        &self,
+        user_id: &str,
+        record_type: Option<RecordType>,
+    ) -> Result<(usize, usize), StoreError> {
         keys::validate_id(user_id)?;
         let conn = self.conn()?;
-        let (total, correct): (i64, i64) = conn.query_row(
-            "SELECT COUNT(*), SUM(CASE WHEN is_correct=1 THEN 1 ELSE 0 END) FROM learning_records WHERE user_id=?1",
-            params![user_id],
-            |r| Ok((r.get(0)?, r.get::<_, Option<i64>>(1)?.unwrap_or(0))),
-        )?;
+        let (total, correct): (i64, i64) = match record_type {
+            None => conn.query_row(
+                "SELECT COUNT(*), SUM(CASE WHEN is_correct=1 THEN 1 ELSE 0 END) FROM learning_records WHERE user_id=?1",
+                params![user_id],
+                |r| Ok((r.get(0)?, r.get::<_, Option<i64>>(1)?.unwrap_or(0))),
+            )?,
+            Some(rt) => conn.query_row(
+                "SELECT COUNT(*), SUM(CASE WHEN is_correct=1 THEN 1 ELSE 0 END) FROM learning_records WHERE user_id=?1 AND record_type=?2",
+                params![user_id, rt.as_str()],
+                |r| Ok((r.get(0)?, r.get::<_, Option<i64>>(1)?.unwrap_or(0))),
+            )?,
+        };
         Ok((total as usize, correct as usize))
+    }
+
+    pub fn get_user_records_filtered(
+        &self,
+        user_id: &str,
+        limit: usize,
+        record_type: Option<RecordType>,
+    ) -> Result<Vec<LearningRecord>, StoreError> {
+        keys::validate_id(user_id)?;
+        let conn = self.conn()?;
+        match record_type {
+            None => {
+                let mut stmt = conn.prepare(&format!(
+                    "SELECT {RECORD_COLS} FROM learning_records WHERE user_id=?1 ORDER BY created_at DESC LIMIT ?2"
+                ))?;
+                let rows = stmt
+                    .query_map(params![user_id, limit as i64], record_from_row)?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            }
+            Some(rt) => {
+                let mut stmt = conn.prepare(&format!(
+                    "SELECT {RECORD_COLS} FROM learning_records WHERE user_id=?1 AND record_type=?2 ORDER BY created_at DESC LIMIT ?3"
+                ))?;
+                let rows = stmt
+                    .query_map(params![user_id, rt.as_str(), limit as i64], record_from_row)?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            }
+        }
+    }
+
+    pub fn distinct_word_ids_for_type(
+        &self,
+        user_id: &str,
+        record_type: RecordType,
+    ) -> Result<HashSet<String>, StoreError> {
+        keys::validate_id(user_id)?;
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT word_id FROM learning_records WHERE user_id=?1 AND record_type=?2",
+        )?;
+        let rows = stmt.query_map(params![user_id, record_type.as_str()], |r| {
+            r.get::<_, String>(0)
+        })?;
+        rows.collect::<Result<HashSet<_>, _>>()
+            .map_err(StoreError::from)
     }
 
     pub fn count_user_records(&self, user_id: &str) -> Result<usize, StoreError> {
@@ -491,6 +590,7 @@ mod tests {
             response_time_ms: 1000,
             session_id: Some("s1".into()),
             created_at,
+            record_type: RecordType::All,
         }
     }
 

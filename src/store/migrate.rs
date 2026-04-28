@@ -8,6 +8,7 @@ fn migrations() -> Vec<(&'static str, MigrationFn)> {
         ("002_client_management", m002_client_management),
         ("003_telemetry_enhanced", m003_telemetry_enhanced),
         ("004_user_data_interfaces", m004_user_data_interfaces),
+        ("005_learning_record_type", m005_learning_record_type),
     ]
 }
 
@@ -185,6 +186,28 @@ fn m004_user_data_interfaces(store: &Store) -> Result<(), StoreError> {
             ON wordbook_import_history(user_id, created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_wordbook_import_history_wordbook
             ON wordbook_import_history(wordbook_id);",
+    )?;
+    Ok(())
+}
+
+fn m005_learning_record_type(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    let has_column: bool = conn
+        .prepare("PRAGMA table_info(learning_records)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .any(|name| name == "record_type");
+    if !has_column {
+        conn.execute(
+            "ALTER TABLE learning_records ADD COLUMN record_type TEXT NOT NULL DEFAULT 'all'
+             CHECK (record_type IN ('learning', 'review', 'all'))",
+            [],
+        )?;
+    }
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_learning_records_user_type_time
+         ON learning_records(user_id, record_type, created_at DESC)",
+        [],
     )?;
     Ok(())
 }
