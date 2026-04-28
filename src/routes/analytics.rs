@@ -530,7 +530,7 @@ async fn dashboard(
     Ok(ok(response))
 }
 
-fn estimated_retention(
+pub(crate) fn estimated_retention(
     state: &WordLearningState,
     mdm_state: Option<&mdm::MdmState>,
     now: DateTime<Utc>,
