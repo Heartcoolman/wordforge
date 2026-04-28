@@ -79,6 +79,8 @@
 
 **接口：** `POST /api/auth/forgot-password`
 
+> 当前版本邮件发送功能未启用；服务端会创建重置 token 并写入诊断日志，响应中不会返回 token。
+
 | 字段 | 类型 | 必填 | 约束 |
 |---|---|---|---|
 | `email` | string | ✓ | 注册邮箱 |
@@ -91,7 +93,7 @@
 
 | 字段 | 类型 | 必填 | 约束 |
 |---|---|---|---|
-| `token` | string | ✓ | 邮件中收到的重置令牌 |
+| `token` | string | ✓ | 重置令牌；当前版本不会通过响应或邮件下发 |
 
 ---
 
@@ -152,6 +154,7 @@
 | `interactionDensity` | number | — | 交互密度（单位时间内操作次数），浮点数 |
 | `pausedTimeMs` | number | — | 暂停状态的总累计时长，单位毫秒 |
 | `hintUsed` | boolean | — | 是否使用了提示功能；默认 `false` |
+| `confusedWith` | string | — | 易混淆的单词 ID，用于 IAD 混淆词对追踪；被标记后两词间会产生干扰衰减，延长复习间隔 |
 
 **完整示例（含行为指标）：**
 ```json
@@ -181,6 +184,8 @@
   "responseTimeMs": 1850
 }
 ```
+
+**响应要点：** 新记录返回 `amasResult`，其 `ProcessResult` 包含 `sessionId`、`strategy`、`explanation`、`state`、`wordMastery`、`reward`、`coldStartPhase`；重复提交时 `amasResult` 为 `null`。
 
 ---
 
@@ -223,7 +228,7 @@
 | 字段 | 类型 | 必填 | 约束 |
 |---|---|---|---|
 | `excludeWordIds` | string[] | ✓ | 本轮已展示过、需排除的单词 ID；最大 1000 条 |
-| `masteredWordIds` | string[] | — | 已确认掌握的单词 ID（触发状态更新至 Mastered） |
+| `masteredWordIds` | string[] | — | 已确认掌握的单词 ID（触发状态更新至 MASTERED） |
 | `sessionPerformance` | object | — | 本次会话实时表现（见下表） |
 
 `sessionPerformance` 字段：
@@ -388,7 +393,7 @@
 ### 5.3 重置单词学习进度
 
 **接口：** `POST /api/word-states/:wordId/reset`
-**说明：** 重置指定单词的学习进度（回到 New 状态）。
+**说明：** 重置指定单词的学习进度（回到 NEW 状态）。
 
 **请求体：** 空（单词 ID 在路径中）
 
@@ -407,13 +412,13 @@
 | 子字段 | 类型 | 必填 | 约束 |
 |---|---|---|---|
 | `wordId` | string | ✓ | 必须存在于单词库；若该用户尚无学习状态，服务端会自动以默认值初始化 |
-| `state` | enum | — | `New` / `Learning` / `Reviewing` / `Mastered` / `Forgotten` |
+| `state` | enum | — | `NEW` / `LEARNING` / `REVIEWING` / `MASTERED` / `FORGOTTEN` |
 | `masteryLevel` | number | — | 范围 [0.0, 1.0] |
 
 ```json
 {
   "updates": [
-    { "wordId": "<id1>", "state": "Mastered", "masteryLevel": 1.0 },
+    { "wordId": "<id1>", "state": "MASTERED", "masteryLevel": 1.0 },
     { "wordId": "<id2>", "masteryLevel": 0.6 }
   ]
 }
@@ -440,7 +445,7 @@
 
 | 字段 | 类型 | 必填 | 约束 |
 |---|---|---|---|
-| `wordIds` | string[] | ✓ | 最大 500 条；元素均需为已存在的单词 ID |
+| `wordIds` | string[] | ✓ | 最大 500 条；元素为单词 ID（服务端不校验单词是否存在） |
 
 ```json
 {
@@ -480,7 +485,7 @@
 
 | 字段 | 类型 | 必填 | 约束 |
 |---|---|---|---|
-| `selectedWordbookIds` | string[] | — | 选用的系统单词本 ID 列表（ID 必须存在） |
+| `selectedWordbookIds` | string[] | — | 选用的单词本 ID 列表，不限系统或自定义（ID 必须存在） |
 | `dailyWordCount` | number | — | 每日学习单词数，范围 [1, 200] |
 | `studyMode` | enum | — | `normal` / `intensive` / `review` / `casual` |
 | `dailyMasteryTarget` | number | — | 每日掌握目标词数，范围 [1, 100] |
@@ -508,6 +513,8 @@
 | `preferredHours` | number[] | — | 每个元素范围 [0, 23]，代表一天中的整点小时数 |
 | `medianSessionLengthMins` | number | — | 单次学习时长中位数，范围 [1, 480] 分钟 |
 | `sessionsPerDay` | number | — | 每日学习次数，范围 [1, 20] |
+
+错误码：`INVALID_PREFERRED_HOURS`、`INVALID_SESSION_LENGTH`、`INVALID_SESSIONS_PER_DAY`。
 
 ```json
 {
@@ -597,6 +604,7 @@ Content-Length: 102400
 | `interactionDensity` | number | — | 交互密度 |
 | `pausedTimeMs` | number | — | 暂停累计时长（毫秒） |
 | `hintUsed` | boolean | — | 是否使用提示；默认 `false` |
+| `confusedWith` | string | — | 易混淆的单词 ID，用于 IAD 混淆词对追踪 |
 
 ```json
 {
@@ -609,6 +617,8 @@ Content-Length: 102400
   "hintUsed": false
 }
 ```
+
+**响应要点：** 返回 `ProcessResult`，包含 `sessionId`、`strategy`、`explanation`、`state`、`wordMastery`、`reward`、`coldStartPhase`。
 
 ---
 
@@ -658,10 +668,10 @@ Content-Length: 102400
 
 | 字段 | 类型 | 必填 | 约束 |
 |---|---|---|---|
-| `eventType` | string | ✓ | `"periodic"` 或 `"on_demand"` |
+| `eventType` | string | ✓ | `"session_start"` / `"periodic"` / `"on_demand"` |
 | `requestId` | string | 条件必填 | `eventType` 为 `"on_demand"` 时必须提供（来自 SSE `telemetry_request` 事件） |
 | `clientTs` | string | ✓ | 客户端时间，ISO 8601 UTC |
-| `payload` | object | ✓ | 见下方 payload 字段说明 |
+| `payload` | object | ✓ | 见下方 payload 字段说明；`eventType` 为 `"session_start"` 时通常携带 `payload.device` |
 
 **payload 字段说明：**
 
@@ -682,7 +692,7 @@ Content-Length: 102400
 | `touchSupport` | boolean | — |
 | `onlineStatus` | boolean | — |
 
-*会话指标（根级字段，可选）：*
+*会话指标（`payload` 内部顶层字段，可选）：*
 
 | 字段 | 类型 | 约束 |
 |---|---|---|
@@ -697,8 +707,8 @@ Content-Length: 102400
 |---|---|
 | `currentRoute` | string |
 | `clickCount` | number |
-| `clickTargets` | array |
-| `scrollDepthPct` | number (0–1) |
+| `clickTargets` | array，元素为 `{ "label": string, "tag": string }` |
+| `scrollDepthPct` | number (0–100) |
 | `visibilityChanges` | number |
 | `routeChanges` | number |
 
@@ -733,7 +743,10 @@ Content-Length: 102400
     "behavior": {
       "currentRoute": "/learning",
       "clickCount": 85,
-      "scrollDepthPct": 0.6,
+      "clickTargets": [
+        { "label": "Submit", "tag": "button" }
+      ],
+      "scrollDepthPct": 60,
       "visibilityChanges": 1,
       "routeChanges": 4
     },
@@ -777,7 +790,23 @@ Content-Length: 102400
 
 ---
 
-### 13.3 从 URL 导入单词
+### 13.3 批量按 ID 获取单词
+
+**接口：** `POST /api/words/batch-get`（需 Auth Token）
+
+| 字段 | 类型 | 必填 | 约束 |
+|---|---|---|---|
+| `ids` | string[] | ✓ | 最大 500 条 |
+
+```json
+{
+  "ids": ["<id1>", "<id2>", "<id3>"]
+}
+```
+
+---
+
+### 13.4 从 URL 导入单词
 
 **接口：** `POST /api/words/import-url`（需 Admin Token）
 
@@ -807,7 +836,7 @@ Content-Length: 102400
 | 子字段 | 类型 | 必填 | 约束 |
 |---|---|---|---|
 | `text` | string | ✓ | 词素文本，如 `"un-"` |
-| `type` | enum | ✓ | `"prefix"` / `"root"` / `"suffix"` |
+| `type` | string | ✓ | 推荐 `"prefix"` / `"root"` / `"suffix"`；当前服务端不做枚举校验 |
 | `meaning` | string | ✓ | 词素含义 |
 
 ```json

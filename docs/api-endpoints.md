@@ -2,7 +2,7 @@
 
 > 所有接口路径均以 `/api` 为前缀（健康检查除外）。
 > 认证方式、响应结构、错误码等全局约定请参见《API 对接规范文档》。
-> **注意：** 服务器维护期间（503）的响应不包含 `success` 字段，结构为 `{"code":"MAINTENANCE","message":"服务器维护中，请稍后重试"}`，客户端应优先识别 HTTP 状态码 503。详见规范文档 §9。
+> **注意：** 服务器维护期间（503）的响应不包含 `success` 字段，结构为 `{"code":"MAINTENANCE","message":"服务器维护中，请稍后重试","traceId":"..."}`（`traceId` 由请求 ID 中间件自动注入），客户端应优先识别 HTTP 状态码 503。详见规范文档 §9。
 
 ---
 
@@ -67,17 +67,18 @@
 }
 ```
 
-同时写入 Cookie：`token`（access token）、`refresh_token`（HttpOnly）
+同时写入 Cookie：`token`（access token，HttpOnly）、`refresh_token`（HttpOnly）
 
 **错误码：**
 
-| 错误码 | 说明 |
-|---|---|
-| `AUTH_INVALID_EMAIL` | 邮箱格式不合法 |
-| `AUTH_INVALID_USERNAME` | 用户名格式不合法 |
-| `AUTH_WEAK_PASSWORD` | 密码强度不足 |
-| `AUTH_EMAIL_EXISTS` | 邮箱已注册 |
-| `FORBIDDEN` | 注册功能已关闭或系统维护 |
+| HTTP | 错误码 | 说明 |
+|---|---|---|
+| 400 | `AUTH_INVALID_EMAIL` | 邮箱格式不合法 |
+| 400 | `AUTH_INVALID_USERNAME` | 用户名格式不合法 |
+| 400 | `AUTH_WEAK_PASSWORD` | 密码强度不足 |
+| 409 | `AUTH_EMAIL_EXISTS` | 邮箱已注册 |
+| 403 | `FORBIDDEN` | 注册功能已关闭或用户注册数量已达上限 |
+| 503 | `MAINTENANCE` | 系统处于维护中 |
 
 ---
 
@@ -116,9 +117,10 @@
 | HTTP | 错误码 | 说明 |
 |---|---|---|
 | 401 | `AUTH_UNAUTHORIZED` | 邮箱或密码错误 |
-| 403 | `FORBIDDEN` | 账号被管理员封禁，或系统处于维护中 |
+| 403 | `FORBIDDEN` | 账号被管理员封禁 |
 | 429 | `RATE_LIMITED` | 账号因连续登录失败被临时锁定 |
 | 429 | `AUTH_RATE_LIMITED` | 认证端点请求过于频繁（IP 级限流） |
+| 503 | `MAINTENANCE` | 系统处于维护中 |
 
 > 连续登录失败 5 次后，账号将被锁定 15 分钟（返回 `429 RATE_LIMITED`，而非 `FORBIDDEN`）。
 
@@ -167,7 +169,7 @@
 
 ### POST /api/auth/forgot-password
 
-发起密码重置流程（向邮箱发送重置链接）。
+发起密码重置流程（当前版本仅生成重置 token，邮件发送功能尚未启用）。
 
 **认证：** 无
 
@@ -188,6 +190,8 @@
   }
 }
 ```
+
+> 当前版本邮件发送功能未启用；服务端会创建重置 token 并写入诊断日志，响应中不会返回 token。
 
 ---
 
@@ -363,6 +367,12 @@
 }
 ```
 
+**错误码：**
+
+| 错误码 | 说明 |
+|---|---|
+| `INVALID_REWARD_TYPE` | 奖励类型不合法，必须为 standard / explorer / achiever / social 之一 |
+
 ---
 
 ### GET /api/user-profile/cognitive
@@ -392,14 +402,14 @@
 {
   "success": true,
   "data": {
-    "visual": 0.7,
-    "auditory": 0.3,
-    "kinesthetic": 0.5
+    "processingSpeed": 0.7,
+    "memoryCapacity": 0.3,
+    "stability": 0.5
   }
 }
 ```
 
-> 字段由 AMAS 引擎计算，具体字段可能随引擎版本扩展。
+> 字段由 AMAS 引擎的 `cognitiveProfile` 计算得出，与 `/api/user-profile/cognitive` 返回相同字段。具体字段可能随引擎版本扩展。
 
 ---
 
@@ -449,6 +459,8 @@
 }
 ```
 
+> `temporalPerformance` 可能不存在：当用户已通过 `POST /api/user-profile/habit` 保存过习惯偏好，但尚未生成时段表现数据时，响应会省略该字段。
+
 ---
 
 ### POST /api/user-profile/habit
@@ -468,6 +480,14 @@
 - `preferredHours`：数组元素范围 0–23
 - `medianSessionLengthMins`：1–480
 - `sessionsPerDay`：1–20
+
+**错误码：**
+
+| 错误码 | 说明 |
+|---|---|
+| `INVALID_PREFERRED_HOURS` | `preferredHours` 中存在超出 0–23 的小时值 |
+| `INVALID_SESSIONS_PER_DAY` | `sessionsPerDay` 超出 1–20 |
+| `INVALID_SESSION_LENGTH` | `medianSessionLengthMins` 超出 1–480 |
 
 ---
 
@@ -577,11 +597,17 @@
 
 **响应 201：** WordPublic 对象
 
+**错误码：**
+
+| 错误码 | 说明 |
+|---|---|
+| `WORDS_INVALID_PAYLOAD` | `text` 或 `meaning` 为空 |
+
 ---
 
 ### PUT /api/words/:id
 
-更新单词（Admin）。请求体字段同 POST，均为可选。
+更新单词（Admin）。请求体字段同 POST，除 `text` 和 `meaning` 必须存在外其余均可选。`text` 或 `meaning` 传空字符串时保留原值，不更新对应字段。
 
 ---
 
@@ -613,17 +639,19 @@
 }
 ```
 
-**响应 201/200：**
+**响应 201：**
 ```json
 {
   "success": true,
   "data": {
     "count": 2,
-    "skipped": [],
+    "skipped": [0, 2],
     "items": [ ... ]
   }
 }
 ```
+
+> `skipped` 为被忽略条目的输入数组索引（从 0 开始），跳过原因：`text` 或 `meaning` 为空。
 
 ---
 
@@ -720,6 +748,7 @@
 | `interactionDensity` | number | — | 交互密度 |
 | `pausedTimeMs` | number | — | 暂停总时长（毫秒） |
 | `hintUsed` | boolean | — | 是否使用了提示，默认 false |
+| `confusedWith` | string | — | 易混淆单词 ID，用于 IAD 混淆词对追踪 |
 
 **响应 201（新记录）/ 200（重复）：**
 ```json
@@ -732,6 +761,8 @@
   }
 }
 ```
+
+> `amasResult` 为 `ProcessResult`，新记录成功时包含 `sessionId`、`strategy`、`explanation`、`state`、`wordMastery`、`reward`、`coldStartPhase`；重复提交时为 `null`。
 
 > **幂等行为**：服务端基于 `(userId, clientRecordId)` 持久去重，任意时刻再次提交相同 `clientRecordId` 都会返回已有记录（`duplicate: true`），**无 5 秒窗口限制**。若未指定 `clientRecordId`，每次调用都会写入新记录。
 
@@ -848,7 +879,7 @@
   "success": true,
   "data": {
     "sessionId": "<uuid>",
-    "status": "Active",
+    "status": "active",
     "resumed": false,
     "targetMasteryCount": 10,
     "crossSessionHint": {
@@ -921,6 +952,12 @@
 }
 ```
 
+**错误码：**
+
+| 错误码 | 说明 |
+|---|---|
+| `LEARNING_TOO_MANY_EXCLUDES` | `excludeWordIds` 数量超过限制值 |
+
 ---
 
 ### POST /api/learning/adjust-words
@@ -958,6 +995,12 @@
   }
 }
 ```
+
+**错误码：**
+
+| 错误码 | 说明 |
+|---|---|
+| `LEARNING_INVALID_RECENT_PERFORMANCE` | `recentPerformance` 不是 0–1 之间的有限数值 |
 
 ---
 
@@ -1020,6 +1063,13 @@
 
 `priority`：`"error_review"` 或 `"normal"`
 
+**错误码：**
+
+| 错误码 | 说明 |
+|---|---|
+| `LEARNING_NO_ACTIVE_WORDS` | `activeWordIds` 为空 |
+| `LEARNING_TOO_MANY_IDS` | `activeWordIds` 数量超限 |
+
 ---
 
 ### POST /api/learning/generate-options
@@ -1045,6 +1095,13 @@
 }
 ```
 
+**错误码：**
+
+| 错误码 | 说明 |
+|---|---|
+| `LEARNING_INVALID_MODE` | `mode` 仅支持 `word-to-meaning` 或 `meaning-to-word` |
+| `LEARNING_TOO_MANY_IDS` | `poolWordIds` 数量超限 |
+
 ---
 
 ## 7. 单词学习状态
@@ -1057,7 +1114,7 @@
 {
   "userId": "<uuid>",
   "wordId": "<uuid>",
-  "state": "Mastered",
+  "state": "MASTERED",
   "masteryLevel": 0.95,
   "nextReviewDate": "2024-01-20T08:00:00Z",
   "halfLife": 72.0,
@@ -1109,11 +1166,11 @@
 {
   "success": true,
   "data": {
-    "New": 120,
-    "Learning": 85,
-    "Reviewing": 60,
-    "Mastered": 200,
-    "Forgotten": 15
+    "newCount": 120,
+    "learning": 85,
+    "reviewing": 60,
+    "mastered": 200,
+    "forgotten": 15
   }
 }
 ```
@@ -1128,7 +1185,7 @@
 
 ### POST /api/word-states/:wordId/reset
 
-重置指定单词的学习进度（回到 New 状态）。
+重置指定单词的学习进度（回到 NEW 状态）。
 
 ---
 
@@ -1142,7 +1199,7 @@
   "updates": [
     {
       "wordId": "<id>",
-      "state": "Reviewing",
+      "state": "REVIEWING",
       "masteryLevel": 0.6
     }
   ]
@@ -1172,7 +1229,7 @@
   "id": "<uuid>",
   "name": "GRE 核心词汇",
   "description": "3000 个 GRE 高频词",
-  "bookType": "System",
+  "type": "system",
   "userId": null,
   "wordCount": 3000,
   "createdAt": "2024-01-01T00:00:00Z"
@@ -1418,6 +1475,7 @@
 {
   "success": true,
   "data": {
+    "userId": "<uuid>",
     "selectedWordbookIds": ["<id1>"],
     "dailyWordCount": 20,
     "studyMode": "normal",
@@ -1447,7 +1505,13 @@
 **字段约束：**
 - `dailyWordCount`：1–200
 - `dailyMasteryTarget`：1–100
-- `selectedWordbookIds`：需为已存在的系统单词本 ID
+- `selectedWordbookIds`：需为已存在的单词本 ID（不限系统或自定义）
+
+**错误码：**
+
+| 错误码 | 说明 |
+|---|---|
+| `WORDBOOK_NOT_FOUND` | `selectedWordbookIds` 中包含不存在的单词本 ID |
 
 ---
 
@@ -1460,11 +1524,13 @@
 {
   "success": true,
   "data": {
-    "words": [ ...WordPublic... ],
+    "words": [ ...Word... ],
     "target": 20
   }
 }
 ```
+
+> 当前实现返回内部 `Word` 结构，包含 `embedding` 字段（值可能为 `null` 或 number 数组）。普通客户端展示时可忽略该字段。
 
 ---
 
@@ -1506,6 +1572,28 @@
 |---|---|---|---|
 | `limit` | number | 50 | 最多返回数量，范围 1–200 |
 | `unreadOnly` | boolean | false | 仅返回未读 |
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "id": "<uuid>",
+      "userId": "<uuid>",
+      "type": "reminder",
+      "title": "复习提醒",
+      "message": "有单词需要复习",
+      "wordId": "<uuid>",
+      "overdueHours": 3,
+      "read": false,
+      "createdAt": "2024-01-15T08:00:00Z"
+    }
+  ]
+}
+```
+
+`type` 枚举：`system` / `achievement` / `reminder` / `info` / `broadcast`。`wordId`、`overdueHours` 为可选字段，无值时不返回。
 
 ---
 
@@ -1641,11 +1729,13 @@
     "word": "abandon",
     "etymology": "源自古法语 abandoner，含义为...",
     "roots": ["a-", "bandon"],
-    "generated": true,
-    "source": "llm"
+    "generated": false,
+    "source": "rule_based_fallback"
   }
 }
 ```
+
+> `generated` 为 `true` 表示由 LLM 生成；`false` 表示由规则引擎回退生成。`source` 可能为 `"llm"` 或 `"rule_based_fallback"`。
 
 ---
 
@@ -1720,6 +1810,8 @@
 }
 ```
 
+> `type` 是服务端按字符串保存和返回的字段；推荐使用 `"prefix"` / `"root"` / `"suffix"`，但当前实现不做枚举校验。
+
 ---
 
 ### GET /api/content/confusion-pairs/:wordId
@@ -1773,12 +1865,37 @@ AMAS（Adaptive Multi-level Adjustment System）是服务端自适应学习引�
     "lastActiveAt": "2024-01-15T08:00:00Z",
     "sessionEventCount": 12,
     "totalEventCount": 834,
-    "createdAt": "2024-01-01T00:00:00Z"
+    "createdAt": "2024-01-01T00:00:00Z",
+    "cognitiveProfile": {
+      "memoryCapacity": 0.5,
+      "processingSpeed": 0.5,
+      "stability": 0.5
+    },
+    "trendState": {
+      "accuracyTrend": 0.0,
+      "speedTrend": 0.0,
+      "engagementTrend": 0.0
+    },
+    "habitProfile": {
+      "preferredHours": [9, 14, 20],
+      "medianSessionLengthMins": 15.0,
+      "sessionsPerDay": 1.0,
+      "temporalPerformance": {
+        "hourlyStats": [
+          { "sessionCount": 5, "avgAccuracy": 0.85, "avgResponseTimeMs": 1200, "masteryEfficiency": 0.7 }
+        ],
+        "totalSessions": 45
+      }
+    },
+    "lastSessionId": null
   }
 }
 ```
 
-> 结构由 AMAS 引擎定义，除上述关键字段外可能包含 `cognitiveProfile`、`trendState`、`habitProfile` 等扩展字段。
+> `cognitiveProfile.memoryCapacity`、`processingSpeed`、`stability` 范围均为 0.0–1.0。
+> `trendState` 各趋势值正值表示上升，负值表示下降。
+> `habitProfile.preferredHours` ≤ 3 个 0–23 的小时值，`temporalPerformance.hourlyStats` 在冷启动期返回 24 个全零条目（每小时一条），稳定期后填充真实数据。
+> `lastSessionId` 为 `null` 时表示尚无活跃会话。
 
 ---
 
@@ -1874,7 +1991,7 @@ AMAS（Adaptive Multi-level Adjustment System）是服务端自适应学习引�
   "success": true,
   "data": {
     "wordId": "<uuid>",
-    "state": "Reviewing",
+    "state": "REVIEWING",
     "masteryLevel": 0.72,
     "correctStreak": 3,
     "totalAttempts": 8,
@@ -1908,8 +2025,9 @@ AMAS（Adaptive Multi-level Adjustment System）是服务端自适应学习引�
 | `interactionDensity` | number | — | 交互密度 |
 | `pausedTimeMs` | number | — | 暂停累计时长（毫秒） |
 | `hintUsed` | boolean | — | 是否使用提示，默认 false |
+| `confusedWith` | string | — | 易混淆单词 ID，用于 IAD 混淆词对追踪 |
 
-**响应 200：** `ProcessResult` 对象（含 `sessionId`、`strategy`、`state`、`wordMastery`、`reward`、`coldStartPhase`）
+**响应 200：** `ProcessResult` 对象（含 `sessionId`、`strategy`、`explanation`、`state`、`wordMastery`、`reward`、`coldStartPhase`）
 
 ---
 
@@ -1994,9 +2112,9 @@ Server-Sent Events（SSE）持久连接，用于接收服务端实时推送。
 
 | 事件名 (`event:`) | 说明 | `data` JSON 结构 |
 |---|---|---|
-| `amas_state` | AMAS 引擎状态变化（服务端每 5 秒轮询，仅当 `totalEventCount` 增长时推送） | `{"type": "state_change", "attention": <f64>, "fatigue": <f64>, "motivation": <f64>, "confidence": <f64>, "sessionEventCount": <u32>, "totalEventCount": <u64>}` |
-| `maintenance` | 维护模式变化 | `{"type": "maintenance", "active": <bool>}` |
-| `update_available` | 新版本可用 | 更新信息载荷 |
+| `amas_state` | AMAS 引擎状态变化（服务端每 5 秒轮询，仅当 `totalEventCount` 增长时推送） | `{"type": "state_change", "attention": 0.72, "fatigue": 0.28, "motivation": 0.65, "confidence": 0.54, "sessionEventCount": 12, "totalEventCount": 834}` |
+| `maintenance` | 维护模式变化 | `{"type": "maintenance", "active": true}` |
+| `update_available` | 新版本可用 | `{"version": "v0.3.3", "message": "新版本已发布"}` |
 | `telemetry_request` | 服务器请求遥测上报 | `{"type": "telemetry_request", "requestId": "<uuid>"}` |
 | `banned` | 账号被封禁 | `{"type": "banned"}` |
 | `unbanned` | 账号解封 | `{"type": "unbanned"}` |
@@ -2048,7 +2166,10 @@ Server-Sent Events（SSE）持久连接，用于接收服务端实时推送。
     "behavior": {
       "currentRoute": "/learning",
       "clickCount": 45,
-      "scrollDepthPct": 0.8,
+      "clickTargets": [
+        { "label": "Submit", "tag": "button" }
+      ],
+      "scrollDepthPct": 80,
       "visibilityChanges": 2,
       "routeChanges": 3
     },
@@ -2064,10 +2185,21 @@ Server-Sent Events（SSE）持久连接，用于接收服务端实时推送。
 
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
-| `eventType` | string | ✓ | `"periodic"` 或 `"on_demand"` |
+| `eventType` | string | ✓ | `"session_start"` / `"periodic"` / `"on_demand"` |
 | `requestId` | string | 条件必填 | `eventType="on_demand"` 时必须提供 |
 | `clientTs` | string | ✓ | 客户端时间（ISO 8601） |
-| `payload` | object | ✓ | 见上方结构 |
+| `payload` | object | ✓ | 见上方结构；`eventType="session_start"` 时通常携带 `payload.device` |
+
+`payload.behavior` 可选字段：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `currentRoute` | string | 当前路由 |
+| `clickCount` | number | 点击次数 |
+| `clickTargets` | array | 点击目标对象列表，元素为 `{ "label": string, "tag": string }` |
+| `scrollDepthPct` | number | 页面滚动深度百分比，0–100 |
+| `visibilityChanges` | number | 可见性变化次数 |
+| `routeChanges` | number | 路由变化次数 |
 
 **响应 200：**
 ```json
@@ -2096,12 +2228,12 @@ Server-Sent Events（SSE）持久连接，用于接收服务端实时推送。
   "success": true,
   "data": {
     "maintenanceMode": false,
-    "version": "v0.3.0-5-gabcdef"
+    "version": "v0.3.2"
   }
 }
 ```
 
-> `version` 为构建时注入的 **git describe** 字符串（如 `v0.3.0` 或 `v0.3.0-5-gabcdef`），非严格 semver。
+> `version` 为构建时注入的 git tag 名称（如 `v0.3.2`），非严格 semver。
 
 ---
 
@@ -2140,7 +2272,11 @@ Server-Sent Events（SSE）持久连接，用于接收服务端实时推送。
   "services": {
     "store": { "healthy": true },
     "amas": { "healthy": true },
-    "sse": { "healthy": true },
+    "sse": {
+      "healthy": true,
+      "activeConnections": 5,
+      "activeDevices": 3
+    },
     "wordbookCenter": { "healthy": true, "probeSkipped": false }
   }
 }
@@ -2148,7 +2284,7 @@ Server-Sent Events（SSE）持久连接，用于接收服务端实时推送。
 
 `status`：`"ok"` / `"degraded"` / `"down"`
 
-> **探测范围说明**：目前仅 `store.healthy` 会反映数据库实际探测结果；`amas` / `sse` / `wordbookCenter` 字段为**位置占位**，当前版本恒为 `true`，客户端不应依赖它们作为真实探测结果。
+> **探测范围说明**：`store.healthy` 反映数据库实际探测结果；`amas.healthy` 反映 AMAS 引擎状态（真实检测）；`sse.healthy` 当前版本只做结构探测，返回 `true`；`wordbookCenter.healthy` 在配置了远程 URL 时执行真实 HTTP 探测。`status` 可能为 `"ok"` / `"degraded"` / `"down"`。
 
 ---
 
@@ -2195,7 +2331,7 @@ AMAS 算法指标快照（需 Admin Token）。
 
 ### GET /api/v1/words
 
-分页获取单词列表。查询参数同 `/api/words`。
+分页获取单词列表。仅支持 `page`、`perPage` 查询参数；v1 兼容层不支持 `search`。
 
 ---
 

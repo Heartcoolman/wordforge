@@ -108,7 +108,7 @@ accessToken 过期 → POST /api/auth/refresh（携带 refresh_token）
 | `ratelimit-limit` | 当前窗口最大请求数 |
 | `ratelimit-remaining` | 当前窗口剩余可用次数 |
 | `ratelimit-reset` | 窗口重置时间（Unix 时间戳） |
-| `retry-after` | 触发限流时等待秒数（仅 429 响应） |
+| `retry-after` | 当前限流窗口总秒数（仅 429 响应） |
 
 ---
 
@@ -122,6 +122,8 @@ accessToken 过期 → POST /api/auth/refresh（携带 refresh_token）
   "data": <T>
 }
 ```
+
+> `/health*` 健康检查接口不使用统一 `success/data` 包装：`/health`、`/health/database`、`/health/metrics` 直接返回各自的健康数据；`/health/live` 和 `/health/ready` 可能只返回 HTTP 状态码。
 
 ### 4.2 分页响应
 
@@ -145,9 +147,11 @@ accessToken 过期 → POST /api/auth/refresh（携带 refresh_token）
   "success": false,
   "code": "AUTH_UNAUTHORIZED",
   "message": "令牌无效或已过期",
-  "traceId": null
+  "traceId": "f47ac10b-58cc-4372-a567-0e02b2c3d479"
 }
 ```
+
+> 当前中间件返回的 `CLIENT_BANNED` 和 `MAINTENANCE` 错误体不包含 `success: false`，结构为 `{"code":"...","message":"...","traceId":"..."}`。客户端应优先按 HTTP 状态码和 `code` 判断错误类型。
 
 > 5xx 错误的 `message` 统一返回 `"服务器内部错误"`，具体原因仅记录在服务端日志中。
 
@@ -163,7 +167,7 @@ accessToken 过期 → POST /api/auth/refresh（携带 refresh_token）
 | 400 | `VALIDATION_ERROR` | 字段校验失败（来自 Store 层） |
 | 400 | 业务错误码 | 各模块自定义前缀码，如 `AUTH_*` / `LEARNING_*` / `WORDS_*` / `WORDBOOK_*` / `BATCH_TOO_LARGE` 等 |
 | 401 | `AUTH_UNAUTHORIZED` | 未携带 token 或 token 失效 |
-| 403 | `FORBIDDEN` | 无权限、账号被封禁、注册关闭或处于维护中 |
+| 403 | `FORBIDDEN` | 无权限、账号被封禁、注册关闭或用户数量达到上限 |
 | 403 | `CLIENT_BANNED` | 设备被封禁（由中间件拦截） |
 | 404 | `NOT_FOUND` | 资源不存在 |
 | 409 | `CONFLICT` | 资源冲突（如邮箱已注册） |
@@ -171,7 +175,7 @@ accessToken 过期 → POST /api/auth/refresh（携带 refresh_token）
 | 429 | `RATE_LIMITED` | 触发通用限流或**账号因登录失败锁定** |
 | 429 | `AUTH_RATE_LIMITED` | 触发认证端点限流 |
 | 500 | `INTERNAL_ERROR` | 服务端内部错误（`message` 统一脱敏为 `服务器内部错误`） |
-| 503 | `MAINTENANCE` | 服务器维护中（响应体结构见 §9） |
+| 503 | `MAINTENANCE` | 服务器维护中（响应体结构见 §9，客户端应按 HTTP 503 或 `code=MAINTENANCE` 识别） |
 
 > **注意**：账号被管理员封禁返回 `403 FORBIDDEN`；账号因**连续登录失败 5 次**被临时锁定则返回 `429 RATE_LIMITED`，两者不同。
 
@@ -225,7 +229,7 @@ accessToken 过期 → POST /api/auth/refresh（携带 refresh_token）
 | `page` | number | 1 | 页码，从 1 开始 |
 | `perPage` | number | 20（`/api/v1` 记录类为 50） | 每页条数，最大 100 |
 
-分页响应结构见第 4.2 节。`page` 不会返回大于 `totalPages` 的值。
+分页响应结构见第 4.2 节。响应中的 `page` 为请求传入的页码，可能大于 `totalPages`。
 
 ---
 
@@ -233,7 +237,7 @@ accessToken 过期 → POST /api/auth/refresh（携带 refresh_token）
 
 - 批量接口（`/batch`、`/batch-get` 等）的数组长度上限由服务器 `max_batch_size` 配置决定（默认 500）
 - 批量操作部分失败时：HTTP 200，响应体包含 `errors` 数组指出失败条目
-- 全部成功时：HTTP 201
+- 批量操作全部成功时：创建类返回 201，查询/更新类返回 200
 
 ---
 
@@ -250,11 +254,12 @@ accessToken 过期 → POST /api/auth/refresh（携带 refresh_token）
 ```json
 {
   "code": "MAINTENANCE",
-  "message": "服务器维护中，请稍后重试"
+  "message": "服务器维护中，请稍后重试",
+  "traceId": "f47ac10b-58cc-4372-a567-0e02b2c3d479"
 }
 ```
 
-> 维护响应**不包含 `success` 字段**，是唯一与通用错误结构不一致的响应。客户端判断时应优先识别 HTTP 状态码 503 或 `code` 字段。
+> 维护响应**不包含 `success` 字段**。`traceId` 由请求 ID 中间件自动注入。客户端判断时应优先识别 HTTP 状态码 503 或 `code` 字段。
 
 ---
 
@@ -266,6 +271,6 @@ accessToken 过期 → POST /api/auth/refresh（携带 refresh_token）
 | 时间戳 | ISO 8601 UTC，如 `"2024-01-15T08:30:00Z"` |
 | 浮点数 | IEEE 754 f64 |
 | 概率/比率 | 0.0 ~ 1.0 的 f64 |
-| 单词学习状态枚举 | `"New"` / `"Learning"` / `"Reviewing"` / `"Mastered"` / `"Forgotten"` |
-| 会话状态枚举 | `"Active"` / `"Completed"` |
-| 单词本类型枚举 | `"System"` / `"User"` |
+| 单词学习状态枚举 | `"NEW"` / `"LEARNING"` / `"REVIEWING"` / `"MASTERED"` / `"FORGOTTEN"` |
+| 会话状态枚举 | `"active"` / `"completed"` / `"abandoned"` |
+| 单词本类型枚举 | `"system"` / `"user"`（字段名为 `type`） |
