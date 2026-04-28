@@ -1,15 +1,15 @@
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::routing::{get, post};
 use axum::Router;
 
 use crate::extractors::JsonBody;
-use chrono::Utc;
+use chrono::{DateTime, Duration, LocalResult, NaiveDate, TimeZone, Utc};
 use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
 
 use crate::amas::word_selector::{self, SessionSelectionContext};
 use crate::auth::AuthUser;
-use crate::response::{ok, AppError};
+use crate::response::{ok, paginated, AppError};
 use crate::routes::words::WordPublic;
 use crate::state::AppState;
 use crate::store::operations::learning_sessions::{LearningSession, SessionStatus, SessionSummary};
@@ -17,6 +17,7 @@ use crate::store::operations::learning_sessions::{LearningSession, SessionStatus
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/session", post(create_or_resume_session))
+        .route("/sessions", get(list_sessions))
         .route("/study-words", get(get_study_words))
         .route("/next-words", post(next_words))
         .route("/adjust-words", post(adjust_words))
@@ -24,6 +25,172 @@ pub fn router() -> Router<AppState> {
         .route("/complete-session", post(complete_session))
         .route("/pick-next-word", post(pick_next_word))
         .route("/generate-options", post(generate_options))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ListSessionsQuery {
+    page: Option<u64>,
+    per_page: Option<u64>,
+    start_date: Option<String>,
+    end_date: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LearningSessionHistoryItem {
+    session_id: String,
+    status: SessionStatus,
+    started_at: DateTime<Utc>,
+    completed_at: Option<DateTime<Utc>>,
+    duration_secs: u64,
+    record_count: u64,
+    correct_count: u64,
+    accuracy: Option<f64>,
+    mastered_word_count: u64,
+    error_prone_word_count: u64,
+}
+
+fn shanghai_midnight(date: NaiveDate) -> Result<DateTime<Utc>, AppError> {
+    let tz: chrono_tz::Tz = "Asia/Shanghai"
+        .parse()
+        .map_err(|_| AppError::internal("invalid default timezone"))?;
+    let naive = date
+        .and_hms_opt(0, 0, 0)
+        .ok_or_else(|| AppError::internal("invalid date"))?;
+    let local = match tz.from_local_datetime(&naive) {
+        LocalResult::Single(dt) => dt,
+        LocalResult::Ambiguous(first, _) => first,
+        LocalResult::None => {
+            return Err(AppError::internal(
+                "failed to resolve Asia/Shanghai local midnight",
+            ))
+        }
+    };
+    Ok(local.with_timezone(&Utc))
+}
+
+fn parse_query_date(value: &str, field: &str) -> Result<NaiveDate, AppError> {
+    NaiveDate::parse_from_str(value, "%Y-%m-%d").map_err(|_| {
+        AppError::bad_request(
+            "LEARNING_INVALID_DATE",
+            &format!("{field} 必须是 yyyy-MM-dd 格式"),
+        )
+    })
+}
+
+fn history_duration_secs(session: &LearningSession) -> u64 {
+    if let Some(summary) = &session.summary {
+        return summary.duration_secs.max(0) as u64;
+    }
+    if session.status == SessionStatus::Completed || session.status == SessionStatus::Abandoned {
+        return (session.updated_at - session.created_at)
+            .num_seconds()
+            .max(0) as u64;
+    }
+    0
+}
+
+fn history_item(session: LearningSession) -> LearningSessionHistoryItem {
+    let duration_secs = history_duration_secs(&session);
+    let record_count = if session.total_count > 0 {
+        session.total_count as u64
+    } else {
+        session.total_questions as u64
+    };
+    let correct_count = session.correct_count as u64;
+    let accuracy = session
+        .summary
+        .as_ref()
+        .map(|summary| summary.accuracy)
+        .or_else(|| {
+            if record_count > 0 {
+                Some(correct_count as f64 / record_count as f64)
+            } else {
+                None
+            }
+        });
+    let mastered_word_count = session
+        .summary
+        .as_ref()
+        .map(|summary| summary.mastered_word_ids.len() as u64)
+        .unwrap_or(session.actual_mastery_count as u64);
+    let error_prone_word_count = session
+        .summary
+        .as_ref()
+        .map(|summary| summary.error_prone_word_ids.len() as u64)
+        .unwrap_or(0);
+    let completed_at = if session.status == SessionStatus::Completed {
+        Some(session.updated_at)
+    } else {
+        None
+    };
+    let status = session.status.clone();
+
+    LearningSessionHistoryItem {
+        session_id: session.id,
+        status,
+        started_at: session.created_at,
+        completed_at,
+        duration_secs,
+        record_count,
+        correct_count,
+        accuracy,
+        mastered_word_count,
+        error_prone_word_count,
+    }
+}
+
+async fn list_sessions(
+    auth: AuthUser,
+    Query(q): Query<ListSessionsQuery>,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let page = q.page.unwrap_or(1).max(1);
+    let per_page = q
+        .per_page
+        .unwrap_or(state.config().pagination.default_page_size)
+        .clamp(1, state.config().pagination.max_page_size);
+    let start_at = match q.start_date.as_deref() {
+        Some(raw) => Some(shanghai_midnight(parse_query_date(raw, "startDate")?)?),
+        None => None,
+    };
+    let end_before = match q.end_date.as_deref() {
+        Some(raw) => {
+            let date = parse_query_date(raw, "endDate")?;
+            Some(shanghai_midnight(date + Duration::days(1))?)
+        }
+        None => None,
+    };
+    if let (Some(start), Some(end)) = (start_at, end_before) {
+        if start >= end {
+            return Err(AppError::bad_request(
+                "LEARNING_INVALID_DATE_RANGE",
+                "startDate 必须早于或等于 endDate",
+            ));
+        }
+    }
+
+    let limit = per_page as usize;
+    let offset = ((page - 1) * per_page) as usize;
+    let user_id = auth.user_id.clone();
+    let (sessions, total) = state
+        .run_store_task("learning.sessions", move |store| {
+            Ok::<_, crate::store::StoreError>((
+                store.list_learning_sessions_for_user(
+                    &user_id, limit, offset, start_at, end_before,
+                )?,
+                store.count_learning_sessions_for_user(&user_id, start_at, end_before)?,
+            ))
+        })
+        .await??;
+
+    Ok(paginated(
+        sessions.into_iter().map(history_item).collect::<Vec<_>>(),
+        total,
+        page,
+        per_page,
+    ))
 }
 
 #[derive(Debug, Deserialize, Default)]

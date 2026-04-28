@@ -9,10 +9,10 @@ use std::net::IpAddr;
 use crate::auth::{AdminAuthUser, AuthUser};
 use crate::constants::{DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE};
 use crate::extractors::JsonBody;
-use crate::response::{created, ok, AppError};
+use crate::response::{created, ok, paginated, AppError};
 use crate::routes::words::{resolve_import_url_addrs, validate_import_url};
 use crate::state::AppState;
-use crate::store::operations::wb_center::WordbookCenterImport;
+use crate::store::operations::wb_center::{WordbookCenterImport, WordbookImportHistory};
 use crate::store::operations::wordbooks::{Wordbook, WordbookType};
 use crate::store::operations::words::Word;
 
@@ -113,6 +113,13 @@ struct PreviewQuery {
     per_page: Option<u64>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportHistoryQuery {
+    page: Option<u64>,
+    per_page: Option<u64>,
+}
+
 // ── Admin routes ──
 
 pub fn admin_router() -> Router<AppState> {
@@ -130,6 +137,7 @@ pub fn user_router() -> Router<AppState> {
     Router::new()
         .route("/browse", get(user_browse))
         .route("/browse/:id", get(user_preview))
+        .route("/import-history", get(user_import_history))
         .route("/import/:id", post(user_import))
         .route("/import-url", post(user_import_url))
         .route("/updates", get(user_updates))
@@ -455,6 +463,88 @@ async fn do_sync(
         sync_remote_wordbook_import(&store, &import_record, remote)
     })
     .await?
+}
+
+fn source_name_from_url(url: &str) -> Option<String> {
+    url.rsplit('/')
+        .next()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn truncate_error_message(message: &str) -> String {
+    message.chars().take(1000).collect()
+}
+
+fn success_import_history(
+    user_id: &str,
+    source_type: &str,
+    source_name: Option<String>,
+    source_url: Option<String>,
+    result: &serde_json::Value,
+) -> WordbookImportHistory {
+    let wordbook = result.get("wordbook");
+    WordbookImportHistory {
+        id: uuid::Uuid::new_v4().to_string(),
+        user_id: user_id.to_string(),
+        source_type: source_type.to_string(),
+        source_name,
+        source_url,
+        status: "success".to_string(),
+        wordbook_id: wordbook
+            .and_then(|value| value.get("id"))
+            .and_then(|value| value.as_str())
+            .map(ToOwned::to_owned),
+        wordbook_name: wordbook
+            .and_then(|value| value.get("name"))
+            .and_then(|value| value.as_str())
+            .map(ToOwned::to_owned),
+        words_imported: result.get("wordsImported").and_then(|value| value.as_u64()),
+        words_skipped: result.get("wordsSkipped").and_then(|value| value.as_u64()),
+        error_message: None,
+        created_at: Utc::now(),
+    }
+}
+
+fn failed_import_history(
+    user_id: &str,
+    source_type: &str,
+    source_name: Option<String>,
+    source_url: Option<String>,
+    error: &AppError,
+) -> WordbookImportHistory {
+    WordbookImportHistory {
+        id: uuid::Uuid::new_v4().to_string(),
+        user_id: user_id.to_string(),
+        source_type: source_type.to_string(),
+        source_name,
+        source_url,
+        status: "failed".to_string(),
+        wordbook_id: None,
+        wordbook_name: None,
+        words_imported: None,
+        words_skipped: None,
+        error_message: Some(truncate_error_message(&error.message)),
+        created_at: Utc::now(),
+    }
+}
+
+async fn record_import_history(state: &AppState, history: WordbookImportHistory) {
+    match state
+        .run_store_task("wordbook_center.import_history.persist", move |store| {
+            store.insert_wordbook_import_history(&history)
+        })
+        .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::warn!(error = %error, "Failed to persist wordbook import history");
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "Failed to persist wordbook import history");
+        }
+    }
 }
 
 fn paginated_words(
@@ -804,11 +894,38 @@ async fn user_preview(
     })))
 }
 
+async fn user_import_history(
+    auth: AuthUser,
+    Query(q): Query<ImportHistoryQuery>,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let page = q.page.unwrap_or(1).max(1);
+    let per_page = q
+        .per_page
+        .unwrap_or(DEFAULT_PAGE_SIZE)
+        .clamp(1, MAX_PAGE_SIZE);
+    let user_id = auth.user_id.clone();
+    let all = state
+        .run_store_task("wordbook_center.import_history", move |store| {
+            store.list_wordbook_import_history(&user_id)
+        })
+        .await??;
+    let total = all.len() as u64;
+    let offset = ((page - 1) * per_page) as usize;
+    let items = all
+        .into_iter()
+        .skip(offset)
+        .take(per_page as usize)
+        .collect::<Vec<_>>();
+    Ok(paginated(items, total, page, per_page))
+}
+
 async fn user_import(
     auth: AuthUser,
     Path(id): Path<String>,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
+    let user_id = auth.user_id.clone();
     let base_url = get_user_wb_center_url(&state, &auth.user_id)
         .await?
         .ok_or_else(|| {
@@ -820,10 +937,27 @@ async fn user_import(
         &base_url,
         &id,
         WordbookType::User,
-        Some(auth.user_id),
+        Some(user_id.clone()),
     )
-    .await?;
-    Ok(created(result))
+    .await;
+    match result {
+        Ok(result) => {
+            record_import_history(
+                &state,
+                success_import_history(&user_id, "center", Some(id), Some(base_url), &result),
+            )
+            .await;
+            Ok(created(result))
+        }
+        Err(error) => {
+            record_import_history(
+                &state,
+                failed_import_history(&user_id, "center", Some(id), Some(base_url), &error),
+            )
+            .await;
+            Err(error)
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -836,24 +970,85 @@ async fn user_import_url(
     State(state): State<AppState>,
     JsonBody(req): JsonBody<ImportUrlRequest>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
+    let user_id_value = auth.user_id.clone();
+    let source_name = source_name_from_url(&req.url);
+    let source_url_for_history = Some(req.url.clone());
     // Validate URL (SSRF protection)
-    validate_import_url(&req.url)?;
+    if let Err(error) = validate_import_url(&req.url) {
+        record_import_history(
+            &state,
+            failed_import_history(
+                &user_id_value,
+                "url",
+                source_name.clone(),
+                source_url_for_history.clone(),
+                &error,
+            ),
+        )
+        .await;
+        return Err(error);
+    }
 
     // Split URL into base and filename for fetch
     let (base, file) = req.url.rsplit_once('/').unwrap_or((&req.url, ""));
 
-    let remote: RemoteWordbook = fetch_remote_json(base, file).await?;
+    let remote: RemoteWordbook = match fetch_remote_json(base, file).await {
+        Ok(remote) => remote,
+        Err(error) => {
+            record_import_history(
+                &state,
+                failed_import_history(
+                    &user_id_value,
+                    "url",
+                    source_name.clone(),
+                    source_url_for_history.clone(),
+                    &error,
+                ),
+            )
+            .await;
+            return Err(error);
+        }
+    };
 
     // Use the full URL as source for dedup
     let source_url = req.url.clone();
     let store = state.store().clone();
-    let user_id = Some(auth.user_id);
+    let user_id = Some(user_id_value.clone());
     let result = crate::blocking::run_blocking("wordbook_center.user_import_url", move || {
         persist_remote_wordbook_import(&store, &source_url, remote, WordbookType::User, user_id)
     })
-    .await??;
+    .await?;
 
-    Ok(created(result))
+    match result {
+        Ok(result) => {
+            record_import_history(
+                &state,
+                success_import_history(
+                    &user_id_value,
+                    "url",
+                    source_name,
+                    source_url_for_history,
+                    &result,
+                ),
+            )
+            .await;
+            Ok(created(result))
+        }
+        Err(app_error) => {
+            record_import_history(
+                &state,
+                failed_import_history(
+                    &user_id_value,
+                    "url",
+                    source_name,
+                    source_url_for_history,
+                    &app_error,
+                ),
+            )
+            .await;
+            Err(app_error)
+        }
+    }
 }
 
 async fn user_updates(

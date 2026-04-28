@@ -1,4 +1,5 @@
 pub mod admin;
+pub mod analytics;
 pub mod auth;
 pub mod content;
 pub mod health;
@@ -12,6 +13,8 @@ pub mod telemetry;
 pub mod user_profile;
 pub mod users;
 pub mod v1;
+pub mod word_favorites;
+pub mod word_notes;
 pub mod word_states;
 pub mod wordbook_center;
 pub mod wordbooks;
@@ -63,6 +66,7 @@ pub fn build_router(state: AppState) -> Router {
         .nest("/users", users::router())
         .nest("/words", words::router())
         .nest("/records", records::router())
+        .nest("/analytics", analytics::router())
         .nest("/amas", admin::amas::router())
         .nest(
             "/admin/auth",
@@ -77,6 +81,8 @@ pub fn build_router(state: AppState) -> Router {
         .nest("/user-profile", user_profile::router())
         .nest("/notifications", notifications::router())
         .nest("/content", content::router())
+        .nest("/word-favorites", word_favorites::router())
+        .nest("/word-notes", word_notes::router())
         .nest("/wordbook-center", wordbook_center::user_router())
         .nest("/v1", v1::router())
         .nest("/status", status::router())
