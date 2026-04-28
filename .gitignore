@@ -30,6 +30,7 @@ static/index.html
 .cursor/
 .vscode/
 .idea/
+.claude/worktrees/
 
 # Workspace crates
 crates/*/target/
