@@ -1,3 +1,4 @@
+pub mod admin_analytics;
 pub mod admins;
 pub mod clients;
 pub mod elo;
