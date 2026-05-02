@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 
 use crate::constants::MAX_CAS_RETRIES;
@@ -271,6 +271,155 @@ impl Store {
         Ok(sessions)
     }
 
+    pub fn get_session_shown_word_ids(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<String>, StoreError> {
+        keys::validate_id(session_id)?;
+        let conn = self.conn()?;
+        let mut stmt = conn
+            .prepare("SELECT word_id FROM session_shown_words WHERE session_id = ?1")?;
+        let rows = stmt
+            .query_map(params![session_id], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn get_session_shown_word_ids_for_batch(
+        &self,
+        session_id: &str,
+        batch_index: u32,
+    ) -> Result<Vec<String>, StoreError> {
+        keys::validate_id(session_id)?;
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT word_id FROM session_shown_words \
+             WHERE session_id = ?1 AND batch_index = ?2 \
+             ORDER BY shown_at ASC, word_id ASC",
+        )?;
+        let rows = stmt
+            .query_map(params![session_id, batch_index as i64], |row| {
+                row.get::<_, String>(0)
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// 原子地认领展示批次。
+    ///
+    /// - `requested_batch_index = Some(idx)`：幂等重放路径。命中已持久化批次直接返回；
+    ///   否则在同一 `BEGIN IMMEDIATE` 事务内插入并返回。
+    /// - `requested_batch_index = None`：legacy 客户端，服务端分配下一个未占用的 batch_index，
+    ///   绕过重放语义，避免 batch 0 被无限复读。
+    ///
+    /// `INSERT OR IGNORE` 容忍跨批次 `(session_id, word_id)` 冲突（并发不同 batch 选到相同词），
+    /// 然后按 rowid 重读，返回插入顺序（AMAS 教学序保留）。
+    pub fn claim_session_batch(
+        &self,
+        session_id: &str,
+        requested_batch_index: Option<u32>,
+        candidate_ids: &[String],
+    ) -> Result<(u32, Vec<String>), StoreError> {
+        keys::validate_id(session_id)?;
+        for word_id in candidate_ids {
+            keys::validate_id(word_id)?;
+        }
+
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        let batch_index: u32 = match requested_batch_index {
+            Some(idx) => {
+                let existing: Vec<String> = {
+                    let mut stmt = tx.prepare(
+                        "SELECT word_id FROM session_shown_words \
+                         WHERE session_id = ?1 AND batch_index = ?2 \
+                         ORDER BY rowid ASC",
+                    )?;
+                    let rows = stmt
+                        .query_map(params![session_id, idx as i64], |row| {
+                            row.get::<_, String>(0)
+                        })?
+                        .collect::<Result<Vec<_>, _>>()?;
+                    rows
+                };
+                if !existing.is_empty() {
+                    return Ok((idx, existing));
+                }
+                idx
+            }
+            None => {
+                let next: i64 = tx.query_row(
+                    "SELECT COALESCE(MAX(batch_index) + 1, 0) FROM session_shown_words \
+                     WHERE session_id = ?1",
+                    params![session_id],
+                    |r| r.get(0),
+                )?;
+                next as u32
+            }
+        };
+
+        if candidate_ids.is_empty() {
+            return Ok((batch_index, Vec::new()));
+        }
+
+        let shown_at = Utc::now().timestamp();
+        {
+            let mut stmt = tx.prepare(
+                "INSERT OR IGNORE INTO session_shown_words \
+                 (session_id, word_id, shown_at, batch_index) \
+                 VALUES (?1, ?2, ?3, ?4)",
+            )?;
+            for word_id in candidate_ids {
+                stmt.execute(params![session_id, word_id, shown_at, batch_index as i64])?;
+            }
+        }
+
+        // 重读：按 rowid 反映插入顺序，确保返回值与 AMAS 选择顺序一致。
+        // 跨批 PK 冲突被 INSERT OR IGNORE 吞掉的词在此次返回里会被剔除。
+        let final_ids: Vec<String> = {
+            let mut stmt = tx.prepare(
+                "SELECT word_id FROM session_shown_words \
+                 WHERE session_id = ?1 AND batch_index = ?2 \
+                 ORDER BY rowid ASC",
+            )?;
+            let rows = stmt
+                .query_map(params![session_id, batch_index as i64], |row| {
+                    row.get::<_, String>(0)
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        tx.commit()?;
+        Ok((batch_index, final_ids))
+    }
+
+    /// 按 `shown_at` 时间窗清理 session_shown_words；不依赖 learning_sessions.status，
+    /// 因为系统中没有自动 abandon 长时间无心跳 active session 的链路。
+    /// 即使会话仍 active，超过 retention 的展示历史也属于陈旧数据可丢弃。
+    pub fn prune_session_shown_words_older_than(
+        &self,
+        older_than_secs: i64,
+    ) -> Result<u32, StoreError> {
+        let conn = self.conn()?;
+        let cutoff = Utc::now().timestamp() - older_than_secs;
+        let removed = conn.execute(
+            "DELETE FROM session_shown_words WHERE shown_at < ?1",
+            params![cutoff],
+        )?;
+        Ok(removed as u32)
+    }
+
+    #[cfg(test)]
+    fn count_session_shown_words(&self, session_id: &str) -> rusqlite::Result<i64> {
+        let conn = self.conn().expect("conn");
+        conn.query_row(
+            "SELECT COUNT(*) FROM session_shown_words WHERE session_id = ?1",
+            params![session_id],
+            |r| r.get(0),
+        )
+    }
+
     pub fn close_active_sessions_for_user(&self, user_id: &str) -> Result<u32, StoreError> {
         keys::validate_id(user_id)?;
         let conn = self.conn()?;
@@ -515,6 +664,115 @@ mod tests {
 
         let active = store.get_active_sessions_for_user("u1").unwrap();
         assert_eq!(active.len(), 2);
+    }
+
+    #[test]
+    fn claim_session_batch_is_idempotent_under_explicit_replay() {
+        let store = test_store();
+        store
+            .create_learning_session(&sample_session("s1", "u1"))
+            .unwrap();
+
+        let (idx0, first) = store
+            .claim_session_batch("s1", Some(0), &["w1".into(), "w2".into(), "w3".into()])
+            .unwrap();
+        assert_eq!(idx0, 0);
+        assert_eq!(first, vec!["w1", "w2", "w3"]);
+
+        let (idx0_replay, replay) = store
+            .claim_session_batch("s1", Some(0), &["w7".into(), "w8".into()])
+            .unwrap();
+        assert_eq!(idx0_replay, 0);
+        assert_eq!(replay, vec!["w1", "w2", "w3"]);
+        assert_eq!(store.count_session_shown_words("s1").unwrap(), 3);
+    }
+
+    #[test]
+    fn claim_session_batch_legacy_allocates_fresh_index() {
+        let store = test_store();
+        store
+            .create_learning_session(&sample_session("s1", "u1"))
+            .unwrap();
+
+        let (idx_a, a) = store
+            .claim_session_batch("s1", None, &["w1".into(), "w2".into()])
+            .unwrap();
+        let (idx_b, b) = store
+            .claim_session_batch("s1", None, &["w3".into(), "w4".into()])
+            .unwrap();
+        assert_eq!(idx_a, 0);
+        assert_eq!(idx_b, 1);
+        assert_eq!(a, vec!["w1", "w2"]);
+        assert_eq!(b, vec!["w3", "w4"]);
+        assert_eq!(store.count_session_shown_words("s1").unwrap(), 4);
+    }
+
+    #[test]
+    fn claim_session_batch_drops_cross_batch_collisions() {
+        let store = test_store();
+        store
+            .create_learning_session(&sample_session("s1", "u1"))
+            .unwrap();
+
+        store
+            .claim_session_batch("s1", Some(0), &["w1".into(), "w2".into()])
+            .unwrap();
+        // Batch 1 selects an overlapping word; INSERT OR IGNORE drops it.
+        let (_, b1) = store
+            .claim_session_batch("s1", Some(1), &["w2".into(), "w3".into()])
+            .unwrap();
+        assert_eq!(b1, vec!["w3"]);
+        assert_eq!(store.count_session_shown_words("s1").unwrap(), 3);
+    }
+
+    #[test]
+    fn claim_session_batch_preserves_insertion_order_on_replay() {
+        let store = test_store();
+        store
+            .create_learning_session(&sample_session("s1", "u1"))
+            .unwrap();
+
+        // Out-of-alphabetical order; replay must match the original sequence.
+        let (_, original) = store
+            .claim_session_batch(
+                "s1",
+                Some(0),
+                &["zeta".into(), "alpha".into(), "mu".into()],
+            )
+            .unwrap();
+        assert_eq!(original, vec!["zeta", "alpha", "mu"]);
+
+        let (_, replay) = store
+            .claim_session_batch("s1", Some(0), &["different".into()])
+            .unwrap();
+        assert_eq!(replay, vec!["zeta", "alpha", "mu"]);
+    }
+
+    #[test]
+    fn prune_session_shown_words_older_than_drops_aged_rows() {
+        let store = test_store();
+        store
+            .create_learning_session(&sample_session("s1", "u1"))
+            .unwrap();
+        store
+            .claim_session_batch("s1", Some(0), &["w1".into(), "w2".into()])
+            .unwrap();
+
+        // Backdate rows beyond the retention window.
+        {
+            let conn = store.conn().unwrap();
+            conn.execute(
+                "UPDATE session_shown_words SET shown_at = ?1 WHERE session_id = ?2",
+                params![Utc::now().timestamp() - 8 * 24 * 60 * 60, "s1"],
+            )
+            .unwrap();
+        }
+
+        let removed = store
+            .prune_session_shown_words_older_than(7 * 24 * 60 * 60)
+            .unwrap();
+        assert_eq!(removed, 2);
+        assert_eq!(store.count_session_shown_words("s1").unwrap(), 0);
     }
 
     #[test]

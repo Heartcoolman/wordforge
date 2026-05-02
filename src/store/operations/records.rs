@@ -300,6 +300,24 @@ impl Store {
             .map_err(StoreError::from)
     }
 
+    pub fn list_records_by_session(
+        &self,
+        user_id: &str,
+        session_id: &str,
+    ) -> Result<Vec<LearningRecord>, StoreError> {
+        keys::validate_id(user_id)?;
+        keys::validate_id(session_id)?;
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {RECORD_COLS} FROM learning_records
+             WHERE user_id=?1 AND session_id=?2
+             ORDER BY created_at ASC"
+        ))?;
+        let rows = stmt.query_map(params![user_id, session_id], record_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
     pub fn get_user_records_with_offset(
         &self,
         user_id: &str,
