@@ -13,6 +13,8 @@ use crate::response::{ok, paginated, AppError};
 use crate::routes::words::WordPublic;
 use crate::state::AppState;
 use crate::store::operations::learning_sessions::{LearningSession, SessionStatus, SessionSummary};
+use crate::store::operations::word_states::WordState;
+use std::collections::HashSet;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -430,6 +432,10 @@ async fn get_study_words(
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct NextWordsRequest {
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    batch_index: Option<u32>,
     exclude_word_ids: Vec<String>,
     mastered_word_ids: Option<Vec<String>>,
     session_performance: Option<SessionPerformanceData>,
@@ -460,6 +466,38 @@ async fn next_words(
     }
 
     let user_id = auth.user_id;
+    // 显式 batchIndex：启用幂等重放路径。
+    // 缺省：服务端在 claim 事务内分配下一个 batch_index，避免老客户端无限 replay batch 0。
+    let requested_batch_index = req.batch_index;
+    let session_id = state
+        .run_store_task("learning.next_words.resolve_session", {
+            let user_id = user_id.clone();
+            let requested = req.session_id.clone();
+            move |store| -> Result<Option<String>, AppError> {
+                if let Some(sid) = requested {
+                    let session = store
+                        .get_learning_session(&sid)?
+                        .ok_or_else(|| AppError::not_found("学习会话不存在"))?;
+                    if session.user_id != user_id {
+                        return Err(AppError::forbidden("该会话属于其他用户"));
+                    }
+                    if session.status != SessionStatus::Active {
+                        return Err(AppError::bad_request(
+                            "LEARNING_SESSION_NOT_ACTIVE",
+                            "学习会话已结束，无法继续取词",
+                        ));
+                    }
+                    return Ok(Some(session.id));
+                }
+                Ok(store
+                    .get_active_sessions_for_user(&user_id)?
+                    .into_iter()
+                    .next()
+                    .map(|s| s.id))
+            }
+        })
+        .await??;
+
     let config = state
         .run_store_task("learning.next_words.config", {
             let user_id = user_id.clone();
@@ -518,21 +556,11 @@ async fn next_words(
     let pool_size = state.config().limits.candidate_word_pool_size;
     let selected_wordbook_ids = config.selected_wordbook_ids.clone();
     let exclude_word_ids = req.exclude_word_ids;
-    let mastered_word_ids = req.mastered_word_ids;
-    let words = state
+    let session_id_for_select = session_id.clone();
+    let (effective_batch_index, words) = state
         .run_store_task(
             "learning.next_words.select",
-            move |store| -> Result<_, AppError> {
-                if let Some(ref mastered_ids) = mastered_word_ids {
-                    for wid in mastered_ids {
-                        if let Some(mut wls) = store.get_word_learning_state(&user_id, wid)? {
-                            wls.state = crate::store::operations::word_states::WordState::Mastered;
-                            wls.updated_at = Utc::now();
-                            store.set_word_learning_state(&wls)?;
-                        }
-                    }
-                }
-
+            move |store| -> Result<(u32, Vec<WordPublic>), AppError> {
                 let mut candidate_word_ids = Vec::new();
                 for book_id in &selected_wordbook_ids {
                     let wids = store.list_wordbook_words(book_id, pool_size, 0)?;
@@ -546,11 +574,15 @@ async fn next_words(
                 candidate_word_ids.sort();
                 candidate_word_ids.dedup();
 
-                let exclude_set: std::collections::HashSet<&str> =
-                    exclude_word_ids.iter().map(|s| s.as_str()).collect();
+                let mut exclude_set: HashSet<String> = exclude_word_ids.into_iter().collect();
+                if let Some(ref sid) = session_id_for_select {
+                    for wid in store.get_session_shown_word_ids(sid)? {
+                        exclude_set.insert(wid);
+                    }
+                }
                 let filtered: Vec<String> = candidate_word_ids
                     .into_iter()
-                    .filter(|wid| !exclude_set.contains(wid.as_str()))
+                    .filter(|wid| !exclude_set.contains(wid))
                     .collect();
 
                 let scored = word_selector::select_words(
@@ -566,14 +598,21 @@ async fn next_words(
                         memory_model: &amas_config.memory_model,
                     },
                 )?;
-
                 let scored_word_ids: Vec<String> =
                     scored.iter().map(|sw| sw.word_id.clone()).collect();
-                let words_by_id = store.get_words_by_ids(&scored_word_ids)?;
-                Ok(scored
+
+                let (used_idx, canonical_ids) = if let Some(ref sid) = session_id_for_select {
+                    store.claim_session_batch(sid, requested_batch_index, &scored_word_ids)?
+                } else {
+                    (requested_batch_index.unwrap_or(0), scored_word_ids.clone())
+                };
+
+                let words_by_id = store.get_words_by_ids(&canonical_ids)?;
+                let result: Vec<WordPublic> = canonical_ids
                     .iter()
-                    .filter_map(|sw| words_by_id.get(&sw.word_id).map(WordPublic::from))
-                    .collect::<Vec<_>>())
+                    .filter_map(|wid| words_by_id.get(wid).map(WordPublic::from))
+                    .collect();
+                Ok((used_idx, result))
             },
         )
         .await??;
@@ -581,6 +620,8 @@ async fn next_words(
     Ok(ok(serde_json::json!({
         "words": words,
         "batchSize": batch_size,
+        "sessionId": session_id,
+        "batchIndex": effective_batch_index,
     })))
 }
 
@@ -698,6 +739,8 @@ async fn sync_progress(
 struct CompleteSessionRequest {
     session_id: String,
     mastered_word_ids: Vec<String>,
+    // 服务端从 records 派生，仅在 rollout 期接收用于客户端兼容
+    #[allow(dead_code)]
     error_prone_word_ids: Vec<String>,
     avg_response_time_ms: i64,
 }
@@ -724,34 +767,78 @@ async fn complete_session(
     let duration_secs = (now - session.created_at).num_seconds();
     let hour_of_day = now.format("%H").to_string().parse::<u8>().unwrap_or(12);
 
-    // Compute accuracy from incremental counters on the session
+    // 服务端真源：按 (user_id, session_id) 直接查询，不受全局 max_records_fetch 限制，
+    // 避免长 session 漏算。
+    let session_records = state
+        .run_store_task("learning.complete_session.records", {
+            let user_id = user_id.clone();
+            let session_id = req.session_id.clone();
+            move |store| store.list_records_by_session(&user_id, &session_id)
+        })
+        .await??;
+
+    let total_in_session = session_records.len();
+    let correct_in_session = session_records.iter().filter(|r| r.is_correct).count();
     let accuracy = if session.total_count > 0 {
         session.correct_count as f64 / session.total_count as f64
+    } else if total_in_session > 0 {
+        correct_in_session as f64 / total_in_session as f64
     } else if session.total_questions > 0 {
-        // Fallback for sessions created before incremental counters:
-        // filter by session_id and compute from matching records
-        let session_records = state
-            .run_store_task("learning.complete_session.records", {
-                let user_id = user_id.clone();
-                move |store| store.get_user_records(&user_id, 10000)
-            })
-            .await??;
-        let total_in_session = session_records
-            .iter()
-            .filter(|r| r.session_id.as_deref() == Some(&req.session_id))
-            .count();
-        if total_in_session > 0 {
-            let correct_in_session = session_records
-                .iter()
-                .filter(|r| r.session_id.as_deref() == Some(&req.session_id) && r.is_correct)
-                .count();
-            correct_in_session as f64 / total_in_session as f64
-        } else {
-            session.correct_count as f64 / session.total_questions as f64
-        }
+        session.correct_count as f64 / session.total_questions as f64
     } else {
         0.0
     };
+
+    let mut session_word_ids: Vec<String> =
+        session_records.iter().map(|r| r.word_id.clone()).collect();
+    session_word_ids.sort();
+    session_word_ids.dedup();
+
+    let mut incorrect_word_ids: Vec<String> = session_records
+        .iter()
+        .filter(|r| !r.is_correct)
+        .map(|r| r.word_id.clone())
+        .collect();
+    incorrect_word_ids.sort();
+    incorrect_word_ids.dedup();
+
+    let (server_mastered, server_error_prone) = state
+        .run_store_task("learning.complete_session.derive_summary", {
+            let user_id = user_id.clone();
+            let session_word_ids = session_word_ids.clone();
+            move |store| -> Result<(Vec<String>, Vec<String>), AppError> {
+                let states = store.get_word_states_batch(&user_id, &session_word_ids)?;
+                let mastered_set: HashSet<String> = states
+                    .iter()
+                    .filter(|s| s.state == WordState::Mastered)
+                    .map(|s| s.word_id.clone())
+                    .collect();
+                let mut mastered: Vec<String> = mastered_set.iter().cloned().collect();
+                mastered.sort();
+                let error_prone: Vec<String> = incorrect_word_ids
+                    .into_iter()
+                    .filter(|w| !mastered_set.contains(w))
+                    .collect();
+                Ok((mastered, error_prone))
+            }
+        })
+        .await??;
+
+    // 对账日志：仅记录差异规模与少量样本，避免在 INFO 日志泄露用户级 word_id 全集
+    let client_set: HashSet<&String> = req.mastered_word_ids.iter().collect();
+    let server_set: HashSet<&String> = server_mastered.iter().collect();
+    let client_only_count = client_set.difference(&server_set).count();
+    let server_only_count = server_set.difference(&client_set).count();
+    let agreed_count = client_set.intersection(&server_set).count();
+    if client_only_count > 0 || server_only_count > 0 {
+        tracing::info!(
+            session_id = %req.session_id,
+            client_only_count,
+            server_only_count,
+            agreed_count,
+            "complete_session.mastered_mismatch"
+        );
+    }
 
     let amas_state = state.amas().get_user_state_async(&user_id).await?;
     let strategy = state.amas().compute_strategy_from_state(&amas_state);
@@ -759,15 +846,15 @@ async fn complete_session(
     let summary = SessionSummary {
         accuracy,
         avg_response_time_ms: req.avg_response_time_ms,
-        mastered_word_ids: req.mastered_word_ids.clone(),
-        error_prone_word_ids: req.error_prone_word_ids.clone(),
+        mastered_word_ids: server_mastered.clone(),
+        error_prone_word_ids: server_error_prone,
         duration_secs,
         hour_of_day,
         final_difficulty: strategy.difficulty,
     };
 
     session.status = SessionStatus::Completed;
-    session.actual_mastery_count = req.mastered_word_ids.len() as u32;
+    session.actual_mastery_count = server_mastered.len() as u32;
     session.summary = Some(summary);
     session.updated_at = now;
     let session_for_store = session.clone();
@@ -777,9 +864,8 @@ async fn complete_session(
         })
         .await??;
 
-    // 更新 HabitProfile.temporal_performance
     let mastery_efficiency = if session.total_questions > 0 {
-        req.mastered_word_ids.len() as f64 / session.total_questions as f64
+        server_mastered.len() as f64 / session.total_questions as f64
     } else {
         0.0
     };
