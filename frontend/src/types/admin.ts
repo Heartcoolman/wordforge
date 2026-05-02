@@ -95,10 +95,95 @@ export interface SystemSettings {
 export interface DailyActiveUsersEntry {
   date: string;
   count: number;
+  registered: number;
 }
 
 export interface DailyRecordsEntry {
   date: string;
   correct: number;
   total: number;
+  durationSecs: number;
+  newWords: number;
+}
+
+export interface StudyDailyEntry {
+  date: string;
+  durationSecs: number;
+  sessionCount: number;
+  recordCount: number;
+  correctCount: number;
+  accuracy: number | null;
+  newWords: number;
+  reviewWords: number;
+  masteredWords: number;
+}
+
+export interface StudyOverview {
+  generatedAt: string;
+  days: number;
+  category: string;
+  summary: {
+    totalDurationSecs: number;
+    sessionCount: number;
+    recordCount: number;
+    correctCount: number;
+    accuracy: number | null;
+    newWords: number;
+    reviewWords: number;
+    masteredWords: number;
+  };
+  daily: StudyDailyEntry[];
+}
+
+export interface RecordTypeTotal {
+  recordType: 'learning' | 'review' | 'all';
+  total: number;
+  correct: number;
+  accuracy: number | null;
+}
+
+export interface RecordTypeDailyEntry {
+  date: string;
+  learning: number;
+  review: number;
+  all: number;
+}
+
+export interface RecordTypeBreakdown {
+  generatedAt: string;
+  days: number;
+  totals: RecordTypeTotal[];
+  daily: RecordTypeDailyEntry[];
+}
+
+export interface WordStateDistribution {
+  generatedAt: string;
+  category: string;
+  states: {
+    newCount: number;
+    learning: number;
+    reviewing: number;
+    mastered: number;
+    forgotten: number;
+  };
+  totals: {
+    trackedWords: number;
+    bookmarkedWords: number;
+    dueReviewWords: number;
+    overdueReviewWords: number;
+    averageMasteryLevel: number | null;
+  };
+}
+
+export interface RetentionPoint {
+  daysSinceLearn: number;
+  retention: number | null;
+  sampleSize: number;
+}
+
+export interface RetentionCurve {
+  generatedAt: string;
+  category: string;
+  points: RetentionPoint[];
+  averageRetention: number | null;
 }

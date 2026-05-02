@@ -63,6 +63,24 @@ export function formatNumber(n: number): string {
   return n.toLocaleString('zh-CN');
 }
 
+/** Format a duration in seconds to "Hh Mm" / "Mm Ss" / "Ss" */
+export function formatDuration(secs: number | null | undefined): string {
+  if (secs == null || !isFinite(secs) || secs < 0) return '-';
+  const total = Math.floor(secs);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
+/** Format a fractional accuracy that may be null. */
+export function formatAccuracy(value: number | null | undefined, decimals = 1): string {
+  if (value == null || !isFinite(value)) return '-';
+  return `${(value * 100).toFixed(decimals)}%`;
+}
+
 /** Truncate text with ellipsis */
 export function truncate(text: string, maxLength: number): string {
   if (text.length <= maxLength) return text;

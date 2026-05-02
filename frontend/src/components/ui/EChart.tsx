@@ -1,11 +1,15 @@
 import { onMount, onCleanup, createEffect } from 'solid-js';
 import * as echarts from 'echarts/core';
-import { LineChart, BarChart } from 'echarts/charts';
+import { LineChart, BarChart, PieChart, ScatterChart } from 'echarts/charts';
 import { GridComponent, TooltipComponent, LegendComponent } from 'echarts/components';
 import { CanvasRenderer } from 'echarts/renderers';
 import type { EChartsOption } from 'echarts';
 
-echarts.use([CanvasRenderer, LineChart, BarChart, GridComponent, TooltipComponent, LegendComponent]);
+echarts.use([
+  CanvasRenderer,
+  LineChart, BarChart, PieChart, ScatterChart,
+  GridComponent, TooltipComponent, LegendComponent,
+]);
 
 interface EChartProps {
   option: () => EChartsOption;

@@ -246,6 +246,18 @@ CREATE INDEX IF NOT EXISTS idx_learning_sessions_user_status
 CREATE INDEX IF NOT EXISTS idx_learning_sessions_user_created_at
     ON learning_sessions(user_id, created_at DESC);
 
+CREATE TABLE IF NOT EXISTS session_shown_words (
+    session_id TEXT NOT NULL,
+    word_id TEXT NOT NULL,
+    shown_at INTEGER NOT NULL,
+    batch_index INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (session_id, word_id)
+);
+CREATE INDEX IF NOT EXISTS idx_ssw_session_batch
+    ON session_shown_words(session_id, batch_index);
+CREATE INDEX IF NOT EXISTS idx_ssw_shown_at
+    ON session_shown_words(shown_at);
+
 CREATE TABLE IF NOT EXISTS learning_records (
     user_id TEXT NOT NULL,
     id TEXT NOT NULL,
@@ -264,6 +276,8 @@ CREATE INDEX IF NOT EXISTS idx_learning_records_time_user
     ON learning_records(created_at, user_id);
 CREATE INDEX IF NOT EXISTS idx_learning_records_user_word
     ON learning_records(user_id, word_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_learning_records_user_session
+    ON learning_records(user_id, session_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_learning_records_word_id
     ON learning_records(word_id);
 CREATE INDEX IF NOT EXISTS idx_learning_records_user_type_time

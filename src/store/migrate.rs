@@ -9,6 +9,9 @@ fn migrations() -> Vec<(&'static str, MigrationFn)> {
         ("003_telemetry_enhanced", m003_telemetry_enhanced),
         ("004_user_data_interfaces", m004_user_data_interfaces),
         ("005_learning_record_type", m005_learning_record_type),
+        ("006_session_shown_words", m006_session_shown_words),
+        ("007_session_perf_indexes", m007_session_perf_indexes),
+        ("008_admin_analytics_indexes", m008_admin_analytics_indexes),
     ]
 }
 
@@ -212,6 +215,46 @@ fn m005_learning_record_type(store: &Store) -> Result<(), StoreError> {
     Ok(())
 }
 
+fn m006_session_shown_words(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS session_shown_words (
+            session_id TEXT NOT NULL,
+            word_id TEXT NOT NULL,
+            shown_at INTEGER NOT NULL,
+            batch_index INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (session_id, word_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_ssw_session_batch
+            ON session_shown_words(session_id, batch_index);",
+    )?;
+    Ok(())
+}
+
+fn m007_session_perf_indexes(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_ssw_shown_at
+            ON session_shown_words(shown_at);
+         CREATE INDEX IF NOT EXISTS idx_learning_records_user_session
+            ON learning_records(user_id, session_id, created_at);",
+    )?;
+    Ok(())
+}
+
+fn m008_admin_analytics_indexes(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_learning_records_type_time
+            ON learning_records(record_type, created_at DESC);
+         CREATE INDEX IF NOT EXISTS idx_word_favorites_created_at
+            ON word_favorites(created_at DESC);
+         CREATE INDEX IF NOT EXISTS idx_learning_sessions_created_at
+            ON learning_sessions(created_at DESC);",
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -228,6 +271,21 @@ mod tests {
         let expected = migrations().len() as u32;
         assert_eq!(first, expected);
         assert_eq!(second, expected);
+    }
+
+    #[test]
+    fn migration_creates_session_shown_words_table() {
+        let store = Store::open(":memory:", 5000, 1).unwrap();
+        run(&store).unwrap();
+        let conn = store.conn().unwrap();
+        let exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='session_shown_words'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(exists, 1);
     }
 
     #[test]

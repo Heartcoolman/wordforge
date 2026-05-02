@@ -5,6 +5,7 @@ import type {
   EngagementAnalytics, LearningAnalytics,
   SystemHealth, DatabaseInfo, SystemSettings,
   UpdateCheck, DailyActiveUsersEntry, DailyRecordsEntry,
+  StudyOverview, RecordTypeBreakdown, WordStateDistribution, RetentionCurve,
 } from '@/types/admin';
 import type { AmasConfig } from '@/types/amas';
 import type { BrowseItem, WordbookPreview, ImportResult, UpdateInfo, SyncResult } from '@/types/wordbookCenter';
@@ -99,6 +100,14 @@ export const adminApi = {
     api.get<DailyActiveUsersEntry[]>('/api/admin/analytics/daily-active-users', days ? { days } : undefined, { useAdminToken: true }),
   getDailyRecords: (days?: number) =>
     api.get<DailyRecordsEntry[]>('/api/admin/analytics/daily-records', days ? { days } : undefined, { useAdminToken: true }),
+  getStudyOverview: (days?: number, category?: string) =>
+    api.get<StudyOverview>('/api/admin/analytics/study-overview', { days, category }, { useAdminToken: true }),
+  getRecordTypes: (days?: number) =>
+    api.get<RecordTypeBreakdown>('/api/admin/analytics/record-types', days ? { days } : undefined, { useAdminToken: true }),
+  getWordStateDistribution: (category?: string) =>
+    api.get<WordStateDistribution>('/api/admin/analytics/word-states', category ? { category } : undefined, { useAdminToken: true }),
+  getRetentionCurve: (category?: string) =>
+    api.get<RetentionCurve>('/api/admin/analytics/retention-curve', category ? { category } : undefined, { useAdminToken: true }),
 
   // Monitoring
   getHealth: () => api.get<SystemHealth>('/api/admin/monitoring/health', undefined, { useAdminToken: true }),

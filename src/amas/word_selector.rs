@@ -3,7 +3,13 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
+use rand::Rng;
 use serde::Serialize;
+
+/// 选词评分微噪声幅度：仅用于打破完全同分时的固定排序，
+/// 远小于任意单项评分项的最小绝对值（mastery_dampen ~1e-2 起），
+/// 不影响 ZPD/UCB/recall/cooldown 数学不变量。
+const SCORE_TIEBREAK_JITTER: f64 = 1e-5;
 
 use crate::amas::config::{EloConfig, MemoryModelConfig, WordSelectorConfig};
 use crate::amas::elo::zpd_priority;
@@ -173,6 +179,7 @@ pub fn select_words(
     let mut new_words: Vec<ScoredWord> =
         Vec::with_capacity(candidate_word_ids.len().saturating_sub(review_population));
     let mut review_words: Vec<ScoredWord> = Vec::with_capacity(review_population);
+    let mut rng = rand::thread_rng();
 
     // 获取用户 ELO（用于新词 ZPD 评分）
     let user_elo = store
@@ -211,7 +218,7 @@ pub fn select_words(
                 strategy,
                 ws,
                 elo_config,
-            );
+            ) + rng.gen_range(0.0..SCORE_TIEBREAK_JITTER);
             new_words.push(ScoredWord {
                 word_id: word_id.clone(),
                 score,
@@ -238,6 +245,7 @@ pub fn select_words(
                     score += ws.recently_mastered_bonus;
                 }
             }
+            score += rng.gen_range(0.0..SCORE_TIEBREAK_JITTER);
 
             review_words.push(ScoredWord {
                 word_id: word_id.clone(),
