@@ -1,5 +1,15 @@
 import type { Word } from './word';
 
+export interface SessionSummary {
+  accuracy: number;
+  avgResponseTimeMs: number;
+  masteredWordIds: string[];
+  errorProneWordIds: string[];
+  durationSecs: number;
+  hourOfDay: number;
+  finalDifficulty: number;
+}
+
 export interface LearningSession {
   id: string;
   userId: string;
@@ -10,6 +20,9 @@ export interface LearningSession {
   contextShifts: number;
   createdAt: string;
   updatedAt: string;
+  summary?: SessionSummary | null;
+  correctCount: number;
+  totalCount: number;
 }
 
 export interface CreateSessionRequest {
