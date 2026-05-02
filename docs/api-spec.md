@@ -274,3 +274,5 @@ accessToken 过期 → POST /api/auth/refresh（携带 refresh_token）
 | 单词学习状态枚举 | `"NEW"` / `"LEARNING"` / `"REVIEWING"` / `"MASTERED"` / `"FORGOTTEN"` |
 | 会话状态枚举 | `"active"` / `"completed"` / `"abandoned"` |
 | 单词本类型枚举 | `"system"` / `"user"`（字段名为 `type`） |
+| 学习记录类型枚举 | `"learning"` / `"review"` / `"all"`（字段名为 `recordType`，写入端可选；缺省落库 `"all"`） |
+| 统计分类查询 | `?category=learning\|review\|all`，缺省或 `all` 等同不过滤；用于 `/api/records/statistics`、`/api/records/statistics/enhanced`、`/api/word-states/stats/overview` |

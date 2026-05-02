@@ -22,6 +22,8 @@
 12. [遥测模块](#12-遥测模块)
 13. [单词管理模块（Admin）](#13-单词管理模块-admin)
 14. [内容管理模块（Admin）](#14-内容管理模块-admin)
+15. [单词收藏模块](#15-单词收藏模块)
+16. [单词笔记模块](#16-单词笔记模块)
 
 ---
 
@@ -155,6 +157,7 @@
 | `pausedTimeMs` | number | — | 暂停状态的总累计时长，单位毫秒 |
 | `hintUsed` | boolean | — | 是否使用了提示功能；默认 `false` |
 | `confusedWith` | string | — | 易混淆的单词 ID，用于 IAD 混淆词对追踪；被标记后两词间会产生干扰衰减，延长复习间隔 |
+| `recordType` | enum | — | `"learning"` / `"review"` / `"all"`；按客户端所在 tab 标注（学习 tab → `learning`，复习 tab → `review`），不传则后端落库 `"all"`，老客户端零变更 |
 
 **完整示例（含行为指标）：**
 ```json
@@ -172,7 +175,8 @@
   "focusLossDurationMs": 500,
   "interactionDensity": 1.2,
   "pausedTimeMs": 0,
-  "hintUsed": false
+  "hintUsed": false,
+  "recordType": "learning"
 }
 ```
 
@@ -201,11 +205,13 @@
 ```json
 {
   "records": [
-    { "wordId": "<id1>", "isCorrect": true, "responseTimeMs": 1200 },
-    { "wordId": "<id2>", "isCorrect": false, "responseTimeMs": 3500, "hintUsed": true }
+    { "wordId": "<id1>", "isCorrect": true,  "responseTimeMs": 1200, "recordType": "learning" },
+    { "wordId": "<id2>", "isCorrect": false, "responseTimeMs": 3500, "hintUsed": true, "recordType": "review" }
   ]
 }
 ```
+
+> 客户端在"学习" tab 上传 `recordType: "learning"`，"复习" tab 上传 `recordType: "review"`；不传走兜底 `"all"`。该字段不影响 AMAS 处理，仅供后续统计接口 `?category=` 过滤使用。
 
 ---
 
@@ -663,15 +669,16 @@ Content-Length: 102400
 ### 12.1 提交遥测数据
 
 **接口：** `POST /api/telemetry`
-**必须请求头：** `x-device-id: <deviceId>`
+**必须请求头：** `x-device-id: <deviceId>`（缺失返回 400 `MISSING_DEVICE_ID`）
 **请求体上限：** 64 KB
+**响应 200：** `{ "success": true, "data": { "id": "<服务端生成的 telemetry UUID>" } }`
 
 | 字段 | 类型 | 必填 | 约束 |
 |---|---|---|---|
 | `eventType` | string | ✓ | `"session_start"` / `"periodic"` / `"on_demand"` |
-| `requestId` | string | 条件必填 | `eventType` 为 `"on_demand"` 时必须提供（来自 SSE `telemetry_request` 事件） |
+| `requestId` | string | 条件必填 | `eventType` 为 `"on_demand"` 时必须提供，**值取自 SSE `telemetry_request` 事件的 `requestId`**；缺失返回 400 `INVALID_TELEMETRY` |
 | `clientTs` | string | ✓ | 客户端时间，ISO 8601 UTC |
-| `payload` | object | ✓ | 见下方 payload 字段说明；`eventType` 为 `"session_start"` 时通常携带 `payload.device` |
+| `payload` | object | ✓ | 见下方字段说明；即使没数据也要传 `{}`。`eventType` 为 `"session_start"` 时通常携带 `payload.device` |
 
 **payload 字段说明：**
 
@@ -692,14 +699,14 @@ Content-Length: 102400
 | `touchSupport` | boolean | — |
 | `onlineStatus` | boolean | — |
 
-*会话指标（`payload` 内部顶层字段，可选）：*
+*会话指标（`payload` 内部顶层字段，可选；负数返回 422 `INVALID_PAYLOAD`）：*
 
 | 字段 | 类型 | 约束 |
 |---|---|---|
-| `sessionDurationSecs` | number | 必须 ≥ 0 |
-| `actionsPerMin` | number | 必须 ≥ 0 |
-| `errorCount` | number | 整数，必须 ≥ 0 |
-| `avgResponseTimeMs` | number | 必须 ≥ 0 |
+| `sessionDurationSecs` | number | 整数 ≥ 0；**单调累计本次 session 的总时长**（不是单次窗口时长），服务端按 SUM 聚合到当日 `study_duration_secs`，每次 `periodic` 上报传当前累计值即可 |
+| `actionsPerMin` | number | 浮点 ≥ 0 |
+| `errorCount` | number | 整数 ≥ 0 |
+| `avgResponseTimeMs` | number | 浮点 ≥ 0 |
 
 *行为追踪（`payload.behavior`，可选）：*
 
@@ -758,6 +765,43 @@ Content-Length: 102400
   }
 }
 ```
+
+---
+
+### 12.2 心跳节奏与 SSE 联动
+
+`POST /api/telemetry` 除了写入历史数据，还会刷新该 device 的心跳时间戳。服务端 watchdog 每 5 秒扫描一次，**任一活跃 SSE 设备超过 10 秒未到包计 1 次 miss，连续 5 次 miss 推送 SSE `data_corrupted` 事件**让客户端走重拉数据流程。
+
+由此对客户端的硬性要求：
+
+| 场景 | 上报要求 |
+|---|---|
+| 维持 SSE 长连期间（默认） | 必须以 **≤ 10 秒**周期上报 `eventType: "periodic"`，**建议 5–8 秒**留网络抖动余量 |
+| 收到 SSE `telemetry_request` 事件 | **立即**上报 `eventType: "on_demand"`，`requestId` 字段填该事件携带的 UUID |
+| App 启动 / 前台恢复 | 上报 `eventType: "session_start"`，`payload.device` 携带硬件/环境信息 |
+| App 进入后台或断开 SSE | 停止 periodic；watchdog 30 秒内会清掉该 device 的心跳记录，恢复时重新走 `session_start` |
+
+**注意：** 没有活跃 SSE 连接的客户端不参与心跳判断，可以低频或不上报；但仅对 `eventType: "session_start"` / `"periodic"` 也仍需正常上报，作为历史数据落库。
+
+### 12.3 上报策略示例（iOS）
+
+```
+[App 启动 / 前台恢复]
+   └── POST /api/telemetry  { eventType: "session_start", payload.device: {...} }
+   └── 启动 5–8 秒 timer
+
+[timer 触发]
+   └── 收集本次 session 累计指标快照（sessionDurationSecs 单调累加，不重置）
+   └── POST /api/telemetry  { eventType: "periodic", payload: {...} }
+
+[SSE 推送 telemetry_request]
+   └── 立即 POST /api/telemetry  { eventType: "on_demand", requestId: <SSE 事件中的值>, payload: {...} }
+
+[App 进入后台]
+   └── 停止 timer，断开 SSE
+```
+
+> **不要**在恢复后补发崩溃期间未发出的 telemetry：服务端按 `clientTs` 入库，但 `data_corrupted` SSE 已经触发过了，应直接走 `session_start` 重新建立心跳。
 
 ---
 
@@ -851,6 +895,82 @@ Content-Length: 102400
 
 ---
 
+## 15. 单词收藏模块
+
+### 15.1 收藏单词
+
+**接口：** `POST /api/word-favorites/:wordId`
+
+**请求体：** 空（单词 ID 在路径中）
+
+**说明：** 幂等——重复收藏返回既有记录。
+
+---
+
+### 15.2 取消收藏
+
+**接口：** `DELETE /api/word-favorites/:wordId`
+
+**请求体：** 空（单词 ID 在路径中）
+
+**说明：** 幂等——未收藏的 word 调用返回 `deleted: false`。
+
+> 写收藏请走本节两个端点，**不要**通过 `PUT /api/word-states/:wordId` 改 `bookmarked` 字段——后者只读。
+
+---
+
+## 16. 单词笔记模块
+
+### 16.1 创建笔记
+
+**接口：** `POST /api/word-notes`
+
+| 字段 | 类型 | 必填 | 约束 |
+|---|---|---|---|
+| `wordId` | string | ✓ | 已存在的单词 ID |
+| `content` | string | ✓ | 去除首尾空格后非空，最长 5000 字符 |
+
+```json
+{
+  "wordId": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+  "content": "记忆要点：源自拉丁文 ad+bandon"
+}
+```
+
+**响应 201：** `WordNote` 对象（含 `id` / `createdAt` / `updatedAt`）
+
+错误码：`NOT_FOUND`（单词不存在）/ `WORD_NOTE_EMPTY_CONTENT` / `WORD_NOTE_TOO_LONG`。
+
+---
+
+### 16.2 更新笔记
+
+**接口：** `PUT /api/word-notes/:id`
+
+| 字段 | 类型 | 必填 | 约束 |
+|---|---|---|---|
+| `content` | string | ✓ | 同 16.1 |
+
+```json
+{
+  "content": "改后内容"
+}
+```
+
+错误码：`NOT_FOUND`（笔记不存在或不属于当前用户）/ `WORD_NOTE_EMPTY_CONTENT` / `WORD_NOTE_TOO_LONG`。
+
+---
+
+### 16.3 删除笔记
+
+**接口：** `DELETE /api/word-notes/:id`
+
+**请求体：** 空（笔记 ID 在路径中）
+
+错误码：`NOT_FOUND`（笔记不存在或不属于当前用户）。
+
+---
+
 ## 附录：字段校验规则汇总
 
 ### 密码规则
@@ -894,3 +1014,4 @@ Content-Length: 102400
 | 语义搜索 `limit` | 1 | 50 |
 | 到期单词 `limit` | 1 | 200 |
 | `score`（视觉疲劳分数） | 0 | 100 |
+| 笔记 `content` 字符数 | 1 | 5000 |

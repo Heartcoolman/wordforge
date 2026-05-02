@@ -26,6 +26,8 @@
 16. [状态 `/api/status`](#16-状态)
 17. [健康检查 `/health`](#17-健康检查)
 18. [V1 兼容层 `/api/v1`](#18-v1-兼容层)
+19. [单词收藏 `/api/word-favorites`](#19-单词收藏)
+20. [单词笔记 `/api/word-notes`](#20-单词笔记)
 
 ---
 
@@ -712,9 +714,12 @@
   "isCorrect": true,
   "responseTimeMs": 1500,
   "sessionId": "<uuid>",
-  "createdAt": "2024-01-15T08:00:00Z"
+  "createdAt": "2024-01-15T08:00:00Z",
+  "recordType": "all"
 }
 ```
+
+`recordType` 取值 `"learning"` / `"review"` / `"all"`，老数据兜底 `"all"`，写入端可选。
 
 ---
 
@@ -749,20 +754,84 @@
 | `pausedTimeMs` | number | — | 暂停总时长（毫秒） |
 | `hintUsed` | boolean | — | 是否使用了提示，默认 false |
 | `confusedWith` | string | — | 易混淆单词 ID，用于 IAD 混淆词对追踪 |
+| `recordType` | enum | — | `"learning"` / `"review"` / `"all"`；按客户端所在 tab 标注，缺省落库 `"all"` |
 
 **响应 201（新记录）/ 200（重复）：**
 ```json
 {
   "success": true,
   "data": {
-    "record": { ... },
-    "amasResult": { ... },
+    "record": {
+      "id": "<uuid>",
+      "userId": "<uuid>",
+      "wordId": "<uuid>",
+      "isCorrect": true,
+      "responseTimeMs": 1850,
+      "sessionId": "<uuid>",
+      "createdAt": "2024-01-15T08:00:00Z",
+      "recordType": "learning"
+    },
+    "amasResult": {
+      "sessionId": "<uuid>",
+      "strategy": {
+        "difficulty": 0.55,
+        "batchSize": 8,
+        "newRatio": 0.4,
+        "intervalScale": 1.0,
+        "reviewMode": false
+      },
+      "explanation": {
+        "primaryReason": "user_state_balanced",
+        "factors": [
+          { "name": "accuracy", "value": 0.82, "impact": "positive" }
+        ]
+      },
+      "state": { "...UserState 完整结构见 §13 GET /api/amas/state": "" },
+      "wordMastery": {
+        "wordId": "<uuid>",
+        "memoryStrength": 0.62,
+        "recallProbability": 0.78,
+        "nextReviewIntervalSecs": 86400,
+        "masteryLevel": "REVIEWING"
+      },
+      "reward": {
+        "value": 0.42,
+        "components": {
+          "accuracyReward": 0.5,
+          "speedReward": 0.1,
+          "fatiguePenalty": 0.05,
+          "frustrationPenalty": 0.0,
+          "expectedForgetCost": 0.13
+        }
+      },
+      "coldStartPhase": "Classify"
+    },
     "duplicate": false
   }
 }
 ```
 
-> `amasResult` 为 `ProcessResult`，新记录成功时包含 `sessionId`、`strategy`、`explanation`、`state`、`wordMastery`、`reward`、`coldStartPhase`；重复提交时为 `null`。
+字段说明：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `record` | `LearningRecord` | 见本节顶部结构 |
+| `amasResult` | `ProcessResult \| null` | 重复提交时为 `null`；新记录成功时为下方结构 |
+| `duplicate` | boolean | 是否为重复提交（基于 `clientRecordId` 持久去重） |
+
+`amasResult.state` 与 `GET /api/amas/state` 完全同构（`UserState`），完整结构见 §13.1。
+
+`amasResult.wordMastery` 是 `WordMasteryDecision \| null`：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `wordId` | string | 触发的单词 ID |
+| `memoryStrength` | number | 记忆强度，范围 0.0–1.0 |
+| `recallProbability` | number | 当前回忆概率，范围 0.0–1.0 |
+| `nextReviewIntervalSecs` | number | 下次复习间隔（秒），用于回填 `WordLearningState.nextReviewDate` |
+| `masteryLevel` | enum | `"NEW" / "LEARNING" / "REVIEWING" / "MASTERED" / "FORGOTTEN"`，**SCREAMING_SNAKE_CASE**，与 `WordLearningState.state` 同一份枚举 |
+
+`amasResult.coldStartPhase` 是 `"Classify" | "Explore" | null`（**PascalCase**，不带 rename）；`null` 表示已进入稳定期。
 
 > **幂等行为**：服务端基于 `(userId, clientRecordId)` 持久去重，任意时刻再次提交相同 `clientRecordId` 都会返回已有记录（`duplicate: true`），**无 5 秒窗口限制**。若未指定 `clientRecordId`，每次调用都会写入新记录。
 
@@ -812,6 +881,12 @@
 
 获取基础统计。
 
+**查询参数：**
+
+| 参数 | 类型 | 说明 |
+|---|---|---|
+| `category` | enum | 可选，`"learning"` / `"review"` / `"all"`（缺省 `all` 等同不过滤），仅过滤 `total` / `correct` / `accuracy` |
+
 **响应 200：**
 ```json
 {
@@ -819,16 +894,25 @@
   "data": {
     "total": 1200,
     "correct": 984,
-    "accuracy": 0.82
+    "accuracy": 0.82,
+    "totalDurationSecs": 32400
   }
 }
 ```
+
+> `totalDurationSecs` 来自 `learning_sessions` 全量 SUM，**不随 `category` 变化**——反映该用户累计学习时长。
 
 ---
 
 ### GET /api/records/statistics/enhanced
 
 获取包含每日明细和连续天数的增强统计。
+
+**查询参数：**
+
+| 参数 | 类型 | 说明 |
+|---|---|---|
+| `category` | enum | 可选，`"learning"` / `"review"` / `"all"`，过滤 `total` / `correct` / `accuracy` 与 `daily[].total/correct/accuracy/newWords` |
 
 **响应 200：**
 ```json
@@ -839,17 +923,22 @@
     "correct": 984,
     "accuracy": 0.82,
     "streak": 7,
+    "totalDurationSecs": 32400,
     "daily": [
       {
         "date": "2024-01-15",
         "total": 50,
         "correct": 42,
-        "accuracy": 0.84
+        "accuracy": 0.84,
+        "newWords": 12,
+        "durationSecs": 1800
       }
     ]
   }
 }
 ```
+
+> `daily[]` 仅包含**有记录**的日期；`durationSecs` 为该日期对应 `learning_sessions` 的时长之和（DB GROUP BY 聚合，不受 `max_stats_records` 上限影响）。`newWords` 为该日"首次出现"的单词数。`streak` 严格基于 `daily[].date` 集合，session-only 日期不参与。`totalDurationSecs` 与 `/records/statistics` 一致，不随 `category` 变化。
 
 ---
 
@@ -1016,7 +1105,7 @@
 | `totalQuestions` | number | — | 总答题数 |
 | `contextShifts` | number | — | 上下文切换次数 |
 
-**响应 200：** 更新后的 LearningSession 对象
+**响应 200：** `{success, data}` 信封，`data` 为更新后的 LearningSession 对象（结构见下方 complete-session 示例；同步进度场景 `summary` 通常为 `null`）。
 
 ---
 
@@ -1033,7 +1122,36 @@
 | `errorProneWordIds` | string[] | ✓ | 本次易错单词 ID 列表 |
 | `avgResponseTimeMs` | number | ✓ | 平均响应时间（毫秒） |
 
-**响应 200：** 已完成的 LearningSession 对象
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": {
+    "id": "<uuid>",
+    "userId": "<uuid>",
+    "status": "completed",
+    "targetMasteryCount": 10,
+    "totalQuestions": 30,
+    "actualMasteryCount": 8,
+    "contextShifts": 2,
+    "createdAt": "<ISO-8601>",
+    "updatedAt": "<ISO-8601>",
+    "summary": {
+      "accuracy": 0.85,
+      "avgResponseTimeMs": 1200,
+      "masteredWordIds": ["<id1>"],
+      "errorProneWordIds": ["<id2>"],
+      "durationSecs": 600,
+      "hourOfDay": 14,
+      "finalDifficulty": 0.6
+    },
+    "correctCount": 0,
+    "totalCount": 0
+  }
+}
+```
+
+> 注意：`data` 是 LearningSession 对象本身，主键字段是 `id`（不是 `sessionId`，与 `POST /api/learning/session` 返回的 `SessionResponse` 不同）。complete-session 写入后 `summary` 必为对象；sync-progress 在会话尚未完成时 `summary` 为 `null`。
 
 ---
 
@@ -1120,9 +1238,12 @@
   "halfLife": 72.0,
   "correctStreak": 5,
   "totalAttempts": 12,
-  "updatedAt": "2024-01-15T08:00:00Z"
+  "updatedAt": "2024-01-15T08:00:00Z",
+  "bookmarked": false
 }
 ```
+
+> `bookmarked` 为只读字段，由后端 join `word_favorites` 批量回填；写收藏走 `/api/word-favorites/:wordId`（见第 19 节），通过该字段做客户端星标回填，不必再调 `/api/word-favorites/status`。本节所有读侧端点（`GET /:wordId`、`POST /batch`、`GET /due/list`、`POST /:wordId/mark-mastered`、`POST /:wordId/reset`）返回的 `WordLearningState` 都带 `bookmarked`。
 
 ---
 
@@ -1160,6 +1281,18 @@
 ### GET /api/word-states/stats/overview
 
 获取各学习状态分布统计。
+
+**查询参数：**
+
+| 参数 | 类型 | 说明 |
+|---|---|---|
+| `category` | enum | 可选，`"learning"` / `"review"` / `"all"`；传 `learning` / `review` 时通过 `learning_records` 子查询限定 word 集合（即"该用户在该 category 下出现过的 word 的当前 state 分布"），缺省/`all` 等同不过滤 |
+
+**错误码：**
+
+| 错误码 | 说明 |
+|---|---|
+| `INVALID_CATEGORY` | `category` 不在 `learning` / `review` / `all` 范围内 |
 
 **响应 200：**
 ```json
@@ -1954,6 +2087,38 @@ AMAS（Adaptive Multi-level Adjustment System）是服务端自适应学习引�
 
 ---
 
+### GET /api/amas/retention-curve
+
+获取按"距首次学习天数"聚合的保持率曲线（艾宾浩斯遗忘曲线）。
+
+**桶分配规则：**
+- 桶为 `[1, 2, 4, 7, 15, 30]` 天（固定 6 个点）
+- 每个 word 按 `(now - 首次记录时间)` 的天数最近邻匹配到一个桶
+- 距首次学习不足 0.5 天的样本不计入（防止刚学的词污染数据）
+- retention 复用指数衰减 / MDM 兜底（与 `/api/analytics/forgetting-risk` 同公式），仅分桶维度不同
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": {
+    "points": [
+      { "daysSinceLearn": 1,  "retention": 0.92, "sampleSize": 47 },
+      { "daysSinceLearn": 2,  "retention": 0.85, "sampleSize": 38 },
+      { "daysSinceLearn": 4,  "retention": 0.71, "sampleSize": 25 },
+      { "daysSinceLearn": 7,  "retention": 0.58, "sampleSize": 18 },
+      { "daysSinceLearn": 15, "retention": null, "sampleSize": 0 },
+      { "daysSinceLearn": 30, "retention": null, "sampleSize": 0 }
+    ],
+    "averageRetention": 0.78
+  }
+}
+```
+
+> `points` 总返回 6 个桶且固定按 `daysSinceLearn` 升序，UI 不需要排序或补桶。某桶 `sampleSize=0` 时 `retention` 为 `null`（前端按空状态绘制）。`averageRetention` 是全部样本的算术平均，无样本时为 `null`。
+
+---
+
 ### GET /api/amas/intervention
 
 获取针对当前用户状态的干预建议（疲劳提醒、专注建议、鼓励等）。
@@ -2027,7 +2192,95 @@ AMAS（Adaptive Multi-level Adjustment System）是服务端自适应学习引�
 | `hintUsed` | boolean | — | 是否使用提示，默认 false |
 | `confusedWith` | string | — | 易混淆单词 ID，用于 IAD 混淆词对追踪 |
 
-**响应 200：** `ProcessResult` 对象（含 `sessionId`、`strategy`、`explanation`、`state`、`wordMastery`、`reward`、`coldStartPhase`）
+**响应 200：** `ProcessResult` 对象。
+
+```json
+{
+  "success": true,
+  "data": {
+    "sessionId": "<uuid>",
+    "strategy": {
+      "difficulty": 0.55,
+      "batchSize": 8,
+      "newRatio": 0.4,
+      "intervalScale": 1.0,
+      "reviewMode": false
+    },
+    "explanation": {
+      "primaryReason": "user_state_balanced",
+      "factors": [
+        { "name": "accuracy", "value": 0.82, "impact": "positive" }
+      ]
+    },
+    "state": {
+      "attention": 0.72,
+      "fatigue": 0.28,
+      "motivation": 0.65,
+      "confidence": 0.54,
+      "lastActiveAt": "2024-01-15T08:00:00Z",
+      "sessionEventCount": 12,
+      "totalEventCount": 834,
+      "createdAt": "2024-01-01T00:00:00Z",
+      "cognitiveProfile": { "memoryCapacity": 0.5, "processingSpeed": 0.5, "stability": 0.5 },
+      "trendState": { "accuracyTrend": 0.0, "speedTrend": 0.0, "engagementTrend": 0.0 },
+      "habitProfile": {
+        "preferredHours": [9, 14, 20],
+        "medianSessionLengthMins": 15.0,
+        "sessionsPerDay": 1.0,
+        "temporalPerformance": {
+          "hourlyStats": [
+            { "sessionCount": 5, "avgAccuracy": 0.85, "avgResponseTimeMs": 1200, "masteryEfficiency": 0.7 }
+          ],
+          "totalSessions": 45
+        }
+      },
+      "lastSessionId": null
+    },
+    "wordMastery": {
+      "wordId": "<uuid>",
+      "memoryStrength": 0.62,
+      "recallProbability": 0.78,
+      "nextReviewIntervalSecs": 86400,
+      "masteryLevel": "REVIEWING"
+    },
+    "reward": {
+      "value": 0.42,
+      "components": {
+        "accuracyReward": 0.5,
+        "speedReward": 0.1,
+        "fatiguePenalty": 0.05,
+        "frustrationPenalty": 0.0,
+        "expectedForgetCost": 0.13
+      }
+    },
+    "coldStartPhase": "Classify"
+  }
+}
+```
+
+`ProcessResult` 字段一览：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `sessionId` | string | 当前活跃会话 ID |
+| `strategy` | `StrategyParams` | 见 `GET /api/amas/strategy` |
+| `explanation` | object | `{ primaryReason: string, factors: [{ name, value, impact }] }`；`impact` 常见值 `"positive" / "negative" / "neutral"`，服务端不做枚举校验 |
+| `state` | `UserState` | 与 `GET /api/amas/state` 完全同构 |
+| `wordMastery` | `WordMasteryDecision \| null` | 见下表；少数路径（如部分早退场景）为 `null` |
+| `reward` | object | `{ value: f64, components: { accuracyReward, speedReward, fatiguePenalty, frustrationPenalty, expectedForgetCost } }` |
+| `coldStartPhase` | `"Classify" \| "Explore" \| null` | **PascalCase 不带 rename**；`null` 表示已进入稳定期 |
+
+`wordMastery` 字段：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `wordId` | string | 触发的单词 ID |
+| `memoryStrength` | number | 记忆强度，范围 0.0–1.0 |
+| `recallProbability` | number | 当前回忆概率，范围 0.0–1.0 |
+| `nextReviewIntervalSecs` | number | 下次复习间隔（秒），用于回填 `WordLearningState.nextReviewDate` |
+| `masteryLevel` | enum | `"NEW" / "LEARNING" / "REVIEWING" / "MASTERED" / "FORGOTTEN"`，**SCREAMING_SNAKE_CASE**，与 `WordLearningState.state` 同一份枚举 |
+
+> `POST /api/records` 响应中的 `data.amasResult` 与本端点返回的 `data` 同构；区别仅在于 `/api/records` 同时把记录写入 `learning_records` 表并触发 ELO/word-state 持久化。
 
 ---
 
@@ -2388,3 +2641,210 @@ AMAS 算法指标快照（需 Admin Token）。
   }
 }
 ```
+
+---
+
+## 19. 单词收藏
+
+**路径前缀：** `/api/word-favorites`
+**认证：** Bearer Token（必须）
+
+收藏单词的 CRUD。批量回填星标时优先用 `WordLearningState.bookmarked`（见第 7 节），无需再调 `/status`。
+
+---
+
+### GET /api/word-favorites
+
+获取当前用户的收藏列表（分页）。
+
+**查询参数：** `page`、`perPage`
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "wordId": "<uuid>",
+      "favorited": true,
+      "createdAt": "2024-01-15T08:00:00Z",
+      "word": { "id": "<uuid>", "text": "abandon", "meaning": "..." }
+    }
+  ]
+}
+```
+
+> `word` 为 `WordPublic` 投影；若收藏的单词已被删除，该条目会被过滤。
+
+---
+
+### GET /api/word-favorites/status
+
+批量查询单词的收藏状态。
+
+**查询参数：**
+
+| 参数 | 类型 | 说明 |
+|---|---|---|
+| `wordIds` | string | 逗号分隔的单词 ID 列表，最多受 `max_batch_size` 限制（默认 500） |
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": [
+    { "wordId": "<id1>", "favorited": true,  "createdAt": "2024-01-15T08:00:00Z" },
+    { "wordId": "<id2>", "favorited": false, "createdAt": null }
+  ]
+}
+```
+
+**错误码：**
+
+| 错误码 | 说明 |
+|---|---|
+| `WORD_FAVORITES_TOO_MANY_IDS` | `wordIds` 数量超过 `max_batch_size` |
+
+---
+
+### POST /api/word-favorites/:wordId
+
+收藏指定单词（幂等：重复收藏返回既有记录）。
+
+**请求体：** 空（单词 ID 在路径中）
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": {
+    "wordId": "<uuid>",
+    "favorited": true,
+    "createdAt": "2024-01-15T08:00:00Z"
+  }
+}
+```
+
+**错误码：**
+
+| 错误码 | 说明 |
+|---|---|
+| `NOT_FOUND` | 单词不存在 |
+
+---
+
+### DELETE /api/word-favorites/:wordId
+
+取消收藏。
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": {
+    "wordId": "<uuid>",
+    "favorited": false,
+    "deleted": true
+  }
+}
+```
+
+> `deleted: false` 表示该 word 本就未收藏（幂等）。
+
+---
+
+## 20. 单词笔记
+
+**路径前缀：** `/api/word-notes`
+**认证：** Bearer Token（必须）
+
+用户级单词笔记的 CRUD。`content` 长度上限 5000 字符。
+
+**WordNote 结构：**
+```json
+{
+  "id": "<uuid>",
+  "wordId": "<uuid>",
+  "content": "记忆要点：源自拉丁文 ad+bandon",
+  "createdAt": "2024-01-15T08:00:00Z",
+  "updatedAt": "2024-01-15T08:00:00Z"
+}
+```
+
+---
+
+### GET /api/word-notes
+
+获取当前用户的笔记列表，按 `updatedAt DESC` 排序。
+
+**查询参数：**
+
+| 参数 | 类型 | 说明 |
+|---|---|---|
+| `wordId` | string | 可选；指定后仅返回该单词下的笔记 |
+
+**响应 200：** `WordNote[]`
+
+---
+
+### POST /api/word-notes
+
+创建笔记。
+
+**请求体：**
+
+| 字段 | 类型 | 必填 | 约束 |
+|---|---|---|---|
+| `wordId` | string | ✓ | 已存在的单词 ID |
+| `content` | string | ✓ | 去除首尾空格后非空，最长 5000 字符 |
+
+**响应 201：** `WordNote` 对象
+
+**错误码：**
+
+| 错误码 | 说明 |
+|---|---|
+| `NOT_FOUND` | 单词不存在 |
+| `WORD_NOTE_EMPTY_CONTENT` | 内容为空或仅含空白字符 |
+| `WORD_NOTE_TOO_LONG` | 内容超过 5000 字符 |
+
+---
+
+### PUT /api/word-notes/:id
+
+更新笔记内容。
+
+**请求体：**
+
+| 字段 | 类型 | 必填 | 约束 |
+|---|---|---|---|
+| `content` | string | ✓ | 同 POST |
+
+**响应 200：** `WordNote` 对象（`updatedAt` 更新为当前时间）
+
+**错误码：**
+
+| 错误码 | 说明 |
+|---|---|
+| `NOT_FOUND` | 笔记不存在或不属于当前用户 |
+| `WORD_NOTE_EMPTY_CONTENT` / `WORD_NOTE_TOO_LONG` | 同 POST |
+
+---
+
+### DELETE /api/word-notes/:id
+
+删除笔记。
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": { "deleted": true }
+}
+```
+
+**错误码：**
+
+| 错误码 | 说明 |
+|---|---|
+| `NOT_FOUND` | 笔记不存在或不属于当前用户 |
