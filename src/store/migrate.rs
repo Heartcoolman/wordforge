@@ -11,6 +11,7 @@ fn migrations() -> Vec<(&'static str, MigrationFn)> {
         ("005_learning_record_type", m005_learning_record_type),
         ("006_session_shown_words", m006_session_shown_words),
         ("007_session_perf_indexes", m007_session_perf_indexes),
+        ("008_admin_analytics_indexes", m008_admin_analytics_indexes),
     ]
 }
 
@@ -237,6 +238,19 @@ fn m007_session_perf_indexes(store: &Store) -> Result<(), StoreError> {
             ON session_shown_words(shown_at);
          CREATE INDEX IF NOT EXISTS idx_learning_records_user_session
             ON learning_records(user_id, session_id, created_at);",
+    )?;
+    Ok(())
+}
+
+fn m008_admin_analytics_indexes(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_learning_records_type_time
+            ON learning_records(record_type, created_at DESC);
+         CREATE INDEX IF NOT EXISTS idx_word_favorites_created_at
+            ON word_favorites(created_at DESC);
+         CREATE INDEX IF NOT EXISTS idx_learning_sessions_created_at
+            ON learning_sessions(created_at DESC);",
     )?;
     Ok(())
 }
