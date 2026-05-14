@@ -1,6 +1,7 @@
 import { createSignal, onMount, Show, For } from 'solid-js';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
 import { Spinner } from '@/components/ui/Spinner';
 import { adminApi, type SseLiveEntry, type RecentlyActiveEntry, type TelemetrySummary, type DataChannelValue } from '@/api/admin';
 import { uiStore } from '@/stores/ui';
@@ -366,32 +367,26 @@ export default function ClientsPage() {
       {/* Ban Confirm Dialog */}
       <Show when={banTarget()}>
         {(target) => (
-          <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => { setBanTarget(null); setBanReason(''); }}>
-            <Card variant="elevated" class="max-w-sm mx-4" onClick={(e: MouseEvent) => e.stopPropagation()}>
-              <h3 class="text-lg font-semibold text-content mb-2">
-                {target().action === 'ban' ? '确认封禁设备' : '确认解封设备'}
-              </h3>
-              <p class="text-sm text-content-secondary mb-3">
-                设备 ID: <span class="font-mono">{truncateId(target().id)}</span>
-              </p>
-              <Show when={target().action === 'ban'}>
-                <input
-                  type="text"
-                  placeholder="封禁原因（可选）"
-                  value={banReason()}
-                  onInput={(e) => setBanReason(e.currentTarget.value)}
-                  class="w-full px-3 py-2 text-sm border border-border rounded-lg bg-surface text-content mb-3"
-                  maxlength={500}
-                />
-              </Show>
-              <div class="flex justify-end gap-2">
-                <Button size="sm" variant="ghost" onClick={() => { setBanTarget(null); setBanReason(''); }}>取消</Button>
-                <Button size="sm" variant={target().action === 'ban' ? 'danger' : 'success'} onClick={handleBan}>
-                  {target().action === 'ban' ? '确认封禁' : '确认解封'}
-                </Button>
-              </div>
-            </Card>
-          </div>
+          <ConfirmDialog
+            open={true}
+            title={target().action === 'ban' ? '确认封禁设备' : '确认解封设备'}
+            message={<>设备 ID: <span class="font-mono">{truncateId(target().id)}</span></>}
+            confirmText={target().action === 'ban' ? '确认封禁' : '确认解封'}
+            variant={target().action === 'ban' ? 'danger' : 'success'}
+            onConfirm={handleBan}
+            onCancel={() => { setBanTarget(null); setBanReason(''); }}
+          >
+            <Show when={target().action === 'ban'}>
+              <input
+                type="text"
+                placeholder="封禁原因（可选）"
+                value={banReason()}
+                onInput={(e) => setBanReason(e.currentTarget.value)}
+                class="w-full px-3 py-2 text-sm border border-border rounded-lg bg-surface text-content"
+                maxlength={500}
+              />
+            </Show>
+          </ConfirmDialog>
         )}
       </Show>
     </div>

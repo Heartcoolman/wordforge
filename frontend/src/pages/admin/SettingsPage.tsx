@@ -2,6 +2,7 @@ import { createSignal, Show, onMount } from 'solid-js';
 import { Card } from '@/components/ui/Card';
 import { Input } from '@/components/ui/Input';
 import { Button } from '@/components/ui/Button';
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
 import { Switch } from '@/components/ui/Switch';
 import { Spinner } from '@/components/ui/Spinner';
 import { uiStore } from '@/stores/ui';
@@ -123,49 +124,42 @@ export default function SettingsPage() {
       <h1 class="text-2xl font-bold text-content">系统设置</h1>
 
       {/* 广播确认弹窗 */}
-      <Show when={showBroadcastConfirm()}>
-        <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => setShowBroadcastConfirm(false)}>
-          <Card variant="elevated" class="max-w-sm mx-4" onClick={(e: MouseEvent) => e.stopPropagation()}>
-            <h3 class="text-lg font-semibold text-content mb-2">确认发送广播</h3>
-            <p class="text-sm text-content-secondary mb-2">
-              标题: <span class="font-medium text-content">{broadcastTitle()}</span>
-            </p>
-            <p class="text-sm text-content-secondary mb-4">此消息将发送给所有用户，确认发送吗？</p>
-            <div class="flex justify-end gap-2">
-              <Button size="sm" variant="ghost" onClick={() => setShowBroadcastConfirm(false)}>取消</Button>
-              <Button size="sm" variant="warning" onClick={confirmBroadcast}>确认发送</Button>
-            </div>
-          </Card>
-        </div>
-      </Show>
+      <ConfirmDialog
+        open={showBroadcastConfirm()}
+        title="确认发送广播"
+        message={
+          <>
+            <p class="mb-2">标题: <span class="font-medium text-content">{broadcastTitle()}</span></p>
+            <p>此消息将发送给所有用户，确认发送吗？</p>
+          </>
+        }
+        confirmText="确认发送"
+        variant="warning"
+        onConfirm={confirmBroadcast}
+        onCancel={() => setShowBroadcastConfirm(false)}
+      />
 
       {/* 更新通知确认弹窗 */}
-      <Show when={showUpdateConfirm()}>
-        <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => setShowUpdateConfirm(false)}>
-          <Card variant="elevated" class="max-w-sm mx-4" onClick={(e: MouseEvent) => e.stopPropagation()}>
-            <h3 class="text-lg font-semibold text-content mb-2">确认发送更新通知</h3>
-            <p class="text-sm text-content-secondary mb-4">此通知将提示所有在线用户刷新页面获取新版本，确认发送吗？</p>
-            <div class="flex justify-end gap-2">
-              <Button size="sm" variant="ghost" onClick={() => setShowUpdateConfirm(false)}>取消</Button>
-              <Button size="sm" variant="warning" onClick={confirmUpdateBroadcast}>确认发送</Button>
-            </div>
-          </Card>
-        </div>
-      </Show>
+      <ConfirmDialog
+        open={showUpdateConfirm()}
+        title="确认发送更新通知"
+        message="此通知将提示所有在线用户刷新页面获取新版本，确认发送吗？"
+        confirmText="确认发送"
+        variant="warning"
+        onConfirm={confirmUpdateBroadcast}
+        onCancel={() => setShowUpdateConfirm(false)}
+      />
 
       {/* 维护模式确认弹窗 */}
-      <Show when={showMaintenanceConfirm()}>
-        <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => setShowMaintenanceConfirm(false)}>
-          <Card variant="elevated" class="max-w-sm mx-4" onClick={(e: MouseEvent) => e.stopPropagation()}>
-            <h3 class="text-lg font-semibold text-content mb-2">确认开启维护模式</h3>
-            <p class="text-sm text-content-secondary mb-4">开启后所有非管理员用户将无法访问系统，确定要开启维护模式吗？</p>
-            <div class="flex justify-end gap-2">
-              <Button size="sm" variant="ghost" onClick={() => setShowMaintenanceConfirm(false)}>取消</Button>
-              <Button size="sm" variant="warning" onClick={confirmMaintenance}>确认开启</Button>
-            </div>
-          </Card>
-        </div>
-      </Show>
+      <ConfirmDialog
+        open={showMaintenanceConfirm()}
+        title="确认开启维护模式"
+        message="开启后所有非管理员用户将无法访问系统，确定要开启维护模式吗？"
+        confirmText="确认开启"
+        variant="warning"
+        onConfirm={confirmMaintenance}
+        onCancel={() => setShowMaintenanceConfirm(false)}
+      />
 
       <Show when={!loading()} fallback={<div class="flex justify-center py-12"><Spinner size="lg" /></div>}>
         <Show when={settings()}>
