@@ -196,23 +196,27 @@ where
         }
 
         let token_hash = hash_token(&token);
-        let session = app_state
-            .store()
-            .get_session(&token_hash)?
-            .ok_or_else(|| AppError::unauthorized("会话不存在或已过期"))?;
+        let sub = claims.sub.clone();
+        app_state
+            .run_store_task("auth.load_user", move |store| -> Result<(), AppError> {
+                let session = store
+                    .get_session(&token_hash)?
+                    .ok_or_else(|| AppError::unauthorized("会话不存在或已过期"))?;
 
-        if session.user_id != claims.sub {
-            return Err(AppError::unauthorized("会话不匹配"));
-        }
+                if session.user_id != sub {
+                    return Err(AppError::unauthorized("会话不匹配"));
+                }
 
-        let user = app_state
-            .store()
-            .get_user_by_id(&claims.sub)?
-            .ok_or_else(|| AppError::unauthorized("用户不存在"))?;
+                let user = store
+                    .get_user_by_id(&sub)?
+                    .ok_or_else(|| AppError::unauthorized("用户不存在"))?;
 
-        if user.is_banned {
-            return Err(AppError::forbidden("用户已被封禁"));
-        }
+                if user.is_banned {
+                    return Err(AppError::forbidden("用户已被封禁"));
+                }
+                Ok(())
+            })
+            .await??;
 
         Ok(AuthUser {
             user_id: claims.sub,
@@ -238,14 +242,19 @@ where
         }
 
         let token_hash = hash_token(&token);
-        let session = app_state
-            .store()
-            .get_admin_session(&token_hash)?
-            .ok_or_else(|| AppError::unauthorized("管理员会话不存在或已过期"))?;
+        let sub = claims.sub.clone();
+        app_state
+            .run_store_task("auth.load_admin", move |store| -> Result<(), AppError> {
+                let session = store
+                    .get_admin_session(&token_hash)?
+                    .ok_or_else(|| AppError::unauthorized("管理员会话不存在或已过期"))?;
 
-        if session.user_id != claims.sub {
-            return Err(AppError::unauthorized("管理员会话不匹配"));
-        }
+                if session.user_id != sub {
+                    return Err(AppError::unauthorized("管理员会话不匹配"));
+                }
+                Ok(())
+            })
+            .await??;
 
         Ok(AdminAuthUser {
             admin_id: claims.sub,
