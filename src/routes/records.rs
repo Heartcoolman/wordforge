@@ -99,135 +99,6 @@ struct CreateRecordResponse {
     duplicate: bool,
 }
 
-#[derive(Debug, Clone)]
-struct EngineStateSnapshot {
-    user_state: Option<serde_json::Value>,
-    ige: Option<serde_json::Value>,
-    swd: Option<serde_json::Value>,
-    trust: Option<serde_json::Value>,
-    mastery: Option<serde_json::Value>,
-    mastery_key: String,
-    user_elo: crate::amas::elo::EloRating,
-    word_elo: crate::amas::elo::EloRating,
-}
-
-#[derive(Debug, Clone)]
-struct UserStateSnapshot {
-    user_state: Option<serde_json::Value>,
-    ige: Option<serde_json::Value>,
-    swd: Option<serde_json::Value>,
-    trust: Option<serde_json::Value>,
-    user_elo: crate::amas::elo::EloRating,
-}
-
-fn capture_user_state_snapshot(
-    store: &crate::store::Store,
-    user_id: &str,
-) -> Result<UserStateSnapshot, AppError> {
-    Ok(UserStateSnapshot {
-        user_state: store.get_engine_user_state(user_id)?,
-        ige: store.get_engine_algo_state(user_id, "ige")?,
-        swd: store.get_engine_algo_state(user_id, "swd")?,
-        trust: store.get_engine_algo_state(user_id, "trust")?,
-        user_elo: store.get_user_elo(user_id)?,
-    })
-}
-
-fn capture_engine_state_snapshot(
-    store: &crate::store::Store,
-    user_id: &str,
-    word_id: &str,
-) -> Result<EngineStateSnapshot, AppError> {
-    let mastery_key = format!("mastery:{word_id}");
-
-    Ok(EngineStateSnapshot {
-        user_state: store.get_engine_user_state(user_id)?,
-        ige: store.get_engine_algo_state(user_id, "ige")?,
-        swd: store.get_engine_algo_state(user_id, "swd")?,
-        trust: store.get_engine_algo_state(user_id, "trust")?,
-        mastery: store.get_engine_algo_state(user_id, &mastery_key)?,
-        mastery_key,
-        user_elo: store.get_user_elo(user_id)?,
-        word_elo: store.get_word_elo(word_id)?,
-    })
-}
-
-fn restore_engine_state_snapshot(
-    store: &crate::store::Store,
-    user_id: &str,
-    word_id: &str,
-    snapshot: &EngineStateSnapshot,
-) {
-    match &snapshot.user_state {
-        Some(previous) => {
-            if let Err(error) = store.set_engine_user_state(user_id, previous) {
-                tracing::warn!(user_id, error = %error, "Failed to rollback AMAS user state");
-            }
-        }
-        None => {
-            if let Err(error) = store.delete_engine_user_state(user_id) {
-                tracing::warn!(user_id, error = %error, "Failed to delete AMAS user state during rollback");
-            }
-        }
-    }
-
-    restore_engine_algo_state(store, user_id, "ige", &snapshot.ige);
-    restore_engine_algo_state(store, user_id, "swd", &snapshot.swd);
-    restore_engine_algo_state(store, user_id, "trust", &snapshot.trust);
-    restore_engine_algo_state(store, user_id, &snapshot.mastery_key, &snapshot.mastery);
-
-    // 回滚 ELO 评分
-    if let Err(error) = store.set_user_elo(user_id, &snapshot.user_elo) {
-        tracing::warn!(user_id, error = %error, "Failed to rollback user ELO");
-    }
-    if let Err(error) = store.set_word_elo(word_id, &snapshot.word_elo) {
-        tracing::warn!(word_id, error = %error, "Failed to rollback word ELO");
-    }
-}
-
-fn restore_user_state_snapshot(
-    store: &crate::store::Store,
-    user_id: &str,
-    snapshot: &UserStateSnapshot,
-) {
-    match &snapshot.user_state {
-        Some(previous) => {
-            if let Err(error) = store.set_engine_user_state(user_id, previous) {
-                tracing::warn!(user_id, error = %error, "Failed to rollback AMAS user state");
-            }
-        }
-        None => {
-            if let Err(error) = store.delete_engine_user_state(user_id) {
-                tracing::warn!(user_id, error = %error, "Failed to delete AMAS user state during rollback");
-            }
-        }
-    }
-
-    restore_engine_algo_state(store, user_id, "ige", &snapshot.ige);
-    restore_engine_algo_state(store, user_id, "swd", &snapshot.swd);
-    restore_engine_algo_state(store, user_id, "trust", &snapshot.trust);
-
-    if let Err(error) = store.set_user_elo(user_id, &snapshot.user_elo) {
-        tracing::warn!(user_id, error = %error, "Failed to rollback user ELO");
-    }
-}
-
-fn restore_engine_algo_state(
-    store: &crate::store::Store,
-    user_id: &str,
-    algo_id: &str,
-    previous: &Option<serde_json::Value>,
-) {
-    let result = match previous {
-        Some(value) => store.set_engine_algo_state(user_id, algo_id, value),
-        None => store.delete_engine_algo_state(user_id, algo_id),
-    };
-
-    if let Err(error) = result {
-        tracing::warn!(user_id, algo_id, error = %error, "Failed to rollback AMAS algorithm state");
-    }
-}
-
 async fn process_single_record(
     user_id: &str,
     req: &CreateRecordRequest,
@@ -271,14 +142,6 @@ async fn process_single_record(
     let record_for_store = record.clone();
     let req_for_store = req.clone();
 
-    let engine_snapshot = state
-        .run_store_task("records.single.snapshot", {
-            let user_id = user_id_owned.clone();
-            let word_id = word_id.clone();
-            move |store| capture_engine_state_snapshot(&store, &user_id, &word_id)
-        })
-        .await??;
-
     let amas_result = state
         .amas()
         .process_event(
@@ -316,83 +179,21 @@ async fn process_single_record(
                     req_for_store.is_correct,
                     &amas_config.elo,
                 );
-                store.set_user_elo(&user_id_owned, &user_elo)?;
-                store.set_word_elo(&word_id, &word_elo)?;
 
-                let mut next_word_state: Option<WordLearningState> = None;
-                if let Some(ref wm) = amas_result_for_store.word_mastery {
-                    let new_state = match wm.mastery_level {
-                        MasteryLevel::New => WordState::New,
-                        MasteryLevel::Learning => WordState::Learning,
-                        MasteryLevel::Reviewing => WordState::Reviewing,
-                        MasteryLevel::Mastered => WordState::Mastered,
-                        MasteryLevel::Forgotten => WordState::Forgotten,
-                    };
-
-                    let mut wls = store
-                        .get_word_learning_state(&user_id_owned, &word_id)?
-                        .unwrap_or_else(|| WordLearningState {
-                            user_id: user_id_owned.clone(),
-                            word_id: word_id.clone(),
-                            state: WordState::New,
-                            mastery_level: 0.0,
-                            next_review_date: None,
-                            half_life: DEFAULT_HALF_LIFE_HOURS,
-                            correct_streak: 0,
-                            total_attempts: 0,
-                            updated_at: Utc::now(),
-                        });
-
-                    wls.state = new_state;
-                    wls.mastery_level = wm.memory_strength;
-                    wls.total_attempts += 1;
-                    if req_for_store.is_correct {
-                        wls.correct_streak += 1;
-                    } else {
-                        wls.correct_streak = 0;
-                    }
-                    if wm.next_review_interval_secs > 0 {
-                        wls.next_review_date = Some(
-                            Utc::now() + chrono::Duration::seconds(wm.next_review_interval_secs),
-                        );
-                    }
-                    wls.updated_at = Utc::now();
-                    next_word_state = Some(wls);
-                }
-
-                let mut next_session: Option<LearningSession> = None;
-                if let Some(ref sid) = req_for_store.session_id {
-                    if let Some(mut session) = store.get_learning_session(sid)? {
-                        session.total_questions += 1;
-                        session.total_count += 1;
-                        if req_for_store.is_correct {
-                            session.correct_count += 1;
-                        }
-                        if let Some(ref wm) = amas_result_for_store.word_mastery {
-                            if wm.mastery_level == MasteryLevel::Mastered {
-                                session.actual_mastery_count += 1;
-                            }
-                        }
-                        session.updated_at = Utc::now();
-                        next_session = Some(session);
-                    }
-                }
+                let next_word_state =
+                    build_next_word_state(&store, &user_id_owned, &word_id, &req_for_store, &amas_result_for_store)?;
+                let next_session =
+                    build_next_session(&store, &req_for_store, &amas_result_for_store)?;
 
                 store
-                    .create_record_with_updates(
+                    .create_record_with_updates_full(
                         &record_for_store,
                         next_word_state.as_ref(),
                         next_session.as_ref(),
+                        Some((&user_id_owned, &user_elo)),
+                        Some((&word_id, &word_elo)),
                     )
-                    .map_err(|error| {
-                        restore_engine_state_snapshot(
-                            &store,
-                            &user_id_owned,
-                            &word_id,
-                            &engine_snapshot,
-                        );
-                        AppError::internal(&error.to_string())
-                    })?;
+                    .map_err(|error| AppError::internal(&error.to_string()))?;
                 Ok(())
             },
         )
@@ -403,6 +204,78 @@ async fn process_single_record(
         amas_result: Some(amas_result),
         duplicate: false,
     })
+}
+
+/// 基于 amas 结果构造下一版 WordLearningState；事务前调用，闭包内传值。
+fn build_next_word_state(
+    store: &crate::store::Store,
+    user_id: &str,
+    word_id: &str,
+    req: &CreateRecordRequest,
+    amas_result: &ProcessResult,
+) -> Result<Option<WordLearningState>, AppError> {
+    let Some(wm) = amas_result.word_mastery.as_ref() else {
+        return Ok(None);
+    };
+    let new_state = match wm.mastery_level {
+        MasteryLevel::New => WordState::New,
+        MasteryLevel::Learning => WordState::Learning,
+        MasteryLevel::Reviewing => WordState::Reviewing,
+        MasteryLevel::Mastered => WordState::Mastered,
+        MasteryLevel::Forgotten => WordState::Forgotten,
+    };
+    let mut wls = store
+        .get_word_learning_state(user_id, word_id)?
+        .unwrap_or_else(|| WordLearningState {
+            user_id: user_id.to_string(),
+            word_id: word_id.to_string(),
+            state: WordState::New,
+            mastery_level: 0.0,
+            next_review_date: None,
+            half_life: DEFAULT_HALF_LIFE_HOURS,
+            correct_streak: 0,
+            total_attempts: 0,
+            updated_at: Utc::now(),
+        });
+    wls.state = new_state;
+    wls.mastery_level = wm.memory_strength;
+    wls.total_attempts += 1;
+    if req.is_correct {
+        wls.correct_streak += 1;
+    } else {
+        wls.correct_streak = 0;
+    }
+    if wm.next_review_interval_secs > 0 {
+        wls.next_review_date =
+            Some(Utc::now() + chrono::Duration::seconds(wm.next_review_interval_secs));
+    }
+    wls.updated_at = Utc::now();
+    Ok(Some(wls))
+}
+
+fn build_next_session(
+    store: &crate::store::Store,
+    req: &CreateRecordRequest,
+    amas_result: &ProcessResult,
+) -> Result<Option<LearningSession>, AppError> {
+    let Some(sid) = req.session_id.as_deref() else {
+        return Ok(None);
+    };
+    let Some(mut session) = store.get_learning_session(sid)? else {
+        return Ok(None);
+    };
+    session.total_questions += 1;
+    session.total_count += 1;
+    if req.is_correct {
+        session.correct_count += 1;
+    }
+    if let Some(ref wm) = amas_result.word_mastery {
+        if wm.mastery_level == MasteryLevel::Mastered {
+            session.actual_mastery_count += 1;
+        }
+    }
+    session.updated_at = Utc::now();
+    Ok(Some(session))
 }
 
 async fn create_record(
@@ -440,14 +313,7 @@ async fn batch_create_records(
         ));
     }
 
-    // S6: 在批量首条前捕获一次用户级快照
     let user_id = auth.user_id;
-    let user_snapshot = state
-        .run_store_task("records.batch.snapshot", {
-            let user_id = user_id.clone();
-            move |store| capture_user_state_snapshot(&store, &user_id)
-        })
-        .await??;
 
     let mut results: Vec<CreateRecordResponse> = Vec::new();
     let mut errors = Vec::new();
@@ -462,18 +328,6 @@ async fn batch_create_records(
                 }));
             }
         }
-    }
-
-    // 如果全部失败（无新记录写入），回滚到初始用户状态
-    let has_new_records = results.iter().any(|r| !r.duplicate);
-    if !has_new_records && !errors.is_empty() {
-        state
-            .run_store_task("records.batch.restore_user_snapshot", {
-                let user_id = user_id.clone();
-                let user_snapshot = user_snapshot.clone();
-                move |store| restore_user_state_snapshot(&store, &user_id, &user_snapshot)
-            })
-            .await?;
     }
 
     let payload = serde_json::json!({
@@ -491,7 +345,7 @@ async fn batch_create_records(
     }
 }
 
-/// S5: 批量场景下的单条记录处理，只捕获 word 级快照（mastery + word_elo）
+/// 批量场景下的单条处理：每条都进入独立的单 SQLite 事务，失败由原生 ROLLBACK 撤销。
 async fn process_batch_record(
     user_id: &str,
     req: &CreateRecordRequest,
@@ -535,23 +389,6 @@ async fn process_batch_record(
     let record_for_store = record.clone();
     let req_for_store = req.clone();
 
-    // S6: 只捕获 word 级状态
-    let mastery_key = format!("mastery:{word_id}");
-    let (prev_mastery, prev_word_elo, prev_user_elo) = state
-        .run_store_task("records.batch.snapshot", {
-            let user_id = user_id_owned.clone();
-            let word_id = word_id.clone();
-            let mastery_key = mastery_key.clone();
-            move |store| {
-                Ok::<_, crate::store::StoreError>((
-                    store.get_engine_algo_state(&user_id, &mastery_key)?,
-                    store.get_word_elo(&word_id)?,
-                    store.get_user_elo(&user_id)?,
-                ))
-            }
-        })
-        .await??;
-
     let amas_result = state
         .amas()
         .process_event(
@@ -589,89 +426,21 @@ async fn process_batch_record(
                     req_for_store.is_correct,
                     &amas_config.elo,
                 );
-                store.set_user_elo(&user_id_owned, &user_elo)?;
-                store.set_word_elo(&word_id, &word_elo)?;
 
-                let mut next_word_state: Option<WordLearningState> = None;
-                if let Some(ref wm) = amas_result_for_store.word_mastery {
-                    let new_state = match wm.mastery_level {
-                        MasteryLevel::New => WordState::New,
-                        MasteryLevel::Learning => WordState::Learning,
-                        MasteryLevel::Reviewing => WordState::Reviewing,
-                        MasteryLevel::Mastered => WordState::Mastered,
-                        MasteryLevel::Forgotten => WordState::Forgotten,
-                    };
-
-                    let mut wls = store
-                        .get_word_learning_state(&user_id_owned, &word_id)?
-                        .unwrap_or_else(|| WordLearningState {
-                            user_id: user_id_owned.clone(),
-                            word_id: word_id.clone(),
-                            state: WordState::New,
-                            mastery_level: 0.0,
-                            next_review_date: None,
-                            half_life: DEFAULT_HALF_LIFE_HOURS,
-                            correct_streak: 0,
-                            total_attempts: 0,
-                            updated_at: Utc::now(),
-                        });
-
-                    wls.state = new_state;
-                    wls.mastery_level = wm.memory_strength;
-                    wls.total_attempts += 1;
-                    if req_for_store.is_correct {
-                        wls.correct_streak += 1;
-                    } else {
-                        wls.correct_streak = 0;
-                    }
-                    if wm.next_review_interval_secs > 0 {
-                        wls.next_review_date = Some(
-                            Utc::now() + chrono::Duration::seconds(wm.next_review_interval_secs),
-                        );
-                    }
-                    wls.updated_at = Utc::now();
-                    next_word_state = Some(wls);
-                }
-
-                let mut next_session: Option<LearningSession> = None;
-                if let Some(ref sid) = req_for_store.session_id {
-                    if let Some(mut session) = store.get_learning_session(sid)? {
-                        session.total_questions += 1;
-                        session.total_count += 1;
-                        if req_for_store.is_correct {
-                            session.correct_count += 1;
-                        }
-                        if let Some(ref wm) = amas_result_for_store.word_mastery {
-                            if wm.mastery_level == MasteryLevel::Mastered {
-                                session.actual_mastery_count += 1;
-                            }
-                        }
-                        session.updated_at = Utc::now();
-                        next_session = Some(session);
-                    }
-                }
+                let next_word_state =
+                    build_next_word_state(&store, &user_id_owned, &word_id, &req_for_store, &amas_result_for_store)?;
+                let next_session =
+                    build_next_session(&store, &req_for_store, &amas_result_for_store)?;
 
                 store
-                    .create_record_with_updates(
+                    .create_record_with_updates_full(
                         &record_for_store,
                         next_word_state.as_ref(),
                         next_session.as_ref(),
+                        Some((&user_id_owned, &user_elo)),
+                        Some((&word_id, &word_elo)),
                     )
-                    .map_err(|error| {
-                        restore_engine_algo_state(
-                            &store,
-                            &user_id_owned,
-                            &mastery_key,
-                            &prev_mastery,
-                        );
-                        if let Err(e) = store.set_word_elo(&word_id, &prev_word_elo) {
-                            tracing::warn!(error = %e, "Failed to rollback word ELO in batch");
-                        }
-                        if let Err(e) = store.set_user_elo(&user_id_owned, &prev_user_elo) {
-                            tracing::warn!(error = %e, "Failed to rollback user ELO in batch");
-                        }
-                        AppError::internal(&error.to_string())
-                    })?;
+                    .map_err(|error| AppError::internal(&error.to_string()))?;
                 Ok(())
             },
         )

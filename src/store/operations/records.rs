@@ -164,9 +164,43 @@ impl Store {
         word_state: Option<&crate::store::operations::word_states::WordLearningState>,
         learning_session: Option<&crate::store::operations::learning_sessions::LearningSession>,
     ) -> Result<(), StoreError> {
+        self.create_record_with_updates_full(record, word_state, learning_session, None, None)
+    }
+
+    /// 事务化写入：record + word_state + session + ELO 全部合入单 SQLite 事务，
+    /// 任一步失败由原生 ROLLBACK 撤销，无需上层手写快照回滚。
+    pub fn create_record_with_updates_full(
+        &self,
+        record: &LearningRecord,
+        word_state: Option<&crate::store::operations::word_states::WordLearningState>,
+        learning_session: Option<&crate::store::operations::learning_sessions::LearningSession>,
+        user_elo: Option<(&str, &crate::amas::elo::EloRating)>,
+        word_elo: Option<(&str, &crate::amas::elo::EloRating)>,
+    ) -> Result<(), StoreError> {
         keys::validate_id(&record.id)?;
+        if let Some((uid, _)) = user_elo {
+            keys::validate_id(uid)?;
+        }
+        if let Some((wid, _)) = word_elo {
+            keys::validate_id(wid)?;
+        }
         let mut conn = self.conn()?;
-        let tx = conn.transaction()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+
+        if let Some((uid, elo)) = user_elo {
+            tx.execute(
+                "INSERT INTO user_elo (user_id, rating, games) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(user_id) DO UPDATE SET rating=?2, games=?3",
+                params![uid, elo.rating, elo.games],
+            )?;
+        }
+        if let Some((wid, elo)) = word_elo {
+            tx.execute(
+                "INSERT INTO word_elo (word_id, rating, games) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(word_id) DO UPDATE SET rating=?2, games=?3",
+                params![wid, elo.rating, elo.games],
+            )?;
+        }
 
         tx.execute(
             "INSERT INTO learning_records (user_id, id, word_id, is_correct, response_time_ms, session_id, created_at, record_type)
