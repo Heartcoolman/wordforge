@@ -778,6 +778,9 @@ async fn ingest_session_events(
     let mut summary = EventIngestSummary::default();
     let mut seen: HashSet<String> = HashSet::new();
     let mut has_committed_record = false;
+    // 仅当至少一次进入 process_batch_record（可能触碰 AMAS user 级状态）时才允许外层回滚；
+    // 纯前置验证失败不应触发回滚，避免覆盖并发请求写入的较新 user_state / ELO。
+    let mut amas_attempted = false;
 
     for (index, event) in events.into_iter().enumerate() {
         let client_event_id = event.client_event_id.trim().to_string();
@@ -843,6 +846,7 @@ async fn ingest_session_events(
             created_at_override: Some(clamp_event_created_at(event.client_ts_ms, session)),
         };
 
+        amas_attempted = true;
         match process_batch_record(user_id, &req, state).await {
             // duplicate 命中早于任何 AMAS / ELO / DB 副作用，因此不计入“已提交”，
             // 也就不能用来抵消失败事件触发的全失败回滚。
@@ -866,8 +870,10 @@ async fn ingest_session_events(
 
     summary.failed = summary.errors.len();
 
-    // 全失败回滚：仅当本批次未成功提交任何记录且存在失败时，撤销 user 级状态变更。
-    if !has_committed_record && summary.failed > 0 {
+    // 全失败回滚：仅当本批次已实际触碰过 AMAS 流水线（amas_attempted）、未成功提交任何记录、
+    // 且存在失败时，才撤销 user 级状态变更。纯前置验证失败不会改写 AMAS user 状态，跳过回滚
+    // 可避免对并发请求写入的较新 user_state / ELO 造成 lost update。
+    if amas_attempted && !has_committed_record && summary.failed > 0 {
         state
             .run_store_task("learning.events.restore_user_snapshot", {
                 let user_id = user_id.to_string();
