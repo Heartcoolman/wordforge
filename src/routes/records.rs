@@ -4,7 +4,7 @@ use axum::routing::{get, post};
 use axum::Router;
 
 use crate::extractors::JsonBody;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::amas::types::{MasteryLevel, ProcessResult, RawEvent};
@@ -64,25 +64,28 @@ async fn list_records(
 
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
-struct CreateRecordRequest {
-    client_record_id: Option<String>,
-    word_id: String,
-    is_correct: bool,
-    response_time_ms: i64,
-    session_id: Option<String>,
-    is_quit: Option<bool>,
-    dwell_time_ms: Option<i64>,
-    pause_count: Option<i32>,
-    switch_count: Option<i32>,
-    retry_count: Option<i32>,
-    focus_loss_duration_ms: Option<i64>,
-    interaction_density: Option<f64>,
-    paused_time_ms: Option<i64>,
-    hint_used: Option<bool>,
+pub(crate) struct CreateRecordRequest {
+    pub(crate) client_record_id: Option<String>,
+    pub(crate) word_id: String,
+    pub(crate) is_correct: bool,
+    pub(crate) response_time_ms: i64,
+    pub(crate) session_id: Option<String>,
+    pub(crate) is_quit: Option<bool>,
+    pub(crate) dwell_time_ms: Option<i64>,
+    pub(crate) pause_count: Option<i32>,
+    pub(crate) switch_count: Option<i32>,
+    pub(crate) retry_count: Option<i32>,
+    pub(crate) focus_loss_duration_ms: Option<i64>,
+    pub(crate) interaction_density: Option<f64>,
+    pub(crate) paused_time_ms: Option<i64>,
+    pub(crate) hint_used: Option<bool>,
     #[serde(default)]
-    confused_with: Option<String>,
+    pub(crate) confused_with: Option<String>,
     #[serde(default)]
-    record_type: Option<RecordType>,
+    pub(crate) record_type: Option<RecordType>,
+    /// 内部派生路径专用：覆盖 created_at（不参与 JSON 反序列化）。
+    #[serde(skip)]
+    pub(crate) created_at_override: Option<DateTime<Utc>>,
 }
 
 impl CreateRecordRequest {
@@ -93,10 +96,10 @@ impl CreateRecordRequest {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct CreateRecordResponse {
+pub(crate) struct CreateRecordResponse {
     record: LearningRecord,
     amas_result: Option<ProcessResult>,
-    duplicate: bool,
+    pub(crate) duplicate: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -112,7 +115,7 @@ struct EngineStateSnapshot {
 }
 
 #[derive(Debug, Clone)]
-struct UserStateSnapshot {
+pub(crate) struct UserStateSnapshot {
     user_state: Option<serde_json::Value>,
     ige: Option<serde_json::Value>,
     swd: Option<serde_json::Value>,
@@ -120,7 +123,7 @@ struct UserStateSnapshot {
     user_elo: crate::amas::elo::EloRating,
 }
 
-fn capture_user_state_snapshot(
+pub(crate) fn capture_user_state_snapshot(
     store: &crate::store::Store,
     user_id: &str,
 ) -> Result<UserStateSnapshot, AppError> {
@@ -185,7 +188,7 @@ fn restore_engine_state_snapshot(
     }
 }
 
-fn restore_user_state_snapshot(
+pub(crate) fn restore_user_state_snapshot(
     store: &crate::store::Store,
     user_id: &str,
     snapshot: &UserStateSnapshot,
@@ -264,7 +267,7 @@ async fn process_single_record(
         is_correct: req.is_correct,
         response_time_ms: req.response_time_ms,
         session_id: req.session_id.clone(),
-        created_at: Utc::now(),
+        created_at: req.created_at_override.unwrap_or_else(Utc::now),
         record_type: req.record_type_or_default(),
     };
     let word_id = req.word_id.clone();
@@ -492,7 +495,7 @@ async fn batch_create_records(
 }
 
 /// S5: 批量场景下的单条记录处理，只捕获 word 级快照（mastery + word_elo）
-async fn process_batch_record(
+pub(crate) async fn process_batch_record(
     user_id: &str,
     req: &CreateRecordRequest,
     state: &AppState,
@@ -528,7 +531,7 @@ async fn process_batch_record(
         is_correct: req.is_correct,
         response_time_ms: req.response_time_ms,
         session_id: req.session_id.clone(),
-        created_at: Utc::now(),
+        created_at: req.created_at_override.unwrap_or_else(Utc::now),
         record_type: req.record_type_or_default(),
     };
     let word_id = req.word_id.clone();
