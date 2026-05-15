@@ -152,7 +152,7 @@ halfLifeTimeUnitSecs = 1296000.0
 halfLifePower = 1.5
 recallRiskBonus = 0.2
 recallRiskThreshold = 0.55
-baseDesiredRetention = 0.92
+baseDesiredRetention = 0.849021
 passiveDecayHalfLifeDays = 30.0
 passiveDecayPower = 0.3
 masteryWindowSize = 20
@@ -160,25 +160,25 @@ streakMinGapMs = 1800000
 stabilityBaseDays = 20.0
 forgettingCurveFactor = 0.3
 forgettingCurveDecay = -0.5
-forgettingCurveFloor = 0.0
+forgettingCurveFloor = 0
 w = [
-    0.2,
-    0.6,
-    1.6,
-    6.0,
+    0.174453,
+    0.660618,
+    3.132149,
+    5.944611,
     7.1949,
     0.5345,
     1.4604,
     0.0046,
-    0.9,
-    0.18,
-    0.6,
+    1.208657,
+    0.273007,
+    0.384712,
     1.2,
     0.08,
     0.2,
     1.3,
-    0.2315,
-    2.9898,
+    0.165065,
+    4.340478,
     0.51655,
     0.6621,
 ]
@@ -188,7 +188,7 @@ alphaMax = 0.5
 forgettingThreshold = 0.2
 retentionMin = 0.7
 retentionMax = 0.95
-maxIntervalDays = 90.0
+maxIntervalDays = 114.565366
 minIntervalSecs = 60
 highAccuracyThreshold = 0.9
 highAccuracyRetentionBoost = 0.02
