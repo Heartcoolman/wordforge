@@ -60,6 +60,9 @@ pub struct WordStateStats {
     pub reviewing: u64,
     pub mastered: u64,
     pub forgotten: u64,
+    /// 预计完成今日到期复习所需分钟（dueCount × avg_response_time_ms / 60000，向上取整；无样本时回退 5 秒/词）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub due_review_estimated_minutes: Option<u32>,
 }
 
 const WLS_COLS: &str =
@@ -220,6 +223,41 @@ impl Store {
 
     pub fn get_word_state_stats(&self, user_id: &str) -> Result<WordStateStats, StoreError> {
         self.get_word_state_stats_filtered(user_id, None)
+    }
+
+    /// 计算 due 词条 ETA：dueCount × avgResponseTimeMs / 60000，向上取整；无样本时按 5s/词 估算。
+    pub fn get_due_review_estimated_minutes(
+        &self,
+        user_id: &str,
+    ) -> Result<u32, StoreError> {
+        keys::validate_id(user_id)?;
+        let conn = self.conn()?;
+        let now = Utc::now().to_rfc3339();
+        let due_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM word_learning_states
+             WHERE user_id=?1 AND next_review_date IS NOT NULL AND next_review_date <= ?2",
+            params![user_id, &now],
+            |r| r.get(0),
+        )?;
+        if due_count <= 0 {
+            return Ok(0);
+        }
+        // 用最近 200 条记录的平均响应时间作为单词耗时估算；不足则回退 5000ms/词。
+        let avg_ms: Option<f64> = conn
+            .query_row(
+                "SELECT AVG(response_time_ms) FROM (
+                    SELECT response_time_ms FROM learning_records
+                    WHERE user_id=?1 ORDER BY created_at DESC LIMIT 200
+                 )",
+                params![user_id],
+                |r| r.get::<_, Option<f64>>(0),
+            )
+            .optional()?
+            .flatten();
+        let per_word_ms = avg_ms.filter(|v| v.is_finite() && *v >= 500.0).unwrap_or(5000.0);
+        let total_ms = (due_count as f64) * per_word_ms;
+        let minutes = (total_ms / 60_000.0).ceil();
+        Ok(minutes.clamp(0.0, u32::MAX as f64) as u32)
     }
 
     pub fn get_word_state_stats_filtered(
