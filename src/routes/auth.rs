@@ -541,22 +541,23 @@ async fn verify_reset_token(
 ) -> Result<impl IntoResponse, AppError> {
     let token_hash = hash_token(&req.token);
 
-    let entry = state
+    // 不存在的 token 不抛 400，而是 200 {valid:false} —— 与客户端 VerifyResetTokenResponse 类型契约对齐。
+    let entry = match state
         .run_store_task("auth.verify_reset_token.get_token", move |store| {
             store.get_password_reset_token(&token_hash)
         })
         .await??
-        .ok_or_else(|| AppError::bad_request("AUTH_INVALID_RESET_TOKEN", "重置令牌无效"))?;
+    {
+        Some(entry) => entry,
+        None => return Ok(ok(serde_json::json!({"valid": false}))),
+    };
 
     let expires_at =
         chrono::DateTime::parse_from_rfc3339(entry["expires_at"].as_str().unwrap_or_default())
             .map_err(|e| AppError::internal(&format!("reset token expires_at parse error: {e}")))?;
 
     if expires_at <= Utc::now() {
-        return Err(AppError::bad_request(
-            "AUTH_EXPIRED_RESET_TOKEN",
-            "重置令牌已过期",
-        ));
+        return Ok(ok(serde_json::json!({"valid": false})));
     }
 
     Ok(ok(serde_json::json!({"valid": true})))
