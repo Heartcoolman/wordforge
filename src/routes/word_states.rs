@@ -164,8 +164,11 @@ async fn stats_overview(
         }
     };
     let stats = state
-        .run_store_task("word_states.stats_overview", move |store| {
-            store.get_word_state_stats_filtered(&auth.user_id, category)
+        .run_store_task("word_states.stats_overview", move |store| -> Result<_, AppError> {
+            let mut s = store.get_word_state_stats_filtered(&auth.user_id, category)?;
+            s.due_review_estimated_minutes =
+                Some(store.get_due_review_estimated_minutes(&auth.user_id)?);
+            Ok(s)
         })
         .await??;
     Ok(ok(stats))

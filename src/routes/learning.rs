@@ -10,11 +10,23 @@ use serde::{Deserialize, Serialize};
 use crate::amas::word_selector::{self, SessionSelectionContext};
 use crate::auth::AuthUser;
 use crate::response::{ok, paginated, AppError};
+use crate::routes::records::{
+    capture_user_state_snapshot, process_batch_record, restore_user_state_snapshot,
+    CreateRecordRequest,
+};
 use crate::routes::words::WordPublic;
 use crate::state::AppState;
 use crate::store::operations::learning_sessions::{LearningSession, SessionStatus, SessionSummary};
+use crate::store::operations::records::RecordType;
 use crate::store::operations::word_states::WordState;
 use std::collections::HashSet;
+
+const SYNC_PROGRESS_EVENTS_LIMIT: usize = 100;
+const COMPLETE_SESSION_EVENTS_LIMIT: usize = 200;
+const EVENT_RESPONSE_TIME_MAX_MS: i64 = 300_000;
+const EVENT_CLIENT_TS_BACKFILL_LIMIT_MIN: i64 = 30;
+const EVENT_CLIENT_TS_FUTURE_TOLERANCE_MIN: i64 = 1;
+const EVENT_CLIENT_EVENT_ID_MAX_LEN: usize = 128;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -688,12 +700,200 @@ async fn adjust_words(
     })))
 }
 
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct SessionEvent {
+    client_event_id: String,
+    word_id: String,
+    is_correct: bool,
+    response_time_ms: i64,
+    client_ts_ms: i64,
+}
+
+#[derive(Debug, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct EventIngestSummary {
+    count: usize,
+    duplicates: usize,
+    failed: usize,
+    errors: Vec<EventIngestError>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EventIngestError {
+    index: usize,
+    client_event_id: String,
+    code: String,
+    message: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionWithEventIngest {
+    #[serde(flatten)]
+    session: LearningSession,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    event_ingest: Option<EventIngestSummary>,
+}
+
+fn clamp_event_created_at(client_ts_ms: i64, session: &LearningSession) -> DateTime<Utc> {
+    let now = Utc::now();
+    let parsed = match Utc.timestamp_millis_opt(client_ts_ms) {
+        LocalResult::Single(dt) => dt,
+        _ => return now,
+    };
+    let upper = now + Duration::minutes(EVENT_CLIENT_TS_FUTURE_TOLERANCE_MIN);
+    // 时钟漂移防御：若 session.created_at 超过 upper（极端时钟错位），令 lower 不超过 upper，
+    // 避免 clamp 在 lower > upper 时 panic。
+    let lower = std::cmp::max(
+        session.created_at,
+        now - Duration::minutes(EVENT_CLIENT_TS_BACKFILL_LIMIT_MIN),
+    )
+    .min(upper);
+    parsed.clamp(lower, upper)
+}
+
+async fn ingest_session_events(
+    user_id: &str,
+    session: &LearningSession,
+    events: Vec<SessionEvent>,
+    limit: usize,
+    state: &AppState,
+) -> Result<EventIngestSummary, AppError> {
+    if events.len() > limit {
+        return Err(AppError::bad_request(
+            "LEARNING_EVENTS_TOO_LARGE",
+            &format!("events 数量上限为 {limit}"),
+        ));
+    }
+
+    let user_snapshot = state
+        .run_store_task("learning.events.snapshot", {
+            let user_id = user_id.to_string();
+            move |store| capture_user_state_snapshot(&store, &user_id)
+        })
+        .await??;
+
+    let mut summary = EventIngestSummary::default();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut has_committed_record = false;
+    // 仅当至少一次进入 process_batch_record（可能触碰 AMAS user 级状态）时才允许外层回滚；
+    // 纯前置验证失败不应触发回滚，避免覆盖并发请求写入的较新 user_state / ELO。
+    let mut amas_attempted = false;
+
+    for (index, event) in events.into_iter().enumerate() {
+        let client_event_id = event.client_event_id.trim().to_string();
+        let push_err = |summary: &mut EventIngestSummary, code: &str, message: &str| {
+            summary.errors.push(EventIngestError {
+                index,
+                client_event_id: client_event_id.clone(),
+                code: code.to_string(),
+                message: message.to_string(),
+            });
+        };
+
+        if client_event_id.is_empty() {
+            push_err(&mut summary, "LEARNING_INVALID_EVENT_ID", "clientEventId 不能为空");
+            continue;
+        }
+        if client_event_id.len() > EVENT_CLIENT_EVENT_ID_MAX_LEN {
+            push_err(
+                &mut summary,
+                "LEARNING_INVALID_EVENT_ID",
+                "clientEventId 长度超过上限",
+            );
+            continue;
+        }
+        if !seen.insert(client_event_id.clone()) {
+            push_err(
+                &mut summary,
+                "LEARNING_DUPLICATE_EVENT_ID",
+                "同一请求内 clientEventId 不能重复",
+            );
+            continue;
+        }
+        if !(0..=EVENT_RESPONSE_TIME_MAX_MS).contains(&event.response_time_ms) {
+            push_err(
+                &mut summary,
+                "LEARNING_INVALID_RESPONSE_TIME",
+                "responseTimeMs 必须在 0 到 300000 之间",
+            );
+            continue;
+        }
+        if event.client_ts_ms <= 0 {
+            push_err(&mut summary, "LEARNING_INVALID_CLIENT_TS", "clientTsMs 必须大于 0");
+            continue;
+        }
+
+        let req = CreateRecordRequest {
+            client_record_id: Some(client_event_id.clone()),
+            word_id: event.word_id,
+            is_correct: event.is_correct,
+            response_time_ms: event.response_time_ms,
+            session_id: Some(session.id.clone()),
+            is_quit: None,
+            dwell_time_ms: None,
+            pause_count: None,
+            switch_count: None,
+            retry_count: None,
+            focus_loss_duration_ms: None,
+            interaction_density: None,
+            paused_time_ms: None,
+            hint_used: None,
+            confused_with: None,
+            record_type: Some(RecordType::Learning),
+            created_at_override: Some(clamp_event_created_at(event.client_ts_ms, session)),
+        };
+
+        amas_attempted = true;
+        match process_batch_record(user_id, &req, state).await {
+            // duplicate 命中早于任何 AMAS / ELO / DB 副作用，因此不计入“已提交”，
+            // 也就不能用来抵消失败事件触发的全失败回滚。
+            Ok(result) if result.duplicate => {
+                summary.duplicates += 1;
+            }
+            Ok(_) => {
+                summary.count += 1;
+                has_committed_record = true;
+            }
+            Err(error) => {
+                summary.errors.push(EventIngestError {
+                    index,
+                    client_event_id,
+                    code: error.code.clone(),
+                    message: error.message.clone(),
+                });
+            }
+        }
+    }
+
+    summary.failed = summary.errors.len();
+
+    // 全失败回滚：仅当本批次已实际触碰过 AMAS 流水线（amas_attempted）、未成功提交任何记录、
+    // 且存在失败时，才撤销 user 级状态变更。纯前置验证失败不会改写 AMAS user 状态，跳过回滚
+    // 可避免对并发请求写入的较新 user_state / ELO 造成 lost update。
+    if amas_attempted && !has_committed_record && summary.failed > 0 {
+        state
+            .run_store_task("learning.events.restore_user_snapshot", {
+                let user_id = user_id.to_string();
+                let snapshot = user_snapshot.clone();
+                move |store| restore_user_state_snapshot(&store, &user_id, &snapshot)
+            })
+            .await?;
+    }
+
+    Ok(summary)
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SyncProgressRequest {
     session_id: String,
     total_questions: Option<u32>,
     context_shifts: Option<u32>,
+    #[serde(default)]
+    events: Option<Vec<SessionEvent>>,
 }
 
 async fn sync_progress(
@@ -701,24 +901,65 @@ async fn sync_progress(
     State(state): State<AppState>,
     JsonBody(req): JsonBody<SyncProgressRequest>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
+    let SyncProgressRequest {
+        session_id,
+        total_questions,
+        context_shifts,
+        events,
+    } = req;
+    let user_id = auth.user_id;
+
+    // events 缺省时保持原路径，零回归。
+    let event_ingest = match events.filter(|v| !v.is_empty()) {
+        Some(events) => {
+            let session_for_events = state
+                .run_store_task("learning.sync_progress.load_for_events", {
+                    let user_id = user_id.clone();
+                    let session_id = session_id.clone();
+                    move |store| -> Result<_, AppError> {
+                        let session = store
+                            .get_learning_session(&session_id)?
+                            .ok_or_else(|| AppError::not_found("学习会话不存在"))?;
+                        if session.user_id != user_id {
+                            return Err(AppError::forbidden("该会话属于其他用户"));
+                        }
+                        Ok(session)
+                    }
+                })
+                .await??;
+            Some(
+                ingest_session_events(
+                    &user_id,
+                    &session_for_events,
+                    events,
+                    SYNC_PROGRESS_EVENTS_LIMIT,
+                    &state,
+                )
+                .await?,
+            )
+        }
+        None => None,
+    };
+
+    let user_id_for_task = user_id.clone();
     let session = state
         .run_store_task(
             "learning.sync_progress",
             move |store| -> Result<_, AppError> {
                 let mut session = store
-                    .get_learning_session(&req.session_id)?
+                    .get_learning_session(&session_id)?
                     .ok_or_else(|| AppError::not_found("学习会话不存在"))?;
 
-                if session.user_id != auth.user_id {
+                if session.user_id != user_id_for_task {
                     return Err(AppError::forbidden("该会话属于其他用户"));
                 }
 
-                if let Some(tq) = req.total_questions {
+                if let Some(tq) = total_questions {
                     if tq > session.total_questions {
                         session.total_questions = tq;
                     }
                 }
-                if let Some(cs) = req.context_shifts {
+                if let Some(cs) = context_shifts {
                     if cs > session.context_shifts {
                         session.context_shifts = cs;
                     }
@@ -731,7 +972,10 @@ async fn sync_progress(
         )
         .await??;
 
-    Ok(ok(session))
+    Ok(ok(SessionWithEventIngest {
+        session,
+        event_ingest,
+    }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -743,6 +987,8 @@ struct CompleteSessionRequest {
     #[allow(dead_code)]
     error_prone_word_ids: Vec<String>,
     avg_response_time_ms: i64,
+    #[serde(default)]
+    events: Option<Vec<SessionEvent>>,
 }
 
 async fn complete_session(
@@ -751,6 +997,7 @@ async fn complete_session(
     JsonBody(req): JsonBody<CompleteSessionRequest>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     let user_id = auth.user_id;
+    let events = req.events.clone();
     let mut session = state
         .run_store_task("learning.complete_session.load", {
             let session_id = req.session_id.clone();
@@ -762,6 +1009,29 @@ async fn complete_session(
     if session.user_id != user_id {
         return Err(AppError::forbidden("该会话属于其他用户"));
     }
+
+    let event_ingest = match events.filter(|v| !v.is_empty()) {
+        Some(events) => {
+            let summary = ingest_session_events(
+                &user_id,
+                &session,
+                events,
+                COMPLETE_SESSION_EVENTS_LIMIT,
+                &state,
+            )
+            .await?;
+            // ingest 已经原子更新 session 计数，重读以避免脏字段被回写。
+            session = state
+                .run_store_task("learning.complete_session.reload_after_events", {
+                    let session_id = req.session_id.clone();
+                    move |store| store.get_learning_session(&session_id)
+                })
+                .await??
+                .ok_or_else(|| AppError::not_found("学习会话不存在"))?;
+            Some(summary)
+        }
+        None => None,
+    };
 
     let now = Utc::now();
     let duration_secs = (now - session.created_at).num_seconds();
@@ -881,7 +1151,10 @@ async fn complete_session(
         )
         .await?;
 
-    Ok(ok(session))
+    Ok(ok(SessionWithEventIngest {
+        session,
+        event_ingest,
+    }))
 }
 
 // ── pick-next-word ──
@@ -1015,16 +1288,23 @@ async fn generate_options(
                     .get_word(&req.word_id)?
                     .ok_or_else(|| AppError::not_found("单词不存在"))?;
 
+                // 题型语义：
+                //   word-to-meaning / audio-to-meaning  → 选项展示为 meaning（前端区别在题面：文本 vs 音频）
+                //   meaning-to-word / meaning-to-spelling → 选项展示为 text（前端区别在答题方式：选择 vs 拼写）
                 let correct_answer = match req.mode.as_str() {
-                    "word-to-meaning" => target.meaning.clone(),
-                    "meaning-to-word" => target.text.clone(),
+                    "word-to-meaning" | "audio-to-meaning" => target.meaning.clone(),
+                    "meaning-to-word" | "meaning-to-spelling" => target.text.clone(),
                     _ => {
                         return Err(AppError::bad_request(
                             "LEARNING_INVALID_MODE",
-                            "mode 仅支持 word-to-meaning 或 meaning-to-word",
+                            "mode 仅支持 word-to-meaning / meaning-to-word / audio-to-meaning / meaning-to-spelling",
                         ));
                     }
                 };
+                let distractor_is_text = matches!(
+                    req.mode.as_str(),
+                    "meaning-to-word" | "meaning-to-spelling"
+                );
 
                 let other_ids: Vec<String> = req
                     .pool_word_ids
@@ -1036,10 +1316,7 @@ async fn generate_options(
                 let words_map = store.get_words_by_ids(&other_ids)?;
                 let mut distractors: Vec<String> = words_map
                     .values()
-                    .map(|w| match req.mode.as_str() {
-                        "meaning-to-word" => w.text.clone(),
-                        _ => w.meaning.clone(),
-                    })
+                    .map(|w| if distractor_is_text { w.text.clone() } else { w.meaning.clone() })
                     .filter(|s| s != &correct_answer)
                     .collect();
 
@@ -1052,10 +1329,7 @@ async fn generate_options(
                     let mut fallback_distractors: Vec<String> = fallback_words
                         .iter()
                         .filter(|w| w.id != req.word_id)
-                        .map(|w| match req.mode.as_str() {
-                            "meaning-to-word" => w.text.clone(),
-                            _ => w.meaning.clone(),
-                        })
+                        .map(|w| if distractor_is_text { w.text.clone() } else { w.meaning.clone() })
                         .filter(|s| s != &correct_answer)
                         .collect();
                     fallback_distractors.shuffle(&mut rng);
