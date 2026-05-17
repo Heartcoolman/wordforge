@@ -163,7 +163,9 @@ impl WorkerManager {
             },
             JobSpec {
                 name: WorkerName::ConfusionPairCache,
-                cron: "0 0 5 * * 0",
+                // cron crate (zslayton/cron) day-of-week 范围 1-7，不接受 0；
+                // 用 SUN 字符串明确表示「每周日」，与官方 example `Mon,Wed,Fri` 风格一致。
+                cron: "0 0 5 * * SUN",
                 enabled: true,
             },
             JobSpec {
@@ -208,7 +210,9 @@ impl WorkerManager {
             },
             JobSpec {
                 name: WorkerName::WordClustering,
-                cron: "0 0 4 * * 0",
+                // day-of-week 用 SUN 字符串，避免 cron crate 拒绝 0；
+                // 见 ConfusionPairCache 同处说明。
+                cron: "0 0 4 * * SUN",
                 // WIP: 待 LLM provider 就绪后启用
                 enabled: false,
             },
@@ -590,6 +594,45 @@ mod tests {
 
         for name in &names {
             assert!(!name.as_str().is_empty(), "{:?} has empty str", name);
+        }
+    }
+
+    /// 回归：所有 planned_jobs 的 cron 表达式必须能被 tokio_cron_scheduler 解析。
+    /// 历史 bug：confusion_pair_cache 用了 `0 0 5 * * 0`，cron crate (1-7 范围) 拒绝 0，
+    /// 启动期 ERROR 但服务继续跑，导致该 worker 永远不触发。
+    #[tokio::test]
+    async fn all_planned_jobs_have_parseable_cron() {
+        use tokio_cron_scheduler::Job;
+
+        let cfg = Config::from_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(
+            Store::open(
+                tmp.path().join("cron_test.db").to_str().unwrap(),
+                5000,
+                1,
+            )
+            .unwrap(),
+        );
+        let amas = Arc::new(AMASEngine::new(AMASConfig::default(), store.clone()));
+        let (tx, _) = broadcast::channel(2);
+
+        let mut worker_cfg = cfg.worker.clone();
+        worker_cfg.is_leader = true;
+
+        let manager = WorkerManager::new(store, amas, tx.subscribe(), &worker_cfg);
+        let jobs = manager.planned_jobs();
+        assert!(!jobs.is_empty(), "leader 模式下应注册至少一个 job");
+
+        for spec in &jobs {
+            let result = Job::new_async(spec.cron, |_, _| Box::pin(async {}));
+            assert!(
+                result.is_ok(),
+                "worker {:?} 的 cron `{}` 必须可解析: {:?}",
+                spec.name,
+                spec.cron,
+                result.err()
+            );
         }
     }
 }
