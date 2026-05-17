@@ -296,4 +296,86 @@ mod tests {
         let err = set_version(&store, 2).unwrap_err();
         assert!(matches!(err, StoreError::Migration { .. }));
     }
+
+    /// 回归：v0.3.3 部署的 DB 升 v0.4.x 时不应在 init_schema 阶段 fail。
+    /// 修复前 init_schema 跑 schema::DDL → 试图建依赖 m005 才有的 record_type
+    /// 列的索引，因列不存在直接 panic，根本走不到 run_migrations。
+    ///
+    /// 修复点：init_schema 仅在 schema_version 表不存在时（即全新 DB）执行 DDL。
+    /// 本测试只验证「is_fresh 检测」核心逻辑：构造一个含 schema_version 但缺失
+    /// 关键列的 DB，Store::open 应跳过 DDL（不再 panic）；不模拟完整 v0.3.3
+    /// schema（避免文件系统级 WAL handle 残留干扰，r2d2 Pool 超时假阳性）。
+    #[test]
+    fn init_schema_skips_full_ddl_when_schema_version_exists() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("legacy.db");
+        let path_str = path.to_str().unwrap();
+
+        // 1. 用 rusqlite 直接构造「最小 v0.3.3 形态」：schema_version 表存在 +
+        //    learning_records 表无 record_type 列。这是导致原 bug 的最小复现 DB。
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE schema_version (
+                    singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+                    version INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                 );
+                 INSERT INTO schema_version (singleton_id, version, updated_at)
+                 VALUES (1, 4, datetime('now'));
+                 CREATE TABLE learning_records (
+                    user_id TEXT NOT NULL,
+                    id TEXT NOT NULL,
+                    word_id TEXT NOT NULL,
+                    is_correct INTEGER NOT NULL DEFAULT 0,
+                    response_time_ms INTEGER NOT NULL DEFAULT 0,
+                    session_id TEXT DEFAULT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (user_id, id)
+                 );",
+            )
+            .unwrap();
+        }
+
+        // 2. Store::open 触发 init_schema：修复前必然 panic（CREATE INDEX 依赖
+        //    record_type 列），修复后检测到 schema_version 表存在，跳过 DDL。
+        let store = Store::open(path_str, 5000, 1)
+            .expect("init_schema must not fail when schema_version exists");
+
+        // 验证 init_schema 确实跳过了全量 DDL：record_type 列仍不存在、
+        // 全量 DDL 中创建的 idx_learning_records_user_type_time 索引也不存在。
+        let conn = store.conn().unwrap();
+        let has_record_type: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('learning_records') WHERE name='record_type'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_record_type, 0, "init_schema 不应在已有 schema_version 表时追加新列");
+        let has_index: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_learning_records_user_type_time'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_index, 0, "init_schema 不应跑全量 DDL");
+    }
+
+    /// 配套验证：全新 DB 上 init_schema 仍应建立完整目标态 schema。
+    #[test]
+    fn init_schema_creates_full_ddl_on_fresh_db() {
+        let store = Store::open(":memory:", 5000, 1).unwrap();
+        let conn = store.conn().unwrap();
+        // schema.rs::DDL 中的代表性表都应存在。
+        let count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('users', 'learning_records', 'schema_version')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 3, "fresh DB 上 init_schema 应建立全量目标 schema");
+    }
 }

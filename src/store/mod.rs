@@ -79,7 +79,18 @@ impl Store {
 
     fn init_schema(&self) -> Result<(), StoreError> {
         let conn = self.conn()?;
-        conn.execute_batch(schema::DDL)?;
+        // 仅在全新 DB（无 schema_version 表）时执行全量 DDL。
+        // 老 DB 由 run_migrations 增量演进——避免 schema.rs 中依赖
+        // migration 后才存在的列的 CREATE INDEX 在老 DB 上 fail
+        // （如 idx_learning_records_user_type_time 依赖 m005 添加的 record_type 列）。
+        let is_fresh: i64 = conn.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='schema_version'",
+            [],
+            |row| row.get(0),
+        )?;
+        if is_fresh == 0 {
+            conn.execute_batch(schema::DDL)?;
+        }
         Ok(())
     }
 
