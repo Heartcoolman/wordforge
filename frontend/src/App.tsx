@@ -17,6 +17,8 @@ const AdminSetupPage = lazy(() => import('@/pages/admin/AdminSetupPage'));
 const AdminDashboard = lazy(() => import('@/pages/admin/AdminDashboard'));
 const UserManagementPage = lazy(() => import('@/pages/admin/UserManagementPage'));
 const AmasConfigPage = lazy(() => import('@/pages/admin/AmasConfigPage'));
+const AmasMetricsPage = lazy(() => import('@/pages/admin/AmasMetricsPage'));
+const AmasAdvisorPage = lazy(() => import('@/pages/admin/AmasAdvisorPage'));
 const MonitoringPage = lazy(() => import('@/pages/admin/MonitoringPage'));
 const AnalyticsPage = lazy(() => import('@/pages/admin/AnalyticsPage'));
 const SettingsPage = lazy(() => import('@/pages/admin/SettingsPage'));
@@ -97,6 +99,8 @@ export default function App() {
             <Route path="/users" component={() => (<AdminProtectedRoute><Suspense fallback={<PageSpinner />}><UserManagementPage /></Suspense></AdminProtectedRoute>)} />
             <Route path="/clients" component={() => (<AdminProtectedRoute><Suspense fallback={<PageSpinner />}><ClientsPage /></Suspense></AdminProtectedRoute>)} />
             <Route path="/amas-config" component={() => (<AdminProtectedRoute><Suspense fallback={<PageSpinner />}><AmasConfigPage /></Suspense></AdminProtectedRoute>)} />
+            <Route path="/amas-metrics" component={() => (<AdminProtectedRoute><Suspense fallback={<PageSpinner />}><AmasMetricsPage /></Suspense></AdminProtectedRoute>)} />
+            <Route path="/amas-advisor" component={() => (<AdminProtectedRoute><Suspense fallback={<PageSpinner />}><AmasAdvisorPage /></Suspense></AdminProtectedRoute>)} />
             <Route path="/monitoring" component={() => (<AdminProtectedRoute><Suspense fallback={<PageSpinner />}><MonitoringPage /></Suspense></AdminProtectedRoute>)} />
             <Route path="/analytics" component={() => (<AdminProtectedRoute><Suspense fallback={<PageSpinner />}><AnalyticsPage /></Suspense></AdminProtectedRoute>)} />
             <Route path="/settings" component={() => (<AdminProtectedRoute><Suspense fallback={<PageSpinner />}><SettingsPage /></Suspense></AdminProtectedRoute>)} />

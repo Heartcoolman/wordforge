@@ -90,6 +90,9 @@ export interface SystemSettings {
   maintenanceMode: boolean;
   defaultDailyWords: number;
   wordbookCenterUrl?: string;
+  amasAutoApplyEnabled: boolean;
+  amasAutoApplyMaxPerDay: number;
+  amasAutoApplyMinConfidence: number;
 }
 
 export interface DailyActiveUsersEntry {

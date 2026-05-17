@@ -6,5 +6,6 @@ pub mod memory;
 pub mod metrics;
 pub mod metrics_persistence;
 pub mod monitoring;
+pub mod tuning_whitelist;
 pub mod types;
 pub mod word_selector;

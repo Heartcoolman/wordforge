@@ -95,9 +95,15 @@ proptest! {
         grade in 1u32..=4,
         n in 1usize..10,
     ) {
+        // 实现细节：mdm.rs::update_strength() 在 same-day 分支算出 target_stability = prev * k，
+        // 然后通过 alpha 线性插值得到 new_stability = prev + alpha * (target - prev)
+        //                                          = prev * (1 + alpha * (k - 1))。
+        // 因此 n 次同日复习后期望值 = s0 * (1 + alpha*(k-1))^n（仍依赖 last_review_at 更新维持递推）。
         let config = MemoryModelConfig::default();
+        let alpha: f64 = 0.3;
         let grade_f = grade as f64;
         let k = (config.w[17] * (grade_f - 3.0 + config.w[18])).clamp(-20.0, 20.0).exp();
+        let step_factor = 1.0 + alpha * (k - 1.0);
 
         let now = 1_000_000_000_000i64;
         let mut state = MdmState::default();
@@ -109,10 +115,10 @@ proptest! {
 
         for _ in 0..n {
             let review_at = state.last_review_at.unwrap() + 3_600_000; // 1 hour later
-            update_strength(&mut state, quality_for_grade(grade), 0.3, review_at, &config);
+            update_strength(&mut state, quality_for_grade(grade), alpha, review_at, &config);
         }
 
-        let expected = (s0 * k.powi(n as i32)).max(0.01);
+        let expected = (s0 * step_factor.powi(n as i32)).max(0.01);
         let tolerance = expected.abs() * 1e-6 + 1e-9;
         prop_assert!(
             (state.stability - expected).abs() < tolerance,

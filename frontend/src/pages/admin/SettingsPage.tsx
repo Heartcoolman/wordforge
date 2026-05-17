@@ -15,6 +15,9 @@ export default function SettingsPage() {
     maintenanceMode: boolean;
     defaultDailyWords: number;
     wordbookCenterUrl?: string;
+    amasAutoApplyEnabled: boolean;
+    amasAutoApplyMaxPerDay: number;
+    amasAutoApplyMinConfidence: number;
   } | null>(null);
   const [loading, setLoading] = createSignal(true);
   const [saving, setSaving] = createSignal(false);
@@ -201,6 +204,47 @@ export default function SettingsPage() {
                   value={s().wordbookCenterUrl || ''}
                   onInput={(e) => updateField('wordbookCenterUrl', e.currentTarget.value || undefined)}
                   placeholder="https://cdn.example.com/wordbooks"
+                />
+                <div class="pt-2">
+                  <Button onClick={saveSettings} loading={saving()}>保存设置</Button>
+                </div>
+              </div>
+            </Card>
+          )}
+        </Show>
+
+        <Show when={settings()}>
+          {(s) => (
+            <Card variant="elevated">
+              <h2 class="text-lg font-semibold text-content mb-1">AMAS 调参自动化</h2>
+              <p class="text-xs text-content-tertiary mb-4">
+                启用后，由 LLM advisor 生成的建议如果满足白名单 + 单参 + 范围 + 置信度阈值 + 当日额度，
+                将直接进入「已自动应用」状态并写入运行配置；否则仍走人工审批。
+              </p>
+              <div class="space-y-4">
+                <Switch
+                  checked={s().amasAutoApplyEnabled}
+                  onChange={(v) => updateField('amasAutoApplyEnabled', v)}
+                  label="启用灰度自动应用（默认关闭，强烈建议先观察建议-only 流）"
+                />
+                <Input
+                  label="每日最多自动应用次数"
+                  type="number"
+                  min={0}
+                  max={20}
+                  value={String(s().amasAutoApplyMaxPerDay)}
+                  onInput={(e) => updateField('amasAutoApplyMaxPerDay', parseInt(e.currentTarget.value) || 1)}
+                  hint="超过此值的当日 patch 自动落 pending"
+                />
+                <Input
+                  label="最低置信度阈值"
+                  type="number"
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  value={String(s().amasAutoApplyMinConfidence)}
+                  onInput={(e) => updateField('amasAutoApplyMinConfidence', parseFloat(e.currentTarget.value) || 0.8)}
+                  hint="LLM 自评 confidence 低于此值时自动转 pending"
                 />
                 <div class="pt-2">
                   <Button onClick={saveSettings} loading={saving()}>保存设置</Button>

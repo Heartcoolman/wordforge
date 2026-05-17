@@ -1,49 +1,60 @@
-import { createSignal, Show, For, onMount } from 'solid-js';
+import { createSignal, createMemo, Show, For, onMount } from 'solid-js';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Spinner } from '@/components/ui/Spinner';
+import { Tabs } from '@/components/ui/Tabs';
+import { Badge } from '@/components/ui/Badge';
 import { uiStore } from '@/stores/ui';
 import { amasApi } from '@/api/amas';
 import { adminApi } from '@/api/admin';
 import type { AmasConfig } from '@/types/amas';
+import { TierAPanel } from './amas/TierAPanel';
+import { SectionPanel } from './amas/SectionPanel';
+import { JsonAdvancedPanel } from './amas/JsonAdvancedPanel';
+import { PresetSelector } from './amas/PresetSelector';
+import { AmasVersionDrawer } from '@/components/admin/AmasVersionDrawer';
+import { validateConfig, diffKnown } from './amas/schema';
+
+type TabId = 'tier-a' | 'sections' | 'json';
 
 export default function AmasConfigPage() {
-  const [config, setConfig] = createSignal('');
+  // source-of-truth：宽松对象，承载 ~295 个参数全量
+  const [config, setConfig] = createSignal<Record<string, unknown>>({});
+  // baseline：从后端拉来的、用于判断"是否有未保存的修改"
+  const [baseline, setBaseline] = createSignal<Record<string, unknown>>({});
   const [metrics, setMetrics] = createSignal<unknown>(null);
   const [loading, setLoading] = createSignal(true);
   const [saving, setSaving] = createSignal(false);
   const [reloading, setReloading] = createSignal(false);
+  const [tab, setTab] = createSignal<TabId>('tier-a');
+  const [versionDrawerOpen, setVersionDrawerOpen] = createSignal(false);
 
   onMount(async () => {
     const [c, m] = await Promise.allSettled([amasApi.getConfig(), amasApi.getMetrics()]);
-    if (c.status === 'fulfilled') setConfig(JSON.stringify(c.value, null, 2));
+    if (c.status === 'fulfilled') {
+      const cfg = c.value as unknown as Record<string, unknown>;
+      setBaseline(structuredClone(cfg));
+      setConfig(structuredClone(cfg));
+    } else {
+      uiStore.toast.error('加载失败', '无法获取 AMAS 配置');
+    }
     if (m.status === 'fulfilled') setMetrics(m.value);
     setLoading(false);
   });
 
-  function parseConfigInput() {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(config());
-    } catch {
-      uiStore.toast.error('保存失败', 'JSON 格式错误，请检查语法');
-      return null;
-    }
-
-    // 基本 schema 校验：配置必须是一个非空对象
-    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-      uiStore.toast.error('保存失败', '配置必须是一个 JSON 对象');
-      return null;
-    }
-    return parsed as AmasConfig;
-  }
+  const errors = createMemo(() => validateConfig(config()));
+  const dirty = createMemo(() => diffKnown(baseline(), config()).length > 0);
 
   async function saveConfig() {
-    const parsed = parseConfigInput();
-    if (!parsed) return;
+    const errs = errors();
+    if (errs.length > 0) {
+      uiStore.toast.error('校验未通过', `${errs.length} 个字段需要修正`);
+      return;
+    }
     try {
       setSaving(true);
-      await amasApi.updateConfig(parsed);
+      await amasApi.updateConfig(config() as unknown as AmasConfig);
+      setBaseline(structuredClone(config()));
       uiStore.toast.success('AMAS 配置已更新');
     } catch (err: unknown) {
       uiStore.toast.error('保存失败', err instanceof Error ? err.message : '未知错误');
@@ -53,12 +64,17 @@ export default function AmasConfigPage() {
   }
 
   async function reloadAmasConfig() {
-    const parsed = parseConfigInput();
-    if (!parsed) return;
+    const errs = errors();
+    if (errs.length > 0) {
+      uiStore.toast.error('校验未通过', `${errs.length} 个字段需要修正`);
+      return;
+    }
     try {
       setReloading(true);
-      const latest = await adminApi.reloadAmas(parsed);
-      setConfig(JSON.stringify(latest, null, 2));
+      const latest = await adminApi.reloadAmas(config() as unknown as AmasConfig);
+      const cfg = latest as unknown as Record<string, unknown>;
+      setBaseline(structuredClone(cfg));
+      setConfig(structuredClone(cfg));
       uiStore.toast.success('AMAS 配置已热重载');
     } catch (err: unknown) {
       uiStore.toast.error('热重载失败', err instanceof Error ? err.message : '未知错误');
@@ -67,24 +83,77 @@ export default function AmasConfigPage() {
     }
   }
 
-  return (
-    <div class="space-y-6 animate-fade-in-up">
+  function discardChanges() {
+    setConfig(structuredClone(baseline()));
+  }
 
+  return (
+    <div class="space-y-4 animate-fade-in-up">
       <Show when={!loading()} fallback={<div class="flex justify-center py-12"><Spinner size="lg" /></div>}>
         <Card variant="elevated">
-          <h2 class="text-lg font-semibold text-content mb-3">配置编辑器</h2>
-          <textarea
-            class="w-full h-80 px-4 py-3 rounded-lg text-sm font-mono bg-surface border border-border text-content focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent resize-y"
-            value={config()}
-            onInput={(e) => setConfig(e.currentTarget.value)}
-            spellcheck={false}
-          />
-          <p class="text-xs text-content-tertiary mt-1">请输入合法的 JSON 对象，例如 {"{"} "key": "value" {"}"}</p>
-          <div class="flex justify-end gap-2 mt-3">
-            <Button onClick={reloadAmasConfig} loading={reloading()} variant="ghost">热重载配置</Button>
-            <Button onClick={saveConfig} loading={saving()}>保存配置</Button>
+          <div class="flex flex-col gap-3">
+            <div class="flex items-baseline justify-between flex-wrap gap-3">
+              <div>
+                <h2 class="text-lg font-semibold text-content">AMAS 调参</h2>
+                <p class="text-xs text-content-tertiary mt-0.5">
+                  共 ~295 个参数，先在「重点参数」调 11 维核心、其余在「分节配置」或「JSON 高级」编辑
+                </p>
+              </div>
+              <div class="flex items-center gap-3 flex-wrap">
+                <Show when={errors().length > 0}>
+                  <Badge variant="error">{errors().length} 处校验错误</Badge>
+                </Show>
+                <Show when={dirty() && errors().length === 0}>
+                  <Badge variant="warning">未保存的修改</Badge>
+                </Show>
+                <Show when={dirty()}>
+                  <Button size="sm" variant="ghost" onClick={discardChanges}>放弃修改</Button>
+                </Show>
+                <Button size="sm" variant="ghost" onClick={() => setVersionDrawerOpen(true)}>
+                  版本历史
+                </Button>
+                <Button size="sm" variant="outline" onClick={reloadAmasConfig} loading={reloading()} disabled={errors().length > 0}>
+                  热重载
+                </Button>
+                <Button size="sm" onClick={saveConfig} loading={saving()} disabled={errors().length > 0 || !dirty()}>
+                  保存配置
+                </Button>
+              </div>
+            </div>
+
+            <PresetSelector config={config()} onApply={(next) => setConfig(next)} />
+
+            <Tabs
+              tabs={[
+                { id: 'tier-a', label: `重点参数（Tier-A · 11 维）` },
+                { id: 'sections', label: `分节配置` },
+                { id: 'json', label: `JSON 高级` },
+              ]}
+              active={tab()}
+              onChange={(id) => setTab(id as TabId)}
+            />
+
+            <Show when={tab() === 'tier-a'}>
+              <TierAPanel config={config()} errors={errors()} onChange={setConfig} />
+            </Show>
+            <Show when={tab() === 'sections'}>
+              <SectionPanel config={config()} errors={errors()} onChange={setConfig} />
+            </Show>
+            <Show when={tab() === 'json'}>
+              <JsonAdvancedPanel config={config()} onChange={setConfig} />
+            </Show>
           </div>
         </Card>
+
+        <AmasVersionDrawer
+          open={versionDrawerOpen()}
+          onClose={() => setVersionDrawerOpen(false)}
+          currentConfig={config()}
+          onRestored={(next) => {
+            setBaseline(structuredClone(next));
+            setConfig(structuredClone(next));
+          }}
+        />
 
         <Show when={metrics()}>
           {(m) => {
@@ -97,10 +166,10 @@ export default function AmasConfigPage() {
                     <table class="w-full text-sm">
                       <thead>
                         <tr class="bg-surface-secondary border-b border-border">
-                          <th class="px-4 py-2 text-left font-medium text-content-secondary">算法名称</th>
-                          <th class="px-4 py-2 text-right font-medium text-content-secondary">调用次数</th>
-                          <th class="px-4 py-2 text-right font-medium text-content-secondary">平均延迟</th>
-                          <th class="px-4 py-2 text-right font-medium text-content-secondary">错误次数</th>
+                          <th scope="col" class="px-4 py-2 text-left font-medium text-content-secondary">算法名称</th>
+                          <th scope="col" class="px-4 py-2 text-right font-medium text-content-secondary">调用次数</th>
+                          <th scope="col" class="px-4 py-2 text-right font-medium text-content-secondary">平均延迟</th>
+                          <th scope="col" class="px-4 py-2 text-right font-medium text-content-secondary">错误次数</th>
                         </tr>
                       </thead>
                       <tbody>

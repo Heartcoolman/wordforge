@@ -305,7 +305,7 @@ async fn it_runs_worker_tasks_and_persists_side_effects() {
 
     workers::session_cleanup::run(store.as_ref()).await;
     workers::monitoring_aggregate::run(store.as_ref()).await;
-    workers::llm_advisor::run(store.as_ref()).await;
+    workers::llm_advisor::run(store.as_ref(), None, &engine).await;
     workers::delayed_reward::run(store.as_ref()).await;
     workers::forgetting_alert::run(store.as_ref()).await;
     workers::algorithm_optimization::run(store.as_ref(), &engine).await;

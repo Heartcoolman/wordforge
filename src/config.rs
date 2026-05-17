@@ -141,7 +141,11 @@ pub struct LLMConfig {
     pub mock: bool,
     pub api_url: String,
     pub api_key: String,
+    pub model: String,
     pub timeout_secs: u64,
+    pub daily_cost_cap_usd: f64,
+    pub input_price_per_mtok_usd: f64,
+    pub output_price_per_mtok_usd: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -201,7 +205,9 @@ impl fmt::Debug for LLMConfig {
             .field("mock", &self.mock)
             .field("api_url", &self.api_url)
             .field("api_key", &"***REDACTED***")
+            .field("model", &self.model)
             .field("timeout_secs", &self.timeout_secs)
+            .field("daily_cost_cap_usd", &self.daily_cost_cap_usd)
             .finish()
     }
 }
@@ -276,9 +282,13 @@ impl Config {
             llm: LLMConfig {
                 enabled: env_or_bool("LLM_ENABLED", false),
                 mock: env_or_bool("LLM_MOCK", true),
-                api_url: env_or("LLM_API_URL", ""),
+                api_url: env_or("LLM_API_URL", "https://api.deepseek.com"),
                 api_key: env_or("LLM_API_KEY", ""),
-                timeout_secs: env_or_parse("LLM_TIMEOUT_SECS", 30_u64),
+                model: env_or("LLM_MODEL", "deepseek-reasoner"),
+                timeout_secs: env_or_parse("LLM_TIMEOUT_SECS", 60_u64),
+                daily_cost_cap_usd: env_or_parse("LLM_DAILY_COST_CAP_USD", 1.0_f64),
+                input_price_per_mtok_usd: env_or_parse("LLM_INPUT_PRICE_PER_MTOK_USD", 0.55_f64),
+                output_price_per_mtok_usd: env_or_parse("LLM_OUTPUT_PRICE_PER_MTOK_USD", 2.19_f64),
             },
             update_check: UpdateCheckConfig {
                 api_url: env_or(

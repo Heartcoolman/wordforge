@@ -131,7 +131,8 @@ async fn main() {
             amas_engine.clone(),
             shutdown_tx.subscribe(),
             &config.worker,
-        );
+        )
+        .with_llm_config(config.llm.clone());
         Some(tokio::spawn(async move {
             if let Err(e) = worker_manager.start().await {
                 tracing::error!(error = %e, "Worker manager failed");

@@ -1,0 +1,96 @@
+import { createResource, createMemo, createSignal, For, Show } from 'solid-js';
+import { Card } from '@/components/ui/Card';
+import { Spinner } from '@/components/ui/Spinner';
+import { Empty } from '@/components/ui/Empty';
+import { EChart } from '@/components/ui/EChart';
+import { adminApi, type AmasMetricsTimeseriesPoint } from '@/api/admin';
+
+const ALGO_COLORS: Record<string, string> = {
+  Heuristic: '#6366f1',
+  IGE: '#10b981',
+  SWD: '#f59e0b',
+  Ensemble: '#ec4899',
+  MDM: '#0ea5e9',
+  Mastery: '#8b5cf6',
+};
+const FALLBACK = '#94a3b8';
+
+/** C1: 算法延迟 / 错误率时间序列。双 Y 轴 — 左 latency μs，右 error 数 */
+export function MetricsDashboard() {
+  const [days, setDays] = createSignal<7 | 14 | 30>(7);
+  const [series] = createResource(days, async (d) => adminApi.amasMetricsTimeseries(d));
+
+  const grouped = createMemo(() => {
+    const data = series() ?? [];
+    const dates = Array.from(new Set(data.map((p) => p.date))).sort();
+    const algos = Array.from(new Set(data.map((p) => p.algorithm))).sort();
+    const idx = new Map<string, AmasMetricsTimeseriesPoint>();
+    for (const p of data) idx.set(`${p.date}|${p.algorithm}`, p);
+    return { dates, algos, lookup: idx };
+  });
+
+  const option = (): import('echarts').EChartsOption => {
+    const { dates, algos, lookup } = grouped();
+    const latencySeries = algos.map((algo) => ({
+      name: `${algo} 延迟`,
+      type: 'line' as const,
+      smooth: true,
+      yAxisIndex: 0,
+      data: dates.map((d) => {
+        const p = lookup.get(`${d}|${algo}`);
+        return p ? Number((p.avgLatencyUs / 1000).toFixed(3)) : null; // → ms
+      }),
+      itemStyle: { color: ALGO_COLORS[algo] ?? FALLBACK },
+      lineStyle: { width: 2 },
+    }));
+    const errorSeries = algos.map((algo) => ({
+      name: `${algo} 错误`,
+      type: 'bar' as const,
+      yAxisIndex: 1,
+      data: dates.map((d) => lookup.get(`${d}|${algo}`)?.errorCount ?? 0),
+      itemStyle: { color: ALGO_COLORS[algo] ?? FALLBACK, opacity: 0.35 },
+      barGap: '5%',
+    }));
+    return {
+      grid: { left: 60, right: 60, top: 50, bottom: 40 },
+      legend: { top: 0, type: 'scroll' },
+      tooltip: { trigger: 'axis' },
+      xAxis: { type: 'category', data: dates },
+      yAxis: [
+        { type: 'value', name: '延迟 ms', position: 'left' },
+        { type: 'value', name: '错误数', position: 'right', minInterval: 1 },
+      ],
+      series: [...latencySeries, ...errorSeries],
+    };
+  };
+
+  return (
+    <div class="space-y-3">
+      <Card variant="elevated">
+        <div class="flex items-baseline justify-between mb-3">
+          <h2 class="text-lg font-semibold text-content">算法延迟 / 错误率</h2>
+          <div class="flex items-center gap-1.5">
+            <For each={[7, 14, 30] as const}>
+              {(n) => (
+                <button
+                  type="button"
+                  onClick={() => setDays(n)}
+                  class={`px-2.5 py-1 text-xs rounded-md transition-colors ${
+                    days() === n ? 'bg-accent text-white' : 'bg-surface-secondary text-content-secondary hover:text-content'
+                  }`}
+                >
+                  {n} 天
+                </button>
+              )}
+            </For>
+          </div>
+        </div>
+        <Show when={!series.loading} fallback={<div class="flex justify-center py-12"><Spinner /></div>}>
+          <Show when={grouped().dates.length > 0} fallback={<Empty title="暂无聚合数据" description="algorithm_metrics_daily 表当前为空" />}>
+            <EChart option={option} height="380px" />
+          </Show>
+        </Show>
+      </Card>
+    </div>
+  );
+}

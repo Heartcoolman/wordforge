@@ -12,6 +12,9 @@ fn migrations() -> Vec<(&'static str, MigrationFn)> {
         ("006_session_shown_words", m006_session_shown_words),
         ("007_session_perf_indexes", m007_session_perf_indexes),
         ("008_admin_analytics_indexes", m008_admin_analytics_indexes),
+        ("009_amas_versioning", m009_amas_versioning),
+        ("010_amas_suggestions", m010_amas_suggestions),
+        ("011_amas_auto_apply_settings", m011_amas_auto_apply_settings),
     ]
 }
 
@@ -251,6 +254,70 @@ fn m008_admin_analytics_indexes(store: &Store) -> Result<(), StoreError> {
             ON word_favorites(created_at DESC);
          CREATE INDEX IF NOT EXISTS idx_learning_sessions_created_at
             ON learning_sessions(created_at DESC);",
+    )?;
+    Ok(())
+}
+
+fn m009_amas_versioning(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS amas_config_versions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            version_hash TEXT NOT NULL UNIQUE,
+            snapshot_json TEXT NOT NULL,
+            author_admin_id TEXT NOT NULL,
+            source TEXT NOT NULL CHECK (source IN ('manual','llm_suggested','llm_auto')),
+            note TEXT,
+            parent_version_hash TEXT,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_amas_config_versions_created
+            ON amas_config_versions(created_at DESC);",
+    )?;
+    Ok(())
+}
+
+fn m011_amas_auto_apply_settings(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    // 三列分别加（已有则跳过）
+    for (col, ddl) in [
+        ("amas_auto_apply_enabled", "INTEGER NOT NULL DEFAULT 0"),
+        ("amas_auto_apply_max_per_day", "INTEGER NOT NULL DEFAULT 1"),
+        ("amas_auto_apply_min_confidence", "REAL NOT NULL DEFAULT 0.8"),
+    ] {
+        let has: bool = conn
+            .prepare("PRAGMA table_info(system_settings)")?
+            .query_map([], |r| r.get::<_, String>(1))?
+            .filter_map(Result::ok)
+            .any(|name| name == col);
+        if !has {
+            conn.execute(&format!("ALTER TABLE system_settings ADD COLUMN {col} {ddl}"), [])?;
+        }
+    }
+    Ok(())
+}
+
+fn m010_amas_suggestions(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS amas_tuning_suggestions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            based_on_version_hash TEXT NOT NULL,
+            patch_json TEXT NOT NULL,
+            rationale TEXT NOT NULL,
+            evidence_json TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('pending','approved','rejected','superseded','expired','auto_applied')),
+            decided_by TEXT,
+            decided_at TEXT,
+            decision_note TEXT,
+            cost_usd REAL,
+            tokens_input INTEGER,
+            tokens_output INTEGER,
+            confidence REAL
+        );
+        CREATE INDEX IF NOT EXISTS idx_amas_suggestions_status_time
+            ON amas_tuning_suggestions(status, created_at DESC);",
     )?;
     Ok(())
 }
