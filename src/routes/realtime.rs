@@ -172,6 +172,7 @@ pub async fn sse_handler(
                                     crate::state::SseEvent::Banned => "banned",
                                     crate::state::SseEvent::Unbanned => "unbanned",
                                     crate::state::SseEvent::DataCorrupted => "data_corrupted",
+                                    crate::state::SseEvent::NewLlmSuggestion { .. } => "new_llm_suggestion",
                                 };
                                 yield Ok(Event::default().event(event_name).data(json));
                             }
@@ -253,7 +254,11 @@ mod tests {
                 mock: true,
                 api_url: String::new(),
                 api_key: String::new(),
+                model: String::new(),
                 timeout_secs: 30,
+                daily_cost_cap_usd: 1.0,
+                input_price_per_mtok_usd: 0.55,
+                output_price_per_mtok_usd: 2.19,
             },
             update_check: UpdateCheckConfig {
                 api_url: String::new(),

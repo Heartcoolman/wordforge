@@ -70,7 +70,11 @@ async fn spawn_with_limits(api_limit: u64) -> TestApp {
             mock: true,
             api_url: String::new(),
             api_key: String::new(),
+            model: String::new(),
             timeout_secs: 30,
+            daily_cost_cap_usd: 1.0,
+            input_price_per_mtok_usd: 0.55,
+            output_price_per_mtok_usd: 2.19,
         },
         update_check: learning_backend::config::UpdateCheckConfig {
             api_url: String::new(),

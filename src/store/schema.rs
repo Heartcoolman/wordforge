@@ -475,6 +475,9 @@ CREATE TABLE IF NOT EXISTS system_settings (
     maintenance_mode INTEGER NOT NULL DEFAULT 0 CHECK (maintenance_mode IN (0, 1)),
     default_daily_words INTEGER NOT NULL DEFAULT 20,
     wordbook_center_url TEXT DEFAULT 'https://cdn.jsdelivr.net/gh/Heartcoolman/wordbook-center@main',
+    amas_auto_apply_enabled INTEGER NOT NULL DEFAULT 0 CHECK (amas_auto_apply_enabled IN (0, 1)),
+    amas_auto_apply_max_per_day INTEGER NOT NULL DEFAULT 1,
+    amas_auto_apply_min_confidence REAL NOT NULL DEFAULT 0.8,
     PRIMARY KEY (singleton_id)
 );
 
@@ -548,4 +551,38 @@ CREATE TABLE IF NOT EXISTS schema_version (
     updated_at TEXT NOT NULL,
     PRIMARY KEY (singleton_id)
 );
+
+-- AMAS 配置版本快照（每次保存 / 回滚均落一条），用于审计与对比
+CREATE TABLE IF NOT EXISTS amas_config_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    version_hash TEXT NOT NULL UNIQUE,
+    snapshot_json TEXT NOT NULL,
+    author_admin_id TEXT NOT NULL,
+    source TEXT NOT NULL CHECK (source IN ('manual','llm_suggested','llm_auto')),
+    note TEXT,
+    parent_version_hash TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_amas_config_versions_created
+    ON amas_config_versions(created_at DESC);
+
+-- AMAS LLM 调参建议（人工审批 / 灰度自动应用）
+CREATE TABLE IF NOT EXISTS amas_tuning_suggestions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    based_on_version_hash TEXT NOT NULL,
+    patch_json TEXT NOT NULL,
+    rationale TEXT NOT NULL,
+    evidence_json TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('pending','approved','rejected','superseded','expired','auto_applied')),
+    decided_by TEXT,
+    decided_at TEXT,
+    decision_note TEXT,
+    cost_usd REAL,
+    tokens_input INTEGER,
+    tokens_output INTEGER,
+    confidence REAL
+);
+CREATE INDEX IF NOT EXISTS idx_amas_suggestions_status_time
+    ON amas_tuning_suggestions(status, created_at DESC);
 "#;

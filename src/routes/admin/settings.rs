@@ -24,6 +24,9 @@ struct UpdateSystemSettings {
     maintenance_mode: Option<bool>,
     default_daily_words: Option<u32>,
     wordbook_center_url: Option<String>,
+    amas_auto_apply_enabled: Option<bool>,
+    amas_auto_apply_max_per_day: Option<u32>,
+    amas_auto_apply_min_confidence: Option<f64>,
 }
 
 impl UpdateSystemSettings {
@@ -41,6 +44,22 @@ impl UpdateSystemSettings {
                 return Err(AppError::bad_request(
                     "INVALID_DAILY_WORDS",
                     "每日默认单词数必须在1到500之间",
+                ));
+            }
+        }
+        if let Some(v) = self.amas_auto_apply_max_per_day {
+            if v > 20 {
+                return Err(AppError::bad_request(
+                    "INVALID_AUTO_APPLY_LIMIT",
+                    "每日自动应用上限必须 ≤ 20",
+                ));
+            }
+        }
+        if let Some(v) = self.amas_auto_apply_min_confidence {
+            if !(0.0..=1.0).contains(&v) {
+                return Err(AppError::bad_request(
+                    "INVALID_CONFIDENCE",
+                    "最低置信度必须在 0-1 之间",
                 ));
             }
         }
@@ -88,6 +107,15 @@ async fn update_settings(
                 if let Some(ref v) = req.wordbook_center_url {
                     settings.wordbook_center_url =
                         if v.is_empty() { None } else { Some(v.clone()) };
+                }
+                if let Some(v) = req.amas_auto_apply_enabled {
+                    settings.amas_auto_apply_enabled = v;
+                }
+                if let Some(v) = req.amas_auto_apply_max_per_day {
+                    settings.amas_auto_apply_max_per_day = v;
+                }
+                if let Some(v) = req.amas_auto_apply_min_confidence {
+                    settings.amas_auto_apply_min_confidence = v;
                 }
 
                 store.save_system_settings(&settings)?;

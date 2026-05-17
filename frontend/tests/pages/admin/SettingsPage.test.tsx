@@ -23,6 +23,9 @@ const mockSettings = {
   registrationEnabled: true,
   maintenanceMode: false,
   defaultDailyWords: 20,
+  amasAutoApplyEnabled: false,
+  amasAutoApplyMaxPerDay: 1,
+  amasAutoApplyMinConfidence: 0.8,
 };
 
 describe('SettingsPage', () => {
@@ -65,11 +68,13 @@ describe('SettingsPage', () => {
     expect(screen.getByText('维护模式')).toBeInTheDocument();
   });
 
-  it('shows "保存设置" button after loading', async () => {
+  it('shows "保存设置" buttons after loading', async () => {
     mockAdminApi.getSettings.mockResolvedValue(mockSettings);
     await renderPage();
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: '保存设置' })).toBeInTheDocument();
+      const buttons = screen.getAllByRole('button', { name: '保存设置' });
+      // 基本设置 + AMAS 调参自动化两个分区，各一个保存按钮
+      expect(buttons.length).toBeGreaterThanOrEqual(1);
     });
   });
 

@@ -1,4 +1,4 @@
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::routing::{get, post};
 use axum::Router;
 
@@ -9,6 +9,7 @@ use crate::amas::types::RawEvent;
 use crate::auth::{AdminAuthUser, AuthUser};
 use crate::response::{ok, AppError};
 use crate::state::AppState;
+use crate::store::operations::amas_versions::ConfigVersionSource;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -26,12 +27,25 @@ pub fn router() -> Router<AppState> {
         .route("/visual-fatigue", post(report_visual_fatigue))
 }
 
-/// Admin-only AMAS endpoints (config, metrics, monitoring)
+/// Admin-only AMAS endpoints (config, metrics, monitoring, versions, telemetry)
 pub fn admin_router() -> Router<AppState> {
     Router::new()
         .route("/config", get(get_config).put(update_config))
+        .route("/config/versions", get(list_versions))
+        .route("/config/versions/:hash", get(get_version))
+        .route("/config/versions/:hash/restore", post(restore_version))
         .route("/metrics", get(get_metrics))
+        .route("/metrics/timeseries", get(metrics_timeseries))
         .route("/monitoring", get(get_monitoring_events))
+        .route("/anomalies", get(anomalies_overview))
+        .route("/user-state/distribution", get(user_state_distribution))
+        .route("/compare", get(compare_versions))
+        .route("/suggestions", get(list_suggestions))
+        .route("/suggestions/explain", post(explain_param))
+        .route("/suggestions/spend", get(suggestion_spend))
+        .route("/suggestions/:id", get(get_suggestion))
+        .route("/suggestions/:id/approve", post(approve_suggestion))
+        .route("/suggestions/:id/reject", post(reject_suggestion))
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -129,11 +143,104 @@ async fn get_config(
     Ok(ok(cfg))
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateConfigQuery {
+    /// 可选备注，写入 amas_config_versions.note
+    note: Option<String>,
+}
+
 async fn update_config(
     admin: AdminAuthUser,
     State(state): State<AppState>,
+    Query(q): Query<UpdateConfigQuery>,
     JsonBody(cfg): JsonBody<crate::amas::config::AMASConfig>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
+    apply_and_persist_config(&state, &admin.admin_id, cfg, ConfigVersionSource::Manual, q.note).await
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RestoreBody {
+    note: Option<String>,
+}
+
+async fn list_versions(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Query(q): Query<ListVersionsQuery>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let limit = q.limit.unwrap_or(50).clamp(1, 500);
+    let rows = state
+        .run_store_task("admin.amas.list_versions", move |store| {
+            store.list_amas_config_versions(limit)
+        })
+        .await??;
+    Ok(ok(rows))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ListVersionsQuery {
+    limit: Option<usize>,
+}
+
+async fn get_version(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Path(hash): Path<String>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let hash_clone = hash.clone();
+    let detail = state
+        .run_store_task("admin.amas.get_version", move |store| {
+            store.get_amas_config_version(&hash_clone)
+        })
+        .await??
+        .ok_or_else(|| AppError::not_found("配置版本不存在"))?;
+    Ok(ok(detail))
+}
+
+async fn restore_version(
+    admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Path(hash): Path<String>,
+    JsonBody(body): JsonBody<RestoreBody>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let hash_clone = hash.clone();
+    let detail = state
+        .run_store_task("admin.amas.restore_lookup", move |store| {
+            store.get_amas_config_version(&hash_clone)
+        })
+        .await??
+        .ok_or_else(|| AppError::not_found("配置版本不存在"))?;
+
+    let cfg: crate::amas::config::AMASConfig =
+        serde_json::from_value(detail.snapshot_json).map_err(|e| {
+            AppError::internal(&format!("快照反序列化失败: {e}"))
+        })?;
+
+    let note = body
+        .note
+        .unwrap_or_else(|| format!("回滚自 {}", &hash[..hash.len().min(8)]));
+    apply_and_persist_config(
+        &state,
+        &admin.admin_id,
+        cfg,
+        ConfigVersionSource::Manual,
+        Some(note),
+    )
+    .await
+}
+
+/// 内部 helper：校验 + 热重载 + 写 toml + 落版本表。
+/// 三档来源（manual / llm_suggested / llm_auto）共用此函数，确保审计与回滚都一致。
+pub(crate) async fn apply_and_persist_config(
+    state: &AppState,
+    admin_id: &str,
+    cfg: crate::amas::config::AMASConfig,
+    source: ConfigVersionSource,
+    note: Option<String>,
+) -> Result<axum::response::Response, AppError> {
     cfg.validate()
         .map_err(|e| AppError::bad_request("AMAS_INVALID_CONFIG", &e))?;
 
@@ -152,13 +259,46 @@ async fn update_config(
         tracing::warn!(path = %toml_path, error = %e, "写回 AMAS 配置文件失败");
     }
 
+    // 序列化为 canonical JSON 并落版本表
+    let snapshot_json = serde_json::to_string(&cfg)
+        .map_err(|e| AppError::internal(&format!("配置序列化失败: {e}")))?;
+
+    let admin_id_owned = admin_id.to_string();
+    let snapshot_for_db = snapshot_json.clone();
+    let note_for_db = note.clone();
+    let (version_id, version_hash) = state
+        .run_store_task("admin.amas.insert_version", move |store| {
+            let parent = store
+                .list_amas_config_versions(1)
+                .ok()
+                .and_then(|mut v| v.pop())
+                .map(|r| r.version_hash);
+            store.insert_amas_config_version(
+                &snapshot_for_db,
+                &admin_id_owned,
+                source,
+                note_for_db.as_deref(),
+                parent.as_deref(),
+            )
+        })
+        .await??;
+
     tracing::info!(
-        admin_id = %admin.admin_id,
+        admin_id = %admin_id,
         action = "update_amas_config",
+        version_id,
+        version_hash = %version_hash,
+        source = ?source,
         "管理员更新 AMAS 配置"
     );
 
-    Ok(ok(serde_json::json!({"updated": true})))
+    use axum::response::IntoResponse;
+    Ok(ok(serde_json::json!({
+        "updated": true,
+        "versionHash": version_hash,
+        "versionId": version_id,
+    }))
+    .into_response())
 }
 
 async fn get_metrics(
@@ -166,6 +306,316 @@ async fn get_metrics(
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     Ok(ok(state.amas().metrics_registry().snapshot()))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DaysQuery {
+    days: Option<u32>,
+}
+
+async fn metrics_timeseries(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Query(q): Query<DaysQuery>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let days = q.days.unwrap_or(7).clamp(1, 90);
+    let series = state
+        .run_store_task("admin.amas.metrics_timeseries", move |store| {
+            store.list_amas_metrics_timeseries(days)
+        })
+        .await??;
+    Ok(ok(series))
+}
+
+async fn anomalies_overview(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Query(q): Query<DaysQuery>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let days = q.days.unwrap_or(7).clamp(1, 30);
+    let overview = state
+        .run_store_task("admin.amas.anomalies", move |store| {
+            store.aggregate_amas_anomalies(days)
+        })
+        .await??;
+    Ok(ok(overview))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UserStateDistQuery {
+    days: Option<u32>,
+    bins: Option<u32>,
+}
+
+async fn user_state_distribution(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Query(q): Query<UserStateDistQuery>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let days = q.days.unwrap_or(1).clamp(1, 30);
+    let bins = q.bins.unwrap_or(20);
+    let dist = state
+        .run_store_task("admin.amas.user_state_dist", move |store| {
+            store.aggregate_amas_user_state_distribution(days, bins)
+        })
+        .await??;
+    Ok(ok(dist))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CompareQuery {
+    version_a: String,
+    version_b: String,
+}
+
+async fn compare_versions(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Query(q): Query<CompareQuery>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let va = q.version_a.clone();
+    let vb = q.version_b.clone();
+    let (a, b) = state
+        .run_store_task("admin.amas.compare", move |store| -> Result<_, crate::store::StoreError> {
+            let a = store.aggregate_amas_version_slice(&va)?;
+            let b = store.aggregate_amas_version_slice(&vb)?;
+            Ok((a, b))
+        })
+        .await??;
+    Ok(ok(serde_json::json!({"a": a, "b": b})))
+}
+
+// ─────────── PR-5: Suggestions / Advisor 路由 ───────────
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ListSuggestionsQuery {
+    status: Option<String>,
+    limit: Option<usize>,
+}
+
+async fn list_suggestions(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Query(q): Query<ListSuggestionsQuery>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    use crate::store::operations::amas_suggestions::SuggestionStatus;
+    let limit = q.limit.unwrap_or(50).clamp(1, 500);
+    let status = if let Some(s) = q.status.as_deref() {
+        Some(SuggestionStatus::parse(s).map_err(|e| AppError::bad_request("BAD_STATUS", &e.to_string()))?)
+    } else {
+        None
+    };
+    let rows = state
+        .run_store_task("admin.amas.list_suggestions", move |store| {
+            store.list_amas_suggestions(status, limit)
+        })
+        .await??;
+    Ok(ok(rows))
+}
+
+async fn get_suggestion(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let row = state
+        .run_store_task("admin.amas.get_suggestion", move |store| {
+            store.get_amas_suggestion(id)
+        })
+        .await??
+        .ok_or_else(|| AppError::not_found("建议不存在"))?;
+    Ok(ok(row))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DecisionBody {
+    note: Option<String>,
+}
+
+async fn approve_suggestion(
+    admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    JsonBody(body): JsonBody<DecisionBody>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    use crate::amas::tuning_whitelist::validate_patch;
+    use crate::store::operations::amas_suggestions::SuggestionStatus;
+
+    let suggestion = state
+        .run_store_task("admin.amas.approve_lookup", move |store| {
+            store.get_amas_suggestion(id)
+        })
+        .await??
+        .ok_or_else(|| AppError::not_found("建议不存在"))?;
+
+    if !matches!(suggestion.status, SuggestionStatus::Pending) {
+        return Err(AppError::bad_request(
+            "BAD_STATUS",
+            "仅 pending 建议可被批准",
+        ));
+    }
+
+    // 校验 patch（防止数据库篡改）
+    let patch_obj = suggestion
+        .patch_json
+        .as_object()
+        .ok_or_else(|| AppError::internal("patch_json 非对象"))?
+        .clone();
+    let errs = validate_patch(&patch_obj);
+    if !errs.is_empty() {
+        return Err(AppError::bad_request("PATCH_INVALID", &errs.join("；")));
+    }
+
+    // 应用 patch 到当前 config
+    let current = state.amas().get_config();
+    let cfg_value =
+        serde_json::to_value(&current).map_err(|e| AppError::internal(&format!("ser: {e}")))?;
+    let mut cfg_value = cfg_value;
+    for (path, value) in &patch_obj {
+        write_path(&mut cfg_value, path, value.clone());
+    }
+    let new_cfg: crate::amas::config::AMASConfig =
+        serde_json::from_value(cfg_value).map_err(|e| AppError::bad_request("PATCH_INVALID", &format!("应用 patch 后反序列化失败: {e}")))?;
+
+    let resp = apply_and_persist_config(
+        &state,
+        &admin.admin_id,
+        new_cfg,
+        ConfigVersionSource::LlmSuggested,
+        Some(format!("approve suggestion#{}", id)),
+    )
+    .await?;
+
+    let admin_id = admin.admin_id.clone();
+    state
+        .run_store_task("admin.amas.approve_update", move |store| {
+            store.update_amas_suggestion_status(id, SuggestionStatus::Approved, Some(&admin_id), body.note.as_deref())
+        })
+        .await??;
+
+    Ok(resp)
+}
+
+async fn reject_suggestion(
+    admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    JsonBody(body): JsonBody<DecisionBody>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    use crate::store::operations::amas_suggestions::SuggestionStatus;
+    let admin_id = admin.admin_id.clone();
+    state
+        .run_store_task("admin.amas.reject", move |store| {
+            store.update_amas_suggestion_status(
+                id,
+                SuggestionStatus::Rejected,
+                Some(&admin_id),
+                body.note.as_deref(),
+            )
+        })
+        .await??;
+    Ok(ok(serde_json::json!({"rejected": true})))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExplainBody {
+    path: String,
+    current_value: serde_json::Value,
+}
+
+async fn explain_param(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    JsonBody(body): JsonBody<ExplainBody>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    use crate::services::llm_provider::{ChatMessage, ChatRequest, LlmProvider};
+
+    let llm_cfg = state.config().llm.clone();
+    if !llm_cfg.enabled {
+        return Err(AppError::bad_request("LLM_DISABLED", "LLM 未启用"));
+    }
+
+    let provider = LlmProvider::new(&llm_cfg);
+    let prompt = format!(
+        "用 80 字以内中文，向运营人员解释 AMAS 参数 `{}` 当前值 {} 的含义、增大/减小会带来什么后果。直接给结论，不要寒暄。",
+        body.path, body.current_value
+    );
+    let resp = provider
+        .chat(ChatRequest {
+            messages: vec![ChatMessage { role: "user".into(), content: prompt }],
+            json_object: false,
+            temperature: 0.3,
+        })
+        .await
+        .map_err(|e| AppError::internal(&format!("LLM 调用失败: {e}")))?;
+
+    let cost = provider.estimate_cost_usd(&resp.usage);
+    Ok(ok(serde_json::json!({
+        "explanation": resp.content,
+        "model": resp.model,
+        "costUsd": cost,
+        "tokensInput": resp.usage.prompt_tokens,
+        "tokensOutput": resp.usage.completion_tokens,
+    })))
+}
+
+async fn suggestion_spend(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let (cost, tin, tout) = state
+        .run_store_task("admin.amas.spend", move |store| {
+            store.aggregate_amas_suggestion_spend_today()
+        })
+        .await??;
+    let cap = state.config().llm.daily_cost_cap_usd;
+    Ok(ok(serde_json::json!({
+        "todayCostUsd": cost,
+        "todayTokensInput": tin,
+        "todayTokensOutput": tout,
+        "dailyCapUsd": cap,
+        "remainingUsd": (cap - cost).max(0.0),
+    })))
+}
+
+/// 简化版按点分式路径写值，支持 `mem.w[0]`
+fn write_path(cfg: &mut serde_json::Value, path: &str, value: serde_json::Value) {
+    let parts: Vec<&str> = path.split('.').collect();
+    let mut cur: &mut serde_json::Value = cfg;
+    for (i, part) in parts.iter().enumerate() {
+        let is_last = i == parts.len() - 1;
+        if let Some(open) = part.find('[') {
+            let (key, rest) = part.split_at(open);
+            let idx: usize = rest[1..rest.len() - 1].parse().unwrap_or(0);
+            let Some(obj) = cur.as_object_mut() else { return };
+            let Some(arr_val) = obj.get_mut(key) else { return };
+            let Some(arr) = arr_val.as_array_mut() else { return };
+            if is_last {
+                if idx < arr.len() {
+                    arr[idx] = value;
+                }
+                return;
+            }
+            let Some(next) = arr.get_mut(idx) else { return };
+            cur = next;
+        } else if is_last {
+            if let Some(obj) = cur.as_object_mut() {
+                obj.insert(part.to_string(), value);
+            }
+            return;
+        } else {
+            let Some(obj) = cur.as_object_mut() else { return };
+            cur = obj
+                .entry(part.to_string())
+                .or_insert_with(|| serde_json::Value::Object(Default::default()));
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]

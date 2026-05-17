@@ -35,6 +35,12 @@ pub enum SseEvent {
     Unbanned,
     #[serde(rename = "data_corrupted")]
     DataCorrupted,
+    /// PR-7 D4: 新的 LLM 调参建议到达，前端 advisor 页可立即刷新
+    #[serde(rename = "new_llm_suggestion")]
+    NewLlmSuggestion {
+        #[serde(rename = "suggestionId")]
+        suggestion_id: i64,
+    },
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

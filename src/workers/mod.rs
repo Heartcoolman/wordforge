@@ -96,6 +96,7 @@ pub struct WorkerManager {
     amas_engine: Arc<AMASEngine>,
     shutdown_rx: broadcast::Receiver<()>,
     config: WorkerConfig,
+    llm_config: Option<crate::config::LLMConfig>,
 }
 
 impl WorkerManager {
@@ -110,7 +111,13 @@ impl WorkerManager {
             amas_engine,
             shutdown_rx,
             config: config.clone(),
+            llm_config: None,
         }
+    }
+
+    pub fn with_llm_config(mut self, llm: crate::config::LLMConfig) -> Self {
+        self.llm_config = Some(llm);
+        self
     }
 
     /// Single source of truth for all planned jobs and their cron schedules.
@@ -298,10 +305,14 @@ impl WorkerManager {
                     .await;
                 }
                 WorkerName::LlmAdvisor => {
+                    let llm = self.llm_config.clone();
+                    let engine_cloned = engine.clone();
                     add_job(scheduler, spec.cron, name_str, move || {
                         let store = store.clone();
+                        let llm = llm.clone();
+                        let engine = engine_cloned.clone();
                         async move {
-                            llm_advisor::run(&store).await;
+                            llm_advisor::run(&store, llm.as_ref(), &engine).await;
                         }
                     })
                     .await;
