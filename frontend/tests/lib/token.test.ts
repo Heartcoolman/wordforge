@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { createFakeJwt } from '../helpers/factories';
 
 // tokenManager 是模块级单例，使用内存存储 access token。
@@ -104,6 +104,95 @@ describe('tokenManager', () => {
       tokenManager.setAdminToken(token);
       tokenManager.clearAdminToken();
       expect(tokenManager.getAdminToken()).toBeNull();
+    });
+
+    it('getAdminToken rehydrates from sessionStorage when memory empty', () => {
+      const token = createFakeJwt({ exp: Math.floor(Date.now() / 1000) + 3600 });
+      // 直接写入 sessionStorage 模拟刷新后场景；先清掉内存态
+      tokenManager.clearAdminToken();
+      sessionStorage.setItem('eng_admin_token', token);
+      expect(tokenManager.getAdminToken()).toBe(token);
+    });
+
+    it('getAdminToken clears expired token and returns null', () => {
+      const expired = createFakeJwt({ exp: Math.floor(Date.now() / 1000) - 100 });
+      tokenManager.setAdminToken(expired);
+      expect(tokenManager.getAdminToken()).toBeNull();
+      expect(sessionStorage.getItem('eng_admin_token')).toBeNull();
+    });
+
+    it('isAdminTokenExpiringSoon returns false when no admin token', () => {
+      expect(tokenManager.isAdminTokenExpiringSoon()).toBe(false);
+    });
+
+    it('isAdminTokenExpiringSoon returns true near expiry', () => {
+      const token = createFakeJwt({ exp: Math.floor(Date.now() / 1000) + 60 });
+      tokenManager.setAdminToken(token);
+      expect(tokenManager.isAdminTokenExpiringSoon()).toBe(true);
+    });
+
+    it('isAdminTokenExpiringSoon returns false when token far from expiry', () => {
+      const token = createFakeJwt({ exp: Math.floor(Date.now() / 1000) + 7200 });
+      tokenManager.setAdminToken(token);
+      expect(tokenManager.isAdminTokenExpiringSoon()).toBe(false);
+    });
+  });
+
+  describe('refreshAccessToken', () => {
+    it('returns true and stores token on successful refresh', async () => {
+      const newToken = createFakeJwt({ exp: Math.floor(Date.now() / 1000) + 3600 });
+      vi.doMock('@/api/auth', () => ({
+        authApi: { refresh: vi.fn().mockResolvedValue({ accessToken: newToken }) },
+      }));
+      vi.resetModules();
+      const { tokenManager: fresh } = await import('@/lib/token');
+      fresh.clearTokens();
+      const ok = await fresh.refreshAccessToken();
+      expect(ok).toBe(true);
+      expect(fresh.getToken()).toBe(newToken);
+      vi.doUnmock('@/api/auth');
+      vi.resetModules();
+    });
+
+    it('returns false and clears tokens on refresh failure', async () => {
+      vi.doMock('@/api/auth', () => ({
+        authApi: { refresh: vi.fn().mockRejectedValue(new Error('boom')) },
+      }));
+      vi.resetModules();
+      const { tokenManager: fresh } = await import('@/lib/token');
+      fresh.clearTokens();
+      const ok = await fresh.refreshAccessToken();
+      expect(ok).toBe(false);
+      expect(fresh.getToken()).toBeNull();
+      vi.doUnmock('@/api/auth');
+      vi.resetModules();
+    });
+
+    it('coalesces concurrent refresh calls (single-flight)', async () => {
+      const refreshSpy = vi.fn().mockImplementation(() =>
+        new Promise((resolve) => setTimeout(() => resolve({ accessToken: createFakeJwt({ exp: Math.floor(Date.now() / 1000) + 3600 }) }), 10)));
+      vi.doMock('@/api/auth', () => ({ authApi: { refresh: refreshSpy } }));
+      vi.resetModules();
+      const { tokenManager: fresh } = await import('@/lib/token');
+      fresh.clearTokens();
+      const [a, b] = await Promise.all([fresh.refreshAccessToken(), fresh.refreshAccessToken()]);
+      expect(a).toBe(true);
+      expect(b).toBe(true);
+      expect(refreshSpy).toHaveBeenCalledTimes(1);
+      vi.doUnmock('@/api/auth');
+      vi.resetModules();
+    });
+  });
+
+  describe('JWT payload parsing edge cases', () => {
+    it('treats malformed token (less than 3 parts) as expired', () => {
+      tokenManager.setTokens('not-a-jwt');
+      expect(tokenManager.getToken()).toBeNull();
+    });
+
+    it('treats token with non-JSON payload as expired', () => {
+      tokenManager.setTokens('aaa.bbb.ccc');
+      expect(tokenManager.getToken()).toBeNull();
     });
   });
 });

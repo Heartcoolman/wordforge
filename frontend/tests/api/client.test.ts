@@ -322,6 +322,22 @@ describe('Timeout', () => {
   });
 });
 
+describe('unwrap edge cases', () => {
+  it('falls back to "API_ERROR" code and uses error field when message missing in success-envelope', async () => {
+    server.use(
+      http.get(`${BASE}/api/envelope-fail`, () =>
+        HttpResponse.json({ success: false, error: 'fallback-error' })),
+    );
+    try {
+      await api.get('/api/envelope-fail', undefined, { skipTokenRefresh: true });
+    } catch (e) {
+      const err = e as ApiError;
+      expect(err.code).toBe('API_ERROR');
+      expect(err.message).toBe('fallback-error');
+    }
+  });
+});
+
 describe('unwrap logic', () => {
   it('unwraps {success:true, data} envelope', async () => {
     server.use(
@@ -723,6 +739,20 @@ describe('connectSseStream', () => {
     dispose();
     // maintenance(false) 应当把信号置为 false 分支
     expect(maintenanceActive()).toBe(false);
+    fetchSpy.mockRestore();
+  });
+
+  it('rejects amas_state when payload is null/non-object via isAmasStatePayload', async () => {
+    const events = [
+      'event: amas_state\ndata: null\n\n',
+      'event: amas_state\ndata: "string-payload"\n\n',
+    ];
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(makeSseResponse(events));
+    const onAmasState = vi.fn();
+    const dispose = connectSseStream({ onAmasState });
+    await new Promise((r) => setTimeout(r, 30));
+    dispose();
+    expect(onAmasState).not.toHaveBeenCalled();
     fetchSpy.mockRestore();
   });
 

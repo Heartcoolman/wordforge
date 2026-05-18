@@ -37,7 +37,7 @@ describe('TierAPanel', () => {
         onChange={onChange}
       />
     ));
-    const input = screen.getByDisplayValue('0.92') as HTMLInputElement;
+    const input = document.querySelector('input[type="number"]') as HTMLInputElement;
     fireEvent.input(input, { target: { value: '0.85' } });
     expect(onChange).toHaveBeenCalled();
   });

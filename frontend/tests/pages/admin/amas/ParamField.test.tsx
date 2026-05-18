@@ -73,7 +73,7 @@ describe('ParamField', () => {
   it('handles number input change', () => {
     const onChange = vi.fn();
     render(() => <ParamField meta={numMeta} value={0.5} onChange={onChange} />);
-    const input = screen.getByDisplayValue('0.5') as HTMLInputElement;
+    const input = document.querySelector('input[type="number"]') as HTMLInputElement;
     fireEvent.input(input, { target: { value: '0.75' } });
     expect(onChange).toHaveBeenCalledWith(0.75);
   });
@@ -81,7 +81,7 @@ describe('ParamField', () => {
   it('handles integer input correctly', () => {
     const onChange = vi.fn();
     render(() => <ParamField meta={intMeta} value={20} onChange={onChange} />);
-    const input = screen.getByDisplayValue('20') as HTMLInputElement;
+    const input = document.querySelector('input[type="number"]') as HTMLInputElement;
     fireEvent.input(input, { target: { value: '50' } });
     expect(onChange).toHaveBeenCalledWith(50);
   });
@@ -89,7 +89,7 @@ describe('ParamField', () => {
   it('ignores empty input', () => {
     const onChange = vi.fn();
     render(() => <ParamField meta={numMeta} value={0.5} onChange={onChange} />);
-    const input = screen.getByDisplayValue('0.5') as HTMLInputElement;
+    const input = document.querySelector('input[type="number"]') as HTMLInputElement;
     fireEvent.input(input, { target: { value: '' } });
     expect(onChange).not.toHaveBeenCalled();
   });
@@ -97,7 +97,7 @@ describe('ParamField', () => {
   it('ignores non-finite input', () => {
     const onChange = vi.fn();
     render(() => <ParamField meta={numMeta} value={0.5} onChange={onChange} />);
-    const input = screen.getByDisplayValue('0.5') as HTMLInputElement;
+    const input = document.querySelector('input[type="number"]') as HTMLInputElement;
     fireEvent.input(input, { target: { value: 'abc' } });
     expect(onChange).not.toHaveBeenCalled();
   });
