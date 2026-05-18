@@ -631,7 +631,7 @@ async fn it_word_states_full_flow() {
         Some(serde_json::json!({
             "updates": [{
                 "wordId": word_id,
-                "state": "learning",
+                "state": "LEARNING",
                 "masteryLevel": 0.5
             }]
         })),
@@ -684,16 +684,19 @@ async fn it_study_config_full_flow() {
         "/api/study-config",
         Some(serde_json::json!({
             "dailyWordCount": 600,
-            "studyMode": "mixed",
-            "dailyMasteryTarget": 30
+            "studyMode": "intensive",
+            "dailyMasteryTarget": 200
         })),
         &[("authorization", auth_header(&user_token))],
     )
     .await;
     let (status, _, body) = response_json(resp).await;
     assert_eq!(status, StatusCode::OK);
-    // 应该被 clamp 到 200
+    // dailyWordCount 应被 clamp 到 200
     assert_eq!(body["data"]["dailyWordCount"], 200);
+    // dailyMasteryTarget 应被 clamp 到 100
+    assert_eq!(body["data"]["dailyMasteryTarget"], 100);
+    assert_eq!(body["data"]["studyMode"], "intensive");
 
     // today-words (empty wordbook list -> fallback to global words)
     let resp = request(
@@ -1074,23 +1077,23 @@ async fn it_wordbook_center_user_import_url_validation_errors() {
 // ────────────────────── wordbook_center (admin) ──────────────────────
 
 #[tokio::test]
-async fn it_wordbook_center_admin_unconfigured_returns_error_or_empty() {
+async fn it_wordbook_center_admin_url_blocked_returns_blocked() {
     let app = spawn_test_server().await;
     let admin_token = setup_admin_and_get_token(&app.app).await;
 
-    // 清除默认 URL: 通过 admin settings 设置为 empty
+    // 将 wordbook_center_url 设置为本地 IP（会被 SSRF 拒绝）
     let resp = request(
         &app.app,
         Method::PUT,
         "/api/admin/settings",
-        Some(serde_json::json!({"wordbookCenterUrl": ""})),
+        Some(serde_json::json!({"wordbookCenterUrl": "http://127.0.0.1/wb"})),
         &[("authorization", auth_header(&admin_token))],
     )
     .await;
     let (status, _, _) = response_json(resp).await;
     assert_eq!(status, StatusCode::OK);
 
-    // admin_browse -> 400 (URL 未配置)
+    // admin_browse: fetch_remote_json 拒绝 -> 400
     let resp = request(
         &app.app,
         Method::GET,
@@ -1101,9 +1104,9 @@ async fn it_wordbook_center_admin_unconfigured_returns_error_or_empty() {
     .await;
     let (status, _, body) = response_json(resp).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(body["code"], "WB_CENTER_NOT_CONFIGURED");
+    assert_eq!(body["code"], "IMPORT_BLOCKED_URL");
 
-    // admin_preview -> 400
+    // admin_preview
     let resp = request(
         &app.app,
         Method::GET,
@@ -1112,11 +1115,10 @@ async fn it_wordbook_center_admin_unconfigured_returns_error_or_empty() {
         &[("authorization", auth_header(&admin_token))],
     )
     .await;
-    let (status, _, body) = response_json(resp).await;
+    let (status, _, _) = response_json(resp).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(body["code"], "WB_CENTER_NOT_CONFIGURED");
 
-    // admin_import -> 400
+    // admin_import
     let resp = request(
         &app.app,
         Method::POST,
@@ -1125,11 +1127,10 @@ async fn it_wordbook_center_admin_unconfigured_returns_error_or_empty() {
         &[("authorization", auth_header(&admin_token))],
     )
     .await;
-    let (status, _, body) = response_json(resp).await;
+    let (status, _, _) = response_json(resp).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(body["code"], "WB_CENTER_NOT_CONFIGURED");
 
-    // admin_updates -> [] (没配置)
+    // admin_updates: 没 import 记录 -> 直接返回空（提前 short-circuit）
     let resp = request(
         &app.app,
         Method::GET,
@@ -1142,7 +1143,7 @@ async fn it_wordbook_center_admin_unconfigured_returns_error_or_empty() {
     assert_eq!(status, StatusCode::OK);
     assert!(body["data"].as_array().unwrap().is_empty());
 
-    // admin_sync -> 400
+    // admin_sync: 没记录 -> 404
     let resp = request(
         &app.app,
         Method::POST,
@@ -1151,9 +1152,8 @@ async fn it_wordbook_center_admin_unconfigured_returns_error_or_empty() {
         &[("authorization", auth_header(&admin_token))],
     )
     .await;
-    let (status, _, body) = response_json(resp).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(body["code"], "WB_CENTER_NOT_CONFIGURED");
+    let (status, _, _) = response_json(resp).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
