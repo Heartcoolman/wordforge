@@ -207,11 +207,19 @@ impl Updater {
         self.status_from(&cache)
     }
 
-    /// 强制刷新缓存。优先走 ETag/cache_ttl 短路；只在确实需要时打 GitHub API。
-    /// 返回当前 status 与本次是否发生 cache 失效。
+    /// 普通检查：走 TTL 短路。worker 用这条。
     pub async fn check_latest(&self) -> Result<UpdateStatus, UpdaterError> {
-        // ttl 命中且有 last_checked → 直接复用缓存
-        {
+        self.check_inner(false).await
+    }
+
+    /// 强制刷新：跳过 TTL，但仍带 ETag 走 304 节省 GitHub 额度。admin "立即检查" 用这条。
+    pub async fn force_check_latest(&self) -> Result<UpdateStatus, UpdaterError> {
+        self.check_inner(true).await
+    }
+
+    async fn check_inner(&self, force: bool) -> Result<UpdateStatus, UpdaterError> {
+        // 非 force：TTL 命中 → 直接复用缓存
+        if !force {
             let cache = self.cache.read().await;
             if let Some(instant) = cache.last_checked_instant {
                 if instant.elapsed() < self.cache_ttl {
@@ -304,6 +312,14 @@ impl Updater {
                 "latest cached tag is {}, not {}",
                 latest.tag, target_tag
             )));
+        }
+        // Codex P3: 资产缺失要在 apply 入口就明确报错，否则会在 fetch_sha256 阶段
+        // 退化成 generic network error，运维难以定位 release 打包失误
+        if latest.tarball_url.is_empty() || latest.sha256_url.is_empty() {
+            return Err(UpdaterError::NoAsset {
+                tag: latest.tag.clone(),
+                arch: current_arch_token().unwrap_or("unknown").to_string(),
+            });
         }
         if !self.allow_downgrade && !is_strictly_newer(&latest.tag, &self.current_tag) {
             return Err(UpdaterError::DowngradeRefused {
@@ -663,6 +679,17 @@ fn parse_release_payload(body: &serde_json::Value) -> Option<CachedRelease> {
         }
     }
 
+    if tar_url.is_empty() || sha_url.is_empty() {
+        // Codex P3: 不阻止缓存（前端仍能看到"有新版本但不可应用"），但留醒目日志
+        tracing::warn!(
+            tag = %tag,
+            arch = %arch,
+            has_tarball = !tar_url.is_empty(),
+            has_sha256 = !sha_url.is_empty(),
+            "release is mispackaged: missing wordforge-linux-{arch}.tar.gz or its .sha256 sibling"
+        );
+    }
+
     Some(CachedRelease {
         tag,
         body: notes,
@@ -697,9 +724,20 @@ fn extract_tar_gz_safe(tarball: &Path, dst: &Path) -> Result<(), UpdaterError> {
     for entry_res in archive.entries()? {
         let mut entry = entry_res?;
         let rel = entry.path()?.into_owned();
-        // 拒绝绝对路径或包含 .. 的条目（zip-slip）
+        // 拒绝绝对路径或包含 .. 的条目（zip-slip 基本款）
         if rel.is_absolute() || rel.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
             return Err(UpdaterError::UnsafePath(rel.to_string_lossy().into()));
+        }
+        // 拒绝任何 link / symlink 条目：本工程发布产物只含 regular file + directory；
+        // 允许 symlink 会让后续 file 条目通过预置的 symlink 写出 dst 外（Codex P1）。
+        match entry.header().entry_type() {
+            tar::EntryType::Symlink | tar::EntryType::Link => {
+                return Err(UpdaterError::UnsafePath(format!(
+                    "{} (link/symlink not allowed)",
+                    rel.to_string_lossy()
+                )));
+            }
+            _ => {}
         }
         let out = dst_canon.join(&rel);
         if let Some(parent) = out.parent() {

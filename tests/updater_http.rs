@@ -318,6 +318,163 @@ async fn apply_runs_until_backup_callback_when_sha_matches() {
     assert!(tmp.path().join(".update-staging").exists());
 }
 
+// ────── Codex review follow-ups ──────
+
+/// Codex P1: 恶意 tarball 用 symlink 跳出 dst。即便 entry path 全部"看起来合法"，
+/// EntryType::Symlink 也必须直接拒掉。
+#[tokio::test]
+async fn apply_rejects_tarball_with_symlink_entries() {
+    if skip_unless_supported_arch() || std::env::consts::OS != "linux" {
+        return;
+    }
+    // 手工组装带 symlink 的 tarball
+    use flate2::write::GzEncoder;
+    use flate2::Compression;
+    use std::io::Write;
+    use tar::{Builder, Header};
+
+    let mut tar_buf = Vec::new();
+    {
+        let mut b = Builder::new(&mut tar_buf);
+
+        // 顶层目录
+        let mut d = Header::new_gnu();
+        d.set_path("wordforge-linux-x86_64/").unwrap();
+        d.set_entry_type(tar::EntryType::Directory);
+        d.set_mode(0o755);
+        d.set_size(0);
+        d.set_cksum();
+        b.append(&d, std::io::empty()).unwrap();
+
+        // 恶意 symlink：wordforge-linux-x86_64/wordforge → /tmp/wf-evil-target
+        let mut s = Header::new_gnu();
+        s.set_path("wordforge-linux-x86_64/wordforge").unwrap();
+        s.set_entry_type(tar::EntryType::Symlink);
+        s.set_link_name("/tmp/wf-evil-target").unwrap();
+        s.set_mode(0o777);
+        s.set_size(0);
+        s.set_cksum();
+        b.append(&s, std::io::empty()).unwrap();
+
+        b.finish().unwrap();
+    }
+    let mut gz = GzEncoder::new(Vec::new(), Compression::default());
+    gz.write_all(&tar_buf).unwrap();
+    let tarball = gz.finish().unwrap();
+    let sha_hex = sha256_hex(&tarball);
+
+    let server = MockServer::start().await;
+    let release = build_release_json(&server.uri(), "v9.9.9", tarball.len() as u64);
+    Mock::given(method("GET"))
+        .and(path("/repos/o/r/releases/latest"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(release))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/dl/wordforge-linux-x86_64.tar.gz.sha256"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(sha_hex))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/dl/wordforge-linux-x86_64.tar.gz"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(tarball.clone()))
+        .mount(&server)
+        .await;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = build_cfg(tmp.path(), &format!("{}/repos/o/r/releases/latest", server.uri()));
+    let updater = Updater::new(&cfg, "v0.4.2").unwrap();
+    let _ = updater.check_latest().await.unwrap();
+    let backup = |_dst: &Path| Ok(());
+    let err = updater.apply("v9.9.9", backup, noop_sink()).await.unwrap_err();
+    assert!(matches!(err, UpdaterError::UnsafePath(_)), "got {err:?}");
+    // /tmp/wf-evil-target 不应被任何东西创建出来
+    assert!(!std::path::Path::new("/tmp/wf-evil-target").exists());
+}
+
+/// Codex P2: `force_check_latest` 必须无视 TTL 真打 GitHub。
+#[tokio::test]
+async fn force_check_bypasses_ttl_cache() {
+    if skip_unless_supported_arch() || std::env::consts::OS != "linux" {
+        return;
+    }
+    let server = MockServer::start().await;
+    let tarball = build_tarball();
+    let release_v1 = build_release_json(&server.uri(), "v1.0.0", tarball.len() as u64);
+    let release_v2 = build_release_json(&server.uri(), "v2.0.0", tarball.len() as u64);
+
+    // 第一次：返 v1
+    Mock::given(method("GET"))
+        .and(path("/repos/o/r/releases/latest"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(release_v1))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    // 后续：返 v2
+    Mock::given(method("GET"))
+        .and(path("/repos/o/r/releases/latest"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(release_v2))
+        .mount(&server)
+        .await;
+
+    let tmp = tempfile::tempdir().unwrap();
+    // 用一个很长的 TTL 保证非 force 会命中缓存
+    let mut cfg = build_cfg(tmp.path(), &format!("{}/repos/o/r/releases/latest", server.uri()));
+    cfg.cache_ttl_secs = 3600;
+    let updater = Updater::new(&cfg, "v0.4.2").unwrap();
+
+    let first = updater.check_latest().await.unwrap();
+    assert_eq!(first.latest_version.as_deref(), Some("v1.0.0"));
+
+    // 普通 check_latest 仍命中 TTL，返回 v1
+    let cached = updater.check_latest().await.unwrap();
+    assert_eq!(cached.latest_version.as_deref(), Some("v1.0.0"));
+
+    // force_check_latest 必须真去打，拿到 v2
+    let fresh = updater.force_check_latest().await.unwrap();
+    assert_eq!(fresh.latest_version.as_deref(), Some("v2.0.0"));
+}
+
+/// Codex P3: tar.gz / sha256 资产任一缺失，apply 必须早抛 NoAsset。
+#[tokio::test]
+async fn apply_rejects_release_missing_assets() {
+    if skip_unless_supported_arch() || std::env::consts::OS != "linux" {
+        return;
+    }
+    // release 但 assets 数组里只有非匹配项
+    let server = MockServer::start().await;
+    let mispackaged = serde_json::json!({
+        "tag_name": "v9.9.9",
+        "html_url": "https://example.com/r/v9.9.9",
+        "body": "## broken release",
+        "published_at": "2026-05-17T16:00:00Z",
+        "assets": [
+            {
+                "name": "wordforge-linux-mips.tar.gz",
+                "browser_download_url": "https://example.com/wrong-arch.tar.gz",
+                "size": 100,
+            }
+        ],
+    });
+    Mock::given(method("GET"))
+        .and(path("/repos/o/r/releases/latest"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(mispackaged))
+        .mount(&server)
+        .await;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = build_cfg(tmp.path(), &format!("{}/repos/o/r/releases/latest", server.uri()));
+    let updater = Updater::new(&cfg, "v0.4.2").unwrap();
+
+    let status = updater.check_latest().await.unwrap();
+    assert!(!status.can_apply, "缓存了 release 但 canApply 应为 false");
+    assert_eq!(status.latest_version.as_deref(), Some("v9.9.9"));
+
+    let backup = |_dst: &Path| Ok(());
+    let err = updater.apply("v9.9.9", backup, noop_sink()).await.unwrap_err();
+    assert!(matches!(err, UpdaterError::NoAsset { .. }), "got {err:?}");
+}
+
 #[tokio::test]
 async fn rate_limit_propagates_as_dedicated_error() {
     if skip_unless_supported_arch() || std::env::consts::OS != "linux" {

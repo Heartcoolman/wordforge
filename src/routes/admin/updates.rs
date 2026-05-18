@@ -47,7 +47,8 @@ async fn force_check(
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     let updater = require_updater(&state).await?;
     let prev = updater.snapshot().await.latest_version;
-    let status = updater.check_latest().await.map_err(map_err)?;
+    // 显式走 force 路径，跳过 TTL，仍带 ETag 节省额度
+    let status = updater.force_check_latest().await.map_err(map_err)?;
     // 缓存里的 latest 发生变化 → 顺手广播一次，省得用户等下次 worker tick
     if status.has_update && status.latest_version != prev {
         if let Some(ref tag) = status.latest_version {

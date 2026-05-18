@@ -93,7 +93,9 @@ Updater 在 apply 时同时 stream 这两个 URL，不匹配立即拒绝，**不
 | 误操作 | `confirmCurrentVersion` 必须 == 服务端 `GIT_VERSION` |
 | Downgrade | 默认拒绝，要求 `allow_downgrade=true` |
 | 巨大产物 | `max_tarball_bytes` 默认 200 MiB，流下载途中超限即拒 |
-| Zip-slip | tar 条目里有 `..` 或绝对路径直接拒，落地前严格 join 校验 |
+| Zip-slip | tar 条目含 `..` 或绝对路径直接拒；落地前严格 join 校验 |
+| Symlink 跳出 | tar 中 **任何 `Symlink` / `Link` 条目都直接拒**，避免预置的 symlink 让后续 file 写出 `dst` 外 |
+| 资产缺失 | `apply` 入口校验 `tarball_url` / `sha256_url` 非空，缺失立即 `NoAsset`，不在下载阶段才崩成 generic error |
 | 数据库 | 备份到 `data/learning-{old_tag}.backup.db`，自动保留 3 份按 mtime 删旧 |
 | 旧二进制 | `wordforge.{old_tag}` + `static.{old_tag}/` 各保留 2 份 |
 
@@ -154,7 +156,7 @@ cp data/learning-vOLD.backup.db data/learning.db
 | 路径 | 方法 | 作用 |
 |---|---|---|
 | `/api/admin/updates/status` | GET | 返回缓存内的版本视图，不打网络 |
-| `/api/admin/updates/check`  | POST | 强制刷新（带 ETag），命中 304 时省额度 |
+| `/api/admin/updates/check`  | POST | **强制刷新**（绕过 TTL，但仍带 ETag，命中 304 时省额度）|
 | `/api/admin/updates/apply`  | POST | 触发完整自更新流程，成功后 fork-exec 退出 |
 | `/api/admin/monitoring/check-update` | GET | **遗留**，前端 dashboard 仍在用，结构更简单 |
 
