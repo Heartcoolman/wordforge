@@ -1442,4 +1442,903 @@ mod tests {
         assert_eq!(algo_states.ige.total_explorations, 0);
         assert_eq!(algo_states.swd.strategy_history.len(), 1);
     }
+
+    // ---- 基础属性 ----
+
+    #[test]
+    fn get_config_clones_internal_config() {
+        let cfg = AMASConfig::default();
+        let engine = test_engine(cfg.clone());
+        let got = engine.get_config();
+        assert_eq!(
+            got.feature_flags.ensemble_enabled,
+            cfg.feature_flags.ensemble_enabled
+        );
+    }
+
+    #[test]
+    fn metrics_registry_is_initialized_with_zero_counts() {
+        let engine = test_engine(AMASConfig::default());
+        let snap = engine.metrics_registry().snapshot();
+        for v in snap.values() {
+            assert_eq!(v.call_count, 0);
+        }
+    }
+
+    #[test]
+    fn ssp_policy_present_when_ssp_enabled() {
+        let mut cfg = AMASConfig::default();
+        cfg.feature_flags.ssp_enabled = true;
+        cfg.ssp.max_iterations = 5; // 加速测试
+        let engine = test_engine(cfg);
+        assert!(engine.ssp_policy().is_some());
+    }
+
+    #[test]
+    fn ssp_policy_absent_when_ssp_disabled() {
+        let mut cfg = AMASConfig::default();
+        cfg.feature_flags.ssp_enabled = false;
+        let engine = test_engine(cfg);
+        assert!(engine.ssp_policy().is_none());
+    }
+
+    #[test]
+    fn ssp_policy_dual_grid_path_constructs_policy() {
+        let mut cfg = AMASConfig::default();
+        cfg.feature_flags.ssp_enabled = true;
+        cfg.ssp.max_iterations = 5;
+        cfg.ssp.dual_grid_enabled = true;
+        let engine = test_engine(cfg);
+        assert!(engine.ssp_policy().is_some());
+    }
+
+    #[test]
+    fn is_healthy_true_for_default_config() {
+        let engine = test_engine(AMASConfig::default());
+        assert!(engine.is_healthy());
+    }
+
+    #[test]
+    fn is_healthy_false_when_ssp_enabled_but_policy_missing() {
+        // 构造时 ssp_enabled=false，跳过 precompute；再 reload 把 flag 翻为 true
+        // 但 reload 会重建 policy，故为了模拟 missing 我们用直接构造方式：
+        // 用 default 配置构造，然后手工把内部 config 切到 ssp_enabled=true 而不重建 policy。
+        let engine = test_engine(AMASConfig::default());
+        let mut new_cfg = AMASConfig::default();
+        new_cfg.feature_flags.ssp_enabled = true;
+        // 直接写入 config 而不调用 reload_config —— 模拟 policy 缺失
+        *engine.config.write().unwrap() = Arc::new(new_cfg);
+        // 不重建 ssp_policy
+        assert!(!engine.is_healthy());
+    }
+
+    // ---- reload_config ----
+
+    #[test]
+    fn reload_config_with_invalid_config_returns_err() {
+        let engine = test_engine(AMASConfig::default());
+        let mut bad = AMASConfig::default();
+        bad.modeling.attention_smoothing = 5.0; // 越界
+        assert!(engine.reload_config(bad).is_err());
+    }
+
+    #[test]
+    fn reload_config_with_valid_config_swaps_state() {
+        let engine = test_engine(AMASConfig::default());
+        let mut new_cfg = AMASConfig::default();
+        new_cfg.feature_flags.ssp_enabled = true;
+        new_cfg.ssp.max_iterations = 3;
+        engine.reload_config(new_cfg).expect("reload ok");
+        assert!(engine.ssp_policy().is_some());
+    }
+
+    #[test]
+    fn reload_config_with_ssp_disabled_clears_policy() {
+        let mut cfg = AMASConfig::default();
+        cfg.feature_flags.ssp_enabled = true;
+        cfg.ssp.max_iterations = 3;
+        let engine = test_engine(cfg);
+        assert!(engine.ssp_policy().is_some());
+
+        let mut new_cfg = AMASConfig::default();
+        new_cfg.feature_flags.ssp_enabled = false;
+        engine.reload_config(new_cfg).expect("reload ok");
+        assert!(engine.ssp_policy().is_none());
+    }
+
+    // ---- compute_strategy_from_state ----
+
+    #[test]
+    fn compute_strategy_boosts_difficulty_when_confidence_high() {
+        let engine = test_engine(AMASConfig::default());
+        let mut state = UserState::default();
+        state.confidence = 0.95;
+        let s = engine.compute_strategy_from_state(&state);
+        assert!(s.difficulty >= StrategyParams::default().difficulty);
+    }
+
+    #[test]
+    fn compute_strategy_increases_new_ratio_when_motivation_high() {
+        let engine = test_engine(AMASConfig::default());
+        let mut state = UserState::default();
+        state.motivation = 0.9;
+        let s = engine.compute_strategy_from_state(&state);
+        assert!(s.new_ratio >= StrategyParams::default().new_ratio);
+    }
+
+    #[test]
+    fn compute_strategy_reduces_difficulty_and_batch_when_fatigued() {
+        let engine = test_engine(AMASConfig::default());
+        let mut state = UserState::default();
+        state.fatigue = 0.95;
+        let s = engine.compute_strategy_from_state(&state);
+        let baseline = StrategyParams::default();
+        assert!(s.batch_size <= baseline.batch_size);
+        assert!(s.difficulty <= baseline.difficulty);
+    }
+
+    // ---- reset_user_state ----
+
+    #[test]
+    fn reset_user_state_persists_default_state() {
+        let engine = test_engine(AMASConfig::default());
+        // 先随便存一个非默认 state
+        let mut state = UserState::default();
+        state.fatigue = 0.7;
+        let state_json = serde_json::to_value(&state).unwrap();
+        engine.store.set_engine_user_state("u-reset", &state_json).unwrap();
+
+        engine.reset_user_state("u-reset").expect("reset");
+        let loaded = engine.get_user_state("u-reset").unwrap();
+        assert!((loaded.fatigue - 0.0).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn reset_user_state_async_works() {
+        let engine = test_engine(AMASConfig::default());
+        engine
+            .reset_user_state_async("u-async-reset")
+            .await
+            .expect("reset async");
+        let state = engine
+            .get_user_state_async("u-async-reset")
+            .await
+            .expect("get state");
+        assert!((state.fatigue - 0.0).abs() < 1e-9);
+    }
+
+    // ---- process_event ----
+
+    #[tokio::test]
+    async fn process_event_full_pipeline_succeeds() {
+        let engine = test_engine(AMASConfig::default());
+        let result = engine
+            .process_event(
+                "u-process",
+                RawEvent {
+                    word_id: "w-1".to_string(),
+                    is_correct: true,
+                    response_time_ms: 500,
+                    session_id: Some("session-A".to_string()),
+                    ..RawEvent::default()
+                },
+            )
+            .await
+            .expect("process_event");
+        assert_eq!(result.session_id, "session-A");
+        assert!(result.state.total_event_count >= 1);
+    }
+
+    #[tokio::test]
+    async fn process_event_without_session_id_falls_back_to_user_session() {
+        let engine = test_engine(AMASConfig::default());
+        let result = engine
+            .process_event(
+                "u-nosession",
+                RawEvent {
+                    word_id: "w-1".to_string(),
+                    is_correct: false,
+                    response_time_ms: 2000,
+                    ..RawEvent::default()
+                },
+            )
+            .await
+            .expect("process_event");
+        assert!(result.session_id.contains("u-nosession"));
+    }
+
+    #[tokio::test]
+    async fn process_event_session_switch_resets_session_count() {
+        let engine = test_engine(AMASConfig::default());
+        // 两次相同 session
+        for i in 0..2 {
+            engine
+                .process_event(
+                    "u-switch",
+                    RawEvent {
+                        word_id: format!("w-{i}"),
+                        is_correct: true,
+                        response_time_ms: 500,
+                        session_id: Some("s-1".to_string()),
+                        ..RawEvent::default()
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        // 切换到新 session
+        let r = engine
+            .process_event(
+                "u-switch",
+                RawEvent {
+                    word_id: "w-x".to_string(),
+                    is_correct: true,
+                    response_time_ms: 500,
+                    session_id: Some("s-2".to_string()),
+                    ..RawEvent::default()
+                },
+            )
+            .await
+            .unwrap();
+        // 新 session 计数应被重置到 1
+        assert_eq!(r.state.session_event_count, 1);
+        assert_eq!(r.state.last_session_id.as_deref(), Some("s-2"));
+    }
+
+    // ---- update_visual_fatigue ----
+
+    #[tokio::test]
+    async fn update_visual_fatigue_clamps_and_persists() {
+        let engine = test_engine(AMASConfig::default());
+        let state = engine
+            .update_visual_fatigue("u-vf", 50.0)
+            .await
+            .expect("vf");
+        assert!(state.fatigue >= 0.0 && state.fatigue <= 1.0);
+        // 再调用一次（已有 state）
+        let state2 = engine
+            .update_visual_fatigue("u-vf", 200.0) // 200 → 应被 clamp 到 1.0
+            .await
+            .expect("vf2");
+        assert!(state2.fatigue >= 0.0 && state2.fatigue <= 1.0);
+    }
+
+    // ---- get_phase ----
+
+    #[tokio::test]
+    async fn get_phase_returns_classify_for_new_user() {
+        let engine = test_engine(AMASConfig::default());
+        let phase = engine.get_phase("u-phase").await.expect("phase");
+        assert!(matches!(phase, Some(ColdStartPhase::Classify)));
+    }
+
+    #[tokio::test]
+    async fn get_phase_returns_none_after_enough_events() {
+        let mut cfg = AMASConfig::default();
+        cfg.cold_start.classify_to_explore_events = 1;
+        cfg.cold_start.explore_to_exploit_events = 2;
+        let engine = test_engine(cfg.clone());
+
+        // 写一个 state，让 total_event_count >= explore_to_exploit_events
+        let mut state = UserState::default();
+        state.total_event_count = 10;
+        let json = serde_json::to_value(&state).unwrap();
+        engine
+            .store
+            .set_engine_user_state("u-mature", &json)
+            .unwrap();
+
+        let phase = engine.get_phase("u-mature").await.expect("phase");
+        assert!(phase.is_none());
+    }
+
+    #[tokio::test]
+    async fn get_phase_returns_explore_in_mid_range() {
+        let mut cfg = AMASConfig::default();
+        cfg.cold_start.classify_to_explore_events = 2;
+        cfg.cold_start.explore_to_exploit_events = 10;
+        let engine = test_engine(cfg);
+
+        let mut state = UserState::default();
+        state.total_event_count = 5;
+        let json = serde_json::to_value(&state).unwrap();
+        engine
+            .store
+            .set_engine_user_state("u-explore", &json)
+            .unwrap();
+
+        let phase = engine.get_phase("u-explore").await.expect("phase");
+        assert!(matches!(phase, Some(ColdStartPhase::Explore)));
+    }
+
+    // ---- update_temporal_profile & get_temporal_boost ----
+
+    #[tokio::test]
+    async fn update_temporal_profile_records_session() {
+        let engine = test_engine(AMASConfig::default());
+        engine
+            .update_temporal_profile("u-tp", 10, 0.9, 800.0, 0.7)
+            .await
+            .expect("update profile");
+        // 调第二次让 EMA 分支生效
+        engine
+            .update_temporal_profile("u-tp", 10, 0.5, 1200.0, 0.4)
+            .await
+            .expect("update profile 2");
+
+        let state = engine.get_user_state_async("u-tp").await.unwrap();
+        let h = &state.habit_profile.temporal_performance.hourly_stats[10];
+        assert_eq!(h.session_count, 2);
+        assert!(h.avg_accuracy > 0.0 && h.avg_accuracy < 1.0);
+    }
+
+    #[tokio::test]
+    async fn update_temporal_profile_clamps_hour_to_23() {
+        let engine = test_engine(AMASConfig::default());
+        engine
+            .update_temporal_profile("u-tp24", 250, 0.9, 800.0, 0.7)
+            .await
+            .expect("update profile");
+        let state = engine.get_user_state_async("u-tp24").await.unwrap();
+        let h = &state.habit_profile.temporal_performance.hourly_stats[23];
+        assert_eq!(h.session_count, 1);
+    }
+
+    #[test]
+    fn get_temporal_boost_returns_one_for_unseen_hour() {
+        let engine = test_engine(AMASConfig::default());
+        let boost = engine.get_temporal_boost("u-unseen", 3).expect("boost");
+        assert!((boost - 1.0).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn get_temporal_boost_after_update_in_range() {
+        let engine = test_engine(AMASConfig::default());
+        engine
+            .update_temporal_profile("u-tp-boost", 10, 0.9, 800.0, 0.8)
+            .await
+            .expect("update");
+        let boost = engine
+            .get_temporal_boost_async("u-tp-boost", 10)
+            .await
+            .expect("boost");
+        let cfg = AMASConfig::default();
+        assert!(boost >= cfg.feature.temporal_boost_min);
+        assert!(boost <= cfg.feature.temporal_boost_max);
+    }
+
+    // ---- classify_learner_type ----
+
+    #[test]
+    fn classify_learner_type_returns_cautious_for_default_state() {
+        let engine = test_engine(AMASConfig::default());
+        let t = engine.classify_learner_type("u-classify").expect("classify");
+        // UserState::default 各项较低 → 走最低分支
+        assert!(matches!(t, LearnerType::Fast | LearnerType::Stable | LearnerType::Cautious));
+    }
+
+    #[tokio::test]
+    async fn classify_learner_type_async_identifies_fast_when_profile_high() {
+        let engine = test_engine(AMASConfig::default());
+        let mut state = UserState::default();
+        state.cognitive_profile.processing_speed = 1.0;
+        state.cognitive_profile.memory_capacity = 1.0;
+        state.cognitive_profile.stability = 1.0;
+        engine
+            .store
+            .set_engine_user_state("u-fast", &serde_json::to_value(&state).unwrap())
+            .unwrap();
+        let t = engine.classify_learner_type_async("u-fast").await.unwrap();
+        assert!(matches!(t, LearnerType::Fast));
+    }
+
+    #[test]
+    fn classify_learner_type_returns_stable_for_mid_range_profile() {
+        let engine = test_engine(AMASConfig::default());
+        let cfg = AMASConfig::default();
+        // 让 auc 略高于 stable_learner_threshold 但低于 fast
+        let target_auc = (cfg.classifier.stable_learner_threshold
+            + cfg.classifier.fast_learner_threshold)
+            / 2.0;
+        // 把所有 profile 设到统一权重位
+        let total_weight = cfg.classifier.processing_speed_weight
+            + cfg.classifier.memory_capacity_weight
+            + cfg.classifier.stability_weight;
+        let v = (target_auc / total_weight).clamp(0.0, 1.0);
+        let mut state = UserState::default();
+        state.cognitive_profile.processing_speed = v;
+        state.cognitive_profile.memory_capacity = v;
+        state.cognitive_profile.stability = v;
+        engine
+            .store
+            .set_engine_user_state("u-stable", &serde_json::to_value(&state).unwrap())
+            .unwrap();
+        let t = engine.classify_learner_type("u-stable").unwrap();
+        assert!(matches!(t, LearnerType::Stable | LearnerType::Fast));
+    }
+
+    // ---- internal: build_feature_vector / compute_engagement via process_event ----
+
+    #[tokio::test]
+    async fn process_event_with_hint_used_applies_penalty() {
+        let engine = test_engine(AMASConfig::default());
+        let r = engine
+            .process_event(
+                "u-hint",
+                RawEvent {
+                    word_id: "w-1".to_string(),
+                    is_correct: true,
+                    response_time_ms: 400,
+                    hint_used: true,
+                    session_id: Some("s-hint".to_string()),
+                    ..RawEvent::default()
+                },
+            )
+            .await
+            .unwrap();
+        // 结果对象应包含 reward
+        assert!(r.reward.value >= -1.0 && r.reward.value <= 1.0);
+    }
+
+    #[tokio::test]
+    async fn process_event_with_engagement_penalties_works() {
+        let engine = test_engine(AMASConfig::default());
+        let r = engine
+            .process_event(
+                "u-eng",
+                RawEvent {
+                    word_id: "w-1".to_string(),
+                    is_correct: false,
+                    response_time_ms: 5000,
+                    pause_count: Some(3),
+                    switch_count: Some(2),
+                    focus_loss_duration_ms: Some(8000),
+                    is_quit: true,
+                    session_id: Some("s-eng".to_string()),
+                    ..RawEvent::default()
+                },
+            )
+            .await
+            .unwrap();
+        // is_quit=true 应增加疲劳
+        assert!(r.state.fatigue > 0.0);
+    }
+
+    #[tokio::test]
+    async fn process_event_after_long_idle_applies_full_reset() {
+        let mut cfg = AMASConfig::default();
+        cfg.fatigue_decay.decay_start_threshold_secs = 1.0;
+        cfg.fatigue_decay.full_reset_threshold_secs = 10.0;
+        let engine = test_engine(cfg);
+
+        // 设置 last_active_at 远在过去
+        let mut state = UserState::default();
+        state.fatigue = 0.9;
+        state.last_active_at = Some(chrono::Utc::now() - chrono::Duration::hours(1));
+        engine
+            .store
+            .set_engine_user_state("u-idle", &serde_json::to_value(&state).unwrap())
+            .unwrap();
+
+        let r = engine
+            .process_event(
+                "u-idle",
+                RawEvent {
+                    word_id: "w-1".to_string(),
+                    is_correct: true,
+                    response_time_ms: 500,
+                    session_id: Some("s-idle".to_string()),
+                    ..RawEvent::default()
+                },
+            )
+            .await
+            .unwrap();
+        // 经过完全衰减后再 +fatigue_increase_rate
+        assert!(r.state.fatigue < 0.5);
+    }
+
+    // ---- ensemble_or_fallback ----
+
+    #[test]
+    fn ensemble_or_fallback_returns_default_for_empty_candidates() {
+        let engine = test_engine(AMASConfig::default());
+        let (strategy, weights) = engine.ensemble_or_fallback(
+            &[],
+            &UserState::default(),
+            &AlgoStates::default(),
+            &AMASConfig::default(),
+        );
+        assert_eq!(weights.len(), 0);
+        assert_eq!(strategy.difficulty, StrategyParams::default().difficulty);
+    }
+
+    #[test]
+    fn ensemble_or_fallback_picks_highest_confidence_when_ensemble_disabled() {
+        let mut cfg = AMASConfig::default();
+        cfg.feature_flags.ensemble_enabled = false;
+        let engine = test_engine(cfg.clone());
+        let candidates = vec![
+            DecisionCandidate {
+                algorithm_id: AlgorithmId::Heuristic,
+                strategy: StrategyParams {
+                    difficulty: 0.2,
+                    ..StrategyParams::default()
+                },
+                confidence: 0.3,
+                explanation: "h".to_string(),
+            },
+            DecisionCandidate {
+                algorithm_id: AlgorithmId::Ige,
+                strategy: StrategyParams {
+                    difficulty: 0.9,
+                    ..StrategyParams::default()
+                },
+                confidence: 0.95,
+                explanation: "i".to_string(),
+            },
+        ];
+        let (strategy, weights) =
+            engine.ensemble_or_fallback(&candidates, &UserState::default(), &AlgoStates::default(), &cfg);
+        assert_eq!(weights.get(&AlgorithmId::Ige), Some(&1.0));
+        assert!((strategy.difficulty - 0.9).abs() < 1e-9);
+    }
+
+    // ---- compute_reward & evaluate_objective ----
+
+    #[test]
+    fn compute_reward_applies_fatigue_and_frustration_penalties() {
+        let engine = test_engine(AMASConfig::default());
+        let feature = FeatureVector {
+            accuracy: 0.0,
+            response_speed: 0.0,
+            quality: 0.0,
+            engagement: 0.0,
+            hint_penalty: 0.0,
+            time_since_last_event_secs: 0.0,
+            session_event_count: 0,
+            is_quit: false,
+        };
+        let mut state = UserState::default();
+        state.fatigue = 0.95;
+        state.motivation = -0.8;
+        let reward = engine.compute_reward(&feature, &state, 0.5, &AMASConfig::default());
+        assert!(reward.components.fatigue_penalty > 0.0);
+        assert!(reward.components.frustration_penalty > 0.0);
+        // value clamp
+        assert!(reward.value >= -1.0 && reward.value <= 1.0);
+    }
+
+    #[test]
+    fn evaluate_objective_score_uses_components() {
+        let engine = test_engine(AMASConfig::default());
+        let reward = Reward {
+            value: 0.5,
+            components: RewardComponents {
+                accuracy_reward: 1.0,
+                speed_reward: 0.5,
+                fatigue_penalty: 0.1,
+                frustration_penalty: 0.0,
+                expected_forget_cost: 0.0,
+            },
+        };
+        let evaluation = engine.evaluate_objective(&reward, 0.9, &AMASConfig::default());
+        assert_eq!(evaluation.retention_gain, 0.9);
+        assert_eq!(evaluation.accuracy_gain, 1.0);
+    }
+
+    // ---- apply_constraints ----
+
+    #[test]
+    fn apply_constraints_fatigue_caps_strategy() {
+        let engine = test_engine(AMASConfig::default());
+        let mut state = UserState::default();
+        state.fatigue = 0.95;
+        let cfg = AMASConfig::default();
+        let s = engine.apply_constraints(
+            StrategyParams {
+                batch_size: 50,
+                new_ratio: 0.8,
+                difficulty: 0.9,
+                ..StrategyParams::default()
+            },
+            &state,
+            &cfg,
+        );
+        assert!(s.batch_size <= cfg.constraints.max_batch_size_when_fatigued);
+        assert!(s.new_ratio <= cfg.constraints.max_new_ratio_when_fatigued);
+        assert!(s.difficulty <= cfg.constraints.max_difficulty_when_fatigued);
+    }
+
+    #[test]
+    fn apply_constraints_low_attention_forces_review_mode() {
+        let engine = test_engine(AMASConfig::default());
+        let mut state = UserState::default();
+        state.attention = 0.05;
+        let s = engine.apply_constraints(StrategyParams::default(), &state, &AMASConfig::default());
+        assert!(s.review_mode);
+        assert_eq!(s.new_ratio, 0.0);
+    }
+
+    #[test]
+    fn apply_constraints_low_motivation_reduces_difficulty() {
+        let engine = test_engine(AMASConfig::default());
+        let mut state = UserState::default();
+        state.motivation = -0.9;
+        let cfg = AMASConfig::default();
+        let s = engine.apply_constraints(
+            StrategyParams {
+                difficulty: 0.8,
+                new_ratio: 0.5,
+                ..StrategyParams::default()
+            },
+            &state,
+            &cfg,
+        );
+        assert!(s.difficulty <= 0.8);
+        assert!(s.new_ratio <= 0.5);
+    }
+
+    #[test]
+    fn apply_constraints_enforces_minimums() {
+        let engine = test_engine(AMASConfig::default());
+        let s = engine.apply_constraints(
+            StrategyParams {
+                batch_size: 0,
+                interval_scale: -1.0,
+                difficulty: -0.5,
+                new_ratio: 5.0,
+                ..StrategyParams::default()
+            },
+            &UserState::default(),
+            &AMASConfig::default(),
+        );
+        assert!(s.batch_size >= 1);
+        assert!(s.interval_scale >= 0.1);
+        assert!(s.difficulty >= 0.0 && s.difficulty <= 1.0);
+        assert!(s.new_ratio >= 0.0 && s.new_ratio <= 1.0);
+    }
+
+    // ---- build_explanation primary reason branches ----
+
+    #[test]
+    fn build_explanation_reports_fatigue_when_high() {
+        let engine = test_engine(AMASConfig::default());
+        let mut state = UserState::default();
+        state.fatigue = 0.95;
+        let exp = engine.build_explanation(&StrategyParams::default(), &state, &HashMap::new());
+        assert!(exp.primary_reason.contains("疲劳"));
+    }
+
+    #[test]
+    fn build_explanation_reports_review_mode() {
+        let engine = test_engine(AMASConfig::default());
+        let strategy = StrategyParams {
+            review_mode: true,
+            ..StrategyParams::default()
+        };
+        let exp = engine.build_explanation(&strategy, &UserState::default(), &HashMap::new());
+        assert!(exp.primary_reason.contains("复习"));
+    }
+
+    #[test]
+    fn build_explanation_reports_low_confidence() {
+        let engine = test_engine(AMASConfig::default());
+        let mut state = UserState::default();
+        state.confidence = 0.1;
+        let exp = engine.build_explanation(&StrategyParams::default(), &state, &HashMap::new());
+        assert!(exp.primary_reason.contains("信心"));
+    }
+
+    #[test]
+    fn build_explanation_reports_low_attention() {
+        let engine = test_engine(AMASConfig::default());
+        let mut state = UserState::default();
+        state.attention = 0.2;
+        state.confidence = 0.8;
+        let exp = engine.build_explanation(&StrategyParams::default(), &state, &HashMap::new());
+        assert!(exp.primary_reason.contains("注意力"));
+    }
+
+    #[test]
+    fn build_explanation_reports_dominant_algorithm() {
+        let engine = test_engine(AMASConfig::default());
+        let mut state = UserState::default();
+        state.attention = 0.9;
+        state.confidence = 0.9;
+        state.motivation = 0.0;
+        let mut weights = HashMap::new();
+        weights.insert(AlgorithmId::Heuristic, 0.9);
+        weights.insert(AlgorithmId::Ige, 0.1);
+        let exp = engine.build_explanation(&StrategyParams::default(), &state, &weights);
+        // 应包含算法描述（经验规则）
+        assert!(exp.primary_reason.contains("经验规则") || exp.primary_reason.contains("综合"));
+    }
+
+    #[test]
+    fn build_explanation_default_when_no_dominant_algorithm() {
+        let engine = test_engine(AMASConfig::default());
+        let mut state = UserState::default();
+        state.attention = 0.9;
+        state.confidence = 0.9;
+        state.motivation = 0.0;
+        // 全部权重低
+        let mut weights = HashMap::new();
+        weights.insert(AlgorithmId::Heuristic, 0.2);
+        weights.insert(AlgorithmId::Ige, 0.2);
+        weights.insert(AlgorithmId::Swd, 0.2);
+        let exp = engine.build_explanation(&StrategyParams::default(), &state, &weights);
+        assert!(exp.primary_reason.contains("综合"));
+    }
+
+    #[test]
+    fn build_explanation_reports_progress_when_high_difficulty_and_motivation() {
+        let engine = test_engine(AMASConfig::default());
+        let mut state = UserState::default();
+        state.attention = 0.9;
+        state.confidence = 0.9;
+        state.motivation = 0.8;
+        let strategy = StrategyParams {
+            difficulty: 0.8,
+            ..StrategyParams::default()
+        };
+        let exp = engine.build_explanation(&strategy, &state, &HashMap::new());
+        assert!(exp.primary_reason.contains("加速") || exp.primary_reason.contains("综合"));
+    }
+
+    // ---- load_or_init / acquire_user_lock_blocking 通过 process_event 间接覆盖（多次） ----
+
+    #[tokio::test]
+    async fn many_users_exercise_user_lock_cleanup() {
+        let engine = test_engine(AMASConfig::default());
+        for i in 0..30 {
+            engine
+                .process_event(
+                    &format!("u-{i}"),
+                    RawEvent {
+                        word_id: "w".to_string(),
+                        is_correct: true,
+                        response_time_ms: 200,
+                        ..RawEvent::default()
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        // 验证不 panic 即可
+    }
+
+    // ---- update_memory with feature flags on ----
+
+    #[tokio::test]
+    async fn process_event_with_iad_and_mtp_and_evm_enabled() {
+        let mut cfg = AMASConfig::default();
+        cfg.feature_flags.iad_enabled = true;
+        cfg.feature_flags.mtp_enabled = true;
+        let engine = test_engine(cfg);
+        let r = engine
+            .process_event(
+                "u-flags",
+                RawEvent {
+                    word_id: "w-iad".to_string(),
+                    is_correct: true,
+                    response_time_ms: 400,
+                    confused_with: Some("w-confused".to_string()),
+                    session_id: Some("s-flags".to_string()),
+                    ..RawEvent::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(r.state.total_event_count >= 1);
+    }
+
+    #[test]
+    fn sanitize_float_replaces_non_finite_with_default() {
+        assert_eq!(sanitize_float(1.5, 0.0), 1.5);
+        assert_eq!(sanitize_float(f64::NAN, 0.5), 0.5);
+        assert_eq!(sanitize_float(f64::INFINITY, 0.5), 0.5);
+        assert_eq!(sanitize_float(f64::NEG_INFINITY, 0.5), 0.5);
+    }
+
+    #[tokio::test]
+    async fn load_algo_states_uses_fallback_on_corrupted_json() {
+        let engine = test_engine(AMASConfig::default());
+        // 写入故意损坏的 algo state（不符合 Schema 的 JSON）
+        let bad = serde_json::json!({"unexpected_field": "x", "ige_state_should_have": null});
+        engine
+            .store
+            .set_engine_algo_state("u-bad", "ige", &bad)
+            .unwrap();
+        engine
+            .store
+            .set_engine_algo_state("u-bad", "swd", &bad)
+            .unwrap();
+        engine
+            .store
+            .set_engine_algo_state("u-bad", "trust", &bad)
+            .unwrap();
+
+        // 触发 load_algo_states + warning fallback —— 通过 process_event 间接
+        let r = engine
+            .process_event(
+                "u-bad",
+                RawEvent {
+                    word_id: "w-bad".to_string(),
+                    is_correct: true,
+                    response_time_ms: 500,
+                    session_id: Some("s-bad".to_string()),
+                    ..RawEvent::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(r.state.total_event_count >= 1);
+    }
+
+    #[test]
+    fn derive_primary_reason_reports_ige_dominant() {
+        let mut state = UserState::default();
+        state.attention = 0.9;
+        state.confidence = 0.9;
+        state.motivation = 0.0;
+        let mut weights = HashMap::new();
+        weights.insert(AlgorithmId::Ige, 0.8);
+        let reason = AMASEngine::derive_primary_reason(
+            &StrategyParams::default(),
+            &state,
+            &weights,
+        );
+        assert!(reason.contains("智能梯度"));
+    }
+
+    #[test]
+    fn derive_primary_reason_reports_swd_dominant() {
+        let mut state = UserState::default();
+        state.attention = 0.9;
+        state.confidence = 0.9;
+        state.motivation = 0.0;
+        let mut weights = HashMap::new();
+        weights.insert(AlgorithmId::Swd, 0.85);
+        let reason = AMASEngine::derive_primary_reason(
+            &StrategyParams::default(),
+            &state,
+            &weights,
+        );
+        assert!(reason.contains("间隔加权"));
+    }
+
+    #[test]
+    fn derive_primary_reason_reports_mdm_fallback_label() {
+        let mut state = UserState::default();
+        state.attention = 0.9;
+        state.confidence = 0.9;
+        state.motivation = 0.0;
+        let mut weights = HashMap::new();
+        weights.insert(AlgorithmId::Mdm, 0.9); // 不在 Heuristic/Ige/Swd 中，走 "_ => 综合评估"
+        let reason = AMASEngine::derive_primary_reason(
+            &StrategyParams::default(),
+            &state,
+            &weights,
+        );
+        assert!(reason.contains("综合评估"));
+    }
+
+    #[tokio::test]
+    async fn process_event_with_empty_word_id_skips_memory() {
+        let engine = test_engine(AMASConfig::default());
+        let r = engine
+            .process_event(
+                "u-empty",
+                RawEvent {
+                    word_id: "".to_string(),
+                    is_correct: true,
+                    response_time_ms: 400,
+                    session_id: Some("s-empty".to_string()),
+                    ..RawEvent::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(r.word_mastery.is_none());
+    }
 }

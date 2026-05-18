@@ -94,4 +94,46 @@ describe('userProfileApi', () => {
     const result = await userProfileApi.updateHabit({ preferredHours: [18, 19, 20] });
     expect(result).toEqual(updated);
   });
+
+  it('updateHabit rounds preferredHours and medianSessionLengthMins', async () => {
+    let body: Record<string, unknown> = {};
+    server.use(
+      http.post(`${BASE}/api/user-profile/habit`, async ({ request }) => {
+        body = await request.json() as Record<string, unknown>;
+        return HttpResponse.json({ success: true, data: {} });
+      }),
+    );
+    await userProfileApi.updateHabit({ preferredHours: [8.6, 14.4], medianSessionLengthMins: 22.7 } as any);
+    expect(body).toEqual({ preferredHours: [9, 14], medianSessionLengthMins: 23 });
+  });
+
+  it('uploadAvatar reads file ArrayBuffer and POSTs with provided Content-Type', async () => {
+    let contentType = '';
+    let bodyLen = 0;
+    server.use(
+      http.post(`${BASE}/api/user-profile/avatar`, async ({ request }) => {
+        contentType = request.headers.get('content-type') ?? '';
+        bodyLen = (await request.arrayBuffer()).byteLength;
+        return HttpResponse.json({ success: true, data: { avatarUrl: 'https://cdn.example/avatar.png' } });
+      }),
+    );
+    const file = new File([new Uint8Array([1, 2, 3, 4, 5])], 'avatar.png', { type: 'image/png' });
+    const result = await userProfileApi.uploadAvatar(file);
+    expect(result).toEqual({ avatarUrl: 'https://cdn.example/avatar.png' });
+    expect(contentType).toBe('image/png');
+    expect(bodyLen).toBe(5);
+  });
+
+  it('uploadAvatar falls back to octet-stream when file has no type', async () => {
+    let contentType = '';
+    server.use(
+      http.post(`${BASE}/api/user-profile/avatar`, async ({ request }) => {
+        contentType = request.headers.get('content-type') ?? '';
+        return HttpResponse.json({ success: true, data: { avatarUrl: 'x' } });
+      }),
+    );
+    const file = new File([new Uint8Array([0])], 'blob', { type: '' });
+    await userProfileApi.uploadAvatar(file);
+    expect(contentType).toBe('application/octet-stream');
+  });
 });

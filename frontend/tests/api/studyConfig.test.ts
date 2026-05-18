@@ -64,4 +64,17 @@ describe('studyConfigApi', () => {
     const result = await studyConfigApi.getProgress();
     expect(result).toEqual(progress);
   });
+
+  it('update rounds dailyWordCount and dailyMasteryTarget when provided', async () => {
+    let body: Record<string, unknown> = {};
+    const updated = { dailyGoal: 30, selectedWordbookIds: [] };
+    server.use(
+      http.put(`${BASE}/api/study-config`, async ({ request }) => {
+        body = await request.json() as Record<string, unknown>;
+        return HttpResponse.json({ success: true, data: updated });
+      }),
+    );
+    await studyConfigApi.update({ dailyWordCount: 25.7, dailyMasteryTarget: 9.2 } as any);
+    expect(body).toEqual({ dailyWordCount: 26, dailyMasteryTarget: 9 });
+  });
 });

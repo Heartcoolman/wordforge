@@ -405,4 +405,114 @@ mod tests {
         let page2 = store.list_wordbook_words("wb1", 2, 2).unwrap();
         assert_eq!(page2.len(), 1);
     }
+
+    fn tempfile_store() -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let store = Store::open(path.to_str().unwrap(), 5000, 4).unwrap();
+        (dir, store)
+    }
+
+    #[test]
+    fn book_type_helpers_roundtrip() {
+        assert_eq!(book_type_to_str(&WordbookType::System), "system");
+        assert_eq!(book_type_to_str(&WordbookType::User), "user");
+        assert_eq!(book_type_from_str("user"), WordbookType::User);
+        // 任何其他字符串都回退到 System
+        assert_eq!(book_type_from_str("system"), WordbookType::System);
+        assert_eq!(book_type_from_str("other"), WordbookType::System);
+    }
+
+    #[test]
+    fn upsert_overwrites_existing_wordbook_fields() {
+        let store = test_store();
+        let mut wb = sample_wordbook("wb1", WordbookType::System, None);
+        store.upsert_wordbook(&wb).unwrap();
+        wb.name = "renamed".into();
+        wb.description = "desc".into();
+        store.upsert_wordbook(&wb).unwrap();
+        let got = store.get_wordbook("wb1").unwrap().unwrap();
+        assert_eq!(got.name, "renamed");
+        assert_eq!(got.description, "desc");
+    }
+
+    #[test]
+    fn remove_word_from_nonexistent_wordbook_returns_false() {
+        let store = test_store();
+        assert!(!store.remove_word_from_wordbook("nope", "w1").unwrap());
+    }
+
+    #[test]
+    fn wordbook_progress_stats_returns_aggregates() {
+        let (_t, store) = tempfile_store();
+        store
+            .upsert_wordbook(&sample_wordbook("wb1", WordbookType::System, None))
+            .unwrap();
+        store.add_word_to_wordbook("wb1", "w1").unwrap();
+        store.add_word_to_wordbook("wb1", "w2").unwrap();
+        store.add_word_to_wordbook("wb1", "w3").unwrap();
+
+        let mut s1 = crate::store::operations::word_states::WordLearningState {
+            user_id: "u1".into(),
+            word_id: "w1".into(),
+            state: crate::store::operations::word_states::WordState::Mastered,
+            mastery_level: 0.9,
+            next_review_date: None,
+            half_life: 24.0,
+            correct_streak: 0,
+            total_attempts: 3,
+            updated_at: Utc::now(),
+        };
+        store.set_word_learning_state(&s1).unwrap();
+        s1.word_id = "w2".into();
+        s1.state = crate::store::operations::word_states::WordState::Reviewing;
+        store.set_word_learning_state(&s1).unwrap();
+        // 一条 learning record on w1 用于 last_studied_at
+        let r = crate::store::operations::records::LearningRecord {
+            id: "r1".into(),
+            user_id: "u1".into(),
+            word_id: "w1".into(),
+            is_correct: true,
+            response_time_ms: 100,
+            session_id: None,
+            created_at: Utc::now(),
+            record_type: crate::store::operations::records::RecordType::All,
+        };
+        store.create_record(&r).unwrap();
+
+        let stats = store.get_wordbook_progress_stats("u1", "wb1").unwrap();
+        assert_eq!(stats.word_count, 3);
+        assert_eq!(stats.studied_words, 2);
+        assert_eq!(stats.mastered_words, 1);
+        assert_eq!(stats.reviewing_words, 1);
+        assert_eq!(stats.forgotten_words, 0);
+        assert!(stats.last_studied_at.is_some());
+    }
+
+    #[test]
+    fn list_system_wordbooks_excludes_user_wordbooks() {
+        let store = test_store();
+        store.upsert_wordbook(&sample_wordbook("sys-a", WordbookType::System, None)).unwrap();
+        store.upsert_wordbook(&sample_wordbook("usr-1", WordbookType::User, Some("u1"))).unwrap();
+        let sys = store.list_system_wordbooks().unwrap();
+        assert!(sys.iter().all(|w| w.book_type == WordbookType::System));
+    }
+
+    #[test]
+    fn validation_rejects_empty_ids() {
+        let store = test_store();
+        let bad = sample_wordbook("", WordbookType::System, None);
+        assert!(matches!(
+            store.upsert_wordbook(&bad).unwrap_err(),
+            StoreError::Validation(_)
+        ));
+        assert!(matches!(
+            store.add_word_to_wordbook("", "w").unwrap_err(),
+            StoreError::Validation(_)
+        ));
+        assert!(matches!(
+            store.get_wordbook("").unwrap_err(),
+            StoreError::Validation(_)
+        ));
+    }
 }

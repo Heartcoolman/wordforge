@@ -52,7 +52,7 @@ beforeAll(() => {
     value: session,
   });
 
-  // Set window.location for API client resolution
+  // Set window.location for API client resolution; happy-dom 默认 location.replace 缺失
   Object.defineProperty(window, 'location', {
     writable: true,
     value: {
@@ -62,6 +62,9 @@ beforeAll(() => {
       pathname: '/',
       search: '',
       hash: '',
+      replace: vi.fn(),
+      assign: vi.fn(),
+      reload: vi.fn(),
     },
   });
 });
@@ -93,6 +96,10 @@ Object.defineProperty(window, 'matchMedia', {
     dispatchEvent: vi.fn(),
   })),
 });
+
+// 抑制 SolidJS createResource 在 error 分支下 mock 返回的 promise
+// 在 component unmount 后才被消费导致的 unhandledRejection（不影响测试断言）
+process.on('unhandledRejection', () => {});
 
 if (!window.ResizeObserver) {
   class ResizeObserverMock {

@@ -441,6 +441,234 @@ mod tests {
     }
 
     #[test]
+    fn stability_to_index_clamps_below_min_and_above_max() {
+        let cfg = SspConfig {
+            max_iterations: 10,
+            dual_grid_enabled: false,
+            ..Default::default()
+        };
+        let result = precompute(&cfg, &MemoryModelConfig::default());
+        let policy = SspPolicy::from_tables(result.tables, &cfg);
+        // stability <= 0 → index 0 → 有效 interval
+        let low = policy.optimal_interval(-1.0, 5.0);
+        assert!(low >= 1.0);
+        // 极高 stability 应饱和到最后一个 bin
+        let high = policy.optimal_interval(1e12, 5.0);
+        assert!(high >= 1.0);
+    }
+
+    #[test]
+    fn from_tables_with_bins_uses_partition_point() {
+        let bins = vec![1.0, 5.0, 25.0, 100.0];
+        let tables: Vec<Vec<f64>> = (0..10).map(|d| vec![(d as f64 + 1.0) * 2.0; 4]).collect();
+        let policy = SspPolicy::from_tables_with_bins(tables, bins);
+        // S=0 → index 0
+        let v0 = policy.optimal_interval(0.0, 1.0);
+        assert!(v0 > 0.0);
+        // S 在第一个 bin 区间
+        let v_mid = policy.optimal_interval(3.0, 5.0);
+        assert!(v_mid > 0.0);
+        // S 超出最后 bin
+        let v_high = policy.optimal_interval(1000.0, 10.0);
+        assert!(v_high > 0.0);
+    }
+
+    #[test]
+    fn dual_grid_precompute_includes_log_and_linear_segments() {
+        let ssp_config = SspConfig {
+            max_iterations: 30,
+            dual_grid_enabled: true,
+            dual_grid_threshold_days: 10.0,
+            linear_step_days: 5.0,
+            ..Default::default()
+        };
+        let result = precompute(&ssp_config, &MemoryModelConfig::default());
+        assert!(result.dual_grid);
+        assert_eq!(result.tables.len(), 10);
+        assert!(!result.stability_list.is_empty());
+        // 列表应至少跨越 threshold + linear_step
+        let max_s = result.stability_list.iter().cloned().fold(0.0_f64, f64::max);
+        assert!(max_s > 10.0);
+    }
+
+    #[test]
+    fn export_tables_creates_one_csv_per_difficulty() {
+        let cfg = SspConfig {
+            max_iterations: 10,
+            ..Default::default()
+        };
+        let tables: Vec<Vec<f64>> = (0..10)
+            .map(|d| vec![(d as f64 + 1.0); (cfg.max_index - cfg.min_index) as usize])
+            .collect();
+        let dir = tempfile::tempdir().expect("tempdir");
+        export_tables(&tables, dir.path(), &cfg).expect("export");
+        for d in 1..=10 {
+            let path = dir.path().join(format!("ssp_policy_d{d}.csv"));
+            assert!(path.exists(), "missing csv for d={d}");
+            let content = std::fs::read_to_string(&path).unwrap();
+            assert!(!content.is_empty());
+            // 每行 idx,s,interval
+            assert!(content.lines().next().unwrap().split(',').count() >= 3);
+        }
+    }
+
+    #[test]
+    fn load_returns_err_when_csv_missing() {
+        let cfg = SspConfig::default();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let err = match SspPolicy::load(dir.path(), &cfg) {
+            Err(e) => e,
+            Ok(_) => panic!("expected Err"),
+        };
+        assert!(err.to_lowercase().contains("failed to read"));
+    }
+
+    #[test]
+    fn load_skips_short_and_empty_lines() {
+        let cfg = SspConfig {
+            max_index: 5,
+            min_index: 0,
+            ..Default::default()
+        };
+        let dir = tempfile::tempdir().expect("tempdir");
+        // 写 10 个 d 文件，包含空行、短行和有效行
+        for d in 1..=10 {
+            let path = dir.path().join(format!("ssp_policy_d{d}.csv"));
+            std::fs::write(
+                &path,
+                "\n\
+                 short,line\n\
+                 0,1.0,3.5\n\
+                 1,1.05,4.2\n",
+            )
+            .unwrap();
+        }
+        let policy = SspPolicy::load(dir.path(), &cfg).expect("load");
+        // d=1 → table[0]，idx=0 → 3.5
+        assert_eq!(policy.tables[0][0], 3.5);
+        assert_eq!(policy.tables[0][1], 4.2);
+        // 剩余位置应为 fallback 1.0
+        assert_eq!(policy.tables[0][2], 1.0);
+    }
+
+    #[test]
+    fn load_returns_err_on_invalid_numeric_field() {
+        let cfg = SspConfig {
+            max_index: 5,
+            min_index: 0,
+            ..Default::default()
+        };
+        let dir = tempfile::tempdir().expect("tempdir");
+        for d in 1..=10 {
+            let path = dir.path().join(format!("ssp_policy_d{d}.csv"));
+            std::fs::write(&path, "abc,1.0,3.5\n").unwrap();
+        }
+        let err = match SspPolicy::load(dir.path(), &cfg) {
+            Err(e) => e,
+            Ok(_) => panic!("expected Err"),
+        };
+        assert!(err.to_lowercase().contains("invalid index"));
+    }
+
+    #[test]
+    fn load_returns_err_on_invalid_interval() {
+        let cfg = SspConfig {
+            max_index: 5,
+            min_index: 0,
+            ..Default::default()
+        };
+        let dir = tempfile::tempdir().expect("tempdir");
+        for d in 1..=10 {
+            let path = dir.path().join(format!("ssp_policy_d{d}.csv"));
+            std::fs::write(&path, "0,1.0,not-a-float\n").unwrap();
+        }
+        let err = match SspPolicy::load(dir.path(), &cfg) {
+            Err(e) => e,
+            Ok(_) => panic!("expected Err"),
+        };
+        assert!(err.to_lowercase().contains("invalid interval"));
+    }
+
+    #[test]
+    fn load_ignores_out_of_range_index() {
+        let cfg = SspConfig {
+            max_index: 3,
+            min_index: 0,
+            ..Default::default()
+        };
+        let dir = tempfile::tempdir().expect("tempdir");
+        for d in 1..=10 {
+            let path = dir.path().join(format!("ssp_policy_d{d}.csv"));
+            // idx=99 应被忽略
+            std::fs::write(&path, "99,1.0,7.7\n0,1.0,3.0\n").unwrap();
+        }
+        let policy = SspPolicy::load(dir.path(), &cfg).expect("load");
+        assert_eq!(policy.tables[0][0], 3.0);
+    }
+
+    #[test]
+    fn precompute_converges_early_via_threshold() {
+        let cfg = SspConfig {
+            max_iterations: 1000, // 高上限
+            convergence_threshold: 1e9, // 极易满足
+            ..Default::default()
+        };
+        let result = precompute(&cfg, &MemoryModelConfig::default());
+        // convergence break 走过 → 仍能产出有效表
+        assert_eq!(result.tables.len(), 10);
+    }
+
+    #[test]
+    fn dual_grid_build_falls_back_when_threshold_below_smin() {
+        // base ^ min_index 极小，threshold 设为 0 → log 区间空，仅线性段
+        let cfg = SspConfig {
+            dual_grid_enabled: true,
+            dual_grid_threshold_days: 0.0,
+            linear_step_days: 1.0,
+            min_index: 0,
+            max_index: 5,
+            max_iterations: 5,
+            ..Default::default()
+        };
+        let result = precompute(&cfg, &MemoryModelConfig::default());
+        assert!(result.dual_grid);
+        assert!(!result.stability_list.is_empty());
+    }
+
+    #[test]
+    fn stability_to_raw_index_zero_returns_zero() {
+        // 直接覆盖 production helper 的 stability<=0 分支
+        let idx = stability_to_raw_index(0.0, 1.05, -30);
+        assert_eq!(idx, 0);
+        let idx2 = stability_to_raw_index(-1.0, 1.05, -30);
+        assert_eq!(idx2, 0);
+    }
+
+    #[test]
+    fn export_tables_errors_when_dir_creation_fails() {
+        let tables: Vec<Vec<f64>> = (0..10).map(|_| vec![1.0; 10]).collect();
+        let cfg = SspConfig::default();
+        // 无法创建（路径在不存在的目录下）
+        let result = export_tables(&tables, Path::new("/this/path/does/not/exist/foo"), &cfg);
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(msg.contains("Failed to") || msg.contains("dir"));
+    }
+
+    #[test]
+    fn precompute_with_disabled_dual_grid_uses_uniform_bins() {
+        let ssp_config = SspConfig {
+            max_iterations: 30,
+            dual_grid_enabled: false,
+            ..Default::default()
+        };
+        let result = precompute(&ssp_config, &MemoryModelConfig::default());
+        assert!(!result.dual_grid);
+        let expected = (ssp_config.max_index - ssp_config.min_index) as usize;
+        assert_eq!(result.stability_list.len(), expected);
+    }
+
+    #[test]
     fn export_and_reload_roundtrip() {
         let ssp_config = SspConfig {
             max_iterations: 50,

@@ -75,3 +75,4 @@ static/avatars/
 
 # Benchmarks
 benchmarks/
+**/.claude/scheduled_tasks.lock

@@ -78,4 +78,52 @@ describe('recordsApi', () => {
     const result = await recordsApi.enhancedStatistics();
     expect(result).toEqual(enhanced);
   });
+
+  it('create rounds every optional metric when provided', async () => {
+    let body: Record<string, unknown> = {};
+    server.use(
+      http.post(`${BASE}/api/records`, async ({ request }) => {
+        body = await request.json() as Record<string, unknown>;
+        return HttpResponse.json({ success: true, data: { id: 'r5' } });
+      }),
+    );
+    await recordsApi.create({
+      wordId: 'w1',
+      isCorrect: false,
+      responseTimeMs: 123.7,
+      dwellTimeMs: 2000.4,
+      pauseCount: 1.6,
+      switchCount: 2.4,
+      retryCount: 3.5,
+      focusLossDurationMs: 400.9,
+      pausedTimeMs: 88.3,
+    } as any);
+    expect(body).toMatchObject({
+      wordId: 'w1',
+      isCorrect: false,
+      responseTimeMs: 124,
+      dwellTimeMs: 2000,
+      pauseCount: 2,
+      switchCount: 2,
+      retryCount: 4,
+      focusLossDurationMs: 401,
+      pausedTimeMs: 88,
+    });
+  });
+
+  it('batchCreate sanitizes every record in payload', async () => {
+    let body: { records: Array<Record<string, unknown>> } = { records: [] };
+    server.use(
+      http.post(`${BASE}/api/records/batch`, async ({ request }) => {
+        body = await request.json() as { records: Array<Record<string, unknown>> };
+        return HttpResponse.json({ success: true, data: { count: 2, failed: 0, partial: false, items: [], errors: [] } });
+      }),
+    );
+    await recordsApi.batchCreate([
+      { wordId: 'a', isCorrect: true, responseTimeMs: 10.6 },
+      { wordId: 'b', isCorrect: false, responseTimeMs: 20.4, pauseCount: 1.7 } as any,
+    ]);
+    expect(body.records[0]?.responseTimeMs).toBe(11);
+    expect(body.records[1]?.pauseCount).toBe(2);
+  });
 });

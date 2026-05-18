@@ -730,3 +730,403 @@ impl Store {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{Duration, Utc};
+    use serde_json::json;
+
+    fn test_store() -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let store = Store::open(path.to_str().unwrap(), 5000, 4).unwrap();
+        (dir, store)
+    }
+
+    #[test]
+    fn badge_save_and_get_roundtrip() {
+        let (_t, store) = test_store();
+        let badge = Badge {
+            user_id: "u1".into(),
+            id: "b1".into(),
+            name: "starter".into(),
+            description: "first badge".into(),
+            unlocked: true,
+            progress: 0.5,
+            unlocked_at: Some("2026-05-01T00:00:00Z".into()),
+        };
+        store.save_badge(&badge).unwrap();
+        let got = store.get_badge("u1", "b1").unwrap().unwrap();
+        assert_eq!(got.name, "starter");
+        assert!(got.unlocked);
+        assert!((got.progress - 0.5).abs() < 1e-9);
+
+        // upsert 覆盖
+        let mut updated = badge.clone();
+        updated.progress = 1.0;
+        store.save_badge(&updated).unwrap();
+        let got = store.get_badge("u1", "b1").unwrap().unwrap();
+        assert!((got.progress - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn badge_get_missing_returns_none_and_validation_errors() {
+        let (_t, store) = test_store();
+        assert!(store.get_badge("u1", "missing").unwrap().is_none());
+        assert!(matches!(
+            store.get_badge("", "x").unwrap_err(),
+            StoreError::Validation(_)
+        ));
+        let bad = Badge {
+            user_id: "".into(),
+            id: "x".into(),
+            name: "".into(),
+            description: "".into(),
+            unlocked: false,
+            progress: 0.0,
+            unlocked_at: None,
+        };
+        assert!(matches!(
+            store.save_badge(&bad).unwrap_err(),
+            StoreError::Validation(_)
+        ));
+    }
+
+    #[test]
+    fn reward_preference_default_string_and_roundtrip() {
+        let (_t, store) = test_store();
+        assert!(store.get_reward_preference("u1").unwrap().is_none());
+        // 不带 reward_type 时取默认 standard
+        store.set_reward_preference("u1", &json!({})).unwrap();
+        let got = store.get_reward_preference("u1").unwrap().unwrap();
+        assert_eq!(got["reward_type"], json!("standard"));
+        store
+            .set_reward_preference("u1", &json!({"reward_type":"gold"}))
+            .unwrap();
+        let got = store.get_reward_preference("u1").unwrap().unwrap();
+        assert_eq!(got["reward_type"], json!("gold"));
+    }
+
+    #[test]
+    fn habit_profile_uses_defaults_when_fields_missing() {
+        let (_t, store) = test_store();
+        store.set_habit_profile("u1", &json!({})).unwrap();
+        let got = store.get_habit_profile("u1").unwrap().unwrap();
+        assert!((got["median_session_length_mins"].as_f64().unwrap() - 15.0).abs() < 1e-9);
+        assert!((got["sessions_per_day"].as_f64().unwrap() - 1.0).abs() < 1e-9);
+        assert_eq!(got["temporal_total_sessions"], json!(0));
+        assert_eq!(got["preferred_hours"], json!([9, 14, 20]));
+    }
+
+    #[test]
+    fn habit_profile_persists_explicit_values() {
+        let (_t, store) = test_store();
+        let profile = json!({
+            "preferred_hours": [8, 12, 22],
+            "median_session_length_mins": 20.0,
+            "sessions_per_day": 2.5,
+            "temporal_hourly_stats": [{"hour":8,"count":1}],
+            "temporal_total_sessions": 7
+        });
+        store.set_habit_profile("u1", &profile).unwrap();
+        let got = store.get_habit_profile("u1").unwrap().unwrap();
+        assert_eq!(got["preferred_hours"], json!([8, 12, 22]));
+        assert_eq!(got["temporal_total_sessions"], json!(7));
+    }
+
+    #[test]
+    fn user_preferences_default_and_explicit() {
+        let (_t, store) = test_store();
+        store.set_user_preferences("u1", &json!({})).unwrap();
+        let got = store.get_user_preferences("u1").unwrap().unwrap();
+        assert_eq!(got["theme"], json!("light"));
+        assert_eq!(got["language"], json!("en"));
+        assert_eq!(got["notification_enabled"], json!(true));
+
+        store
+            .set_user_preferences(
+                "u1",
+                &json!({
+                    "theme":"dark","language":"zh","notification_enabled":false,"sound_enabled":false,
+                    "wordbook_center_url":"https://example.com"
+                }),
+            )
+            .unwrap();
+        let got = store.get_user_preferences("u1").unwrap().unwrap();
+        assert_eq!(got["theme"], json!("dark"));
+        assert_eq!(got["notification_enabled"], json!(false));
+        assert_eq!(got["wordbook_center_url"], json!("https://example.com"));
+    }
+
+    #[test]
+    fn user_avatar_persists_payload() {
+        let (_t, store) = test_store();
+        store
+            .set_user_avatar(
+                "u1",
+                &json!({
+                    "avatarUrl":"u","filename":"a.png","extension":"png","sizeBytes":100
+                }),
+            )
+            .unwrap();
+        // 写第二次 upsert
+        store
+            .set_user_avatar(
+                "u1",
+                &json!({
+                    "avatarUrl":"u2","filename":"b.png","extension":"png","sizeBytes":200
+                }),
+            )
+            .unwrap();
+        let conn = store.connection().unwrap();
+        let (url, size): (String, i64) = conn
+            .query_row(
+                "SELECT avatar_url, size_bytes FROM user_avatars WHERE user_id='u1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(url, "u2");
+        assert_eq!(size, 200);
+    }
+
+    #[test]
+    fn etymology_set_get_delete() {
+        let (_t, store) = test_store();
+        assert!(store.get_etymology("w1").unwrap().is_none());
+        store
+            .set_etymology(
+                "w1",
+                &json!({
+                    "word":"foo","etymology":"old text",
+                    "roots":[{"text":"f"}],
+                    "generated":true,"source":"llm","generated_at":"2026-05-01T00:00:00Z"
+                }),
+            )
+            .unwrap();
+        let got = store.get_etymology("w1").unwrap().unwrap();
+        assert_eq!(got["etymology"], json!("old text"));
+        assert_eq!(got["generated"], json!(true));
+        store.delete_etymology("w1").unwrap();
+        assert!(store.get_etymology("w1").unwrap().is_none());
+    }
+
+    #[test]
+    fn monitoring_timeseries_upsert_and_cleanup_events() {
+        let (_t, store) = test_store();
+        store
+            .insert_monitoring_timeseries("p1", &json!({"x":1}))
+            .unwrap();
+        store
+            .insert_monitoring_timeseries("p1", &json!({"x":2}))
+            .unwrap();
+        let conn = store.connection().unwrap();
+        let cnt: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM monitoring_timeseries WHERE period_id='p1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(cnt, 1);
+
+        // cleanup: 插一条 timestamp=旧 的 engine_monitoring_events
+        conn.execute(
+            "INSERT INTO engine_monitoring_events (id, user_id, session_id, event_type, timestamp, latency_ms)
+             VALUES ('e1','u1','s1','process_event','2020-01-01T00:00:00Z',0)",
+            [],
+        )
+        .unwrap();
+        let removed = store
+            .cleanup_old_monitoring_events("2024-01-01T00:00:00Z")
+            .unwrap();
+        assert_eq!(removed, 1);
+    }
+
+    #[test]
+    fn password_reset_token_lifecycle() {
+        let (_t, store) = test_store();
+        let future = (Utc::now() + Duration::hours(1)).to_rfc3339();
+        store
+            .create_password_reset_token("hash1", "u1", &future)
+            .unwrap();
+        let got = store.get_password_reset_token("hash1").unwrap().unwrap();
+        assert_eq!(got["user_id"], json!("u1"));
+        let taken = store.take_password_reset_token("hash1").unwrap().unwrap();
+        assert_eq!(taken["token_hash"], json!("hash1"));
+        assert!(store.get_password_reset_token("hash1").unwrap().is_none());
+        // cleanup 删除过期
+        let past = (Utc::now() - Duration::hours(1)).to_rfc3339();
+        store.create_password_reset_token("hash2", "u1", &past).unwrap();
+        let removed = store.cleanup_expired_reset_tokens().unwrap();
+        assert!(removed >= 1);
+    }
+
+    #[test]
+    fn list_words_without_etymology_filters_existing_rows() {
+        let (_t, store) = test_store();
+        let conn = store.connection().unwrap();
+        conn.execute(
+            "INSERT INTO words (id, text, meaning, difficulty, created_at) VALUES ('w1','foo','m',0.5,?1)",
+            params![Utc::now().to_rfc3339()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO words (id, text, meaning, difficulty, created_at) VALUES ('w2','bar','m',0.7,?1)",
+            params![Utc::now().to_rfc3339()],
+        )
+        .unwrap();
+        store
+            .set_etymology("w1", &json!({"word":"foo","etymology":"e","roots":[]}))
+            .unwrap();
+        let missing = store.list_words_without_etymology(10).unwrap();
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0]["id"], json!("w2"));
+
+        let all = store.list_all_words().unwrap();
+        assert_eq!(all.len(), 2);
+        let with_tags = store.list_all_words_with_tags().unwrap();
+        assert_eq!(with_tags.len(), 2);
+    }
+
+    #[test]
+    fn alert_dedup_set_get() {
+        let (_t, store) = test_store();
+        assert!(store.get_alert_dedup("u1", "w1").unwrap().is_none());
+        store.set_alert_dedup("u1", "w1", 100).unwrap();
+        assert_eq!(store.get_alert_dedup("u1", "w1").unwrap(), Some(100));
+        store.set_alert_dedup("u1", "w1", 200).unwrap();
+        assert_eq!(store.get_alert_dedup("u1", "w1").unwrap(), Some(200));
+    }
+
+    #[test]
+    fn db_info_helpers_report_consistent_values() {
+        let (_t, store) = test_store();
+        assert!(store.db_size_bytes().unwrap() > 0);
+        store.db_ping().unwrap();
+        assert!(store.db_page_size().unwrap() > 0);
+        assert!(store.db_page_count().unwrap() > 0);
+        // WAL 默认开启
+        assert!(store.db_wal_enabled().unwrap());
+        let tables = store.db_table_list().unwrap();
+        assert!(tables.contains(&"words".into()));
+    }
+
+    #[test]
+    fn confusion_pairs_canonical_ordering_and_lookup() {
+        let (_t, store) = test_store();
+        store.set_confusion_pair("w-b", "w-a", 0.5).unwrap();
+        // upsert update
+        store.set_confusion_pair("w-a", "w-b", 0.9).unwrap();
+        let pairs = store.get_confusion_pairs_for_word("w-a", 10).unwrap();
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].0, "w-b");
+        assert!((pairs[0].1 - 0.9).abs() < 1e-9);
+        // query other side
+        let from_b = store.get_confusion_pairs_for_word("w-b", 10).unwrap();
+        assert_eq!(from_b[0].0, "w-a");
+    }
+
+    #[test]
+    fn set_word_morphemes_replaces_existing_rows() {
+        let (_t, store) = test_store();
+        store
+            .set_word_morphemes(
+                "w1",
+                &[json!({"text":"pre","type":"prefix","meaning":"before"})],
+            )
+            .unwrap();
+        store
+            .set_word_morphemes(
+                "w1",
+                &[
+                    json!({"text":"root","morpheme_type":"root","meaning":"core"}),
+                    json!({"text":"suf","type":"suffix","meaning":"after"}),
+                ],
+            )
+            .unwrap();
+        let got = store.get_word_morphemes("w1").unwrap().unwrap();
+        let arr = got.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["text"], json!("root"));
+        assert_eq!(arr[1]["type"], json!("suffix"));
+        assert!(store.get_word_morphemes("missing").unwrap().is_none());
+    }
+
+    #[test]
+    fn aggregate_and_daily_stats_count_correctly() {
+        let (_t, store) = test_store();
+        let now = Utc::now();
+        let conn = store.connection().unwrap();
+        for (i, (uid, wid, ok)) in [("u1", "w1", true), ("u1", "w2", false), ("u2", "w1", true)]
+            .iter()
+            .enumerate()
+        {
+            conn.execute(
+                "INSERT INTO learning_records (user_id, id, word_id, is_correct, response_time_ms, created_at)
+                 VALUES (?1, ?2, ?3, ?4, 100, ?5)",
+                params![uid, format!("r{i}"), wid, *ok as i64, now.to_rfc3339()],
+            )
+            .unwrap();
+        }
+        drop(conn);
+        let (total, correct) = store
+            .aggregate_records_since(now - Duration::seconds(1))
+            .unwrap();
+        assert_eq!((total, correct), (3, 2));
+
+        let (t, c, uu, uw) = store
+            .daily_aggregation_stats(now - Duration::seconds(1))
+            .unwrap();
+        assert_eq!((t, c, uu, uw), (3, 2, 2, 2));
+    }
+
+    #[test]
+    fn create_notification_inserts_row() {
+        let (_t, store) = test_store();
+        let now = Utc::now().to_rfc3339();
+        store
+            .create_notification(&json!({
+                "userId":"u1","id":"n1","type":"review",
+                "title":"t","message":"m","wordId":"w1","overdueHours":3,
+                "read":false,"createdAt":now
+            }))
+            .unwrap();
+        // INSERT OR IGNORE 相同 (user_id, id) 不重复插入
+        store
+            .create_notification(&json!({
+                "userId":"u1","id":"n1","type":"review","title":"t2","message":"m2","createdAt":now
+            }))
+            .unwrap();
+        let conn = store.connection().unwrap();
+        let title: String = conn
+            .query_row(
+                "SELECT title FROM notifications WHERE user_id='u1' AND id='n1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(title, "t");
+    }
+
+    #[test]
+    fn get_user_records_minimal_returns_word_and_correct_flag() {
+        let (_t, store) = test_store();
+        let now = Utc::now();
+        let conn = store.connection().unwrap();
+        for i in 0..3 {
+            conn.execute(
+                "INSERT INTO learning_records (user_id, id, word_id, is_correct, response_time_ms, created_at)
+                 VALUES ('u1', ?1, ?2, ?3, 100, ?4)",
+                params![format!("r{i}"), format!("w{i}"), (i % 2) as i64, (now + Duration::seconds(i as i64)).to_rfc3339()],
+            )
+            .unwrap();
+        }
+        drop(conn);
+        let mini = store.get_user_records_minimal("u1", 10).unwrap();
+        assert_eq!(mini.len(), 3);
+        // 最新的在前
+        assert_eq!(mini[0].0, "w2");
+    }
+}

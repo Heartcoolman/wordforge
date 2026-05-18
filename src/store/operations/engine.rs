@@ -263,4 +263,148 @@ mod tests {
             .unwrap();
         assert_eq!(got["level"], 0.8);
     }
+
+    fn tempfile_store() -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let store = Store::open(path.to_str().unwrap(), 5000, 4).unwrap();
+        (dir, store)
+    }
+
+    #[test]
+    fn get_engine_user_state_missing_returns_none() {
+        let store = Store::open(":memory:", 5000, 1).unwrap();
+        assert!(store.get_engine_user_state("u1").unwrap().is_none());
+        assert!(store.get_engine_algo_state("u1", "x").unwrap().is_none());
+    }
+
+    #[test]
+    fn delete_user_and_algo_state_idempotent() {
+        let store = Store::open(":memory:", 5000, 1).unwrap();
+        store.set_engine_user_state("u1", &serde_json::json!({})).unwrap();
+        store.delete_engine_user_state("u1").unwrap();
+        assert!(store.get_engine_user_state("u1").unwrap().is_none());
+        store.delete_engine_user_state("u1").unwrap(); // 再删不报错
+
+        store
+            .set_engine_algo_state("u1", "a", &serde_json::json!({}))
+            .unwrap();
+        store.delete_engine_algo_state("u1", "a").unwrap();
+        assert!(store.get_engine_algo_state("u1", "a").unwrap().is_none());
+        store.delete_engine_algo_state("u1", "a").unwrap();
+    }
+
+    #[test]
+    fn engine_state_upsert_overwrites_existing() {
+        let store = Store::open(":memory:", 5000, 1).unwrap();
+        store.set_engine_user_state("u1", &serde_json::json!({"v":1})).unwrap();
+        store.set_engine_user_state("u1", &serde_json::json!({"v":2})).unwrap();
+        let got = store.get_engine_user_state("u1").unwrap().unwrap();
+        assert_eq!(got["v"], 2);
+    }
+
+    #[test]
+    fn engine_validation_rejects_bad_id() {
+        let store = Store::open(":memory:", 5000, 1).unwrap();
+        assert!(matches!(
+            store.get_engine_user_state("").unwrap_err(),
+            crate::store::StoreError::Validation(_)
+        ));
+        assert!(matches!(
+            store
+                .set_engine_user_state("", &serde_json::json!({}))
+                .unwrap_err(),
+            crate::store::StoreError::Validation(_)
+        ));
+        assert!(matches!(
+            store.delete_engine_user_state("").unwrap_err(),
+            crate::store::StoreError::Validation(_)
+        ));
+        assert!(matches!(
+            store
+                .set_engine_algo_state("", "a", &serde_json::json!({}))
+                .unwrap_err(),
+            crate::store::StoreError::Validation(_)
+        ));
+        assert!(matches!(
+            store.delete_engine_algo_state("", "a").unwrap_err(),
+            crate::store::StoreError::Validation(_)
+        ));
+    }
+
+    #[test]
+    fn monitoring_event_insert_and_recent_query() {
+        let (_t, store) = tempfile_store();
+        let evt1 = serde_json::json!({
+            "id":"e1","userId":"u1","sessionId":"s1","timestamp":"2026-05-01T12:00:00Z","strategy":{"a":1}
+        });
+        let evt2 = serde_json::json!({
+            "user_id":"u1","session_id":"s2","timestamp":"2026-05-02T12:00:00Z","strategy":{"a":2}
+        });
+        store.insert_monitoring_event(&evt1).unwrap();
+        store.insert_monitoring_event(&evt2).unwrap();
+        let recent = store.get_recent_monitoring_events(10).unwrap();
+        assert_eq!(recent.len(), 2);
+        // 最新在前
+        assert_eq!(recent[0]["timestamp"], serde_json::json!("2026-05-02T12:00:00Z"));
+    }
+
+    #[test]
+    fn metrics_daily_upsert_and_batch() {
+        let (_t, store) = tempfile_store();
+        store
+            .upsert_metrics_daily("2026-05-01", "algo-a", &serde_json::json!({"x":1}))
+            .unwrap();
+        store
+            .upsert_metrics_daily("2026-05-01", "algo-a", &serde_json::json!({"x":2}))
+            .unwrap();
+        let m = store.get_metrics_daily("2026-05-01", "algo-a").unwrap().unwrap();
+        assert_eq!(m["x"], 2);
+
+        // batch 形式
+        store
+            .batch_upsert_metrics_daily(&[
+                ("2026-05-02:algo-b".into(), serde_json::json!({"y":3})),
+                ("invalid-key-no-colon".into(), serde_json::json!({})), // 应被忽略
+            ])
+            .unwrap();
+        let b = store.get_metrics_daily("2026-05-02", "algo-b").unwrap().unwrap();
+        assert_eq!(b["y"], 3);
+        assert!(store.get_metrics_daily("invalid-key-no-colon", "").unwrap().is_none());
+    }
+
+    #[test]
+    fn persist_engine_state_atomic_writes_user_and_algo_states() {
+        let (_t, store) = tempfile_store();
+        let user_state = serde_json::json!({"attention":0.5});
+        let algo = vec![
+            ("a1".to_string(), serde_json::json!({"l":1})),
+            ("a2".to_string(), serde_json::json!({"l":2})),
+        ];
+        store.persist_engine_state_atomic("u1", &user_state, &algo).unwrap();
+        let us = store.get_engine_user_state("u1").unwrap().unwrap();
+        assert_eq!(us["attention"], 0.5);
+        let a1 = store.get_engine_algo_state("u1", "a1").unwrap().unwrap();
+        assert_eq!(a1["l"], 1);
+        let a2 = store.get_engine_algo_state("u1", "a2").unwrap().unwrap();
+        assert_eq!(a2["l"], 2);
+
+        // 二次 atomic upsert 替换
+        let algo2 = vec![("a1".into(), serde_json::json!({"l":99}))];
+        store
+            .persist_engine_state_atomic("u1", &serde_json::json!({"attention":0.9}), &algo2)
+            .unwrap();
+        assert_eq!(
+            store.get_engine_algo_state("u1", "a1").unwrap().unwrap()["l"],
+            99
+        );
+
+        // 错误 ID
+        assert!(matches!(
+            store
+                .persist_engine_state_atomic("", &user_state, &[])
+                .unwrap_err(),
+            crate::store::StoreError::Validation(_)
+        ));
+    }
 }

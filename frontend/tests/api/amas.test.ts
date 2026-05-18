@@ -227,4 +227,66 @@ describe('amasApi', () => {
     const result = await amasApi.getMonitoring();
     expect(result).toEqual(events);
   });
+
+  it('reportVisualFatigue posts score and returns state', async () => {
+    const state = { attention: 0.5, fatigue: 0.4, motivation: 0.6, confidence: 0.7 };
+    let body: Record<string, unknown> = {};
+    server.use(
+      http.post(`${BASE}/api/amas/visual-fatigue`, async ({ request }) => {
+        body = await request.json() as Record<string, unknown>;
+        return HttpResponse.json({ success: true, data: state });
+      }),
+    );
+    const result = await amasApi.reportVisualFatigue(0.85);
+    expect(result).toEqual(state);
+    expect(body).toEqual({ score: 0.85 });
+  });
+
+  it('processEvent rounds every optional metric when provided', async () => {
+    let body: Record<string, unknown> = {};
+    server.use(
+      http.post(`${BASE}/api/amas/process-event`, async ({ request }) => {
+        body = await request.json() as Record<string, unknown>;
+        return HttpResponse.json({ success: true, data: {} });
+      }),
+    );
+    await amasApi.processEvent({
+      wordId: 'w-1',
+      isCorrect: true,
+      responseTime: 100.6,
+      dwellTime: 200.4,
+      pauseCount: 1.7,
+      switchCount: 2.3,
+      retryCount: 3.6,
+      focusLossDuration: 400.4,
+      pausedTimeMs: 50.5,
+    } as any);
+    expect(body).toMatchObject({
+      responseTime: 101,
+      dwellTime: 200,
+      pauseCount: 2,
+      switchCount: 2,
+      retryCount: 4,
+      focusLossDuration: 400,
+      pausedTimeMs: 51,
+    });
+  });
+
+  it('subscribeStateEvents delegates to connectAmasStateStream', async () => {
+    // 通过 mock client 的 connectAmasStateStream 来隔离 SSE 真实连接
+    const dispose = vi.fn();
+    const connect = vi.fn(() => dispose);
+    vi.doMock('@/api/client', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('@/api/client')>();
+      return { ...actual, connectAmasStateStream: connect };
+    });
+    vi.resetModules();
+    const { amasApi: freshApi } = await import('@/api/amas');
+    const cb = vi.fn();
+    const ret = freshApi.subscribeStateEvents(cb);
+    expect(connect).toHaveBeenCalledWith(cb);
+    expect(ret).toBe(dispose);
+    vi.doUnmock('@/api/client');
+    vi.resetModules();
+  });
 });

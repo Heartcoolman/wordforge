@@ -18,37 +18,26 @@ export default defineConfig({
     globals: true,
     environment: 'happy-dom',
     setupFiles: ['./tests/setup.ts'],
-    exclude: [
-      'e2e/**',
-      'node_modules/**',
-      'tests/components/layout/Navigation.test.tsx',
-      'tests/components/layout/PageLayout.test.tsx',
-      'tests/pages/FlashcardPage.test.tsx',
-      'tests/pages/HistoryPage.test.tsx',
-      'tests/pages/HomePage.test.tsx',
-      'tests/pages/LearningPage.test.tsx',
-      'tests/pages/LoginPage.test.tsx',
-      'tests/pages/NotificationsPage.test.tsx',
-      'tests/pages/ProfilePage.test.tsx',
-      'tests/pages/RegisterPage.test.tsx',
-      'tests/pages/StatisticsPage.test.tsx',
-      'tests/pages/VocabularyPage.test.tsx',
-      'tests/pages/WordbookPage.test.tsx',
-      'tests/stores/auth.test.ts',
-      'tests/stores/fatigue.test.ts',
-      'tests/stores/learning.test.ts',
-    ],
+    exclude: ['e2e/**', 'node_modules/**'],
     env: {
       VITE_API_BASE_URL: TEST_API_BASE_URL,
     },
     coverage: {
       provider: 'v8',
       include: ['src/**/*.{ts,tsx}'],
-      exclude: ['src/main.tsx', 'src/admin-main.tsx', 'src/types/**', 'src/index.css'],
+      exclude: [
+        'src/main.tsx',             // bootstrap render entry
+        'src/vite-env.d.ts',        // type-only
+        'src/types/**',             // type-only
+        'src/index.css',            // css
+        'src/workers/telemetry.ts', // navigator.sendBeacon worker
+        'src/lib/fatigue/**',       // WebRTC + MediaDevices, happy-dom 无原生支持
+      ],
       thresholds: {
         lines: 80,
         functions: 80,
-        branches: 75,
+        branches: 80,
+        statements: 80,
       },
     },
   },

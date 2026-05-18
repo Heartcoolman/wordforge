@@ -102,3 +102,94 @@ impl Store {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_store() -> Store {
+        Store::open(":memory:", 5000, 1).unwrap()
+    }
+
+    #[test]
+    fn get_returns_default_when_empty() {
+        let store = test_store();
+        let s = store.get_system_settings().unwrap();
+        assert_eq!(s.max_users, DEFAULT_MAX_USERS);
+        assert!(s.registration_enabled);
+        assert!(!s.maintenance_mode);
+        assert_eq!(s.default_daily_words, DEFAULT_DAILY_WORDS);
+        assert!(s.wordbook_center_url.is_some());
+        assert!(!s.amas_auto_apply_enabled);
+        assert_eq!(s.amas_auto_apply_max_per_day, 1);
+        assert!((s.amas_auto_apply_min_confidence - 0.8).abs() < 1e-9);
+    }
+
+    #[test]
+    fn save_and_get_roundtrip() {
+        let store = test_store();
+        let new = SystemSettings {
+            max_users: 42,
+            registration_enabled: false,
+            maintenance_mode: true,
+            default_daily_words: 5,
+            wordbook_center_url: Some("https://example.com".into()),
+            amas_auto_apply_enabled: true,
+            amas_auto_apply_max_per_day: 9,
+            amas_auto_apply_min_confidence: 0.55,
+        };
+        store.save_system_settings(&new).unwrap();
+        let got = store.get_system_settings().unwrap();
+        assert_eq!(got.max_users, 42);
+        assert!(!got.registration_enabled);
+        assert!(got.maintenance_mode);
+        assert_eq!(got.default_daily_words, 5);
+        assert_eq!(got.wordbook_center_url.as_deref(), Some("https://example.com"));
+        assert!(got.amas_auto_apply_enabled);
+        assert_eq!(got.amas_auto_apply_max_per_day, 9);
+        assert!((got.amas_auto_apply_min_confidence - 0.55).abs() < 1e-9);
+    }
+
+    #[test]
+    fn save_twice_overwrites_via_upsert() {
+        let store = test_store();
+        let mut s = SystemSettings::default();
+        s.max_users = 100;
+        store.save_system_settings(&s).unwrap();
+        s.max_users = 200;
+        store.save_system_settings(&s).unwrap();
+        assert_eq!(store.get_system_settings().unwrap().max_users, 200);
+    }
+
+    #[test]
+    fn get_replaces_null_wordbook_center_url_with_default() {
+        let store = test_store();
+        // 通过 raw SQL 写入 NULL，模拟 schema 默认场景
+        {
+            let conn = store.connection().unwrap();
+            conn.execute(
+                "INSERT INTO system_settings (singleton_id, max_users, registration_enabled, maintenance_mode, default_daily_words, wordbook_center_url, amas_auto_apply_enabled, amas_auto_apply_max_per_day, amas_auto_apply_min_confidence)
+                 VALUES (1, 1, 1, 0, 1, NULL, 0, 1, 0.5)",
+                [],
+            ).unwrap();
+        }
+        let got = store.get_system_settings().unwrap();
+        assert!(got.wordbook_center_url.is_some());
+    }
+
+    #[test]
+    fn default_helpers_return_expected_values() {
+        assert_eq!(default_auto_apply_max_per_day(), 1);
+        assert!((default_auto_apply_min_confidence() - 0.8).abs() < 1e-9);
+    }
+
+    #[test]
+    fn deserialize_missing_fields_uses_defaults() {
+        let json = r#"{"maxUsers":1,"registrationEnabled":true,"maintenanceMode":false,"defaultDailyWords":1}"#;
+        let parsed: SystemSettings = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.amas_auto_apply_max_per_day, 1);
+        assert!((parsed.amas_auto_apply_min_confidence - 0.8).abs() < 1e-9);
+        assert!(!parsed.amas_auto_apply_enabled);
+        assert!(parsed.wordbook_center_url.is_none());
+    }
+}

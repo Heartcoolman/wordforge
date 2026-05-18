@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render } from '@solidjs/testing-library';
 
 vi.mock('@/pages/NotFoundPage', () => ({ default: () => <div>NotFound</div> }));
@@ -56,20 +56,24 @@ vi.mock('@/workers/telemetry', () => ({
 import App from '@/App';
 
 describe('App', () => {
+  beforeEach(() => {
+    // 默认 pathname 指向 admin login，避免 "/" 路由触发 window.location.replace 后 container 为空
+    window.location.pathname = '/admin/login';
+    window.location.href = 'http://localhost:3000/admin/login';
+  });
+
   it('renders without crashing', () => {
     const { container } = render(() => <App />);
     expect(container).toBeTruthy();
   });
 
-  it('renders the Toaster component', () => {
+  it('renders content for the admin login route', () => {
     const { container } = render(() => <App />);
-    // Toaster renders a div container for toasts
-    expect(container.innerHTML).toBeTruthy();
+    expect(container.innerHTML.length).toBeGreaterThan(0);
   });
 
   it('renders route structure', () => {
     const { container } = render(() => <App />);
-    // App should render some content (at minimum the layout)
     expect(container.children.length).toBeGreaterThan(0);
   });
 });

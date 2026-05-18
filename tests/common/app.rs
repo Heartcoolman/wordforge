@@ -64,7 +64,14 @@ async fn spawn_with_limits(api_limit: u64) -> TestApp {
             ensemble_enabled: true,
             monitor_sample_rate: 0.05,
         },
-        amas_config_file: None,
+        // 重定向到 tempdir，避免任何写回到生产 amas_config.toml
+        amas_config_file: Some(
+            temp_dir
+                .path()
+                .join("amas_config.toml")
+                .to_string_lossy()
+                .to_string(),
+        ),
         llm: learning_backend::config::LLMConfig {
             enabled: false,
             mock: true,

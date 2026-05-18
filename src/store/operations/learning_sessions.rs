@@ -815,4 +815,136 @@ mod tests {
         assert_eq!(SessionStatus::Completed.as_str(), "completed");
         assert_eq!(SessionStatus::Abandoned.as_str(), "abandoned");
     }
+
+    fn tempfile_store() -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let store = Store::open(path.to_str().unwrap(), 5000, 4).unwrap();
+        (dir, store)
+    }
+
+    #[test]
+    fn update_learning_session_missing_returns_not_found() {
+        let store = test_store();
+        let s = sample_session("ghost", "u1");
+        assert!(matches!(
+            store.update_learning_session(&s).unwrap_err(),
+            StoreError::NotFound { .. }
+        ));
+    }
+
+    #[test]
+    fn parse_status_rejects_unknown_value() {
+        // 内部 helper：覆盖错误分支
+        assert!(super::parse_status("active").is_ok());
+        assert!(super::parse_status("bogus").is_err());
+    }
+
+    #[test]
+    fn get_session_shown_word_ids_returns_all_and_per_batch() {
+        let store = test_store();
+        store
+            .create_learning_session(&sample_session("s1", "u1"))
+            .unwrap();
+        store
+            .claim_session_batch("s1", Some(0), &["a".into(), "b".into()])
+            .unwrap();
+        store
+            .claim_session_batch("s1", Some(1), &["c".into()])
+            .unwrap();
+        let all = store.get_session_shown_word_ids("s1").unwrap();
+        assert_eq!(all.len(), 3);
+        let batch1 = store.get_session_shown_word_ids_for_batch("s1", 1).unwrap();
+        assert_eq!(batch1, vec!["c"]);
+    }
+
+    #[test]
+    fn claim_session_batch_empty_candidates_returns_assigned_index() {
+        let store = test_store();
+        store.create_learning_session(&sample_session("s1", "u1")).unwrap();
+        let (idx, ids) = store.claim_session_batch("s1", None, &[]).unwrap();
+        assert_eq!(idx, 0);
+        assert!(ids.is_empty());
+    }
+
+    #[test]
+    fn list_count_learning_sessions_pagination_and_time_window() {
+        let (_t, store) = tempfile_store();
+        let base = Utc::now();
+        for i in 0..4 {
+            let mut s = sample_session(&format!("s{i}"), "u1");
+            s.created_at = base - chrono::Duration::days(i as i64);
+            s.updated_at = s.created_at;
+            store.create_learning_session(&s).unwrap();
+        }
+        let total = store.count_learning_sessions_for_user("u1", None, None).unwrap();
+        assert_eq!(total, 4);
+        let page = store
+            .list_learning_sessions_for_user("u1", 2, 0, None, None)
+            .unwrap();
+        assert_eq!(page.len(), 2);
+        // 最新（s0）在前
+        assert_eq!(page[0].id, "s0");
+
+        let window_start = base - chrono::Duration::days(2);
+        let cnt = store
+            .count_learning_sessions_for_user("u1", Some(window_start), None)
+            .unwrap();
+        assert_eq!(cnt, 3); // s0, s1, s2
+
+        let bounded = store
+            .list_learning_sessions_for_user(
+                "u1",
+                10,
+                0,
+                Some(window_start),
+                Some(base + chrono::Duration::seconds(1)),
+            )
+            .unwrap();
+        assert_eq!(bounded.len(), 3);
+
+        let between = store
+            .list_learning_sessions_between(
+                "u1",
+                base - chrono::Duration::days(1),
+                base + chrono::Duration::seconds(1),
+            )
+            .unwrap();
+        // s0, s1 (asc)
+        assert_eq!(between.len(), 2);
+        assert_eq!(between[0].id, "s1");
+        assert_eq!(between[1].id, "s0");
+    }
+
+    #[test]
+    fn total_session_duration_and_daily_aggregate() {
+        let (_t, store) = tempfile_store();
+        let now = Utc::now();
+        let mut s1 = sample_session("s1", "u1");
+        s1.status = SessionStatus::Completed;
+        s1.created_at = now;
+        s1.updated_at = now + chrono::Duration::seconds(120);
+        s1.summary = Some(SessionSummary {
+            accuracy: 1.0,
+            avg_response_time_ms: 100,
+            mastered_word_ids: vec![],
+            error_prone_word_ids: vec![],
+            duration_secs: 60,
+            hour_of_day: 0,
+            final_difficulty: 0.5,
+        });
+        store.create_learning_session(&s1).unwrap();
+        // 第二条 completed，无 summary，按 julianday 计算 ≈120s
+        let mut s2 = sample_session("s2", "u1");
+        s2.status = SessionStatus::Completed;
+        s2.created_at = now;
+        s2.updated_at = now + chrono::Duration::seconds(120);
+        s2.summary = None;
+        store.create_learning_session(&s2).unwrap();
+
+        let total = store.total_session_duration_secs("u1").unwrap();
+        assert!(total >= 60); // 至少包含 s1 的 60s
+        let daily = store.daily_session_durations("u1").unwrap();
+        assert!(daily.values().sum::<u64>() >= 60);
+    }
 }

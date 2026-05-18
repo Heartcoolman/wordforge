@@ -100,4 +100,13 @@ describe('notificationsApi', () => {
     const result = await notificationsApi.updatePreferences({ emailNotifications: false } as any);
     expect(result).toEqual(updated);
   });
+
+  it('getUnreadCount returns unread count', async () => {
+    server.use(
+      http.get(`${BASE}/api/notifications/unread-count`, () =>
+        HttpResponse.json({ success: true, data: { unreadCount: 3 } })),
+    );
+    const result = await notificationsApi.getUnreadCount();
+    expect(result).toEqual({ unreadCount: 3 });
+  });
 });

@@ -571,4 +571,225 @@ mod tests {
         assert!(cfg.llm.enabled);
         assert!(!cfg.llm.mock);
     }
+
+    #[test]
+    fn env_or_bool_accepts_common_truthy_falsy_synonyms() {
+        let _guard = env_lock().lock().expect("env lock");
+        for v in ["1", "true", "yes", "on", "TRUE", "On"] {
+            env::set_var("__TEST_BOOL_T", v);
+            assert!(env_or_bool("__TEST_BOOL_T", false), "v={v}");
+        }
+        for v in ["0", "false", "no", "off", "FALSE", "Off"] {
+            env::set_var("__TEST_BOOL_T", v);
+            assert!(!env_or_bool("__TEST_BOOL_T", true), "v={v}");
+        }
+        // 无法识别 -> 取 default
+        env::set_var("__TEST_BOOL_T", "maybe");
+        assert!(env_or_bool("__TEST_BOOL_T", true));
+        assert!(!env_or_bool("__TEST_BOOL_T", false));
+        env::remove_var("__TEST_BOOL_T");
+        assert!(env_or_bool("__TEST_BOOL_T", true));
+    }
+
+    #[test]
+    fn env_or_returns_default_when_missing() {
+        let _guard = env_lock().lock().expect("env lock");
+        env::remove_var("__TEST_MISSING");
+        assert_eq!(env_or("__TEST_MISSING", "default-val"), "default-val");
+    }
+
+    #[test]
+    fn env_or_parse_falls_back_on_bad_value() {
+        let _guard = env_lock().lock().expect("env lock");
+        env::set_var("__TEST_PARSE_BAD", "not-a-u64");
+        let v = env_or_parse::<u64>("__TEST_PARSE_BAD", 99);
+        assert_eq!(v, 99);
+        env::remove_var("__TEST_PARSE_BAD");
+    }
+
+    #[test]
+    fn config_debug_redacts_secrets() {
+        let _guard = env_lock().lock().expect("env lock");
+        clear_keys(managed_keys());
+        set_test_secrets();
+        let cfg = Config::from_env();
+        let dbg = format!("{:?}", cfg);
+        assert!(dbg.contains("***REDACTED***"));
+        assert!(!dbg.contains("test_secret_that_is_at_least_32_characters_long_ok"));
+        // LLMConfig 也覆盖
+        let llm_dbg = format!("{:?}", cfg.llm);
+        assert!(llm_dbg.contains("***REDACTED***"));
+    }
+
+    #[test]
+    fn loads_absolute_database_path_unchanged() {
+        let _guard = env_lock().lock().expect("env lock");
+        clear_keys(managed_keys());
+        set_test_secrets();
+        env::set_var("DATABASE_URL", "/tmp/wordforge-test-abs.db");
+        let cfg = Config::from_env();
+        assert_eq!(cfg.database_url, "/tmp/wordforge-test-abs.db");
+        env::remove_var("DATABASE_URL");
+    }
+
+    #[test]
+    fn cors_wildcard_in_production_does_not_panic() {
+        let _guard = env_lock().lock().expect("env lock");
+        clear_keys(managed_keys());
+        set_test_secrets();
+        env::set_var("CORS_ORIGIN", "*");
+        env::set_var("RUST_ENV", "production");
+        // 只是 warn，不应 panic
+        let cfg = Config::from_env();
+        assert_eq!(cfg.cors_origin, "*");
+        env::remove_var("CORS_ORIGIN");
+        env::remove_var("RUST_ENV");
+    }
+
+    #[test]
+    fn refresh_secret_auto_derives_when_empty() {
+        let _guard = env_lock().lock().expect("env lock");
+        clear_keys(managed_keys());
+        // 仅设置 JWT_SECRET 与 ADMIN_JWT_SECRET，留空 REFRESH_JWT_SECRET
+        let secret = "test_secret_that_is_at_least_32_characters_long_ok";
+        env::set_var("JWT_SECRET", secret);
+        env::set_var("ADMIN_JWT_SECRET", secret);
+        env::set_var("REFRESH_JWT_SECRET", ""); // 空字符串触发派生分支
+        let cfg = Config::from_env();
+        // 派生出的 hex 长度 = 64
+        assert_eq!(cfg.refresh_jwt_secret.len(), 64);
+        assert_ne!(cfg.refresh_jwt_secret, secret);
+        env::remove_var("REFRESH_JWT_SECRET");
+    }
+
+    #[test]
+    fn refresh_secret_uses_env_when_set() {
+        let _guard = env_lock().lock().expect("env lock");
+        clear_keys(managed_keys());
+        set_test_secrets();
+        env::set_var(
+            "REFRESH_JWT_SECRET",
+            "explicit-refresh-secret-that-is-long-enough-ok",
+        );
+        let cfg = Config::from_env();
+        assert_eq!(
+            cfg.refresh_jwt_secret,
+            "explicit-refresh-secret-that-is-long-enough-ok"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "JWT_SECRET contains insecure default value")]
+    fn validate_panics_on_insecure_jwt_secret() {
+        let cfg = make_test_cfg(|c| {
+            c.jwt_secret = "change_me_to_something_better_with_enough_padding".into();
+        });
+        cfg.validate_secrets();
+    }
+
+    #[test]
+    #[should_panic(expected = "JWT_SECRET is too short")]
+    fn validate_panics_on_short_jwt_secret() {
+        let cfg = make_test_cfg(|c| c.jwt_secret = "short".into());
+        cfg.validate_secrets();
+    }
+
+    #[test]
+    #[should_panic(expected = "ADMIN_JWT_SECRET contains insecure default value")]
+    fn validate_panics_on_insecure_admin_secret() {
+        let cfg = make_test_cfg(|c| {
+            c.admin_jwt_secret = "change_me_admin_with_lots_of_padding_for_min_len".into();
+        });
+        cfg.validate_secrets();
+    }
+
+    #[test]
+    #[should_panic(expected = "ADMIN_JWT_SECRET is too short")]
+    fn validate_panics_on_short_admin_secret() {
+        let cfg = make_test_cfg(|c| c.admin_jwt_secret = "short".into());
+        cfg.validate_secrets();
+    }
+
+    #[test]
+    #[should_panic(expected = "REFRESH_JWT_SECRET contains insecure default value")]
+    fn validate_panics_on_insecure_refresh_secret() {
+        let cfg = make_test_cfg(|c| {
+            c.refresh_jwt_secret = "change_me_refresh_with_enough_padding_for_min_len".into();
+        });
+        cfg.validate_secrets();
+    }
+
+    #[test]
+    #[should_panic(expected = "REFRESH_JWT_SECRET is too short")]
+    fn validate_panics_on_short_refresh_secret() {
+        let cfg = make_test_cfg(|c| c.refresh_jwt_secret = "short".into());
+        cfg.validate_secrets();
+    }
+
+    /// 构造一份"全部 secret 合法"的 Config，再由闭包注入待测违例字段。
+    fn make_test_cfg<F: FnOnce(&mut Config)>(mutate: F) -> Config {
+        let good = "test_secret_that_is_at_least_32_characters_long_ok".to_string();
+        let mut cfg = Config {
+            host: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+            port: 3000,
+            log_level: "info".into(),
+            enable_file_logs: false,
+            log_dir: "./logs".into(),
+            database_url: ":memory:".into(),
+            api_only: false,
+            sqlite_busy_timeout_ms: 5000,
+            sqlite_connection_timeout_ms: 250,
+            sqlite_pool_size: 2,
+            jwt_secret: good.clone(),
+            refresh_jwt_secret: good.clone(),
+            jwt_expires_in_hours: 1,
+            refresh_token_expires_in_hours: 24,
+            admin_jwt_secret: good,
+            admin_jwt_expires_in_hours: 1,
+            cors_origin: "http://localhost".into(),
+            trust_proxy: false,
+            cookie_secure: false,
+            self_watchdog: SelfWatchdogConfig::default(),
+            rate_limit: RateLimitConfig {
+                window_secs: 60,
+                max_requests: 100,
+            },
+            auth_rate_limit: AuthRateLimitConfig::default(),
+            worker: WorkerConfig {
+                is_leader: false,
+                enable_llm_advisor: false,
+                enable_monitoring: false,
+            },
+            amas: AMASEnvConfig {
+                ensemble_enabled: true,
+                monitor_sample_rate: 0.05,
+            },
+            amas_config_file: None,
+            llm: LLMConfig {
+                enabled: false,
+                mock: true,
+                api_url: String::new(),
+                api_key: String::new(),
+                model: String::new(),
+                timeout_secs: 30,
+                daily_cost_cap_usd: 1.0,
+                input_price_per_mtok_usd: 0.55,
+                output_price_per_mtok_usd: 2.19,
+            },
+            update_check: UpdateCheckConfig {
+                api_url: String::new(),
+                cache_ttl_secs: 3600,
+                worker_enabled: false,
+                worker_interval_secs: 3600,
+                github_token: None,
+                allow_downgrade: false,
+                install_dir: None,
+                max_tarball_bytes: 1024,
+            },
+            pagination: PaginationConfig::default(),
+            limits: LimitsConfig::default(),
+        };
+        mutate(&mut cfg);
+        cfg
+    }
 }

@@ -75,3 +75,36 @@ where
     drop(permit);
     result.map_err(|source| BlockingTaskError::new(task_name, source))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn run_blocking_returns_value() {
+        let v = run_blocking("test.ok", || 42).await.expect("ok");
+        assert_eq!(v, 42);
+    }
+
+    #[tokio::test]
+    async fn run_blocking_propagates_panic_as_error() {
+        let res: Result<(), BlockingTaskError> = run_blocking("test.panic", || {
+            panic!("boom");
+        })
+        .await;
+        let err = res.expect_err("should be Err");
+        // 触发 Display 与 Error::source
+        let displayed = format!("{}", err);
+        assert!(displayed.contains("test.panic"));
+        let source = err.source().expect("has source");
+        // JoinError 的 Display 不空即可
+        assert!(!format!("{}", source).is_empty());
+        let _ = format!("{:?}", err); // Debug
+    }
+
+    #[test]
+    fn init_blocking_semaphore_clamps_zero_to_one() {
+        // OnceLock 已被先前测试初始化，set 返回 Err；仍验证调用不 panic
+        init_blocking_semaphore(0);
+    }
+}

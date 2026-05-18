@@ -4,7 +4,7 @@
 //! - **缓存**：ETag + cache_ttl_secs 双层；304 命中则只刷新时间戳。
 //! - **平台**：仅 Linux x86_64 / aarch64，asset 命名 `wordforge-linux-{arch}.tar.gz` + `.sha256`。
 //! - **安全网**：DB backup（VACUUM INTO）→ 旧二进制保留 N=2 → 文件锁防并发 → zip-slip 守门。
-//! - **重启**：fork-exec 直接 spawn 新二进制 + exit(0)，不依赖 systemd。
+//! - **重启**：fork 一个后台启动器，等旧进程退出后再 exec 新二进制，不依赖 systemd。
 //!   `env::current_exe()` 在 rename 后仍指向旧 inode，故必须用显式 install_dir.join("wordforge") 路径。
 
 use std::path::{Path, PathBuf};
@@ -270,7 +270,9 @@ impl Updater {
             if cache.latest.is_none() {
                 // 理论不可达；万一被外部清空了 cache.latest，丢 etag 让下次重新拉
                 cache.etag = None;
-                tracing::warn!("304 received but cache.latest is empty; dropping etag for next call");
+                tracing::warn!(
+                    "304 received but cache.latest is empty; dropping etag for next call"
+                );
             }
             return Ok(self.status_from(&cache));
         }
@@ -400,7 +402,12 @@ impl Updater {
             total: latest.tarball_size,
         });
         let actual_sha = self
-            .stream_download(&latest.tarball_url, &tarball_path, &progress, latest.tarball_size)
+            .stream_download(
+                &latest.tarball_url,
+                &tarball_path,
+                &progress,
+                latest.tarball_size,
+            )
             .await?;
         progress(UpdatePhase::Verifying);
         if !actual_sha.eq_ignore_ascii_case(&sha_expected) {
@@ -576,17 +583,9 @@ impl Updater {
     fn prune_old_backups(&self, prefix: &str) -> std::io::Result<()> {
         let mut entries: Vec<_> = std::fs::read_dir(&self.install_dir)?
             .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.file_name()
-                    .to_string_lossy()
-                    .starts_with(prefix)
-            })
+            .filter(|e| e.file_name().to_string_lossy().starts_with(prefix))
             .collect();
-        entries.sort_by_key(|e| {
-            e.metadata()
-                .and_then(|m| m.modified())
-                .ok()
-        });
+        entries.sort_by_key(|e| e.metadata().and_then(|m| m.modified()).ok());
         while entries.len() > KEEP_OLD_VERSIONS {
             let victim = entries.remove(0);
             let p = victim.path();
@@ -742,7 +741,11 @@ fn extract_tar_gz_safe(tarball: &Path, dst: &Path) -> Result<(), UpdaterError> {
         let mut entry = entry_res?;
         let rel = entry.path()?.into_owned();
         // 拒绝绝对路径或包含 .. 的条目（zip-slip 基本款）
-        if rel.is_absolute() || rel.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        if rel.is_absolute()
+            || rel
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
             return Err(UpdaterError::UnsafePath(rel.to_string_lossy().into()));
         }
         // 拒绝任何 link / symlink 条目：本工程发布产物只含 regular file + directory；
@@ -814,8 +817,24 @@ fn rollback(mut steps: Vec<UndoStep>) {
 #[cfg(unix)]
 fn spawn_replacement(bin_path: &Path) -> Result<(), UpdaterError> {
     use std::os::unix::process::CommandExt;
-    let mut cmd = std::process::Command::new(bin_path);
-    cmd.args(std::env::args().skip(1));
+    let parent_pid = std::process::id().to_string();
+    let mut cmd = std::process::Command::new("/bin/sh");
+    cmd.arg("-c")
+        .arg(
+            r#"parent="$1"; shift
+while kill -0 "$parent" 2>/dev/null; do
+  sleep 0.2
+done
+exec "$@"
+"#,
+        )
+        .arg("wordforge-restart")
+        .arg(parent_pid)
+        .arg(bin_path)
+        .args(std::env::args().skip(1))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
     unsafe {
         cmd.pre_exec(|| {
             // 新建 session，让子进程脱离父 tty 与进程组，父退出不影响子
@@ -829,8 +848,17 @@ fn spawn_replacement(bin_path: &Path) -> Result<(), UpdaterError> {
 
 #[cfg(not(unix))]
 fn spawn_replacement(bin_path: &Path) -> Result<(), UpdaterError> {
-    std::process::Command::new(bin_path)
-        .args(std::env::args().skip(1))
+    let parent_pid = std::process::id().to_string();
+    std::process::Command::new("cmd")
+        .arg("/C")
+        .arg(format!(
+            "ping 127.0.0.1 -n 2 >NUL && start \"\" \"{}\"",
+            bin_path.display()
+        ))
+        .arg(parent_pid)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .spawn()?;
     Ok(())
 }

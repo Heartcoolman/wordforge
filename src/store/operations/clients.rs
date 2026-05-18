@@ -230,3 +230,139 @@ impl Store {
         Ok(summary)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+
+    fn test_store() -> Store {
+        let store = Store::open(":memory:", 5000, 1).unwrap();
+        store.run_migrations().unwrap();
+        store
+    }
+
+    #[test]
+    fn upsert_inserts_then_updates_last_seen() {
+        let store = test_store();
+        store.upsert_client_device("dev-1", "ios", "u-1").unwrap();
+        // 重复 upsert 不应失败，且 platform/user_id 被覆盖
+        store.upsert_client_device("dev-1", "android", "u-2").unwrap();
+        let active = store.get_recently_active_clients(60).unwrap();
+        assert_eq!(active.len(), 1);
+        let d = &active[0];
+        assert_eq!(d.device_id, "dev-1");
+        assert_eq!(d.platform, "android");
+        assert_eq!(d.user_id.as_deref(), Some("u-2"));
+        assert!(!d.is_banned);
+    }
+
+    #[test]
+    fn device_exists_and_is_banned_flow() {
+        let store = test_store();
+        assert!(!store.client_device_exists("dev-x").unwrap());
+        assert!(!store.is_device_banned("dev-x").unwrap());
+        store.upsert_client_device("dev-x", "web", "u-1").unwrap();
+        assert!(store.client_device_exists("dev-x").unwrap());
+        assert!(!store.is_device_banned("dev-x").unwrap());
+
+        assert!(store.ban_client_device("dev-x", "admin-1", Some("spam")).unwrap());
+        assert!(store.is_device_banned("dev-x").unwrap());
+
+        assert!(store.unban_client_device("dev-x").unwrap());
+        assert!(!store.is_device_banned("dev-x").unwrap());
+    }
+
+    #[test]
+    fn ban_unban_nonexistent_returns_false() {
+        let store = test_store();
+        assert!(!store.ban_client_device("missing", "admin", None).unwrap());
+        assert!(!store.unban_client_device("missing").unwrap());
+    }
+
+    #[test]
+    fn recently_active_includes_banned_even_if_old() {
+        let store = test_store();
+        store.upsert_client_device("dev-a", "web", "u-a").unwrap();
+        store.ban_client_device("dev-a", "admin", Some("r")).unwrap();
+        // 用 -100000 minutes 也仍包含 banned
+        let list = store.get_recently_active_clients(1).unwrap();
+        assert!(list.iter().any(|d| d.device_id == "dev-a" && d.is_banned));
+    }
+
+    #[test]
+    fn data_upload_status_empty_inputs() {
+        let store = test_store();
+        let s = store.get_data_upload_status(&[], &[]).unwrap();
+        assert!(s.amas_by_user.is_empty());
+        assert!(s.learning_by_user.is_empty());
+        assert!(s.telemetry_by_device.is_empty());
+    }
+
+    #[test]
+    fn data_upload_status_with_real_data() {
+        let store = test_store();
+        // seed engine_user_states
+        let user_id = "u-1".to_string();
+        store.upsert_client_device("dev-1", "ios", &user_id).unwrap();
+        {
+            let conn = store.connection().unwrap();
+            conn.execute(
+                "INSERT INTO engine_user_states (user_id, total_event_count, created_at)
+                 VALUES (?1, 7, ?2)",
+                params![user_id, Utc::now().to_rfc3339()],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO learning_records (user_id, id, word_id, is_correct, response_time_ms, created_at)
+                 VALUES (?1, ?2, 'w1', 1, 100, ?3)",
+                params![user_id, uuid::Uuid::new_v4().to_string(), Utc::now().to_rfc3339()],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO telemetry_events (id, device_id, event_type, payload_json, client_ts, server_ts)
+                 VALUES (?1, 'dev-1', 'periodic', '{}', ?2, ?2)",
+                params![uuid::Uuid::new_v4().to_string(), Utc::now().to_rfc3339()],
+            ).unwrap();
+        }
+
+        let s = store.get_data_upload_status(&[user_id.clone()], &["dev-1".to_string()]).unwrap();
+        assert_eq!(s.amas_by_user.get(&user_id).copied(), Some("uploaded"));
+        assert_eq!(s.learning_by_user.get(&user_id).copied(), Some("uploaded"));
+        assert_eq!(s.telemetry_by_device.get("dev-1").copied(), Some("uploaded"));
+    }
+
+    #[test]
+    fn data_upload_status_zero_event_count_marked_nil() {
+        let store = test_store();
+        let user_id = "u-2".to_string();
+        {
+            let conn = store.connection().unwrap();
+            conn.execute(
+                "INSERT INTO engine_user_states (user_id, total_event_count, created_at)
+                 VALUES (?1, 0, ?2)",
+                params![user_id, Utc::now().to_rfc3339()],
+            ).unwrap();
+        }
+        let s = store.get_data_upload_status(&[user_id.clone()], &[]).unwrap();
+        assert_eq!(s.amas_by_user.get(&user_id).copied(), Some("nil"));
+        // 没有 learning_records 时 key 不出现
+        assert!(s.learning_by_user.get(&user_id).is_none());
+    }
+
+    #[test]
+    fn data_channel_status_default_is_none_strings() {
+        let s = DataChannelStatus::default();
+        assert_eq!(s.amas, "none");
+        assert_eq!(s.learning, "none");
+        assert_eq!(s.telemetry, "none");
+        // 同步覆盖 Serialize
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains("\"amas\":\"none\""));
+    }
+
+    #[test]
+    fn data_upload_summary_default_serializes() {
+        let s = DataUploadSummary::default();
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains("amasByUser"));
+    }
+}
