@@ -11,35 +11,61 @@ export default defineConfig({
 
   themeConfig: {
     nav: [
+      { text: '指南', link: '/guide/introduction' },
       { text: 'API', link: '/api-endpoints' },
       { text: 'AMAS', link: '/amas-admin-console' },
     ],
 
-    sidebar: [
-      {
-        text: 'API 文档',
-        items: [
-          { text: 'API 接口对接', link: '/api-endpoints' },
-          { text: 'API 对接规范', link: '/api-spec' },
-          { text: '客户端上传数据规范', link: '/client-upload-data' },
-        ],
-      },
-      {
-        text: 'AMAS',
-        items: [
-          { text: '调参管理后台', link: '/amas-admin-console' },
-          {
-            text: '2026-05-15 调参记录',
-            collapsed: true,
-            items: [
-              { text: '最终报告', link: '/amas-tuning-2026-05-15/01-final-report' },
-              { text: 'FSRS-5 / DHP 研究', link: '/amas-tuning-2026-05-15/02-fsrs-dhp-research' },
-              { text: 'Adapter 扩展分析', link: '/amas-tuning-2026-05-15/03-adapter-analysis' },
-            ],
-          },
-        ],
-      },
-    ],
+    sidebar: {
+      '/guide/': [
+        {
+          text: '入门',
+          items: [
+            { text: '项目简介', link: '/guide/introduction' },
+            { text: '快速开始', link: '/guide/getting-started' },
+            { text: '架构概览', link: '/guide/architecture' },
+            { text: 'AMAS 入门', link: '/guide/amas-intro' },
+          ],
+        },
+      ],
+      '/': [
+        {
+          text: '入门',
+          collapsed: false,
+          items: [
+            { text: '项目简介', link: '/guide/introduction' },
+            { text: '快速开始', link: '/guide/getting-started' },
+            { text: '架构概览', link: '/guide/architecture' },
+            { text: 'AMAS 入门', link: '/guide/amas-intro' },
+          ],
+        },
+        {
+          text: 'API 文档',
+          collapsed: false,
+          items: [
+            { text: 'API 接口对接', link: '/api-endpoints' },
+            { text: 'API 对接规范', link: '/api-spec' },
+            { text: '客户端上传数据规范', link: '/client-upload-data' },
+          ],
+        },
+        {
+          text: 'AMAS',
+          collapsed: false,
+          items: [
+            { text: '调参管理后台', link: '/amas-admin-console' },
+            {
+              text: '2026-05-15 调参记录',
+              collapsed: true,
+              items: [
+                { text: '最终报告', link: '/amas-tuning-2026-05-15/01-final-report' },
+                { text: 'FSRS-5 / DHP 研究', link: '/amas-tuning-2026-05-15/02-fsrs-dhp-research' },
+                { text: 'Adapter 扩展分析', link: '/amas-tuning-2026-05-15/03-adapter-analysis' },
+              ],
+            },
+          ],
+        },
+      ],
+    },
 
     socialLinks: [
       { icon: 'github', link: 'https://github.com/Heartcoolman/wordforge' },
