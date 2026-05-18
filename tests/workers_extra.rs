@@ -453,7 +453,8 @@ async fn config_watcher_reloads_on_modify() {
 
     // 修改文件，触发 reload
     let mut new_cfg = AMASConfig::default();
-    new_cfg.thresholds.fatigue_high = (new_cfg.thresholds.fatigue_high - 0.05).max(0.0);
+    new_cfg.constraints.max_difficulty_when_fatigued =
+        (new_cfg.constraints.max_difficulty_when_fatigued - 0.05).max(0.2);
     let new_toml = toml::to_string(&new_cfg).expect("ser new toml");
     std::fs::write(&path, new_toml).expect("write new toml");
 
@@ -520,8 +521,20 @@ async fn delayed_reward_runs_with_no_overdue_words() {
 // ────────────────────── log_export 边界 ──────────────────────
 
 #[tokio::test]
-async fn log_export_creates_metrics_entry() {
+async fn log_export_creates_metrics_entry_when_events_present() {
     let (_tmp, store) = setup_store("logexport.db");
+
+    // 没事件 -> 提前 return，不写 metrics
+    workers::log_export::run(&store).await;
+
+    // 注入一条事件，再跑一次
+    let event = serde_json::json!({
+        "id": "ev-1",
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "kind": "test"
+    });
+    store.insert_monitoring_event(&event).unwrap();
+
     workers::log_export::run(&store).await;
     let hour = chrono::Utc::now().format("%Y-%m-%d-%H").to_string();
     assert!(store
