@@ -239,6 +239,26 @@ describe('collectDeviceFingerprint', () => {
     }
   });
 
+  it('reports deviceMemory value when present on navigator', () => {
+    const navAny = navigator as any;
+    const original = navAny.deviceMemory;
+    Object.defineProperty(navigator, 'deviceMemory', {
+      configurable: true,
+      value: 8,
+    });
+    Object.defineProperty(navigator, 'userAgent', {
+      configurable: true,
+      value: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0)',
+    });
+    const fp = collectDeviceFingerprint();
+    expect(fp.memoryGb).toBe(8);
+    if (original === undefined) {
+      delete navAny.deviceMemory;
+    } else {
+      Object.defineProperty(navigator, 'deviceMemory', { configurable: true, value: original });
+    }
+  });
+
   it('falls back to memoryGb=null when navigator.deviceMemory missing', () => {
     Object.defineProperty(navigator, 'userAgent', {
       configurable: true,

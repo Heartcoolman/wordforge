@@ -340,6 +340,42 @@ describe('createWordQueueManager', () => {
     expect(mgr.pickNext()?.word.id).toBe('p-b'); // 更早 lastShown 优先
   });
 
+  it('restore backfills priority for legacy mastered items as well', () => {
+    const wA = createFakeWord({ id: 'mast-a' });
+    const wB = createFakeWord({ id: 'mast-b' });
+    localStorage.setItem(
+      'eng_learning_queue',
+      JSON.stringify({
+        active: [],
+        mastered: [
+          { word: wA, correctCount: 2, errorCount: 0, lastShown: 1 },
+          { word: wB, correctCount: 2, errorCount: 0, lastShown: 2 },
+        ],
+        batchSize: 5,
+      }),
+    );
+    const mgr = createManager();
+    expect(mgr.getMasteredCount()).toBe(2);
+    expect(mgr.getMasteredWordIds()).toEqual(['mast-a', 'mast-b']);
+  });
+
+  it('generateOptions in meaning-to-word mode pulls distractor word texts', () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    const mgr = createManager();
+    const words = createFakeWords(5);
+    mgr.loadWords(words);
+    const target = mgr.pickNext()!;
+    const options = mgr.generateOptions(target, 'meaning-to-word');
+    expect(options).toHaveLength(4);
+    expect(options).toContain(target.word.text);
+    // 干扰项必须是其它 word 的 text
+    const others = options.filter((o) => o !== target.word.text);
+    for (const o of others) {
+      expect(words.some((w) => w.text === o)).toBe(true);
+    }
+    vi.restoreAllMocks();
+  });
+
   it('generateOptions in meaning-to-word mode returns word text answer + placeholder', () => {
     vi.spyOn(Math, 'random').mockReturnValue(0.5);
     const mgr = createManager();

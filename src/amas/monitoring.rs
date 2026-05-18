@@ -181,3 +181,150 @@ pub fn record_event(
         tracing::error!(error=%e, "Failed to persist monitoring event");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::amas::types::{Explanation, Reward, RewardComponents};
+
+    fn make_result(
+        state: UserState,
+        strategy: StrategyParams,
+        cold_start_phase: Option<ColdStartPhase>,
+    ) -> ProcessResult {
+        ProcessResult {
+            session_id: "s1".into(),
+            strategy,
+            explanation: Explanation {
+                primary_reason: "test".into(),
+                factors: vec![],
+            },
+            state,
+            word_mastery: None,
+            reward: Reward {
+                value: 0.5,
+                components: RewardComponents {
+                    accuracy_reward: 0.5,
+                    speed_reward: 0.5,
+                    fatigue_penalty: 0.0,
+                    frustration_penalty: 0.0,
+                    expected_forget_cost: 0.0,
+                },
+            },
+            cold_start_phase,
+        }
+    }
+
+    fn tempfile_store() -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let store = Store::open(path.to_str().unwrap(), 5000, 4).unwrap();
+        (dir, store)
+    }
+
+    #[test]
+    fn check_invariants_passes_for_valid_result() {
+        let result = make_result(UserState::default(), StrategyParams::default(), None);
+        let v = check_invariants(&result);
+        assert!(v.is_empty());
+    }
+
+    #[test]
+    fn check_invariants_detects_out_of_range_and_nan() {
+        let mut state = UserState::default();
+        state.attention = 2.0;
+        state.fatigue = f64::NAN;
+        state.motivation = -2.0;
+        let strategy = StrategyParams {
+            difficulty: 1.5,
+            new_ratio: -0.1,
+            batch_size: 0,
+            ..StrategyParams::default()
+        };
+        let result = make_result(state, strategy, None);
+        let v = check_invariants(&result);
+        // attention out of range, fatigue NaN, motivation out, difficulty out,
+        // new_ratio out, batch_size 0 → 6 violations 至少
+        let fields: Vec<&str> = v.iter().map(|x| x.field.as_str()).collect();
+        for expected in [
+            "attention",
+            "fatigue",
+            "motivation",
+            "difficulty",
+            "new_ratio",
+            "batch_size",
+        ] {
+            assert!(fields.contains(&expected), "missing {expected}");
+        }
+    }
+
+    #[test]
+    fn should_sample_always_true_for_anomaly_or_cold_start() {
+        assert!(should_sample(true, &None, 0.0));
+        assert!(should_sample(false, &Some(ColdStartPhase::Classify), 0.0));
+    }
+
+    #[test]
+    fn should_sample_false_at_zero_rate_normal() {
+        assert!(!should_sample(false, &None, 0.0));
+    }
+
+    #[test]
+    fn should_sample_true_at_full_rate_normal() {
+        assert!(should_sample(false, &None, 1.0));
+    }
+
+    #[test]
+    fn compute_config_hash_is_stable_and_diffs_on_change() {
+        let mut c = AMASConfig::default();
+        let h1 = compute_config_hash(&c);
+        let h2 = compute_config_hash(&c);
+        assert_eq!(h1, h2);
+        assert_eq!(h1.len(), 16);
+        c.monitoring.sample_rate = 0.99;
+        let h3 = compute_config_hash(&c);
+        assert_ne!(h1, h3);
+    }
+
+    #[test]
+    fn record_event_persists_when_anomaly_present() {
+        let (_t, store) = tempfile_store();
+        let mut config = AMASConfig::default();
+        // 强制不通过 sampling 的非 anomaly 路径
+        config.monitoring.sample_rate = 0.0;
+        let mut state = UserState::default();
+        state.attention = 2.0; // 越界 → anomaly → 必落
+        let strategy = StrategyParams::default();
+        let result = make_result(state, strategy.clone(), None);
+        record_event(&store, "u1", "s1", &result, 12, &config, &strategy, "v1");
+        // 落库
+        let evts = store.get_recent_monitoring_events(10).unwrap();
+        assert!(!evts.is_empty());
+    }
+
+    #[test]
+    fn record_event_skips_when_sampling_off_and_no_anomaly() {
+        let (_t, store) = tempfile_store();
+        let mut config = AMASConfig::default();
+        config.monitoring.sample_rate = 0.0;
+        let strategy = StrategyParams::default();
+        let result = make_result(UserState::default(), strategy.clone(), None);
+        record_event(&store, "u1", "s1", &result, 10, &config, &strategy, "v1");
+        assert!(store.get_recent_monitoring_events(10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn record_event_logs_when_cold_start_phase_is_set() {
+        let (_t, store) = tempfile_store();
+        let mut config = AMASConfig::default();
+        config.monitoring.sample_rate = 0.0;
+        let strategy = StrategyParams::default();
+        let result = make_result(
+            UserState::default(),
+            strategy.clone(),
+            Some(ColdStartPhase::Explore),
+        );
+        record_event(&store, "u1", "s1", &result, 10, &config, &strategy, "v1");
+        assert!(!store.get_recent_monitoring_events(10).unwrap().is_empty());
+    }
+}

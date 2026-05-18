@@ -184,6 +184,24 @@ describe('tokenManager', () => {
     });
   });
 
+  describe('refresh edge cases', () => {
+    it('catch path also runs the finally block (resets single-flight refreshPromise)', async () => {
+      const rej = vi.fn().mockRejectedValue(new Error('boom'));
+      vi.doMock('@/api/auth', () => ({ authApi: { refresh: rej } }));
+      vi.resetModules();
+      const { tokenManager: fresh } = await import('@/lib/token');
+      fresh.clearTokens();
+      const ok1 = await fresh.refreshAccessToken();
+      // 第二次调用：refreshPromise 应已被 finally 重置为 null，所以 rej 应被再次调用
+      const ok2 = await fresh.refreshAccessToken();
+      expect(ok1).toBe(false);
+      expect(ok2).toBe(false);
+      expect(rej).toHaveBeenCalledTimes(2);
+      vi.doUnmock('@/api/auth');
+      vi.resetModules();
+    });
+  });
+
   describe('JWT payload parsing edge cases', () => {
     it('treats malformed token (less than 3 parts) as expired', () => {
       tokenManager.setTokens('not-a-jwt');
