@@ -19,6 +19,21 @@ cleanup() {
 }
 trap cleanup EXIT
 
+dump_debug() {
+  echo "---- process status ----" >&2
+  if [[ -f "${WORKDIR}/wordforge.pid" ]]; then
+    local pid
+    pid="$(cat "${WORKDIR}/wordforge.pid")"
+    ps -fp "${pid}" >&2 || true
+  fi
+  echo "---- install dir ----" >&2
+  find "${INSTALL_DIR:-${WORKDIR}}" -maxdepth 2 -type f -o -type d 2>/dev/null | sort >&2 || true
+  echo "---- server log ----" >&2
+  if [[ -f "${WORKDIR}/server.log" ]]; then
+    tail -200 "${WORKDIR}/server.log" >&2 || true
+  fi
+}
+
 wait_for_status_version() {
   local expected="$1"
   local deadline=$((SECONDS + 90))
@@ -32,6 +47,7 @@ wait_for_status_version() {
     sleep 2
   done
   echo "Timed out waiting for /api/status version ${expected}" >&2
+  dump_debug
   return 1
 }
 
