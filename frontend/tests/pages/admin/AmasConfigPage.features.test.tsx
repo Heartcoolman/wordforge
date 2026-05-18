@@ -14,6 +14,8 @@ vi.mock('@/api/admin', () => ({
     reloadAmas: vi.fn(),
     amasListVersions: vi.fn(() => Promise.resolve([])),
     amasRollback: vi.fn(),
+    amasGetVersion: vi.fn(),
+    amasRestoreVersion: vi.fn(),
   },
 }));
 vi.mock('@/stores/ui', () => ({
@@ -33,13 +35,13 @@ const baseConfig = {
   objectiveWeights: { retention: 0.35, accuracy: 0.25, speed: 0.15, fatigue: 0.15, frustration: 0.1 },
 };
 
-describe('AmasConfigPage extra', () => {
-  beforeEach(() => vi.clearAllMocks());
+async function renderPage() {
+  const { default: Page } = await import('@/pages/admin/AmasConfigPage');
+  return renderWithProviders(() => <Page />);
+}
 
-  async function renderPage() {
-    const { default: Page } = await import('@/pages/admin/AmasConfigPage');
-    return renderWithProviders(() => <Page />);
-  }
+describe('AmasConfigPage — CRUD & error fallbacks', () => {
+  beforeEach(() => vi.clearAllMocks());
 
   it('handles getConfig failure with toast', async () => {
     mockAmas.getConfig.mockRejectedValue(new Error('boom'));
@@ -54,7 +56,6 @@ describe('AmasConfigPage extra', () => {
     mockAmas.updateConfig.mockResolvedValue(undefined);
     await renderPage();
     await waitFor(() => expect(screen.getByRole('button', { name: '保存配置' })).toBeInTheDocument());
-    // 编辑 baseDesiredRetention 触发 dirty
     const input = document.querySelector('input[type="number"]') as HTMLInputElement;
     fireEvent.input(input, { target: { value: '0.85' } });
     await waitFor(() => expect(screen.getByText('未保存的修改')).toBeInTheDocument());
@@ -140,5 +141,50 @@ describe('AmasConfigPage extra', () => {
     mockAmas.getMetrics.mockResolvedValue({});
     await renderPage();
     await waitFor(() => expect(screen.getByText('暂无指标数据')).toBeInTheDocument());
+  });
+});
+
+describe('AmasConfigPage — tabs / preset / drawer', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('switches to sections tab and renders SectionPanel', async () => {
+    mockAmas.getConfig.mockResolvedValue(baseConfig);
+    mockAmas.getMetrics.mockResolvedValue({});
+    await renderPage();
+    await waitFor(() => expect(screen.getByRole('tab', { name: /分节配置/ })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('tab', { name: /分节配置/ }));
+    await waitFor(() => expect(screen.getByRole('tab', { name: /分节配置/ })).toHaveAttribute('aria-selected', 'true'));
+  });
+
+  it('switches to json tab and renders JsonAdvancedPanel', async () => {
+    mockAmas.getConfig.mockResolvedValue(baseConfig);
+    mockAmas.getMetrics.mockResolvedValue({});
+    await renderPage();
+    await waitFor(() => expect(screen.getByRole('tab', { name: /JSON 高级/ })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('tab', { name: /JSON 高级/ }));
+    await waitFor(() => expect(screen.getByRole('tab', { name: /JSON 高级/ })).toHaveAttribute('aria-selected', 'true'));
+  });
+
+  it('opens then closes version drawer via × button', async () => {
+    mockAmas.getConfig.mockResolvedValue(baseConfig);
+    mockAmas.getMetrics.mockResolvedValue({});
+    await renderPage();
+    await waitFor(() => expect(screen.getByText('版本历史')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('版本历史'));
+    await waitFor(() => expect(screen.getByText('尚无版本')).toBeInTheDocument());
+    const closeBtns = screen.getAllByText('×');
+    fireEvent.click(closeBtns[0]);
+    await waitFor(() => expect(screen.queryByText('尚无版本')).not.toBeInTheDocument());
+  });
+
+  it('applies a preset via PresetSelector confirm button', async () => {
+    mockAmas.getConfig.mockResolvedValue(baseConfig);
+    mockAmas.getMetrics.mockResolvedValue({});
+    await renderPage();
+    await waitFor(() => expect(screen.getByText('出厂默认')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('出厂默认'));
+    await waitFor(() => expect(screen.getByText('应用到表单')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('应用到表单'));
+    await waitFor(() => expect(screen.queryByText('应用到表单')).not.toBeInTheDocument());
   });
 });

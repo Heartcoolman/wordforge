@@ -23,13 +23,13 @@ const mockToast = uiStore.toast as unknown as Record<string, ReturnType<typeof v
 const user1 = { id: 1, username: 'alice', email: 'alice@example.com', isBanned: false };
 const user2 = { id: 2, username: 'bob', email: 'bob@example.com', isBanned: true };
 
-describe('UserManagementPage', () => {
-  beforeEach(() => vi.clearAllMocks());
+async function renderPage() {
+  const { default: Page } = await import('@/pages/admin/UserManagementPage');
+  return renderWithProviders(() => <Page />);
+}
 
-  async function renderPage() {
-    const { default: Page } = await import('@/pages/admin/UserManagementPage');
-    return renderWithProviders(() => <Page />);
-  }
+describe('UserManagementPage — list, ban, reset password, pagination', () => {
+  beforeEach(() => vi.clearAllMocks());
 
   it('lists users after loading', async () => {
     mockApi.getUsers.mockResolvedValue({ data: [user1, user2], total: 2 });
@@ -56,7 +56,6 @@ describe('UserManagementPage', () => {
     await renderPage();
     await waitFor(() => expect(screen.getByText('封禁')).toBeInTheDocument());
     fireEvent.click(screen.getByText('封禁'));
-    // 弹窗打开后会出现 2 个"确认封禁"（标题 h3 + 按钮 button）
     await waitFor(() => expect(screen.getAllByText('确认封禁').length).toBeGreaterThanOrEqual(2));
     fireEvent.click(screen.getAllByText('确认封禁')[1]);
     await waitFor(() => expect(mockApi.banUser).toHaveBeenCalledWith(1));
@@ -180,5 +179,50 @@ describe('UserManagementPage', () => {
     await waitFor(() => expect(screen.getByLabelText('第 2 页')).toBeInTheDocument());
     fireEvent.click(screen.getByLabelText('第 2 页'));
     await waitFor(() => expect(mockApi.getUsers).toHaveBeenCalledWith({ page: 2, perPage: 20 }));
+  });
+});
+
+describe('UserManagementPage — reset key copy & navigation', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('direct-reset 返回 button goes back to choose mode', async () => {
+    mockApi.getUsers.mockResolvedValue({ data: [user1], total: 1 });
+    await renderPage();
+    await waitFor(() => expect(screen.getByText('重置密码')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('重置密码'));
+    fireEvent.click(screen.getByText('直接重置密码'));
+    await waitFor(() => expect(screen.getByText('确认重置')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('返回'));
+    await waitFor(() => expect(screen.getByText('生成重置密钥')).toBeInTheDocument());
+  });
+
+  it('copy button on reset-key result calls clipboard.writeText', async () => {
+    mockApi.getUsers.mockResolvedValue({ data: [user1], total: 1 });
+    mockApi.resetUserPassword.mockResolvedValue({ resetKey: 'XYZ-789' });
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+    await renderPage();
+    await waitFor(() => expect(screen.getByText('重置密码')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('重置密码'));
+    fireEvent.click(screen.getByText('生成重置密钥'));
+    await waitFor(() => expect(screen.getByText('XYZ-789')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('复制'));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('XYZ-789'));
+    expect(mockToast.success).toHaveBeenCalledWith('已复制到剪贴板');
+  });
+
+  it('copy button falls back to error toast on clipboard failure', async () => {
+    mockApi.getUsers.mockResolvedValue({ data: [user1], total: 1 });
+    mockApi.resetUserPassword.mockResolvedValue({ resetKey: 'KEY-FAIL' });
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: vi.fn().mockRejectedValue(new Error('no perm')) },
+    });
+    await renderPage();
+    fireEvent.click(await screen.findByText('重置密码'));
+    fireEvent.click(screen.getByText('生成重置密钥'));
+    await waitFor(() => expect(screen.getByText('KEY-FAIL')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('复制'));
+    await waitFor(() => expect(mockToast.error).toHaveBeenCalledWith('复制失败', '请手动选择并复制'));
   });
 });

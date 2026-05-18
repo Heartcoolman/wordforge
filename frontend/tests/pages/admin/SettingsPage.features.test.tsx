@@ -30,13 +30,13 @@ const baseSettings = {
   amasAutoApplyMinConfidence: 0.8,
 };
 
-describe('SettingsPage', () => {
-  beforeEach(() => vi.clearAllMocks());
+async function renderPage() {
+  const { default: Page } = await import('@/pages/admin/SettingsPage');
+  return renderWithProviders(() => <Page />);
+}
 
-  async function renderPage() {
-    const { default: Page } = await import('@/pages/admin/SettingsPage');
-    return renderWithProviders(() => <Page />);
-  }
+describe('SettingsPage — load, save, validation, broadcast, maintenance', () => {
+  beforeEach(() => vi.clearAllMocks());
 
   it('loads and renders settings form', async () => {
     mockApi.getSettings.mockResolvedValue(baseSettings);
@@ -102,10 +102,8 @@ describe('SettingsPage', () => {
     mockApi.broadcast.mockResolvedValue({ sent: 5 });
     await renderPage();
     await waitFor(() => expect(screen.getByText('发送广播')).toBeInTheDocument());
-    const titleInput = screen.getByPlaceholderText('通知标题') as HTMLInputElement;
-    fireEvent.input(titleInput, { target: { value: '维护通知' } });
-    const msgArea = screen.getByPlaceholderText('通知内容') as HTMLTextAreaElement;
-    fireEvent.input(msgArea, { target: { value: '今晚 10 点维护' } });
+    fireEvent.input(screen.getByPlaceholderText('通知标题'), { target: { value: '维护通知' } });
+    fireEvent.input(screen.getByPlaceholderText('通知内容'), { target: { value: '今晚 10 点维护' } });
     fireEvent.click(screen.getByText('发送广播'));
     await waitFor(() => expect(screen.getByText('确认发送广播')).toBeInTheDocument());
     fireEvent.click(screen.getByText('确认发送'));
@@ -116,10 +114,8 @@ describe('SettingsPage', () => {
     mockApi.getSettings.mockResolvedValue(baseSettings);
     await renderPage();
     await waitFor(() => expect(screen.getByText('发送广播')).toBeInTheDocument());
-    const titleInput = screen.getByPlaceholderText('通知标题') as HTMLInputElement;
-    fireEvent.input(titleInput, { target: { value: 't' } });
-    const msgArea = screen.getByPlaceholderText('通知内容') as HTMLTextAreaElement;
-    fireEvent.input(msgArea, { target: { value: 'm' } });
+    fireEvent.input(screen.getByPlaceholderText('通知标题'), { target: { value: 't' } });
+    fireEvent.input(screen.getByPlaceholderText('通知内容'), { target: { value: 'm' } });
     fireEvent.click(screen.getByText('发送广播'));
     await waitFor(() => expect(screen.getByText('确认发送广播')).toBeInTheDocument());
     fireEvent.click(screen.getByText('取消'));
@@ -164,9 +160,7 @@ describe('SettingsPage', () => {
     await renderPage();
     await waitFor(() => expect(screen.getByText('维护模式')).toBeInTheDocument());
     const switches = document.querySelectorAll('button[role="switch"]');
-    // 找到维护模式 switch（第二个）
-    const maintSwitch = switches[1] as HTMLButtonElement;
-    fireEvent.click(maintSwitch);
+    fireEvent.click(switches[1] as HTMLButtonElement);
     await waitFor(() => expect(screen.getByText('确认开启维护模式')).toBeInTheDocument());
     fireEvent.click(screen.getByText('确认开启'));
   });
@@ -180,5 +174,79 @@ describe('SettingsPage', () => {
     await waitFor(() => expect(screen.getByText('确认开启维护模式')).toBeInTheDocument());
     fireEvent.click(screen.getByText('取消'));
     await waitFor(() => expect(screen.queryByText('确认开启维护模式')).not.toBeInTheDocument());
+  });
+});
+
+describe('SettingsPage — input handlers & AMAS toggles', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('updates maxUsers / defaultDailyWords / wordbookCenterUrl via input', async () => {
+    mockApi.getSettings.mockResolvedValue(baseSettings);
+    await renderPage();
+    await waitFor(() => expect(screen.getByLabelText('最大用户数')).toBeInTheDocument());
+    fireEvent.input(screen.getByLabelText('最大用户数'), { target: { value: '500' } });
+    fireEvent.input(screen.getByLabelText('默认每日单词数'), { target: { value: '50' } });
+    fireEvent.input(screen.getByLabelText('词书中心 URL'), { target: { value: 'https://x.example' } });
+    mockApi.updateSettings.mockResolvedValue(undefined);
+    fireEvent.click(screen.getAllByText('保存设置')[0]);
+    await waitFor(() => expect(mockApi.updateSettings).toHaveBeenCalled());
+    const payload = mockApi.updateSettings.mock.calls[0][0];
+    expect(payload.maxUsers).toBe(500);
+    expect(payload.defaultDailyWords).toBe(50);
+    expect(payload.wordbookCenterUrl).toBe('https://x.example');
+  });
+
+  it('toggles registration switch', async () => {
+    mockApi.getSettings.mockResolvedValue(baseSettings);
+    await renderPage();
+    await waitFor(() => expect(screen.getByText('开放注册')).toBeInTheDocument());
+    const switches = document.querySelectorAll('button[role="switch"]');
+    fireEvent.click(switches[0] as HTMLButtonElement);
+    mockApi.updateSettings.mockResolvedValue(undefined);
+    fireEvent.click(screen.getAllByText('保存设置')[0]);
+    await waitFor(() => expect(mockApi.updateSettings).toHaveBeenCalled());
+    expect(mockApi.updateSettings.mock.calls[0][0].registrationEnabled).toBe(false);
+  });
+
+  it('disables maintenance via switch (skips confirm dialog)', async () => {
+    mockApi.getSettings.mockResolvedValue({ ...baseSettings, maintenanceMode: true });
+    await renderPage();
+    await waitFor(() => expect(screen.getByText('维护模式')).toBeInTheDocument());
+    const switches = document.querySelectorAll('button[role="switch"]');
+    fireEvent.click(switches[1] as HTMLButtonElement);
+    expect(screen.queryByText('确认开启维护模式')).not.toBeInTheDocument();
+    mockApi.updateSettings.mockResolvedValue(undefined);
+    fireEvent.click(screen.getAllByText('保存设置')[0]);
+    await waitFor(() => expect(mockApi.updateSettings).toHaveBeenCalled());
+    expect(mockApi.updateSettings.mock.calls[0][0].maintenanceMode).toBe(false);
+  });
+
+  it('toggles amasAutoApplyEnabled and updates numeric AMAS inputs', async () => {
+    mockApi.getSettings.mockResolvedValue(baseSettings);
+    await renderPage();
+    await waitFor(() => expect(screen.getByLabelText('每日最多自动应用次数')).toBeInTheDocument());
+    const switches = document.querySelectorAll('button[role="switch"]');
+    fireEvent.click(switches[2] as HTMLButtonElement);
+    fireEvent.input(screen.getByLabelText('每日最多自动应用次数'), { target: { value: '5' } });
+    fireEvent.input(screen.getByLabelText('最低置信度阈值'), { target: { value: '0.95' } });
+    mockApi.updateSettings.mockResolvedValue(undefined);
+    fireEvent.click(screen.getAllByText('保存设置')[1]);
+    await waitFor(() => expect(mockApi.updateSettings).toHaveBeenCalled());
+    const p = mockApi.updateSettings.mock.calls[0][0];
+    expect(p.amasAutoApplyEnabled).toBe(true);
+    expect(p.amasAutoApplyMaxPerDay).toBe(5);
+    expect(p.amasAutoApplyMinConfidence).toBe(0.95);
+  });
+
+  it('updateMsg textarea input is sent with broadcastUpdate', async () => {
+    mockApi.getSettings.mockResolvedValue(baseSettings);
+    mockApi.broadcastUpdate.mockResolvedValue(undefined);
+    await renderPage();
+    await waitFor(() => expect(screen.getByText('发送更新通知')).toBeInTheDocument());
+    const ta = screen.getByPlaceholderText('有新版本可用，请刷新页面获取最新内容') as HTMLTextAreaElement;
+    fireEvent.input(ta, { target: { value: '紧急更新' } });
+    fireEvent.click(screen.getByText('发送更新通知'));
+    fireEvent.click(screen.getByText('确认发送'));
+    await waitFor(() => expect(mockApi.broadcastUpdate).toHaveBeenCalledWith({ message: '紧急更新' }));
   });
 });
