@@ -51,19 +51,14 @@ wait_for_status_version() {
   return 1
 }
 
-download_release_asset() {
-  local tag="$1"
-  local asset="wordforge-linux-${ARCH}.tar.gz"
-  gh release download "${tag}" \
-    --repo Heartcoolman/wordforge \
-    --pattern "${asset}" \
-    --dir "${WORKDIR}/${tag}"
-  mkdir -p "${INSTALL_DIR}"
-  tar -xzf "${WORKDIR}/${tag}/${asset}" -C "${WORKDIR}/${tag}"
-  cp -R "${WORKDIR}/${tag}/wordforge-linux-${ARCH}/." "${INSTALL_DIR}/"
+build_test_binary() {
+  WORDFORGE_BUILD_VERSION="${OLD_TAG}" cargo build --release --bin learning-backend
+  mkdir -p "${INSTALL_DIR}/static"
+  cp target/release/learning-backend "${INSTALL_DIR}/wordforge"
+  printf '<!doctype html><title>WordForge verify</title>\n' > "${INSTALL_DIR}/static/index.html"
 }
 
-download_release_asset "${OLD_TAG}"
+build_test_binary
 chmod +x "${INSTALL_DIR}/wordforge"
 mkdir -p "${INSTALL_DIR}/data" "${INSTALL_DIR}/logs"
 
