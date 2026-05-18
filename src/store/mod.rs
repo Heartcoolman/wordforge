@@ -10,7 +10,9 @@ use r2d2_sqlite::SqliteConnectionManager;
 use serde::{de::DeserializeOwned, Serialize};
 use thiserror::Error;
 
-pub const DEFAULT_POOL_CONNECTION_TIMEOUT_MS: u64 = 250;
+/// 默认连接池获取连接超时。CI / 慢盘环境 250 ms 不够（inline 单元测试并发跑时 pool 抢连接），
+/// 改 2000 ms 给 SQLite open + WAL 初始化留足余量。Prod 启动显式传 env 配置，不走默认。
+pub const DEFAULT_POOL_CONNECTION_TIMEOUT_MS: u64 = 2000;
 
 #[derive(Debug, Clone)]
 pub struct Store {
