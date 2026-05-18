@@ -98,6 +98,21 @@ async fn main() {
         initial_maintenance,
     );
 
+    // 自更新服务（含缓存 + ETag），不打 GitHub，纯本地构造
+    let updater = match learning_backend::services::updater::Updater::new(
+        &config.update_check,
+        env!("GIT_VERSION"),
+    ) {
+        Ok(u) => {
+            state.set_updater(u.clone());
+            Some(u)
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "Updater 初始化失败，自更新功能禁用");
+            None
+        }
+    };
+
     {
         let watch_path = config
             .amas_config_file
@@ -126,13 +141,20 @@ async fn main() {
     ));
 
     let worker_handle = if config.worker.is_leader {
-        let worker_manager = WorkerManager::new(
+        let mut worker_manager = WorkerManager::new(
             store.clone(),
             amas_engine.clone(),
             shutdown_tx.subscribe(),
             &config.worker,
         )
         .with_llm_config(config.llm.clone());
+        if let Some(u) = updater.clone() {
+            worker_manager = worker_manager.with_update_checker(
+                u,
+                state.clone(),
+                config.update_check.worker_enabled,
+            );
+        }
         Some(tokio::spawn(async move {
             if let Err(e) = worker_manager.start().await {
                 tracing::error!(error = %e, "Worker manager failed");

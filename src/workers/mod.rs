@@ -15,6 +15,7 @@ pub mod metrics_flush;
 pub mod monitoring_aggregate;
 pub mod password_reset_cleanup;
 pub mod session_cleanup;
+pub mod update_checker;
 pub mod weekly_report;
 pub mod word_clustering;
 
@@ -58,6 +59,7 @@ pub enum WorkerName {
     ConfusionPairCache,
     WeeklyReport,
     LogExport,
+    UpdateChecker,
 }
 
 impl WorkerName {
@@ -80,6 +82,7 @@ impl WorkerName {
             Self::ConfusionPairCache => "confusion_pair_cache",
             Self::WeeklyReport => "weekly_report",
             Self::LogExport => "log_export",
+            Self::UpdateChecker => "update_checker",
         }
     }
 }
@@ -97,6 +100,14 @@ pub struct WorkerManager {
     shutdown_rx: broadcast::Receiver<()>,
     config: WorkerConfig,
     llm_config: Option<crate::config::LLMConfig>,
+    update_checker_ctx: Option<UpdateCheckerCtx>,
+}
+
+#[derive(Clone)]
+struct UpdateCheckerCtx {
+    updater: Arc<crate::services::updater::Updater>,
+    state: crate::state::AppState,
+    enabled: bool,
 }
 
 impl WorkerManager {
@@ -112,11 +123,26 @@ impl WorkerManager {
             shutdown_rx,
             config: config.clone(),
             llm_config: None,
+            update_checker_ctx: None,
         }
     }
 
     pub fn with_llm_config(mut self, llm: crate::config::LLMConfig) -> Self {
         self.llm_config = Some(llm);
+        self
+    }
+
+    pub fn with_update_checker(
+        mut self,
+        updater: Arc<crate::services::updater::Updater>,
+        state: crate::state::AppState,
+        enabled: bool,
+    ) -> Self {
+        self.update_checker_ctx = Some(UpdateCheckerCtx {
+            updater,
+            state,
+            enabled,
+        });
         self
     }
 
@@ -201,6 +227,15 @@ impl WorkerManager {
                 name: WorkerName::LlmAdvisor,
                 cron: "0 */20 * * * *",
                 enabled: self.config.enable_llm_advisor,
+            },
+            JobSpec {
+                name: WorkerName::UpdateChecker,
+                cron: "0 0 */1 * * *", // 每小时整点检查一次
+                enabled: self
+                    .update_checker_ctx
+                    .as_ref()
+                    .map(|c| c.enabled)
+                    .unwrap_or(false),
             },
             // Stub workers —— 默认禁用
             JobSpec {
@@ -422,6 +457,20 @@ impl WorkerManager {
                         let store = store.clone();
                         async move {
                             log_export::run(&store).await;
+                        }
+                    })
+                    .await;
+                }
+                WorkerName::UpdateChecker => {
+                    let ctx = match self.update_checker_ctx.clone() {
+                        Some(ctx) => ctx,
+                        None => continue,
+                    };
+                    add_job(scheduler, spec.cron, name_str, move || {
+                        let updater = ctx.updater.clone();
+                        let state = ctx.state.clone();
+                        async move {
+                            update_checker::run(updater, state).await;
                         }
                     })
                     .await;

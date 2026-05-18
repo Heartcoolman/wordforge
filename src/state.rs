@@ -41,6 +41,19 @@ pub enum SseEvent {
         #[serde(rename = "suggestionId")]
         suggestion_id: i64,
     },
+    /// 自更新 worker 探测到 GitHub Releases 有新二进制版本（与 broadcast_update 的
+    /// `update_available` 区分，后者是给所有用户"刷新页面"的通知）
+    #[serde(rename = "release_available")]
+    ReleaseAvailable {
+        #[serde(rename = "latestTag")]
+        latest_tag: String,
+    },
+    /// 一键更新执行过程中推给前端的阶段进度（0–100）
+    #[serde(rename = "update_progress")]
+    UpdateProgress {
+        phase: String,
+        percent: u8,
+    },
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -66,6 +79,7 @@ pub struct AppState {
     active_sse: Arc<DashMap<String, Vec<SseClientInfo>>>,
     last_heartbeat: Arc<DashMap<String, Instant>>,
     heartbeat_miss_count: Arc<DashMap<String, u8>>,
+    updater: Arc<RwLock<Option<Arc<crate::services::updater::Updater>>>>,
 }
 
 pub struct RuntimeConfig {
@@ -109,7 +123,19 @@ impl AppState {
             active_sse: Arc::new(DashMap::new()),
             last_heartbeat: Arc::new(DashMap::new()),
             heartbeat_miss_count: Arc::new(DashMap::new()),
+            updater: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// 在 main 启动期注入 Updater；测试和老路径可以保持为 None。
+    pub fn set_updater(&self, updater: Arc<crate::services::updater::Updater>) {
+        if let Ok(mut slot) = self.updater.try_write() {
+            *slot = Some(updater);
+        }
+    }
+
+    pub async fn updater(&self) -> Option<Arc<crate::services::updater::Updater>> {
+        self.updater.read().await.clone()
     }
 
     pub fn store(&self) -> &Store {
@@ -196,6 +222,17 @@ impl AppState {
 
     pub fn active_sse(&self) -> &DashMap<String, Vec<SseClientInfo>> {
         &self.active_sse
+    }
+
+    /// 把同一个 SseEvent 广播给当前所有 SSE 连接。
+    /// 用于 admin 级别的全局通知（update_available / update_progress 等）。
+    /// 非 admin 前端没有对应 handler，收到只会忽略。
+    pub fn broadcast_to_all_sse(&self, event: SseEvent) {
+        for entry in self.active_sse.iter() {
+            for conn in entry.value() {
+                let _ = conn.tx.send(event.clone());
+            }
+        }
     }
 
     pub fn last_heartbeat(&self) -> &DashMap<String, Instant> {

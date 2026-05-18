@@ -5,6 +5,7 @@ pub mod broadcast;
 pub mod clients;
 pub mod monitoring;
 pub mod settings;
+pub mod updates;
 
 use axum::extract::{Path, Query, State};
 use axum::routing::{get, post};
@@ -56,6 +57,7 @@ pub fn router() -> Router<AppState> {
         .nest("/settings", settings::router())
         .nest("/wordbook-center", super::wordbook_center::admin_router())
         .nest("/amas", amas::admin_router())
+        .nest("/updates", updates::router())
         .nest("/clients", clients::router())
         .nest("/telemetry", clients::telemetry_router())
         .route("/users", get(list_users))

@@ -1,92 +1,52 @@
 import { test, expect } from '@playwright/test';
 
-test.describe('Learning Records', () => {
-  test('records page loads', async ({ page }) => {
+/**
+ * 学习记录
+ *
+ * /records 路由已不存在（用户前端迁移后未保留），客户端路由会落到 404 兜底。
+ * 这里的断言守住"被删除路由必须给出 404 页，不能白屏"。
+ */
+test.describe('Learning Records (route removed)', () => {
+  test('records route falls back to 404 page', async ({ page }) => {
     await page.goto('/records');
-    await expect(page.locator('body')).toBeVisible();
-    await page.waitForTimeout(2000);
-    const pageContent = await page.textContent('body');
-    const hasContent =
-      pageContent?.includes('记录') ||
-      pageContent?.includes('历史') ||
-      pageContent?.includes('学习');
-    expect(hasContent).toBe(true);
+    await expect(page.getByText('404')).toBeVisible({ timeout: 5000 });
+    await expect(page.getByRole('heading', { name: '页面不存在' })).toBeVisible();
   });
 
-  test('displays learning history', async ({ page }) => {
+  test('404 page exposes accent 404 hero', async ({ page }) => {
     await page.goto('/records');
-    await page.waitForTimeout(2000);
-    await expect(page.locator('body')).toBeVisible();
+    await expect(page.locator('p', { hasText: '404' })).toBeVisible();
   });
 
-  test('can filter by date', async ({ page }) => {
+  test('404 page exposes return-home link', async ({ page }) => {
     await page.goto('/records');
-    await page.waitForTimeout(1500);
-    const dateFilter = page.locator('input[type="date"], [data-testid="date-filter"]').first();
-    const filterExists = await dateFilter.isVisible().catch(() => false);
-    
-    if (filterExists) {
-      await dateFilter.click();
-      await page.waitForTimeout(500);
-      await expect(page.locator('body')).toBeVisible();
-    }
+    const homeLink = page.getByRole('link', { name: /返回首页/ });
+    await expect(homeLink).toBeVisible();
+    await expect(homeLink).toHaveAttribute('href', '/');
   });
 
-  test('can view record details', async ({ page }) => {
+  test('404 page contains friendly description', async ({ page }) => {
     await page.goto('/records');
-    await page.waitForTimeout(2000);
-    const recordItem = page.locator('[data-testid="record-item"]').first();
-    const itemExists = await recordItem.isVisible().catch(() => false);
-    
-    if (itemExists) {
-      await recordItem.click();
-      await page.waitForTimeout(1000);
-      await expect(page.locator('body')).toBeVisible();
-    }
+    await expect(page.getByText(/你访问的页面可能已被移除或地址有误/)).toBeVisible();
   });
 
-  test('displays statistics summary', async ({ page }) => {
-    await page.goto('/records');
-    await page.waitForTimeout(2000);
-    const pageContent = await page.textContent('body');
-    const hasStats =
-      pageContent?.includes('统计') ||
-      pageContent?.includes('总计') ||
-      pageContent?.includes('正确率');
-    expect(typeof hasStats).toBe('boolean');
+  test('records sub-paths also fall back to 404', async ({ page }) => {
+    await page.goto('/records/123');
+    await expect(page.getByRole('heading', { name: '页面不存在' })).toBeVisible();
   });
 
-  test('pagination works', async ({ page }) => {
+  test('404 fallback keeps the original URL', async ({ page }) => {
     await page.goto('/records');
-    await page.waitForTimeout(2000);
-    const nextButton = page.getByRole('button', { name: /下一页|next/i });
-    const buttonExists = await nextButton.isVisible().catch(() => false);
-    
-    if (buttonExists) {
-      await nextButton.click();
-      await page.waitForTimeout(1000);
-      await expect(page.locator('body')).toBeVisible();
-    }
+    await expect(page).toHaveURL(/\/records$/);
   });
 
-  test('can export records', async ({ page }) => {
+  test('404 page renders return-home button label', async ({ page }) => {
     await page.goto('/records');
-    await page.waitForTimeout(1500);
-    const exportButton = page.getByRole('button', { name: /导出|下载/ });
-    const buttonExists = await exportButton.isVisible().catch(() => false);
-    expect(typeof buttonExists).toBe('boolean');
+    await expect(page.getByRole('button', { name: '返回首页' })).toBeVisible();
   });
 
-  test('shows time range selector', async ({ page }) => {
-    await page.goto('/records');
-    await page.waitForTimeout(1500);
-    const rangeSelector = page.locator('select, [role="combobox"]').first();
-    const selectorExists = await rangeSelector.isVisible().catch(() => false);
-    
-    if (selectorExists) {
-      await rangeSelector.click();
-      await page.waitForTimeout(300);
-      await expect(page.locator('body')).toBeVisible();
-    }
+  test('records statistics page also routes to 404', async ({ page }) => {
+    await page.goto('/records/statistics');
+    await expect(page.getByText('404')).toBeVisible({ timeout: 5000 });
   });
 });

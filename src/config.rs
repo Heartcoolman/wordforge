@@ -152,6 +152,18 @@ pub struct LLMConfig {
 pub struct UpdateCheckConfig {
     pub api_url: String,
     pub cache_ttl_secs: u64,
+    /// 后台 worker 是否周期性预热缓存
+    pub worker_enabled: bool,
+    /// worker 探测间隔（秒）
+    pub worker_interval_secs: u64,
+    /// 可选 GitHub PAT，限额从 60/h 升到 5000/h
+    pub github_token: Option<String>,
+    /// 默认拒绝 latest_tag ≤ current_tag；置 true 允许回滚到旧版本
+    pub allow_downgrade: bool,
+    /// 自更新安装目录；为 None 时取 current_exe 的父目录
+    pub install_dir: Option<PathBuf>,
+    /// 下载产物上限字节数，超出直接拒绝
+    pub max_tarball_bytes: u64,
 }
 
 impl fmt::Debug for Config {
@@ -296,6 +308,15 @@ impl Config {
                     "https://api.github.com/repos/Heartcoolman/wordforge/releases/latest",
                 ),
                 cache_ttl_secs: env_or_parse("UPDATE_CHECK_CACHE_TTL_SECS", 3600_u64),
+                worker_enabled: env_or_bool("ENABLE_UPDATE_CHECKER_WORKER", true),
+                worker_interval_secs: env_or_parse("UPDATE_CHECKER_INTERVAL_SECS", 3600_u64),
+                github_token: env::var("WORDFORGE_GITHUB_TOKEN").ok().filter(|s| !s.is_empty()),
+                allow_downgrade: env_or_bool("UPDATE_ALLOW_DOWNGRADE", false),
+                install_dir: env::var("UPDATE_INSTALL_DIR")
+                    .ok()
+                    .filter(|s| !s.is_empty())
+                    .map(PathBuf::from),
+                max_tarball_bytes: env_or_parse("UPDATE_MAX_TARBALL_BYTES", 200 * 1024 * 1024_u64),
             },
             pagination: PaginationConfig {
                 default_page_size: env_or_parse("PAGINATION_DEFAULT_SIZE", 20_u64),

@@ -225,6 +225,10 @@ export interface SseCallbacks {
   onMaintenance?: (active: boolean) => void;
   onTelemetryRequest?: (requestId: string) => void;
   onUpdateAvailable?: (payload: { version: string; message: string }) => void;
+  /** 后端 `release_available`：探测到 GitHub Releases 有新二进制版本（仅 admin 关心） */
+  onReleaseAvailable?: (payload: { latestTag: string }) => void;
+  /** 后端 `update_progress`：一键自更新执行进度（仅 admin 关心） */
+  onUpdateProgress?: (payload: { phase: string; percent: number }) => void;
   onDataCorrupted?: () => void;
 }
 
@@ -302,6 +306,13 @@ export function connectSseStream(callbacks: SseCallbacks): () => void {
                 } else if (eventType === 'update_available' && data.version) {
                   setUpdateInfo({ version: data.version, message: data.message || '' });
                   callbacks.onUpdateAvailable?.({ version: data.version, message: data.message || '' });
+                } else if (eventType === 'release_available' && typeof data.latestTag === 'string') {
+                  callbacks.onReleaseAvailable?.({ latestTag: data.latestTag });
+                } else if (eventType === 'update_progress' && typeof data.phase === 'string') {
+                  callbacks.onUpdateProgress?.({
+                    phase: data.phase,
+                    percent: Number(data.percent) || 0,
+                  });
                 } else if (eventType === 'data_corrupted') {
                   callbacks.onDataCorrupted?.();
                 }

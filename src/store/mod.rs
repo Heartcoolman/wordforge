@@ -104,6 +104,16 @@ impl Store {
         Ok(())
     }
 
+    /// 把当前库快照拷贝到 `dst`。先 checkpoint 落 WAL，再 `VACUUM INTO` 生成单文件副本。
+    /// 用于自更新前的兜底备份。
+    pub fn backup_to(&self, dst: &std::path::Path) -> Result<(), StoreError> {
+        let conn = self.conn()?;
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        let raw = dst.to_string_lossy().replace('\'', "''");
+        conn.execute_batch(&format!("VACUUM INTO '{raw}';"))?;
+        Ok(())
+    }
+
     pub fn connection(
         &self,
     ) -> Result<r2d2::PooledConnection<SqliteConnectionManager>, StoreError> {

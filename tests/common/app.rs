@@ -79,6 +79,12 @@ async fn spawn_with_limits(api_limit: u64) -> TestApp {
         update_check: learning_backend::config::UpdateCheckConfig {
             api_url: String::new(),
             cache_ttl_secs: 3600,
+            worker_enabled: false,
+            worker_interval_secs: 3600,
+            github_token: None,
+            allow_downgrade: false,
+            install_dir: None,
+            max_tarball_bytes: 200 * 1024 * 1024,
         },
         pagination: Default::default(),
         limits: Default::default(),

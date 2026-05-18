@@ -1,79 +1,49 @@
 import { test, expect } from '@playwright/test';
 
-test.describe('Study Configuration', () => {
-  test('study config page loads', async ({ page }) => {
+/**
+ * 学习配置
+ *
+ * /study-config 路由已不存在（用户前端迁移后未保留），客户端路由会落到 404 兜底。
+ * AMAS 配置已迁移至 /admin/amas-config（管理后台）。
+ */
+test.describe('Study Configuration (route removed)', () => {
+  test('study-config route falls back to 404 page', async ({ page }) => {
     await page.goto('/study-config');
-    await expect(page.locator('body')).toBeVisible();
-    await page.waitForTimeout(2000);
-    const pageContent = await page.textContent('body');
-    const hasContent =
-      pageContent?.includes('学习') ||
-      pageContent?.includes('配置') ||
-      pageContent?.includes('设置');
-    expect(hasContent).toBe(true);
+    await expect(page.getByText('404')).toBeVisible({ timeout: 5000 });
+    await expect(page.getByRole('heading', { name: '页面不存在' })).toBeVisible();
   });
 
-  test('displays study settings', async ({ page }) => {
+  test('404 page exposes return-home link', async ({ page }) => {
     await page.goto('/study-config');
-    await page.waitForTimeout(2000);
-    await expect(page.locator('body')).toBeVisible();
+    const homeLink = page.getByRole('link', { name: /返回首页/ });
+    await expect(homeLink).toBeVisible();
+    await expect(homeLink).toHaveAttribute('href', '/');
   });
 
-  test('can adjust daily goal', async ({ page }) => {
+  test('404 fallback keeps the original URL', async ({ page }) => {
     await page.goto('/study-config');
-    await page.waitForTimeout(1500);
-    const goalInput = page.locator('input[type="number"]').first();
-    const inputExists = await goalInput.isVisible().catch(() => false);
-    
-    if (inputExists) {
-      await goalInput.fill('50');
-      await page.waitForTimeout(500);
-      await expect(goalInput).toHaveValue('50');
-    }
+    await expect(page).toHaveURL(/\/study-config$/);
   });
 
-  test('can toggle study modes', async ({ page }) => {
-    await page.goto('/study-config');
-    await page.waitForTimeout(1500);
-    const toggleButton = page.locator('button[role="switch"], input[type="checkbox"]').first();
-    const toggleExists = await toggleButton.isVisible().catch(() => false);
-    
-    if (toggleExists) {
-      await toggleButton.click();
-      await page.waitForTimeout(300);
-      await expect(page.locator('body')).toBeVisible();
-    }
+  test('admin AMAS config route exists (replaces legacy study-config)', async ({ page }) => {
+    await page.goto('/admin/amas-config');
+    // 未登录 ProtectedRoute 会跳到 /admin/login，断言落地页可识别
+    await page.waitForURL('**/admin/login', { timeout: 10_000 });
+    await expect(page.getByText('管理后台登录')).toBeVisible();
   });
 
-  test('can save configuration', async ({ page }) => {
+  test('404 page hints at removed page', async ({ page }) => {
     await page.goto('/study-config');
-    await page.waitForTimeout(1500);
-    const saveButton = page.getByRole('button', { name: /保存|确定|应用/ });
-    const buttonExists = await saveButton.isVisible().catch(() => false);
-    
-    if (buttonExists) {
-      await saveButton.click();
-      await page.waitForTimeout(1000);
-      await expect(page.locator('body')).toBeVisible();
-    }
+    await expect(page.getByText(/你访问的页面可能已被移除或地址有误/)).toBeVisible();
   });
 
-  test('displays wordbook selection', async ({ page }) => {
+  test('404 page renders return-home button label', async ({ page }) => {
     await page.goto('/study-config');
-    await page.waitForTimeout(2000);
-    const selectElement = page.locator('select, [role="combobox"]').first();
-    const selectExists = await selectElement.isVisible().catch(() => false);
-    expect(typeof selectExists).toBe('boolean');
+    await expect(page.getByRole('button', { name: '返回首页' })).toBeVisible();
   });
 
-  test('AMAS settings panel accessible', async ({ page }) => {
-    await page.goto('/study-config');
-    await page.waitForTimeout(2000);
-    const pageContent = await page.textContent('body');
-    const hasAMAS =
-      pageContent?.includes('AMAS') ||
-      pageContent?.includes('自适应') ||
-      pageContent?.includes('算法');
-    expect(typeof hasAMAS).toBe('boolean');
+  test('study-config sub-paths also fall back to 404', async ({ page }) => {
+    await page.goto('/study-config/amas');
+    await expect(page.getByRole('heading', { name: '页面不存在' })).toBeVisible();
   });
 });

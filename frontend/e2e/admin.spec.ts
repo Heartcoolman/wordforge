@@ -3,7 +3,8 @@ import { test, expect } from '@playwright/test';
 test.describe('Admin flows', () => {
   test('admin login page loads', async ({ page }) => {
     await page.goto('/admin/login');
-    await expect(page.locator('h1')).toContainText('管理后台登录');
+    await expect(page.getByText('WordForge Admin')).toBeVisible();
+    await expect(page.getByText('管理后台登录')).toBeVisible();
     await expect(page.locator('input[type="email"]')).toBeVisible();
     await expect(page.locator('input[type="password"]')).toBeVisible();
     await expect(page.getByRole('button', { name: '登录' })).toBeVisible();
@@ -14,32 +15,27 @@ test.describe('Admin flows', () => {
     await page.locator('input[type="email"]').fill('wrong@admin.com');
     await page.locator('input[type="password"]').fill('wrongpass');
     await page.getByRole('button', { name: '登录' }).click();
-    // Expect error message to appear
-    await expect(page.locator('.text-error')).toBeVisible({ timeout: 5000 });
+    // 后端不可用或返回 401 都会触发 role="alert"，统一断言错误文案容器可见
+    await expect(page.locator('[role="alert"]')).toBeVisible({ timeout: 10_000 });
   });
 
   test('admin dashboard requires authentication', async ({ page }) => {
     await page.goto('/admin');
-    await page.waitForTimeout(2000);
-    // Without admin token, should redirect to login or show login
-    const pageContent = await page.textContent('body');
-    const onLoginOrDash =
-      pageContent?.includes('管理后台登录') ||
-      pageContent?.includes('仪表盘');
-    expect(onLoginOrDash).toBe(true);
+    // 未带 token 时 ProtectedRoute 会跳转到 /admin/login
+    await page.waitForURL('**/admin/login', { timeout: 10_000 });
+    await expect(page.getByText('管理后台登录')).toBeVisible();
   });
 
-  test('sidebar navigation works', async ({ page }) => {
+  test('login form structural integrity', async ({ page }) => {
     await page.goto('/admin/login');
-    // Verify admin login page has proper structure
     await expect(page.locator('form')).toBeVisible();
-    const inputs = page.locator('input');
-    expect(await inputs.count()).toBeGreaterThanOrEqual(2);
+    const inputs = page.locator('form input');
+    await expect(inputs).toHaveCount(2);
   });
 
-  test('logout clears admin session', async ({ page }) => {
+  test('logout state keeps user on admin login', async ({ page }) => {
     await page.goto('/admin/login');
-    // Without session, should stay on login
-    await expect(page.locator('h1')).toContainText('管理后台登录');
+    await expect(page.getByText('管理后台登录')).toBeVisible();
+    await expect(page).toHaveURL(/\/admin\/login$/);
   });
 });

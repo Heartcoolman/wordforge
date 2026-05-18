@@ -4,7 +4,7 @@ import type {
   AdminUsersPage, AdminUsersQuery,
   EngagementAnalytics, LearningAnalytics,
   SystemHealth, DatabaseInfo, SystemSettings,
-  UpdateCheck, DailyActiveUsersEntry, DailyRecordsEntry,
+  UpdateCheck, AdminUpdateStatus, DailyActiveUsersEntry, DailyRecordsEntry,
   StudyOverview, RecordTypeBreakdown, WordStateDistribution, RetentionCurve,
 } from '@/types/admin';
 import type { AmasConfig } from '@/types/amas';
@@ -113,6 +113,16 @@ export const adminApi = {
   getHealth: () => api.get<SystemHealth>('/api/admin/monitoring/health', undefined, { useAdminToken: true }),
   getDatabase: () => api.get<DatabaseInfo>('/api/admin/monitoring/database', undefined, { useAdminToken: true }),
   checkUpdate: () => api.get<UpdateCheck>('/api/admin/monitoring/check-update', undefined, { useAdminToken: true }),
+
+  // 一键自更新（PR-auto-update）
+  updatesStatus: () => api.get<AdminUpdateStatus>('/api/admin/updates/status', undefined, { useAdminToken: true }),
+  updatesCheck: () => api.post<AdminUpdateStatus>('/api/admin/updates/check', undefined, { useAdminToken: true }),
+  updatesApply: (targetVersion: string, confirmCurrentVersion: string) =>
+    api.post<{ restarting: boolean }>(
+      '/api/admin/updates/apply',
+      { targetVersion, confirmCurrentVersion },
+      { useAdminToken: true },
+    ),
 
   // Broadcast & Settings
   broadcast: (data: { title: string; message: string }) => api.post<{ sent: number }>('/api/admin/broadcast', data, { useAdminToken: true }),
