@@ -38,7 +38,8 @@ async fn spawn_with_limits(api_limit: u64) -> TestApp {
             .to_string(),
         api_only: false,
         sqlite_busy_timeout_ms: 5000,
-        sqlite_connection_timeout_ms: 250,
+        // CI 上 ubuntu 磁盘 IO 较慢，并发测试时 pool 等连接 250ms 不够导致 Pool(Error(None)) panic
+        sqlite_connection_timeout_ms: 2000,
         sqlite_pool_size: 2,
         jwt_secret: test_secret,
         refresh_jwt_secret: test_refresh_secret,
