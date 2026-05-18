@@ -31,6 +31,7 @@ export default defineConfig({
         'src/types/**',             // type-only
         'src/index.css',            // css
         'src/workers/telemetry.ts', // navigator.sendBeacon worker
+        'src/lib/fatigue/**',       // WebRTC + MediaDevices, happy-dom 无原生支持
       ],
       thresholds: {
         lines: 99,

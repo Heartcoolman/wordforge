@@ -56,7 +56,8 @@ describe('UserManagementPage', () => {
     await renderPage();
     await waitFor(() => expect(screen.getByText('封禁')).toBeInTheDocument());
     fireEvent.click(screen.getByText('封禁'));
-    await waitFor(() => expect(screen.getByText('确认封禁')).toBeInTheDocument());
+    // 弹窗打开后会出现 2 个"确认封禁"（标题 h3 + 按钮 button）
+    await waitFor(() => expect(screen.getAllByText('确认封禁').length).toBeGreaterThanOrEqual(2));
     fireEvent.click(screen.getAllByText('确认封禁')[1]);
     await waitFor(() => expect(mockApi.banUser).toHaveBeenCalledWith(1));
   });
@@ -66,7 +67,7 @@ describe('UserManagementPage', () => {
     await renderPage();
     await waitFor(() => expect(screen.getByText('封禁')).toBeInTheDocument());
     fireEvent.click(screen.getByText('封禁'));
-    await waitFor(() => expect(screen.getByText('确认封禁')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getAllByText('确认封禁').length).toBeGreaterThanOrEqual(2));
     fireEvent.click(screen.getByText('取消'));
     await waitFor(() => expect(screen.queryByText('确认封禁')).not.toBeInTheDocument());
   });
@@ -87,7 +88,7 @@ describe('UserManagementPage', () => {
     await renderPage();
     await waitFor(() => expect(screen.getByText('解封')).toBeInTheDocument());
     fireEvent.click(screen.getByText('解封'));
-    await waitFor(() => expect(screen.getByText('确认解封')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getAllByText('确认解封').length).toBeGreaterThanOrEqual(2));
     fireEvent.click(screen.getAllByText('确认解封')[1]);
     await waitFor(() => expect(mockApi.unbanUser).toHaveBeenCalledWith(2));
   });

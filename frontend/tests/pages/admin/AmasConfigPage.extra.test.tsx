@@ -10,7 +10,11 @@ vi.mock('@/api/amas', () => ({
   },
 }));
 vi.mock('@/api/admin', () => ({
-  adminApi: { reloadAmas: vi.fn() },
+  adminApi: {
+    reloadAmas: vi.fn(),
+    amasListVersions: vi.fn(() => Promise.resolve([])),
+    amasRollback: vi.fn(),
+  },
 }));
 vi.mock('@/stores/ui', () => ({
   uiStore: { toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() } },

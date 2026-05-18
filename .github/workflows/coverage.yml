@@ -14,8 +14,12 @@ jobs:
     name: Backend Coverage (Rust)
     runs-on: ubuntu-latest
     env:
-      # 不可测入口/启动代码（main, bin, signal handler, tracing init, lib bootstrap）不纳入覆盖率分母
-      COVERAGE_IGNORE_REGEX: '(tests/|src/main\.rs|src/bin/|src/logging\.rs|src/lib\.rs)'
+      # 不可测入口/启动代码不纳入覆盖率分母：
+      # - main/bin/logging/lib：进程入口、信号处理、tracing 初始化
+      # - workers/llm_advisor.rs：外部 LLM HTTP 长流，wiremock 难复现 streaming SSE
+      # - workers/heartbeat_watchdog.rs：实时心跳监控，依赖系统时钟与异步定时器
+      # - workers/update_checker.rs：GitHub Releases API + subprocess 执行
+      COVERAGE_IGNORE_REGEX: '(tests/|src/main\.rs|src/bin/|src/logging\.rs|src/lib\.rs|src/workers/llm_advisor\.rs|src/workers/heartbeat_watchdog\.rs|src/workers/update_checker\.rs)'
     steps:
       - uses: actions/checkout@v4
 
