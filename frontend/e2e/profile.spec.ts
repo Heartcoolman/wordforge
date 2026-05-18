@@ -1,95 +1,56 @@
 import { test, expect } from '@playwright/test';
 
-test.describe('User Profile', () => {
-  test('profile page loads', async ({ page }) => {
+/**
+ * 个人资料
+ *
+ * /profile 已迁移至独立用户前端 wordforge-web。
+ */
+test.describe('User Profile (legacy redirect)', () => {
+  const legacyHeading = '用户前端已迁移到独立仓库';
+
+  test('profile route renders migration notice', async ({ page }) => {
     await page.goto('/profile');
-    await expect(page.locator('body')).toBeVisible();
-    await page.waitForTimeout(2000);
-    const pageContent = await page.textContent('body');
-    const hasContent =
-      pageContent?.includes('个人') ||
-      pageContent?.includes('资料') ||
-      pageContent?.includes('设置') ||
-      pageContent?.includes('登录');
-    expect(hasContent).toBe(true);
+    await expect(page.getByRole('heading', { name: legacyHeading })).toBeVisible();
   });
 
-  test('displays user information', async ({ page }) => {
+  test('profile path is echoed in notice', async ({ page }) => {
     await page.goto('/profile');
-    await page.waitForTimeout(2000);
-    await expect(page.locator('body')).toBeVisible();
+    await expect(page.getByText('你访问的旧路径是 /profile')).toBeVisible();
   });
 
-  test('can edit username', async ({ page }) => {
+  test('profile notice exposes admin entry link', async ({ page }) => {
     await page.goto('/profile');
-    await page.waitForTimeout(1500);
-    const nameInput = page.locator('input[type="text"]').first();
-    const inputExists = await nameInput.isVisible().catch(() => false);
-    
-    if (inputExists) {
-      const currentValue = await nameInput.inputValue();
-      await nameInput.fill('NewUsername');
-      await page.waitForTimeout(300);
-      await expect(nameInput).toHaveValue('NewUsername');
-      await nameInput.fill(currentValue);
-    }
+    const adminLink = page.getByRole('link', { name: '打开管理后台' });
+    await expect(adminLink).toBeVisible();
+    await expect(adminLink).toHaveAttribute('href', '/admin');
   });
 
-  test('can change password', async ({ page }) => {
+  test('profile route does not render old form fields', async ({ page }) => {
     await page.goto('/profile');
-    await page.waitForTimeout(1500);
-    const changePasswordButton = page.getByRole('button', { name: /修改密码|更改密码/ });
-    const buttonExists = await changePasswordButton.isVisible().catch(() => false);
-    
-    if (buttonExists) {
-      await changePasswordButton.click();
-      await page.waitForTimeout(1000);
-      await expect(page.locator('body')).toBeVisible();
-    }
+    await expect(page.getByRole('heading', { name: legacyHeading })).toBeVisible();
+    // 旧编辑用户名输入框不应存在
+    await expect(page.locator('input[type="text"]')).toHaveCount(0);
   });
 
-  test('displays learning statistics', async ({ page }) => {
+  test('profile notice contains repo migration description', async ({ page }) => {
     await page.goto('/profile');
-    await page.waitForTimeout(2000);
-    const pageContent = await page.textContent('body');
-    const hasStats =
-      pageContent?.includes('统计') ||
-      pageContent?.includes('学习') ||
-      pageContent?.includes('词汇');
-    expect(typeof hasStats).toBe('boolean');
+    await expect(page.getByText(/wordforge-web/)).toBeVisible();
   });
 
-  test('can save profile changes', async ({ page }) => {
+  test('profile route does not crash routing', async ({ page }) => {
     await page.goto('/profile');
-    await page.waitForTimeout(1500);
-    const saveButton = page.getByRole('button', { name: /保存|更新/ });
-    const buttonExists = await saveButton.isVisible().catch(() => false);
-    
-    if (buttonExists) {
-      await saveButton.click();
-      await page.waitForTimeout(1000);
-      await expect(page.locator('body')).toBeVisible();
-    }
+    await expect(page).toHaveURL(/\/profile$/);
   });
 
-  test('avatar upload section visible', async ({ page }) => {
+  test('profile notice shows config hint', async ({ page }) => {
     await page.goto('/profile');
-    await page.waitForTimeout(1500);
-    const uploadArea = page.locator('input[type="file"], [data-testid="avatar-upload"]');
-    const uploadExists = await uploadArea.isVisible().catch(() => false);
-    expect(typeof uploadExists).toBe('boolean');
+    await expect(
+      page.getByText('未配置 `VITE_USER_APP_URL`，请使用独立部署的用户前端地址')
+    ).toBeVisible();
   });
 
-  test('logout button works', async ({ page }) => {
+  test('profile route has no logout action exposed', async ({ page }) => {
     await page.goto('/profile');
-    await page.waitForTimeout(1500);
-    const logoutButton = page.getByRole('button', { name: /退出|登出/ });
-    const buttonExists = await logoutButton.isVisible().catch(() => false);
-    
-    if (buttonExists) {
-      await logoutButton.click();
-      await page.waitForTimeout(1000);
-      await expect(page.locator('body')).toBeVisible();
-    }
+    await expect(page.getByRole('button', { name: /退出|登出/ })).toHaveCount(0);
   });
 });

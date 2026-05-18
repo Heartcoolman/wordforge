@@ -1,92 +1,58 @@
 import { test, expect } from '@playwright/test';
 
-test.describe('Notifications', () => {
-  test('notifications page loads', async ({ page }) => {
+/**
+ * 通知中心
+ *
+ * /notifications 已迁移至独立用户前端 wordforge-web，
+ * 当前仓库该路由统一渲染 LegacyUserFrontendPage 提示页。
+ */
+test.describe('Notifications (legacy redirect)', () => {
+  const legacyHeading = '用户前端已迁移到独立仓库';
+
+  test('notifications route renders migration notice', async ({ page }) => {
     await page.goto('/notifications');
-    await expect(page.locator('body')).toBeVisible();
-    await page.waitForTimeout(2000);
-    const pageContent = await page.textContent('body');
-    const hasContent =
-      pageContent?.includes('通知') ||
-      pageContent?.includes('消息') ||
-      pageContent?.includes('提醒');
-    expect(hasContent).toBe(true);
+    await expect(page.getByRole('heading', { name: legacyHeading })).toBeVisible();
   });
 
-  test('displays notification list', async ({ page }) => {
+  test('notifications path is echoed in notice', async ({ page }) => {
     await page.goto('/notifications');
-    await page.waitForTimeout(2000);
-    await expect(page.locator('body')).toBeVisible();
+    await expect(page.getByText('你访问的旧路径是 /notifications')).toBeVisible();
   });
 
-  test('can mark notification as read', async ({ page }) => {
+  test('notifications notice exposes admin entry link', async ({ page }) => {
     await page.goto('/notifications');
-    await page.waitForTimeout(2000);
-    const markReadButton = page.getByRole('button', { name: /标记|已读/ }).first();
-    const buttonExists = await markReadButton.isVisible().catch(() => false);
-    
-    if (buttonExists) {
-      await markReadButton.click();
-      await page.waitForTimeout(500);
-      await expect(page.locator('body')).toBeVisible();
-    }
+    const adminLink = page.getByRole('link', { name: '打开管理后台' });
+    await expect(adminLink).toBeVisible();
+    await expect(adminLink).toHaveAttribute('href', '/admin');
   });
 
-  test('can mark all as read', async ({ page }) => {
+  test('notifications notice shows user-app config hint', async ({ page }) => {
     await page.goto('/notifications');
-    await page.waitForTimeout(1500);
-    const markAllButton = page.getByRole('button', { name: /全部已读|标记所有/ });
-    const buttonExists = await markAllButton.isVisible().catch(() => false);
-    
-    if (buttonExists) {
-      await markAllButton.click();
-      await page.waitForTimeout(1000);
-      await expect(page.locator('body')).toBeVisible();
-    }
+    await expect(
+      page.getByText('未配置 `VITE_USER_APP_URL`，请使用独立部署的用户前端地址')
+    ).toBeVisible();
   });
 
-  test('can filter notifications', async ({ page }) => {
+  test('notifications route does not render old list UI', async ({ page }) => {
     await page.goto('/notifications');
-    await page.waitForTimeout(1500);
-    const filterButton = page.getByRole('button', { name: /筛选|过滤|类型/ }).first();
-    const buttonExists = await filterButton.isVisible().catch(() => false);
-    
-    if (buttonExists) {
-      await filterButton.click();
-      await page.waitForTimeout(500);
-      await expect(page.locator('body')).toBeVisible();
-    }
+    await expect(page.getByRole('heading', { name: legacyHeading })).toBeVisible();
+    await expect(page.getByRole('button', { name: /标记|已读/ })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: /全部已读|标记所有/ })).toHaveCount(0);
   });
 
-  test('can delete notification', async ({ page }) => {
+  test('legacy notice exposes WordForge brand', async ({ page }) => {
     await page.goto('/notifications');
-    await page.waitForTimeout(2000);
-    const deleteButton = page.getByRole('button', { name: /删除/ }).first();
-    const buttonExists = await deleteButton.isVisible().catch(() => false);
-    
-    if (buttonExists) {
-      await deleteButton.click();
-      await page.waitForTimeout(500);
-      await expect(page.locator('body')).toBeVisible();
-    }
+    await expect(page.getByText('WordForge', { exact: true })).toBeVisible();
   });
 
-  test('notification badge shows count', async ({ page }) => {
-    await page.goto('/');
-    await page.waitForTimeout(2000);
-    const badge = page.locator('[data-testid="notification-badge"], .badge');
-    const badgeExists = await badge.isVisible().catch(() => false);
-    expect(typeof badgeExists).toBe('boolean');
+  test('notifications notice references migrated repo name', async ({ page }) => {
+    await page.goto('/notifications');
+    await expect(page.getByText(/wordforge-web/)).toBeVisible();
   });
 
-  test('empty state displays correctly', async ({ page }) => {
+  test('notifications path mismatch does not crash routing', async ({ page }) => {
     await page.goto('/notifications');
-    await page.waitForTimeout(2000);
-    const pageContent = await page.textContent('body');
-    const hasEmptyOrContent =
-      pageContent?.includes('暂无') ||
-      pageContent?.includes('通知') ||
-      pageContent?.includes('消息');
-    expect(hasEmptyOrContent).toBe(true);
+    // 仍然在原路径，未被 404 兜底吞掉
+    await expect(page).toHaveURL(/\/notifications$/);
   });
 });

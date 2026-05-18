@@ -34,7 +34,6 @@ jobs:
 
       - name: Run E2E tests
         run: npm run test:e2e
-        continue-on-error: true
 
       - name: Upload test results
         if: always()

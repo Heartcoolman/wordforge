@@ -1,73 +1,47 @@
 import { test, expect } from '@playwright/test';
 
-test.describe('Wordbook Center', () => {
-  test('wordbook center page loads', async ({ page }) => {
+/**
+ * 词书中心
+ *
+ * /wordbook-center 路由仍存在，但已迁移至独立用户前端 wordforge-web。
+ * 当前仓库该路由统一渲染 LegacyUserFrontendPage 提示页；管理员词书中心位于 /admin/wordbook-center。
+ */
+test.describe('Wordbook Center (legacy redirect)', () => {
+  const legacyHeading = '用户前端已迁移到独立仓库';
+
+  test('wordbook-center route renders migration notice', async ({ page }) => {
     await page.goto('/wordbook-center');
-    await expect(page.locator('body')).toBeVisible();
-    await page.waitForTimeout(2000);
-    const pageContent = await page.textContent('body');
-    const hasContent =
-      pageContent?.includes('词书') ||
-      pageContent?.includes('中心') ||
-      pageContent?.includes('加载');
-    expect(hasContent).toBe(true);
+    await expect(page.getByRole('heading', { name: legacyHeading })).toBeVisible();
   });
 
-  test('displays available wordbooks', async ({ page }) => {
+  test('wordbook-center path is echoed in notice', async ({ page }) => {
     await page.goto('/wordbook-center');
-    await page.waitForTimeout(3000);
-    await expect(page.locator('body')).toBeVisible();
+    await expect(page.getByText('你访问的旧路径是 /wordbook-center')).toBeVisible();
   });
 
-  test('can preview wordbook', async ({ page }) => {
+  test('legacy notice exposes admin entry link', async ({ page }) => {
     await page.goto('/wordbook-center');
-    await page.waitForTimeout(2000);
-    const previewButton = page.getByRole('button', { name: /预览|查看/ }).first();
-    const buttonExists = await previewButton.isVisible().catch(() => false);
-    
-    if (buttonExists) {
-      await previewButton.click();
-      await page.waitForTimeout(1000);
-      await expect(page.locator('body')).toBeVisible();
-    }
+    const adminLink = page.getByRole('link', { name: '打开管理后台' });
+    await expect(adminLink).toBeVisible();
+    await expect(adminLink).toHaveAttribute('href', '/admin');
   });
 
-  test('wordbook import flow', async ({ page }) => {
-    await page.goto('/wordbook-center');
-    await page.waitForTimeout(2000);
-    const importButton = page.getByRole('button', { name: /导入|添加/ }).first();
-    const buttonExists = await importButton.isVisible().catch(() => false);
-    
-    if (buttonExists) {
-      await importButton.click();
-      await page.waitForTimeout(1000);
-      await expect(page.locator('body')).toBeVisible();
-    }
+  test('admin wordbook center is the new entrypoint', async ({ page }) => {
+    await page.goto('/admin/wordbook-center');
+    // 未登录会被 ProtectedRoute 跳到管理员登录
+    await page.waitForURL('**/admin/login', { timeout: 10_000 });
+    await expect(page.getByText('管理后台登录')).toBeVisible();
   });
 
-  test('wordbook search functionality', async ({ page }) => {
+  test('legacy notice references migrated repo name', async ({ page }) => {
     await page.goto('/wordbook-center');
-    await page.waitForTimeout(1000);
-    const searchInput = page.locator('input[type="search"], input[placeholder*="搜索"]');
-    const searchExists = await searchInput.isVisible().catch(() => false);
-    
-    if (searchExists) {
-      await searchInput.fill('CET');
-      await page.waitForTimeout(500);
-      await expect(page.locator('body')).toBeVisible();
-    }
+    await expect(page.getByText(/wordforge-web/)).toBeVisible();
   });
 
-  test('wordbook category filtering', async ({ page }) => {
+  test('legacy notice shows config hint', async ({ page }) => {
     await page.goto('/wordbook-center');
-    await page.waitForTimeout(2000);
-    const categoryButton = page.getByRole('button', { name: /分类|类别/ }).first();
-    const buttonExists = await categoryButton.isVisible().catch(() => false);
-    
-    if (buttonExists) {
-      await categoryButton.click();
-      await page.waitForTimeout(500);
-      await expect(page.locator('body')).toBeVisible();
-    }
+    await expect(
+      page.getByText('未配置 `VITE_USER_APP_URL`，请使用独立部署的用户前端地址')
+    ).toBeVisible();
   });
 });

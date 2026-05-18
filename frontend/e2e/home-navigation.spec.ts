@@ -1,114 +1,66 @@
 import { test, expect } from '@playwright/test';
 
+/**
+ * 首页与导航
+ *
+ * 当前仓库根路径 `/` 会重定向到 `/admin/login`（用户前端已迁移）。
+ * 这里的断言守住"未配置/未登录访客落地行为正确、404 兜底有效"。
+ */
 test.describe('Home Page and Navigation', () => {
-  test('home page loads correctly', async ({ page }) => {
+  test('root redirects to admin login', async ({ page }) => {
     await page.goto('/');
-    await expect(page.locator('body')).toBeVisible();
-    await expect(page.getByText('WordMaster')).toBeVisible({ timeout: 3000 });
+    await page.waitForURL('**/admin/login', { timeout: 5000 });
+    await expect(page).toHaveURL(/\/admin\/login$/);
+    await expect(page.getByText('WordForge Admin')).toBeVisible();
   });
 
-  test('navigation bar is visible', async ({ page }) => {
-    await page.goto('/');
-    await page.waitForTimeout(1000);
-    const nav = page.locator('nav, [role="navigation"]');
-    await expect(nav).toBeVisible();
+  test('admin login renders header brand', async ({ page }) => {
+    await page.goto('/admin/login');
+    await expect(page.getByText('WordForge Admin')).toBeVisible();
   });
 
-  test('can navigate to learning page', async ({ page }) => {
-    await page.goto('/');
-    await page.waitForTimeout(1000);
-    const learningLink = page.getByRole('link', { name: /学习|开始/ });
-    const linkExists = await learningLink.isVisible().catch(() => false);
-    
-    if (linkExists) {
-      await learningLink.click();
-      await page.waitForTimeout(1000);
-      await expect(page.locator('body')).toBeVisible();
-    }
+  test('legacy learning route shows migration notice', async ({ page }) => {
+    await page.goto('/learning');
+    await expect(page.getByRole('heading', { name: '用户前端已迁移到独立仓库' })).toBeVisible();
   });
 
-  test('can navigate to wordbooks page', async ({ page }) => {
-    await page.goto('/');
-    await page.waitForTimeout(1000);
-    const wordbooksLink = page.getByRole('link', { name: /词本/ });
-    const linkExists = await wordbooksLink.isVisible().catch(() => false);
-    
-    if (linkExists) {
-      await wordbooksLink.click();
-      await page.waitForTimeout(1000);
-      await expect(page.locator('body')).toBeVisible();
-    }
+  test('legacy wordbooks route shows migration notice', async ({ page }) => {
+    await page.goto('/wordbooks');
+    await expect(page.getByRole('heading', { name: '用户前端已迁移到独立仓库' })).toBeVisible();
   });
 
-  test('can navigate to profile page', async ({ page }) => {
-    await page.goto('/');
-    await page.waitForTimeout(1000);
-    const profileLink = page.getByRole('link', { name: /个人|资料/ });
-    const linkExists = await profileLink.isVisible().catch(() => false);
-    
-    if (linkExists) {
-      await profileLink.click();
-      await page.waitForTimeout(1000);
-      await expect(page.locator('body')).toBeVisible();
-    }
+  test('legacy profile route shows migration notice', async ({ page }) => {
+    await page.goto('/profile');
+    await expect(page.getByRole('heading', { name: '用户前端已迁移到独立仓库' })).toBeVisible();
   });
 
-  test('theme toggle works', async ({ page }) => {
-    await page.goto('/');
-    await page.waitForTimeout(1000);
-    const themeToggle = page.locator('[data-testid="theme-toggle"], button[aria-label*="主题"]');
-    const toggleExists = await themeToggle.isVisible().catch(() => false);
-    
-    if (toggleExists) {
-      const initialClass = await page.locator('html').getAttribute('class');
-      await themeToggle.click();
-      await page.waitForTimeout(300);
-      const newClass = await page.locator('html').getAttribute('class');
-      expect(typeof newClass).toBe('string');
-    }
+  test('legacy notice link points to admin console', async ({ page }) => {
+    await page.goto('/profile');
+    const adminLink = page.getByRole('link', { name: '打开管理后台' });
+    await expect(adminLink).toBeVisible();
+    await expect(adminLink).toHaveAttribute('href', '/admin');
   });
 
-  test('footer displays correctly', async ({ page }) => {
-    await page.goto('/');
-    await page.waitForTimeout(1000);
-    const footer = page.locator('footer');
-    const footerExists = await footer.isVisible().catch(() => false);
-    expect(typeof footerExists).toBe('boolean');
+  test('admin login has a single form element', async ({ page }) => {
+    await page.goto('/admin/login');
+    await expect(page.locator('form')).toHaveCount(1);
   });
 
   test('404 page shows for invalid route', async ({ page }) => {
     await page.goto('/invalid-route-that-does-not-exist');
-    await page.waitForTimeout(1500);
-    await expect(page.locator('body')).toBeVisible();
-    const pageContent = await page.textContent('body');
-    const has404Content =
-      pageContent?.includes('404') ||
-      pageContent?.includes('找不到') ||
-      pageContent?.includes('Not Found');
-    expect(typeof has404Content).toBe('boolean');
+    await expect(page.getByText('404')).toBeVisible({ timeout: 5000 });
+    await expect(page.getByRole('heading', { name: '页面不存在' })).toBeVisible();
   });
 
-  test('mobile menu toggle works', async ({ page, isMobile }) => {
-    if (!isMobile) {
-      await page.setViewportSize({ width: 375, height: 667 });
-    }
-    await page.goto('/');
-    await page.waitForTimeout(1000);
-    const menuButton = page.locator('button[aria-label*="菜单"], [data-testid="mobile-menu"]');
-    const buttonExists = await menuButton.isVisible().catch(() => false);
-    
-    if (buttonExists) {
-      await menuButton.click();
-      await page.waitForTimeout(500);
-      await expect(page.locator('body')).toBeVisible();
-    }
+  test('admin login is responsive at mobile width', async ({ page }) => {
+    await page.setViewportSize({ width: 375, height: 667 });
+    await page.goto('/admin/login');
+    await expect(page.getByText('管理后台登录')).toBeVisible();
+    await expect(page.locator('input[type="email"]')).toBeVisible();
   });
 
-  test('search functionality accessible', async ({ page }) => {
-    await page.goto('/');
-    await page.waitForTimeout(1000);
-    const searchButton = page.locator('button[aria-label*="搜索"], [data-testid="search-button"]');
-    const buttonExists = await searchButton.isVisible().catch(() => false);
-    expect(typeof buttonExists).toBe('boolean');
+  test('404 page provides return-home button', async ({ page }) => {
+    await page.goto('/some/non/existent/page');
+    await expect(page.getByRole('link', { name: /返回首页/ })).toBeVisible();
   });
 });
