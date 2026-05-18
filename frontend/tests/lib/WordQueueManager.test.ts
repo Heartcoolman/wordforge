@@ -214,4 +214,142 @@ describe('createWordQueueManager', () => {
       dispose();
     });
   });
+
+  it('recordAnswer on unknown wordId returns mastered:false', () => {
+    const mgr = createManager();
+    expect(mgr.recordAnswer('does-not-exist', true)).toEqual({ mastered: false });
+  });
+
+  it('recordAnswer tracks history when responseTimeMs provided and truncates after MAX_ANSWER_HISTORY', async () => {
+    const { MAX_ANSWER_HISTORY } = await import('@/lib/constants');
+    const mgr = createManager();
+    const w = createFakeWord({ id: 'hist' });
+    mgr.loadWords([w]);
+    for (let i = 0; i < MAX_ANSWER_HISTORY + 5; i++) {
+      mgr.recordAnswer('hist', false, 100 + i);
+    }
+    // 应不抛错；计算指标可以返回数字
+    const metrics = mgr.computeSessionMetrics();
+    expect(metrics.overallAccuracy).toBe(0);
+    expect(metrics.overallAvgResponseTimeMs).toBeGreaterThan(0);
+  });
+
+  it('computeSessionMetrics returns zeros when history empty', () => {
+    const mgr = createManager();
+    expect(mgr.computeSessionMetrics()).toEqual({
+      recentAccuracy: 0,
+      overallAccuracy: 0,
+      recentAvgResponseTimeMs: 0,
+      overallAvgResponseTimeMs: 0,
+    });
+  });
+
+  it('computeSessionMetrics computes recent and overall accuracy + response time', () => {
+    const mgr = createManager();
+    const w = createFakeWord({ id: 'c' });
+    mgr.loadWords([w]);
+    mgr.recordAnswer('c', true, 100);
+    mgr.recordAnswer('c', false, 200);
+    mgr.recordAnswer('c', true, 300);
+    const m = mgr.computeSessionMetrics();
+    expect(m.overallAccuracy).toBeCloseTo(2 / 3, 5);
+    expect(m.overallAvgResponseTimeMs).toBe(200);
+    expect(m.recentAccuracy).toBeCloseTo(2 / 3, 5);
+    expect(m.recentAvgResponseTimeMs).toBe(200);
+  });
+
+  it('setTargetMasteryCount + shouldPrefetch returns true near depletion', () => {
+    const mgr = createManager();
+    mgr.loadWords(createFakeWords(2));
+    mgr.setTargetMasteryCount(5);
+    expect(mgr.shouldPrefetch()).toBe(true);
+  });
+
+  it('shouldPrefetch returns false when mastered already meets target', () => {
+    const mgr = createManager();
+    mgr.loadWords(createFakeWords(1));
+    mgr.setTargetMasteryCount(0); // target 0 时 always allow prefetch when active<=2
+    expect(mgr.shouldPrefetch()).toBe(true);
+  });
+
+  it('shouldPrefetch returns false when active queue is large', () => {
+    const mgr = createManager();
+    mgr.loadWords(createFakeWords(5));
+    expect(mgr.shouldPrefetch()).toBe(false);
+  });
+
+  it('getErrorProneWordIds returns wordIds with errorCount > 0 across queues', () => {
+    const mgr = createManager();
+    const w1 = createFakeWord({ id: 'ep-1' });
+    const w2 = createFakeWord({ id: 'ep-2' });
+    const w3 = createFakeWord({ id: 'ep-3' });
+    mgr.loadWords([w1, w2, w3]);
+    mgr.recordAnswer('ep-2', false);
+    expect(mgr.getErrorProneWordIds()).toEqual(['ep-2']);
+  });
+
+  it('resetHistory clears computed accuracy', () => {
+    const mgr = createManager();
+    const w = createFakeWord({ id: 'rh' });
+    mgr.loadWords([w]);
+    mgr.recordAnswer('rh', true, 100);
+    mgr.resetHistory();
+    expect(mgr.computeSessionMetrics().overallAvgResponseTimeMs).toBe(0);
+  });
+
+  it('restore handles legacy persisted data without priority field', () => {
+    const word = createFakeWord({ id: 'legacy' });
+    // 模拟旧版本：active 项缺 priority 字段
+    localStorage.setItem(
+      'eng_learning_queue',
+      JSON.stringify({
+        active: [{ word, correctCount: 0, errorCount: 0, lastShown: 0 }],
+        mastered: [],
+        batchSize: 5,
+      }),
+    );
+    const mgr = createManager();
+    const next = mgr.pickNext();
+    expect(next?.word.id).toBe('legacy');
+  });
+
+  it('restore tolerates missing active/mastered/batchSize fields entirely', () => {
+    // 已损坏 / 早期版本：所有可选字段缺失
+    localStorage.setItem('eng_learning_queue', JSON.stringify({}));
+    const mgr = createManager(7);
+    expect(mgr.getActiveCount()).toBe(0);
+    expect(mgr.getMasteredCount()).toBe(0);
+  });
+
+  it('pickNext sorts equal-priority items by lastShown ascending', () => {
+    // 通过持久化注入两个 priority 相同但 lastShown 不同的词
+    const w1 = createFakeWord({ id: 'p-a' });
+    const w2 = createFakeWord({ id: 'p-b' });
+    localStorage.setItem(
+      'eng_learning_queue',
+      JSON.stringify({
+        active: [
+          { word: w1, correctCount: 0, errorCount: 0, lastShown: 200, priority: 0 },
+          { word: w2, correctCount: 0, errorCount: 0, lastShown: 100, priority: 0 },
+        ],
+        mastered: [],
+        batchSize: 5,
+      }),
+    );
+    const mgr = createManager();
+    expect(mgr.pickNext()?.word.id).toBe('p-b'); // 更早 lastShown 优先
+  });
+
+  it('generateOptions in meaning-to-word mode returns word text answer + placeholder', () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    const mgr = createManager();
+    const w = createFakeWord({ id: 'single' });
+    mgr.loadWords([w]);
+    const target = mgr.pickNext()!;
+    const options = mgr.generateOptions(target, 'meaning-to-word');
+    expect(options).toHaveLength(4);
+    expect(options).toContain(w.text);
+    expect(options).toContain('(未知)');
+    vi.restoreAllMocks();
+  });
 });

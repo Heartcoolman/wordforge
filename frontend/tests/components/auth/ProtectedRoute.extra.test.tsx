@@ -32,23 +32,23 @@ describe('AdminProtectedRoute (extra branches)', () => {
 
   it('handles focus event re-verification failure', async () => {
     (tokenManager.getAdminToken as ReturnType<typeof vi.fn>).mockReturnValue('tok');
-    (adminApi.verifyToken as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ id: '1', email: 'a@b.c' });
+    (adminApi.verifyToken as ReturnType<typeof vi.fn>).mockResolvedValue({ id: '1', email: 'a@b.c' });
 
     const { AdminProtectedRoute } = await import('@/components/auth/ProtectedRoute');
     renderWithProviders(() => <AdminProtectedRoute>Body</AdminProtectedRoute>);
     await waitFor(() => expect(screen.getByText('Body')).toBeInTheDocument());
 
-    // 模拟节流后超时，让 handleFocus 触发 verify
-    vi.useFakeTimers();
+    // 通过 Date.now stub 越过 30s 节流
+    const realNow = Date.now;
+    Date.now = () => realNow() + 60_000;
     try {
-      vi.advanceTimersByTime(31_000);
+      (adminApi.verifyToken as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('expired'));
+      window.dispatchEvent(new Event('focus'));
+      await waitFor(() => {
+        expect(tokenManager.clearAdminToken).toHaveBeenCalled();
+      });
     } finally {
-      vi.useRealTimers();
+      Date.now = realNow;
     }
-    (adminApi.verifyToken as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('expired'));
-    window.dispatchEvent(new Event('focus'));
-    await waitFor(() => {
-      expect(tokenManager.clearAdminToken).toHaveBeenCalled();
-    });
   });
 });

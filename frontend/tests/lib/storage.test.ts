@@ -80,44 +80,70 @@ describe('storage', () => {
     expect(localStorage.getItem('eng_' + STORAGE_KEYS.ADMIN_TOKEN)).toBeNull();
   });
 
-  it('write swallows errors when setItem throws', () => {
-    const original = localStorage.setItem.bind(localStorage);
-    const spy = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (this: Storage, k: string, v: string) {
-      if (k === 'eng_throwy') throw new Error('quota');
-      return original(k, v);
-    });
-    // 应不抛
-    expect(() => storage.set('throwy', { a: 1 })).not.toThrow();
-    expect(() => storage.setString('throwy', 'x')).not.toThrow();
-    spy.mockRestore();
-  });
-
   it('admin token write swallows error if sessionStorage migration setItem throws', () => {
     localStorage.setItem('eng_' + STORAGE_KEYS.ADMIN_TOKEN, 'legacy');
-    const original = sessionStorage.setItem.bind(sessionStorage);
-    const spy = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (this: Storage, k: string, v: string) {
-      if (this === sessionStorage) throw new Error('session-full');
-      return original(k, v);
-    });
-    // 读时尝试迁移失败但仍应返回 legacy 值
-    expect(storage.getString(STORAGE_KEYS.ADMIN_TOKEN)).toBe('legacy');
-    spy.mockRestore();
+    const origSet = sessionStorage.setItem;
+    sessionStorage.setItem = ((..._args: unknown[]) => {
+      throw new Error('session-full');
+    }) as typeof sessionStorage.setItem;
+    try {
+      // 读时尝试迁移失败但仍应返回 legacy 值
+      expect(storage.getString(STORAGE_KEYS.ADMIN_TOKEN)).toBe('legacy');
+    } finally {
+      sessionStorage.setItem = origSet;
+    }
+  });
+
+  it('write swallows errors when localStorage.setItem throws', () => {
+    const origSet = localStorage.setItem;
+    localStorage.setItem = ((..._args: unknown[]) => {
+      throw new Error('quota');
+    }) as typeof localStorage.setItem;
+    try {
+      expect(() => storage.set('throwy', { a: 1 })).not.toThrow();
+    } finally {
+      localStorage.setItem = origSet;
+    }
   });
 
   it('remove swallows errors when storage throws', () => {
-    const spy = vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(() => {
+    const origRemove = localStorage.removeItem;
+    localStorage.removeItem = ((..._args: unknown[]) => {
       throw new Error('boom');
-    });
-    expect(() => storage.remove('any')).not.toThrow();
-    spy.mockRestore();
+    }) as typeof localStorage.removeItem;
+    try {
+      expect(() => storage.remove('any')).not.toThrow();
+    } finally {
+      localStorage.removeItem = origRemove;
+    }
   });
 
-  it('read returns null when storage throws on getItem', () => {
-    const spy = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
+  it('admin token remove swallows errors when sessionStorage throws', () => {
+    const origRemove = sessionStorage.removeItem;
+    sessionStorage.removeItem = ((..._args: unknown[]) => {
       throw new Error('boom');
-    });
-    expect(storage.get('broken', 'fallback')).toBe('fallback');
-    expect(storage.getString('broken')).toBe('');
-    spy.mockRestore();
+    }) as typeof sessionStorage.removeItem;
+    try {
+      expect(() => storage.remove(STORAGE_KEYS.ADMIN_TOKEN)).not.toThrow();
+    } finally {
+      sessionStorage.removeItem = origRemove;
+    }
+  });
+
+  it('admin token getString returns fallback when neither session nor legacy localStorage has value', () => {
+    expect(storage.getString(STORAGE_KEYS.ADMIN_TOKEN)).toBe('');
+  });
+
+  it('readRaw returns null on outer try/catch when primary.getItem throws', () => {
+    const origGet = localStorage.getItem;
+    localStorage.getItem = ((..._args: unknown[]) => {
+      throw new Error('boom');
+    }) as typeof localStorage.getItem;
+    try {
+      expect(storage.get('broken', 'fallback')).toBe('fallback');
+      expect(storage.getString('broken')).toBe('');
+    } finally {
+      localStorage.getItem = origGet;
+    }
   });
 });

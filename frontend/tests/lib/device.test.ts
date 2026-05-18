@@ -186,4 +186,70 @@ describe('collectDeviceFingerprint', () => {
     expect(fp.osName).toBe('Unknown');
     expect(fp.browserName).toBe('Unknown');
   });
+
+  it('falls back to empty version string when OS regex does not match', () => {
+    Object.defineProperty(navigator, 'userAgent', {
+      configurable: true,
+      value: 'iPhone-no-version-string-without-os-number',
+    });
+    const fp = collectDeviceFingerprint();
+    expect(fp.osName).toBe('iOS ');
+  });
+
+  it('parses Mac OS X without minor version when regex misses', () => {
+    Object.defineProperty(navigator, 'userAgent', {
+      configurable: true,
+      value: 'Something Mac OS X without-number',
+    });
+    const fp = collectDeviceFingerprint();
+    expect(fp.osName).toBe('macOS ');
+  });
+
+  it('parses Android UA without version-number gracefully', () => {
+    Object.defineProperty(navigator, 'userAgent', {
+      configurable: true,
+      value: 'Mozilla/5.0 (Android; Mobile)',
+    });
+    const fp = collectDeviceFingerprint();
+    expect(fp.osName).toBe('Android ');
+  });
+
+  it('parses Windows UA without version regex match', () => {
+    Object.defineProperty(navigator, 'userAgent', {
+      configurable: true,
+      value: 'Mozilla/5.0 (Windows; lite)',
+    });
+    const fp = collectDeviceFingerprint();
+    expect(fp.osName).toBe('Windows ');
+  });
+
+  it('parses Edge/Chrome/Firefox/Safari/Opera versions falling back to empty when regex misses', () => {
+    const cases = [
+      { ua: 'Edg/', name: 'Edge' },
+      { ua: 'OPR/', name: 'Opera' },
+      { ua: 'Chrome/', name: 'Chrome' },
+      { ua: 'Firefox/', name: 'Firefox' },
+      { ua: 'Safari/', name: 'Safari' },
+    ];
+    for (const c of cases) {
+      Object.defineProperty(navigator, 'userAgent', { configurable: true, value: c.ua });
+      const fp = collectDeviceFingerprint();
+      expect(fp.browserName).toBe(c.name);
+      expect(fp.browserVersion).toBe('');
+    }
+  });
+
+  it('falls back to memoryGb=null when navigator.deviceMemory missing', () => {
+    Object.defineProperty(navigator, 'userAgent', {
+      configurable: true,
+      value: 'Mozilla/5.0 (X11; Linux)',
+    });
+    // deviceMemory 不存在 → null fallback (用 any cast 来读取/删除)
+    const navAny = navigator as any;
+    const original = navAny.deviceMemory;
+    delete navAny.deviceMemory;
+    const fp = collectDeviceFingerprint();
+    expect(fp.memoryGb).toBeNull();
+    if (original !== undefined) navAny.deviceMemory = original;
+  });
 });
