@@ -54,6 +54,15 @@ thiserror = "2"
 tokio-stream = { version = "0.1", features = ["sync"] }
 async-stream = "0.3"
 
+# Auto-update (admin 后台自更新)
+tar = "0.4"
+flate2 = "1"
+semver = "1"
+fs2 = "0.4"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [[bin]]
 name = "migrate-sled-to-sqlite"
 path = "src/bin/migrate_sled_to_sqlite.rs"
@@ -64,6 +73,7 @@ axum-test = "16"
 tokio-test = "0.4"
 tempfile = "3"
 proptest = "1"
+wiremock = "0.6"
 
 [profile.release]
 lto = true

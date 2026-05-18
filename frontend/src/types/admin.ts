@@ -84,6 +84,21 @@ export interface UpdateCheck {
   releaseNotes: string | null;
 }
 
+/// `/api/admin/updates/status` 与 `/check` 共用，比 legacy UpdateCheck 多了
+/// `canApply`/`lastCheckedAt`/`autoCheckEnabled`/`allowDowngrade` 等运维字段。
+export interface AdminUpdateStatus {
+  currentVersion: string;
+  latestVersion: string | null;
+  latestPublishedAt: string | null;
+  releaseNotes: string | null;
+  releaseUrl: string | null;
+  hasUpdate: boolean;
+  canApply: boolean;
+  lastCheckedAt: string | null;
+  autoCheckEnabled: boolean;
+  allowDowngrade: boolean;
+}
+
 export interface SystemSettings {
   maxUsers: number;
   registrationEnabled: boolean;

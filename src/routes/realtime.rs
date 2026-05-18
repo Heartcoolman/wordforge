@@ -173,6 +173,8 @@ pub async fn sse_handler(
                                     crate::state::SseEvent::Unbanned => "unbanned",
                                     crate::state::SseEvent::DataCorrupted => "data_corrupted",
                                     crate::state::SseEvent::NewLlmSuggestion { .. } => "new_llm_suggestion",
+                                    crate::state::SseEvent::ReleaseAvailable { .. } => "release_available",
+                                    crate::state::SseEvent::UpdateProgress { .. } => "update_progress",
                                 };
                                 yield Ok(Event::default().event(event_name).data(json));
                             }
@@ -263,6 +265,12 @@ mod tests {
             update_check: UpdateCheckConfig {
                 api_url: String::new(),
                 cache_ttl_secs: 3600,
+                worker_enabled: false,
+                worker_interval_secs: 3600,
+                github_token: None,
+                allow_downgrade: false,
+                install_dir: None,
+                max_tarball_bytes: 200 * 1024 * 1024,
             },
             pagination: Default::default(),
             limits: Default::default(),

@@ -73,11 +73,14 @@ jobs:
           cp -r static "$DIST/static"
           cp .env.example "$DIST/.env.example"
           tar czf "${DIST}.tar.gz" "$DIST"
+          sha256sum "${DIST}.tar.gz" | awk '{print $1}' > "${DIST}.tar.gz.sha256"
 
       - uses: actions/upload-artifact@v4
         with:
           name: wordforge-linux-${{ matrix.arch }}
-          path: wordforge-linux-${{ matrix.arch }}.tar.gz
+          path: |
+            wordforge-linux-${{ matrix.arch }}.tar.gz
+            wordforge-linux-${{ matrix.arch }}.tar.gz.sha256
 
   release:
     needs: build-backend
@@ -91,5 +94,7 @@ jobs:
 
       - uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.tar.gz
+          files: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
           generate_release_notes: true

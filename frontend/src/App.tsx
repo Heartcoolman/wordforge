@@ -22,6 +22,7 @@ const AmasAdvisorPage = lazy(() => import('@/pages/admin/AmasAdvisorPage'));
 const MonitoringPage = lazy(() => import('@/pages/admin/MonitoringPage'));
 const AnalyticsPage = lazy(() => import('@/pages/admin/AnalyticsPage'));
 const SettingsPage = lazy(() => import('@/pages/admin/SettingsPage'));
+const UpdatesPage = lazy(() => import('@/pages/admin/UpdatesPage'));
 const AdminWordbookCenterPage = lazy(() => import('@/pages/admin/AdminWordbookCenterPage'));
 const ClientsPage = lazy(() => import('@/pages/admin/ClientsPage'));
 
@@ -104,6 +105,7 @@ export default function App() {
             <Route path="/monitoring" component={() => (<AdminProtectedRoute><Suspense fallback={<PageSpinner />}><MonitoringPage /></Suspense></AdminProtectedRoute>)} />
             <Route path="/analytics" component={() => (<AdminProtectedRoute><Suspense fallback={<PageSpinner />}><AnalyticsPage /></Suspense></AdminProtectedRoute>)} />
             <Route path="/settings" component={() => (<AdminProtectedRoute><Suspense fallback={<PageSpinner />}><SettingsPage /></Suspense></AdminProtectedRoute>)} />
+            <Route path="/updates" component={() => (<AdminProtectedRoute><Suspense fallback={<PageSpinner />}><UpdatesPage /></Suspense></AdminProtectedRoute>)} />
             <Route path="/wordbook-center" component={() => (<AdminProtectedRoute><Suspense fallback={<PageSpinner />}><AdminWordbookCenterPage /></Suspense></AdminProtectedRoute>)} />
           </Route>
           <Route path="*" component={() => (<Suspense fallback={<PageSpinner />}><NotFoundPage /></Suspense>)} />
