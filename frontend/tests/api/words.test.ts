@@ -121,6 +121,20 @@ describe('wordsApi', () => {
     expect(result).toEqual({ total: 5000 });
   });
 
+  it('batchGet POSTs ids and returns words array', async () => {
+    const words = [{ id: 'a' }, { id: 'b' }];
+    let body: Record<string, unknown> = {};
+    server.use(
+      http.post(`${BASE}/api/words/batch-get`, async ({ request }) => {
+        body = await request.json() as Record<string, unknown>;
+        return HttpResponse.json({ success: true, data: words });
+      }),
+    );
+    const result = await wordsApi.batchGet(['a', 'b']);
+    expect(body).toEqual({ ids: ['a', 'b'] });
+    expect(result).toEqual(words);
+  });
+
   it('importUrl sends URL and returns import result', async () => {
     const importResult = { imported: 25, skipped: 3, errors: [] };
     server.use(
