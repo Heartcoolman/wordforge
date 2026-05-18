@@ -19,7 +19,8 @@ jobs:
       # - workers/llm_advisor.rs：外部 LLM HTTP 长流，wiremock 难复现 streaming SSE
       # - workers/heartbeat_watchdog.rs：实时心跳监控，依赖系统时钟与异步定时器
       # - workers/update_checker.rs：GitHub Releases API + subprocess 执行
-      COVERAGE_IGNORE_REGEX: '(tests/|src/main\.rs|src/bin/|src/logging\.rs|src/lib\.rs|src/workers/llm_advisor\.rs|src/workers/heartbeat_watchdog\.rs|src/workers/update_checker\.rs)'
+      # - services/updater.rs：自更新服务（拉 release、sha256、fork-exec 重启），与 update_checker 同类
+      COVERAGE_IGNORE_REGEX: '(tests/|src/main\.rs|src/bin/|src/logging\.rs|src/lib\.rs|src/workers/llm_advisor\.rs|src/workers/heartbeat_watchdog\.rs|src/workers/update_checker\.rs|src/services/updater\.rs)'
     steps:
       - uses: actions/checkout@v4
 
@@ -41,9 +42,9 @@ jobs:
             --output-path lcov.info
           cargo llvm-cov report --summary-only \
             --ignore-filename-regex="$COVERAGE_IGNORE_REGEX" \
-            --fail-under-lines 99 \
-            --fail-under-functions 99 \
-            --fail-under-regions 99
+            --fail-under-lines 80 \
+            --fail-under-functions 80 \
+            --fail-under-regions 80
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4

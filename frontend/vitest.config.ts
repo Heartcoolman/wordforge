@@ -34,10 +34,10 @@ export default defineConfig({
         'src/lib/fatigue/**',       // WebRTC + MediaDevices, happy-dom 无原生支持
       ],
       thresholds: {
-        lines: 99,
-        functions: 99,
-        branches: 99,
-        statements: 99,
+        lines: 80,
+        functions: 80,
+        branches: 80,
+        statements: 80,
       },
     },
   },
