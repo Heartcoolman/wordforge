@@ -52,7 +52,7 @@ beforeAll(() => {
     value: session,
   });
 
-  // Set window.location for API client resolution
+  // Set window.location for API client resolution; happy-dom 默认 location.replace 缺失
   Object.defineProperty(window, 'location', {
     writable: true,
     value: {
@@ -62,6 +62,9 @@ beforeAll(() => {
       pathname: '/',
       search: '',
       hash: '',
+      replace: vi.fn(),
+      assign: vi.fn(),
+      reload: vi.fn(),
     },
   });
 });

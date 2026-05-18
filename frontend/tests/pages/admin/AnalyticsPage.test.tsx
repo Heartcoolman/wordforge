@@ -32,8 +32,8 @@ const mockOverview = { summary: { totalDurationSecs: 0, newWords: 0 }, daily: []
 const mockRecordTypes = { daily: [], totals: { learning: 0, review: 0, all: 0 } };
 const mockRetention = { points: [], averageRetention: null };
 const mockStates = {
-  tracked: { NEW: 0, LEARNING: 0, REVIEWING: 0, MASTERED: 0, FORGOTTEN: 0 },
-  bookmarked: { NEW: 0, LEARNING: 0, REVIEWING: 0, MASTERED: 0, FORGOTTEN: 0 },
+  totals: { trackedWords: 0, bookmarkedWords: 0 },
+  states: { newCount: 0, learning: 0, reviewing: 0, mastered: 0, forgotten: 0 },
 };
 
 describe('AnalyticsPage', () => {

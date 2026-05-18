@@ -32,16 +32,6 @@ pub struct Notification {
     pub created_at: DateTime<Utc>,
 }
 
-fn notification_type_to_str(t: &NotificationType) -> &'static str {
-    match t {
-        NotificationType::System => "system",
-        NotificationType::Achievement => "achievement",
-        NotificationType::Reminder => "reminder",
-        NotificationType::Info => "info",
-        NotificationType::Broadcast => "broadcast",
-    }
-}
-
 fn notification_type_from_str(s: &str) -> NotificationType {
     match s {
         "achievement" => NotificationType::Achievement,

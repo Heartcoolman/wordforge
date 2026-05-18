@@ -131,57 +131,12 @@ struct SimResult {
 // 三种调度策略模拟
 // ============================================================================
 
-fn cooldown_factor(last_review_at: Option<i64>, now_ms: i64, cooldown_secs: f64) -> f64 {
-    match last_review_at {
-        None => 1.0,
-        Some(last) => {
-            let elapsed_secs = (now_ms - last) as f64 / 1000.0;
-            1.0 - (-elapsed_secs / cooldown_secs).exp()
-        }
-    }
-}
-
-fn gaussian_recall_bonus(recall: f64, center: f64, sigma: f64) -> f64 {
-    let d = (recall - center) / sigma;
-    (-0.5 * d * d).exp()
-}
-
-fn score_review_word(
-    mdm_state: &MdmState,
-    total_attempts: u32,
-    review_population: usize,
-    now_ms: i64,
-    mm: &MemoryModelConfig,
-    ws: &WordSelectorConfig,
-) -> (f64, f64) {
-    let recall = recall_probability(mdm_state, now_ms, mm);
-
-    let sigmoid = |x: f64| 1.0 / (1.0 + (-x).exp());
-    let mut score = 1.0 - recall;
-    score +=
-        mm.recall_risk_bonus * sigmoid((mm.recall_risk_threshold - recall) * ws.sigmoid_steepness);
-
-    let g_bonus = gaussian_recall_bonus(recall, ws.optimal_recall_center, ws.optimal_recall_sigma);
-    let g_bonus = g_bonus.max(0.15); // Urgency floor: prevent score collapse for weak words
-    let cd = cooldown_factor(mdm_state.last_review_at, now_ms, ws.spacing_cooldown_secs);
-    let ucb_bonus = if review_population <= 1 {
-        0.0
-    } else {
-        let numerator = (review_population as f64 + 1.0).ln();
-        let denominator = total_attempts as f64 + 1.0;
-        let bonus = ws.review_ucb_weight * (numerator / denominator).sqrt();
-        bonus.min(ws.review_ucb_max_bonus)
-    };
-
-    (score * g_bonus * cd + ucb_bonus, recall)
-}
-
 fn run_amas_sim(
     words: &[f64],
     seed: u64,
     scenario: SimScenario,
     config: &MemoryModelConfig,
-    selector_config: &WordSelectorConfig,
+    _selector_config: &WordSelectorConfig,
 ) -> SimResult {
     let mut rng = StdRng::seed_from_u64(seed);
     let n = words.len();

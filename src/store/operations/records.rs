@@ -106,21 +106,6 @@ impl Store {
         }
     }
 
-    fn set_user_stats_agg(&self, user_id: &str, stats: &UserStatsAgg) -> Result<(), StoreError> {
-        let conn = self.conn()?;
-        conn.execute(
-            "INSERT INTO user_stats (user_id, total_records, correct_records, word_ids_json, session_ids_json)
-             VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(user_id) DO UPDATE SET
-                total_records=?2, correct_records=?3, word_ids_json=?4, session_ids_json=?5",
-            params![
-                user_id, stats.total_records as i64, stats.correct_records as i64,
-                Self::serialize_json(&stats.word_ids)?, Self::serialize_json(&stats.session_ids)?,
-            ],
-        )?;
-        Ok(())
-    }
-
     pub fn count_active_users_since(&self, since: DateTime<Utc>) -> Result<usize, StoreError> {
         let conn = self.conn()?;
         let count: i64 = conn.query_row(

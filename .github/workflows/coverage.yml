@@ -13,9 +13,12 @@ jobs:
   backend-coverage:
     name: Backend Coverage (Rust)
     runs-on: ubuntu-latest
+    env:
+      # 不可测入口/启动代码（main, bin, signal handler, tracing init, lib bootstrap）不纳入覆盖率分母
+      COVERAGE_IGNORE_REGEX: '(tests/|src/main\.rs|src/bin/|src/logging\.rs|src/lib\.rs)'
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -24,15 +27,19 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
 
-      - name: Generate coverage
+      - name: Generate coverage (lcov + text summary)
         env:
           JWT_SECRET: test_secret_key_for_jwt_signing_minimum_64_characters_long_abcd
           ADMIN_JWT_SECRET: test_admin_secret_key_for_jwt_signing_minimum_64_chars_long
         run: |
           cargo llvm-cov --all-features --workspace --lcov \
-            --ignore-filename-regex="tests/" \
-            --ignore-run-fail \
+            --ignore-filename-regex="$COVERAGE_IGNORE_REGEX" \
             --output-path lcov.info
+          cargo llvm-cov report --summary-only \
+            --ignore-filename-regex="$COVERAGE_IGNORE_REGEX" \
+            --fail-under-lines 99 \
+            --fail-under-functions 99 \
+            --fail-under-regions 99
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
@@ -49,7 +56,7 @@ jobs:
         working-directory: ./frontend
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -61,10 +68,7 @@ jobs:
         run: npm ci
 
       - name: Run tests with coverage
-        # Note: continue-on-error is used because some frontend tests are currently failing
-        # TODO: Remove continue-on-error once all tests are fixed
         run: npm run test:coverage
-        continue-on-error: true
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
