@@ -19,6 +19,10 @@ export default defineConfig({
     environment: 'happy-dom',
     setupFiles: ['./tests/setup.ts'],
     exclude: ['e2e/**', 'node_modules/**'],
+    // 用 child_process forks 替代 worker_threads，消除 vitest+v8 coverage+tinypool
+    // 在 Linux/Node 20 上 worker 销毁时 libuv 触发的 IPC channel closed 偶发崩溃。
+    // 代价：略慢一点，但稳定。
+    pool: 'forks',
     env: {
       VITE_API_BASE_URL: TEST_API_BASE_URL,
     },
