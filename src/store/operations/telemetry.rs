@@ -310,3 +310,165 @@ impl Store {
         Ok((records, total))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_store() -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let store = Store::open(path.to_str().unwrap(), 5000, 4).unwrap();
+        (dir, store)
+    }
+
+    fn full_summary_input() -> TelemetrySummaryInput {
+        TelemetrySummaryInput {
+            cpu_cores: Some(8),
+            memory_gb: Some(16.0),
+            screen_width: Some(1920),
+            screen_height: Some(1080),
+            pixel_ratio: Some(2.0),
+            os_name: Some("macOS".into()),
+            browser_name: Some("Chrome".into()),
+            browser_version: Some("130".into()),
+            timezone: Some("Asia/Shanghai".into()),
+            language: Some("zh-CN".into()),
+            touch_support: Some(false),
+            online_status: Some(true),
+            session_duration_secs: 60,
+            actions_per_min: 12.5,
+            error_count: 1,
+            avg_response_time_ms: 250.0,
+            current_route: Some("/home".into()),
+            click_count: Some(8),
+            click_targets_json: Some(r#"["btn-a","btn-b"]"#.into()),
+            scroll_depth_pct: Some(0.75),
+            visibility_changes: Some(3),
+            route_changes: Some(5),
+            feature_usage_json: r#"{"feat-a":2}"#.into(),
+        }
+    }
+
+    #[test]
+    fn insert_telemetry_creates_event_row() {
+        let (_t, store) = test_store();
+        store
+            .insert_telemetry(
+                "id1",
+                "dev",
+                "user",
+                "periodic",
+                Some("req-1"),
+                "{\"k\":1}",
+                "2026-05-01T12:00:00Z",
+            )
+            .unwrap();
+        let (rows, total) = store.get_telemetry_by_device("dev", 10, 0).unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(rows.len(), 1);
+        let r = &rows[0];
+        assert_eq!(r.id, "id1");
+        assert_eq!(r.event_type, "periodic");
+        assert_eq!(r.triggered_by_request_id.as_deref(), Some("req-1"));
+        assert_eq!(r.payload["k"], serde_json::json!(1));
+    }
+
+    #[test]
+    fn insert_with_summary_persists_both_tables() {
+        let (_t, store) = test_store();
+        let summary = full_summary_input();
+        store
+            .insert_telemetry_and_summary(
+                "id2",
+                "dev2",
+                "u",
+                "session_start",
+                None,
+                "{}",
+                "2026-05-01T12:00:00Z",
+                &summary,
+            )
+            .unwrap();
+        let (evt, total_evt) = store.get_telemetry_by_device("dev2", 10, 0).unwrap();
+        assert_eq!(total_evt, 1);
+        assert_eq!(evt[0].triggered_by_request_id, None);
+
+        let (sums, total) = store.get_telemetry_summaries_by_device("dev2", 10, 0).unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(sums.len(), 1);
+        let s = &sums[0];
+        assert_eq!(s.id, "id2");
+        assert_eq!(s.device_profile.cpu_cores, Some(8));
+        assert_eq!(s.device_profile.touch_support, Some(false));
+        assert_eq!(s.device_profile.online_status, Some(true));
+        assert_eq!(s.session_stats.session_duration_secs, 60);
+        assert_eq!(s.behavior_summary.current_route.as_deref(), Some("/home"));
+        let targets = s.behavior_summary.click_targets.as_ref().unwrap();
+        assert_eq!(targets[0], serde_json::json!("btn-a"));
+        assert_eq!(s.feature_usage["feat-a"], serde_json::json!(2));
+    }
+
+    #[test]
+    fn pagination_respects_limit_and_offset() {
+        let (_t, store) = test_store();
+        for i in 0..3 {
+            store
+                .insert_telemetry(
+                    &format!("e{i}"),
+                    "dev",
+                    "u",
+                    "periodic",
+                    None,
+                    "{}",
+                    &format!("2026-05-01T12:00:0{i}Z"),
+                )
+                .unwrap();
+        }
+        let (page, total) = store.get_telemetry_by_device("dev", 2, 0).unwrap();
+        assert_eq!(total, 3);
+        assert_eq!(page.len(), 2);
+        let (page2, _) = store.get_telemetry_by_device("dev", 2, 2).unwrap();
+        assert_eq!(page2.len(), 1);
+    }
+
+    #[test]
+    fn empty_device_returns_empty_zero() {
+        let (_t, store) = test_store();
+        let (rows, total) = store.get_telemetry_by_device("nope", 10, 0).unwrap();
+        assert!(rows.is_empty());
+        assert_eq!(total, 0);
+        let (sums, total_s) = store.get_telemetry_summaries_by_device("nope", 10, 0).unwrap();
+        assert!(sums.is_empty());
+        assert_eq!(total_s, 0);
+    }
+
+    #[test]
+    fn summary_row_with_null_click_targets_and_corrupt_feature_usage_recovers_gracefully() {
+        let (_t, store) = test_store();
+        let mut summary = full_summary_input();
+        summary.click_targets_json = None;
+        summary.feature_usage_json = "not-json".into();
+        store
+            .insert_telemetry_and_summary(
+                "id3", "dev3", "u", "periodic", None, "{}", "2026-05-01T12:00:00Z", &summary,
+            )
+            .unwrap();
+        let (sums, _) = store.get_telemetry_summaries_by_device("dev3", 10, 0).unwrap();
+        let s = &sums[0];
+        assert!(s.behavior_summary.click_targets.is_none());
+        assert!(s.feature_usage.is_object());
+        assert!(s.feature_usage.as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn record_payload_corrupt_falls_back_to_empty_object() {
+        let (_t, store) = test_store();
+        store
+            .insert_telemetry("id4", "dev4", "u", "periodic", None, "not-json", "2026-05-01T12:00:00Z")
+            .unwrap();
+        let (rows, _) = store.get_telemetry_by_device("dev4", 10, 0).unwrap();
+        assert!(rows[0].payload.is_object());
+        assert!(rows[0].payload.as_object().unwrap().is_empty());
+    }
+}
