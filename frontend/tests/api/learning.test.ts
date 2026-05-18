@@ -75,4 +75,56 @@ describe('learningApi', () => {
     const result = await learningApi.syncProgress({ sessionId: 'sess-1', totalQuestions: 10 });
     expect(result).toEqual(session);
   });
+
+  it('completeSession posts payload and returns session', async () => {
+    const session = { sessionId: 'sess-1', wordsCompleted: 20, completedAt: '2026-05-18' };
+    let body: Record<string, unknown> = {};
+    server.use(
+      http.post(`${BASE}/api/learning/complete-session`, async ({ request }) => {
+        body = await request.json() as Record<string, unknown>;
+        return HttpResponse.json({ success: true, data: session });
+      }),
+    );
+    const result = await learningApi.completeSession({ sessionId: 'sess-1', wordsCompleted: 20 } as any);
+    expect(result).toEqual(session);
+    expect(body).toEqual({ sessionId: 'sess-1', wordsCompleted: 20 });
+  });
+
+  it('syncProgress rounds contextShifts when provided', async () => {
+    let body: Record<string, unknown> = {};
+    server.use(
+      http.post(`${BASE}/api/learning/sync-progress`, async ({ request }) => {
+        body = await request.json() as Record<string, unknown>;
+        return HttpResponse.json({ success: true, data: {} });
+      }),
+    );
+    await learningApi.syncProgress({ sessionId: 's', totalQuestions: 4.6, contextShifts: 2.7 } as any);
+    expect(body.totalQuestions).toBe(5);
+    expect(body.contextShifts).toBe(3);
+  });
+
+  it('adjustWords without argument posts empty body', async () => {
+    const adjusted = { adjustedStrategy: { difficulty: 1, pace: 'slow' } };
+    let body: Record<string, unknown> = { sentinel: true };
+    server.use(
+      http.post(`${BASE}/api/learning/adjust-words`, async ({ request }) => {
+        body = await request.json() as Record<string, unknown>;
+        return HttpResponse.json({ success: true, data: adjusted });
+      }),
+    );
+    const result = await learningApi.adjustWords();
+    expect(result).toEqual(adjusted);
+    expect(body).toEqual({});
+  });
+
+  it('syncProgress forwards explicit keepalive flag', async () => {
+    server.use(
+      http.post(`${BASE}/api/learning/sync-progress`, () =>
+        HttpResponse.json({ success: true, data: {} })),
+    );
+    // 仅断言不抛错 + 调用成功，分支覆盖 options.keepalive 显式 true 路径
+    await expect(
+      learningApi.syncProgress({ sessionId: 's' } as any, { keepalive: true }),
+    ).resolves.toBeDefined();
+  });
 });

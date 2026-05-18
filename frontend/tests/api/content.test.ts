@@ -91,4 +91,18 @@ describe('contentApi', () => {
     const result = await contentApi.getConfusionPairs('w1');
     expect(result).toEqual(pairs);
   });
+
+  it('setMorphemes POSTs morphemes payload and returns persisted value', async () => {
+    const morphemes = [{ type: 'root', value: 'lect' }];
+    let body: Record<string, unknown> = {};
+    server.use(
+      http.post(`${BASE}/api/content/morphemes/w7`, async ({ request }) => {
+        body = await request.json() as Record<string, unknown>;
+        return HttpResponse.json({ success: true, data: { wordId: 'w7', morphemes } });
+      }),
+    );
+    const result = await contentApi.setMorphemes('w7', morphemes as any);
+    expect(result).toEqual({ wordId: 'w7', morphemes });
+    expect(body).toEqual({ morphemes });
+  });
 });
