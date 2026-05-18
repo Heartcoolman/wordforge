@@ -536,4 +536,177 @@ mod tests {
         assert_eq!(got.total_attempts, 5);
         assert_eq!(got.state, WordState::Mastered);
     }
+
+    use crate::store::operations::records::{LearningRecord, RecordType};
+    use crate::store::StoreError;
+
+    fn tempfile_store() -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let store = Store::open(path.to_str().unwrap(), 5000, 4).unwrap();
+        (dir, store)
+    }
+
+    #[test]
+    fn word_state_as_str_and_from_str_roundtrip() {
+        for st in [
+            WordState::New,
+            WordState::Learning,
+            WordState::Reviewing,
+            WordState::Mastered,
+            WordState::Forgotten,
+        ] {
+            let s = st.as_str();
+            let parsed = WordState::from_str(s).unwrap();
+            assert_eq!(parsed, st);
+        }
+        assert!(matches!(
+            WordState::from_str("bogus"),
+            Err(StoreError::Validation(_))
+        ));
+    }
+
+    #[test]
+    fn validation_rejects_empty_ids() {
+        let store = test_store();
+        assert!(matches!(
+            store.get_word_learning_state("", "w").unwrap_err(),
+            StoreError::Validation(_)
+        ));
+        assert!(matches!(
+            store.delete_word_learning_state("u", "").unwrap_err(),
+            StoreError::Validation(_)
+        ));
+        let mut bad = mock_word_learning_state("", "w", 1);
+        bad.user_id = "".into();
+        assert!(matches!(
+            store.set_word_learning_state(&bad).unwrap_err(),
+            StoreError::Validation(_)
+        ));
+    }
+
+    #[test]
+    fn get_word_states_batch_empty_input_returns_empty() {
+        let store = test_store();
+        let v = store.get_word_states_batch("u1", &[]).unwrap();
+        assert!(v.is_empty());
+    }
+
+    #[test]
+    fn get_due_words_zero_limit_short_circuits() {
+        let store = test_store();
+        let v = store.get_due_words("u1", 0).unwrap();
+        assert!(v.is_empty());
+    }
+
+    #[test]
+    fn list_all_user_word_states_orders_by_updated_desc() {
+        let store = test_store();
+        let now = Utc::now();
+        let mut s1 = mock_word_learning_state("u1", "w1", 1);
+        s1.updated_at = now - Duration::seconds(10);
+        let mut s2 = mock_word_learning_state("u1", "w2", 1);
+        s2.updated_at = now;
+        store.set_word_learning_state(&s1).unwrap();
+        store.set_word_learning_state(&s2).unwrap();
+        let all = store.list_all_user_word_states("u1").unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].word_id, "w2");
+    }
+
+    #[test]
+    fn due_review_eta_returns_zero_when_no_due() {
+        let store = test_store();
+        // 没有 word_learning_states
+        assert_eq!(store.get_due_review_estimated_minutes("u1").unwrap(), 0);
+    }
+
+    #[test]
+    fn due_review_eta_uses_avg_response_time_when_available() {
+        let (_t, store) = tempfile_store();
+        let now = Utc::now();
+        // 一条 due 词条
+        let mut state = mock_word_learning_state("u1", "w1", 1);
+        state.next_review_date = Some(now - Duration::minutes(1));
+        store.set_word_learning_state(&state).unwrap();
+        // 一条 learning record，avg response time 600ms
+        let r = LearningRecord {
+            id: "r1".into(),
+            user_id: "u1".into(),
+            word_id: "w1".into(),
+            is_correct: true,
+            response_time_ms: 600,
+            session_id: None,
+            created_at: now,
+            record_type: RecordType::All,
+        };
+        store.create_record(&r).unwrap();
+        let eta = store.get_due_review_estimated_minutes("u1").unwrap();
+        // 1 个词 * 600 ms = 600 ms -> 0.01 min ceil -> 1
+        assert_eq!(eta, 1);
+    }
+
+    #[test]
+    fn due_review_eta_falls_back_to_5000ms_when_avg_too_small() {
+        let (_t, store) = tempfile_store();
+        let now = Utc::now();
+        let mut state = mock_word_learning_state("u1", "w1", 1);
+        state.next_review_date = Some(now - Duration::minutes(1));
+        store.set_word_learning_state(&state).unwrap();
+        // 平均 100ms，低于 500ms 阈值 → 回退 5000ms
+        let r = LearningRecord {
+            id: "r1".into(),
+            user_id: "u1".into(),
+            word_id: "w1".into(),
+            is_correct: true,
+            response_time_ms: 100,
+            session_id: None,
+            created_at: now,
+            record_type: RecordType::All,
+        };
+        store.create_record(&r).unwrap();
+        let eta = store.get_due_review_estimated_minutes("u1").unwrap();
+        // 1 个词 * 5000 ms = 5s -> ceil(5/60) = 1
+        assert_eq!(eta, 1);
+    }
+
+    #[test]
+    fn word_state_stats_filtered_by_record_type() {
+        let (_t, store) = tempfile_store();
+        // 两个 word state，仅 w1 在 learning record 中
+        let mut s1 = mock_word_learning_state("u1", "w1", 1);
+        s1.state = WordState::Learning;
+        store.set_word_learning_state(&s1).unwrap();
+        let mut s2 = mock_word_learning_state("u1", "w2", 1);
+        s2.state = WordState::Mastered;
+        store.set_word_learning_state(&s2).unwrap();
+
+        let r = LearningRecord {
+            id: "r1".into(),
+            user_id: "u1".into(),
+            word_id: "w1".into(),
+            is_correct: true,
+            response_time_ms: 100,
+            session_id: None,
+            created_at: Utc::now(),
+            record_type: RecordType::Learning,
+        };
+        store.create_record(&r).unwrap();
+        let stats = store
+            .get_word_state_stats_filtered("u1", Some(RecordType::Learning))
+            .unwrap();
+        assert_eq!(stats.learning, 1);
+        assert_eq!(stats.mastered, 0);
+    }
+
+    #[test]
+    fn write_with_next_review_date_persists_and_reads_back() {
+        let store = test_store();
+        let now = Utc::now();
+        let mut s = mock_word_learning_state("u1", "w1", 1);
+        s.next_review_date = Some(now);
+        store.set_word_learning_state(&s).unwrap();
+        let got = store.get_word_learning_state("u1", "w1").unwrap().unwrap();
+        assert!(got.next_review_date.is_some());
+    }
 }
