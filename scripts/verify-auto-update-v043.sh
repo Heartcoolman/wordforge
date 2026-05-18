@@ -65,6 +65,7 @@ download_release_asset() {
 
 download_release_asset "${OLD_TAG}"
 chmod +x "${INSTALL_DIR}/wordforge"
+mkdir -p "${INSTALL_DIR}/data" "${INSTALL_DIR}/logs"
 
 cat > "${INSTALL_DIR}/.env" <<EOF
 HOST=127.0.0.1
