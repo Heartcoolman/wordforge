@@ -188,6 +188,358 @@ describe('adminApi', () => {
     expect(result).toEqual(updated);
   });
 
+  it('verifyToken returns admin identity', async () => {
+    server.use(
+      http.get(`${BASE}/api/admin/auth/verify`, () =>
+        HttpResponse.json({ success: true, data: { id: 'a1', email: 'a@e' } })),
+    );
+    const result = await adminApi.verifyToken();
+    expect(result).toEqual({ id: 'a1', email: 'a@e' });
+  });
+
+  it('resetUserPassword posts and returns reset key', async () => {
+    server.use(
+      http.post(`${BASE}/api/admin/users/u-1/reset-password`, () =>
+        HttpResponse.json({ success: true, data: { resetKey: 'k', expiresInHours: 24 } })),
+    );
+    const result = await adminApi.resetUserPassword('u-1');
+    expect(result).toEqual({ resetKey: 'k', expiresInHours: 24 });
+  });
+
+  it('setUserPassword sends new password and returns reset confirmation', async () => {
+    let body: Record<string, unknown> = {};
+    server.use(
+      http.post(`${BASE}/api/admin/users/u-2/set-password`, async ({ request }) => {
+        body = await request.json() as Record<string, unknown>;
+        return HttpResponse.json({ success: true, data: { passwordReset: true, userId: 'u-2', sessionsRevoked: 3 } });
+      }),
+    );
+    const result = await adminApi.setUserPassword('u-2', 'newpass');
+    expect(body).toEqual({ newPassword: 'newpass' });
+    expect(result).toEqual({ passwordReset: true, userId: 'u-2', sessionsRevoked: 3 });
+  });
+
+  it('getDailyActiveUsers without days omits param', async () => {
+    server.use(
+      http.get(`${BASE}/api/admin/analytics/daily-active-users`, ({ request }) => {
+        const url = new URL(request.url);
+        expect(url.searchParams.has('days')).toBe(false);
+        return HttpResponse.json({ success: true, data: [] });
+      }),
+    );
+    await adminApi.getDailyActiveUsers();
+  });
+
+  it('getDailyActiveUsers forwards days', async () => {
+    server.use(
+      http.get(`${BASE}/api/admin/analytics/daily-active-users`, ({ request }) => {
+        const url = new URL(request.url);
+        expect(url.searchParams.get('days')).toBe('14');
+        return HttpResponse.json({ success: true, data: [{ date: '2026-05-18', activeUsers: 100 }] });
+      }),
+    );
+    const result = await adminApi.getDailyActiveUsers(14);
+    expect(result).toEqual([{ date: '2026-05-18', activeUsers: 100 }]);
+  });
+
+  it('getDailyRecords with and without days', async () => {
+    server.use(
+      http.get(`${BASE}/api/admin/analytics/daily-records`, ({ request }) => {
+        const url = new URL(request.url);
+        const days = url.searchParams.get('days');
+        return HttpResponse.json({ success: true, data: days ? [{ date: '2026-05-18', count: 1 }] : [] });
+      }),
+    );
+    expect(await adminApi.getDailyRecords()).toEqual([]);
+    expect(await adminApi.getDailyRecords(7)).toEqual([{ date: '2026-05-18', count: 1 }]);
+  });
+
+  it('getStudyOverview passes both days and category', async () => {
+    server.use(
+      http.get(`${BASE}/api/admin/analytics/study-overview`, ({ request }) => {
+        const url = new URL(request.url);
+        expect(url.searchParams.get('days')).toBe('7');
+        expect(url.searchParams.get('category')).toBe('cet4');
+        return HttpResponse.json({ success: true, data: { totals: {} } });
+      }),
+    );
+    await adminApi.getStudyOverview(7, 'cet4');
+  });
+
+  it('getRecordTypes/getWordStateDistribution/getRetentionCurve send their params', async () => {
+    server.use(
+      http.get(`${BASE}/api/admin/analytics/record-types`, ({ request }) => {
+        expect(new URL(request.url).searchParams.get('days')).toBe('30');
+        return HttpResponse.json({ success: true, data: { typed: 0, untyped: 0 } });
+      }),
+      http.get(`${BASE}/api/admin/analytics/word-states`, ({ request }) => {
+        expect(new URL(request.url).searchParams.get('category')).toBe('toefl');
+        return HttpResponse.json({ success: true, data: { learning: 0, mastered: 0 } });
+      }),
+      http.get(`${BASE}/api/admin/analytics/retention-curve`, ({ request }) => {
+        // 不传 category 时，category 不应在 URL 中
+        expect(new URL(request.url).searchParams.has('category')).toBe(false);
+        return HttpResponse.json({ success: true, data: { points: [] } });
+      }),
+    );
+    await adminApi.getRecordTypes(30);
+    await adminApi.getWordStateDistribution('toefl');
+    await adminApi.getRetentionCurve();
+  });
+
+  it('getRecordTypes/getWordStateDistribution/getRetentionCurve also support undefined-arg branch', async () => {
+    server.use(
+      http.get(`${BASE}/api/admin/analytics/record-types`, ({ request }) => {
+        expect(new URL(request.url).searchParams.has('days')).toBe(false);
+        return HttpResponse.json({ success: true, data: { typed: 0, untyped: 0 } });
+      }),
+      http.get(`${BASE}/api/admin/analytics/word-states`, ({ request }) => {
+        expect(new URL(request.url).searchParams.has('category')).toBe(false);
+        return HttpResponse.json({ success: true, data: { learning: 0, mastered: 0 } });
+      }),
+      http.get(`${BASE}/api/admin/analytics/retention-curve`, ({ request }) => {
+        expect(new URL(request.url).searchParams.get('category')).toBe('ielts');
+        return HttpResponse.json({ success: true, data: { points: [] } });
+      }),
+    );
+    await adminApi.getRecordTypes();
+    await adminApi.getWordStateDistribution();
+    await adminApi.getRetentionCurve('ielts');
+  });
+
+  it('checkUpdate returns update check payload', async () => {
+    server.use(
+      http.get(`${BASE}/api/admin/monitoring/check-update`, () =>
+        HttpResponse.json({ success: true, data: { hasUpdate: false, latestVersion: '1.0.0' } })),
+    );
+    expect(await adminApi.checkUpdate()).toEqual({ hasUpdate: false, latestVersion: '1.0.0' });
+  });
+
+  it('updatesStatus/updatesCheck/updatesApply hit their endpoints', async () => {
+    server.use(
+      http.get(`${BASE}/api/admin/updates/status`, () =>
+        HttpResponse.json({ success: true, data: { state: 'idle' } })),
+      http.post(`${BASE}/api/admin/updates/check`, () =>
+        HttpResponse.json({ success: true, data: { state: 'checking' } })),
+      http.post(`${BASE}/api/admin/updates/apply`, async ({ request }) => {
+        const body = await request.json() as Record<string, unknown>;
+        expect(body).toEqual({ targetVersion: '1.2.3', confirmCurrentVersion: '1.2.2' });
+        return HttpResponse.json({ success: true, data: { restarting: true } });
+      }),
+    );
+    expect(await adminApi.updatesStatus()).toEqual({ state: 'idle' });
+    expect(await adminApi.updatesCheck()).toEqual({ state: 'checking' });
+    expect(await adminApi.updatesApply('1.2.3', '1.2.2')).toEqual({ restarting: true });
+  });
+
+  it('broadcastUpdate sends payload (or empty when absent)', async () => {
+    let bodyA: Record<string, unknown> = {};
+    let bodyB: Record<string, unknown> = {};
+    server.use(
+      http.post(`${BASE}/api/admin/broadcast-update`, async ({ request }) => {
+        const body = await request.json() as Record<string, unknown>;
+        if (body.version === '1.1.0') {
+          bodyA = body;
+        } else {
+          bodyB = body;
+        }
+        return HttpResponse.json({ success: true, data: { broadcasted: true } });
+      }),
+    );
+    await adminApi.broadcastUpdate({ version: '1.1.0', message: 'hi' });
+    await adminApi.broadcastUpdate();
+    expect(bodyA).toEqual({ version: '1.1.0', message: 'hi' });
+    expect(bodyB).toEqual({});
+  });
+
+  it('getClients returns sseLive + recentlyActive sections', async () => {
+    const payload = { sseLive: [], recentlyActive: [] };
+    server.use(
+      http.get(`${BASE}/api/admin/clients`, () =>
+        HttpResponse.json({ success: true, data: payload })),
+    );
+    expect(await adminApi.getClients()).toEqual(payload);
+  });
+
+  it('banClient sends reason when provided and omits body otherwise', async () => {
+    const bodies: unknown[] = [];
+    server.use(
+      http.post(`${BASE}/api/admin/clients/d-1/ban`, async ({ request }) => {
+        const text = await request.text();
+        bodies.push(text);
+        return HttpResponse.json({ success: true, data: { banned: true, deviceId: 'd-1' } });
+      }),
+    );
+    await adminApi.banClient('d-1', 'spam');
+    await adminApi.banClient('d-1');
+    expect(bodies[0]).toBe(JSON.stringify({ reason: 'spam' }));
+    expect(bodies[1]).toBe('');
+  });
+
+  it('unbanClient hits unban endpoint', async () => {
+    server.use(
+      http.post(`${BASE}/api/admin/clients/d-9/unban`, () =>
+        HttpResponse.json({ success: true, data: { banned: false, deviceId: 'd-9' } })),
+    );
+    expect(await adminApi.unbanClient('d-9')).toEqual({ banned: false, deviceId: 'd-9' });
+  });
+
+  it('requestTelemetry returns generated requestId', async () => {
+    server.use(
+      http.post(`${BASE}/api/admin/clients/d-2/request-telemetry`, () =>
+        HttpResponse.json({ success: true, data: { requestId: 'req-1' } })),
+    );
+    expect(await adminApi.requestTelemetry('d-2')).toEqual({ requestId: 'req-1' });
+  });
+
+  it('getTelemetry forwards limit/offset query params', async () => {
+    server.use(
+      http.get(`${BASE}/api/admin/telemetry/d-3`, ({ request }) => {
+        const url = new URL(request.url);
+        expect(url.searchParams.get('limit')).toBe('50');
+        expect(url.searchParams.get('offset')).toBe('100');
+        return HttpResponse.json({ success: true, data: { records: [], total: 0 } });
+      }),
+    );
+    await adminApi.getTelemetry('d-3', { limit: 50, offset: 100 });
+  });
+
+  it('wbCenterBrowse/Preview/Import/Updates/Sync all hit admin endpoints', async () => {
+    server.use(
+      http.get(`${BASE}/api/admin/wordbook-center/browse`, () =>
+        HttpResponse.json({ success: true, data: [] })),
+      http.get(`${BASE}/api/admin/wordbook-center/browse/wb-1`, ({ request }) => {
+        expect(new URL(request.url).searchParams.get('page')).toBe('1');
+        return HttpResponse.json({ success: true, data: { id: 'wb-1', title: 't', words: [], total: 0 } });
+      }),
+      http.post(`${BASE}/api/admin/wordbook-center/import/wb-1`, () =>
+        HttpResponse.json({ success: true, data: { imported: 1, skipped: 0, errors: [] } })),
+      http.get(`${BASE}/api/admin/wordbook-center/updates`, () =>
+        HttpResponse.json({ success: true, data: [] })),
+      http.post(`${BASE}/api/admin/wordbook-center/updates/wb-1/sync`, () =>
+        HttpResponse.json({ success: true, data: { updated: 1, added: 0, removed: 0 } })),
+    );
+    expect(await adminApi.wbCenterBrowse()).toEqual([]);
+    expect(await adminApi.wbCenterPreview('wb-1', { page: 1 })).toMatchObject({ id: 'wb-1' });
+    expect(await adminApi.wbCenterImport('wb-1')).toMatchObject({ imported: 1 });
+    expect(await adminApi.wbCenterUpdates()).toEqual([]);
+    expect(await adminApi.wbCenterSync('wb-1')).toMatchObject({ updated: 1 });
+  });
+
+  it('amasListVersions sends default limit and amasGetVersion fetches by hash', async () => {
+    server.use(
+      http.get(`${BASE}/api/admin/amas/config/versions`, ({ request }) => {
+        expect(new URL(request.url).searchParams.get('limit')).toBe('50');
+        return HttpResponse.json({ success: true, data: [{ id: 1, versionHash: 'h1' }] });
+      }),
+      http.get(`${BASE}/api/admin/amas/config/versions/h1`, () =>
+        HttpResponse.json({ success: true, data: { id: 1, versionHash: 'h1', snapshotJson: {} } })),
+    );
+    expect(await adminApi.amasListVersions()).toEqual([{ id: 1, versionHash: 'h1' }]);
+    expect(await adminApi.amasGetVersion('h1')).toMatchObject({ versionHash: 'h1' });
+  });
+
+  it('amasRestoreVersion posts note and returns updated version', async () => {
+    let body: Record<string, unknown> = {};
+    server.use(
+      http.post(`${BASE}/api/admin/amas/config/versions/h2/restore`, async ({ request }) => {
+        body = await request.json() as Record<string, unknown>;
+        return HttpResponse.json({ success: true, data: { updated: true, versionHash: 'h2', versionId: 2 } });
+      }),
+    );
+    await adminApi.amasRestoreVersion('h2', 'reverting');
+    expect(body).toEqual({ note: 'reverting' });
+  });
+
+  it('amasUpdateConfigWithNote appends note query when provided', async () => {
+    let queryNote: string | null = null;
+    server.use(
+      http.put(`${BASE}/api/admin/amas/config`, ({ request }) => {
+        queryNote = new URL(request.url).searchParams.get('note');
+        return HttpResponse.json({ success: true, data: { updated: true, versionHash: 'h3', versionId: 3 } });
+      }),
+    );
+    await adminApi.amasUpdateConfigWithNote({} as any, 'tune & cap');
+    expect(queryNote).toBe('tune & cap');
+  });
+
+  it('amasUpdateConfigWithNote omits note query when undefined', async () => {
+    let hadNote = true;
+    server.use(
+      http.put(`${BASE}/api/admin/amas/config`, ({ request }) => {
+        hadNote = new URL(request.url).searchParams.has('note');
+        return HttpResponse.json({ success: true, data: { updated: true, versionHash: 'h4', versionId: 4 } });
+      }),
+    );
+    await adminApi.amasUpdateConfigWithNote({} as any);
+    expect(hadNote).toBe(false);
+  });
+
+  it('amas metrics/anomalies/distribution/compare each pass their default query params', async () => {
+    server.use(
+      http.get(`${BASE}/api/admin/amas/metrics/timeseries`, ({ request }) => {
+        expect(new URL(request.url).searchParams.get('days')).toBe('7');
+        return HttpResponse.json({ success: true, data: [] });
+      }),
+      http.get(`${BASE}/api/admin/amas/anomalies`, ({ request }) => {
+        expect(new URL(request.url).searchParams.get('days')).toBe('14');
+        return HttpResponse.json({ success: true, data: { totalEvents: 0, anomalyCount: 0, violationCount: 0, coldStartExplore: 0, coldStartExploit: 0, byDay: [], topViolationFields: [] } });
+      }),
+      http.get(`${BASE}/api/admin/amas/user-state/distribution`, ({ request }) => {
+        const url = new URL(request.url);
+        expect(url.searchParams.get('days')).toBe('2');
+        expect(url.searchParams.get('bins')).toBe('30');
+        return HttpResponse.json({ success: true, data: {} });
+      }),
+      http.get(`${BASE}/api/admin/amas/compare`, ({ request }) => {
+        const url = new URL(request.url);
+        expect(url.searchParams.get('versionA')).toBe('A');
+        expect(url.searchParams.get('versionB')).toBe('B');
+        return HttpResponse.json({ success: true, data: { a: {}, b: {} } });
+      }),
+    );
+    await adminApi.amasMetricsTimeseries();
+    await adminApi.amasAnomaliesOverview(14);
+    await adminApi.amasUserStateDistribution(2, 30);
+    await adminApi.amasCompareVersions('A', 'B');
+  });
+
+  it('amas suggestions: list/get/approve/reject/explain/spend round-trip', async () => {
+    server.use(
+      http.get(`${BASE}/api/admin/amas/suggestions`, ({ request }) => {
+        const url = new URL(request.url);
+        expect(url.searchParams.get('status')).toBe('pending');
+        expect(url.searchParams.get('limit')).toBe('20');
+        return HttpResponse.json({ success: true, data: [{ id: 1 }] });
+      }),
+      http.get(`${BASE}/api/admin/amas/suggestions/1`, () =>
+        HttpResponse.json({ success: true, data: { id: 1 } })),
+      http.post(`${BASE}/api/admin/amas/suggestions/1/approve`, async ({ request }) => {
+        const body = await request.json() as Record<string, unknown>;
+        expect(body).toEqual({ note: 'lgtm' });
+        return HttpResponse.json({ success: true, data: { updated: true, versionHash: 'h', versionId: 1 } });
+      }),
+      http.post(`${BASE}/api/admin/amas/suggestions/2/reject`, async ({ request }) => {
+        const body = await request.json() as Record<string, unknown>;
+        expect(body).toEqual({ note: 'nope' });
+        return HttpResponse.json({ success: true, data: { rejected: true } });
+      }),
+      http.post(`${BASE}/api/admin/amas/suggestions/explain`, async ({ request }) => {
+        const body = await request.json() as Record<string, unknown>;
+        expect(body).toEqual({ path: 'modeling.attentionSmoothing', currentValue: 0.3 });
+        return HttpResponse.json({ success: true, data: { explanation: 'x', model: 'm', costUsd: 0, tokensInput: 0, tokensOutput: 0 } });
+      }),
+      http.get(`${BASE}/api/admin/amas/suggestions/spend`, () =>
+        HttpResponse.json({ success: true, data: { todayCostUsd: 0, todayTokensInput: 0, todayTokensOutput: 0, dailyCapUsd: 1, remainingUsd: 1 } })),
+    );
+    expect(await adminApi.amasListSuggestions('pending', 20)).toEqual([{ id: 1 }]);
+    expect(await adminApi.amasGetSuggestion(1)).toEqual({ id: 1 });
+    expect(await adminApi.amasApproveSuggestion(1, 'lgtm')).toMatchObject({ updated: true });
+    expect(await adminApi.amasRejectSuggestion(2, 'nope')).toEqual({ rejected: true });
+    expect(await adminApi.amasExplainParam('modeling.attentionSmoothing', 0.3)).toMatchObject({ model: 'm' });
+    expect(await adminApi.amasSuggestionSpend()).toMatchObject({ remainingUsd: 1 });
+  });
+
   it('reloadAmas sends config and returns reloaded config', async () => {
     const config = {
       featureFlags: { ensembleEnabled: true, heuristicEnabled: true, igeEnabled: true, swdEnabled: true, mdmEnabled: true },

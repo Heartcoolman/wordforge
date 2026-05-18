@@ -267,3 +267,137 @@ impl Store {
         Ok(deleted > 0)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_store() -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let store = Store::open(path.to_str().unwrap(), 5000, 4).unwrap();
+        (dir, store)
+    }
+
+    fn user() -> String {
+        format!("user-{}", uuid::Uuid::new_v4())
+    }
+
+    fn word() -> String {
+        format!("word-{}", uuid::Uuid::new_v4())
+    }
+
+    #[test]
+    fn favorite_upsert_idempotent_and_returns_current_row() {
+        let store = test_store();
+        let (u, w) = (user(), word());
+        let f1 = store.upsert_word_favorite(&u, &w).unwrap();
+        let f2 = store.upsert_word_favorite(&u, &w).unwrap();
+        assert_eq!(f1.user_id, f2.user_id);
+        assert_eq!(f1.word_id, f2.word_id);
+        // INSERT OR IGNORE => created_at 维持原值
+        assert_eq!(f1.created_at, f2.created_at);
+    }
+
+    #[test]
+    fn favorite_delete_returns_true_then_false() {
+        let store = test_store();
+        let (u, w) = (user(), word());
+        store.upsert_word_favorite(&u, &w).unwrap();
+        assert!(store.delete_word_favorite(&u, &w).unwrap());
+        assert!(!store.delete_word_favorite(&u, &w).unwrap());
+    }
+
+    #[test]
+    fn favorite_list_pagination_and_count() {
+        let store = test_store();
+        let u = user();
+        for _ in 0..3 {
+            store.upsert_word_favorite(&u, &word()).unwrap();
+        }
+        let all = store.list_word_favorites(&u, 10, 0).unwrap();
+        assert_eq!(all.len(), 3);
+        assert_eq!(store.count_word_favorites(&u).unwrap(), 3);
+        let page = store.list_word_favorites(&u, 2, 0).unwrap();
+        assert_eq!(page.len(), 2);
+        let page2 = store.list_word_favorites(&u, 2, 2).unwrap();
+        assert_eq!(page2.len(), 1);
+    }
+
+    #[test]
+    fn favorite_statuses_empty_input_short_circuits() {
+        let store = test_store();
+        let u = user();
+        let m = store.get_word_favorite_statuses(&u, &[]).unwrap();
+        assert!(m.is_empty());
+    }
+
+    #[test]
+    fn favorite_statuses_only_returns_existing() {
+        let store = test_store();
+        let u = user();
+        let w1 = word();
+        let w2 = word();
+        store.upsert_word_favorite(&u, &w1).unwrap();
+        let missing = word();
+        let m = store.get_word_favorite_statuses(&u, &[w1.clone(), w2.clone(), missing.clone()]).unwrap();
+        assert!(m.contains_key(&w1));
+        assert!(!m.contains_key(&w2));
+        assert!(!m.contains_key(&missing));
+    }
+
+    #[test]
+    fn note_create_get_update_delete_roundtrip() {
+        let store = test_store();
+        let (u, w) = (user(), word());
+        let note = store.create_word_note(&u, &w, "initial").unwrap();
+        assert_eq!(note.content, "initial");
+
+        let got = store.get_word_note(&u, &note.id).unwrap().unwrap();
+        assert_eq!(got.content, "initial");
+
+        let updated = store.update_word_note(&u, &note.id, "edited").unwrap().unwrap();
+        assert_eq!(updated.content, "edited");
+
+        assert!(store.delete_word_note(&u, &note.id).unwrap());
+        assert!(store.get_word_note(&u, &note.id).unwrap().is_none());
+        assert!(!store.delete_word_note(&u, &note.id).unwrap());
+    }
+
+    #[test]
+    fn note_list_filters_by_word_when_provided() {
+        let store = test_store();
+        let u = user();
+        let w1 = word();
+        let w2 = word();
+        store.create_word_note(&u, &w1, "a").unwrap();
+        store.create_word_note(&u, &w1, "b").unwrap();
+        store.create_word_note(&u, &w2, "c").unwrap();
+        let all = store.list_word_notes(&u, None).unwrap();
+        assert_eq!(all.len(), 3);
+        let only_w1 = store.list_word_notes(&u, Some(&w1)).unwrap();
+        assert_eq!(only_w1.len(), 2);
+    }
+
+    #[test]
+    fn note_update_missing_returns_none() {
+        let store = test_store();
+        let u = user();
+        let missing = format!("note-{}", uuid::Uuid::new_v4());
+        assert!(store.update_word_note(&u, &missing, "x").unwrap().is_none());
+    }
+
+    #[test]
+    fn favorite_validation_rejects_bad_id() {
+        let store = test_store();
+        let err = store.upsert_word_favorite("", "wid").unwrap_err();
+        assert!(matches!(err, StoreError::Validation(_)));
+    }
+
+    #[test]
+    fn note_validation_rejects_bad_id() {
+        let store = test_store();
+        let err = store.create_word_note("", "wid", "c").unwrap_err();
+        assert!(matches!(err, StoreError::Validation(_)));
+    }
+}
