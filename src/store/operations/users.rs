@@ -440,4 +440,208 @@ mod tests {
         store.delete_user("u1").unwrap();
         assert!(store.get_user_by_id("u1").unwrap().is_none());
     }
+
+    fn tempfile_store() -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let store = Store::open(path.to_str().unwrap(), 5000, 4).unwrap();
+        (dir, store)
+    }
+
+    #[test]
+    fn count_users_and_registered_on_date() {
+        let store = test_store();
+        assert_eq!(store.count_users().unwrap(), 0);
+        store.create_user(&sample_user("u1", "a@b.com")).unwrap();
+        store.create_user(&sample_user("u2", "c@d.com")).unwrap();
+        assert_eq!(store.count_users().unwrap(), 2);
+        let today = Utc::now().date_naive().format("%Y-%m-%d").to_string();
+        assert_eq!(store.count_users_registered_on_date(&today).unwrap(), 2);
+        assert_eq!(store.count_users_registered_on_date("2000-01-01").unwrap(), 0);
+    }
+
+    #[test]
+    fn list_users_pagination_orders_by_created_desc() {
+        let store = test_store();
+        let now = Utc::now();
+        for i in 0..3 {
+            let mut u = sample_user(&format!("u{i}"), &format!("u{i}@e.com"));
+            u.created_at = now - Duration::seconds(i as i64);
+            u.updated_at = u.created_at;
+            store.create_user(&u).unwrap();
+        }
+        let page = store.list_users(2, 0).unwrap();
+        assert_eq!(page.len(), 2);
+        // 最新（u0）在前
+        assert_eq!(page[0].id, "u0");
+        let next = store.list_users(2, 2).unwrap();
+        assert_eq!(next.len(), 1);
+        assert_eq!(next[0].id, "u2");
+    }
+
+    #[test]
+    fn update_user_persists_changes() {
+        let store = test_store();
+        let original = sample_user("u1", "a@b.com");
+        store.create_user(&original).unwrap();
+        let mut updated = original.clone();
+        updated.username = "new-name".into();
+        updated.is_banned = true;
+        store.update_user(&updated).unwrap();
+        let got = store.get_user_by_id("u1").unwrap().unwrap();
+        assert_eq!(got.username, "new-name");
+        assert!(got.is_banned);
+    }
+
+    #[test]
+    fn update_user_with_email_conflict_returns_conflict() {
+        let store = test_store();
+        store.create_user(&sample_user("u1", "a@b.com")).unwrap();
+        store.create_user(&sample_user("u2", "c@d.com")).unwrap();
+        let mut u2 = store.get_user_by_id("u2").unwrap().unwrap();
+        u2.email = "a@b.com".into();
+        assert!(matches!(
+            store.update_user(&u2).unwrap_err(),
+            StoreError::Conflict { .. }
+        ));
+    }
+
+    #[test]
+    fn update_user_missing_returns_not_found() {
+        let store = test_store();
+        let ghost = sample_user("ghost", "ghost@e.com");
+        assert!(matches!(
+            store.update_user(&ghost).unwrap_err(),
+            StoreError::NotFound { .. }
+        ));
+    }
+
+    #[test]
+    fn ban_unban_toggles_state_and_idempotent() {
+        let store = test_store();
+        store.create_user(&sample_user("u1", "a@b.com")).unwrap();
+        assert!(!store.get_user_by_id("u1").unwrap().unwrap().is_banned);
+        store.ban_user("u1").unwrap();
+        assert!(store.get_user_by_id("u1").unwrap().unwrap().is_banned);
+        store.ban_user("u1").unwrap(); // 已禁仍 ok
+        store.unban_user("u1").unwrap();
+        assert!(!store.get_user_by_id("u1").unwrap().unwrap().is_banned);
+        store.unban_user("u1").unwrap();
+        // 不存在用户
+        assert!(matches!(
+            store.ban_user("ghost").unwrap_err(),
+            StoreError::NotFound { .. }
+        ));
+    }
+
+    #[test]
+    fn record_failed_login_locks_after_threshold() {
+        let store = test_store();
+        store.create_user(&sample_user("u1", "a@b.com")).unwrap();
+        let max = crate::constants::MAX_FAILED_LOGIN_ATTEMPTS;
+        let mut last_locked = false;
+        for i in 1..=max {
+            last_locked = store.record_failed_login("u1").unwrap();
+            if i < max {
+                assert!(!last_locked, "should not lock before threshold at attempt {i}");
+            }
+        }
+        assert!(last_locked, "should lock at threshold");
+        assert!(store.is_account_locked("u1").unwrap());
+
+        // 不存在用户
+        assert!(matches!(
+            store.record_failed_login("ghost").unwrap_err(),
+            StoreError::NotFound { .. }
+        ));
+    }
+
+    #[test]
+    fn reset_login_attempts_clears_count_and_unlock_status() {
+        let store = test_store();
+        store.create_user(&sample_user("u1", "a@b.com")).unwrap();
+        let max = crate::constants::MAX_FAILED_LOGIN_ATTEMPTS;
+        for _ in 0..max {
+            let _ = store.record_failed_login("u1").unwrap();
+        }
+        assert!(store.is_account_locked("u1").unwrap());
+        store.reset_login_attempts("u1").unwrap();
+        assert!(!store.is_account_locked("u1").unwrap());
+        // 已清空再次调用幂等
+        store.reset_login_attempts("u1").unwrap();
+    }
+
+    #[test]
+    fn is_account_locked_returns_not_found_for_missing_user() {
+        let store = test_store();
+        assert!(matches!(
+            store.is_account_locked("ghost").unwrap_err(),
+            StoreError::NotFound { .. }
+        ));
+    }
+
+    #[test]
+    fn delete_user_returns_not_found_when_missing() {
+        let store = test_store();
+        assert!(matches!(
+            store.delete_user("ghost").unwrap_err(),
+            StoreError::NotFound { .. }
+        ));
+    }
+
+    #[test]
+    fn delete_user_cleans_user_scoped_tables() {
+        let (_t, store) = tempfile_store();
+        store.create_user(&sample_user("u1", "a@b.com")).unwrap();
+        let now = Utc::now().to_rfc3339();
+        let conn = store.connection().unwrap();
+        conn.execute(
+            "INSERT INTO learning_records (user_id, id, word_id, is_correct, response_time_ms, created_at)
+             VALUES ('u1','r1','w1',1,100,?1)",
+            params![now],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO notifications (user_id, id, notification_type, title, message, created_at)
+             VALUES ('u1','n1','review','t','m',?1)",
+            params![now],
+        ).unwrap();
+        drop(conn);
+        store.delete_user("u1").unwrap();
+        let conn = store.connection().unwrap();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM learning_records WHERE user_id='u1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0);
+        let m: i64 = conn
+            .query_row("SELECT COUNT(*) FROM notifications WHERE user_id='u1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(m, 0);
+    }
+
+    #[test]
+    fn validation_rejects_empty_ids() {
+        let store = test_store();
+        let mut bad = sample_user("", "x@e.com");
+        bad.id = "".into();
+        assert!(matches!(
+            store.create_user(&bad).unwrap_err(),
+            StoreError::Validation(_)
+        ));
+        assert!(matches!(
+            store.get_user_by_id("").unwrap_err(),
+            StoreError::Validation(_)
+        ));
+    }
+
+    #[test]
+    fn record_failed_login_keeps_locked_until_when_below_threshold() {
+        let store = test_store();
+        let mut u = sample_user("u1", "a@b.com");
+        u.locked_until = Some(Utc::now() + Duration::minutes(5));
+        store.create_user(&u).unwrap();
+        // 第一次 failed login 不会重新计算 lock，但保持已有 locked_until
+        let _ = store.record_failed_login("u1").unwrap();
+        let got = store.get_user_by_id("u1").unwrap().unwrap();
+        assert!(got.locked_until.is_some());
+    }
 }

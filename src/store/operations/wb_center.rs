@@ -365,4 +365,99 @@ mod tests {
         assert_eq!(got.version, "2.0");
         assert_eq!(got.word_count, 20);
     }
+
+    fn tempfile_store() -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let store = Store::open(path.to_str().unwrap(), 5000, 4).unwrap();
+        (dir, store)
+    }
+
+    fn sample_history(id: &str, user_id: &str) -> WordbookImportHistory {
+        WordbookImportHistory {
+            id: id.into(),
+            user_id: user_id.into(),
+            source_type: "upload".into(),
+            source_name: Some("mybook.json".into()),
+            source_url: None,
+            status: "success".into(),
+            wordbook_id: Some(format!("wb-{id}")),
+            wordbook_name: Some("My Book".into()),
+            words_imported: Some(100),
+            words_skipped: Some(2),
+            error_message: None,
+            created_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn insert_and_list_history_orders_by_created_desc() {
+        let (_t, store) = tempfile_store();
+        let mut h1 = sample_history("h1", "u1");
+        h1.created_at = Utc::now() - chrono::Duration::seconds(10);
+        let h2 = sample_history("h2", "u1");
+        store.insert_wordbook_import_history(&h1).unwrap();
+        store.insert_wordbook_import_history(&h2).unwrap();
+        // 另一个用户的应被过滤
+        store.insert_wordbook_import_history(&sample_history("h3", "u2")).unwrap();
+        let list = store.list_wordbook_import_history("u1").unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].id, "h2");
+        assert_eq!(list[1].id, "h1");
+    }
+
+    #[test]
+    fn list_history_merges_center_imports_for_missing_entries() {
+        let (_t, store) = tempfile_store();
+        // 仅在 wb_center_imports 中存在
+        store
+            .upsert_wb_center_import(&sample_import("r1", "https://a.com/b", Some("u1")))
+            .unwrap();
+        let list = store.list_wordbook_import_history("u1").unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].source_type, "center");
+        assert_eq!(list[0].wordbook_id.as_deref(), Some("local_r1"));
+        // 当 history 已有同 wordbook_id 时不重复
+        let h = WordbookImportHistory {
+            id: "history-r1".into(),
+            user_id: "u1".into(),
+            source_type: "center".into(),
+            source_name: None,
+            source_url: Some("https://a.com/b".into()),
+            status: "success".into(),
+            wordbook_id: Some("local_r1".into()),
+            wordbook_name: None,
+            words_imported: Some(10),
+            words_skipped: None,
+            error_message: None,
+            created_at: Utc::now(),
+        };
+        store.insert_wordbook_import_history(&h).unwrap();
+        let list = store.list_wordbook_import_history("u1").unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, "history-r1");
+    }
+
+    #[test]
+    fn insert_history_validates_ids() {
+        let store = test_store();
+        let bad_h = WordbookImportHistory {
+            id: "".into(),
+            user_id: "u1".into(),
+            source_type: "x".into(),
+            source_name: None,
+            source_url: None,
+            status: "ok".into(),
+            wordbook_id: None,
+            wordbook_name: None,
+            words_imported: None,
+            words_skipped: None,
+            error_message: None,
+            created_at: Utc::now(),
+        };
+        assert!(matches!(
+            store.insert_wordbook_import_history(&bad_h).unwrap_err(),
+            StoreError::Validation(_)
+        ));
+    }
 }
