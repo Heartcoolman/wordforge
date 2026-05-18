@@ -30,7 +30,18 @@ vi.mock('@/lib/token', () => {
   };
 });
 
-import { ApiError, unauthorized, resetUnauthorized, api } from '@/api/client';
+import {
+  ApiError,
+  unauthorized,
+  resetUnauthorized,
+  api,
+  maintenanceActive,
+  setMaintenanceActive,
+  updateInfo,
+  setUpdateInfo,
+  connectSseStream,
+  connectAmasStateStream,
+} from '@/api/client';
 import { tokenManager } from '@/lib/token';
 
 const tm = tokenManager as unknown as typeof tokenManager & {

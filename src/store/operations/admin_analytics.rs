@@ -555,3 +555,254 @@ impl Store {
         rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::operations::learning_sessions::{
+        LearningSession, SessionStatus, SessionSummary,
+    };
+    use crate::store::operations::records::LearningRecord;
+    use crate::store::operations::users::User;
+    use crate::store::operations::word_states::{WordLearningState, WordState};
+    use chrono::Utc;
+
+    fn test_store() -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let store = Store::open(path.to_str().unwrap(), 5000, 4).unwrap();
+        (dir, store)
+    }
+
+    fn user(store: &Store, id: &str) {
+        let u = User {
+            id: id.into(),
+            email: format!("{id}@e.com"),
+            username: id.into(),
+            password_hash: "h".into(),
+            is_banned: false,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            failed_login_count: 0,
+            locked_until: None,
+        };
+        store.create_user(&u).unwrap();
+    }
+
+    fn seed_record(store: &Store, id: &str, user_id: &str, word_id: &str, rt: RecordType, correct: bool, at: DateTime<Utc>) {
+        let r = LearningRecord {
+            id: id.into(),
+            user_id: user_id.into(),
+            word_id: word_id.into(),
+            is_correct: correct,
+            response_time_ms: 500,
+            session_id: Some("s1".into()),
+            created_at: at,
+            record_type: rt,
+        };
+        store.create_record(&r).unwrap();
+    }
+
+    fn seed_word_state(store: &Store, user_id: &str, word_id: &str, state: WordState, mastery: f64, next_review: Option<DateTime<Utc>>) {
+        let s = WordLearningState {
+            user_id: user_id.into(),
+            word_id: word_id.into(),
+            state,
+            mastery_level: mastery,
+            next_review_date: next_review,
+            half_life: 24.0,
+            correct_streak: 0,
+            total_attempts: 1,
+            updated_at: Utc::now(),
+        };
+        store.set_word_learning_state(&s).unwrap();
+    }
+
+    #[test]
+    fn window_since_date_uses_inclusive_offset() {
+        let s1 = window_since_date(1);
+        let today = Utc::now().date_naive().format("%Y-%m-%d").to_string();
+        assert_eq!(s1, today);
+        // days=0 saturates to 0 days back -> today
+        assert_eq!(window_since_date(0), today);
+        // days=2 -> yesterday
+        let yest = (Utc::now().date_naive() - Duration::days(1)).format("%Y-%m-%d").to_string();
+        assert_eq!(window_since_date(2), yest);
+    }
+
+    #[test]
+    fn parse_dt_handles_rfc3339_and_sqlite_datetime() {
+        assert!(parse_dt("2026-04-25T08:00:00Z").is_some());
+        assert!(parse_dt("2026-04-25 08:00:00").is_some());
+        assert!(parse_dt("not-a-date").is_none());
+    }
+
+    #[test]
+    fn summary_empty_db_returns_zeros() {
+        let (_t, store) = test_store();
+        let s = store.admin_study_overview_summary(7, None).unwrap();
+        assert_eq!(s.record_count, 0);
+        assert_eq!(s.correct_count, 0);
+        assert_eq!(s.session_count, 0);
+        assert_eq!(s.total_duration_secs, 0);
+        assert_eq!(s.mastered_words, 0);
+    }
+
+    #[test]
+    fn summary_with_records_aggregates_correctly() {
+        let (_t, store) = test_store();
+        user(&store, "u1");
+        let now = Utc::now();
+        seed_record(&store, "r1", "u1", "w1", RecordType::Learning, true, now);
+        seed_record(&store, "r2", "u1", "w2", RecordType::Learning, false, now);
+        // 老的 review on same w1 在 window 之外
+        seed_record(&store, "r0", "u1", "w1", RecordType::Learning, true, now - Duration::days(40));
+
+        let summary = store.admin_study_overview_summary(7, None).unwrap();
+        // window 内 r1 + r2 + r0 都 >= since-date 因为 since 是 7 天前的午夜，r0 在 40 天前 → 应在窗口外
+        assert_eq!(summary.record_count, 2);
+        assert_eq!(summary.correct_count, 1);
+        // new vs review classification: w2 是新（无更早记录），w1 因 r0 存在被算作 review
+        assert_eq!(summary.new_words, 1);
+        assert_eq!(summary.review_words, 1);
+
+        // filtered by record_type
+        let filtered = store.admin_study_overview_summary(7, Some(RecordType::Learning)).unwrap();
+        assert_eq!(filtered.record_count, 2);
+    }
+
+    #[test]
+    fn daily_overview_groups_by_date() {
+        let (_t, store) = test_store();
+        user(&store, "u1");
+        let now = Utc::now();
+        seed_record(&store, "r1", "u1", "w1", RecordType::All, true, now);
+        seed_record(&store, "r2", "u1", "w2", RecordType::All, true, now - Duration::days(1));
+
+        let daily = store.admin_daily_study_overview(7, None).unwrap();
+        assert!(daily.len() >= 2);
+        let total: i64 = daily.iter().map(|r| r.record_count).sum();
+        assert_eq!(total, 2);
+
+        let daily_l = store.admin_daily_study_overview(7, Some(RecordType::All)).unwrap();
+        let total2: i64 = daily_l.iter().map(|r| r.record_count).sum();
+        assert_eq!(total2, 2);
+    }
+
+    #[test]
+    fn daily_overview_includes_sessions_and_mastered() {
+        let (_t, store) = test_store();
+        user(&store, "u1");
+        let now = Utc::now();
+        let session = LearningSession {
+            id: "s1".into(),
+            user_id: "u1".into(),
+            status: SessionStatus::Completed,
+            target_mastery_count: 1,
+            total_questions: 1,
+            actual_mastery_count: 1,
+            context_shifts: 0,
+            created_at: now - Duration::minutes(5),
+            updated_at: now,
+            summary: Some(SessionSummary {
+                accuracy: 1.0,
+                avg_response_time_ms: 100,
+                mastered_word_ids: vec!["w1".into()],
+                error_prone_word_ids: vec![],
+                duration_secs: 60,
+                hour_of_day: 9,
+                final_difficulty: 0.5,
+            }),
+            correct_count: 1,
+            total_count: 1,
+        };
+        store.create_learning_session(&session).unwrap();
+        store.update_learning_session(&session).unwrap();
+        seed_word_state(&store, "u1", "w1", WordState::Mastered, 0.9, None);
+
+        let daily = store.admin_daily_study_overview(7, None).unwrap();
+        assert!(daily.iter().any(|r| r.session_count >= 1));
+        assert!(daily.iter().any(|r| r.mastered_words >= 1));
+    }
+
+    #[test]
+    fn daily_record_type_counts() {
+        let (_t, store) = test_store();
+        user(&store, "u1");
+        let now = Utc::now();
+        seed_record(&store, "r1", "u1", "w1", RecordType::Learning, true, now);
+        seed_record(&store, "r2", "u1", "w2", RecordType::Review, false, now);
+        let rows = store.admin_daily_record_type_counts(7).unwrap();
+        let total: i64 = rows.iter().map(|r| r.total).sum();
+        assert_eq!(total, 2);
+        assert!(rows.iter().any(|r| r.record_type == "learning" && r.correct == 1));
+        assert!(rows.iter().any(|r| r.record_type == "review" && r.correct == 0));
+    }
+
+    #[test]
+    fn word_state_distribution_counts_states_and_due() {
+        let (_t, store) = test_store();
+        user(&store, "u1");
+        let now = Utc::now();
+        seed_word_state(&store, "u1", "w-new", WordState::New, 0.0, None);
+        seed_word_state(&store, "u1", "w-learn", WordState::Learning, 0.3, None);
+        seed_word_state(&store, "u1", "w-rev", WordState::Reviewing, 0.5, Some(now - Duration::hours(1)));
+        seed_word_state(&store, "u1", "w-mast", WordState::Mastered, 0.95, None);
+        seed_word_state(&store, "u1", "w-forg", WordState::Forgotten, 0.1, None);
+        store.upsert_word_favorite("u1", "w-new").unwrap();
+
+        let d = store.admin_word_state_distribution(None).unwrap();
+        assert_eq!(d.new_count, 1);
+        assert_eq!(d.learning, 1);
+        assert_eq!(d.reviewing, 1);
+        assert_eq!(d.mastered, 1);
+        assert_eq!(d.forgotten, 1);
+        assert_eq!(d.bookmarked, 1);
+        assert_eq!(d.due, 1);
+        assert_eq!(d.overdue, 1);
+        assert!(d.average_mastery.is_some());
+
+        // 过滤模式：no learning_records → 全 0
+        let filtered = store.admin_word_state_distribution(Some(RecordType::Learning)).unwrap();
+        assert_eq!(filtered.new_count + filtered.learning + filtered.reviewing + filtered.mastered + filtered.forgotten, 0);
+
+        // 加 record 后部分恢复
+        seed_record(&store, "r1", "u1", "w-new", RecordType::Learning, true, now);
+        let filtered2 = store.admin_word_state_distribution(Some(RecordType::Learning)).unwrap();
+        assert_eq!(filtered2.new_count, 1);
+        assert_eq!(filtered2.bookmarked, 1);
+    }
+
+    #[test]
+    fn retention_samples_filter_by_window_and_record_type() {
+        let (_t, store) = test_store();
+        user(&store, "u1");
+        let now = Utc::now();
+        seed_record(&store, "r1", "u1", "w1", RecordType::Learning, true, now - Duration::days(2));
+        seed_word_state(&store, "u1", "w1", WordState::Learning, 0.5, None);
+
+        let samples = store.admin_retention_curve_samples(None, 7).unwrap();
+        assert_eq!(samples.len(), 1);
+        let s = &samples[0];
+        assert!(s.half_life_hours.is_some());
+        assert_eq!(s.total_attempts, 1);
+
+        let filtered = store
+            .admin_retention_curve_samples(Some(RecordType::Learning), 7)
+            .unwrap();
+        assert_eq!(filtered.len(), 1);
+        let none_match = store
+            .admin_retention_curve_samples(Some(RecordType::Review), 7)
+            .unwrap();
+        assert!(none_match.is_empty());
+    }
+
+    #[test]
+    fn daily_registered_users_counts_today() {
+        let (_t, store) = test_store();
+        user(&store, "u1");
+        let rows = store.admin_daily_registered_users(7).unwrap();
+        let today = Utc::now().date_naive().format("%Y-%m-%d").to_string();
+        assert!(rows.iter().any(|r| r.date == today && r.registered == 1));
+    }
+}

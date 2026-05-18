@@ -289,7 +289,7 @@ mod tests {
 
     #[test]
     fn favorite_upsert_idempotent_and_returns_current_row() {
-        let store = test_store();
+        let (_tmp, store) = test_store();
         let (u, w) = (user(), word());
         let f1 = store.upsert_word_favorite(&u, &w).unwrap();
         let f2 = store.upsert_word_favorite(&u, &w).unwrap();
@@ -301,7 +301,7 @@ mod tests {
 
     #[test]
     fn favorite_delete_returns_true_then_false() {
-        let store = test_store();
+        let (_tmp, store) = test_store();
         let (u, w) = (user(), word());
         store.upsert_word_favorite(&u, &w).unwrap();
         assert!(store.delete_word_favorite(&u, &w).unwrap());
@@ -310,7 +310,7 @@ mod tests {
 
     #[test]
     fn favorite_list_pagination_and_count() {
-        let store = test_store();
+        let (_tmp, store) = test_store();
         let u = user();
         for _ in 0..3 {
             store.upsert_word_favorite(&u, &word()).unwrap();
@@ -326,7 +326,7 @@ mod tests {
 
     #[test]
     fn favorite_statuses_empty_input_short_circuits() {
-        let store = test_store();
+        let (_tmp, store) = test_store();
         let u = user();
         let m = store.get_word_favorite_statuses(&u, &[]).unwrap();
         assert!(m.is_empty());
@@ -334,7 +334,7 @@ mod tests {
 
     #[test]
     fn favorite_statuses_only_returns_existing() {
-        let store = test_store();
+        let (_tmp, store) = test_store();
         let u = user();
         let w1 = word();
         let w2 = word();
@@ -348,7 +348,7 @@ mod tests {
 
     #[test]
     fn note_create_get_update_delete_roundtrip() {
-        let store = test_store();
+        let (_tmp, store) = test_store();
         let (u, w) = (user(), word());
         let note = store.create_word_note(&u, &w, "initial").unwrap();
         assert_eq!(note.content, "initial");
@@ -366,7 +366,7 @@ mod tests {
 
     #[test]
     fn note_list_filters_by_word_when_provided() {
-        let store = test_store();
+        let (_tmp, store) = test_store();
         let u = user();
         let w1 = word();
         let w2 = word();
@@ -381,7 +381,7 @@ mod tests {
 
     #[test]
     fn note_update_missing_returns_none() {
-        let store = test_store();
+        let (_tmp, store) = test_store();
         let u = user();
         let missing = format!("note-{}", uuid::Uuid::new_v4());
         assert!(store.update_word_note(&u, &missing, "x").unwrap().is_none());
@@ -389,14 +389,14 @@ mod tests {
 
     #[test]
     fn favorite_validation_rejects_bad_id() {
-        let store = test_store();
+        let (_tmp, store) = test_store();
         let err = store.upsert_word_favorite("", "wid").unwrap_err();
         assert!(matches!(err, StoreError::Validation(_)));
     }
 
     #[test]
     fn note_validation_rejects_bad_id() {
-        let store = test_store();
+        let (_tmp, store) = test_store();
         let err = store.create_word_note("", "wid", "c").unwrap_err();
         assert!(matches!(err, StoreError::Validation(_)));
     }

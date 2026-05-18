@@ -631,4 +631,251 @@ mod tests {
         assert_eq!(store.count_user_records("u1").unwrap(), 2);
         assert_eq!(store.count_all_records().unwrap(), 2);
     }
+
+    fn tempfile_store() -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let store = Store::open(path.to_str().unwrap(), 5000, 4).unwrap();
+        (dir, store)
+    }
+
+    #[test]
+    fn record_type_as_str_and_parse_roundtrip() {
+        for rt in [RecordType::Learning, RecordType::Review, RecordType::All] {
+            let s = rt.as_str();
+            let parsed = RecordType::parse(s).unwrap();
+            assert_eq!(parsed, rt);
+        }
+        assert!(matches!(
+            RecordType::parse("bogus"),
+            Err(StoreError::Validation(_))
+        ));
+        assert_eq!(RecordType::default(), RecordType::All);
+    }
+
+    #[test]
+    fn get_user_stats_agg_returns_default_when_missing() {
+        let store = test_store();
+        let s = store.get_user_stats_agg("nobody").unwrap();
+        assert_eq!(s.total_records, 0);
+        assert_eq!(s.correct_records, 0);
+        assert!(s.word_ids.is_empty());
+        assert!(s.session_ids.is_empty());
+    }
+
+    #[test]
+    fn count_user_records_filtered_handles_no_rows_returning_zeros() {
+        let store = test_store();
+        let (total, correct) = store.count_user_records_stats("u-missing").unwrap();
+        assert_eq!(total, 0);
+        assert_eq!(correct, 0);
+        let (t2, c2) = store
+            .count_user_records_stats_filtered("u-missing", Some(RecordType::Review))
+            .unwrap();
+        assert_eq!((t2, c2), (0, 0));
+    }
+
+    #[test]
+    fn first_record_times_for_empty_list_short_circuits() {
+        let store = test_store();
+        let m = store.first_record_times_for_words("u1", &[]).unwrap();
+        assert!(m.is_empty());
+    }
+
+    #[test]
+    fn create_record_with_updates_writes_record_state_session_and_stats() {
+        use crate::store::operations::learning_sessions::{
+            LearningSession, SessionStatus, SessionSummary,
+        };
+        use crate::store::operations::word_states::{WordLearningState, WordState};
+        let (_tmp, store) = tempfile_store();
+        store
+            .create_user(&super::super::users::User {
+                id: "u1".into(),
+                email: "a@b.com".into(),
+                username: "a".into(),
+                password_hash: "h".into(),
+                is_banned: false,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                failed_login_count: 0,
+                locked_until: None,
+            })
+            .unwrap();
+        // 创建一条 active session
+        let now = Utc::now();
+        let session = LearningSession {
+            id: "s1".into(),
+            user_id: "u1".into(),
+            status: SessionStatus::Completed,
+            target_mastery_count: 5,
+            total_questions: 3,
+            actual_mastery_count: 1,
+            context_shifts: 0,
+            created_at: now,
+            updated_at: now,
+            summary: Some(SessionSummary {
+                accuracy: 0.5,
+                avg_response_time_ms: 1234,
+                mastered_word_ids: vec!["w1".into()],
+                error_prone_word_ids: vec!["w2".into()],
+                duration_secs: 60,
+                hour_of_day: 14,
+                final_difficulty: 0.4,
+            }),
+            correct_count: 2,
+            total_count: 3,
+        };
+        store.create_learning_session(&session).unwrap();
+        let word_state = WordLearningState {
+            user_id: "u1".into(),
+            word_id: "w1".into(),
+            state: WordState::Reviewing,
+            mastery_level: 0.7,
+            next_review_date: Some(now + Duration::hours(1)),
+            half_life: 24.0,
+            correct_streak: 2,
+            total_attempts: 5,
+            updated_at: now,
+        };
+        let record = sample_record("r1", "u1", "w1", now);
+        store
+            .create_record_with_updates(&record, Some(&word_state), Some(&session))
+            .unwrap();
+
+        let stats = store.get_user_stats_agg("u1").unwrap();
+        assert_eq!(stats.total_records, 1);
+        assert_eq!(stats.correct_records, 1);
+        assert!(stats.word_ids.contains("w1"));
+        assert!(stats.session_ids.contains("s1"));
+
+        // 第二条记录复用同一个 user，累加 stats
+        let r2 = LearningRecord {
+            is_correct: false,
+            ..sample_record("r2", "u1", "w2", now + Duration::seconds(1))
+        };
+        store.create_record_with_updates(&r2, None, None).unwrap();
+        let stats2 = store.get_user_stats_agg("u1").unwrap();
+        assert_eq!(stats2.total_records, 2);
+        assert_eq!(stats2.correct_records, 1);
+        assert!(stats2.word_ids.contains("w2"));
+    }
+
+    #[test]
+    fn record_lookup_helpers_cover_session_word_offset_and_between() {
+        let store = test_store();
+        let now = Utc::now();
+        for (i, rid) in ["r1", "r2", "r3"].iter().enumerate() {
+            let rec = sample_record(rid, "u1", "w1", now + Duration::seconds(i as i64));
+            store.create_record(&rec).unwrap();
+        }
+        let one = store.get_user_record_by_id("u1", "r2").unwrap().unwrap();
+        assert_eq!(one.id, "r2");
+        assert!(store.get_user_record_by_id("u1", "missing").unwrap().is_none());
+
+        let by_session = store.list_records_by_session("u1", "s1").unwrap();
+        assert_eq!(by_session.len(), 3);
+
+        let page = store.get_user_records_with_offset("u1", 1, 1).unwrap();
+        assert_eq!(page.len(), 1);
+
+        let between = store
+            .get_user_records_between(
+                "u1",
+                now,
+                now + Duration::seconds(2),
+            )
+            .unwrap();
+        assert_eq!(between.len(), 2);
+
+        let by_word = store.get_user_word_records("u1", "w1", 10).unwrap();
+        assert_eq!(by_word.len(), 3);
+    }
+
+    #[test]
+    fn count_helpers_and_first_record_times() {
+        let store = test_store();
+        let now = Utc::now();
+        store
+            .create_record(&sample_record("r1", "u1", "w1", now))
+            .unwrap();
+        store
+            .create_record(&LearningRecord {
+                is_correct: false,
+                ..sample_record("r2", "u1", "w2", now)
+            })
+            .unwrap();
+        assert_eq!(store.count_all_correct_records().unwrap(), 1);
+        assert_eq!(store.count_records_since(now - Duration::seconds(1)).unwrap(), 2);
+        assert_eq!(store.count_active_users_since(now - Duration::seconds(1)).unwrap(), 1);
+
+        let map = store
+            .first_record_times_for_words("u1", &["w1".to_string(), "w-missing".to_string()])
+            .unwrap();
+        assert!(map.contains_key("w1"));
+        assert!(!map.contains_key("w-missing"));
+    }
+
+    #[test]
+    fn filtered_lookups_consider_record_type() {
+        let store = test_store();
+        let now = Utc::now();
+        let mut a = sample_record("ra", "u1", "wa", now);
+        a.record_type = RecordType::Learning;
+        store.create_record(&a).unwrap();
+        let mut b = sample_record("rb", "u1", "wb", now);
+        b.record_type = RecordType::Review;
+        store.create_record(&b).unwrap();
+
+        let learning_total =
+            store.count_user_records_stats_filtered("u1", Some(RecordType::Learning)).unwrap();
+        assert_eq!(learning_total, (1, 1));
+        let review_total =
+            store.count_user_records_stats_filtered("u1", Some(RecordType::Review)).unwrap();
+        assert_eq!(review_total, (1, 1));
+
+        let only_review = store
+            .get_user_records_filtered("u1", 10, Some(RecordType::Review))
+            .unwrap();
+        assert_eq!(only_review.len(), 1);
+        assert_eq!(only_review[0].id, "rb");
+
+        let unfiltered = store.get_user_records_filtered("u1", 10, None).unwrap();
+        assert_eq!(unfiltered.len(), 2);
+
+        let learning_words =
+            store.distinct_word_ids_for_type("u1", RecordType::Learning).unwrap();
+        assert!(learning_words.contains("wa"));
+        assert!(!learning_words.contains("wb"));
+    }
+
+    #[test]
+    fn date_bucket_helpers_match_today_records() {
+        let store = test_store();
+        let now = Utc::now();
+        let today = now.date_naive().format("%Y-%m-%d").to_string();
+        store
+            .create_record(&sample_record("r1", "u1", "w1", now))
+            .unwrap();
+        assert_eq!(store.count_records_on_date(&today).unwrap(), 1);
+        assert_eq!(store.count_correct_records_on_date(&today).unwrap(), 1);
+        assert_eq!(store.count_active_users_on_date(&today).unwrap(), 1);
+
+        let daily = store.daily_active_users(7).unwrap();
+        assert!(daily.iter().any(|(d, c)| d == &today && *c == 1));
+        let daily_rec = store.daily_records(7).unwrap();
+        assert!(daily_rec.iter().any(|(d, t, c)| d == &today && *t == 1 && *c == 1));
+    }
+
+    #[test]
+    fn create_record_rejects_invalid_id() {
+        let store = test_store();
+        let now = Utc::now();
+        let mut rec = sample_record("", "u1", "w1", now);
+        rec.id = "".into();
+        assert!(matches!(
+            store.create_record(&rec).unwrap_err(),
+            StoreError::Validation(_)
+        ));
+    }
 }
