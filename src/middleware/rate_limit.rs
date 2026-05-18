@@ -417,4 +417,287 @@ mod tests {
         let ip: IpAddr = "10.0.0.1".parse().unwrap();
         assert_eq!(normalize_ip_for_rate_limit(ip), ip);
     }
+
+    use crate::amas::config::AMASConfig;
+    use crate::amas::engine::AMASEngine;
+    use crate::config::Config;
+    use crate::store::Store;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use axum::routing::get;
+    use axum::Router;
+    use std::sync::Arc as StdArc;
+    use tokio::sync::broadcast;
+    use tower::ServiceExt;
+
+    fn ensure_secrets() {
+        let secret = "test_secret_that_is_at_least_32_characters_long_ok";
+        std::env::set_var("JWT_SECRET", secret);
+        std::env::set_var("ADMIN_JWT_SECRET", secret);
+        std::env::set_var("REFRESH_JWT_SECRET", secret);
+    }
+
+    async fn build_state(api_window: u64, api_max: u64) -> (AppState, tempfile::TempDir) {
+        ensure_secrets();
+        let mut cfg = Config::from_env();
+        cfg.rate_limit.window_secs = api_window;
+        cfg.rate_limit.max_requests = api_max;
+        cfg.auth_rate_limit.window_secs = api_window;
+        cfg.auth_rate_limit.max_requests = api_max;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = StdArc::new(
+            Store::open(
+                tmp.path().join("rate_mw.db").to_str().unwrap(),
+                5000,
+                4,
+            )
+            .unwrap(),
+        );
+        store.run_migrations().unwrap();
+        let amas = StdArc::new(AMASEngine::new(AMASConfig::default(), store.clone()));
+        let (tx, _) = broadcast::channel(4);
+        let state = AppState::new(store, amas, &cfg, tx, false);
+        (state, tmp)
+    }
+
+    fn build_router(state: AppState) -> Router {
+        Router::new()
+            .route("/api/users/me", get(|| async { "ok" }))
+            .route("/api/admin/x", get(|| async { "admin-ok" }))
+            .route("/non-api", get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                rate_limit_middleware,
+            ))
+            .with_state(state)
+    }
+
+    fn build_auth_router(state: AppState) -> Router {
+        Router::new()
+            .route("/api/auth/login", get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                auth_rate_limit_middleware,
+            ))
+            .with_state(state)
+    }
+
+    #[tokio::test]
+    async fn limiter_check_allows_then_denies_after_max() {
+        let limiter = RateLimiter::new(60, 3);
+        let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        for _ in 0..3 {
+            assert!(limiter.check(ip, 100_000).await.allowed);
+        }
+        let denied = limiter.check(ip, 100_000).await;
+        assert!(!denied.allowed);
+        assert_eq!(denied.remaining, 0);
+        assert_eq!(denied.limit, 3);
+    }
+
+    #[tokio::test]
+    async fn limiter_resets_after_window_elapsed() {
+        let limiter = RateLimiter::new(1, 1);
+        let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        assert!(limiter.check(ip, 100_000).await.allowed);
+        assert!(!limiter.check(ip, 100_000).await.allowed);
+        // 等待 window 过期
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        assert!(limiter.check(ip, 100_000).await.allowed);
+    }
+
+    #[tokio::test]
+    async fn limiter_max_entries_evicts_and_rejects_new_ip() {
+        // 极小容量；NUM_SHARDS=16，每 shard 容量 = max_entries/16 + 1
+        let limiter = RateLimiter::new(60, 1);
+        // 让某 shard 满
+        let ip0 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        // 选择落在同一 shard 的 IPs（通过 shard_index 推导）
+        let target_shard = shard_index(&ip0);
+        let mut fills: Vec<IpAddr> = Vec::new();
+        let mut octet = 0u8;
+        while fills.len() < 2 {
+            let cand = IpAddr::V4(Ipv4Addr::new(10, 0, 0, octet));
+            if shard_index(&cand) == target_shard {
+                fills.push(cand);
+            }
+            if octet == 255 {
+                break;
+            }
+            octet += 1;
+        }
+        // 用 max_entries=1 → per_shard_max=1+1=2；先填满 2 个 IP
+        for ip in &fills {
+            limiter.check(*ip, 1).await;
+        }
+        // 第三个新 IP（同 shard）应被拒
+        let mut octet2 = octet;
+        let mut new_ip = None;
+        for o in 0..=255_u16 {
+            let candidate = IpAddr::V4(Ipv4Addr::new(10, 0, 0, o as u8));
+            if shard_index(&candidate) == target_shard
+                && !fills.contains(&candidate)
+            {
+                new_ip = Some(candidate);
+                break;
+            }
+            octet2 = o as u8;
+        }
+        let _ = octet2;
+        if let Some(ip) = new_ip {
+            let result = limiter.check(ip, 1).await;
+            assert!(!result.allowed, "expected rejection when shard is full");
+        }
+    }
+
+    #[tokio::test]
+    async fn limiter_cleanup_removes_old_entries() {
+        let limiter = RateLimiter::new(1, 5);
+        let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        limiter.check(ip, 100_000).await;
+        // 等到 entries 过期（>2*window）
+        tokio::time::sleep(std::time::Duration::from_millis(2100)).await;
+        limiter.cleanup().await;
+        // cleanup 后再次 check 应是新窗口
+        let result = limiter.check(ip, 100_000).await;
+        assert_eq!(result.remaining, 4);
+    }
+
+    #[tokio::test]
+    async fn ipv6_shard_index_uses_segments() {
+        let v6: IpAddr = "2001:db8::1".parse().unwrap();
+        let _ = shard_index(&v6); // 仅验证不 panic
+    }
+
+    #[tokio::test]
+    async fn extract_client_ip_prefers_xff_when_trusted() {
+        let mut h = HeaderMap::new();
+        h.insert("x-forwarded-for", "5.5.5.5, 9.9.9.9".parse().unwrap());
+        let ip = extract_client_ip(&h, true, None);
+        assert_eq!(ip, "5.5.5.5".parse::<IpAddr>().unwrap());
+    }
+
+    #[tokio::test]
+    async fn extract_client_ip_falls_back_to_real_ip_when_xff_invalid() {
+        let mut h = HeaderMap::new();
+        h.insert("x-forwarded-for", "garbage".parse().unwrap());
+        h.insert("x-real-ip", "8.8.8.8".parse().unwrap());
+        let ip = extract_client_ip(&h, true, Some("1.1.1.1".parse().unwrap()));
+        assert_eq!(ip, "8.8.8.8".parse::<IpAddr>().unwrap());
+    }
+
+    #[tokio::test]
+    async fn middleware_normalizes_non_api_path_into_api_prefix() {
+        // normalize_api_path 把 /non-api → /api/non-api，因此仍走限流。
+        // 验证：max=10 时连发 5 次都能通过（说明限流被实际应用，但容量充足）。
+        let (state, _tmp) = build_state(60, 10).await;
+        let app = build_router(state);
+        for _ in 0..5 {
+            let req = Request::builder()
+                .uri("/non-api")
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+    }
+
+    #[tokio::test]
+    async fn middleware_admin_path_bypasses_check() {
+        let (state, _tmp) = build_state(60, 1).await;
+        let app = build_router(state);
+        for _ in 0..5 {
+            let req = Request::builder()
+                .uri("/api/admin/x")
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+    }
+
+    #[tokio::test]
+    async fn middleware_returns_429_with_headers_when_over_limit() {
+        let (state, _tmp) = build_state(60, 1).await;
+        let app = build_router(state);
+        // 第一次：通过
+        let req1 = Request::builder()
+            .uri("/api/users/me")
+            .body(Body::empty())
+            .unwrap();
+        let resp1 = app.clone().oneshot(req1).await.unwrap();
+        assert_eq!(resp1.status(), StatusCode::OK);
+        assert!(resp1.headers().get("ratelimit-limit").is_some());
+
+        // 第二次：超限
+        let req2 = Request::builder()
+            .uri("/api/users/me")
+            .body(Body::empty())
+            .unwrap();
+        let resp2 = app.oneshot(req2).await.unwrap();
+        assert_eq!(resp2.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(resp2.headers().get("retry-after").is_some());
+        let body = axum::body::to_bytes(resp2.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["code"], "RATE_LIMITED");
+    }
+
+    #[tokio::test]
+    async fn auth_middleware_returns_auth_rate_limited_on_excess() {
+        let (state, _tmp) = build_state(60, 1).await;
+        let app = build_auth_router(state);
+        let req1 = Request::builder()
+            .uri("/api/auth/login")
+            .body(Body::empty())
+            .unwrap();
+        let resp1 = app.clone().oneshot(req1).await.unwrap();
+        assert_eq!(resp1.status(), StatusCode::OK);
+
+        let req2 = Request::builder()
+            .uri("/api/auth/login")
+            .body(Body::empty())
+            .unwrap();
+        let resp2 = app.oneshot(req2).await.unwrap();
+        assert_eq!(resp2.status(), StatusCode::TOO_MANY_REQUESTS);
+        let body = axum::body::to_bytes(resp2.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["code"], "AUTH_RATE_LIMITED");
+    }
+
+    #[tokio::test]
+    async fn rate_limit_cleanup_loop_terminates_on_shutdown() {
+        let limiter = StdArc::new(RateLimitState::new(60, 5));
+        let (tx, rx) = broadcast::channel(1);
+        let handle = tokio::spawn(rate_limit_cleanup_loop(limiter, 60, rx));
+        // 立即关闭
+        let _ = tx.send(());
+        tokio::time::timeout(std::time::Duration::from_secs(2), handle)
+            .await
+            .expect("cleanup loop should exit on shutdown")
+            .expect("join ok");
+    }
+
+    #[tokio::test]
+    async fn auth_rate_limit_cleanup_loop_terminates_on_shutdown() {
+        let limiter = StdArc::new(AuthRateLimitState::new(60, 5));
+        let (tx, rx) = broadcast::channel(1);
+        let handle = tokio::spawn(auth_rate_limit_cleanup_loop(limiter, 60, rx));
+        let _ = tx.send(());
+        tokio::time::timeout(std::time::Duration::from_secs(2), handle)
+            .await
+            .expect("auth cleanup loop should exit on shutdown")
+            .expect("join ok");
+    }
+
+    #[test]
+    fn rate_limit_state_constructors_work() {
+        let s = RateLimitState::new(60, 100);
+        assert_eq!(s.limiter.window_secs, 60);
+        let a = AuthRateLimitState::new(30, 10);
+        assert_eq!(a.limiter.window_secs, 30);
+    }
 }

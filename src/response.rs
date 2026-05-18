@@ -246,4 +246,155 @@ mod tests {
         assert_eq!(json["code"], "NOT_FOUND");
         assert!(json.get("error").is_none());
     }
+
+    #[tokio::test]
+    async fn unauthorized_sets_401_and_code() {
+        let err = AppError::unauthorized("need login");
+        assert_eq!(err.status, axum::http::StatusCode::UNAUTHORIZED);
+        assert_eq!(err.code, "AUTH_UNAUTHORIZED");
+        let resp = err.into_response();
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["code"], "AUTH_UNAUTHORIZED");
+        assert_eq!(json["message"], "need login");
+    }
+
+    #[tokio::test]
+    async fn forbidden_sets_403_and_code() {
+        let err = AppError::forbidden("no access");
+        assert_eq!(err.status, axum::http::StatusCode::FORBIDDEN);
+        assert_eq!(err.code, "FORBIDDEN");
+        let resp = err.into_response();
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["code"], "FORBIDDEN");
+    }
+
+    #[tokio::test]
+    async fn conflict_carries_custom_code() {
+        let err = AppError::conflict("DUPLICATE", "already exists");
+        assert_eq!(err.status, axum::http::StatusCode::CONFLICT);
+        let resp = err.into_response();
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["code"], "DUPLICATE");
+        assert_eq!(json["message"], "already exists");
+    }
+
+    #[tokio::test]
+    async fn too_many_requests_sets_429() {
+        let err = AppError::too_many_requests("slow down");
+        assert_eq!(err.status, axum::http::StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(err.code, "RATE_LIMITED");
+        let resp = err.into_response();
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["code"], "RATE_LIMITED");
+    }
+
+    #[tokio::test]
+    async fn payload_too_large_sets_413() {
+        let err = AppError::payload_too_large("body too big");
+        assert_eq!(err.status, axum::http::StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(err.code, "PAYLOAD_TOO_LARGE");
+        let resp = err.into_response();
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["code"], "PAYLOAD_TOO_LARGE");
+        assert_eq!(json["message"], "body too big");
+    }
+
+    #[tokio::test]
+    async fn ok_wraps_data_with_success_true() {
+        let resp = ok(serde_json::json!({"hello": "world"})).into_response();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["success"], true);
+        assert_eq!(json["data"]["hello"], "world");
+    }
+
+    #[tokio::test]
+    async fn created_returns_201() {
+        let resp = created(serde_json::json!({"id": 1})).into_response();
+        assert_eq!(resp.status(), axum::http::StatusCode::CREATED);
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["success"], true);
+        assert_eq!(json["data"]["id"], 1);
+    }
+
+    #[tokio::test]
+    async fn paginated_computes_total_pages() {
+        let resp = paginated(vec![1, 2, 3], 25, 1, 10).into_response();
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["success"], true);
+        assert_eq!(json["data"]["total"], 25);
+        assert_eq!(json["data"]["page"], 1);
+        assert_eq!(json["data"]["perPage"], 10);
+        assert_eq!(json["data"]["totalPages"], 3);
+        assert_eq!(json["data"]["data"].as_array().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn paginated_with_zero_per_page_returns_zero_total_pages() {
+        let resp = paginated::<i32>(vec![], 100, 1, 0).into_response();
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["data"]["totalPages"], 0);
+    }
+
+    #[test]
+    fn store_validation_error_maps_to_bad_request() {
+        let err: AppError = crate::store::StoreError::Validation("bad input".to_string()).into();
+        assert_eq!(err.status, axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(err.code, "VALIDATION_ERROR");
+        assert!(err.is_operational);
+        assert!(err.message.contains("bad input"));
+    }
+
+    #[test]
+    fn store_not_found_error_maps_to_internal() {
+        let err: AppError = crate::store::StoreError::NotFound {
+            entity: "user".to_string(),
+            key: "abc".to_string(),
+        }
+        .into();
+        assert_eq!(err.status, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(err.code, "INTERNAL_ERROR");
+        assert!(!err.is_operational);
+    }
+
+    #[tokio::test]
+    async fn blocking_task_error_maps_to_internal() {
+        // 构造一个 panic 的 JoinError
+        let handle: tokio::task::JoinHandle<()> = tokio::spawn(async {
+            panic!("boom");
+        });
+        let join_err = handle.await.unwrap_err();
+        let bte = crate::blocking::BlockingTaskError::new("test-task", join_err);
+        let err: AppError = bte.into();
+        assert_eq!(err.status, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(!err.is_operational);
+        let resp = err.into_response();
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        // 内部错误消息被隐藏
+        assert!(!text.contains("boom"));
+        assert!(text.contains("服务器内部错误"));
+    }
+
+    #[test]
+    fn error_body_serializes_camel_case_trace_id() {
+        let body = ErrorBody {
+            success: false,
+            code: "X".to_string(),
+            message: "m".to_string(),
+            trace_id: Some("tid".to_string()),
+        };
+        let json = serde_json::to_value(&body).unwrap();
+        assert_eq!(json["traceId"], "tid");
+        assert!(json.get("trace_id").is_none());
+    }
 }

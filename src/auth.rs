@@ -277,4 +277,118 @@ mod tests {
     fn token_hash_is_stable() {
         assert_eq!(hash_token("abc"), hash_token("abc"));
     }
+
+    #[test]
+    fn dummy_argon2_hash_is_constant() {
+        let a = generate_dummy_argon2_hash();
+        let b = generate_dummy_argon2_hash();
+        assert_eq!(a, b);
+        assert!(a.starts_with("$argon2id$"));
+    }
+
+    #[test]
+    fn sign_jwt_zero_hours_returns_error() {
+        let err = sign_jwt_for_user("u", "secret", 0).unwrap_err();
+        // AppError Debug 应包含 internal 描述
+        let dbg = format!("{:?}", err);
+        assert!(dbg.contains("JWT") || dbg.contains("jwt") || dbg.contains("expiry"));
+    }
+
+    #[test]
+    fn verify_jwt_rejects_wrong_secret() {
+        let token = sign_jwt_for_user("u1", "secret-a", 1).unwrap();
+        let err = verify_jwt(&token, "secret-b").unwrap_err();
+        let dbg = format!("{:?}", err);
+        assert!(dbg.contains("无效") || dbg.contains("Unauthorized") || dbg.contains("过期"));
+    }
+
+    #[test]
+    fn verify_jwt_rejects_garbage() {
+        assert!(verify_jwt("not.a.jwt", "secret").is_err());
+    }
+
+    #[test]
+    fn verify_password_invalid_hash_returns_internal_error() {
+        let err = verify_password("anything", "not-an-argon2-hash").unwrap_err();
+        let dbg = format!("{:?}", err);
+        assert!(dbg.contains("hash") || dbg.contains("invalid"));
+    }
+
+    #[test]
+    fn refresh_token_uses_distinct_type() {
+        let secret = "another-secret-for-refresh-tokens";
+        let token = sign_refresh_token_for_user("u1", secret, 24).unwrap();
+        let claims = verify_jwt(&token, secret).unwrap();
+        assert_eq!(claims.token_type, "refresh");
+        assert!(!claims.jti.is_empty());
+    }
+
+    #[test]
+    fn extract_bearer_token_from_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            "Bearer my-token".parse().unwrap(),
+        );
+        assert_eq!(extract_token_from_headers(&headers).unwrap(), "my-token");
+    }
+
+    #[test]
+    fn extract_token_from_cookie_when_bearer_missing() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::COOKIE,
+            "foo=bar; token=cookie-token; baz=qux".parse().unwrap(),
+        );
+        assert_eq!(
+            extract_token_from_headers(&headers).unwrap(),
+            "cookie-token"
+        );
+    }
+
+    #[test]
+    fn extract_token_from_headers_returns_err_when_absent() {
+        let headers = HeaderMap::new();
+        assert!(extract_token_from_headers(&headers).is_err());
+    }
+
+    #[test]
+    fn extract_refresh_token_falls_back_through_cookies() {
+        // bearer 缺失，refresh_token cookie 命中
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::COOKIE,
+            "refresh_token=r-cookie; other=x".parse().unwrap(),
+        );
+        assert_eq!(
+            extract_refresh_token_from_headers(&headers).unwrap(),
+            "r-cookie"
+        );
+
+        // 仅 token cookie，应回退使用之
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::COOKIE,
+            "token=access-cookie".parse().unwrap(),
+        );
+        assert_eq!(
+            extract_refresh_token_from_headers(&headers).unwrap(),
+            "access-cookie"
+        );
+
+        // 无任何 token
+        let headers = HeaderMap::new();
+        assert!(extract_refresh_token_from_headers(&headers).is_err());
+    }
+
+    #[test]
+    fn extract_bearer_ignores_non_bearer_scheme() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            "Basic abc123".parse().unwrap(),
+        );
+        // 应该穿透到 cookie，cookie 也没有，最终 Err
+        assert!(extract_token_from_headers(&headers).is_err());
+    }
 }
