@@ -475,6 +475,47 @@ async fn apply_rejects_release_missing_assets() {
     assert!(matches!(err, UpdaterError::NoAsset { .. }), "got {err:?}");
 }
 
+/// Codex P1 (2nd pass): 进程重启后 .update_etag 还原但 cache.latest=None，
+/// 此时若发条件请求 + 拿到 304 会永远卡住。修复确保第一次发的是无条件请求。
+#[tokio::test]
+async fn etag_loaded_from_disk_without_payload_triggers_unconditional_request() {
+    if skip_unless_supported_arch() || std::env::consts::OS != "linux" {
+        return;
+    }
+    let server = MockServer::start().await;
+    let tarball = build_tarball();
+    let release = build_release_json(&server.uri(), "v9.9.9", tarball.len() as u64);
+
+    // 只接受**没有** If-None-Match 头的请求 → 返 200 + body
+    use wiremock::matchers::header_exists;
+    Mock::given(method("GET"))
+        .and(path("/repos/o/r/releases/latest"))
+        .and(wiremock::matchers::any())
+        .respond_with(ResponseTemplate::new(200).set_body_json(release))
+        .mount(&server)
+        .await;
+    // 如果错误地发了 If-None-Match，wiremock 没有匹配规则 → 返 404；
+    // 但更稳的是用一个互斥 mock：If-None-Match 存在 → 500，让测试直接失败
+    Mock::given(method("GET"))
+        .and(path("/repos/o/r/releases/latest"))
+        .and(header_exists("If-None-Match"))
+        .respond_with(ResponseTemplate::new(500).set_body_string("ETAG SHOULD NOT BE SENT"))
+        .mount(&server)
+        .await;
+
+    let tmp = tempfile::tempdir().unwrap();
+    // 预先把一个 etag 写到磁盘，模拟"上次 run 写过 etag"
+    std::fs::write(tmp.path().join(".update_etag"), "\"stale-etag-from-disk\"").unwrap();
+
+    let cfg = build_cfg(tmp.path(), &format!("{}/repos/o/r/releases/latest", server.uri()));
+    let updater = Updater::new(&cfg, "v0.4.2").unwrap();
+
+    // 关键：第一次 check 必须无视磁盘上的 etag（因为内存里没 latest payload）
+    let status = updater.check_latest().await.expect("must not 500");
+    assert_eq!(status.latest_version.as_deref(), Some("v9.9.9"));
+    assert!(status.has_update);
+}
+
 #[tokio::test]
 async fn rate_limit_propagates_as_dedicated_error() {
     if skip_unless_supported_arch() || std::env::consts::OS != "linux" {

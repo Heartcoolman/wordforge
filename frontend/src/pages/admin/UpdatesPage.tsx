@@ -4,7 +4,7 @@ import { Button } from '@/components/ui/Button';
 import { Modal } from '@/components/ui/Modal';
 import { Spinner } from '@/components/ui/Spinner';
 import { adminApi } from '@/api/admin';
-import { connectSseStream } from '@/api/client';
+import { ApiError, connectSseStream } from '@/api/client';
 import { uiStore } from '@/stores/ui';
 import type { AdminUpdateStatus } from '@/types/admin';
 
@@ -68,8 +68,19 @@ export default function UpdatesPage() {
       // fetch 极可能以网络中断的方式返回错误 —— 这是预期的"成功信号"。
       await adminApi.updatesApply(s.latestVersion, s.currentVersion);
       // 罕见路径：apply 返回了 JSON（说明 fork-exec 提前失败），继续走 polling
-    } catch {
-      // 网络中断视为重启进行中
+    } catch (err) {
+      // Codex P2 (2nd pass): 区分网络中断（=服务端 exit 成功）vs 4xx/5xx（=真实失败）。
+      // ApiError.status === 0 是 client.ts 给 NETWORK_ERROR / TIMEOUT 的占位码。
+      const isServerSideFailure = err instanceof ApiError && err.status >= 400;
+      if (isServerSideFailure) {
+        setApplying(false);
+        setProgress(null);
+        const e = err as ApiError;
+        uiStore.toast.error(`升级失败 [${e.code}]`, e.message);
+        await refetch();
+        return;
+      }
+      // 否则视为重启进行中，继续走下面的 polling
     }
 
     // Poll /api/status 直到 version 切到 latest（5s 间隔，2 min 上限）

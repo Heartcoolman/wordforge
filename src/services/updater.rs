@@ -236,7 +236,17 @@ impl Updater {
             return Ok(self.status_from(&cache));
         }
 
-        let etag_now = self.cache.read().await.etag.clone();
+        // Codex P1 (2nd pass): etag 仅在内存 latest 也在时才发；进程重启后
+        // .update_etag 被还原但 latest=None，此时若发条件请求拿到 304 就永远
+        // 看不到任何版本元数据。
+        let etag_now = {
+            let cache = self.cache.read().await;
+            if cache.latest.is_some() {
+                cache.etag.clone()
+            } else {
+                None
+            }
+        };
         let mut req = self
             .client
             .get(&self.api_url)
@@ -252,9 +262,16 @@ impl Updater {
         let status = resp.status();
 
         if status.as_u16() == 304 {
+            // 304 时必须保证 cache.latest 非空（上面的守门已经保证了 etag
+            // 仅在 latest 存在时才发），但加一道防御性 assert 让逻辑更稳。
             let mut cache = self.cache.write().await;
             cache.last_checked_at = Some(Utc::now());
             cache.last_checked_instant = Some(Instant::now());
+            if cache.latest.is_none() {
+                // 理论不可达；万一被外部清空了 cache.latest，丢 etag 让下次重新拉
+                cache.etag = None;
+                tracing::warn!("304 received but cache.latest is empty; dropping etag for next call");
+            }
             return Ok(self.status_from(&cache));
         }
         if status.as_u16() == 403 || status.as_u16() == 429 {
