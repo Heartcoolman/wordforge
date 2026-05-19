@@ -75,7 +75,7 @@ export default function AmasAdvisorPage() {
   }
 
   return (
-    <div class="space-y-4 animate-fade-in-up">
+    <div class="space-y-4">
       <Show when={spend()} fallback={<Card variant="elevated"><Spinner size="sm" /></Card>}>
         {(s) => (
           <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
@@ -119,7 +119,7 @@ export default function AmasAdvisorPage() {
             <Card variant="elevated">
               <table class="w-full text-sm">
                 <thead>
-                  <tr class="bg-surface-secondary border-b border-border">
+                  <tr class="bg-surface-secondary/60 backdrop-blur-sm border-b border-border-hairline">
                     <th scope="col" class="px-3 py-2 text-left font-medium text-content-secondary">时间</th>
                     <th scope="col" class="px-3 py-2 text-left font-medium text-content-secondary">状态</th>
                     <th scope="col" class="px-3 py-2 text-left font-medium text-content-secondary">基础版本</th>
@@ -131,7 +131,7 @@ export default function AmasAdvisorPage() {
                 <tbody>
                   <For each={history() ?? []}>
                     {(s) => (
-                      <tr class="border-b border-border/40">
+                      <tr class="border-b border-border-hairline">
                         <td class="px-3 py-2 text-xs text-content-tertiary">{formatTime(s.createdAt)}</td>
                         <td class="px-3 py-2"><Badge variant={STATUS_VARIANT[s.status]} size="sm">{STATUS_LABEL[s.status]}</Badge></td>
                         <td class="px-3 py-2 font-mono text-xs">{s.basedOnVersionHash.slice(0, 10)}</td>
@@ -184,7 +184,7 @@ function SuggestionCard(props: {
         <h4 class="text-xs font-medium text-content-secondary">Patch（{Object.keys(props.s.patchJson).length} 项）</h4>
         <table class="w-full text-xs font-mono">
           <thead>
-            <tr class="text-content-tertiary border-b border-border/40">
+            <tr class="text-content-tertiary border-b border-border-hairline">
               <th class="text-left py-1 pr-2">字段</th>
               <th class="text-right py-1">建议值</th>
             </tr>
@@ -192,7 +192,7 @@ function SuggestionCard(props: {
           <tbody>
             <For each={Object.entries(props.s.patchJson)}>
               {([path, value]) => (
-                <tr class="border-b border-border/30">
+                <tr class="border-b border-border-hairline">
                   <td class="py-1 pr-2 text-content">{path}</td>
                   <td class="py-1 text-right text-success">{typeof value === 'number' ? value.toFixed(6).replace(/0+$/, '').replace(/\.$/, '') : String(value)}</td>
                 </tr>

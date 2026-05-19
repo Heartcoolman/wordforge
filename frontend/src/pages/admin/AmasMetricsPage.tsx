@@ -11,7 +11,7 @@ export default function AmasMetricsPage() {
   const [tab, setTab] = createSignal<TabId>('metrics');
 
   return (
-    <div class="space-y-4 animate-fade-in-up">
+    <div class="space-y-4">
       <Tabs
         tabs={[
           { id: 'metrics', label: '算法延迟 / 错误率' },

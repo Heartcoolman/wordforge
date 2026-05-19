@@ -88,13 +88,13 @@ export default function AmasConfigPage() {
   }
 
   return (
-    <div class="space-y-4 animate-fade-in-up">
+    <div class="space-y-4">
       <Show when={!loading()} fallback={<div class="flex justify-center py-12"><Spinner size="lg" /></div>}>
         <Card variant="elevated">
           <div class="flex flex-col gap-3">
             <div class="flex items-baseline justify-between flex-wrap gap-3">
               <div>
-                <h2 class="text-lg font-semibold text-content">AMAS 调参</h2>
+                <h2 class="text-headline text-content">AMAS 调参</h2>
                 <p class="text-xs text-content-tertiary mt-0.5">
                   共 ~295 个参数，先在「重点参数」调 11 维核心、其余在「分节配置」或「JSON 高级」编辑
                 </p>
@@ -160,12 +160,12 @@ export default function AmasConfigPage() {
             const entries = () => Object.entries(m() as Record<string, { callCount: number; totalLatencyUs: number; errorCount: number }>);
             return (
               <Card variant="elevated">
-                <h2 class="text-lg font-semibold text-content mb-3">算法指标</h2>
+                <h2 class="text-headline text-content mb-3">算法指标</h2>
                 <Show when={entries().length > 0} fallback={<p class="text-sm text-content-secondary">暂无指标数据</p>}>
                   <div class="overflow-x-auto">
                     <table class="w-full text-sm">
                       <thead>
-                        <tr class="bg-surface-secondary border-b border-border">
+                        <tr class="bg-surface-secondary/60 backdrop-blur-sm border-b border-border-hairline">
                           <th scope="col" class="px-4 py-2 text-left font-medium text-content-secondary">算法名称</th>
                           <th scope="col" class="px-4 py-2 text-right font-medium text-content-secondary">调用次数</th>
                           <th scope="col" class="px-4 py-2 text-right font-medium text-content-secondary">平均延迟</th>
@@ -175,7 +175,7 @@ export default function AmasConfigPage() {
                       <tbody>
                         <For each={entries()}>
                           {([name, snapshot]) => (
-                            <tr class="border-b border-border/50 hover:bg-surface-secondary/50 transition-colors">
+                            <tr class="border-b border-border-hairline hover:bg-accent-light/40 transition-colors duration-fast ease-out-expo">
                               <td class="px-4 py-2 font-mono text-sm">{name}</td>
                               <td class="px-4 py-2 text-right">{snapshot.callCount}</td>
                               <td class="px-4 py-2 text-right">
