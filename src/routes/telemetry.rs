@@ -43,6 +43,48 @@ async fn submit_telemetry(
         ));
     }
 
+    // §12 strict-mode payload 级校验：timezone / language 必填；session_start 额外要求
+    // 指纹四件套（screenWidth / screenHeight / pixelRatio / cpuCores 均 > 0）。
+    // hard_block=false 时仅 warn 不拒绝；启用前需客户端先上线 strict-mode 兼容版本。
+    let strict = state.config().strict_mode.clone();
+    if strict.enabled {
+        let device = body.payload.get("device").and_then(|v| v.as_object());
+        let timezone_ok = device
+            .and_then(|d| d.get("timezone"))
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.is_empty());
+        let language_ok = device
+            .and_then(|d| d.get("language"))
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.is_empty());
+
+        if !timezone_ok {
+            strict_reject_or_warn(&strict, "MISSING_TIMEZONE", "telemetry payload 缺少 device.timezone")?;
+        }
+        if !language_ok {
+            strict_reject_or_warn(&strict, "MISSING_LANGUAGE", "telemetry payload 缺少 device.language")?;
+        }
+
+        if body.event_type == "session_start" {
+            let fp_ok = device.is_some_and(|d| {
+                ["screenWidth", "screenHeight", "pixelRatio", "cpuCores"]
+                    .iter()
+                    .all(|k| {
+                        d.get(*k)
+                            .and_then(|v| v.as_f64())
+                            .is_some_and(|n| n > 0.0)
+                    })
+            });
+            if !fp_ok {
+                strict_reject_or_warn(
+                    &strict,
+                    "MISSING_DEVICE_FINGERPRINT",
+                    "session_start 必须携带完整设备指纹（screenWidth/screenHeight/pixelRatio/cpuCores 均 > 0）",
+                )?;
+            }
+        }
+    }
+
     if let Some(obj) = body.payload.as_object() {
         for key in ["sessionDurationSecs", "errorCount"] {
             if let Some(v) = obj.get(key).and_then(|v| v.as_i64()) {
@@ -106,6 +148,20 @@ async fn submit_telemetry(
         .insert(device_id.to_string(), 0);
 
     Ok(ok(serde_json::json!({ "id": id })))
+}
+
+/// 根据 strict_mode 配置决定拦截或仅 warn。hard_block=true 时返回 400。
+fn strict_reject_or_warn(
+    cfg: &crate::config::StrictModeConfig,
+    code: &'static str,
+    message: &'static str,
+) -> Result<(), AppError> {
+    if cfg.hard_block {
+        Err(AppError::bad_request(code, message))
+    } else {
+        tracing::warn!(code, message, "telemetry strict-mode soft-block (放行)");
+        Ok(())
+    }
 }
 
 fn extract_summary(payload: &serde_json::Value) -> TelemetrySummaryInput {

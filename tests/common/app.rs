@@ -18,7 +18,22 @@ pub struct TestApp {
     _temp_dir: TempDir,
 }
 
-async fn spawn_with_limits(api_limit: u64) -> TestApp {
+/// 自定义 strict_mode 配置的 TestApp，便于 strict_mode_http.rs 集成测试。
+pub async fn spawn_test_app_with_strict_mode(
+    strict: learning_backend::config::StrictModeConfig,
+) -> TestApp {
+    spawn_with_limits_inner(100, 10, strict).await
+}
+
+async fn spawn_with_limits(api_limit: u64, auth_limit: u64) -> TestApp {
+    spawn_with_limits_inner(api_limit, auth_limit, Default::default()).await
+}
+
+async fn spawn_with_limits_inner(
+    api_limit: u64,
+    auth_limit: u64,
+    strict_mode: learning_backend::config::StrictModeConfig,
+) -> TestApp {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     // 直接构造 Config，避免使用 set_var 造成多线程测试环境变量竞态
     let test_secret = format!("integration-test-jwt-secret-{}", uuid::Uuid::new_v4());
@@ -55,7 +70,10 @@ async fn spawn_with_limits(api_limit: u64) -> TestApp {
             window_secs: 60,
             max_requests: api_limit,
         },
-        auth_rate_limit: Default::default(),
+        auth_rate_limit: learning_backend::config::AuthRateLimitConfig {
+            window_secs: 60,
+            max_requests: auth_limit,
+        },
         worker: learning_backend::config::WorkerConfig {
             is_leader: false,
             enable_llm_advisor: false,
@@ -96,6 +114,7 @@ async fn spawn_with_limits(api_limit: u64) -> TestApp {
         },
         pagination: Default::default(),
         limits: Default::default(),
+        strict_mode,
     };
 
     let store = Arc::new(
@@ -128,7 +147,7 @@ async fn spawn_with_limits(api_limit: u64) -> TestApp {
 }
 
 pub async fn spawn_test_app() -> TestApp {
-    spawn_with_limits(100).await
+    spawn_with_limits(100, 10).await
 }
 
 pub async fn spawn_test_server() -> TestApp {
@@ -136,5 +155,5 @@ pub async fn spawn_test_server() -> TestApp {
 }
 
 pub async fn spawn_test_server_with_limits(api_limit: u64, _auth_limit: u64) -> TestApp {
-    spawn_with_limits(api_limit).await
+    spawn_with_limits(api_limit, _auth_limit).await
 }

@@ -2,6 +2,7 @@ pub mod admin;
 pub mod analytics;
 pub mod auth;
 pub mod content;
+pub mod feedback;
 pub mod health;
 pub mod learning;
 pub mod notifications;
@@ -28,7 +29,7 @@ use axum::routing::get_service;
 use axum::Router;
 use tower_http::services::{ServeDir, ServeFile};
 
-use crate::middleware::{device, maintenance, rate_limit, request_id};
+use crate::middleware::{device, maintenance, rate_limit, request_id, strict_mode};
 use crate::state::AppState;
 
 /// Maximum request body size: 2 MiB.
@@ -81,6 +82,7 @@ pub fn build_router(state: AppState) -> Router {
         .nest("/user-profile", user_profile::router())
         .nest("/notifications", notifications::router())
         .nest("/content", content::router())
+        .nest("/feedback", feedback::router())
         .nest("/word-favorites", word_favorites::router())
         .nest("/word-notes", word_notes::router())
         .nest("/wordbook-center", wordbook_center::user_router())
@@ -90,6 +92,10 @@ pub fn build_router(state: AppState) -> Router {
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             device::device_middleware,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            strict_mode::strict_mode_middleware,
         ))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
