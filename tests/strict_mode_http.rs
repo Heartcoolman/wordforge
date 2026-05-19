@@ -141,3 +141,73 @@ async fn soft_block_warns_but_passes() {
     // soft-block: 不拒绝
     assert_ne!(resp.status(), StatusCode::BAD_REQUEST);
 }
+
+/// v0.5.2 加固：`/status` 是公共版本探测端点，hard-block 启用时也不应被拦
+#[tokio::test]
+async fn hard_block_bypasses_status_endpoint() {
+    let app = build_strict_app(true, None).await;
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/status")
+        // 浏览器原生 UA：strict-mode 解析器不认，但 /status 应豁免
+        .header(
+            "User-Agent",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/148.0.0.0",
+        )
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.app.clone().oneshot(req).await.unwrap();
+    assert_ne!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "/status 应豁免 strict-mode 拦截"
+    );
+}
+
+/// v0.5.2 加固：`/realtime/events` 是 SSE 通道，admin 浏览器直连，hard-block 不能拦
+#[tokio::test]
+async fn hard_block_bypasses_realtime_events() {
+    let app = build_strict_app(true, None).await;
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/realtime/events")
+        .header(
+            "User-Agent",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/148.0.0.0",
+        )
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.app.clone().oneshot(req).await.unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+    // 业务上可能 401（无 token），但绝不应是 MISSING_USER_AGENT
+    assert_ne!(
+        v["code"], "MISSING_USER_AGENT",
+        "/realtime/events 应豁免 strict-mode 拦截"
+    );
+    assert_ne!(
+        v["code"], "MISSING_OS",
+        "/realtime/events 应豁免 strict-mode 拦截"
+    );
+}
+
+/// admin updates apply / status 路径也应畅通（admin 豁免路径已有，加 explicit 测试覆盖）
+#[tokio::test]
+async fn hard_block_bypasses_admin_updates_status() {
+    let app = build_strict_app(true, None).await;
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/admin/updates/status")
+        .header("User-Agent", "Mozilla/5.0 Chrome/148.0.0.0")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.app.clone().oneshot(req).await.unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+    assert_ne!(v["code"], "MISSING_USER_AGENT");
+    assert_ne!(v["code"], "MISSING_OS");
+}

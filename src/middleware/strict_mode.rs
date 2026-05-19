@@ -1,9 +1,13 @@
 //! §12 strict-mode 客户端契约校验中间件
 //!
-//! 校验维度（仅作用于 `/api/*`，跳过 `/api/admin/*` 与 `/api/v1/*`）：
+//! 校验维度（仅作用于 `/api/*`，跳过 `/api/admin/*`、`/api/v1/*` 与公共健康/SSE 路径）：
 //! - `User-Agent` 必须匹配 `WordForge-(iOS|Android|Web)/<semver>` → `MISSING_USER_AGENT`
 //! - `x-device-platform` header 必须存在且非 `unknown` → `MISSING_OS`
 //! - 若配置 `min_client_version`，UA 中 semver 低于阈值 → `CLIENT_OUTDATED`
+//!
+//! 豁免路径（v0.5.2 加固）：
+//! - `/status` —— 维护模式 / 版本探测，admin 后台与浏览器均直访，不属客户端契约范畴
+//! - `/realtime/events` —— SSE 通道，admin 后台用浏览器原生 UA 直连，无法塞 WordForge-* 模板
 //!
 //! 失败行为：
 //! - `enabled=false`：直接放行（默认）
@@ -33,8 +37,12 @@ pub async fn strict_mode_middleware(
     // 注意：本中间件 .layer 在 api_routes 上，axum nest 已剥离 `/api` 前缀，
     // 此处看到的 path 形如 `/auth/login`、`/admin/foo`、`/v1/bar`。
     let path = req.uri().path();
-    // 豁免 admin 后台、v1 兼容层
-    if path.starts_with("/admin/") || path.starts_with("/v1/") {
+    // 豁免 admin 后台、v1 兼容层、公共健康/SSE 通道（admin 浏览器侧依赖）
+    if path.starts_with("/admin/")
+        || path.starts_with("/v1/")
+        || path == "/status"
+        || path == "/realtime/events"
+    {
         return next.run(req).await;
     }
 

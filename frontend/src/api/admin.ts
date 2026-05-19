@@ -4,7 +4,7 @@ import type {
   AdminUsersPage, AdminUsersQuery,
   EngagementAnalytics, LearningAnalytics,
   SystemHealth, DatabaseInfo, SystemSettings,
-  UpdateCheck, AdminUpdateStatus, DailyActiveUsersEntry, DailyRecordsEntry,
+  UpdateCheck, AdminUpdateStatus, ApplyAccepted, DailyActiveUsersEntry, DailyRecordsEntry,
   StudyOverview, RecordTypeBreakdown, WordStateDistribution, RetentionCurve,
   FeedbackItem,
 } from '@/types/admin';
@@ -118,8 +118,9 @@ export const adminApi = {
   // 一键自更新（PR-auto-update）
   updatesStatus: () => api.get<AdminUpdateStatus>('/api/admin/updates/status', undefined, { useAdminToken: true }),
   updatesCheck: () => api.post<AdminUpdateStatus>('/api/admin/updates/check', undefined, { useAdminToken: true }),
+  // v0.5.2 起 apply 改为异步：返回 ApplyAccepted（含 taskId），前端通过 status 轮询拿进度
   updatesApply: (targetVersion: string, confirmCurrentVersion: string) =>
-    api.post<{ restarting: boolean }>(
+    api.post<ApplyAccepted>(
       '/api/admin/updates/apply',
       { targetVersion, confirmCurrentVersion },
       { useAdminToken: true },

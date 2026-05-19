@@ -199,9 +199,41 @@ async fn it_admin_updates_apply_propagates_no_asset_error() {
     )
     .await;
     let (status, _, body) = response_json(resp).await;
-    // 应该是 400 NO_ASSET 或 400 INVALID_TARGET_VERSION 等 map_err 分支之一
+    // v0.5.2 起 apply 异步化：handler 立即返回 202 ACCEPTED + taskId，
+    // 真实 NoAsset 错误在后台 task 跑完后落到 applyTask.error 字段。
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "expected 202 ACCEPTED, got {status} body={body}"
+    );
     assert!(
-        status == StatusCode::BAD_REQUEST || status == StatusCode::BAD_GATEWAY,
-        "expected error, got {status} body={body}"
+        body["data"]["taskId"].is_string(),
+        "should return taskId, body={body}"
+    );
+
+    // 轮询 /status 直到后台 task 完成（最多 5s）
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut final_error: Option<String> = None;
+    while std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let resp = request(
+            &app.app,
+            Method::GET,
+            "/api/admin/updates/status",
+            None,
+            &[("authorization", auth_header(&token))],
+        )
+        .await;
+        let (_, _, body) = response_json(resp).await;
+        let task = &body["data"]["applyTask"];
+        if !task.is_null() && task["completedAt"].is_string() {
+            final_error = task["error"].as_str().map(String::from);
+            break;
+        }
+    }
+    let err_msg = final_error.expect("apply task should have completed with error");
+    assert!(
+        err_msg.contains("asset") || err_msg.contains("target"),
+        "expected NoAsset/InvalidTarget error in applyTask.error, got {err_msg}"
     );
 }
