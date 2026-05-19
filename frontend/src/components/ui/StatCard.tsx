@@ -43,12 +43,18 @@ export function StatCard(props: StatCardProps) {
   const displayValue = () => (countUpEnabled() ? animatedDisplay() : String(props.value));
 
   return (
-    <Card variant="interactive" padding="lg">
+    <Card variant="interactive" padding="lg" class="h-full">
       <div class="flex items-start gap-4">
+        {/* icon 缺失时降级为色块 dot，避免空 svg 让卡片看起来"图标丢失" */}
         <div class={`w-10 h-10 rounded-lg flex items-center justify-center shadow-elevation-1 ${colors().bg}`}>
-          <svg class={`w-6 h-6 ${colors().text}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-            <path stroke-linecap="round" stroke-linejoin="round" d={props.icon} />
-          </svg>
+          <Show
+            when={props.icon}
+            fallback={<span aria-hidden="true" class={`w-2 h-2 rounded-full ${colors().text.replace('text-', 'bg-')}`} />}
+          >
+            <svg class={`w-6 h-6 ${colors().text}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+              <path stroke-linecap="round" stroke-linejoin="round" d={props.icon} />
+            </svg>
+          </Show>
         </div>
         <div class="flex-1 min-w-0">
           <p class={`text-3xl font-bold tabular-nums ${colors().text}`}>{displayValue()}</p>
