@@ -5,6 +5,7 @@ import { adminApi } from '@/api/admin';
 import { tokenManager } from '@/lib/token';
 import { uiStore } from '@/stores/ui';
 import { Skeleton } from '@/components/ui/Skeleton';
+import { useIndicatorTrack } from '@/lib/motion';
 
 const sidebarLinks = [
   { href: '/admin', label: '仪表盘', icon: 'M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zm10 0a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zm10 0a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z', exact: true },
@@ -28,9 +29,23 @@ export function AdminLayout(props: ParentProps) {
   const [mobileOpen, setMobileOpen] = createSignal(false);
   const [adminEmail, setAdminEmail] = createSignal<string | null>(null);
   const [emailLoading, setEmailLoading] = createSignal(true);
+  let navRef: HTMLElement | undefined;
 
   const isActive = (href: string, exact?: boolean) =>
     exact ? location.pathname === href : location.pathname.startsWith(href);
+
+  // 算出 sidebar 当前激活项的 key（便于 indicator 跟踪）
+  const activeHref = () => {
+    const match = sidebarLinks.find((link) => isActive(link.href, link.exact));
+    return match?.href ?? '';
+  };
+
+  // 侧边栏激活 indicator — 在选项之间平滑滑动
+  const indicator = useIndicatorTrack(
+    () => navRef,
+    () => activeHref(),
+    '[data-sidebar-active="true"]',
+  );
 
   const pageTitle = () => {
     const path = location.pathname;
@@ -54,19 +69,20 @@ export function AdminLayout(props: ParentProps) {
         <button
           type="button"
           aria-label="关闭导航菜单"
-          class="fixed inset-0 z-20 bg-black/40 md:hidden"
+          class="fixed inset-0 z-20 bg-black/40 backdrop-blur-sm md:hidden animate-fade-in"
           onClick={() => setMobileOpen(false)}
         />
       </Show>
 
       {/* Sidebar */}
       <aside class={cn(
-        'fixed left-0 top-0 h-screen bg-surface border-r border-border flex flex-col z-30 transition-all duration-200',
+        'fixed left-0 top-0 h-screen bg-surface border-r border-border-hairline flex flex-col z-30',
+        'transition-[width,transform] duration-base ease-out-expo',
         'w-72 md:w-56',
         collapsed() && 'md:w-16',
         mobileOpen() ? 'translate-x-0' : '-translate-x-full md:translate-x-0',
       )}>
-        <div class="h-14 flex items-center justify-between px-4 border-b border-border">
+        <div class="h-14 flex items-center justify-between px-4 border-b border-border-hairline">
           <Show when={!collapsed() || mobileOpen()}>
             <span class="font-bold text-accent">管理后台</span>
           </Show>
@@ -79,7 +95,7 @@ export function AdminLayout(props: ParentProps) {
               }
             }}
             aria-label={collapsed() ? '展开侧边栏' : '折叠侧边栏'}
-            class="p-1.5 rounded-lg text-content-tertiary hover:text-content hover:bg-surface-secondary transition-colors cursor-pointer"
+            class="p-1.5 rounded-lg text-content-tertiary hover:text-content hover:bg-surface-secondary transition-colors duration-fast cursor-pointer"
           >
             <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
               <path stroke-linecap="round" stroke-linejoin="round" d={mobileOpen() ? 'M6 18L18 6M6 6l12 12' : collapsed() ? 'M13 5l7 7-7 7' : 'M11 19l-7-7 7-7'} />
@@ -87,22 +103,36 @@ export function AdminLayout(props: ParentProps) {
           </button>
         </div>
 
-        <nav class="flex-1 py-3 px-2 space-y-1 overflow-y-auto">
+        <nav ref={navRef} class="relative flex-1 py-3 px-2 space-y-1 overflow-y-auto">
+          {/* Indicator — 在激活项位置滑动 */}
+          <div
+            aria-hidden="true"
+            class="absolute left-2 right-2 h-9 rounded-lg bg-accent-light pointer-events-none transition-[transform,opacity] duration-base ease-out-expo"
+            style={{
+              transform: `translateY(${indicator().top}px)`,
+              opacity: indicator().height > 0 ? 1 : 0,
+            }}
+          />
           <For each={sidebarLinks}>
             {(link) => (
             <A
               href={link.href}
+              data-sidebar-active={isActive(link.href, link.exact) ? 'true' : undefined}
               class={cn(
-                'flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors',
+                'group relative flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium',
+                'transition-colors duration-fast ease-out-expo',
                 isActive(link.href, link.exact)
-                  ? 'bg-accent-light text-accent'
-                  : 'text-content-secondary hover:text-content hover:bg-surface-secondary',
+                  ? 'text-accent'
+                  : 'text-content-secondary hover:text-content hover:bg-surface-secondary/60',
                 collapsed() && 'md:justify-center md:px-2',
               )}
               title={collapsed() && !mobileOpen() ? link.label : undefined}
               onClick={() => setMobileOpen(false)}
             >
-              <svg class="w-5 h-5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+              <svg
+                class="w-5 h-5 flex-shrink-0 transition-transform duration-fast ease-out-expo group-hover:scale-110"
+                fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"
+              >
                 <path stroke-linecap="round" stroke-linejoin="round" d={link.icon} />
               </svg>
               <Show when={!collapsed() || mobileOpen()}>
@@ -115,20 +145,23 @@ export function AdminLayout(props: ParentProps) {
       </aside>
 
       {/* Main */}
-      <div class={cn('flex-1 min-w-0 transition-all duration-200', collapsed() ? 'md:ml-16' : 'md:ml-56')}>
-        <header class="h-14 bg-surface border-b border-border flex items-center justify-between gap-3 px-4 sm:px-6">
+      <div class={cn('flex-1 min-w-0 transition-[margin] duration-base ease-out-expo', collapsed() ? 'md:ml-16' : 'md:ml-56')}>
+        <header class="sticky top-0 z-10 h-14 bg-surface/80 backdrop-blur-md border-b border-border-hairline flex items-center justify-between gap-3 px-4 sm:px-6">
           <div class="flex items-center gap-3 min-w-0">
             <button
               type="button"
               onClick={() => setMobileOpen(true)}
               aria-label="打开导航菜单"
-              class="p-1.5 rounded-lg text-content-tertiary hover:text-content hover:bg-surface-secondary transition-colors cursor-pointer md:hidden"
+              class="p-1.5 rounded-lg text-content-tertiary hover:text-content hover:bg-surface-secondary transition-colors duration-fast cursor-pointer md:hidden"
             >
               <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
                 <path stroke-linecap="round" stroke-linejoin="round" d="M4 6h16M4 12h16M4 18h16" />
               </svg>
             </button>
-            <h1 class="truncate text-base sm:text-lg font-semibold text-content">{pageTitle()}</h1>
+            {/* 标题切换 fade — Show keyed 在 pageTitle 变化时强制 remount，触发 CSS 入场 */}
+            <Show when={pageTitle()} keyed>
+              {(title) => <h1 class="truncate text-base sm:text-lg font-semibold text-content animate-fade-in">{title}</h1>}
+            </Show>
           </div>
           <div class="flex items-center gap-2 sm:gap-3 min-w-0">
             <Show when={!emailLoading()} fallback={<Skeleton width="120px" />}>
@@ -141,7 +174,7 @@ export function AdminLayout(props: ParentProps) {
                 try { await adminApi.logout(); } catch { uiStore.toast.warning('退出请求失败，已清理本地登录状态'); }
                 finally { tokenManager.clearAdminToken(); navigate('/admin/login', { replace: true }); }
               }}
-              class="p-1.5 rounded-lg text-content-tertiary hover:text-error hover:bg-error-light transition-colors cursor-pointer"
+              class="p-1.5 rounded-lg text-content-tertiary hover:text-error hover:bg-error-light transition-colors duration-fast cursor-pointer"
               title="退出登录"
             >
               <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
@@ -150,7 +183,12 @@ export function AdminLayout(props: ParentProps) {
             </button>
           </div>
         </header>
-        <main class="p-4 sm:p-6">{props.children}</main>
+        <main class="p-4 sm:p-6">
+          {/* 路由 children fade-in — Show keyed 在 pathname 变化时重新 mount 触发 CSS 入场 */}
+          <Show when={location.pathname} keyed>
+            <div class="animate-fade-in-up">{props.children}</div>
+          </Show>
+        </main>
       </div>
     </div>
   );
