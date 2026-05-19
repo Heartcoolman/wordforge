@@ -92,6 +92,7 @@ fn build_test_config(database_url: String) -> Config {
             max_tarball_bytes: 200 * 1024 * 1024,
         },
         pagination: Default::default(),
+        strict_mode: Default::default(),
         limits: Default::default(),
     }
 }
@@ -202,6 +203,7 @@ async fn algorithm_optimization_lowers_difficulty_on_low_accuracy() {
             session_id: None,
             created_at: now,
             record_type: learning_backend::store::operations::records::RecordType::All,
+            self_rating: None,
         };
         store.create_record(&rec).unwrap();
     }
@@ -241,6 +243,7 @@ async fn algorithm_optimization_raises_difficulty_on_high_accuracy() {
             session_id: None,
             created_at: now,
             record_type: learning_backend::store::operations::records::RecordType::All,
+            self_rating: None,
         };
         store.create_record(&rec).unwrap();
     }

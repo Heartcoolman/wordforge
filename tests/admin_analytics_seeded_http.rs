@@ -40,6 +40,7 @@ fn seed_records(
             session_id: None,
             created_at: at,
             record_type,
+            self_rating: None,
         };
         store.create_record(&rec).expect("create_record");
     }

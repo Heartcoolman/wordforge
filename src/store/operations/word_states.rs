@@ -638,6 +638,7 @@ mod tests {
             session_id: None,
             created_at: now,
             record_type: RecordType::All,
+            self_rating: None,
         };
         store.create_record(&r).unwrap();
         let eta = store.get_due_review_estimated_minutes("u1").unwrap();
@@ -662,6 +663,7 @@ mod tests {
             session_id: None,
             created_at: now,
             record_type: RecordType::All,
+            self_rating: None,
         };
         store.create_record(&r).unwrap();
         let eta = store.get_due_review_estimated_minutes("u1").unwrap();
@@ -689,6 +691,7 @@ mod tests {
             session_id: None,
             created_at: Utc::now(),
             record_type: RecordType::Learning,
+            self_rating: None,
         };
         store.create_record(&r).unwrap();
         let stats = store

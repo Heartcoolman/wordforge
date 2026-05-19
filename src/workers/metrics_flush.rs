@@ -46,8 +46,9 @@ mod tests {
             .expect("read flushed metric")
             .expect("metric should exist");
 
-        assert_eq!(persisted["call_count"], 2);
-        assert_eq!(persisted["error_count"], 1);
-        assert_eq!(persisted["total_latency_us"], 200);
+        // P0-1: MetricsSnapshot 序列化为 camelCase，存储读出字段名同步
+        assert_eq!(persisted["callCount"], 2);
+        assert_eq!(persisted["errorCount"], 1);
+        assert_eq!(persisted["totalLatencyUs"], 200);
     }
 }

@@ -817,6 +817,7 @@ mod tests {
                 max_tarball_bytes: 1024,
             },
             pagination: PaginationConfig::default(),
+            strict_mode: StrictModeConfig::default(),
             limits: LimitsConfig::default(),
         };
         mutate(&mut cfg);

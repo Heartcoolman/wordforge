@@ -477,6 +477,7 @@ mod tests {
             session_id: None,
             created_at: Utc::now(),
             record_type: crate::store::operations::records::RecordType::All,
+            self_rating: None,
         };
         store.create_record(&r).unwrap();
 

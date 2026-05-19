@@ -620,6 +620,7 @@ mod tests {
             session_id: Some("s1".into()),
             created_at: at,
             record_type: rt,
+            self_rating: None,
         };
         store.create_record(&r).unwrap();
     }

@@ -76,6 +76,7 @@ fn sample_record(
         session_id: Some("session-1".to_string()),
         created_at,
         record_type: RecordType::All,
+        self_rating: None,
     }
 }
 
