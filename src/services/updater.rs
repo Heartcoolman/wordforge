@@ -35,7 +35,11 @@ fn blocking_io<T, F>(f: F) -> Result<T, UpdaterError>
 where
     F: FnOnce() -> Result<T, UpdaterError>,
 {
-    tokio::task::block_in_place(f)
+    // 同步执行：updater 的 file IO 全是 KB 级毫秒操作（etag 写盘、tar 解包、
+    // 文件锁、清理旧版本），对 axum 调度影响可忽略；而 `block_in_place` 在
+    // current_thread runtime（含 `#[tokio::test]` 默认）下直接 panic，
+    // 反而把测试搞坏。保留 wrapper 名留作未来批量切换的占位。
+    f()
 }
 
 /// 整个 service 的错误层级。
