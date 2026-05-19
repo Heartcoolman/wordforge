@@ -394,7 +394,9 @@ mod tests {
         assert_eq!(total_evt, 1);
         assert_eq!(evt[0].triggered_by_request_id, None);
 
-        let (sums, total) = store.get_telemetry_summaries_by_device("dev2", 10, 0).unwrap();
+        let (sums, total) = store
+            .get_telemetry_summaries_by_device("dev2", 10, 0)
+            .unwrap();
         assert_eq!(total, 1);
         assert_eq!(sums.len(), 1);
         let s = &sums[0];
@@ -438,7 +440,9 @@ mod tests {
         let (rows, total) = store.get_telemetry_by_device("nope", 10, 0).unwrap();
         assert!(rows.is_empty());
         assert_eq!(total, 0);
-        let (sums, total_s) = store.get_telemetry_summaries_by_device("nope", 10, 0).unwrap();
+        let (sums, total_s) = store
+            .get_telemetry_summaries_by_device("nope", 10, 0)
+            .unwrap();
         assert!(sums.is_empty());
         assert_eq!(total_s, 0);
     }
@@ -451,10 +455,19 @@ mod tests {
         summary.feature_usage_json = "not-json".into();
         store
             .insert_telemetry_and_summary(
-                "id3", "dev3", "u", "periodic", None, "{}", "2026-05-01T12:00:00Z", &summary,
+                "id3",
+                "dev3",
+                "u",
+                "periodic",
+                None,
+                "{}",
+                "2026-05-01T12:00:00Z",
+                &summary,
             )
             .unwrap();
-        let (sums, _) = store.get_telemetry_summaries_by_device("dev3", 10, 0).unwrap();
+        let (sums, _) = store
+            .get_telemetry_summaries_by_device("dev3", 10, 0)
+            .unwrap();
         let s = &sums[0];
         assert!(s.behavior_summary.click_targets.is_none());
         assert!(s.feature_usage.is_object());
@@ -465,7 +478,15 @@ mod tests {
     fn record_payload_corrupt_falls_back_to_empty_object() {
         let (_t, store) = test_store();
         store
-            .insert_telemetry("id4", "dev4", "u", "periodic", None, "not-json", "2026-05-01T12:00:00Z")
+            .insert_telemetry(
+                "id4",
+                "dev4",
+                "u",
+                "periodic",
+                None,
+                "not-json",
+                "2026-05-01T12:00:00Z",
+            )
             .unwrap();
         let (rows, _) = store.get_telemetry_by_device("dev4", 10, 0).unwrap();
         assert!(rows[0].payload.is_object());

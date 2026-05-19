@@ -4,6 +4,7 @@ import { LineChart, BarChart, PieChart, ScatterChart } from 'echarts/charts';
 import { GridComponent, TooltipComponent, LegendComponent } from 'echarts/components';
 import { CanvasRenderer } from 'echarts/renderers';
 import type { EChartsOption } from 'echarts';
+import { themeStore } from '@/stores/theme';
 
 echarts.use([
   CanvasRenderer,
@@ -21,7 +22,6 @@ export function EChart(props: EChartProps) {
   let containerRef: HTMLDivElement | undefined;
   let instance: echarts.ECharts | null = null;
   let resizeOb: ResizeObserver | null = null;
-  let mutationOb: MutationObserver | null = null;
 
   onMount(() => {
     if (!containerRef) return;
@@ -32,21 +32,14 @@ export function EChart(props: EChartProps) {
     resizeOb = new ResizeObserver(() => instance?.resize());
     resizeOb.observe(containerRef);
 
-    mutationOb = new MutationObserver(() => {
-      if (instance) instance.setOption(props.option(), { notMerge: true });
-    });
-    mutationOb.observe(document.documentElement, {
-      attributes: true,
-      attributeFilter: ['class'],
-    });
   });
 
   createEffect(() => {
+    themeStore.effective();
     instance?.setOption(props.option(), { notMerge: true });
   });
 
   onCleanup(() => {
-    mutationOb?.disconnect();
     resizeOb?.disconnect();
     instance?.dispose();
     instance = null;

@@ -4,12 +4,13 @@ import { Spinner } from '@/components/ui/Spinner';
 import { Empty } from '@/components/ui/Empty';
 import { EChart } from '@/components/ui/EChart';
 import { adminApi, type AmasUserStateHistogram } from '@/api/admin';
+import { chartColor } from '@/lib/chartTheme';
 
-const FIELD_COLOR: Record<string, string> = {
-  attention: '#6366f1',
-  fatigue: '#ef4444',
-  motivation: '#10b981',
-  confidence: '#f59e0b',
+const FIELD_TONE: Record<string, Parameters<typeof chartColor>[0]> = {
+  attention: 'accent',
+  fatigue: 'error',
+  motivation: 'success',
+  confidence: 'warning',
 };
 
 const FIELD_LABEL: Record<string, string> = {
@@ -43,7 +44,7 @@ export function UserStatePanel() {
         {
           type: 'bar',
           data: h.bins,
-          itemStyle: { color: FIELD_COLOR[h.field] ?? '#94a3b8' },
+          itemStyle: { color: chartColor(FIELD_TONE[h.field] ?? 'muted') },
           barCategoryGap: '8%',
         },
       ],

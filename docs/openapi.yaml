@@ -1,0 +1,93 @@
+openapi: 3.1.0
+info:
+  title: WordForge API
+  version: 0.4.3
+  description: Core public and admin API surface for generated clients.
+servers:
+  - url: /api
+security:
+  - bearerAuth: []
+paths:
+  /auth/login:
+    post:
+      summary: User login
+      x-frontend-response-type: unknown
+      responses:
+        "200":
+          description: User access and refresh tokens.
+  /auth/refresh:
+    post:
+      summary: Rotate refresh token and issue a new access token
+      x-frontend-response-type: unknown
+      responses:
+        "200":
+          description: New token pair.
+  /admin/auth/login:
+    post:
+      summary: Admin login
+      x-frontend-response-type: unknown
+      responses:
+        "200":
+          description: Admin access token.
+        "429":
+          description: Admin account lockout or auth rate limit.
+  /admin/users:
+    get:
+      summary: List users for admin management
+      x-frontend-response-type: import('./admin').AdminUsersPage
+      security:
+        - adminBearerAuth: []
+      responses:
+        "200":
+          description: Paged user list.
+  /admin/amas/config:
+    get:
+      summary: Read current AMAS configuration
+      x-frontend-response-type: import('./amas').AmasConfig
+      security:
+        - adminBearerAuth: []
+      responses:
+        "200":
+          description: AMAS configuration.
+    put:
+      summary: Update AMAS configuration
+      x-frontend-response-type: "{ updated: boolean; versionHash?: string; versionId?: number }"
+      security:
+        - adminBearerAuth: []
+      responses:
+        "200":
+          description: Saved configuration version.
+  /admin/amas/metrics/timeseries:
+    get:
+      summary: AMAS algorithm latency and error metrics
+      x-frontend-response-type: import('../api/admin').AmasMetricsTimeseriesPoint[]
+      security:
+        - adminBearerAuth: []
+      parameters:
+        - name: days
+          in: query
+          schema:
+            type: integer
+            default: 7
+      responses:
+        "200":
+          description: Daily algorithm metrics.
+  /admin/updates/status:
+    get:
+      summary: Read self-update status
+      x-frontend-response-type: import('./admin').AdminUpdateStatus
+      security:
+        - adminBearerAuth: []
+      responses:
+        "200":
+          description: Current and latest release status.
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    adminBearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT

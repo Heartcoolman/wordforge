@@ -4,16 +4,7 @@ import { Spinner } from '@/components/ui/Spinner';
 import { Empty } from '@/components/ui/Empty';
 import { EChart } from '@/components/ui/EChart';
 import { adminApi, type AmasMetricsTimeseriesPoint } from '@/api/admin';
-
-const ALGO_COLORS: Record<string, string> = {
-  Heuristic: '#6366f1',
-  IGE: '#10b981',
-  SWD: '#f59e0b',
-  Ensemble: '#ec4899',
-  MDM: '#0ea5e9',
-  Mastery: '#8b5cf6',
-};
-const FALLBACK = '#94a3b8';
+import { algorithmColor } from '@/lib/chartTheme';
 
 /** C1: 算法延迟 / 错误率时间序列。双 Y 轴 — 左 latency μs，右 error 数 */
 export function MetricsDashboard() {
@@ -40,7 +31,7 @@ export function MetricsDashboard() {
         const p = lookup.get(`${d}|${algo}`);
         return p ? Number((p.avgLatencyUs / 1000).toFixed(3)) : null; // → ms
       }),
-      itemStyle: { color: ALGO_COLORS[algo] ?? FALLBACK },
+      itemStyle: { color: algorithmColor(algo) },
       lineStyle: { width: 2 },
     }));
     const errorSeries = algos.map((algo) => ({
@@ -48,7 +39,7 @@ export function MetricsDashboard() {
       type: 'bar' as const,
       yAxisIndex: 1,
       data: dates.map((d) => lookup.get(`${d}|${algo}`)?.errorCount ?? 0),
-      itemStyle: { color: ALGO_COLORS[algo] ?? FALLBACK, opacity: 0.35 },
+      itemStyle: { color: algorithmColor(algo), opacity: 0.35 },
       barGap: '5%',
     }));
     return {

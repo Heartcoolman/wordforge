@@ -743,23 +743,7 @@ async fn get_user_wb_center_url(
     state: &AppState,
     user_id: &str,
 ) -> Result<Option<String>, AppError> {
-    let user_id = user_id.to_string();
-    state
-        .run_store_task(
-            "wordbook_center.get_user_url",
-            move |store| -> Result<_, AppError> {
-                match store.get_user_preferences(&user_id)? {
-                    Some(val) => Ok(val
-                        .get("wordbook_center_url")
-                        .or(val.get("wordbookCenterUrl"))
-                        .and_then(|v| v.as_str())
-                        .filter(|s| !s.is_empty())
-                        .map(|s| s.to_string())),
-                    None => Ok(None),
-                }
-            },
-        )
-        .await?
+    state.wordbook_service().user_center_url(user_id).await
 }
 
 async fn set_user_wb_center_url(
@@ -767,35 +751,10 @@ async fn set_user_wb_center_url(
     user_id: &str,
     url: Option<&str>,
 ) -> Result<(), AppError> {
-    let user_id = user_id.to_string();
-    let url = url.map(str::to_string);
     state
-        .run_store_task(
-            "wordbook_center.set_user_url",
-            move |store| -> Result<_, AppError> {
-                let mut prefs = store
-                    .get_user_preferences(&user_id)?
-                    .unwrap_or(serde_json::json!({}));
-
-                if let Some(obj) = prefs.as_object_mut() {
-                    match url.as_deref() {
-                        Some(u) if !u.is_empty() => {
-                            obj.insert(
-                                "wordbook_center_url".to_string(),
-                                serde_json::Value::String(u.to_string()),
-                            );
-                        }
-                        _ => {
-                            obj.remove("wordbook_center_url");
-                        }
-                    }
-                }
-
-                store.set_user_preferences(&user_id, &prefs)?;
-                Ok(())
-            },
-        )
-        .await?
+        .wordbook_service()
+        .set_user_center_url(user_id, url)
+        .await
 }
 
 async fn user_get_settings(

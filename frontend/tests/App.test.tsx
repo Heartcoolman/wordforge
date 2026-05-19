@@ -64,16 +64,16 @@ describe('App', () => {
 
   it('renders without crashing', () => {
     const { container } = render(() => <App />);
-    expect(container).toBeTruthy();
+    expect(container).toBeInstanceOf(HTMLElement);
   });
 
   it('renders content for the admin login route', () => {
-    const { container } = render(() => <App />);
-    expect(container.innerHTML.length).toBeGreaterThan(0);
+    const { getByText } = render(() => <App />);
+    expect(getByText('AdminLogin')).toBeInTheDocument();
   });
 
   it('renders route structure', () => {
     const { container } = render(() => <App />);
-    expect(container.children.length).toBeGreaterThan(0);
+    expect(container.firstElementChild).toHaveTextContent('AdminLogin');
   });
 });

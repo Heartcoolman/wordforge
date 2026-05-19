@@ -5,6 +5,7 @@ import { Empty } from '@/components/ui/Empty';
 import { EChart } from '@/components/ui/EChart';
 import { StatCard } from '@/components/ui/StatCard';
 import { adminApi } from '@/api/admin';
+import { chartColor } from '@/lib/chartTheme';
 
 /** C3: Anomaly / Invariant Violation 表盘 */
 export function AnomaliesPanel() {
@@ -20,9 +21,9 @@ export function AnomaliesPanel() {
       xAxis: { type: 'category', data: data.map((d) => d.date) },
       yAxis: { type: 'value', minInterval: 1 },
       series: [
-        { name: '总事件', type: 'bar', data: data.map((d) => d.total), itemStyle: { color: '#94a3b8', opacity: 0.6 } },
-        { name: '异常', type: 'bar', data: data.map((d) => d.anomalies), itemStyle: { color: '#ef4444' } },
-        { name: '违反不变量', type: 'bar', data: data.map((d) => d.violations), itemStyle: { color: '#f59e0b' } },
+        { name: '总事件', type: 'bar', data: data.map((d) => d.total), itemStyle: { color: chartColor('muted'), opacity: 0.6 } },
+        { name: '异常', type: 'bar', data: data.map((d) => d.anomalies), itemStyle: { color: chartColor('error') } },
+        { name: '违反不变量', type: 'bar', data: data.map((d) => d.violations), itemStyle: { color: chartColor('warning') } },
       ],
     };
   };
@@ -35,7 +36,7 @@ export function AnomaliesPanel() {
       xAxis: { type: 'value', minInterval: 1 },
       yAxis: { type: 'category', data: fields.map((f) => f.field), inverse: true },
       series: [
-        { type: 'bar', data: fields.map((f) => f.count), itemStyle: { color: '#f59e0b' }, barWidth: 16 },
+        { type: 'bar', data: fields.map((f) => f.count), itemStyle: { color: chartColor('warning') }, barWidth: 16 },
       ],
     };
   };

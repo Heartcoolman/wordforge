@@ -8,8 +8,8 @@ describe('schema', () => {
   describe('PARAM_DICT / TIER_A', () => {
     it('all sections have at least one meta', () => {
       for (const [key, list] of Object.entries(PARAM_DICT)) {
-        expect(list.length).toBeGreaterThan(0);
-        for (const m of list) expect(m.path.startsWith(key + '.') || m.path.startsWith(key + '[')).toBeTruthy();
+        expect(list).not.toHaveLength(0);
+        for (const m of list) expect(m.path.startsWith(key + '.') || m.path.startsWith(key + '[')).toBe(true);
       }
     });
 

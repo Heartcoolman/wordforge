@@ -63,7 +63,7 @@ describe('VersionComparePanel — diff table, loading, swap, select fallback', (
     await waitFor(() => expect(screen.getByText('版本对比')).toBeInTheDocument());
     await waitFor(() => {
       const spinners = document.querySelectorAll('[class*="animate-spin"], [data-testid="spinner"]');
-      expect(spinners.length).toBeGreaterThan(0);
+      expect(spinners).toHaveLength(1);
     });
     resolveCompare?.(compareFull);
   });
@@ -93,6 +93,6 @@ describe('VersionComparePanel — diff table, loading, swap, select fallback', (
     const [selA, selB] = screen.getAllByRole('combobox') as HTMLSelectElement[];
     fireEvent.change(selA, { target: { value: 'aaaaaaaaaaaaaaaa' } });
     fireEvent.change(selB, { target: { value: 'cccccccccccccccc' } });
-    await waitFor(() => expect(screen.getAllByText('—').length).toBeGreaterThan(0));
+    await waitFor(() => expect(screen.getAllByText('—')).toHaveLength(7));
   });
 });

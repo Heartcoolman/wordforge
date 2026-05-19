@@ -17,7 +17,7 @@ describe('SystemLockedModal', () => {
       </div>
     ));
     const overlay = document.querySelector('[tabindex="0"]') as HTMLDivElement;
-    expect(overlay).toBeTruthy();
+    expect(overlay).toBeInstanceOf(HTMLDivElement);
     fireEvent.click(overlay);
     expect(outerHandler).not.toHaveBeenCalled();
   });

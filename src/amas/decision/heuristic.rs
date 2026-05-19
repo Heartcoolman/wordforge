@@ -1,11 +1,9 @@
 use crate::amas::config::AMASConfig;
+use crate::amas::constants::{
+    FATIGUE_BATCH_SIZE_CAP, FATIGUE_DIFFICULTY_CAP, FATIGUE_NEW_RATIO_CAP,
+    LOW_ACCURACY_DIFFICULTY_FLOOR, LOW_MOTIVATION_DIFFICULTY_FLOOR,
+};
 use crate::amas::types::*;
-
-const FATIGUE_DIFFICULTY_CAP: f64 = 0.4;
-const FATIGUE_BATCH_SIZE_CAP: u32 = 5;
-const FATIGUE_NEW_RATIO_CAP: f64 = 0.1;
-const LOW_ACCURACY_DIFFICULTY_FLOOR: f64 = 0.1;
-const LOW_MOTIVATION_DIFFICULTY_FLOOR: f64 = 0.2;
 
 pub fn generate(
     user_state: &UserState,

@@ -1,8 +1,10 @@
 import { defineConfig } from 'vitest/config';
 import solid from 'vite-plugin-solid';
 import { fileURLToPath, URL } from 'node:url';
+import os from 'node:os';
 
 const TEST_API_BASE_URL = 'http://localhost:3000';
+const MAX_TEST_THREADS = Math.max(2, Math.min(4, os.cpus().length - 1));
 
 export default defineConfig({
   plugins: [solid()],
@@ -19,13 +21,13 @@ export default defineConfig({
     environment: 'happy-dom',
     setupFiles: ['./tests/setup.ts'],
     exclude: ['e2e/**', 'node_modules/**'],
-    // 用 child_process forks 替代 worker_threads + singleFork：所有测试跑同一 fork，
-    // 从根本上消除 vitest+v8 coverage+tinypool 在 Linux/Node 20 上 worker 销毁时
-    // libuv 触发的 IPC channel closed 偶发崩溃（Node 20 libuv race，Node 22+ 已修）。
-    // 代价：测试串行跑，约慢 2-3x，但稳定。
-    pool: 'forks',
+    pool: 'threads',
     poolOptions: {
-      forks: { singleFork: true },
+      threads: {
+        isolate: true,
+        minThreads: 1,
+        maxThreads: MAX_TEST_THREADS,
+      },
     },
     env: {
       VITE_API_BASE_URL: TEST_API_BASE_URL,

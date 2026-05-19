@@ -226,10 +226,7 @@ impl Store {
     }
 
     /// 计算 due 词条 ETA：dueCount × avgResponseTimeMs / 60000，向上取整；无样本时按 5s/词 估算。
-    pub fn get_due_review_estimated_minutes(
-        &self,
-        user_id: &str,
-    ) -> Result<u32, StoreError> {
+    pub fn get_due_review_estimated_minutes(&self, user_id: &str) -> Result<u32, StoreError> {
         keys::validate_id(user_id)?;
         let conn = self.conn()?;
         let now = Utc::now().to_rfc3339();
@@ -254,7 +251,9 @@ impl Store {
             )
             .optional()?
             .flatten();
-        let per_word_ms = avg_ms.filter(|v| v.is_finite() && *v >= 500.0).unwrap_or(5000.0);
+        let per_word_ms = avg_ms
+            .filter(|v| v.is_finite() && *v >= 500.0)
+            .unwrap_or(5000.0);
         let total_ms = (due_count as f64) * per_word_ms;
         let minutes = (total_ms / 60_000.0).ceil();
         Ok(minutes.clamp(0.0, u32::MAX as f64) as u32)

@@ -8,7 +8,7 @@ use crate::store::{Store, StoreError};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AlgoTimeseriesPoint {
-    pub date: String,        // YYYY-MM-DD
+    pub date: String, // YYYY-MM-DD
     pub algorithm: String,
     pub call_count: u64,
     pub avg_latency_us: f64,
@@ -43,11 +43,25 @@ impl Store {
             .collect::<Result<Vec<_>, _>>()?;
         let mut out = Vec::with_capacity(rows.len());
         for (date, algo, json) in rows {
-            let parsed: serde_json::Value = serde_json::from_str(&json).map_err(StoreError::Serialization)?;
-            let calls = parsed.get("call_count").and_then(|v| v.as_u64()).unwrap_or(0);
-            let total_us = parsed.get("total_latency_us").and_then(|v| v.as_u64()).unwrap_or(0);
-            let errors = parsed.get("error_count").and_then(|v| v.as_u64()).unwrap_or(0);
-            let avg = if calls > 0 { total_us as f64 / calls as f64 } else { 0.0 };
+            let parsed: serde_json::Value =
+                serde_json::from_str(&json).map_err(StoreError::Serialization)?;
+            let calls = parsed
+                .get("call_count")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let total_us = parsed
+                .get("total_latency_us")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let errors = parsed
+                .get("error_count")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let avg = if calls > 0 {
+                total_us as f64 / calls as f64
+            } else {
+                0.0
+            };
             out.push(AlgoTimeseriesPoint {
                 date,
                 algorithm: algo,
@@ -111,7 +125,8 @@ impl Store {
             })?
             .collect::<Result<Vec<_>, _>>()?;
 
-        let mut by_day_map: std::collections::BTreeMap<String, (u64, u64, u64)> = Default::default();
+        let mut by_day_map: std::collections::BTreeMap<String, (u64, u64, u64)> =
+            Default::default();
         let mut field_counts: std::collections::HashMap<String, u64> = Default::default();
         let mut total = 0u64;
         let mut anom = 0u64;
@@ -238,12 +253,22 @@ impl Store {
             },
         )?;
 
-        let first = row.8.and_then(|s| DateTime::parse_from_rfc3339(&s).ok()).map(|d| d.with_timezone(&Utc));
-        let last = row.9.and_then(|s| DateTime::parse_from_rfc3339(&s).ok()).map(|d| d.with_timezone(&Utc));
+        let first = row
+            .8
+            .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+            .map(|d| d.with_timezone(&Utc));
+        let last = row
+            .9
+            .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+            .map(|d| d.with_timezone(&Utc));
 
         let event_count = row.0;
         let anomaly_count = row.1;
-        let anomaly_rate = if event_count > 0 { anomaly_count as f64 / event_count as f64 } else { 0.0 };
+        let anomaly_rate = if event_count > 0 {
+            anomaly_count as f64 / event_count as f64
+        } else {
+            0.0
+        };
 
         Ok(VersionMetricsSlice {
             version_hash: version_hash.to_string(),
@@ -427,9 +452,27 @@ mod tests {
     fn anomaly_overview_aggregates_correctly() {
         let store = fresh_store();
         let now = Utc::now();
-        insert_event(&store, "e1", now, true, r#"[{"field":"fatigue"}]"#, Some("explore"), 0.8, 0.2);
+        insert_event(
+            &store,
+            "e1",
+            now,
+            true,
+            r#"[{"field":"fatigue"}]"#,
+            Some("explore"),
+            0.8,
+            0.2,
+        );
         insert_event(&store, "e2", now, false, "[]", Some("exploit"), 0.7, 0.3);
-        insert_event(&store, "e3", now, true, r#"[{"field":"fatigue"},{"field":"motivation"}]"#, None, 0.6, 0.4);
+        insert_event(
+            &store,
+            "e3",
+            now,
+            true,
+            r#"[{"field":"fatigue"},{"field":"motivation"}]"#,
+            None,
+            0.6,
+            0.4,
+        );
 
         let overview = store.aggregate_amas_anomalies(7).unwrap();
         assert_eq!(overview.total_events, 3);
@@ -437,7 +480,11 @@ mod tests {
         assert_eq!(overview.violation_count, 3);
         assert_eq!(overview.cold_start_explore, 1);
         assert_eq!(overview.cold_start_exploit, 1);
-        let fatigue_stat = overview.top_violation_fields.iter().find(|s| s.field == "fatigue").unwrap();
+        let fatigue_stat = overview
+            .top_violation_fields
+            .iter()
+            .find(|s| s.field == "fatigue")
+            .unwrap();
         assert_eq!(fatigue_stat.count, 2);
     }
 

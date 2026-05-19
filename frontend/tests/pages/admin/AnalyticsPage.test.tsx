@@ -174,8 +174,7 @@ describe('AnalyticsPage', () => {
     mockAdminApi.getWordStateDistribution.mockResolvedValue(mockStates);
     await renderPage();
     await waitFor(() => {
-      const failed = screen.getAllByText('加载失败');
-      expect(failed.length).toBeGreaterThan(0);
+      expect(screen.getByText('无法获取学习构成数据')).toBeInTheDocument();
     });
   });
 

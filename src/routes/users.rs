@@ -17,7 +17,10 @@ use crate::validation::{validate_password, validate_username};
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/me", get(get_profile).put(update_profile))
+        .route(
+            "/me",
+            get(get_profile).put(update_profile).delete(delete_me),
+        )
         .route("/me/password", put(change_password))
         .route("/me/stats", get(get_stats))
 }
@@ -83,6 +86,17 @@ async fn update_profile(
         )
         .await??;
     Ok(ok(UserProfile::from(&user)))
+}
+
+async fn delete_me(
+    auth: AuthUser,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let user_id = auth.user_id.clone();
+    state
+        .run_store_task("users.delete_me", move |store| store.delete_user(&user_id))
+        .await??;
+    Ok(ok(serde_json::json!({ "deleted": true })))
 }
 
 #[derive(Debug, Deserialize)]

@@ -6,7 +6,7 @@ describe('JsonAdvancedPanel', () => {
   it('renders textarea with serialized config', () => {
     render(() => <JsonAdvancedPanel config={{ a: 1 }} onChange={() => {}} />);
     const ta = document.querySelector('textarea') as HTMLTextAreaElement;
-    expect(ta).toBeTruthy();
+    expect(ta).toBeInstanceOf(HTMLTextAreaElement);
     expect(ta.value).toContain('"a": 1');
   });
 

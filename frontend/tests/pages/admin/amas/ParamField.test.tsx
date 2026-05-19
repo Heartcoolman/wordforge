@@ -133,7 +133,7 @@ describe('ParamField', () => {
   it('shows changed dot when value differs from default', () => {
     render(() => <ParamField meta={numMeta} value={0.9} onChange={() => {}} />);
     const dot = document.querySelector('span[title="已修改"]');
-    expect(dot).toBeTruthy();
+    expect(dot).toHaveClass('bg-accent');
   });
 
   it('shows error message when prop.error', () => {

@@ -340,7 +340,9 @@ mod tests {
         let w2 = word();
         store.upsert_word_favorite(&u, &w1).unwrap();
         let missing = word();
-        let m = store.get_word_favorite_statuses(&u, &[w1.clone(), w2.clone(), missing.clone()]).unwrap();
+        let m = store
+            .get_word_favorite_statuses(&u, &[w1.clone(), w2.clone(), missing.clone()])
+            .unwrap();
         assert!(m.contains_key(&w1));
         assert!(!m.contains_key(&w2));
         assert!(!m.contains_key(&missing));
@@ -356,7 +358,10 @@ mod tests {
         let got = store.get_word_note(&u, &note.id).unwrap().unwrap();
         assert_eq!(got.content, "initial");
 
-        let updated = store.update_word_note(&u, &note.id, "edited").unwrap().unwrap();
+        let updated = store
+            .update_word_note(&u, &note.id, "edited")
+            .unwrap()
+            .unwrap();
         assert_eq!(updated.content, "edited");
 
         assert!(store.delete_word_note(&u, &note.id).unwrap());

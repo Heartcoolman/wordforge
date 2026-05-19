@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/Button';
 import { Select } from '@/components/ui/Select';
 import { Badge } from '@/components/ui/Badge';
 import { adminApi, type AmasConfigVersionRow, type AmasVersionSlice } from '@/api/admin';
+import { chartColor } from '@/lib/chartTheme';
 
 const METRICS: { key: keyof AmasVersionSlice; label: string; format: (v: number) => string; lowerIsBetter: boolean }[] = [
   { key: 'eventCount', label: '事件数', format: (v) => v.toFixed(0), lowerIsBetter: false },
@@ -63,8 +64,8 @@ export function VersionComparePanel() {
       xAxis: { type: 'value' },
       yAxis: { type: 'category', data: labels, inverse: true },
       series: [
-        { name: 'A', type: 'bar', data: aVals, itemStyle: { color: '#6366f1' }, barGap: '10%' },
-        { name: 'B', type: 'bar', data: bVals, itemStyle: { color: '#10b981' }, barGap: '10%' },
+        { name: 'A', type: 'bar', data: aVals, itemStyle: { color: chartColor('accent') }, barGap: '10%' },
+        { name: 'B', type: 'bar', data: bVals, itemStyle: { color: chartColor('success') }, barGap: '10%' },
       ],
     };
   };

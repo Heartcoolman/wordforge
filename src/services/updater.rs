@@ -31,6 +31,13 @@ const LOCK_FILE: &str = ".update.lock";
 const ETAG_FILE: &str = ".update_etag";
 const KEEP_OLD_VERSIONS: usize = 2;
 
+fn blocking_io<T, F>(f: F) -> Result<T, UpdaterError>
+where
+    F: FnOnce() -> Result<T, UpdaterError>,
+{
+    tokio::task::block_in_place(f)
+}
+
 /// 整个 service 的错误层级。
 #[derive(Debug, thiserror::Error)]
 pub enum UpdaterError {
@@ -301,7 +308,10 @@ impl Updater {
         if let Some(tag) = new_etag {
             cache.etag = Some(tag.clone());
             // 持久化（写盘失败仅 warn）
-            if let Err(e) = std::fs::write(self.etag_path(), tag) {
+            if let Err(e) = blocking_io(|| {
+                std::fs::write(self.etag_path(), tag)?;
+                Ok(())
+            }) {
                 tracing::warn!("persist etag: {e}");
             }
         }
@@ -353,17 +363,19 @@ impl Updater {
             });
         }
 
-        // 文件锁防并发
-        std::fs::create_dir_all(&self.install_dir)?;
-        let lock_path = self.install_dir.join(LOCK_FILE);
-        let lock_file = std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(false)
-            .open(&lock_path)?;
-        lock_file
-            .try_lock_exclusive()
-            .map_err(|_| UpdaterError::Locked)?;
+        let _lock_file = blocking_io(|| {
+            std::fs::create_dir_all(&self.install_dir)?;
+            let lock_path = self.install_dir.join(LOCK_FILE);
+            let lock_file = std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(false)
+                .open(&lock_path)?;
+            lock_file
+                .try_lock_exclusive()
+                .map_err(|_| UpdaterError::Locked)?;
+            Ok(lock_file)
+        })?;
 
         let outcome = self
             .apply_locked(&latest, backup_callback, progress.clone())
@@ -385,8 +397,11 @@ impl Updater {
         F: FnOnce(&Path) -> Result<(), UpdaterError> + Send,
     {
         let tmp_dir = self.install_dir.join(TMP_DIR);
-        let _ = std::fs::remove_dir_all(&tmp_dir);
-        std::fs::create_dir_all(&tmp_dir)?;
+        blocking_io(|| {
+            let _ = std::fs::remove_dir_all(&tmp_dir);
+            std::fs::create_dir_all(&tmp_dir)?;
+            Ok(())
+        })?;
         let tarball_path = tmp_dir.join(format!(
             "{}{}.tar.gz",
             ASSET_PREFIX,
@@ -411,7 +426,10 @@ impl Updater {
             .await?;
         progress(UpdatePhase::Verifying);
         if !actual_sha.eq_ignore_ascii_case(&sha_expected) {
-            let _ = std::fs::remove_file(&tarball_path);
+            let _ = blocking_io(|| {
+                let _ = std::fs::remove_file(&tarball_path);
+                Ok(())
+            });
             return Err(UpdaterError::Sha256Mismatch {
                 expected: sha_expected,
                 actual: actual_sha,
@@ -421,10 +439,12 @@ impl Updater {
         // 3) 解压到 staging
         progress(UpdatePhase::Extracting);
         let staging_dir = self.install_dir.join(STAGING_DIR);
-        let _ = std::fs::remove_dir_all(&staging_dir);
-        std::fs::create_dir_all(&staging_dir)?;
-        extract_tar_gz_safe(&tarball_path, &staging_dir)?;
-        let extracted = locate_extracted_root(&staging_dir)?;
+        let extracted = blocking_io(|| {
+            let _ = std::fs::remove_dir_all(&staging_dir);
+            std::fs::create_dir_all(&staging_dir)?;
+            extract_tar_gz_safe(&tarball_path, &staging_dir)?;
+            locate_extracted_root(&staging_dir)
+        })?;
 
         // 4) DB 备份
         progress(UpdatePhase::BackingUpDb);
@@ -432,10 +452,12 @@ impl Updater {
             .install_dir
             .join("data")
             .join(format!("learning-{}.backup.db", self.current_tag));
-        if let Some(parent) = backup_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        backup_callback(&backup_path)?;
+        blocking_io(|| {
+            if let Some(parent) = backup_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            backup_callback(&backup_path)
+        })?;
 
         // 5) 原子替换二进制和 static/
         progress(UpdatePhase::Swapping);
@@ -448,53 +470,55 @@ impl Updater {
             .install_dir
             .join(format!("static.{}", self.current_tag));
 
-        let mut steps_done: Vec<UndoStep> = Vec::new();
-        if bin_path.exists() {
-            std::fs::rename(&bin_path, &bin_backup)?;
-            steps_done.push(UndoStep::Rename(bin_backup.clone(), bin_path.clone()));
-        }
-        if static_path.exists() {
-            if let Err(e) = std::fs::rename(&static_path, &static_backup) {
+        blocking_io(|| {
+            let mut steps_done: Vec<UndoStep> = Vec::new();
+            if bin_path.exists() {
+                std::fs::rename(&bin_path, &bin_backup)?;
+                steps_done.push(UndoStep::Rename(bin_backup.clone(), bin_path.clone()));
+            }
+            if static_path.exists() {
+                if let Err(e) = std::fs::rename(&static_path, &static_backup) {
+                    rollback(steps_done);
+                    return Err(UpdaterError::RolledBack(format!(
+                        "rename static failed: {e}"
+                    )));
+                }
+                steps_done.push(UndoStep::Rename(static_backup.clone(), static_path.clone()));
+            }
+
+            if let Err(e) = std::fs::rename(extracted.join("wordforge"), &bin_path) {
                 rollback(steps_done);
                 return Err(UpdaterError::RolledBack(format!(
-                    "rename static failed: {e}"
+                    "install new binary failed: {e}"
                 )));
             }
-            steps_done.push(UndoStep::Rename(static_backup.clone(), static_path.clone()));
-        }
+            steps_done.push(UndoStep::Remove(bin_path.clone()));
+            if let Err(e) = std::fs::rename(extracted.join("static"), &static_path) {
+                rollback(steps_done);
+                return Err(UpdaterError::RolledBack(format!(
+                    "install new static failed: {e}"
+                )));
+            }
 
-        if let Err(e) = std::fs::rename(extracted.join("wordforge"), &bin_path) {
-            rollback(steps_done);
-            return Err(UpdaterError::RolledBack(format!(
-                "install new binary failed: {e}"
-            )));
-        }
-        steps_done.push(UndoStep::Remove(bin_path.clone()));
-        if let Err(e) = std::fs::rename(extracted.join("static"), &static_path) {
-            rollback(steps_done);
-            return Err(UpdaterError::RolledBack(format!(
-                "install new static failed: {e}"
-            )));
-        }
-
-        // 清理 staging / tmp（失败不阻塞）
-        let _ = std::fs::remove_dir_all(&staging_dir);
-        let _ = std::fs::remove_dir_all(&tmp_dir);
+            let _ = std::fs::remove_dir_all(&staging_dir);
+            let _ = std::fs::remove_dir_all(&tmp_dir);
+            Ok(())
+        })?;
 
         // 旧版本保留数控制
-        if let Err(e) = self.prune_old_backups("wordforge.") {
+        if let Err(e) = blocking_io(|| self.prune_old_backups("wordforge.").map_err(Into::into)) {
             tracing::warn!("prune binary backups: {e}");
         }
-        if let Err(e) = self.prune_old_backups("static.") {
+        if let Err(e) = blocking_io(|| self.prune_old_backups("static.").map_err(Into::into)) {
             tracing::warn!("prune static backups: {e}");
         }
-        if let Err(e) = self.prune_old_db_backups() {
+        if let Err(e) = blocking_io(|| self.prune_old_db_backups().map_err(Into::into)) {
             tracing::warn!("prune db backups: {e}");
         }
 
         // 6) fork-exec 自重启
         progress(UpdatePhase::Restarting);
-        spawn_replacement(&bin_path)?;
+        blocking_io(|| spawn_replacement(&bin_path))?;
         // 给子进程 500ms 抢端口，让父释放 SocketAddr
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         std::process::exit(0);

@@ -144,7 +144,10 @@ mod tests {
         assert!(!got.registration_enabled);
         assert!(got.maintenance_mode);
         assert_eq!(got.default_daily_words, 5);
-        assert_eq!(got.wordbook_center_url.as_deref(), Some("https://example.com"));
+        assert_eq!(
+            got.wordbook_center_url.as_deref(),
+            Some("https://example.com")
+        );
         assert!(got.amas_auto_apply_enabled);
         assert_eq!(got.amas_auto_apply_max_per_day, 9);
         assert!((got.amas_auto_apply_min_confidence - 0.55).abs() < 1e-9);
