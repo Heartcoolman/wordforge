@@ -46,6 +46,10 @@ pub struct LearningRecord {
     pub created_at: DateTime<Utc>,
     #[serde(default)]
     pub record_type: RecordType,
+    /// SRS 自评粒度（0=Again / 1=Hard / 2=Good / 3=Easy）；
+    /// 客户端选填，落库供 AMAS half-life 模型未来分级回退使用。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub self_rating: Option<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -58,7 +62,7 @@ pub struct UserStatsAgg {
 }
 
 const RECORD_COLS: &str =
-    "user_id, id, word_id, is_correct, response_time_ms, session_id, created_at, record_type";
+    "user_id, id, word_id, is_correct, response_time_ms, session_id, created_at, record_type, self_rating";
 
 fn parse_dt(s: String) -> rusqlite::Result<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(&s)
@@ -82,6 +86,7 @@ fn record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LearningRecord> 
         session_id: row.get(5)?,
         created_at: parse_dt(row.get(6)?)?,
         record_type,
+        self_rating: row.get::<_, Option<i64>>(8)?.map(|v| v as u8),
     })
 }
 
@@ -131,13 +136,14 @@ impl Store {
         keys::validate_id(&record.user_id)?;
         let conn = self.conn()?;
         conn.execute(
-            "INSERT INTO learning_records (user_id, id, word_id, is_correct, response_time_ms, session_id, created_at, record_type)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO learning_records (user_id, id, word_id, is_correct, response_time_ms, session_id, created_at, record_type, self_rating)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 &record.user_id, &record.id, &record.word_id,
                 record.is_correct as i64, record.response_time_ms,
                 record.session_id.as_deref(), record.created_at.to_rfc3339(),
                 record.record_type.as_str(),
+                record.self_rating.map(|v| v as i64),
             ],
         )?;
         Ok(())
@@ -154,13 +160,14 @@ impl Store {
         let tx = conn.transaction()?;
 
         tx.execute(
-            "INSERT INTO learning_records (user_id, id, word_id, is_correct, response_time_ms, session_id, created_at, record_type)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO learning_records (user_id, id, word_id, is_correct, response_time_ms, session_id, created_at, record_type, self_rating)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 &record.user_id, &record.id, &record.word_id,
                 record.is_correct as i64, record.response_time_ms,
                 record.session_id.as_deref(), record.created_at.to_rfc3339(),
                 record.record_type.as_str(),
+                record.self_rating.map(|v| v as i64),
             ],
         )?;
 
@@ -594,6 +601,7 @@ mod tests {
             session_id: Some("s1".into()),
             created_at,
             record_type: RecordType::All,
+            self_rating: None,
         }
     }
 
@@ -771,7 +779,10 @@ mod tests {
         }
         let one = store.get_user_record_by_id("u1", "r2").unwrap().unwrap();
         assert_eq!(one.id, "r2");
-        assert!(store.get_user_record_by_id("u1", "missing").unwrap().is_none());
+        assert!(store
+            .get_user_record_by_id("u1", "missing")
+            .unwrap()
+            .is_none());
 
         let by_session = store.list_records_by_session("u1", "s1").unwrap();
         assert_eq!(by_session.len(), 3);
@@ -780,11 +791,7 @@ mod tests {
         assert_eq!(page.len(), 1);
 
         let between = store
-            .get_user_records_between(
-                "u1",
-                now,
-                now + Duration::seconds(2),
-            )
+            .get_user_records_between("u1", now, now + Duration::seconds(2))
             .unwrap();
         assert_eq!(between.len(), 2);
 
@@ -806,8 +813,18 @@ mod tests {
             })
             .unwrap();
         assert_eq!(store.count_all_correct_records().unwrap(), 1);
-        assert_eq!(store.count_records_since(now - Duration::seconds(1)).unwrap(), 2);
-        assert_eq!(store.count_active_users_since(now - Duration::seconds(1)).unwrap(), 1);
+        assert_eq!(
+            store
+                .count_records_since(now - Duration::seconds(1))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            store
+                .count_active_users_since(now - Duration::seconds(1))
+                .unwrap(),
+            1
+        );
 
         let map = store
             .first_record_times_for_words("u1", &["w1".to_string(), "w-missing".to_string()])
@@ -827,11 +844,13 @@ mod tests {
         b.record_type = RecordType::Review;
         store.create_record(&b).unwrap();
 
-        let learning_total =
-            store.count_user_records_stats_filtered("u1", Some(RecordType::Learning)).unwrap();
+        let learning_total = store
+            .count_user_records_stats_filtered("u1", Some(RecordType::Learning))
+            .unwrap();
         assert_eq!(learning_total, (1, 1));
-        let review_total =
-            store.count_user_records_stats_filtered("u1", Some(RecordType::Review)).unwrap();
+        let review_total = store
+            .count_user_records_stats_filtered("u1", Some(RecordType::Review))
+            .unwrap();
         assert_eq!(review_total, (1, 1));
 
         let only_review = store
@@ -843,8 +862,9 @@ mod tests {
         let unfiltered = store.get_user_records_filtered("u1", 10, None).unwrap();
         assert_eq!(unfiltered.len(), 2);
 
-        let learning_words =
-            store.distinct_word_ids_for_type("u1", RecordType::Learning).unwrap();
+        let learning_words = store
+            .distinct_word_ids_for_type("u1", RecordType::Learning)
+            .unwrap();
         assert!(learning_words.contains("wa"));
         assert!(!learning_words.contains("wb"));
     }
@@ -864,7 +884,9 @@ mod tests {
         let daily = store.daily_active_users(7).unwrap();
         assert!(daily.iter().any(|(d, c)| d == &today && *c == 1));
         let daily_rec = store.daily_records(7).unwrap();
-        assert!(daily_rec.iter().any(|(d, t, c)| d == &today && *t == 1 && *c == 1));
+        assert!(daily_rec
+            .iter()
+            .any(|(d, t, c)| d == &today && *t == 1 && *c == 1));
     }
 
     #[test]

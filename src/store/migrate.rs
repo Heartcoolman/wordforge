@@ -15,6 +15,11 @@ fn migrations() -> Vec<(&'static str, MigrationFn)> {
         ("009_amas_versioning", m009_amas_versioning),
         ("010_amas_suggestions", m010_amas_suggestions),
         ("011_amas_auto_apply_settings", m011_amas_auto_apply_settings),
+        ("012_feedback_items", m012_feedback_items),
+        (
+            "013_learning_record_self_rating",
+            m013_learning_record_self_rating,
+        ),
     ]
 }
 
@@ -141,6 +146,24 @@ fn m003_telemetry_enhanced(store: &Store) -> Result<(), StoreError> {
         );
         CREATE INDEX IF NOT EXISTS idx_telemetry_summaries_device
             ON telemetry_summaries(device_id, server_ts DESC);",
+    )?;
+    Ok(())
+}
+
+fn m012_feedback_items(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS feedback_items (
+            id TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            category TEXT DEFAULT NULL,
+            body TEXT NOT NULL,
+            route TEXT DEFAULT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_feedback_items_created_at ON feedback_items(created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_feedback_items_user ON feedback_items(user_id, created_at DESC);",
     )?;
     Ok(())
 }
@@ -319,6 +342,23 @@ fn m010_amas_suggestions(store: &Store) -> Result<(), StoreError> {
         CREATE INDEX IF NOT EXISTS idx_amas_suggestions_status_time
             ON amas_tuning_suggestions(status, created_at DESC);",
     )?;
+    Ok(())
+}
+
+fn m013_learning_record_self_rating(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    let has_column: bool = conn
+        .prepare("PRAGMA table_info(learning_records)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .any(|name| name == "self_rating");
+    if !has_column {
+        conn.execute(
+            "ALTER TABLE learning_records ADD COLUMN self_rating INTEGER DEFAULT NULL
+             CHECK (self_rating IS NULL OR self_rating BETWEEN 0 AND 3)",
+            [],
+        )?;
+    }
     Ok(())
 }
 

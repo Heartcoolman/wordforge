@@ -1,4 +1,5 @@
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::Router;
 
@@ -32,6 +33,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/session", post(create_or_resume_session))
         .route("/sessions", get(list_sessions))
+        .route("/sessions/:id", get(get_session))
         .route("/study-words", get(get_study_words))
         .route("/next-words", post(next_words))
         .route("/adjust-words", post(adjust_words))
@@ -205,6 +207,31 @@ async fn list_sessions(
         page,
         per_page,
     ))
+}
+
+// 客户端 validateDraftSession 用：按 id 校验 session 是否仍可恢复。
+// 找不到 / 属于他人均返回 404 + LEARNING_SESSION_NOT_FOUND（避免信息泄漏）。
+async fn get_session(
+    auth: AuthUser,
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let user_id = auth.user_id;
+    let session = state
+        .run_store_task("learning.get_session", {
+            let session_id = session_id.clone();
+            move |store| store.get_learning_session(&session_id)
+        })
+        .await??
+        .filter(|s| s.user_id == user_id)
+        .ok_or_else(|| AppError {
+            status: StatusCode::NOT_FOUND,
+            code: "LEARNING_SESSION_NOT_FOUND".into(),
+            message: "学习会话不存在".into(),
+            is_operational: true,
+        })?;
+
+    Ok(ok(session))
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -794,7 +821,11 @@ async fn ingest_session_events(
         };
 
         if client_event_id.is_empty() {
-            push_err(&mut summary, "LEARNING_INVALID_EVENT_ID", "clientEventId 不能为空");
+            push_err(
+                &mut summary,
+                "LEARNING_INVALID_EVENT_ID",
+                "clientEventId 不能为空",
+            );
             continue;
         }
         if client_event_id.len() > EVENT_CLIENT_EVENT_ID_MAX_LEN {
@@ -822,7 +853,11 @@ async fn ingest_session_events(
             continue;
         }
         if event.client_ts_ms <= 0 {
-            push_err(&mut summary, "LEARNING_INVALID_CLIENT_TS", "clientTsMs 必须大于 0");
+            push_err(
+                &mut summary,
+                "LEARNING_INVALID_CLIENT_TS",
+                "clientTsMs 必须大于 0",
+            );
             continue;
         }
 
@@ -843,6 +878,7 @@ async fn ingest_session_events(
             hint_used: None,
             confused_with: None,
             record_type: Some(RecordType::Learning),
+            self_rating: None,
             created_at_override: Some(clamp_event_created_at(event.client_ts_ms, session)),
         };
 

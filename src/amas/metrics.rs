@@ -193,6 +193,7 @@ impl Default for MetricsRegistry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MetricsSnapshot {
     pub call_count: u64,
     pub total_latency_us: u64,
