@@ -86,6 +86,7 @@ export interface UpdateCheck {
 
 /// `/api/admin/updates/status` 与 `/check` 共用，比 legacy UpdateCheck 多了
 /// `canApply`/`lastCheckedAt`/`autoCheckEnabled`/`allowDowngrade` 等运维字段。
+/// v0.5.2 起 status 端点同时返回 `applyTask` 后台任务状态。
 export interface AdminUpdateStatus {
   currentVersion: string;
   latestVersion: string | null;
@@ -97,6 +98,30 @@ export interface AdminUpdateStatus {
   lastCheckedAt: string | null;
   autoCheckEnabled: boolean;
   allowDowngrade: boolean;
+  /// v0.5.2+ 后端 spawn 的异步升级任务进度；首次发起前为 undefined
+  applyTask?: ApplyTaskStatus;
+}
+
+/// admin 一键升级后台任务状态（v0.5.2+，配合异步 apply）。
+/// `phase` 取值：`pending` | `downloading` | `verifying` | `extracting`
+///                | `backing_up_db` | `swapping` | `restarting` | `completed` | `failed`
+export interface ApplyTaskStatus {
+  taskId: string;
+  phase: string;
+  percent: number;
+  targetVersion: string;
+  startedAt: string;
+  completedAt?: string;
+  error?: string;
+}
+
+/// `POST /api/admin/updates/apply` 立即返回（202 Accepted）的载荷
+export interface ApplyAccepted {
+  taskId: string;
+  phase: string;
+  percent: number;
+  targetVersion: string;
+  startedAt: string;
 }
 
 export interface SystemSettings {

@@ -60,6 +60,33 @@ pub struct UpdatePayload {
     pub message: String,
 }
 
+/// v0.5.2 加固：admin 一键升级异步执行的共享状态。
+///
+/// handler spawn 后台 task 后立即返回，前端通过 `/api/admin/updates/status` 轮询
+/// 拿到当前 phase / percent / error；避免前端 fetch 超时（HTTP 499）中断 axum
+/// handler 进而打断升级流程的设计缺陷（v0.5.1 之前的实现）。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyTaskStatus {
+    pub task_id: String,
+    /// `pending` | `downloading` | `verifying` | `extracting` | `backing_up_db`
+    /// | `swapping` | `restarting` | `completed` | `failed`
+    pub phase: String,
+    pub percent: u8,
+    pub target_version: String,
+    pub started_at: chrono::DateTime<chrono::Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl ApplyTaskStatus {
+    pub fn is_running(&self) -> bool {
+        self.completed_at.is_none() && self.error.is_none()
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     store: Arc<Store>,
@@ -81,6 +108,8 @@ pub struct AppState {
     last_heartbeat: Arc<DashMap<String, Instant>>,
     heartbeat_miss_count: Arc<DashMap<String, u8>>,
     updater: Arc<RwLock<Option<Arc<crate::services::updater::Updater>>>>,
+    /// v0.5.2 apply 后台 task 状态；sink 同步写、HTTP 同步读，故用 std::sync::Mutex
+    apply_task: Arc<std::sync::Mutex<Option<ApplyTaskStatus>>>,
 }
 
 pub struct RuntimeConfig {
@@ -132,6 +161,31 @@ impl AppState {
             last_heartbeat: Arc::new(DashMap::new()),
             heartbeat_miss_count: Arc::new(DashMap::new()),
             updater: Arc::new(RwLock::new(None)),
+            apply_task: Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+
+    /// 读取当前 apply 后台 task 状态（若无返回 None）。
+    pub fn apply_task_snapshot(&self) -> Option<ApplyTaskStatus> {
+        self.apply_task
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
+    }
+
+    /// 替换 apply task 状态；保留以便 handler/sink 显式覆盖。
+    pub fn set_apply_task(&self, status: Option<ApplyTaskStatus>) {
+        if let Ok(mut guard) = self.apply_task.lock() {
+            *guard = status;
+        }
+    }
+
+    /// 原地更新当前 apply task 状态，仅当存在时执行 mutator。
+    pub fn update_apply_task<F: FnOnce(&mut ApplyTaskStatus)>(&self, f: F) {
+        if let Ok(mut guard) = self.apply_task.lock() {
+            if let Some(t) = guard.as_mut() {
+                f(t);
+            }
         }
     }
 

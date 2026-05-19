@@ -9,7 +9,20 @@ import { uiStore } from '@/stores/ui';
 import type { AdminUpdateStatus } from '@/types/admin';
 
 const POLL_AFTER_APPLY_MS = 2000;
-const POLL_TIMEOUT_MS = 120_000;
+const POLL_TIMEOUT_MS = 300_000; // 5 分钟（异步化后给低性能机更宽容窗口）
+
+/// 把后端 apply task 的 phase 标识转成中文短句
+const PHASE_LABEL: Record<string, string> = {
+  pending: '等待启动',
+  downloading: '下载中',
+  verifying: '校验 SHA256',
+  extracting: '解压产物',
+  backing_up_db: '备份数据库',
+  swapping: '替换二进制',
+  restarting: '重启服务',
+  completed: '完成',
+  failed: '失败',
+};
 
 export default function UpdatesPage() {
   const [status, { refetch }] = createResource<AdminUpdateStatus>(() => adminApi.updatesStatus());
@@ -61,50 +74,70 @@ export default function UpdatesPage() {
     if (!s || !s.latestVersion) return;
     setConfirmOpen(false);
     setApplying(true);
-    setProgress({ phase: 'starting', percent: 0 });
+    setProgress({ phase: PHASE_LABEL.pending, percent: 0 });
 
+    // v0.5.2+ apply 立即返回 202（异步执行），不再阻塞 handler 等到 exit
     try {
-      // POST /apply 在成功路径会触发服务端 process::exit(0)，
-      // fetch 极可能以网络中断的方式返回错误 —— 这是预期的"成功信号"。
       await adminApi.updatesApply(s.latestVersion, s.currentVersion);
-      // 罕见路径：apply 返回了 JSON（说明 fork-exec 提前失败），继续走 polling
     } catch (err) {
-      // Codex P2 (2nd pass): 区分网络中断（=服务端 exit 成功）vs 4xx/5xx（=真实失败）。
-      // ApiError.status === 0 是 client.ts 给 NETWORK_ERROR / TIMEOUT 的占位码。
-      const isServerSideFailure = err instanceof ApiError && err.status >= 400;
-      if (isServerSideFailure) {
+      // 立即返回阶段的错误只可能是 4xx（参数 / 已在跑 / 版本不匹配等）
+      if (err instanceof ApiError) {
         setApplying(false);
         setProgress(null);
-        const e = err as ApiError;
-        uiStore.toast.error(`升级失败 [${e.code}]`, e.message);
+        uiStore.toast.error(`升级启动失败 [${err.code}]`, err.message);
         await refetch();
         return;
       }
-      // 否则视为重启进行中，继续走下面的 polling
+      // 网络问题（请求都没发出去），停下来让用户重试
+      setApplying(false);
+      setProgress(null);
+      uiStore.toast.error('请求未送达', err instanceof Error ? err.message : '未知网络错误');
+      return;
     }
 
-    // Poll /api/status 直到 version 切到 latest（5s 间隔，2 min 上限）
+    // 轮询 /status，从 applyTask.phase + .percent 取后端真实进度；
+    // 完成判据：currentVersion 切到 target 或 applyTask.phase === 'completed'；
+    // 失败判据：applyTask.error 非空（直接终止并报错）。
     const deadline = Date.now() + POLL_TIMEOUT_MS;
-    let success = false;
+    let outcome: 'success' | 'failed' | 'timeout' = 'timeout';
+    let failureMessage: string | undefined;
+
     while (Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, POLL_AFTER_APPLY_MS));
       try {
         const fresh = await adminApi.updatesStatus();
+        if (fresh.applyTask) {
+          const label = PHASE_LABEL[fresh.applyTask.phase] ?? fresh.applyTask.phase;
+          setProgress({ phase: label, percent: fresh.applyTask.percent });
+          if (fresh.applyTask.error) {
+            outcome = 'failed';
+            failureMessage = fresh.applyTask.error;
+            break;
+          }
+          if (fresh.applyTask.phase === 'completed') {
+            outcome = 'success';
+            break;
+          }
+        }
         if (fresh.currentVersion === s.latestVersion) {
-          success = true;
+          outcome = 'success';
           break;
         }
       } catch {
-        // 服务端尚未拉起，继续轮询
+        // 重启窗口期 fetch 失败：保留当前 progress 文案，继续轮询
       }
     }
 
     setApplying(false);
-    setProgress(null);
-    if (success) {
+    if (outcome === 'success') {
+      setProgress({ phase: PHASE_LABEL.completed, percent: 100 });
       uiStore.toast.success(`已升级到 ${s.latestVersion}，刷新页面以加载新前端`);
       setTimeout(() => window.location.reload(), 1500);
+    } else if (outcome === 'failed') {
+      setProgress(null);
+      uiStore.toast.error('升级失败', failureMessage ?? '后端 apply task 报错');
     } else {
+      setProgress(null);
       uiStore.toast.error('升级超时', '请检查后端日志，或 SSH 登录手动验证状态');
     }
     await refetch();
