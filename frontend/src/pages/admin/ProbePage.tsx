@@ -7,6 +7,7 @@
 
 import { createSignal, For, Show, onCleanup } from 'solid-js';
 import { connectProbeBatchStream, probeApi, type ProbeResultEvent } from '@/api/probe';
+import ConfirmDialog from '@/components/probe/ConfirmDialog';
 
 interface ResultCardData extends ProbeResultEvent {
   receivedAt: number;
@@ -27,6 +28,7 @@ export default function ProbePage() {
   const [results, setResults] = createSignal<ResultCardData[]>([]);
   const [completed, setCompleted] = createSignal<{ received: number; expected: number } | null>(null);
   const [currentBatch, setCurrentBatch] = createSignal<string | null>(null);
+  const [confirmTarget, setConfirmTarget] = createSignal<ResultCardData | null>(null);
   let stopStream: (() => void) | undefined;
 
   onCleanup(() => stopStream?.());
@@ -193,12 +195,43 @@ export default function ProbePage() {
                       {r.stderr}
                     </pre>
                   </Show>
+                  <Show when={r.status === 'confirm_required'}>
+                    <button
+                      type="button"
+                      class="rounded bg-status-warning px-2 py-1 text-xs font-medium text-white"
+                      onClick={() => setConfirmTarget(r)}
+                    >
+                      确认执行
+                    </button>
+                  </Show>
                 </article>
               )}
             </For>
           </div>
         </Show>
       </section>
+
+      <Show when={confirmTarget()}>
+        <ConfirmDialog
+          open={true}
+          requestId={confirmTarget()!.requestId}
+          deviceId={confirmTarget()!.deviceId}
+          actionsPreview={extractActionsPreview(confirmTarget()!.resultJson)}
+          onClose={() => setConfirmTarget(null)}
+          onConfirmed={() => {
+            // 确认后等客户端重跑回 result，原卡片会被新 result 覆盖（按 requestId 去重）
+            setResults((prev) => prev.filter((r) => r.requestId !== confirmTarget()!.requestId));
+          }}
+        />
+      </Show>
     </div>
   );
+}
+
+function extractActionsPreview(resultJson: unknown): string[] {
+  if (resultJson && typeof resultJson === 'object' && '_actions' in resultJson) {
+    const actions = (resultJson as { _actions: Array<{ type: string }> })._actions;
+    if (Array.isArray(actions)) return actions.map((a) => a.type);
+  }
+  return [];
 }

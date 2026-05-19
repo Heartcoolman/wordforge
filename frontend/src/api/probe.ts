@@ -38,6 +38,14 @@ export interface ProbeResultEvent {
 export const probeApi = {
   dispatch: (body: DispatchRequest) =>
     api.post<DispatchResponse>('/api/admin/probe', body, { useAdminToken: true }),
+  /** D 类受控写二次确认：admin 仅输入 device_id 后 5 位。confirm_token 是
+   *  客户端 ↔ 服务端的内部凭证，admin 不持有不需要。 */
+  confirm: (requestId: string, body: { deviceIdSuffix: string }) =>
+    api.post<{ confirmed: boolean }>(
+      `/api/admin/probe/${encodeURIComponent(requestId)}/confirm`,
+      body,
+      { useAdminToken: true },
+    ),
 };
 
 /**

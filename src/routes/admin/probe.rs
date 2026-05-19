@@ -39,6 +39,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", post(dispatch_probe))
         .route("/:batch_id/stream", get(batch_stream))
+        .route("/:request_id/confirm", post(confirm_probe))
 }
 
 #[derive(Debug, Deserialize)]
@@ -285,6 +286,76 @@ impl OwnedRow {
             dispatched_at: &self.dispatched_at,
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ConfirmBody {
+    device_id_suffix: String,
+}
+
+async fn confirm_probe(
+    admin: AdminAuthUser,
+    Path(request_id): Path<String>,
+    State(state): State<AppState>,
+    JsonBody(body): JsonBody<ConfirmBody>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    use crate::services::probe::ConfirmError;
+
+    let ticket = state
+        .probe_service()
+        .consume_confirm(&request_id, &body.device_id_suffix)
+        .map_err(|e| match e {
+            ConfirmError::NotFound => {
+                AppError::not_found("confirm ticket 不存在或已被消费")
+            }
+            ConfirmError::Expired => AppError::bad_request(
+                "PROBE_CONFIRM_EXPIRED",
+                "confirm token 已过期（60s TTL），请重新下发探针",
+            ),
+            ConfirmError::SuffixMismatch => AppError::bad_request(
+                "PROBE_CONFIRM_SUFFIX_MISMATCH",
+                "device_id 后 5 位不匹配",
+            ),
+        })?;
+
+    // 落库：confirmed_at + 状态保持 confirm_pending（客户端重跑后由 results
+    // 端点推进到 ok/error/timeout）。注意：UPDATE 用 update_probe_status 但
+    // status 字段必须从表里 select 后回写——这里简化为只更新 confirmed_at，
+    // 用一条小 SQL；不复用 update_probe_status（它会改 status）。
+    let req_id_for_db = request_id.clone();
+    let now = chrono::Utc::now().to_rfc3339();
+    let store = state.store().clone();
+    tokio::task::spawn_blocking(move || {
+        let conn = store.conn()?;
+        conn.execute(
+            "UPDATE probe_executions SET confirmed_at = ?2 WHERE id = ?1",
+            rusqlite::params![req_id_for_db, now],
+        )?;
+        Ok::<_, crate::store::StoreError>(())
+    })
+    .await
+    .map_err(|e| AppError::internal(&format!("spawn_blocking: {e}")))?
+    .map_err(|e| AppError::internal(&format!("confirmed_at update: {e}")))?;
+
+    // 推 SSE 让客户端用同一 ctx 快照重跑
+    if let Some(conns) = state.active_sse().get(&ticket.device_id) {
+        for conn in conns.value() {
+            let _ = conn.tx.send(SseEvent::ProbeConfirm {
+                request_id: request_id.clone(),
+                confirm_token: ticket.token.clone(),
+            });
+        }
+    }
+
+    tracing::info!(
+        admin_id = %admin.admin_id,
+        request_id = %request_id,
+        device_id = %ticket.device_id,
+        "admin 已确认远程探针 cmd 执行"
+    );
+
+    Ok(ok(serde_json::json!({ "confirmed": true })))
 }
 
 async fn batch_stream(

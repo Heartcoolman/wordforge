@@ -14,6 +14,7 @@ pub mod log_export;
 pub mod metrics_flush;
 pub mod monitoring_aggregate;
 pub mod password_reset_cleanup;
+pub mod probe_confirm_sweeper;
 pub mod session_cleanup;
 pub mod update_checker;
 pub mod weekly_report;

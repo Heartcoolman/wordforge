@@ -16,7 +16,7 @@ use axum::Router;
 use crate::auth::AuthUser;
 use crate::extractors::JsonBody;
 use crate::response::{ok, AppError};
-use crate::services::probe::ProbeResultPayload;
+use crate::services::probe::{ConfirmTicket, ProbeResultPayload, CONFIRM_TTL_SECS};
 use crate::state::AppState;
 use crate::store::operations::probe::ProbeStatusUpdate;
 
@@ -132,7 +132,27 @@ async fn submit_result(
     .map_err(|e| AppError::internal(&format!("spawn_blocking: {e}")))?
     .map_err(|e| AppError::internal(&format!("update_probe_status: {e}")))?;
 
-    // ── 4. 广播到 admin SSE 流 ──
+    // ── 4. confirm_required 路径：写 ticket，等待 admin 确认 ──
+    if body.status == "confirm_required" {
+        let token = body
+            .confirm_token
+            .clone()
+            .ok_or_else(|| AppError::bad_request(
+                "PROBE_CONFIRM_TOKEN_MISSING",
+                "confirm_required 状态必须携带 confirmToken",
+            ))?;
+        state.probe_service().issue_confirm(
+            &body.request_id,
+            ConfirmTicket {
+                token,
+                device_id: row.device_id.clone(),
+                expires_at: std::time::Instant::now()
+                    + std::time::Duration::from_secs(CONFIRM_TTL_SECS),
+            },
+        );
+    }
+
+    // ── 5. 广播到 admin SSE 流 ──
     state.probe_service().publish_result(ProbeResultPayload {
         device_id: row.device_id.clone(),
         request_id: body.request_id.clone(),
