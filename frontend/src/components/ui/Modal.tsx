@@ -1,6 +1,7 @@
 import { type JSX, Show, createEffect, onCleanup } from 'solid-js';
 import { Portal } from 'solid-js/web';
 import { cn } from '@/utils/cn';
+import { Motion, Presence, modalPreset } from '@/lib/motion';
 
 interface ModalProps {
   open: boolean;
@@ -87,48 +88,55 @@ export function Modal(props: ModalProps) {
   });
 
   return (
-    <Show when={props.open}>
-      <Portal>
-        <div class="fixed inset-0 z-50 flex items-center justify-center p-4">
-          {/* Backdrop */}
-          <div
-            class="absolute inset-0 bg-black/50 animate-fade-in"
-            onClick={props.onClose}
-          />
-          {/* Content */}
-          <div
-            ref={dialogRef}
-            role="dialog"
-            aria-modal="true"
-            aria-label={props.title}
-            class={cn(
-              'relative w-full bg-surface-elevated rounded-2xl shadow-xl animate-scale-in',
-              'max-h-[85vh] overflow-y-auto',
-              sizeMap[props.size ?? 'md'],
-            )}
-          >
-            <Show when={props.title || !props.hideClose}>
-              <div class="flex items-center justify-between px-6 pt-5 pb-2">
-                <Show when={props.title}>
-                  <h2 class="text-lg font-semibold text-content">{props.title}</h2>
-                </Show>
-                <Show when={!props.hideClose}>
-                  <button
-                    onClick={props.onClose}
-                    aria-label="关闭"
-                    class="p-1.5 rounded-lg text-content-tertiary hover:text-content hover:bg-surface-secondary transition-colors cursor-pointer"
-                  >
-                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-                      <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
-                    </svg>
-                  </button>
-                </Show>
-              </div>
-            </Show>
-            <div class="px-6 pb-6">{props.children}</div>
+    <Portal>
+      <Presence exitBeforeEnter>
+        <Show when={props.open}>
+          <div class="fixed inset-0 z-50 flex items-center justify-center p-4">
+            {/* Backdrop — 独立 Motion 以独立淡入淡出 */}
+            <Motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.18 }}
+              class="absolute inset-0 bg-black/40 backdrop-blur-md"
+              onClick={props.onClose}
+            />
+            {/* Content — 由 modalPreset 驱动进出场 */}
+            <Motion.div
+              {...modalPreset}
+              ref={(el: HTMLDivElement) => (dialogRef = el)}
+              role="dialog"
+              aria-modal="true"
+              aria-label={props.title}
+              class={cn(
+                'relative w-full bg-surface-elevated rounded-2xl shadow-elevation-4 border border-border-hairline',
+                'max-h-[85vh] overflow-y-auto',
+                sizeMap[props.size ?? 'md'],
+              )}
+            >
+              <Show when={props.title || !props.hideClose}>
+                <div class="flex items-center justify-between px-6 pt-5 pb-2">
+                  <Show when={props.title}>
+                    <h2 class="text-lg font-semibold text-content">{props.title}</h2>
+                  </Show>
+                  <Show when={!props.hideClose}>
+                    <button
+                      onClick={props.onClose}
+                      aria-label="关闭"
+                      class="p-1.5 rounded-lg text-content-tertiary hover:text-content hover:bg-surface-secondary transition-colors duration-fast cursor-pointer"
+                    >
+                      <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
+                      </svg>
+                    </button>
+                  </Show>
+                </div>
+              </Show>
+              <div class="px-6 pb-6">{props.children}</div>
+            </Motion.div>
           </div>
-        </div>
-      </Portal>
-    </Show>
+        </Show>
+      </Presence>
+    </Portal>
   );
 }

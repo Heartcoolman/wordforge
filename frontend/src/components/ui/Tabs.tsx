@@ -1,5 +1,6 @@
 import { createSignal, For, type JSX } from 'solid-js';
 import { cn } from '@/utils/cn';
+import { useIndicatorTrack } from '@/lib/motion';
 
 interface Tab {
   id: string;
@@ -16,6 +17,14 @@ interface TabsProps {
 
 export function Tabs(props: TabsProps) {
   const [focusedIndex, setFocusedIndex] = createSignal(-1);
+  let containerRef: HTMLDivElement | undefined;
+
+  // 测量激活 tab 的位置，驱动底部 indicator 滑动
+  const indicator = useIndicatorTrack(
+    () => containerRef,
+    () => props.active,
+    '[data-active="true"]',
+  );
 
   function handleKeyDown(e: KeyboardEvent) {
     const tabs = props.tabs;
@@ -37,7 +46,12 @@ export function Tabs(props: TabsProps) {
   }
 
   return (
-    <div class={cn('flex border-b border-border', props.class)} role="tablist" onKeyDown={handleKeyDown}>
+    <div
+      ref={containerRef}
+      class={cn('relative flex border-b border-border-hairline', props.class)}
+      role="tablist"
+      onKeyDown={handleKeyDown}
+    >
       <For each={props.tabs}>
         {(tab) => {
           const isActive = () => props.active === tab.id;
@@ -46,13 +60,14 @@ export function Tabs(props: TabsProps) {
               role="tab"
               aria-selected={isActive()}
               tabIndex={isActive() ? 0 : -1}
+              data-active={isActive() ? 'true' : undefined}
               onClick={() => props.onChange(tab.id)}
               class={cn(
-                'flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium transition-colors cursor-pointer',
-                'border-b-2 -mb-px',
+                'flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium cursor-pointer',
+                'transition-[color] duration-fast ease-out-expo',
                 isActive()
-                  ? 'border-accent text-accent'
-                  : 'border-transparent text-content-secondary hover:text-content hover:border-border',
+                  ? 'text-accent'
+                  : 'text-content-secondary hover:text-content',
               )}
             >
               {tab.icon}
@@ -61,6 +76,15 @@ export function Tabs(props: TabsProps) {
           );
         }}
       </For>
+      {/* Indicator — 通过 transform 滑动，复用 CSS transition 实现平滑跟随 */}
+      <div
+        aria-hidden="true"
+        class="absolute bottom-0 h-0.5 bg-accent rounded-full pointer-events-none transition-[transform,width] duration-base ease-out-expo"
+        style={{
+          transform: `translateX(${indicator().left}px)`,
+          width: `${indicator().width}px`,
+        }}
+      />
     </div>
   );
 }

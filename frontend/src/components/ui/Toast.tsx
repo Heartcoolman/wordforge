@@ -3,6 +3,7 @@ import { Portal } from 'solid-js/web';
 import { cn } from '@/utils/cn';
 import { uiStore } from '@/stores/ui';
 import type { ToastItem as ToastItemType } from '@/stores/ui';
+import { Motion, DURATION, EASE } from '@/lib/motion';
 
 const bgMap: Record<string, string> = {
   success: 'border-l-success',
@@ -31,11 +32,16 @@ function ToastIcon(props: { type: string }) {
 
 function SingleToast(props: { toast: ToastItemType }) {
   return (
-    <div class={cn(
-      'flex items-start gap-3 p-4 rounded-lg shadow-lg animate-slide-in-right',
-      'bg-surface-elevated border border-border border-l-4 min-w-[280px] max-w-[420px]',
-      bgMap[props.toast.type],
-    )}>
+    <Motion.div
+      initial={{ opacity: 0, x: 40 }}
+      animate={{ opacity: 1, x: 0 }}
+      transition={{ duration: DURATION.base, easing: EASE.outExpo }}
+      class={cn(
+        'flex items-start gap-3 p-4 rounded-lg shadow-elevation-3',
+        'bg-surface-elevated border border-border-hairline border-l-4 min-w-[280px] max-w-[420px]',
+        bgMap[props.toast.type],
+      )}
+    >
       <div class="flex-shrink-0 mt-0.5"><ToastIcon type={props.toast.type} /></div>
       <div class="flex-1 min-w-0">
         <p class="text-sm font-medium text-content">{props.toast.title}</p>
@@ -46,13 +52,13 @@ function SingleToast(props: { toast: ToastItemType }) {
       <button
         onClick={() => uiStore.removeToast(props.toast.id)}
         aria-label="关闭"
-        class="flex-shrink-0 p-0.5 rounded text-content-tertiary hover:text-content cursor-pointer"
+        class="flex-shrink-0 p-0.5 rounded text-content-tertiary hover:text-content cursor-pointer transition-colors duration-fast"
       >
         <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
           <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
         </svg>
       </button>
-    </div>
+    </Motion.div>
   );
 }
 
@@ -60,6 +66,8 @@ export function Toaster() {
   return (
     <Portal>
       <div role="region" aria-live="polite" class="fixed top-4 right-4 z-[100] flex flex-col gap-2">
+        {/* 注：solid-motionone v1 的 <Presence> 是 single-child 设计，与 <For> 组合时只渲染首个子节点；
+            因此 toast 列表暂不使用 <Presence>，每条入场由各自 <Motion.div> 独立驱动；出场动画待后续优化 */}
         <For each={uiStore.toasts()}>{(t) => <SingleToast toast={t} />}</For>
       </div>
     </Portal>

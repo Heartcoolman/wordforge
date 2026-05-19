@@ -2,13 +2,26 @@ import { type JSX, splitProps, Show } from 'solid-js';
 import { cn } from '@/utils/cn';
 
 const variants = {
-  primary: 'bg-accent text-accent-content hover:bg-accent-hover shadow-sm',
-  secondary: 'bg-surface-tertiary text-content hover:bg-border',
-  outline: 'border border-border text-content hover:bg-surface-secondary',
-  ghost: 'text-content hover:bg-surface-secondary',
-  danger: 'bg-error text-white hover:opacity-90 shadow-sm',
-  success: 'bg-success text-white hover:opacity-90 shadow-sm',
-  warning: 'bg-warning text-white hover:opacity-90 shadow-sm',
+  // Linear/Vercel 风：渐变主色 + layered shadow，hover 时多层阴影抬升 1px
+  primary:
+    'bg-gradient-accent-strong text-accent-content shadow-elevation-1 ' +
+    'hover:shadow-elevation-2 hover:-translate-y-px active:translate-y-0 active:shadow-elevation-1',
+  secondary:
+    'bg-surface-tertiary text-content shadow-elevation-1 ' +
+    'hover:bg-surface-secondary hover:shadow-elevation-2 hover:-translate-y-px active:translate-y-0',
+  outline:
+    'border border-border-hairline bg-surface text-content shadow-elevation-1 ' +
+    'hover:bg-surface-secondary hover:border-border hover:-translate-y-px active:translate-y-0',
+  ghost: 'text-content hover:bg-surface-secondary active:bg-surface-tertiary',
+  danger:
+    'bg-error text-white shadow-elevation-1 ' +
+    'hover:bg-error/90 hover:shadow-elevation-2 hover:-translate-y-px active:translate-y-0',
+  success:
+    'bg-success text-white shadow-elevation-1 ' +
+    'hover:bg-success/90 hover:shadow-elevation-2 hover:-translate-y-px active:translate-y-0',
+  warning:
+    'bg-warning text-white shadow-elevation-1 ' +
+    'hover:bg-warning/90 hover:shadow-elevation-2 hover:-translate-y-px active:translate-y-0',
 } as const;
 
 const sizes = {
@@ -37,11 +50,12 @@ export function Button(props: ButtonProps) {
       {...rest}
       disabled={local.disabled || local.loading}
       class={cn(
-        'inline-flex items-center justify-center font-medium transition-all duration-150',
+        'inline-flex items-center justify-center font-medium',
+        // 仅过渡形变与阴影、背景；颜色由 variant 控制
+        'transition-[transform,box-shadow,background-color,opacity] duration-fast ease-out-expo',
         'focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
-        'disabled:opacity-50 disabled:pointer-events-none',
-        'active:scale-[0.98]',
-        'cursor-pointer',
+        'disabled:opacity-50 disabled:pointer-events-none disabled:hover:translate-y-0 disabled:hover:shadow-elevation-1',
+        'cursor-pointer select-none',
         variants[local.variant ?? 'primary'],
         sizes[local.size ?? 'md'],
         local.fullWidth && 'w-full',

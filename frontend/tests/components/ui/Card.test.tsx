@@ -20,6 +20,7 @@ describe('Card', () => {
 
   it('applies hover effect', () => {
     const { container } = render(() => <Card hover>Content</Card>);
-    expect(container.firstElementChild!.className).toContain('hover:shadow-lg');
+    // 升级后用 layered elevation 替代单层 shadow-lg
+    expect(container.firstElementChild!.className).toContain('hover:shadow-elevation-3');
   });
 });
