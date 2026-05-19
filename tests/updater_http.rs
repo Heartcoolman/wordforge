@@ -104,6 +104,7 @@ fn build_cfg(install_dir: &Path, api_url: &str) -> UpdateCheckConfig {
         allow_downgrade: false,
         install_dir: Some(install_dir.to_path_buf()),
         max_tarball_bytes: 50 * 1024 * 1024,
+        download_mirror_prefix: None,
     }
 }
 

@@ -187,6 +187,11 @@ pub struct UpdateCheckConfig {
     pub install_dir: Option<PathBuf>,
     /// 下载产物上限字节数，超出直接拒绝
     pub max_tarball_bytes: u64,
+    /// v0.5.4：可选 GitHub 下载镜像前缀（如 `https://gh-proxy.com/`）；
+    /// 国内服务器访问 release CDN 速度极慢（实测阿里云 22 KB/s），
+    /// 配置后所有 release tarball / sha256 URL 会拼到 prefix 后访问。
+    /// None 时走原 URL。
+    pub download_mirror_prefix: Option<String>,
 }
 
 impl fmt::Debug for Config {
@@ -340,6 +345,9 @@ impl Config {
                     .filter(|s| !s.is_empty())
                     .map(PathBuf::from),
                 max_tarball_bytes: env_or_parse("UPDATE_MAX_TARBALL_BYTES", 200 * 1024 * 1024_u64),
+                download_mirror_prefix: env::var("GITHUB_DOWNLOAD_MIRROR_PREFIX")
+                    .ok()
+                    .filter(|s| !s.is_empty()),
             },
             pagination: PaginationConfig {
                 default_page_size: env_or_parse("PAGINATION_DEFAULT_SIZE", 20_u64),
@@ -815,6 +823,7 @@ mod tests {
                 allow_downgrade: false,
                 install_dir: None,
                 max_tarball_bytes: 1024,
+                download_mirror_prefix: None,
             },
             pagination: PaginationConfig::default(),
             strict_mode: StrictModeConfig::default(),

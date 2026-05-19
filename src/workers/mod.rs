@@ -782,6 +782,7 @@ mod tests {
                 allow_downgrade: false,
                 install_dir: Some(tmp.path().to_path_buf()),
                 max_tarball_bytes: 1024,
+                download_mirror_prefix: None,
             },
             "v0.0.0",
         )
@@ -830,6 +831,7 @@ mod tests {
                 allow_downgrade: false,
                 install_dir: Some(tmp.path().to_path_buf()),
                 max_tarball_bytes: 1024,
+                download_mirror_prefix: None,
             },
             "v0.0.0",
         )
@@ -921,6 +923,7 @@ mod tests {
                 allow_downgrade: false,
                 install_dir: Some(tmp.path().to_path_buf()),
                 max_tarball_bytes: 1024,
+                download_mirror_prefix: None,
             },
             "v0.0.0",
         )
