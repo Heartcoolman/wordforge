@@ -8,6 +8,7 @@ import { Spinner } from '@/components/ui/Spinner';
 import { api, maintenanceActive, setMaintenanceActive, setUpdateInfo } from '@/api/client';
 import MaintenancePage from '@/pages/MaintenancePage';
 import { UpdateBanner } from '@/components/ui/UpdateBanner';
+import { startProbeBridge, stopProbeBridge } from '@/workers/probe/api-bridge';
 
 const NotFoundPage = lazy(() => import('@/pages/NotFoundPage'));
 const LegacyUserFrontendPage = lazy(() => import('@/pages/LegacyUserFrontendPage'));
@@ -26,6 +27,7 @@ const UpdatesPage = lazy(() => import('@/pages/admin/UpdatesPage'));
 const AdminWordbookCenterPage = lazy(() => import('@/pages/admin/AdminWordbookCenterPage'));
 const ClientsPage = lazy(() => import('@/pages/admin/ClientsPage'));
 const FeedbackPage = lazy(() => import('@/pages/admin/FeedbackPage'));
+const ProbePage = lazy(() => import('@/pages/admin/ProbePage'));
 
 function PageSpinner() {
   return (
@@ -61,10 +63,14 @@ function MaintenanceProvider(props: { children: any }) {
   onMount(() => {
     checkStatus();
     pollTimer = setInterval(checkStatus, 30_000);
+    // 远程探针：客户端 worker bridge 全局只启动一次；connectSseStream 内部按 token
+    // 自适应（无 token → 401 → 自动重试，admin 登录后会自然恢复）。
+    startProbeBridge();
   });
 
   onCleanup(() => {
     if (pollTimer) clearInterval(pollTimer);
+    stopProbeBridge();
   });
 
   return (
@@ -109,6 +115,7 @@ export default function App() {
             <Route path="/updates" component={() => (<AdminProtectedRoute><Suspense fallback={<PageSpinner />}><UpdatesPage /></Suspense></AdminProtectedRoute>)} />
             <Route path="/wordbook-center" component={() => (<AdminProtectedRoute><Suspense fallback={<PageSpinner />}><AdminWordbookCenterPage /></Suspense></AdminProtectedRoute>)} />
             <Route path="/feedback" component={() => (<AdminProtectedRoute><Suspense fallback={<PageSpinner />}><FeedbackPage /></Suspense></AdminProtectedRoute>)} />
+            <Route path="/probe" component={() => (<AdminProtectedRoute><Suspense fallback={<PageSpinner />}><ProbePage /></Suspense></AdminProtectedRoute>)} />
           </Route>
           <Route path="*" component={() => (<Suspense fallback={<PageSpinner />}><NotFoundPage /></Suspense>)} />
         </Route>

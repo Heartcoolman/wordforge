@@ -6,6 +6,7 @@ pub mod feedback;
 pub mod health;
 pub mod learning;
 pub mod notifications;
+pub mod probe_results;
 pub mod realtime;
 pub mod records;
 pub mod status;
@@ -89,6 +90,7 @@ pub fn build_router(state: AppState) -> Router {
         .nest("/v1", v1::router())
         .nest("/status", status::router())
         .nest("/telemetry", telemetry::router())
+        .nest("/probe", probe_results::router())
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             device::device_middleware,

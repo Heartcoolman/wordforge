@@ -20,6 +20,7 @@ fn migrations() -> Vec<(&'static str, MigrationFn)> {
             "013_learning_record_self_rating",
             m013_learning_record_self_rating,
         ),
+        ("014_probe_executions", m014_probe_executions),
     ]
 }
 
@@ -359,6 +360,45 @@ fn m013_learning_record_self_rating(store: &Store) -> Result<(), StoreError> {
             [],
         )?;
     }
+    Ok(())
+}
+
+fn m014_probe_executions(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS probe_executions (
+            id TEXT PRIMARY KEY,
+            batch_id TEXT NOT NULL,
+            device_id TEXT NOT NULL,
+            admin_id TEXT NOT NULL,
+            admin_username TEXT NOT NULL,
+            script_body TEXT NOT NULL,
+            script_sha256 TEXT NOT NULL,
+            has_cmd_call INTEGER NOT NULL DEFAULT 0,
+            note TEXT,
+            timeout_ms INTEGER NOT NULL,
+            status TEXT NOT NULL CHECK (status IN (
+                'pending', 'confirm_pending', 'ok', 'error',
+                'timeout', 'offline', 'expired', 'unsupported_ctx_version'
+            )),
+            result_json TEXT,
+            stderr TEXT,
+            duration_ms INTEGER,
+            truncated INTEGER NOT NULL DEFAULT 0,
+            dispatched_at TEXT NOT NULL,
+            confirmed_at TEXT,
+            completed_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_probe_exec_batch
+            ON probe_executions(batch_id, dispatched_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_probe_exec_device
+            ON probe_executions(device_id, dispatched_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_probe_exec_admin
+            ON probe_executions(admin_id, dispatched_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_probe_exec_pending
+            ON probe_executions(status, dispatched_at)
+            WHERE status IN ('pending', 'confirm_pending');",
+    )?;
     Ok(())
 }
 

@@ -52,6 +52,32 @@ pub enum SseEvent {
     /// 一键更新执行过程中推给前端的阶段进度（0–100）
     #[serde(rename = "update_progress")]
     UpdateProgress { phase: String, percent: u8 },
+    /// 远程探针下发：admin 通过 POST /api/admin/probe 派发到指定客户端，
+    /// 客户端 Worker 沙箱里 eval base64 解码后的 script，传入白名单 ctx 快照，
+    /// 通过 POST /api/probe/results 回传结果。
+    #[serde(rename = "probe_request")]
+    ProbeRequest {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "batchId")]
+        batch_id: String,
+        #[serde(rename = "scriptB64")]
+        script_b64: String,
+        #[serde(rename = "timeoutMs")]
+        timeout_ms: u32,
+        #[serde(rename = "ctxVersion")]
+        ctx_version: u32,
+    },
+    /// 远程探针二次确认：当 script 调用 ctx.cmd.*（受控写）时，客户端首次回
+    /// `confirm_required`，admin 输对 device 后 5 位后后端推 ProbeConfirm，
+    /// 客户端用同一 ctx 快照重跑并执行 _actions。
+    #[serde(rename = "probe_confirm")]
+    ProbeConfirm {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "confirmToken")]
+        confirm_token: String,
+    },
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -110,6 +136,7 @@ pub struct AppState {
     updater: Arc<RwLock<Option<Arc<crate::services::updater::Updater>>>>,
     /// v0.5.2 apply 后台 task 状态；sink 同步写、HTTP 同步读，故用 std::sync::Mutex
     apply_task: Arc<std::sync::Mutex<Option<ApplyTaskStatus>>>,
+    probe_service: Arc<crate::services::probe::ProbeService>,
 }
 
 pub struct RuntimeConfig {
@@ -162,7 +189,12 @@ impl AppState {
             heartbeat_miss_count: Arc::new(DashMap::new()),
             updater: Arc::new(RwLock::new(None)),
             apply_task: Arc::new(std::sync::Mutex::new(None)),
+            probe_service: Arc::new(crate::services::probe::ProbeService::new()),
         }
+    }
+
+    pub fn probe_service(&self) -> &crate::services::probe::ProbeService {
+        &self.probe_service
     }
 
     /// 读取当前 apply 后台 task 状态（若无返回 None）。

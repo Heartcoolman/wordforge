@@ -18,6 +18,7 @@ const sidebarLinks = [
   { href: '/admin/analytics', label: '数据分析', icon: 'M16 8v8m-4-5v5m-4-2v2m-2 4h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z' },
   { href: '/admin/wordbook-center', label: '词书中心', icon: 'M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253' },
   { href: '/admin/feedback', label: '用户反馈', icon: 'M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z' },
+  { href: '/admin/probe', label: '远程探针', icon: 'M9 17.25v1.007a3 3 0 01-.879 2.122L7.5 21h9l-.621-.621A3 3 0 0115 18.257V17.25m6-12V15a2.25 2.25 0 01-2.25 2.25H5.25A2.25 2.25 0 013 15V5.25m18 0A2.25 2.25 0 0018.75 3H5.25A2.25 2.25 0 003 5.25m18 0V12a2.25 2.25 0 01-2.25 2.25H5.25A2.25 2.25 0 013 12V5.25' },
   { href: '/admin/updates', label: '版本更新', icon: 'M12 4v16m8-8H4' },
   { href: '/admin/settings', label: '系统设置', icon: 'M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4' },
 ];
@@ -104,12 +105,14 @@ export function AdminLayout(props: ParentProps) {
         </div>
 
         <nav ref={navRef} class="relative flex-1 py-3 px-2 space-y-1 overflow-y-auto">
-          {/* Indicator — 在激活项位置滑动 */}
+          {/* Indicator — 完整跟随测量值（left/top/width/height），避免高度/宽度溢出到邻居 */}
           <div
             aria-hidden="true"
-            class="absolute left-2 right-2 h-9 rounded-lg bg-accent-light pointer-events-none transition-[transform,opacity] duration-base ease-out-expo"
+            class="absolute left-0 top-0 rounded-lg bg-accent-light pointer-events-none transition-[transform,width,height,opacity] duration-base ease-out-expo"
             style={{
-              transform: `translateY(${indicator().top}px)`,
+              transform: `translate(${indicator().left}px, ${indicator().top}px)`,
+              width: `${indicator().width}px`,
+              height: `${indicator().height}px`,
               opacity: indicator().height > 0 ? 1 : 0,
             }}
           />
