@@ -92,7 +92,7 @@ export default function MonitoringPage() {
   });
 
   return (
-    <div class="space-y-6 animate-fade-in-up">
+    <div class="space-y-6">
       <Show when={!loading()} fallback={<div class="flex justify-center py-12"><Spinner size="lg" /></div>}>
         <Show when={!allFailed()} fallback={
           <Empty title="加载失败" description="无法获取任何监控数据，请检查后端服务状态后重试" />
@@ -107,7 +107,7 @@ export default function MonitoringPage() {
               const st = () => statusMap[h().status] ?? statusMap.down;
               return (
                 <Card variant="elevated">
-                  <h2 class="text-lg font-semibold text-content mb-3">系统健康</h2>
+                  <h2 class="text-headline text-content mb-3">系统健康</h2>
                   <div class="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
                     <MetricCell label="状态">
                       <span class="flex items-center gap-1.5">
@@ -132,7 +132,7 @@ export default function MonitoringPage() {
           }>
             {(ph) => (
               <Card variant="elevated">
-                <h2 class="text-lg font-semibold text-content mb-3">公开健康探针</h2>
+                <h2 class="text-headline text-content mb-3">公开健康探针</h2>
                 <div class="flex items-center gap-2 mb-3">
                   <Badge variant={ph().status === 'ok' ? 'success' : 'error'}>{ph().status}</Badge>
                 </div>
@@ -160,7 +160,7 @@ export default function MonitoringPage() {
           }>
             {(d) => (
               <Card variant="elevated">
-                <h2 class="text-lg font-semibold text-content mb-3">数据库信息</h2>
+                <h2 class="text-headline text-content mb-3">数据库信息</h2>
                 <div class="grid grid-cols-2 md:grid-cols-3 gap-4">
                   <MetricCell label="大小">{(d().sizeOnDisk / 1024 / 1024).toFixed(2)} MB</MetricCell>
                   <MetricCell label="表数量">{d().tableCount}</MetricCell>
@@ -184,7 +184,7 @@ export default function MonitoringPage() {
           }>
             {(events) => (
               <Card variant="elevated">
-                <h2 class="text-lg font-semibold text-content mb-3">AMAS 监控事件</h2>
+                <h2 class="text-headline text-content mb-3">AMAS 监控事件</h2>
                 <Show when={events().length > 0} fallback={<p class="text-sm text-content-secondary">暂无事件</p>}>
                   <div class="max-h-96 overflow-y-auto space-y-2">
                     <For each={events()}>
