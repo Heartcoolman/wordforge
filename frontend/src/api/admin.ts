@@ -6,6 +6,7 @@ import type {
   SystemHealth, DatabaseInfo, SystemSettings,
   UpdateCheck, AdminUpdateStatus, DailyActiveUsersEntry, DailyRecordsEntry,
   StudyOverview, RecordTypeBreakdown, WordStateDistribution, RetentionCurve,
+  FeedbackItem,
 } from '@/types/admin';
 import type { AmasConfig } from '@/types/amas';
 import type { BrowseItem, WordbookPreview, ImportResult, UpdateInfo, SyncResult } from '@/types/wordbookCenter';
@@ -155,6 +156,14 @@ export const adminApi = {
     api.get<UpdateInfo[]>('/api/admin/wordbook-center/updates', undefined, { useAdminToken: true }),
   wbCenterSync: (id: string) =>
     api.post<SyncResult>(`/api/admin/wordbook-center/updates/${id}/sync`, undefined, { useAdminToken: true }),
+
+  // ─────────── 用户反馈（PR-feedback） ───────────
+  listFeedback: (params?: { page?: number; perPage?: number }) =>
+    api.get<{ items: FeedbackItem[]; total: number; page: number; perPage: number }>(
+      '/api/admin/feedback',
+      params as Record<string, string | number | boolean | undefined>,
+      { useAdminToken: true },
+    ),
 
   // ─────────── AMAS 配置版本（PR-2） ───────────
   amasListVersions: (limit = 50) =>

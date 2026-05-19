@@ -3,6 +3,7 @@ pub mod analytics;
 pub mod auth;
 pub mod broadcast;
 pub mod clients;
+pub mod feedback;
 pub mod monitoring;
 pub mod settings;
 pub mod updates;
@@ -12,7 +13,7 @@ use axum::routing::{get, post};
 use axum::Router;
 use serde::{Deserialize, Serialize};
 
-use crate::auth::{hash_password, hash_token, AdminAuthUser};
+use crate::auth::AdminAuthUser;
 use crate::extractors::JsonBody;
 use crate::response::{ok, AppError};
 use crate::state::AppState;
@@ -59,6 +60,7 @@ pub fn router() -> Router<AppState> {
         .nest("/amas", amas::admin_router())
         .nest("/updates", updates::router())
         .nest("/clients", clients::router())
+        .nest("/feedback", feedback::router())
         .nest("/telemetry", clients::telemetry_router())
         .route("/users", get(list_users))
         .route("/users/:id/ban", post(ban_user))
@@ -97,40 +99,17 @@ async fn list_users(
         .per_page
         .unwrap_or(state.config().pagination.default_page_size)
         .clamp(1, state.config().pagination.max_page_size);
-    let limit = per_page as usize;
-    let offset = ((page - 1) * per_page) as usize;
     let search = q
         .search
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_ascii_lowercase);
-    let banned = q.banned;
-    let has_filter = search.is_some() || banned.is_some();
 
     let (users, total) = state
-        .run_store_task("admin.list_users", move |store| {
-            if has_filter {
-                let mut all = store.list_users(10_000, 0)?;
-                // TODO: Push search/filter to SQL layer for better performance at scale
-                all.retain(|user| {
-                    let banned_match = banned.map(|v| user.is_banned == v).unwrap_or(true);
-                    let search_match = search.as_ref().map_or(true, |needle| {
-                        user.username.to_ascii_lowercase().contains(needle)
-                            || user.email.to_ascii_lowercase().contains(needle)
-                    });
-                    banned_match && search_match
-                });
-                let total = all.len() as u64;
-                let page_slice: Vec<_> = all.into_iter().skip(offset).take(limit).collect();
-                Ok::<_, crate::store::StoreError>((page_slice, total))
-            } else {
-                let page_slice = store.list_users(limit, offset)?;
-                let total = store.count_users()? as u64;
-                Ok((page_slice, total))
-            }
-        })
-        .await??;
+        .admin_service()
+        .list_users(page, per_page, search, q.banned)
+        .await?;
 
     let safe_users: Vec<AdminUserView> = users.iter().map(AdminUserView::from).collect();
     Ok(crate::response::paginated(
@@ -143,16 +122,7 @@ async fn ban_user(
     Path(id): Path<String>,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let user_id_for_store = id.clone();
-    let revoked = state
-        .run_store_task("admin.ban_user", move |store| -> Result<_, AppError> {
-            if store.get_user_by_id(&user_id_for_store)?.is_none() {
-                return Err(AppError::not_found("用户不存在"));
-            }
-            store.ban_user(&user_id_for_store)?;
-            Ok(store.delete_user_sessions(&user_id_for_store)?)
-        })
-        .await??;
+    let revoked = state.admin_service().ban_user(id.clone()).await?;
     tracing::info!(
         admin_id = %admin.admin_id,
         action = "ban_user",
@@ -170,16 +140,7 @@ async fn unban_user(
     Path(id): Path<String>,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let user_id_for_store = id.clone();
-    state
-        .run_store_task("admin.unban_user", move |store| -> Result<_, AppError> {
-            if store.get_user_by_id(&user_id_for_store)?.is_none() {
-                return Err(AppError::not_found("用户不存在"));
-            }
-            store.unban_user(&user_id_for_store)?;
-            Ok(())
-        })
-        .await??;
+    state.admin_service().unban_user(id.clone()).await?;
     tracing::info!(
         admin_id = %admin.admin_id,
         action = "unban_user",
@@ -193,51 +154,7 @@ async fn admin_stats(
     _admin: AdminAuthUser,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let today_str = chrono::Utc::now()
-        .date_naive()
-        .format("%Y-%m-%d")
-        .to_string();
-    let yesterday_str = (chrono::Utc::now().date_naive() - chrono::Duration::days(1))
-        .format("%Y-%m-%d")
-        .to_string();
-    let (
-        user_count,
-        word_count,
-        record_count,
-        users_today,
-        users_yesterday,
-        records_today,
-        records_yesterday,
-    ) = state
-        .run_store_task("admin.stats", move |store| {
-            Ok::<_, crate::store::StoreError>((
-                store.count_users()?,
-                store.count_words()?,
-                store.count_all_records()?,
-                store.count_users_registered_on_date(&today_str)?,
-                store.count_users_registered_on_date(&yesterday_str)?,
-                store.count_records_on_date(&today_str)?,
-                store.count_records_on_date(&yesterday_str)?,
-            ))
-        })
-        .await??;
-
-    let calc_trend = |today: usize, yesterday: usize| -> i64 {
-        if yesterday == 0 {
-            return 0;
-        }
-        ((today as f64 - yesterday as f64) / yesterday as f64 * 100.0).round() as i64
-    };
-
-    Ok(ok(serde_json::json!({
-        "users": user_count,
-        "words": word_count,
-        "records": record_count,
-        "trend": {
-            "users": { "value": calc_trend(users_today, users_yesterday), "label": "较昨日" },
-            "records": { "value": calc_trend(records_today, records_yesterday), "label": "较昨日" }
-        }
-    })))
+    Ok(ok(state.admin_service().stats().await?))
 }
 
 async fn admin_reset_user_password(
@@ -245,26 +162,10 @@ async fn admin_reset_user_password(
     Path(id): Path<String>,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let raw_token = uuid::Uuid::new_v4().simple().to_string();
-    let token_hash = hash_token(&raw_token);
-
-    let expires_at = (chrono::Utc::now() + chrono::Duration::hours(4)).to_rfc3339();
-    let user_id_for_store = id.clone();
-
-    state
-        .run_store_task(
-            "admin.reset_user_password",
-            move |store| -> Result<_, AppError> {
-                if store.get_user_by_id(&user_id_for_store)?.is_none() {
-                    return Err(AppError::not_found("用户不存在"));
-                }
-                store
-                    .create_password_reset_token(&token_hash, &user_id_for_store, &expires_at)
-                    .map_err(|e| AppError::internal(&e.to_string()))?;
-                Ok(())
-            },
-        )
-        .await??;
+    let reset = state
+        .admin_service()
+        .create_password_reset(id.clone())
+        .await?;
 
     tracing::info!(
         admin_id = %admin.admin_id,
@@ -275,8 +176,8 @@ async fn admin_reset_user_password(
 
     Ok(ok(serde_json::json!({
         "resetCreated": true,
-        "resetKey": raw_token,
-        "expiresInHours": 4,
+        "resetKey": reset.reset_key,
+        "expiresInHours": reset.expires_in_hours,
         "message": "密码重置令牌已创建，请通过安全渠道通知用户",
     })))
 }
@@ -297,21 +198,10 @@ async fn admin_set_user_password(
         return Err(AppError::bad_request("AUTH_WEAK_PASSWORD", msg));
     }
 
-    let store = state.store().clone();
-    let user_id_for_store = id.clone();
-    let revoked =
-        crate::blocking::run_blocking("admin.set_user_password", move || -> Result<_, AppError> {
-            let mut user = store
-                .get_user_by_id(&user_id_for_store)?
-                .ok_or_else(|| AppError::not_found("用户不存在"))?;
-
-            user.password_hash = hash_password(&req.new_password)?;
-            user.updated_at = chrono::Utc::now();
-            store.update_user(&user)?;
-
-            Ok(store.delete_user_sessions(&user_id_for_store)?)
-        })
-        .await??;
+    let revoked = state
+        .admin_service()
+        .set_user_password(id.clone(), req.new_password)
+        .await?;
 
     tracing::info!(
         admin_id = %admin.admin_id,

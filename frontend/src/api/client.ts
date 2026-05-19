@@ -229,6 +229,8 @@ export interface SseCallbacks {
   onReleaseAvailable?: (payload: { latestTag: string }) => void;
   /** 后端 `update_progress`：一键自更新执行进度（仅 admin 关心） */
   onUpdateProgress?: (payload: { phase: string; percent: number }) => void;
+  /** 后端 `new_llm_suggestion`：LLM 调参建议生成（仅 admin 关心，advisor 页用） */
+  onNewLlmSuggestion?: (payload: { suggestionId: number }) => void;
   onDataCorrupted?: () => void;
 }
 
@@ -313,6 +315,8 @@ export function connectSseStream(callbacks: SseCallbacks): () => void {
                     phase: data.phase,
                     percent: Number(data.percent) || 0,
                   });
+                } else if (eventType === 'new_llm_suggestion' && typeof data.suggestionId === 'number') {
+                  callbacks.onNewLlmSuggestion?.({ suggestionId: data.suggestionId });
                 } else if (eventType === 'data_corrupted') {
                   callbacks.onDataCorrupted?.();
                 }

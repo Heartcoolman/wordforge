@@ -25,6 +25,7 @@ const SettingsPage = lazy(() => import('@/pages/admin/SettingsPage'));
 const UpdatesPage = lazy(() => import('@/pages/admin/UpdatesPage'));
 const AdminWordbookCenterPage = lazy(() => import('@/pages/admin/AdminWordbookCenterPage'));
 const ClientsPage = lazy(() => import('@/pages/admin/ClientsPage'));
+const FeedbackPage = lazy(() => import('@/pages/admin/FeedbackPage'));
 
 function PageSpinner() {
   return (
@@ -107,6 +108,7 @@ export default function App() {
             <Route path="/settings" component={() => (<AdminProtectedRoute><Suspense fallback={<PageSpinner />}><SettingsPage /></Suspense></AdminProtectedRoute>)} />
             <Route path="/updates" component={() => (<AdminProtectedRoute><Suspense fallback={<PageSpinner />}><UpdatesPage /></Suspense></AdminProtectedRoute>)} />
             <Route path="/wordbook-center" component={() => (<AdminProtectedRoute><Suspense fallback={<PageSpinner />}><AdminWordbookCenterPage /></Suspense></AdminProtectedRoute>)} />
+            <Route path="/feedback" component={() => (<AdminProtectedRoute><Suspense fallback={<PageSpinner />}><FeedbackPage /></Suspense></AdminProtectedRoute>)} />
           </Route>
           <Route path="*" component={() => (<Suspense fallback={<PageSpinner />}><NotFoundPage /></Suspense>)} />
         </Route>
