@@ -31,6 +31,8 @@ pub fn router() -> Router<AppState> {
 pub fn admin_router() -> Router<AppState> {
     Router::new()
         .route("/config", get(get_config).put(update_config))
+        // schemars 导出：供前端 codegen 拉取，作为 TS 类型生成的单一事实源
+        .route("/config/schema", get(get_config_schema))
         .route("/config/versions", get(list_versions))
         .route("/config/versions/:hash", get(get_version))
         .route("/config/versions/:hash/restore", post(restore_version))
@@ -143,6 +145,17 @@ async fn get_config(
     Ok(ok(cfg))
 }
 
+/// GET /api/admin/amas/config/schema —— 返回 AMASConfig 的 JSON Schema（由 schemars 派生）
+///
+/// 用途：作为前端 `frontend/src/types/amas.generated.ts` codegen 的事实源，
+/// 任何后端结构体增删字段都会自动反映到 schema，避免手写 TS 漂移。
+async fn get_config_schema(
+    _admin: AdminAuthUser,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let schema = schemars::schema_for!(crate::amas::config::AMASConfig);
+    Ok(ok(serde_json::to_value(&schema).unwrap_or_default()))
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct UpdateConfigQuery {
@@ -156,7 +169,14 @@ async fn update_config(
     Query(q): Query<UpdateConfigQuery>,
     JsonBody(cfg): JsonBody<crate::amas::config::AMASConfig>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    apply_and_persist_config(&state, &admin.admin_id, cfg, ConfigVersionSource::Manual, q.note).await
+    apply_and_persist_config(
+        &state,
+        &admin.admin_id,
+        cfg,
+        ConfigVersionSource::Manual,
+        q.note,
+    )
+    .await
 }
 
 #[derive(Debug, Deserialize)]
@@ -214,10 +234,8 @@ async fn restore_version(
         .await??
         .ok_or_else(|| AppError::not_found("配置版本不存在"))?;
 
-    let cfg: crate::amas::config::AMASConfig =
-        serde_json::from_value(detail.snapshot_json).map_err(|e| {
-            AppError::internal(&format!("快照反序列化失败: {e}"))
-        })?;
+    let cfg: crate::amas::config::AMASConfig = serde_json::from_value(detail.snapshot_json)
+        .map_err(|e| AppError::internal(&format!("快照反序列化失败: {e}")))?;
 
     let note = body
         .note
@@ -379,11 +397,14 @@ async fn compare_versions(
     let va = q.version_a.clone();
     let vb = q.version_b.clone();
     let (a, b) = state
-        .run_store_task("admin.amas.compare", move |store| -> Result<_, crate::store::StoreError> {
-            let a = store.aggregate_amas_version_slice(&va)?;
-            let b = store.aggregate_amas_version_slice(&vb)?;
-            Ok((a, b))
-        })
+        .run_store_task(
+            "admin.amas.compare",
+            move |store| -> Result<_, crate::store::StoreError> {
+                let a = store.aggregate_amas_version_slice(&va)?;
+                let b = store.aggregate_amas_version_slice(&vb)?;
+                Ok((a, b))
+            },
+        )
         .await??;
     Ok(ok(serde_json::json!({"a": a, "b": b})))
 }
@@ -405,7 +426,10 @@ async fn list_suggestions(
     use crate::store::operations::amas_suggestions::SuggestionStatus;
     let limit = q.limit.unwrap_or(50).clamp(1, 500);
     let status = if let Some(s) = q.status.as_deref() {
-        Some(SuggestionStatus::parse(s).map_err(|e| AppError::bad_request("BAD_STATUS", &e.to_string()))?)
+        Some(
+            SuggestionStatus::parse(s)
+                .map_err(|e| AppError::bad_request("BAD_STATUS", &e.to_string()))?,
+        )
     } else {
         None
     };
@@ -480,7 +504,9 @@ async fn approve_suggestion(
         write_path(&mut cfg_value, path, value.clone());
     }
     let new_cfg: crate::amas::config::AMASConfig =
-        serde_json::from_value(cfg_value).map_err(|e| AppError::bad_request("PATCH_INVALID", &format!("应用 patch 后反序列化失败: {e}")))?;
+        serde_json::from_value(cfg_value).map_err(|e| {
+            AppError::bad_request("PATCH_INVALID", &format!("应用 patch 后反序列化失败: {e}"))
+        })?;
 
     let resp = apply_and_persist_config(
         &state,
@@ -494,7 +520,12 @@ async fn approve_suggestion(
     let admin_id = admin.admin_id.clone();
     state
         .run_store_task("admin.amas.approve_update", move |store| {
-            store.update_amas_suggestion_status(id, SuggestionStatus::Approved, Some(&admin_id), body.note.as_deref())
+            store.update_amas_suggestion_status(
+                id,
+                SuggestionStatus::Approved,
+                Some(&admin_id),
+                body.note.as_deref(),
+            )
         })
         .await??;
 
@@ -548,7 +579,10 @@ async fn explain_param(
     );
     let resp = provider
         .chat(ChatRequest {
-            messages: vec![ChatMessage { role: "user".into(), content: prompt }],
+            messages: vec![ChatMessage {
+                role: "user".into(),
+                content: prompt,
+            }],
             json_object: false,
             temperature: 0.3,
         })
@@ -593,9 +627,15 @@ fn write_path(cfg: &mut serde_json::Value, path: &str, value: serde_json::Value)
         if let Some(open) = part.find('[') {
             let (key, rest) = part.split_at(open);
             let idx: usize = rest[1..rest.len() - 1].parse().unwrap_or(0);
-            let Some(obj) = cur.as_object_mut() else { return };
-            let Some(arr_val) = obj.get_mut(key) else { return };
-            let Some(arr) = arr_val.as_array_mut() else { return };
+            let Some(obj) = cur.as_object_mut() else {
+                return;
+            };
+            let Some(arr_val) = obj.get_mut(key) else {
+                return;
+            };
+            let Some(arr) = arr_val.as_array_mut() else {
+                return;
+            };
             if is_last {
                 if idx < arr.len() {
                     arr[idx] = value;
@@ -610,7 +650,9 @@ fn write_path(cfg: &mut serde_json::Value, path: &str, value: serde_json::Value)
             }
             return;
         } else {
-            let Some(obj) = cur.as_object_mut() else { return };
+            let Some(obj) = cur.as_object_mut() else {
+                return;
+            };
             cur = obj
                 .entry(part.to_string())
                 .or_insert_with(|| serde_json::Value::Object(Default::default()));
@@ -635,7 +677,26 @@ async fn get_monitoring_events(
             store.get_recent_monitoring_events(limit)
         })
         .await??;
-    Ok(ok(events))
+    // 前端 MonitoringPage 期望 { timestamp, eventType, data } 包装结构
+    let wrapped: Vec<serde_json::Value> = events
+        .into_iter()
+        .map(|ev| {
+            let timestamp = ev
+                .get("timestamp")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            let event_type = ev
+                .get("eventType")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            serde_json::json!({
+                "timestamp": timestamp,
+                "eventType": event_type,
+                "data": ev,
+            })
+        })
+        .collect();
+    Ok(ok(wrapped))
 }
 
 #[derive(Debug, Deserialize)]
@@ -809,7 +870,11 @@ async fn get_retention_curve(
                         let (sum, count) = sums.get(&b).copied().unwrap_or((0.0, 0));
                         RetentionPoint {
                             days_since_learn: b,
-                            retention: if count > 0 { Some(sum / count as f64) } else { None },
+                            retention: if count > 0 {
+                                Some(sum / count as f64)
+                            } else {
+                                None
+                            },
                             sample_size: count,
                         }
                     })

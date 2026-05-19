@@ -1,3 +1,59 @@
+// AMAS 类型入口
+//
+// 配置类（AmasConfig 及其所有子结构）由 schemars + json-schema-to-typescript 自动生成，
+// 见 `amas.generated.ts`。任何后端 struct 增删字段都会反映到 generated 文件，
+// 无需手工同步。运行时返回类型（ProcessResult、AmasStrategy 等）继续手写。
+
+export type {
+  AMASConfig,
+  ClassifierConfig,
+  ColdStartConfig,
+  ConstraintConfig,
+  EloConfig,
+  EnsembleConfig,
+  EvmConfig,
+  FatigueDecayConfig,
+  FeatureConfig,
+  FeatureFlags,
+  HeuristicConfig,
+  IadConfig,
+  IgeConfig,
+  InterventionConfig,
+  LearningStrategyConfig,
+  MemoryModelConfig,
+  ModelingConfig,
+  MonitoringConfig,
+  MtpConfig,
+  ObjectiveWeights,
+  RewardConfig,
+  SspConfig,
+  SspCostParams,
+  SwdConfig,
+  WordSelectorConfig,
+} from './amas.generated';
+
+// 兼容旧命名：现有代码以 `AmasConfig` / `AmasFeatureFlags` 等 PascalCase+Amas 前缀引用
+import type * as Gen from './amas.generated';
+
+/** @deprecated 使用 `AMASConfig`（从 amas.generated 导出） */
+export type AmasConfig = Gen.AMASConfig;
+/** @deprecated 使用 `FeatureFlags` */
+export type AmasFeatureFlags = Gen.FeatureFlags;
+/** @deprecated 使用 `EnsembleConfig` */
+export type AmasEnsembleConfig = Gen.EnsembleConfig;
+/** @deprecated 使用 `ModelingConfig` */
+export type AmasModelingConfig = Gen.ModelingConfig;
+/** @deprecated 使用 `ConstraintConfig` */
+export type AmasConstraintConfig = Gen.ConstraintConfig;
+/** @deprecated 使用 `MonitoringConfig` */
+export type AmasMonitoringConfig = Gen.MonitoringConfig;
+/** @deprecated 使用 `ColdStartConfig` */
+export type AmasColdStartConfig = Gen.ColdStartConfig;
+/** @deprecated 使用 `ObjectiveWeights` */
+export type AmasObjectiveWeights = Gen.ObjectiveWeights;
+
+// === 运行时返回类型（非配置）：保持手写 ===
+
 export interface ProcessResult {
   sessionId: string;
   strategy: AmasStrategy;
@@ -22,6 +78,8 @@ export interface ProcessEventRequest {
   interactionDensity?: number;
   pausedTimeMs?: number;
   hintUsed?: boolean;
+  /** 易混淆词对（对齐后端 RawEvent.confused_with） */
+  confusedWith?: string;
 }
 
 export interface BatchProcessResult {
@@ -64,11 +122,26 @@ export interface AmasTrendState {
   engagementTrend: number;
 }
 
+// 时段表现（对应后端 TemporalPerformance.hourly_stats[24]）
+export interface AmasHourlyStat {
+  accuracy: number;
+  sessionCount: number;
+  avgEngagementScore: number;
+}
+
+// 时段表现汇总（对应后端 TemporalPerformance）
+export interface AmasTemporalPerformance {
+  hourlyStats: AmasHourlyStat[];
+  totalSessions: number;
+}
+
 // 习惯档案（对应后端 HabitProfile）
 export interface AmasHabitProfile {
   preferredHours: number[];
   medianSessionLengthMins: number;
   sessionsPerDay: number;
+  /** 24 小时分桶表现 */
+  temporalPerformance?: AmasTemporalPerformance;
 }
 
 export interface AmasUserState {
@@ -83,6 +156,8 @@ export interface AmasUserState {
   cognitiveProfile?: AmasCognitiveProfile;
   trendState?: AmasTrendState;
   habitProfile?: AmasHabitProfile;
+  /** 最近会话 ID（对齐后端 UserState.last_session_id） */
+  lastSessionId?: string;
 }
 
 export interface WordMastery {
@@ -100,6 +175,8 @@ export interface AmasReward {
     speedReward: number;
     fatiguePenalty: number;
     frustrationPenalty: number;
+    /** 预期遗忘成本（对齐后端 RewardComponents.expected_forget_cost） */
+    expectedForgetCost?: number;
   };
 }
 
@@ -125,72 +202,6 @@ export interface MasteryEvaluation {
   correctStreak: number;
   totalAttempts: number;
   nextReviewDate: string;
-}
-
-export interface AmasFeatureFlags {
-  ensembleEnabled: boolean;
-  heuristicEnabled: boolean;
-  igeEnabled: boolean;
-  swdEnabled: boolean;
-  mdmEnabled: boolean;
-}
-
-export interface AmasEnsembleConfig {
-  baseWeightHeuristic: number;
-  baseWeightIge: number;
-  baseWeightSwd: number;
-  warmupSamples: number;
-  blendScale: number;
-  blendMax: number;
-  minWeight: number;
-}
-
-export interface AmasModelingConfig {
-  attentionSmoothing: number;
-  confidenceDecay: number;
-  minConfidence: number;
-  fatigueIncreaseRate: number;
-  fatigueRecoveryRate: number;
-  motivationMomentum: number;
-  visualFatigueWeight: number;
-}
-
-export interface AmasConstraintConfig {
-  highFatigueThreshold: number;
-  lowAttentionThreshold: number;
-  lowMotivationThreshold: number;
-  maxBatchSizeWhenFatigued: number;
-  maxNewRatioWhenFatigued: number;
-  maxDifficultyWhenFatigued: number;
-}
-
-export interface AmasMonitoringConfig {
-  sampleRate: number;
-  metricsFlushIntervalSecs: number;
-}
-
-export interface AmasColdStartConfig {
-  classifyToExploreEvents: number;
-  classifyToExploreConfidence: number;
-  exploreToExploitEvents: number;
-}
-
-export interface AmasObjectiveWeights {
-  retention: number;
-  accuracy: number;
-  speed: number;
-  fatigue: number;
-  frustration: number;
-}
-
-export interface AmasConfig {
-  featureFlags: AmasFeatureFlags;
-  ensemble: AmasEnsembleConfig;
-  modeling: AmasModelingConfig;
-  constraints: AmasConstraintConfig;
-  monitoring: AmasMonitoringConfig;
-  coldStart: AmasColdStartConfig;
-  objectiveWeights: AmasObjectiveWeights;
 }
 
 export interface AmasMetricsSnapshot {
