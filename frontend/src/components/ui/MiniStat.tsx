@@ -23,12 +23,12 @@ export function MiniStat(props: MiniStatProps) {
   const trendArrow = (v: number) => (v > 0 ? '↑' : v < 0 ? '↓' : '→');
 
   return (
-    <div class="rounded-lg bg-surface-secondary border border-border p-3">
-      <p class="text-xs font-medium text-content-secondary mb-1">{props.label}</p>
-      <p class={cn('text-2xl font-bold tracking-tight', tone())}>{props.value}</p>
+    <div class="rounded-lg bg-surface-secondary border border-border-hairline p-3 transition-[transform,box-shadow] duration-base ease-out-expo hover:-translate-y-0.5 hover:shadow-elevation-1">
+      <p class="text-caption font-medium text-content-secondary mb-1">{props.label}</p>
+      <p class={cn('text-2xl font-bold tracking-tight tabular-nums', tone())}>{props.value}</p>
       <Show when={props.trend}>
         {(t) => (
-          <p class={cn('text-xs mt-1.5 flex items-center gap-1', trendClass(t().value))}>
+          <p class={cn('text-xs mt-1.5 flex items-center gap-1 tabular-nums', trendClass(t().value))}>
             <span>{trendArrow(t().value)}</span>
             <span>{Math.abs(t().value)}%</span>
             <span class="text-content-tertiary ml-1">{t().label}</span>
