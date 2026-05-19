@@ -1,5 +1,6 @@
-import { Show } from 'solid-js';
+import { Show, createMemo } from 'solid-js';
 import { Card } from './Card';
+import { useCountUp } from '@/lib/motion';
 
 interface StatCardProps {
   title: string;
@@ -7,6 +8,10 @@ interface StatCardProps {
   icon: string;
   color: 'accent' | 'success' | 'warning' | 'error' | 'info';
   trend?: { value: number; label: string };
+  /** value 是 number 时启用 count-up 滚动动画，默认 true */
+  animate?: boolean;
+  /** 数字格式化（仅 value 是 number 时生效） */
+  format?: (v: number) => string;
 }
 
 const colorMap = {
@@ -28,6 +33,15 @@ export function StatCard(props: StatCardProps) {
     return { arrow: '→', class: 'text-content-tertiary', text: '0%' };
   };
 
+  // 数字 count-up：仅当 value 是 number 且 animate !== false 时启用
+  const numericTarget = createMemo(() => (typeof props.value === 'number' ? props.value : null));
+  const countUpEnabled = () => numericTarget() !== null && props.animate !== false;
+  const animatedDisplay = useCountUp({
+    to: () => numericTarget() ?? 0,
+    format: props.format,
+  });
+  const displayValue = () => (countUpEnabled() ? animatedDisplay() : String(props.value));
+
   return (
     <Card variant="interactive" padding="lg">
       <div class="flex items-start gap-4">
@@ -37,7 +51,7 @@ export function StatCard(props: StatCardProps) {
           </svg>
         </div>
         <div class="flex-1 min-w-0">
-          <p class={`text-3xl font-bold tabular-nums ${colors().text}`}>{props.value}</p>
+          <p class={`text-3xl font-bold tabular-nums ${colors().text}`}>{displayValue()}</p>
           <p class="text-sm text-content-secondary">{props.title}</p>
           <Show when={trendDisplay()}>
             {(t) => (

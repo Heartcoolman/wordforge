@@ -42,56 +42,67 @@ export default function AdminDashboard() {
   });
 
   return (
-    <div class="space-y-6 animate-fade-in-up">
-      <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-2 border-b border-border">
-        <h1 class="text-xl font-bold text-content">全局概览</h1>
+    <div class="space-y-6">
+      <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-2 border-b border-border-hairline">
+        <h1 class="text-title text-content">全局概览</h1>
         <WindowPicker value={days} onChange={setDays} />
       </div>
 
-      {/* KPI 行 */}
+      {/* KPI 行 — 4 张卡 stagger 80ms 错开 + count-up 数字滚动 */}
       <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <Show when={stats()} fallback={<Skeleton height="100px" />}>
-          {(s) => (
-            <StatCard
-              title="注册用户"
-              value={formatNumber(s().users)}
-              color="accent"
-              icon="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z"
-              trend={s().trend?.users}
-            />
-          )}
-        </Show>
-        <Show when={eng()} fallback={<Skeleton height="100px" />}>
-          {(e) => (
-            <StatCard
-              title="今日活跃"
-              value={formatNumber(e().activeToday)}
-              color="success"
-              icon="M13 10V3L4 14h7v7l9-11h-7z"
-              trend={e().trend?.activeToday}
-            />
-          )}
-        </Show>
-        <Show when={overview()} fallback={<Skeleton height="100px" />}>
-          {(o) => (
-            <StatCard
-              title={`${days()}天答题数`}
-              value={formatNumber(o().summary.recordCount)}
-              color="info"
-              icon="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"
-            />
-          )}
-        </Show>
-        <Show when={overview()} fallback={<Skeleton height="100px" />}>
-          {(o) => (
-            <StatCard
-              title={`${days()}天正确率`}
-              value={formatAccuracy(o().summary.accuracy)}
-              color="warning"
-              icon="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
-            />
-          )}
-        </Show>
+        <div class="animate-fade-in-up" style={{ 'animation-fill-mode': 'backwards' }}>
+          <Show when={stats()} fallback={<Skeleton height="100px" />}>
+            {(s) => (
+              <StatCard
+                title="注册用户"
+                value={s().users}
+                format={formatNumber}
+                color="accent"
+                icon="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z"
+                trend={s().trend?.users}
+              />
+            )}
+          </Show>
+        </div>
+        <div class="animate-fade-in-up" style={{ 'animation-delay': '80ms', 'animation-fill-mode': 'backwards' }}>
+          <Show when={eng()} fallback={<Skeleton height="100px" />}>
+            {(e) => (
+              <StatCard
+                title="今日活跃"
+                value={e().activeToday}
+                format={formatNumber}
+                color="success"
+                icon="M13 10V3L4 14h7v7l9-11h-7z"
+                trend={e().trend?.activeToday}
+              />
+            )}
+          </Show>
+        </div>
+        <div class="animate-fade-in-up" style={{ 'animation-delay': '160ms', 'animation-fill-mode': 'backwards' }}>
+          <Show when={overview()} fallback={<Skeleton height="100px" />}>
+            {(o) => (
+              <StatCard
+                title={`${days()}天答题数`}
+                value={o().summary.recordCount}
+                format={formatNumber}
+                color="info"
+                icon="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"
+              />
+            )}
+          </Show>
+        </div>
+        <div class="animate-fade-in-up" style={{ 'animation-delay': '240ms', 'animation-fill-mode': 'backwards' }}>
+          <Show when={overview()} fallback={<Skeleton height="100px" />}>
+            {(o) => (
+              <StatCard
+                title={`${days()}天正确率`}
+                value={formatAccuracy(o().summary.accuracy)}
+                color="warning"
+                icon="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
+              />
+            )}
+          </Show>
+        </div>
       </div>
 
       {/* Panel: 用户活跃趋势 */}
@@ -245,12 +256,12 @@ export default function AdminDashboard() {
                 <p class="text-content-secondary">状态</p>
                 <p class="font-medium flex items-center gap-1.5">
                   <span
-                    class={`w-2 h-2 rounded-full ${
+                    class={`w-2 h-2 rounded-full animate-ring-pulse ${
                       h().status === 'healthy'
-                        ? 'bg-success'
+                        ? 'bg-success text-success'
                         : h().status === 'degraded'
-                        ? 'bg-warning'
-                        : 'bg-error'
+                        ? 'bg-warning text-warning'
+                        : 'bg-error text-error'
                     }`}
                   />
                   <span

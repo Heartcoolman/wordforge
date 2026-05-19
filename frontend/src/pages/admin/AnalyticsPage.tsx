@@ -45,9 +45,9 @@ export default function AnalyticsPage() {
   const [states] = createResource(() => adminApi.getWordStateDistribution());
 
   return (
-    <div class="space-y-6 animate-fade-in-up">
-      <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-2 border-b border-border">
-        <h1 class="text-xl font-bold text-content">深度分析</h1>
+    <div class="space-y-6">
+      <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-2 border-b border-border-hairline">
+        <h1 class="text-title text-content">深度分析</h1>
         <WindowPicker value={days} onChange={setDays} />
       </div>
 
@@ -120,7 +120,7 @@ export default function AnalyticsPage() {
 
       {/* Panel: 学习构成 */}
       <Card variant="elevated">
-        <h2 class="text-lg font-semibold text-content mb-4">学习构成（学习 vs 复习）</h2>
+        <h2 class="text-headline text-content mb-4">学习构成（学习 vs 复习）</h2>
         <Show
           when={!recordTypes.error}
           fallback={<Empty title="加载失败" description="无法获取学习构成数据" />}
@@ -173,7 +173,7 @@ export default function AnalyticsPage() {
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <Card variant="elevated">
           <div class="flex items-center justify-between mb-4">
-            <h2 class="text-lg font-semibold text-content">记忆遗忘曲线</h2>
+            <h2 class="text-headline text-content">记忆遗忘曲线</h2>
             <Show when={retention()?.averageRetention != null}>
               <span class="text-xs text-content-secondary">
                 平均留存 {formatAccuracy(retention()!.averageRetention)}
@@ -245,7 +245,7 @@ export default function AnalyticsPage() {
 
         <Card variant="elevated">
           <div class="flex items-center justify-between mb-4">
-            <h2 class="text-lg font-semibold text-content">单词状态分布</h2>
+            <h2 class="text-headline text-content">单词状态分布</h2>
             <Show when={states()}>
               <span class="text-xs text-content-secondary">
                 跟踪 {formatNumber(states()!.totals.trackedWords)}，已收藏 {formatNumber(states()!.totals.bookmarkedWords)}
