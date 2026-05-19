@@ -134,7 +134,7 @@ export default function ClientsPage() {
 
       <Show when={!loading()} fallback={<div class="flex justify-center py-12"><Spinner size="lg" /></div>}>
         {/* Tabs */}
-        <div class="flex gap-2 border-b border-border">
+        <div class="flex gap-2 border-b border-border-hairline">
           <button
             class={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${tab() === 'sse' ? 'border-accent text-accent' : 'border-transparent text-content-secondary hover:text-content'}`}
             onClick={() => setTab('sse')}
@@ -155,7 +155,7 @@ export default function ClientsPage() {
             <div class="overflow-x-auto">
               <table class="w-full text-sm">
                 <thead>
-<tr class="border-b border-border text-left text-content-secondary">
+<tr class="border-b border-border-hairline text-left text-caption uppercase tracking-wide text-content-secondary">
                      <th class="py-2 pr-4">设备 ID</th>
                      <th class="py-2 pr-4">平台</th>
                      <th class="py-2 pr-4">用户</th>
@@ -168,7 +168,7 @@ export default function ClientsPage() {
                 <tbody>
                   <For each={sseLive()}>
                     {(entry) => (
-                      <tr class="border-b border-border/50 hover:bg-surface-secondary/50 transition-colors">
+                      <tr class="border-b border-border-hairline hover:bg-accent-light/40 transition-colors duration-fast ease-out-expo">
                         <td class="py-2 pr-4 font-mono text-xs" title={entry.deviceId}>{truncateId(entry.deviceId)}</td>
                         <td class="py-2 pr-4">{entry.platform}</td>
                         <td class="py-2 pr-4 font-mono text-xs">{truncateId(entry.userId)}</td>
@@ -205,7 +205,7 @@ export default function ClientsPage() {
             <div class="overflow-x-auto">
               <table class="w-full text-sm">
                 <thead>
-<tr class="border-b border-border text-left text-content-secondary">
+<tr class="border-b border-border-hairline text-left text-caption uppercase tracking-wide text-content-secondary">
                      <th class="py-2 pr-4">设备 ID</th>
                      <th class="py-2 pr-4">平台</th>
                      <th class="py-2 pr-4">用户</th>
@@ -218,7 +218,7 @@ export default function ClientsPage() {
                 <tbody>
                   <For each={recentlyActive()}>
                     {(entry) => (
-                      <tr class="border-b border-border/50 hover:bg-surface-secondary/50 transition-colors">
+                      <tr class="border-b border-border-hairline hover:bg-accent-light/40 transition-colors duration-fast ease-out-expo">
                         <td class="py-2 pr-4 font-mono text-xs" title={entry.deviceId}>{truncateId(entry.deviceId)}</td>
                         <td class="py-2 pr-4">{entry.platform}</td>
                         <td class="py-2 pr-4 font-mono text-xs">{entry.userId ? truncateId(entry.userId) : '-'}</td>

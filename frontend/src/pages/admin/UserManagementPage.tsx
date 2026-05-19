@@ -136,7 +136,7 @@ export default function UserManagementPage() {
   }
 
   return (
-    <div class="space-y-6 animate-fade-in-up">
+    <div class="space-y-6">
 
       {/* 确认弹窗 */}
       <Show when={confirmTarget()}>
@@ -163,24 +163,24 @@ export default function UserManagementPage() {
           <Empty title="暂无用户" description="目前还没有注册用户" />
         }>
           <div class="space-y-3">
-            <div class="overflow-x-auto rounded-xl border border-border">
+            <div class="overflow-x-auto rounded-xl border border-border-hairline shadow-elevation-1">
               <table class="w-full text-sm">
                 <thead>
-                  <tr class="bg-surface-secondary border-b border-border">
-                    <th class="px-4 py-3 text-left font-medium text-content-secondary">用户名</th>
-                    <th class="px-4 py-3 text-left font-medium text-content-secondary">邮箱</th>
-                    <th class="px-4 py-3 text-left font-medium text-content-secondary">状态</th>
-                    <th class="px-4 py-3 text-right font-medium text-content-secondary">操作</th>
+                  <tr class="bg-surface-secondary/60 backdrop-blur-sm border-b border-border-hairline">
+                    <th class="px-4 py-3 text-left text-caption uppercase tracking-wide font-medium text-content-secondary">用户名</th>
+                    <th class="px-4 py-3 text-left text-caption uppercase tracking-wide font-medium text-content-secondary">邮箱</th>
+                    <th class="px-4 py-3 text-left text-caption uppercase tracking-wide font-medium text-content-secondary">状态</th>
+                    <th class="px-4 py-3 text-right text-caption uppercase tracking-wide font-medium text-content-secondary">操作</th>
                   </tr>
                 </thead>
                 <tbody>
                   <For each={users()}>
                     {(user) => (
-                      <tr class="border-b border-border last:border-b-0 hover:bg-surface-secondary/40 transition-colors">
+                      <tr class="border-b border-border-hairline last:border-b-0 hover:bg-accent-light/40 transition-colors duration-fast ease-out-expo">
                         <td class="px-4 py-3 font-medium text-content">{user.username}</td>
                         <td class="px-4 py-3 text-content-secondary">{maskEmail(user.email)}</td>
                         <td class="px-4 py-3">
-                          <Badge variant={user.isBanned ? 'error' : 'success'}>
+                          <Badge variant={user.isBanned ? 'error' : 'success'} dot>
                             {user.isBanned ? '已封禁' : '正常'}
                           </Badge>
                         </td>
@@ -213,18 +213,18 @@ export default function UserManagementPage() {
         <Show when={resetMode() === 'choose'}>
           <div class="space-y-3 mt-2">
             <button
-              class="w-full p-4 rounded-xl border-2 border-border hover:border-accent bg-surface-elevated text-left transition-all cursor-pointer"
+              class="w-full p-4 rounded-xl border border-border-hairline hover:border-accent bg-surface-elevated text-left cursor-pointer shadow-elevation-1 transition-[transform,box-shadow,border-color] duration-base ease-out-expo hover:-translate-y-0.5 hover:shadow-elevation-3"
               onClick={() => setResetMode('direct')}
             >
               <p class="font-medium text-content">直接重置密码</p>
-              <p class="text-xs text-content-tertiary mt-1">由管理员设定新密码，用户现有会话将被注销</p>
+              <p class="text-caption mt-1">由管理员设定新密码，用户现有会话将被注销</p>
             </button>
             <button
-              class="w-full p-4 rounded-xl border-2 border-border hover:border-accent bg-surface-elevated text-left transition-all cursor-pointer"
+              class="w-full p-4 rounded-xl border border-border-hairline hover:border-accent bg-surface-elevated text-left cursor-pointer shadow-elevation-1 transition-[transform,box-shadow,border-color] duration-base ease-out-expo hover:-translate-y-0.5 hover:shadow-elevation-3"
               onClick={() => { setResetMode('key-result'); handleGenerateKey(); }}
             >
               <p class="font-medium text-content">生成重置密钥</p>
-              <p class="text-xs text-content-tertiary mt-1">生成一次性密钥发送给用户，由用户自行修改密码</p>
+              <p class="text-caption mt-1">生成一次性密钥发送给用户，由用户自行修改密码</p>
             </button>
           </div>
         </Show>

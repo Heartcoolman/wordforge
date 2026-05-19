@@ -112,9 +112,9 @@ export default function AdminWordbookCenterPage() {
   }
 
   return (
-    <div class="space-y-6 animate-fade-in-up">
-      <div class="flex items-center justify-between flex-wrap gap-2">
-        <h1 class="text-2xl font-bold text-content">词书中心</h1>
+    <div class="space-y-6">
+      <div class="flex items-center justify-between flex-wrap gap-2 pb-2 border-b border-border-hairline">
+        <h1 class="text-title text-content">词书中心</h1>
         <Show when={configured()}>
           <Button size="sm" variant="ghost" onClick={checkUpdates} loading={checkingUpdates()}>
             检查更新
