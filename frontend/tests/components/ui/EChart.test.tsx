@@ -58,4 +58,11 @@ describe('EChart', () => {
     unmount();
     expect(dispose).toHaveBeenCalled();
   });
+
+  it('does not subscribe to global DOM mutation events', () => {
+    const observer = vi.spyOn(window, 'MutationObserver');
+    render(() => <EChart option={() => ({})} />);
+    expect(observer).not.toHaveBeenCalled();
+    observer.mockRestore();
+  });
 });

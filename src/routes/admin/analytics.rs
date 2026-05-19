@@ -540,8 +540,7 @@ async fn word_states(
         })
         .await??;
 
-    let tracked =
-        dist.new_count + dist.learning + dist.reviewing + dist.mastered + dist.forgotten;
+    let tracked = dist.new_count + dist.learning + dist.reviewing + dist.mastered + dist.forgotten;
 
     Ok(ok(WordStatesResponse {
         generated_at: Utc::now(),
@@ -592,15 +591,12 @@ fn nearest_bucket(days_since_learn: f64) -> Option<u32> {
     if days_since_learn < 0.5 {
         return None;
     }
-    RETENTION_BUCKETS
-        .iter()
-        .copied()
-        .min_by(|a, b| {
-            (days_since_learn - *a as f64)
-                .abs()
-                .partial_cmp(&(days_since_learn - *b as f64).abs())
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
+    RETENTION_BUCKETS.iter().copied().min_by(|a, b| {
+        (days_since_learn - *a as f64)
+            .abs()
+            .partial_cmp(&(days_since_learn - *b as f64).abs())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    })
 }
 
 /// Same exponential half-life model as `src/routes/analytics.rs::estimated_retention`.
@@ -656,7 +652,11 @@ async fn retention_curve(
             let (sum, count) = buckets.get(&bucket).copied().unwrap_or((0.0, 0));
             RetentionPoint {
                 days_since_learn: bucket,
-                retention: if count > 0 { Some(sum / count as f64) } else { None },
+                retention: if count > 0 {
+                    Some(sum / count as f64)
+                } else {
+                    None
+                },
                 sample_size: count,
             }
         })

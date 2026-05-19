@@ -27,6 +27,13 @@ const USER_SCOPED_TABLES: &[&str] = &[
     "engine_algo_states",
     "user_stats",
     "alert_dedup",
+    "feedback_items",
+    "telemetry_events",
+    "telemetry_summaries",
+    "word_favorites",
+    "word_notes",
+    "wordbook_import_history",
+    "wb_center_imports",
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -336,6 +343,24 @@ impl Store {
         keys::validate_id(user_id)?;
         let mut conn = self.conn()?;
         let tx = conn.transaction()?;
+        // 用户自建词书：先收集 id，删 wordbook_words，再删 wordbooks（主键非 user_id）
+        let user_wordbook_ids: Vec<String> = {
+            let mut stmt = tx.prepare(
+                "SELECT id FROM wordbooks WHERE book_type='user' AND user_id=?1",
+            )?;
+            let rows = stmt.query_map(params![user_id], |r| r.get::<_, String>(0))?;
+            rows.collect::<Result<_, _>>()?
+        };
+        for wb_id in &user_wordbook_ids {
+            tx.execute(
+                "DELETE FROM wordbook_words WHERE wordbook_id=?1",
+                params![wb_id],
+            )?;
+        }
+        tx.execute(
+            "DELETE FROM wordbooks WHERE book_type='user' AND user_id=?1",
+            params![user_id],
+        )?;
         for table in USER_SCOPED_TABLES {
             tx.execute(
                 &format!("DELETE FROM {table} WHERE user_id=?1"),
@@ -457,7 +482,10 @@ mod tests {
         assert_eq!(store.count_users().unwrap(), 2);
         let today = Utc::now().date_naive().format("%Y-%m-%d").to_string();
         assert_eq!(store.count_users_registered_on_date(&today).unwrap(), 2);
-        assert_eq!(store.count_users_registered_on_date("2000-01-01").unwrap(), 0);
+        assert_eq!(
+            store.count_users_registered_on_date("2000-01-01").unwrap(),
+            0
+        );
     }
 
     #[test]
@@ -543,7 +571,10 @@ mod tests {
         for i in 1..=max {
             last_locked = store.record_failed_login("u1").unwrap();
             if i < max {
-                assert!(!last_locked, "should not lock before threshold at attempt {i}");
+                assert!(
+                    !last_locked,
+                    "should not lock before threshold at attempt {i}"
+                );
             }
         }
         assert!(last_locked, "should lock at threshold");
@@ -604,18 +635,105 @@ mod tests {
             "INSERT INTO notifications (user_id, id, notification_type, title, message, created_at)
              VALUES ('u1','n1','review','t','m',?1)",
             params![now],
-        ).unwrap();
+        )
+        .unwrap();
         drop(conn);
         store.delete_user("u1").unwrap();
         let conn = store.connection().unwrap();
         let n: i64 = conn
-            .query_row("SELECT COUNT(*) FROM learning_records WHERE user_id='u1'", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM learning_records WHERE user_id='u1'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(n, 0);
         let m: i64 = conn
-            .query_row("SELECT COUNT(*) FROM notifications WHERE user_id='u1'", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM notifications WHERE user_id='u1'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(m, 0);
+    }
+
+    #[test]
+    fn delete_user_cleans_favorites_notes_history_and_user_wordbooks() {
+        let (_t, store) = tempfile_store();
+        store.create_user(&sample_user("u1", "a@b.com")).unwrap();
+        let now = Utc::now().to_rfc3339();
+        let conn = store.connection().unwrap();
+        // word_favorites
+        conn.execute(
+            "INSERT INTO word_favorites (user_id, word_id, created_at) VALUES ('u1','w1',?1)",
+            params![now],
+        )
+        .unwrap();
+        // word_notes
+        conn.execute(
+            "INSERT INTO word_notes (user_id, id, word_id, content, created_at, updated_at)
+             VALUES ('u1','note1','w1','memo',?1,?1)",
+            params![now],
+        )
+        .unwrap();
+        // wordbook_import_history
+        conn.execute(
+            "INSERT INTO wordbook_import_history (id, user_id, source_type, status, created_at)
+             VALUES ('h1','u1','json','success',?1)",
+            params![now],
+        )
+        .unwrap();
+        // 用户自建词书 + 关联词条
+        conn.execute(
+            "INSERT INTO wordbooks (id, name, description, book_type, user_id, word_count, created_at)
+             VALUES ('wb_u1','my','d','user','u1',1,?1)",
+            params![now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO wordbook_words (wordbook_id, word_id, added_at) VALUES ('wb_u1','w1',?1)",
+            params![now],
+        )
+        .unwrap();
+        // 系统词书及其条目不应被删
+        conn.execute(
+            "INSERT INTO wordbooks (id, name, description, book_type, user_id, word_count, created_at)
+             VALUES ('wb_sys','sys','d','system',NULL,1,?1)",
+            params![now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO wordbook_words (wordbook_id, word_id, added_at) VALUES ('wb_sys','w1',?1)",
+            params![now],
+        )
+        .unwrap();
+        drop(conn);
+
+        store.delete_user("u1").unwrap();
+
+        let conn = store.connection().unwrap();
+        let cnt = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+        assert_eq!(cnt("SELECT COUNT(*) FROM word_favorites WHERE user_id='u1'"), 0);
+        assert_eq!(cnt("SELECT COUNT(*) FROM word_notes WHERE user_id='u1'"), 0);
+        assert_eq!(
+            cnt("SELECT COUNT(*) FROM wordbook_import_history WHERE user_id='u1'"),
+            0
+        );
+        assert_eq!(
+            cnt("SELECT COUNT(*) FROM wordbooks WHERE book_type='user' AND user_id='u1'"),
+            0
+        );
+        assert_eq!(
+            cnt("SELECT COUNT(*) FROM wordbook_words WHERE wordbook_id='wb_u1'"),
+            0
+        );
+        // 系统词书保留
+        assert_eq!(cnt("SELECT COUNT(*) FROM wordbooks WHERE id='wb_sys'"), 1);
+        assert_eq!(
+            cnt("SELECT COUNT(*) FROM wordbook_words WHERE wordbook_id='wb_sys'"),
+            1
+        );
     }
 
     #[test]

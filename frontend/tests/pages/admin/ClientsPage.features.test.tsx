@@ -99,7 +99,7 @@ describe('ClientsPage — tabs, ban dialog, telemetry edge data', () => {
     await waitFor(() => expect(screen.getByText(/近期活跃/)).toBeInTheDocument());
     fireEvent.click(screen.getByText(/近期活跃/));
     await waitFor(() => expect(screen.getByText('已封禁')).toBeInTheDocument());
-    expect(screen.getAllByText('-').length).toBeGreaterThan(0);
+    expect(screen.getByRole('cell', { name: '-' })).toBeInTheDocument();
   });
 
   it('telemetry with all-null behaviorSummary + empty featureUsage hides those sections', async () => {

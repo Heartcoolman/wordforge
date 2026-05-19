@@ -36,6 +36,29 @@ pub struct Config {
     pub update_check: UpdateCheckConfig,
     pub pagination: PaginationConfig,
     pub limits: LimitsConfig,
+    pub strict_mode: StrictModeConfig,
+}
+
+/// §12 strict-mode 协议配置：
+/// - `enabled=false`：完全跳过（默认，保留向后兼容）
+/// - `enabled=true` + `hard_block=false`：仅 tracing warn，不拒绝请求
+/// - `enabled=true` + `hard_block=true`：违规返回 400 + 错误码
+/// - `min_client_version=Some("1.0.0")`：低于该版本的客户端被 CLIENT_OUTDATED 拒绝
+#[derive(Debug, Clone)]
+pub struct StrictModeConfig {
+    pub enabled: bool,
+    pub hard_block: bool,
+    pub min_client_version: Option<String>,
+}
+
+impl Default for StrictModeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            hard_block: false,
+            min_client_version: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -321,6 +344,13 @@ impl Config {
             pagination: PaginationConfig {
                 default_page_size: env_or_parse("PAGINATION_DEFAULT_SIZE", 20_u64),
                 max_page_size: env_or_parse("PAGINATION_MAX_SIZE", 100_u64),
+            },
+            strict_mode: StrictModeConfig {
+                enabled: env_or_bool("STRICT_MODE_ENABLED", false),
+                hard_block: env_or_bool("STRICT_MODE_HARD_BLOCK", false),
+                min_client_version: env::var("MIN_CLIENT_VERSION")
+                    .ok()
+                    .filter(|s| !s.is_empty()),
             },
             limits: LimitsConfig {
                 max_batch_size: env_or_parse("LIMITS_MAX_BATCH_SIZE", 500_usize),
@@ -787,6 +817,7 @@ mod tests {
                 max_tarball_bytes: 1024,
             },
             pagination: PaginationConfig::default(),
+            strict_mode: StrictModeConfig::default(),
             limits: LimitsConfig::default(),
         };
         mutate(&mut cfg);

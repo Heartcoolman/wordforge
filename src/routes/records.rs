@@ -83,6 +83,10 @@ pub(crate) struct CreateRecordRequest {
     pub(crate) confused_with: Option<String>,
     #[serde(default)]
     pub(crate) record_type: Option<RecordType>,
+    /// SRS 自评粒度（0=Again / 1=Hard / 2=Good / 3=Easy）；
+    /// 客户端选填，落库供 AMAS half-life 模型分级回退使用。
+    #[serde(default)]
+    pub(crate) self_rating: Option<u8>,
     /// 内部派生路径专用：覆盖 created_at（不参与 JSON 反序列化）。
     #[serde(skip)]
     pub(crate) created_at_override: Option<DateTime<Utc>>,
@@ -269,6 +273,7 @@ async fn process_single_record(
         session_id: req.session_id.clone(),
         created_at: req.created_at_override.unwrap_or_else(Utc::now),
         record_type: req.record_type_or_default(),
+        self_rating: req.self_rating,
     };
     let word_id = req.word_id.clone();
     let record_for_store = record.clone();
@@ -533,6 +538,7 @@ pub(crate) async fn process_batch_record(
         session_id: req.session_id.clone(),
         created_at: req.created_at_override.unwrap_or_else(Utc::now),
         record_type: req.record_type_or_default(),
+        self_rating: req.self_rating,
     };
     let word_id = req.word_id.clone();
     let record_for_store = record.clone();
@@ -799,10 +805,7 @@ async fn get_enhanced_statistics(
         if r.is_correct {
             entry.correct += 1;
         }
-        let first_at = first_times
-            .get(&r.word_id)
-            .copied()
-            .unwrap_or(r.created_at);
+        let first_at = first_times.get(&r.word_id).copied().unwrap_or(r.created_at);
         if first_at.format("%Y-%m-%d").to_string() == day {
             entry.new_words.insert(r.word_id.clone());
         }

@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 const DEFAULT_ATTENTION: f64 = 0.7;
@@ -7,7 +8,7 @@ const DEFAULT_ACTIVE_HOURS: [u8; 3] = [9, 14, 20];
 const DEFAULT_SESSION_MINUTES: f64 = 15.0;
 const DEFAULT_BREAKS_PER_SESSION: f64 = 1.0;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RawEvent {
     pub word_id: String,
@@ -48,14 +49,14 @@ impl Default for RawEvent {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ProcessOptions {
     pub skip_monitoring: bool,
     pub force_heuristic: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct FeatureVector {
     pub accuracy: f64,
@@ -68,7 +69,7 @@ pub struct FeatureVector {
     pub is_quit: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UserState {
     pub attention: f64,
@@ -110,7 +111,7 @@ impl Default for UserState {
 }
 
 // B25: Cognitive profile
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CognitiveProfile {
     pub memory_capacity: f64,
@@ -129,7 +130,7 @@ impl Default for CognitiveProfile {
 }
 
 // B25: Trend state
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TrendState {
     pub accuracy_trend: f64,
@@ -148,7 +149,7 @@ impl Default for TrendState {
 }
 
 // B25: Habit profile
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct HabitProfile {
     pub preferred_hours: Vec<u8>,
@@ -169,7 +170,7 @@ impl Default for HabitProfile {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TemporalPerformance {
     pub hourly_stats: Vec<HourlyStats>,
@@ -185,7 +186,7 @@ impl Default for TemporalPerformance {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct HourlyStats {
     pub session_count: u32,
@@ -206,14 +207,14 @@ impl Default for HourlyStats {
 }
 
 // B28: Learner types
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub enum LearnerType {
     Fast,
     Stable,
     Cautious,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct StrategyParams {
     pub difficulty: f64,
@@ -235,14 +236,14 @@ impl Default for StrategyParams {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Reward {
     pub value: f64,
     pub components: RewardComponents,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RewardComponents {
     pub accuracy_reward: f64,
@@ -253,7 +254,7 @@ pub struct RewardComponents {
     pub expected_forget_cost: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ObjectiveEvaluation {
     pub score: f64,
@@ -264,14 +265,14 @@ pub struct ObjectiveEvaluation {
     pub frustration_penalty: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Explanation {
     pub primary_reason: String,
     pub factors: Vec<ExplanationFactor>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ExplanationFactor {
     pub name: String,
@@ -279,7 +280,7 @@ pub struct ExplanationFactor {
     pub impact: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct WordMasteryDecision {
     pub word_id: String,
@@ -289,7 +290,7 @@ pub struct WordMasteryDecision {
     pub mastery_level: MasteryLevel,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum MasteryLevel {
     New,
@@ -299,7 +300,7 @@ pub enum MasteryLevel {
     Forgotten,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ProcessResult {
     pub session_id: String,
@@ -311,7 +312,7 @@ pub struct ProcessResult {
     pub cold_start_phase: Option<ColdStartPhase>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub enum ColdStartPhase {
     Classify,
     Explore,
@@ -328,7 +329,7 @@ pub struct DecisionCandidate {
     pub explanation: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub enum AlgorithmId {
     Heuristic,
     Ige,

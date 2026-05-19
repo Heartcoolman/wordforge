@@ -16,6 +16,7 @@ const sidebarLinks = [
   { href: '/admin/monitoring', label: '系统监控', icon: 'M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z' },
   { href: '/admin/analytics', label: '数据分析', icon: 'M16 8v8m-4-5v5m-4-2v2m-2 4h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z' },
   { href: '/admin/wordbook-center', label: '词书中心', icon: 'M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253' },
+  { href: '/admin/feedback', label: '用户反馈', icon: 'M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z' },
   { href: '/admin/updates', label: '版本更新', icon: 'M12 4v16m8-8H4' },
   { href: '/admin/settings', label: '系统设置', icon: 'M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4' },
 ];
@@ -24,6 +25,7 @@ export function AdminLayout(props: ParentProps) {
   const location = useLocation();
   const navigate = useNavigate();
   const [collapsed, setCollapsed] = createSignal(false);
+  const [mobileOpen, setMobileOpen] = createSignal(false);
   const [adminEmail, setAdminEmail] = createSignal<string | null>(null);
   const [emailLoading, setEmailLoading] = createSignal(true);
 
@@ -48,22 +50,39 @@ export function AdminLayout(props: ParentProps) {
 
   return (
     <div class="min-h-screen flex bg-surface-secondary">
+      <Show when={mobileOpen()}>
+        <button
+          type="button"
+          aria-label="关闭导航菜单"
+          class="fixed inset-0 z-20 bg-black/40 md:hidden"
+          onClick={() => setMobileOpen(false)}
+        />
+      </Show>
+
       {/* Sidebar */}
       <aside class={cn(
         'fixed left-0 top-0 h-screen bg-surface border-r border-border flex flex-col z-30 transition-all duration-200',
-        collapsed() ? 'w-16' : 'w-56',
+        'w-72 md:w-56',
+        collapsed() && 'md:w-16',
+        mobileOpen() ? 'translate-x-0' : '-translate-x-full md:translate-x-0',
       )}>
         <div class="h-14 flex items-center justify-between px-4 border-b border-border">
-          <Show when={!collapsed()}>
+          <Show when={!collapsed() || mobileOpen()}>
             <span class="font-bold text-accent">管理后台</span>
           </Show>
           <button
-            onClick={() => setCollapsed(!collapsed())}
+            onClick={() => {
+              if (window.matchMedia('(min-width: 768px)').matches) {
+                setCollapsed(!collapsed());
+              } else {
+                setMobileOpen(false);
+              }
+            }}
             aria-label={collapsed() ? '展开侧边栏' : '折叠侧边栏'}
             class="p-1.5 rounded-lg text-content-tertiary hover:text-content hover:bg-surface-secondary transition-colors cursor-pointer"
           >
             <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-              <path stroke-linecap="round" stroke-linejoin="round" d={collapsed() ? 'M13 5l7 7-7 7' : 'M11 19l-7-7 7-7'} />
+              <path stroke-linecap="round" stroke-linejoin="round" d={mobileOpen() ? 'M6 18L18 6M6 6l12 12' : collapsed() ? 'M13 5l7 7-7 7' : 'M11 19l-7-7 7-7'} />
             </svg>
           </button>
         </div>
@@ -78,14 +97,15 @@ export function AdminLayout(props: ParentProps) {
                 isActive(link.href, link.exact)
                   ? 'bg-accent-light text-accent'
                   : 'text-content-secondary hover:text-content hover:bg-surface-secondary',
-                collapsed() && 'justify-center px-2',
+                collapsed() && 'md:justify-center md:px-2',
               )}
-              title={collapsed() ? link.label : undefined}
+              title={collapsed() && !mobileOpen() ? link.label : undefined}
+              onClick={() => setMobileOpen(false)}
             >
               <svg class="w-5 h-5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
                 <path stroke-linecap="round" stroke-linejoin="round" d={link.icon} />
               </svg>
-              <Show when={!collapsed()}>
+              <Show when={!collapsed() || mobileOpen()}>
                 <span>{link.label}</span>
               </Show>
             </A>
@@ -95,13 +115,25 @@ export function AdminLayout(props: ParentProps) {
       </aside>
 
       {/* Main */}
-      <div class={cn('flex-1 transition-all duration-200', collapsed() ? 'ml-16' : 'ml-56')}>
-        <header class="h-14 bg-surface border-b border-border flex items-center justify-between px-6">
-          <h1 class="text-lg font-semibold text-content">{pageTitle()}</h1>
-          <div class="flex items-center gap-3">
+      <div class={cn('flex-1 min-w-0 transition-all duration-200', collapsed() ? 'md:ml-16' : 'md:ml-56')}>
+        <header class="h-14 bg-surface border-b border-border flex items-center justify-between gap-3 px-4 sm:px-6">
+          <div class="flex items-center gap-3 min-w-0">
+            <button
+              type="button"
+              onClick={() => setMobileOpen(true)}
+              aria-label="打开导航菜单"
+              class="p-1.5 rounded-lg text-content-tertiary hover:text-content hover:bg-surface-secondary transition-colors cursor-pointer md:hidden"
+            >
+              <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M4 6h16M4 12h16M4 18h16" />
+              </svg>
+            </button>
+            <h1 class="truncate text-base sm:text-lg font-semibold text-content">{pageTitle()}</h1>
+          </div>
+          <div class="flex items-center gap-2 sm:gap-3 min-w-0">
             <Show when={!emailLoading()} fallback={<Skeleton width="120px" />}>
               <Show when={adminEmail()}>
-                <span class="text-sm text-content-secondary">{adminEmail()}</span>
+                <span class="hidden sm:inline truncate text-sm text-content-secondary">{adminEmail()}</span>
               </Show>
             </Show>
             <button
@@ -118,7 +150,7 @@ export function AdminLayout(props: ParentProps) {
             </button>
           </div>
         </header>
-        <main class="p-6">{props.children}</main>
+        <main class="p-4 sm:p-6">{props.children}</main>
       </div>
     </div>
   );

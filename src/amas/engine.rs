@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 
 use crate::amas::config::AMASConfig;
+use crate::amas::constants::{SIGNAL_THRESHOLD, TREND_BASELINE, USER_LOCK_CLEANUP_THRESHOLD};
 use crate::amas::decision::{ensemble, heuristic, ige, swd};
 use crate::amas::memory::{evm, iad, mastery, mdm, mtp, ssp};
 use crate::amas::metrics;
@@ -9,10 +10,6 @@ use crate::amas::monitoring;
 use crate::amas::types::*;
 use crate::response::AppError;
 use crate::store::Store;
-
-const USER_LOCK_CLEANUP_THRESHOLD: usize = 500;
-const SIGNAL_THRESHOLD: f64 = 0.5;
-const TREND_BASELINE: f64 = 0.5;
 
 fn sanitize_float(value: f64, default: f64) -> f64 {
     if value.is_finite() {
@@ -45,6 +42,27 @@ struct MemoryFeedback {
     scheduled_recall: f64,
     #[allow(dead_code)]
     desired_retention: f64,
+}
+
+struct ProcessingContext {
+    config: Arc<AMASConfig>,
+    user_state: UserState,
+    algo_states: AlgoStates,
+    feature: FeatureVector,
+    cold_start_phase: Option<ColdStartPhase>,
+}
+
+struct StrategySelection {
+    final_strategy: StrategyParams,
+    constrained_strategy: StrategyParams,
+    candidates: Vec<DecisionCandidate>,
+    weights: HashMap<AlgorithmId, f64>,
+}
+
+struct MemoryScoring {
+    word_mastery: Option<MemoryFeedback>,
+    reward: Reward,
+    objective: ObjectiveEvaluation,
 }
 
 impl AMASEngine {
@@ -164,103 +182,184 @@ impl AMASEngine {
             Arc::clone(&guard)
         };
         let now = chrono::Utc::now();
-
-        let mut user_state = self.load_or_init_state(user_id)?;
-        let mut algo_states = self.load_algo_states(user_id, &config)?;
-
-        let feature = self.build_feature_vector(&raw_event, &user_state, &config, now);
-        self.update_modeling(&mut user_state, &feature, &config);
-
-        let cold_start_phase = self.determine_cold_start_phase(&user_state, &config);
-
-        let candidates = self.generate_candidates(&user_state, &feature, &mut algo_states, &config);
-        let (final_strategy, weights) =
-            self.ensemble_or_fallback(&candidates, &user_state, &algo_states, &config);
-
-        let ssp_arc = self.ssp_policy.read().unwrap().clone();
-        let ssp_ref = ssp_arc.as_deref();
-        let word_mastery = self.update_memory(
-            user_id,
-            &raw_event,
-            &feature,
-            &final_strategy,
-            &user_state,
-            &config,
-            ssp_ref,
-        )?;
-
-        let retention_signal = word_mastery
-            .as_ref()
-            .map(|feedback| feedback.scheduled_recall)
-            .unwrap_or(0.0);
-        let reward = self.compute_reward(&feature, &user_state, retention_signal, &config);
-        let objective = self.evaluate_objective(&reward, retention_signal, &config);
-
-        let constrained_strategy =
-            self.apply_constraints(final_strategy.clone(), &user_state, &config);
+        let mut context = self.prepare_processing_context(user_id, &raw_event, config, now)?;
+        let strategy = self.select_strategy(&mut context);
+        let scoring = self.apply_memory_and_score(user_id, &raw_event, &context, &strategy)?;
 
         self.update_trust_scores(
-            &mut algo_states,
-            &candidates,
-            reward.value,
-            objective.score,
-            &user_state,
-            &weights,
-            &config,
+            &mut context.algo_states,
+            &strategy.candidates,
+            scoring.reward.value,
+            scoring.objective.score,
+            &context.user_state,
+            &strategy.weights,
+            &context.config,
         );
 
-        user_state.session_event_count += 1;
-        user_state.total_event_count += 1;
-        user_state.last_active_at = Some(now);
+        Self::update_session_counters(&mut context.user_state, &raw_event, now);
+        self.persist_state(user_id, &mut context.user_state, &context.algo_states)?;
 
-        // 检测 session 切换，重置 session 事件计数
-        let current_session_id = raw_event.session_id.as_deref().unwrap_or("");
-        if !current_session_id.is_empty() {
-            let session_changed = !user_state
-                .last_session_id
-                .as_deref()
-                .is_some_and(|prev| prev == current_session_id);
-            if session_changed {
-                user_state.session_event_count = 1;
-                user_state.last_session_id = Some(current_session_id.to_string());
-            }
-        }
-
-        self.persist_state(user_id, &mut user_state, &algo_states)?;
-
-        let explanation = self.build_explanation(&constrained_strategy, &user_state, &weights);
-
-        let session_id = raw_event
-            .session_id
-            .clone()
-            .unwrap_or_else(|| format!("{user_id}-session"));
-
-        let result = ProcessResult {
-            session_id: session_id.clone(),
-            strategy: constrained_strategy,
+        let explanation = self.build_explanation(
+            &strategy.constrained_strategy,
+            &context.user_state,
+            &strategy.weights,
+        );
+        let result = Self::build_process_result(
+            user_id,
+            &raw_event,
+            strategy.constrained_strategy,
             explanation,
-            state: user_state.clone(),
-            word_mastery: word_mastery
-                .as_ref()
-                .map(|feedback| feedback.decision.clone()),
-            reward: reward.clone(),
-            cold_start_phase,
-        };
+            context.user_state,
+            scoring.word_mastery.as_ref(),
+            scoring.reward,
+            context.cold_start_phase,
+        );
 
         let latency_ms = start.elapsed().as_millis() as i64;
         let config_version = self.config_hash.read().unwrap().clone();
         drop(_guard);
         self.emit_monitoring(
             user_id,
-            &session_id,
             &result,
             latency_ms,
-            &config,
-            &final_strategy,
+            &context.config,
+            &strategy.final_strategy,
             &config_version,
         );
 
         Ok(result)
+    }
+
+    fn prepare_processing_context(
+        &self,
+        user_id: &str,
+        raw_event: &RawEvent,
+        config: Arc<AMASConfig>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<ProcessingContext, AppError> {
+        let mut user_state = self.load_or_init_state(user_id)?;
+        let algo_states = self.load_algo_states(user_id, &config)?;
+        let feature = self.build_feature_vector(raw_event, &user_state, &config, now);
+        self.update_modeling(&mut user_state, &feature, &config);
+        let cold_start_phase = self.determine_cold_start_phase(&user_state, &config);
+
+        Ok(ProcessingContext {
+            config,
+            user_state,
+            algo_states,
+            feature,
+            cold_start_phase,
+        })
+    }
+
+    fn select_strategy(&self, context: &mut ProcessingContext) -> StrategySelection {
+        let candidates = self.generate_candidates(
+            &context.user_state,
+            &context.feature,
+            &mut context.algo_states,
+            &context.config,
+        );
+        let (final_strategy, weights) = self.ensemble_or_fallback(
+            &candidates,
+            &context.user_state,
+            &context.algo_states,
+            &context.config,
+        );
+        let constrained_strategy =
+            self.apply_constraints(final_strategy.clone(), &context.user_state, &context.config);
+
+        StrategySelection {
+            final_strategy,
+            constrained_strategy,
+            candidates,
+            weights,
+        }
+    }
+
+    fn apply_memory_and_score(
+        &self,
+        user_id: &str,
+        raw_event: &RawEvent,
+        context: &ProcessingContext,
+        strategy: &StrategySelection,
+    ) -> Result<MemoryScoring, AppError> {
+        let ssp_arc = self.ssp_policy.read().unwrap().clone();
+        let word_mastery = self.update_memory(
+            user_id,
+            raw_event,
+            &context.feature,
+            &strategy.final_strategy,
+            &context.user_state,
+            &context.config,
+            ssp_arc.as_deref(),
+        )?;
+        let retention_signal = word_mastery
+            .as_ref()
+            .map(|feedback| feedback.scheduled_recall)
+            .unwrap_or(0.0);
+        let reward = self.compute_reward(
+            &context.feature,
+            &context.user_state,
+            retention_signal,
+            &context.config,
+        );
+        let objective = self.evaluate_objective(&reward, retention_signal, &context.config);
+
+        Ok(MemoryScoring {
+            word_mastery,
+            reward,
+            objective,
+        })
+    }
+
+    fn update_session_counters(
+        user_state: &mut UserState,
+        raw_event: &RawEvent,
+        now: chrono::DateTime<chrono::Utc>,
+    ) {
+        user_state.session_event_count += 1;
+        user_state.total_event_count += 1;
+        user_state.last_active_at = Some(now);
+
+        let current_session_id = raw_event.session_id.as_deref().unwrap_or("");
+        if current_session_id.is_empty() {
+            return;
+        }
+
+        let session_changed = !user_state
+            .last_session_id
+            .as_deref()
+            .is_some_and(|prev| prev == current_session_id);
+        if session_changed {
+            user_state.session_event_count = 1;
+            user_state.last_session_id = Some(current_session_id.to_string());
+        }
+    }
+
+    fn build_process_result(
+        user_id: &str,
+        raw_event: &RawEvent,
+        strategy: StrategyParams,
+        explanation: Explanation,
+        user_state: UserState,
+        word_mastery: Option<&MemoryFeedback>,
+        reward: Reward,
+        cold_start_phase: Option<ColdStartPhase>,
+    ) -> ProcessResult {
+        let session_id = raw_event
+            .session_id
+            .clone()
+            .unwrap_or_else(|| format!("{user_id}-session"));
+
+        ProcessResult {
+            session_id,
+            strategy,
+            explanation,
+            state: user_state,
+            word_mastery: word_mastery.map(|feedback| feedback.decision.clone()),
+            reward,
+            cold_start_phase,
+        }
     }
 
     pub async fn update_visual_fatigue(
@@ -1273,7 +1372,6 @@ impl AMASEngine {
     fn emit_monitoring(
         &self,
         user_id: &str,
-        session_id: &str,
         result: &ProcessResult,
         latency_ms: i64,
         config: &AMASConfig,
@@ -1283,7 +1381,7 @@ impl AMASEngine {
         monitoring::record_event(
             &self.store,
             user_id,
-            session_id,
+            &result.session_id,
             result,
             latency_ms,
             config,
@@ -1586,7 +1684,10 @@ mod tests {
         let mut state = UserState::default();
         state.fatigue = 0.7;
         let state_json = serde_json::to_value(&state).unwrap();
-        engine.store.set_engine_user_state("u-reset", &state_json).unwrap();
+        engine
+            .store
+            .set_engine_user_state("u-reset", &state_json)
+            .unwrap();
 
         engine.reset_user_state("u-reset").expect("reset");
         let loaded = engine.get_user_state("u-reset").unwrap();
@@ -1812,9 +1913,14 @@ mod tests {
     #[test]
     fn classify_learner_type_returns_cautious_for_default_state() {
         let engine = test_engine(AMASConfig::default());
-        let t = engine.classify_learner_type("u-classify").expect("classify");
+        let t = engine
+            .classify_learner_type("u-classify")
+            .expect("classify");
         // UserState::default 各项较低 → 走最低分支
-        assert!(matches!(t, LearnerType::Fast | LearnerType::Stable | LearnerType::Cautious));
+        assert!(matches!(
+            t,
+            LearnerType::Fast | LearnerType::Stable | LearnerType::Cautious
+        ));
     }
 
     #[tokio::test]
@@ -1837,9 +1943,8 @@ mod tests {
         let engine = test_engine(AMASConfig::default());
         let cfg = AMASConfig::default();
         // 让 auc 略高于 stable_learner_threshold 但低于 fast
-        let target_auc = (cfg.classifier.stable_learner_threshold
-            + cfg.classifier.fast_learner_threshold)
-            / 2.0;
+        let target_auc =
+            (cfg.classifier.stable_learner_threshold + cfg.classifier.fast_learner_threshold) / 2.0;
         // 把所有 profile 设到统一权重位
         let total_weight = cfg.classifier.processing_speed_weight
             + cfg.classifier.memory_capacity_weight
@@ -1977,8 +2082,12 @@ mod tests {
                 explanation: "i".to_string(),
             },
         ];
-        let (strategy, weights) =
-            engine.ensemble_or_fallback(&candidates, &UserState::default(), &AlgoStates::default(), &cfg);
+        let (strategy, weights) = engine.ensemble_or_fallback(
+            &candidates,
+            &UserState::default(),
+            &AlgoStates::default(),
+            &cfg,
+        );
         assert_eq!(weights.get(&AlgorithmId::Ige), Some(&1.0));
         assert!((strategy.difficulty - 0.9).abs() < 1e-9);
     }
@@ -2283,11 +2392,8 @@ mod tests {
         state.motivation = 0.0;
         let mut weights = HashMap::new();
         weights.insert(AlgorithmId::Ige, 0.8);
-        let reason = AMASEngine::derive_primary_reason(
-            &StrategyParams::default(),
-            &state,
-            &weights,
-        );
+        let reason =
+            AMASEngine::derive_primary_reason(&StrategyParams::default(), &state, &weights);
         assert!(reason.contains("智能梯度"));
     }
 
@@ -2299,11 +2405,8 @@ mod tests {
         state.motivation = 0.0;
         let mut weights = HashMap::new();
         weights.insert(AlgorithmId::Swd, 0.85);
-        let reason = AMASEngine::derive_primary_reason(
-            &StrategyParams::default(),
-            &state,
-            &weights,
-        );
+        let reason =
+            AMASEngine::derive_primary_reason(&StrategyParams::default(), &state, &weights);
         assert!(reason.contains("间隔加权"));
     }
 
@@ -2315,11 +2418,8 @@ mod tests {
         state.motivation = 0.0;
         let mut weights = HashMap::new();
         weights.insert(AlgorithmId::Mdm, 0.9); // 不在 Heuristic/Ige/Swd 中，走 "_ => 综合评估"
-        let reason = AMASEngine::derive_primary_reason(
-            &StrategyParams::default(),
-            &state,
-            &weights,
-        );
+        let reason =
+            AMASEngine::derive_primary_reason(&StrategyParams::default(), &state, &weights);
         assert!(reason.contains("综合评估"));
     }
 

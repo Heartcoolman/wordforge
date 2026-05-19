@@ -79,6 +79,7 @@ fn create_record(store: &Store, user_id: &str, word_id: &str, session_id: &str, 
             session_id: Some(session_id.to_string()),
             created_at: Utc::now(),
             record_type: RecordType::All,
+            self_rating: None,
         })
         .unwrap();
 }

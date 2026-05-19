@@ -87,6 +87,9 @@ impl From<&User> for UserProfile {
 #[serde(rename_all = "camelCase")]
 pub struct AuthResponse {
     pub access_token: String,
+    /// refresh token 也通过 JSON body 暴露，便于 iOS 等无 cookie jar 场景
+    /// 持久化到 Keychain；同时仍下发 HttpOnly cookie 兼容 Web 浏览器。
+    pub refresh_token: String,
     pub user: UserProfile,
 }
 
@@ -212,6 +215,7 @@ async fn register(
 
     let payload = AuthResponse {
         access_token: access_token.clone(),
+        refresh_token: refresh_token.clone(),
         user: UserProfile::from(&user),
     };
 
@@ -321,6 +325,7 @@ async fn login(
 
     let payload = AuthResponse {
         access_token: access_token.clone(),
+        refresh_token: refresh_token.clone(),
         user: UserProfile::from(&user),
     };
 
@@ -396,6 +401,7 @@ async fn refresh(State(state): State<AppState>, headers: HeaderMap) -> Result<Re
     let secure = state.config().cookie_secure;
     let mut response = ok(AuthResponse {
         access_token: access_token.clone(),
+        refresh_token: refresh_token.clone(),
         user: UserProfile::from(&user),
     })
     .into_response();

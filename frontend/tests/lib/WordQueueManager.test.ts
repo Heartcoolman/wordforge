@@ -231,7 +231,7 @@ describe('createWordQueueManager', () => {
     // 应不抛错；计算指标可以返回数字
     const metrics = mgr.computeSessionMetrics();
     expect(metrics.overallAccuracy).toBe(0);
-    expect(metrics.overallAvgResponseTimeMs).toBeGreaterThan(0);
+    expect(metrics.overallAvgResponseTimeMs).toBe(604.5);
   });
 
   it('computeSessionMetrics returns zeros when history empty', () => {

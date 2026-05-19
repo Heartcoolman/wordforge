@@ -958,7 +958,9 @@ mod tests {
         assert!(store.get_password_reset_token("hash1").unwrap().is_none());
         // cleanup 删除过期
         let past = (Utc::now() - Duration::hours(1)).to_rfc3339();
-        store.create_password_reset_token("hash2", "u1", &past).unwrap();
+        store
+            .create_password_reset_token("hash2", "u1", &past)
+            .unwrap();
         let removed = store.cleanup_expired_reset_tokens().unwrap();
         assert!(removed >= 1);
     }

@@ -205,3 +205,16 @@ export interface RetentionCurve {
   points: RetentionPoint[];
   averageRetention: number | null;
 }
+
+/**
+ * 用户反馈条目，对应后端 `FeedbackItem`（src/store/operations/feedback.rs）。
+ * 后端 list_feedback 暴露在 /api/admin/feedback。
+ */
+export interface FeedbackItem {
+  id: string;
+  userId: string;
+  category: string | null;
+  body: string;
+  route: string | null;
+  createdAt: string;
+}

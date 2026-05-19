@@ -27,11 +27,29 @@ describe('AdminLayout extra', () => {
   });
 
   it('toggles sidebar collapse', async () => {
-    const { AdminLayout } = await import('@/components/layout/AdminLayout');
-    renderWithProviders(() => <AdminLayout>Content</AdminLayout>);
-    const collapseBtn = screen.getByLabelText('折叠侧边栏');
-    fireEvent.click(collapseBtn);
-    await waitFor(() => expect(screen.getByLabelText('展开侧边栏')).toBeInTheDocument());
+    // 折叠按钮按 matchMedia('(min-width: 768px)') 切换 collapsed/mobileOpen；
+    // setup.ts 默认 mock 所有 query 返回 false，会让按钮误判为移动端走关抽屉分支。
+    // 这里把视口断点覆盖为桌面态。
+    const originalMatchMedia = window.matchMedia;
+    window.matchMedia = vi.fn((query: string) => ({
+      matches: query.includes('min-width: 768px'),
+      media: query,
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })) as unknown as typeof window.matchMedia;
+    try {
+      const { AdminLayout } = await import('@/components/layout/AdminLayout');
+      renderWithProviders(() => <AdminLayout>Content</AdminLayout>);
+      const collapseBtn = screen.getByLabelText('折叠侧边栏');
+      fireEvent.click(collapseBtn);
+      await waitFor(() => expect(screen.getByLabelText('展开侧边栏')).toBeInTheDocument());
+    } finally {
+      window.matchMedia = originalMatchMedia;
+    }
   });
 
   it('shows toast warning when logout API throws', async () => {

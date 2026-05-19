@@ -8,11 +8,6 @@ let timer: ReturnType<typeof setInterval> | undefined;
 let stopSseStream: (() => void) | undefined;
 let sessionStart = Date.now();
 
-// Legacy counters (kept for backwards-compat fields)
-let actionCount = 0;
-let errorCount = 0;
-const featureUsage: Record<string, number> = {};
-
 // Behavior counters (active buffer)
 interface BehaviorBuffer {
   currentRoute: string;
@@ -84,40 +79,19 @@ function onPopState() {
   behavior.currentRoute = window.location.pathname;
 }
 
-export function trackAction() {
-  actionCount++;
-}
-
-export function trackFeature(name: string) {
-  featureUsage[name] = (featureUsage[name] || 0) + 1;
-}
-
-export function trackError() {
-  errorCount++;
-}
-
-function resetLegacyCounters() {
-  sessionStart = Date.now();
-  actionCount = 0;
-  errorCount = 0;
-  Object.keys(featureUsage).forEach((k) => delete featureUsage[k]);
-}
-
 async function sendTelemetry(
   eventType = 'periodic',
   requestId: string | null = null,
   includeDevice = false,
 ) {
   if (!tokenManager.getToken() || !getDeviceId()) {
-    resetLegacyCounters();
+    sessionStart = Date.now();
     behavior = newBuffer();
     return;
   }
 
   const now = Date.now();
   const durationSecs = Math.round((now - sessionStart) / 1000);
-  const minutes = durationSecs / 60;
-  const apm = minutes > 0 ? actionCount / minutes : 0;
 
   // Buffer swap: snapshot and replace before HTTP roundtrip
   const snapshot = behavior;
@@ -125,10 +99,6 @@ async function sendTelemetry(
 
   const payload: Record<string, unknown> = {
     sessionDurationSecs: durationSecs,
-    actionsPerMin: Math.round(apm * 100) / 100,
-    featureUsage: { ...featureUsage },
-    errorCount,
-    avgResponseTimeMs: 0,
     behavior: snapshot,
   };
 
@@ -143,7 +113,7 @@ async function sendTelemetry(
       clientTs: new Date().toISOString(),
       payload,
     });
-    resetLegacyCounters();
+    sessionStart = Date.now();
   } catch {
     // On failure: merge snapshot back into current buffer to avoid data loss
     behavior.clickCount += snapshot.clickCount;

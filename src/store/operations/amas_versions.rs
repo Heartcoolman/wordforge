@@ -177,7 +177,8 @@ impl Store {
                 },
             )
             .optional()?;
-        let Some((id, version_hash, snapshot_str, author, source, note, parent, created)) = row else {
+        let Some((id, version_hash, snapshot_str, author, source, note, parent, created)) = row
+        else {
             return Ok(None);
         };
         let snapshot_json: serde_json::Value =
@@ -211,10 +212,22 @@ mod tests {
     fn insert_and_list_versions() {
         let store = fresh_store();
         let (id1, h1) = store
-            .insert_amas_config_version(r#"{"a":1}"#, "admin-1", ConfigVersionSource::Manual, Some("first"), None)
+            .insert_amas_config_version(
+                r#"{"a":1}"#,
+                "admin-1",
+                ConfigVersionSource::Manual,
+                Some("first"),
+                None,
+            )
             .unwrap();
         let (id2, h2) = store
-            .insert_amas_config_version(r#"{"a":2}"#, "admin-1", ConfigVersionSource::Manual, None, Some(&h1))
+            .insert_amas_config_version(
+                r#"{"a":2}"#,
+                "admin-1",
+                ConfigVersionSource::Manual,
+                None,
+                Some(&h1),
+            )
             .unwrap();
         assert_ne!(h1, h2);
         assert!(id2 > id1);
@@ -245,12 +258,24 @@ mod tests {
     fn get_returns_full_detail() {
         let store = fresh_store();
         let (_, h) = store
-            .insert_amas_config_version(r#"{"k":42}"#, "a", ConfigVersionSource::LlmAuto, Some("auto"), None)
+            .insert_amas_config_version(
+                r#"{"k":42}"#,
+                "a",
+                ConfigVersionSource::LlmAuto,
+                Some("auto"),
+                None,
+            )
             .unwrap();
-        let detail = store.get_amas_config_version(&h).unwrap().expect("must exist");
+        let detail = store
+            .get_amas_config_version(&h)
+            .unwrap()
+            .expect("must exist");
         assert_eq!(detail.snapshot_json["k"], 42);
         assert_eq!(detail.source, ConfigVersionSource::LlmAuto);
         assert_eq!(detail.note.as_deref(), Some("auto"));
-        assert!(store.get_amas_config_version("nonexistent").unwrap().is_none());
+        assert!(store
+            .get_amas_config_version("nonexistent")
+            .unwrap()
+            .is_none());
     }
 }

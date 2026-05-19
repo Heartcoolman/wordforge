@@ -477,6 +477,7 @@ mod tests {
             session_id: None,
             created_at: Utc::now(),
             record_type: crate::store::operations::records::RecordType::All,
+            self_rating: None,
         };
         store.create_record(&r).unwrap();
 
@@ -492,8 +493,12 @@ mod tests {
     #[test]
     fn list_system_wordbooks_excludes_user_wordbooks() {
         let store = test_store();
-        store.upsert_wordbook(&sample_wordbook("sys-a", WordbookType::System, None)).unwrap();
-        store.upsert_wordbook(&sample_wordbook("usr-1", WordbookType::User, Some("u1"))).unwrap();
+        store
+            .upsert_wordbook(&sample_wordbook("sys-a", WordbookType::System, None))
+            .unwrap();
+        store
+            .upsert_wordbook(&sample_wordbook("usr-1", WordbookType::User, Some("u1")))
+            .unwrap();
         let sys = store.list_system_wordbooks().unwrap();
         assert!(sys.iter().all(|w| w.book_type == WordbookType::System));
     }

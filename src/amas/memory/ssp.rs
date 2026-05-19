@@ -384,6 +384,14 @@ mod tests {
     use crate::amas::config::{MemoryModelConfig, SspConfig};
     use crate::amas::memory::mdm;
 
+    macro_rules! ssp_debug {
+        ($($arg:tt)*) => {
+            if std::env::var_os("WORDFORGE_SSP_DEBUG").is_some() {
+                eprintln!($($arg)*);
+            }
+        };
+    }
+
     #[test]
     fn precompute_produces_valid_tables() {
         let ssp_config = SspConfig {
@@ -487,7 +495,11 @@ mod tests {
         assert_eq!(result.tables.len(), 10);
         assert!(!result.stability_list.is_empty());
         // 列表应至少跨越 threshold + linear_step
-        let max_s = result.stability_list.iter().cloned().fold(0.0_f64, f64::max);
+        let max_s = result
+            .stability_list
+            .iter()
+            .cloned()
+            .fold(0.0_f64, f64::max);
         assert!(max_s > 10.0);
     }
 
@@ -498,7 +510,7 @@ mod tests {
             ..Default::default()
         };
         let tables: Vec<Vec<f64>> = (0..10)
-            .map(|d| vec![(d as f64 + 1.0); (cfg.max_index - cfg.min_index) as usize])
+            .map(|d| vec![d as f64 + 1.0; (cfg.max_index - cfg.min_index) as usize])
             .collect();
         let dir = tempfile::tempdir().expect("tempdir");
         export_tables(&tables, dir.path(), &cfg).expect("export");
@@ -609,7 +621,7 @@ mod tests {
     #[test]
     fn precompute_converges_early_via_threshold() {
         let cfg = SspConfig {
-            max_iterations: 1000, // 高上限
+            max_iterations: 1000,       // 高上限
             convergence_threshold: 1e9, // 极易满足
             ..Default::default()
         };
@@ -704,25 +716,39 @@ mod tests {
 
         let policy = SspPolicy::from_tables(result.tables, &ssp_config);
 
-        println!("\n=== SSP 策略表全览 ===");
-        println!(
+        ssp_debug!("\n=== SSP 策略表全览 ===");
+        ssp_debug!(
             "{:<6} {:<10} {:<10} {:<10} {:<10} {:<10} {:<10} {:<10} {:<10} {:<10} {:<10}",
-            "S(天)", "D=1", "D=2", "D=3", "D=4", "D=5", "D=6", "D=7", "D=8", "D=9", "D=10"
+            "S(天)",
+            "D=1",
+            "D=2",
+            "D=3",
+            "D=4",
+            "D=5",
+            "D=6",
+            "D=7",
+            "D=8",
+            "D=9",
+            "D=10"
         );
         for s in [
             0.3, 0.5, 1.0, 2.0, 3.0, 5.0, 8.0, 12.0, 20.0, 30.0, 50.0, 80.0, 120.0, 200.0, 300.0,
         ] {
-            print!("{:<6.1}", s);
+            let mut row = format!("{:<6.1}", s);
             for d in 1..=10 {
-                print!(" {:<9.0}", policy.optimal_interval(s, d as f64));
+                row.push_str(&format!(" {:<9.0}", policy.optimal_interval(s, d as f64)));
             }
-            println!();
+            ssp_debug!("{row}");
         }
 
-        println!("\n=== SSP vs MDM 间隔对比 ===");
-        println!(
+        ssp_debug!("\n=== SSP vs MDM 间隔对比 ===");
+        ssp_debug!(
             "{:<6} {:<12} {:<15} {:<15} {:<10}",
-            "D", "S(days)", "MDM(days)", "SSP(days)", "Δ%"
+            "D",
+            "S(days)",
+            "MDM(days)",
+            "SSP(days)",
+            "Δ%"
         );
 
         for d in [1.0, 3.0, 5.0, 7.0, 10.0] {
@@ -743,9 +769,13 @@ mod tests {
                     0.0
                 };
 
-                println!(
+                ssp_debug!(
                     "{:<6.0} {:<12.1} {:<15.2} {:<15.2} {:<+10.1}",
-                    d, s, mdm_days, ssp_days, delta_pct
+                    d,
+                    s,
+                    mdm_days,
+                    ssp_days,
+                    delta_pct
                 );
 
                 // 两者都应产生有效间隔
@@ -784,7 +814,7 @@ mod tests {
             "higher stability should give longer interval: S=1→{ivl_low}, S=30→{ivl_high}"
         );
 
-        println!(
+        ssp_debug!(
             "\n双网格 bins 数量: {} (原始均匀: {})",
             result.stability_list.len(),
             (ssp_config.max_index - ssp_config.min_index) as usize
@@ -833,10 +863,10 @@ mod tests {
         // === Phase 1: sweep forget_cost/recall_cost 比值 ===
         let ratios: Vec<f64> = vec![1.5, 2.0, 3.0, 5.0, 8.0, 12.0, 20.0, 30.0];
 
-        println!("\n============================================================");
-        println!("Phase 1: forget/recall 比值扫描 (recall_cost=3, 10k iter)");
-        println!("============================================================");
-        println!("{:<8} {:<10}", "比值", "对齐分数");
+        ssp_debug!("\n============================================================");
+        ssp_debug!("Phase 1: forget/recall 比值扫描 (recall_cost=3, 10k iter)");
+        ssp_debug!("============================================================");
+        ssp_debug!("{:<8} {:<10}", "比值", "对齐分数");
 
         let mut best_ratio = 3.0_f64;
         let mut best_score = 0.0_f64;
@@ -867,7 +897,7 @@ mod tests {
                 0.0
             };
 
-            println!("{:<8.1} {:<10.4}", ratio, score);
+            ssp_debug!("{:<8.1} {:<10.4}", ratio, score);
 
             if score > best_score {
                 best_score = score;
@@ -875,12 +905,12 @@ mod tests {
             }
         }
 
-        println!("\n最佳比值: {best_ratio:.1} (对齐分数: {best_score:.4})");
+        ssp_debug!("\n最佳比值: {best_ratio:.1} (对齐分数: {best_score:.4})");
 
         // === Phase 2: 用最佳比值展示完整策略表 ===
-        println!("\n============================================================");
-        println!("Phase 2: 最佳比值 {best_ratio:.1} 的完整策略表 (200k iter)");
-        println!("============================================================");
+        ssp_debug!("\n============================================================");
+        ssp_debug!("Phase 2: 最佳比值 {best_ratio:.1} 的完整策略表 (200k iter)");
+        ssp_debug!("============================================================");
 
         let ssp_config = SspConfig {
             recall_cost: 3.0,
@@ -891,9 +921,13 @@ mod tests {
         let result = precompute(&ssp_config, &mem_config);
         let policy = SspPolicy::from_tables(result.tables, &ssp_config);
 
-        println!(
+        ssp_debug!(
             "\n{:<8} {:<8} {:<10} {:<10} {:<10}",
-            "S(天)", "D", "SSP(天)", "MDM(天)", "SSP/MDM"
+            "S(天)",
+            "D",
+            "SSP(天)",
+            "MDM(天)",
+            "SSP/MDM"
         );
         for &(s, d) in &sample_points {
             let ssp = policy.optimal_interval(s, d);
@@ -903,16 +937,20 @@ mod tests {
             state.last_review_at = Some(0);
             let mdm = mdm::compute_interval(&state, 0.90, 1.0, &mem_config) as f64 / 86400.0;
             let ratio_val = if mdm > 0.01 { ssp / mdm } else { 0.0 };
-            println!(
+            ssp_debug!(
                 "{:<8.1} {:<8.0} {:<10.1} {:<10.1} {:<10.2}",
-                s, d, ssp, mdm, ratio_val
+                s,
+                d,
+                ssp,
+                mdm,
+                ratio_val
             );
         }
 
         // === Phase 3: 在最佳比值基础上 sweep cost_params ===
-        println!("\n============================================================");
-        println!("Phase 3: cost_params 调制扫描");
-        println!("============================================================");
+        ssp_debug!("\n============================================================");
+        ssp_debug!("Phase 3: cost_params 调制扫描");
+        ssp_debug!("============================================================");
 
         let param_combos: Vec<(f64, f64, &str)> = vec![
             (0.0, 0.0, "baseline"),
@@ -924,7 +962,7 @@ mod tests {
             (1.0, 0.5, "forget_s=1.0,d=0.5"),
         ];
 
-        println!("{:<25} {:<10}", "参数组合", "对齐分数");
+        ssp_debug!("{:<25} {:<10}", "参数组合", "对齐分数");
         let mut best_params_score = 0.0_f64;
         let mut best_params_name = "baseline";
         let mut best_fs = 0.0_f64;
@@ -960,7 +998,7 @@ mod tests {
             } else {
                 0.0
             };
-            println!("{:<25} {:<10.4}", name, score);
+            ssp_debug!("{:<25} {:<10.4}", name, score);
 
             if score > best_params_score {
                 best_params_score = score;
@@ -970,14 +1008,14 @@ mod tests {
             }
         }
 
-        println!(
+        ssp_debug!(
             "\n最佳 cost_params: {} (分数: {best_params_score:.4})",
             best_params_name
         );
-        println!("\n=== 推荐配置 ===");
-        println!("recall_cost: 3.0");
-        println!("forget_cost: {:.1}", 3.0 * best_ratio);
-        println!("forget_s_coeff: {best_fs:.1}");
-        println!("forget_d_coeff: {best_fd:.1}");
+        ssp_debug!("\n=== 推荐配置 ===");
+        ssp_debug!("recall_cost: 3.0");
+        ssp_debug!("forget_cost: {:.1}", 3.0 * best_ratio);
+        ssp_debug!("forget_s_coeff: {best_fs:.1}");
+        ssp_debug!("forget_d_coeff: {best_fd:.1}");
     }
 }

@@ -207,7 +207,8 @@ impl Store {
 
         // Records per day (with new/review classification).
         let sql = match record_type {
-            Some(_) => "SELECT DATE(lr.created_at) AS d,
+            Some(_) => {
+                "SELECT DATE(lr.created_at) AS d,
                     COUNT(*),
                     COALESCE(SUM(lr.is_correct), 0),
                     COUNT(DISTINCT CASE WHEN NOT EXISTS (
@@ -226,8 +227,10 @@ impl Store {
                     ) THEN lr.user_id || ':' || lr.word_id END)
                  FROM learning_records lr
                  WHERE lr.created_at >= ?1 AND lr.record_type = ?2
-                 GROUP BY d ORDER BY d",
-            None => "SELECT DATE(lr.created_at) AS d,
+                 GROUP BY d ORDER BY d"
+            }
+            None => {
+                "SELECT DATE(lr.created_at) AS d,
                     COUNT(*),
                     COALESCE(SUM(lr.is_correct), 0),
                     COUNT(DISTINCT CASE WHEN NOT EXISTS (
@@ -244,7 +247,8 @@ impl Store {
                     ) THEN lr.user_id || ':' || lr.word_id END)
                  FROM learning_records lr
                  WHERE lr.created_at >= ?1
-                 GROUP BY d ORDER BY d",
+                 GROUP BY d ORDER BY d"
+            }
         };
         let mut stmt = conn.prepare(sql)?;
         let mapper = |r: &rusqlite::Row<'_>| {
@@ -284,7 +288,11 @@ impl Store {
              GROUP BY d ORDER BY d",
         )?;
         let session_rows = stmt.query_map(params![&since], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
         })?;
         for r in session_rows {
             let (date, sessions, duration) = r?;
@@ -300,10 +308,9 @@ impl Store {
              WHERE updated_at >= ?1 AND state = 'MASTERED'
              GROUP BY d ORDER BY d",
         )?;
-        let mastered_rows = stmt
-            .query_map(params![&since], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
-            })?;
+        let mastered_rows = stmt.query_map(params![&since], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        })?;
         for r in mastered_rows {
             let (date, mastered) = r?;
             let entry = by_date.entry(date.clone()).or_insert_with(|| row(date));
@@ -335,7 +342,8 @@ impl Store {
                 correct: r.get(3)?,
             })
         })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
     }
 
     pub fn admin_word_state_distribution(
@@ -348,7 +356,8 @@ impl Store {
 
         // -- per-state counts --------------------------------------------
         let state_sql = match record_type {
-            Some(_) => "SELECT wls.state, COUNT(*)
+            Some(_) => {
+                "SELECT wls.state, COUNT(*)
                  FROM word_learning_states wls
                  WHERE EXISTS (
                     SELECT 1 FROM learning_records lr
@@ -356,13 +365,12 @@ impl Store {
                       AND lr.word_id = wls.word_id
                       AND lr.record_type = ?1
                  )
-                 GROUP BY wls.state",
+                 GROUP BY wls.state"
+            }
             None => "SELECT state, COUNT(*) FROM word_learning_states GROUP BY state",
         };
         let mut stmt = conn.prepare(state_sql)?;
-        let mapper = |r: &rusqlite::Row<'_>| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
-        };
+        let mapper = |r: &rusqlite::Row<'_>| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?));
         let rows = match record_type {
             Some(rt) => stmt.query_map(params![rt.as_str()], mapper)?,
             None => stmt.query_map([], mapper)?,
@@ -461,7 +469,8 @@ impl Store {
         let conn = self.conn()?;
         let since = window_since_date(window_days);
         let sql = match record_type {
-            Some(_) => "WITH firsts AS (
+            Some(_) => {
+                "WITH firsts AS (
                     SELECT lr.user_id, lr.word_id, MIN(lr.created_at) AS first_at
                     FROM learning_records lr
                     WHERE lr.created_at >= ?1
@@ -481,8 +490,10 @@ impl Store {
                 LEFT JOIN word_learning_states wls
                     ON wls.user_id = f.user_id AND wls.word_id = f.word_id
                 LEFT JOIN mastery_states ms
-                    ON ms.user_id = f.user_id AND ms.word_id = f.word_id",
-            None => "WITH firsts AS (
+                    ON ms.user_id = f.user_id AND ms.word_id = f.word_id"
+            }
+            None => {
+                "WITH firsts AS (
                     SELECT lr.user_id, lr.word_id, MIN(lr.created_at) AS first_at
                     FROM learning_records lr
                     WHERE lr.created_at >= ?1
@@ -500,7 +511,8 @@ impl Store {
                 LEFT JOIN word_learning_states wls
                     ON wls.user_id = f.user_id AND wls.word_id = f.word_id
                 LEFT JOIN mastery_states ms
-                    ON ms.user_id = f.user_id AND ms.word_id = f.word_id",
+                    ON ms.user_id = f.user_id AND ms.word_id = f.word_id"
+            }
         };
         let mut stmt = conn.prepare(sql)?;
         let mapper = |r: &rusqlite::Row<'_>| -> rusqlite::Result<Option<AdminRetentionSampleRow>> {
@@ -552,7 +564,8 @@ impl Store {
                 registered: r.get(1)?,
             })
         })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
     }
 }
 
@@ -589,7 +602,15 @@ mod tests {
         store.create_user(&u).unwrap();
     }
 
-    fn seed_record(store: &Store, id: &str, user_id: &str, word_id: &str, rt: RecordType, correct: bool, at: DateTime<Utc>) {
+    fn seed_record(
+        store: &Store,
+        id: &str,
+        user_id: &str,
+        word_id: &str,
+        rt: RecordType,
+        correct: bool,
+        at: DateTime<Utc>,
+    ) {
         let r = LearningRecord {
             id: id.into(),
             user_id: user_id.into(),
@@ -599,11 +620,19 @@ mod tests {
             session_id: Some("s1".into()),
             created_at: at,
             record_type: rt,
+            self_rating: None,
         };
         store.create_record(&r).unwrap();
     }
 
-    fn seed_word_state(store: &Store, user_id: &str, word_id: &str, state: WordState, mastery: f64, next_review: Option<DateTime<Utc>>) {
+    fn seed_word_state(
+        store: &Store,
+        user_id: &str,
+        word_id: &str,
+        state: WordState,
+        mastery: f64,
+        next_review: Option<DateTime<Utc>>,
+    ) {
         let s = WordLearningState {
             user_id: user_id.into(),
             word_id: word_id.into(),
@@ -626,7 +655,9 @@ mod tests {
         // days=0 saturates to 0 days back -> today
         assert_eq!(window_since_date(0), today);
         // days=2 -> yesterday
-        let yest = (Utc::now().date_naive() - Duration::days(1)).format("%Y-%m-%d").to_string();
+        let yest = (Utc::now().date_naive() - Duration::days(1))
+            .format("%Y-%m-%d")
+            .to_string();
         assert_eq!(window_since_date(2), yest);
     }
 
@@ -656,7 +687,15 @@ mod tests {
         seed_record(&store, "r1", "u1", "w1", RecordType::Learning, true, now);
         seed_record(&store, "r2", "u1", "w2", RecordType::Learning, false, now);
         // 老的 review on same w1 在 window 之外
-        seed_record(&store, "r0", "u1", "w1", RecordType::Learning, true, now - Duration::days(40));
+        seed_record(
+            &store,
+            "r0",
+            "u1",
+            "w1",
+            RecordType::Learning,
+            true,
+            now - Duration::days(40),
+        );
 
         let summary = store.admin_study_overview_summary(7, None).unwrap();
         // window 内 r1 + r2 + r0 都 >= since-date 因为 since 是 7 天前的午夜，r0 在 40 天前 → 应在窗口外
@@ -667,7 +706,9 @@ mod tests {
         assert_eq!(summary.review_words, 1);
 
         // filtered by record_type
-        let filtered = store.admin_study_overview_summary(7, Some(RecordType::Learning)).unwrap();
+        let filtered = store
+            .admin_study_overview_summary(7, Some(RecordType::Learning))
+            .unwrap();
         assert_eq!(filtered.record_count, 2);
     }
 
@@ -677,14 +718,24 @@ mod tests {
         user(&store, "u1");
         let now = Utc::now();
         seed_record(&store, "r1", "u1", "w1", RecordType::All, true, now);
-        seed_record(&store, "r2", "u1", "w2", RecordType::All, true, now - Duration::days(1));
+        seed_record(
+            &store,
+            "r2",
+            "u1",
+            "w2",
+            RecordType::All,
+            true,
+            now - Duration::days(1),
+        );
 
         let daily = store.admin_daily_study_overview(7, None).unwrap();
         assert!(daily.len() >= 2);
         let total: i64 = daily.iter().map(|r| r.record_count).sum();
         assert_eq!(total, 2);
 
-        let daily_l = store.admin_daily_study_overview(7, Some(RecordType::All)).unwrap();
+        let daily_l = store
+            .admin_daily_study_overview(7, Some(RecordType::All))
+            .unwrap();
         let total2: i64 = daily_l.iter().map(|r| r.record_count).sum();
         assert_eq!(total2, 2);
     }
@@ -735,8 +786,12 @@ mod tests {
         let rows = store.admin_daily_record_type_counts(7).unwrap();
         let total: i64 = rows.iter().map(|r| r.total).sum();
         assert_eq!(total, 2);
-        assert!(rows.iter().any(|r| r.record_type == "learning" && r.correct == 1));
-        assert!(rows.iter().any(|r| r.record_type == "review" && r.correct == 0));
+        assert!(rows
+            .iter()
+            .any(|r| r.record_type == "learning" && r.correct == 1));
+        assert!(rows
+            .iter()
+            .any(|r| r.record_type == "review" && r.correct == 0));
     }
 
     #[test]
@@ -746,7 +801,14 @@ mod tests {
         let now = Utc::now();
         seed_word_state(&store, "u1", "w-new", WordState::New, 0.0, None);
         seed_word_state(&store, "u1", "w-learn", WordState::Learning, 0.3, None);
-        seed_word_state(&store, "u1", "w-rev", WordState::Reviewing, 0.5, Some(now - Duration::hours(1)));
+        seed_word_state(
+            &store,
+            "u1",
+            "w-rev",
+            WordState::Reviewing,
+            0.5,
+            Some(now - Duration::hours(1)),
+        );
         seed_word_state(&store, "u1", "w-mast", WordState::Mastered, 0.95, None);
         seed_word_state(&store, "u1", "w-forg", WordState::Forgotten, 0.1, None);
         store.upsert_word_favorite("u1", "w-new").unwrap();
@@ -763,12 +825,23 @@ mod tests {
         assert!(d.average_mastery.is_some());
 
         // 过滤模式：no learning_records → 全 0
-        let filtered = store.admin_word_state_distribution(Some(RecordType::Learning)).unwrap();
-        assert_eq!(filtered.new_count + filtered.learning + filtered.reviewing + filtered.mastered + filtered.forgotten, 0);
+        let filtered = store
+            .admin_word_state_distribution(Some(RecordType::Learning))
+            .unwrap();
+        assert_eq!(
+            filtered.new_count
+                + filtered.learning
+                + filtered.reviewing
+                + filtered.mastered
+                + filtered.forgotten,
+            0
+        );
 
         // 加 record 后部分恢复
         seed_record(&store, "r1", "u1", "w-new", RecordType::Learning, true, now);
-        let filtered2 = store.admin_word_state_distribution(Some(RecordType::Learning)).unwrap();
+        let filtered2 = store
+            .admin_word_state_distribution(Some(RecordType::Learning))
+            .unwrap();
         assert_eq!(filtered2.new_count, 1);
         assert_eq!(filtered2.bookmarked, 1);
     }
@@ -778,7 +851,15 @@ mod tests {
         let (_t, store) = test_store();
         user(&store, "u1");
         let now = Utc::now();
-        seed_record(&store, "r1", "u1", "w1", RecordType::Learning, true, now - Duration::days(2));
+        seed_record(
+            &store,
+            "r1",
+            "u1",
+            "w1",
+            RecordType::Learning,
+            true,
+            now - Duration::days(2),
+        );
         seed_word_state(&store, "u1", "w1", WordState::Learning, 0.5, None);
 
         let samples = store.admin_retention_curve_samples(None, 7).unwrap();

@@ -67,6 +67,65 @@ async fn it_admin_login_locks_after_5_failed_attempts() {
 }
 
 #[tokio::test]
+async fn it_admin_login_lockout_boundaries_for_four_five_and_six_attempts() {
+    let app = spawn_test_server().await;
+    let email = format!("boundary-{}@test.com", uuid::Uuid::new_v4());
+    let resp = request(
+        &app.app,
+        Method::POST,
+        "/api/admin/auth/setup",
+        Some(serde_json::json!({
+            "email": &email,
+            "password": "AdminPassw0rd!"
+        })),
+        &[],
+    )
+    .await;
+    assert_eq!(response_json(resp).await.0, StatusCode::CREATED);
+
+    for attempt in 1..=4 {
+        let resp = request(
+            &app.app,
+            Method::POST,
+            "/api/admin/auth/login",
+            Some(serde_json::json!({
+                "email": &email,
+                "password": "WrongP4ssword!"
+            })),
+            &[],
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "attempt {attempt}");
+    }
+
+    let fifth = request(
+        &app.app,
+        Method::POST,
+        "/api/admin/auth/login",
+        Some(serde_json::json!({
+            "email": &email,
+            "password": "WrongP4ssword!"
+        })),
+        &[],
+    )
+    .await;
+    assert_eq!(fifth.status(), StatusCode::UNAUTHORIZED);
+
+    let sixth = request(
+        &app.app,
+        Method::POST,
+        "/api/admin/auth/login",
+        Some(serde_json::json!({
+            "email": &email,
+            "password": "AdminPassw0rd!"
+        })),
+        &[],
+    )
+    .await;
+    assert_eq!(sixth.status(), StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
 async fn it_admin_login_does_not_lock_unknown_email() {
     let app = spawn_test_server().await;
     // 没有 setup admin，仍然要能 reject 不存在的账户（generate_dummy_argon2_hash 路径）

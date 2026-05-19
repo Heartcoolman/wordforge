@@ -128,6 +128,7 @@ async fn create_record(
                 session_id: None,
                 created_at: now,
                 record_type: crate::store::operations::records::RecordType::All,
+                self_rating: None,
             };
             store.create_record(&record)?;
             Ok(record)

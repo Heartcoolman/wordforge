@@ -268,6 +268,8 @@ CREATE TABLE IF NOT EXISTS learning_records (
     created_at TEXT NOT NULL,
     record_type TEXT NOT NULL DEFAULT 'all'
         CHECK (record_type IN ('learning', 'review', 'all')),
+    self_rating INTEGER DEFAULT NULL
+        CHECK (self_rating IS NULL OR self_rating BETWEEN 0 AND 3),
     PRIMARY KEY (user_id, id)
 );
 CREATE INDEX IF NOT EXISTS idx_learning_records_user_time
@@ -510,6 +512,18 @@ CREATE TABLE IF NOT EXISTS telemetry_events (
 );
 CREATE INDEX IF NOT EXISTS idx_telemetry_device ON telemetry_events(device_id, server_ts DESC);
 CREATE INDEX IF NOT EXISTS idx_telemetry_server_ts ON telemetry_events(server_ts DESC);
+
+CREATE TABLE IF NOT EXISTS feedback_items (
+    id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    category TEXT DEFAULT NULL,
+    body TEXT NOT NULL,
+    route TEXT DEFAULT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (id)
+);
+CREATE INDEX IF NOT EXISTS idx_feedback_items_created_at ON feedback_items(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_feedback_items_user ON feedback_items(user_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS telemetry_summaries (
     id TEXT NOT NULL,

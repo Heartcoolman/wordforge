@@ -101,7 +101,7 @@ describe('getDeviceId', () => {
 
   it('generates and persists a new device id on first call', () => {
     const id1 = getDeviceId();
-    expect(id1).toBeTruthy();
+    expect(id1).toMatch(/^[0-9a-f-]{36}$/i);
     expect(localStorage.getItem('eng_device_id')).toBe(id1);
   });
 

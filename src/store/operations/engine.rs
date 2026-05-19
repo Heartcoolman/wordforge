@@ -281,7 +281,9 @@ mod tests {
     #[test]
     fn delete_user_and_algo_state_idempotent() {
         let store = Store::open(":memory:", 5000, 1).unwrap();
-        store.set_engine_user_state("u1", &serde_json::json!({})).unwrap();
+        store
+            .set_engine_user_state("u1", &serde_json::json!({}))
+            .unwrap();
         store.delete_engine_user_state("u1").unwrap();
         assert!(store.get_engine_user_state("u1").unwrap().is_none());
         store.delete_engine_user_state("u1").unwrap(); // 再删不报错
@@ -297,8 +299,12 @@ mod tests {
     #[test]
     fn engine_state_upsert_overwrites_existing() {
         let store = Store::open(":memory:", 5000, 1).unwrap();
-        store.set_engine_user_state("u1", &serde_json::json!({"v":1})).unwrap();
-        store.set_engine_user_state("u1", &serde_json::json!({"v":2})).unwrap();
+        store
+            .set_engine_user_state("u1", &serde_json::json!({"v":1}))
+            .unwrap();
+        store
+            .set_engine_user_state("u1", &serde_json::json!({"v":2}))
+            .unwrap();
         let got = store.get_engine_user_state("u1").unwrap().unwrap();
         assert_eq!(got["v"], 2);
     }
@@ -346,7 +352,10 @@ mod tests {
         let recent = store.get_recent_monitoring_events(10).unwrap();
         assert_eq!(recent.len(), 2);
         // 最新在前
-        assert_eq!(recent[0]["timestamp"], serde_json::json!("2026-05-02T12:00:00Z"));
+        assert_eq!(
+            recent[0]["timestamp"],
+            serde_json::json!("2026-05-02T12:00:00Z")
+        );
     }
 
     #[test]
@@ -358,7 +367,10 @@ mod tests {
         store
             .upsert_metrics_daily("2026-05-01", "algo-a", &serde_json::json!({"x":2}))
             .unwrap();
-        let m = store.get_metrics_daily("2026-05-01", "algo-a").unwrap().unwrap();
+        let m = store
+            .get_metrics_daily("2026-05-01", "algo-a")
+            .unwrap()
+            .unwrap();
         assert_eq!(m["x"], 2);
 
         // batch 形式
@@ -368,9 +380,15 @@ mod tests {
                 ("invalid-key-no-colon".into(), serde_json::json!({})), // 应被忽略
             ])
             .unwrap();
-        let b = store.get_metrics_daily("2026-05-02", "algo-b").unwrap().unwrap();
+        let b = store
+            .get_metrics_daily("2026-05-02", "algo-b")
+            .unwrap()
+            .unwrap();
         assert_eq!(b["y"], 3);
-        assert!(store.get_metrics_daily("invalid-key-no-colon", "").unwrap().is_none());
+        assert!(store
+            .get_metrics_daily("invalid-key-no-colon", "")
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -381,7 +399,9 @@ mod tests {
             ("a1".to_string(), serde_json::json!({"l":1})),
             ("a2".to_string(), serde_json::json!({"l":2})),
         ];
-        store.persist_engine_state_atomic("u1", &user_state, &algo).unwrap();
+        store
+            .persist_engine_state_atomic("u1", &user_state, &algo)
+            .unwrap();
         let us = store.get_engine_user_state("u1").unwrap().unwrap();
         assert_eq!(us["attention"], 0.5);
         let a1 = store.get_engine_algo_state("u1", "a1").unwrap().unwrap();

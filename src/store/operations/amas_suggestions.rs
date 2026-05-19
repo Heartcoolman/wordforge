@@ -80,9 +80,23 @@ fn parse_dt(s: String) -> Result<DateTime<Utc>, StoreError> {
         .map_err(|e| StoreError::Validation(format!("bad datetime: {e}")))
 }
 
-fn row_to_suggestion(row: &rusqlite::Row<'_>) -> rusqlite::Result<(
-    i64, String, String, String, String, String, String, Option<String>,
-    Option<String>, Option<String>, Option<f64>, Option<i64>, Option<i64>, Option<f64>,
+fn row_to_suggestion(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<(
+    i64,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<f64>,
+    Option<i64>,
+    Option<i64>,
+    Option<f64>,
 )> {
     Ok((
         row.get::<_, i64>(0)?,
@@ -103,10 +117,36 @@ fn row_to_suggestion(row: &rusqlite::Row<'_>) -> rusqlite::Result<(
 }
 
 fn build(
-    (id, created_at, based_on, patch, rationale, evidence, status, decided_by,
-     decided_at, decision_note, cost, tin, tout, conf): (
-        i64, String, String, String, String, String, String, Option<String>,
-        Option<String>, Option<String>, Option<f64>, Option<i64>, Option<i64>, Option<f64>,
+    (
+        id,
+        created_at,
+        based_on,
+        patch,
+        rationale,
+        evidence,
+        status,
+        decided_by,
+        decided_at,
+        decision_note,
+        cost,
+        tin,
+        tout,
+        conf,
+    ): (
+        i64,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<f64>,
+        Option<i64>,
+        Option<i64>,
+        Option<f64>,
     ),
 ) -> Result<TuningSuggestionRow, StoreError> {
     Ok(TuningSuggestionRow {
@@ -185,9 +225,8 @@ impl Store {
                     "SELECT {COLS} FROM amas_tuning_suggestions
                      ORDER BY created_at DESC LIMIT ?1"
                 ))?;
-                let rows: Result<Vec<_>, _> = stmt
-                    .query_map(params![limit], row_to_suggestion)?
-                    .collect();
+                let rows: Result<Vec<_>, _> =
+                    stmt.query_map(params![limit], row_to_suggestion)?.collect();
                 rows?
             }
         };
@@ -282,7 +321,9 @@ mod tests {
     #[test]
     fn insert_and_get_pending() {
         let store = fresh_store();
-        let id = store.insert_amas_suggestion(&ins(SuggestionStatus::Pending)).unwrap();
+        let id = store
+            .insert_amas_suggestion(&ins(SuggestionStatus::Pending))
+            .unwrap();
         let row = store.get_amas_suggestion(id).unwrap().expect("must exist");
         assert_eq!(row.status, SuggestionStatus::Pending);
         assert_eq!(row.cost_usd, Some(0.01));
@@ -292,13 +333,23 @@ mod tests {
     #[test]
     fn list_filters_by_status() {
         let store = fresh_store();
-        store.insert_amas_suggestion(&ins(SuggestionStatus::Pending)).unwrap();
-        store.insert_amas_suggestion(&ins(SuggestionStatus::AutoApplied)).unwrap();
-        store.insert_amas_suggestion(&ins(SuggestionStatus::Pending)).unwrap();
+        store
+            .insert_amas_suggestion(&ins(SuggestionStatus::Pending))
+            .unwrap();
+        store
+            .insert_amas_suggestion(&ins(SuggestionStatus::AutoApplied))
+            .unwrap();
+        store
+            .insert_amas_suggestion(&ins(SuggestionStatus::Pending))
+            .unwrap();
 
-        let pending = store.list_amas_suggestions(Some(SuggestionStatus::Pending), 10).unwrap();
+        let pending = store
+            .list_amas_suggestions(Some(SuggestionStatus::Pending), 10)
+            .unwrap();
         assert_eq!(pending.len(), 2);
-        let auto = store.list_amas_suggestions(Some(SuggestionStatus::AutoApplied), 10).unwrap();
+        let auto = store
+            .list_amas_suggestions(Some(SuggestionStatus::AutoApplied), 10)
+            .unwrap();
         assert_eq!(auto.len(), 1);
         let all = store.list_amas_suggestions(None, 10).unwrap();
         assert_eq!(all.len(), 3);
@@ -307,8 +358,17 @@ mod tests {
     #[test]
     fn update_status_transitions() {
         let store = fresh_store();
-        let id = store.insert_amas_suggestion(&ins(SuggestionStatus::Pending)).unwrap();
-        store.update_amas_suggestion_status(id, SuggestionStatus::Approved, Some("admin"), Some("ok")).unwrap();
+        let id = store
+            .insert_amas_suggestion(&ins(SuggestionStatus::Pending))
+            .unwrap();
+        store
+            .update_amas_suggestion_status(
+                id,
+                SuggestionStatus::Approved,
+                Some("admin"),
+                Some("ok"),
+            )
+            .unwrap();
         let row = store.get_amas_suggestion(id).unwrap().unwrap();
         assert_eq!(row.status, SuggestionStatus::Approved);
         assert_eq!(row.decided_by.as_deref(), Some("admin"));
@@ -319,8 +379,12 @@ mod tests {
     #[test]
     fn spend_today_aggregates() {
         let store = fresh_store();
-        store.insert_amas_suggestion(&ins(SuggestionStatus::Pending)).unwrap();
-        store.insert_amas_suggestion(&ins(SuggestionStatus::AutoApplied)).unwrap();
+        store
+            .insert_amas_suggestion(&ins(SuggestionStatus::Pending))
+            .unwrap();
+        store
+            .insert_amas_suggestion(&ins(SuggestionStatus::AutoApplied))
+            .unwrap();
         let (cost, tin, tout) = store.aggregate_amas_suggestion_spend_today().unwrap();
         assert!((cost - 0.02).abs() < 1e-9);
         assert_eq!(tin, 200);

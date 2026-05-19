@@ -209,7 +209,7 @@ describe('UpdatesPage — SSE handlers', () => {
   it('invokes onReleaseAvailable: info toast + refetch', async () => {
     mockApi.updatesStatus.mockResolvedValue(baseStatus);
     await renderPage();
-    await waitFor(() => expect(lastSseHandlers).toBeTruthy());
+    await waitFor(() => expect(lastSseHandlers).not.toBeNull());
     expect(typeof lastSseHandlers.onReleaseAvailable).toBe('function');
     lastSseHandlers.onReleaseAvailable();
     await waitFor(() => expect(mockToast.info).toHaveBeenCalledWith('有新版本可用，已自动刷新'));
@@ -218,7 +218,7 @@ describe('UpdatesPage — SSE handlers', () => {
   it('invokes onUpdateProgress: sets progress state without throwing', async () => {
     mockApi.updatesStatus.mockResolvedValue(baseStatus);
     await renderPage();
-    await waitFor(() => expect(lastSseHandlers).toBeTruthy());
+    await waitFor(() => expect(lastSseHandlers).not.toBeNull());
     expect(typeof lastSseHandlers.onUpdateProgress).toBe('function');
     expect(() => lastSseHandlers.onUpdateProgress({ phase: 'download', percent: 42 })).not.toThrow();
   });

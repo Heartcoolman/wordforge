@@ -271,14 +271,11 @@ impl Store {
         Ok(sessions)
     }
 
-    pub fn get_session_shown_word_ids(
-        &self,
-        session_id: &str,
-    ) -> Result<Vec<String>, StoreError> {
+    pub fn get_session_shown_word_ids(&self, session_id: &str) -> Result<Vec<String>, StoreError> {
         keys::validate_id(session_id)?;
         let conn = self.conn()?;
-        let mut stmt = conn
-            .prepare("SELECT word_id FROM session_shown_words WHERE session_id = ?1")?;
+        let mut stmt =
+            conn.prepare("SELECT word_id FROM session_shown_words WHERE session_id = ?1")?;
         let rows = stmt
             .query_map(params![session_id], |row| row.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?;
@@ -734,11 +731,7 @@ mod tests {
 
         // Out-of-alphabetical order; replay must match the original sequence.
         let (_, original) = store
-            .claim_session_batch(
-                "s1",
-                Some(0),
-                &["zeta".into(), "alpha".into(), "mu".into()],
-            )
+            .claim_session_batch("s1", Some(0), &["zeta".into(), "alpha".into(), "mu".into()])
             .unwrap();
         assert_eq!(original, vec!["zeta", "alpha", "mu"]);
 
@@ -861,7 +854,9 @@ mod tests {
     #[test]
     fn claim_session_batch_empty_candidates_returns_assigned_index() {
         let store = test_store();
-        store.create_learning_session(&sample_session("s1", "u1")).unwrap();
+        store
+            .create_learning_session(&sample_session("s1", "u1"))
+            .unwrap();
         let (idx, ids) = store.claim_session_batch("s1", None, &[]).unwrap();
         assert_eq!(idx, 0);
         assert!(ids.is_empty());
@@ -877,7 +872,9 @@ mod tests {
             s.updated_at = s.created_at;
             store.create_learning_session(&s).unwrap();
         }
-        let total = store.count_learning_sessions_for_user("u1", None, None).unwrap();
+        let total = store
+            .count_learning_sessions_for_user("u1", None, None)
+            .unwrap();
         assert_eq!(total, 4);
         let page = store
             .list_learning_sessions_for_user("u1", 2, 0, None, None)

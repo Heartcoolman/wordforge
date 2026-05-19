@@ -399,7 +399,9 @@ mod tests {
         store.insert_wordbook_import_history(&h1).unwrap();
         store.insert_wordbook_import_history(&h2).unwrap();
         // 另一个用户的应被过滤
-        store.insert_wordbook_import_history(&sample_history("h3", "u2")).unwrap();
+        store
+            .insert_wordbook_import_history(&sample_history("h3", "u2"))
+            .unwrap();
         let list = store.list_wordbook_import_history("u1").unwrap();
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].id, "h2");

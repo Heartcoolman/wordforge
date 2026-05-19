@@ -273,6 +273,7 @@ mod tests {
                 max_tarball_bytes: 200 * 1024 * 1024,
             },
             pagination: Default::default(),
+            strict_mode: Default::default(),
             limits: Default::default(),
         };
         let store = Arc::new(

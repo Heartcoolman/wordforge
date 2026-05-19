@@ -1,0 +1,1776 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AMASConfig",
+  "type": "object",
+  "required": [
+    "coldStart",
+    "constraints",
+    "ensemble",
+    "featureFlags",
+    "modeling",
+    "monitoring",
+    "objectiveWeights"
+  ],
+  "properties": {
+    "classifier": {
+      "default": {
+        "fastLearnerThreshold": 0.7,
+        "memoryCapacityWeight": 0.4,
+        "processingSpeedWeight": 0.4,
+        "stabilityWeight": 0.2,
+        "stableLearnerThreshold": 0.4
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/ClassifierConfig"
+        }
+      ]
+    },
+    "coldStart": {
+      "$ref": "#/definitions/ColdStartConfig"
+    },
+    "constraints": {
+      "$ref": "#/definitions/ConstraintConfig"
+    },
+    "elo": {
+      "default": {
+        "defaultElo": 1200.0,
+        "kFactor": 32.0,
+        "maxElo": 2400.0,
+        "minElo": 400.0,
+        "noviceGameThreshold": 30,
+        "noviceKMultiplier": 2.0,
+        "wordKFactorRatio": 0.5,
+        "zpdGaussianSigma": 150.0,
+        "zpdOptimalOffset": 100.0
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/EloConfig"
+        }
+      ]
+    },
+    "ensemble": {
+      "$ref": "#/definitions/EnsembleConfig"
+    },
+    "evm": {
+      "default": {
+        "diversityBonusCap": 0.3,
+        "diversityGrowthRate": 0.2,
+        "diversityLogDivisor": 5.0
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/EvmConfig"
+        }
+      ]
+    },
+    "fatigueDecay": {
+      "default": {
+        "decayStartThresholdSecs": 300.0,
+        "decayTimeConstantSecs": 600.0,
+        "fullResetThresholdSecs": 1800.0
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/FatigueDecayConfig"
+        }
+      ]
+    },
+    "feature": {
+      "default": {
+        "confidenceNegativeSignal": -0.02,
+        "confidencePositiveSignal": 0.02,
+        "hintPenalty": 0.3,
+        "incorrectQualityScale": 0.1,
+        "motivationNegativeSignal": -0.15,
+        "motivationPositiveSignal": 0.1,
+        "qualityAccuracyWeight": 0.6,
+        "qualitySpeedWeight": 0.4,
+        "temporalBoostBase": 0.7,
+        "temporalBoostMax": 1.5,
+        "temporalBoostMin": 0.5,
+        "temporalBoostScale": 0.6,
+        "temporalProfileAlpha": 0.3,
+        "trustBaseLearningRate": 0.05,
+        "trustWeightBlend": 0.5
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/FeatureConfig"
+        }
+      ]
+    },
+    "featureFlags": {
+      "$ref": "#/definitions/FeatureFlags"
+    },
+    "heuristic": {
+      "default": {
+        "accuracySpeedDifficultyBoost": 0.1,
+        "coldStartBatchSize": 5,
+        "coldStartDifficulty": 0.3,
+        "coldStartEventThreshold": 10,
+        "coldStartNewRatio": 0.5,
+        "confidenceBase": 0.7,
+        "confidenceDecayCap": 0.5,
+        "confidenceDecayScale": 200.0,
+        "confidenceMin": 0.2,
+        "lowAccuracyDifficultyDrop": 0.15,
+        "lowAccuracyRatioDrop": 0.1,
+        "lowMotivationDifficultyDrop": 0.1,
+        "lowMotivationMaxBatch": 8
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/HeuristicConfig"
+        }
+      ]
+    },
+    "iad": {
+      "default": {
+        "confusionDecayRate": 0.05,
+        "confusionUpdateIncrement": 0.2,
+        "interferencePenaltyCap": 0.3,
+        "interferencePenaltyFactor": 0.1,
+        "intervalShorteningFactor": 0.5,
+        "maxConfusionPairs": 20,
+        "newConfusionInitialScore": 0.2
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/IadConfig"
+        }
+      ]
+    },
+    "ige": {
+      "default": {
+        "batchSize": 10,
+        "defaultConfidence": 0.6,
+        "difficultyBinCount": 20,
+        "intervalScale": 1.0,
+        "pretrainedDifficultyRewards": null,
+        "pretrainedRatioRewards": null,
+        "ratioBinCount": 16,
+        "ucbConfidenceCoeff": 2.0
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/IgeConfig"
+        }
+      ]
+    },
+    "intervention": {
+      "default": {
+        "attentionAlertThreshold": 0.3,
+        "fatigueAlertThreshold": 0.7,
+        "motivationAlertThreshold": -0.3
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/InterventionConfig"
+        }
+      ]
+    },
+    "learningStrategy": {
+      "default": {
+        "confidenceBoostThreshold": 0.5,
+        "confidenceDifficultyBoost": 0.1,
+        "crossSessionHighAccuracy": 0.8,
+        "crossSessionHighDifficulty": 0.6,
+        "crossSessionLowDifficulty": 0.35,
+        "crossSessionMediumAccuracy": 0.5,
+        "crossSessionMediumDifficulty": 0.5,
+        "difficultyBoostStep": 0.1,
+        "difficultyDropStep": 0.15,
+        "fatigueBatchScale": 0.7,
+        "fatigueDifficultyDrop": 0.15,
+        "fatigueReductionThreshold": 0.5,
+        "motivationRatioBoost": 0.1,
+        "motivationRatioThreshold": 0.3,
+        "ratioBoostStep": 0.15,
+        "ratioDropStep": 0.15,
+        "sessionBoostAccuracy": 0.8,
+        "sessionDropAccuracy": 0.4,
+        "sprintMasteryRatio": 0.8,
+        "sprintNewRatio": 0.9
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/LearningStrategyConfig"
+        }
+      ]
+    },
+    "memoryModel": {
+      "default": {
+        "alphaMax": 0.5,
+        "alphaMin": 0.1,
+        "alphaScale": 0.3,
+        "baseDesiredRetention": 0.92,
+        "compositeWeightLong": 0.5,
+        "compositeWeightMedium": 0.3,
+        "compositeWeightShort": 0.2,
+        "consolidationBonus": 1.5,
+        "consolidationRateScale": 0.25,
+        "forgettingCurveDecay": -0.5,
+        "forgettingCurveFactor": 0.3,
+        "forgettingCurveFloor": 0.0,
+        "forgettingThreshold": 0.2,
+        "halfLifeBaseEpsilon": 0.3,
+        "halfLifePower": 1.5,
+        "halfLifeTimeUnitSecs": 1296000.0,
+        "highAccuracyRetentionBoost": 0.02,
+        "highAccuracyThreshold": 0.9,
+        "highFatigueRetentionDrop": 0.05,
+        "highFatigueThreshold": 0.6,
+        "longTermLearningRate": 0.12,
+        "lowMotivationRetentionDrop": 0.03,
+        "lowMotivationThreshold": -0.2,
+        "masteryAccuracyThreshold": 0.65,
+        "masteryCompositeThreshold": 0.3,
+        "masteryStreakThreshold": 1,
+        "masteryWindowSize": 20,
+        "maxIntervalDays": 90.0,
+        "mediumTermLearningRate": 0.3,
+        "minIntervalSecs": 60,
+        "passiveDecayHalfLifeDays": 30.0,
+        "passiveDecayPower": 0.3,
+        "recallRiskBonus": 0.2,
+        "recallRiskThreshold": 0.55,
+        "retentionMax": 0.95,
+        "retentionMin": 0.7,
+        "reviewingThreshold": 0.4,
+        "shortTermLearningRate": 0.85,
+        "stabilityBaseDays": 20.0,
+        "streakMinGapMs": 1800000,
+        "w": [
+          0.4072,
+          1.1829,
+          3.1262,
+          15.4722,
+          7.1949,
+          0.5345,
+          1.4604,
+          0.0046,
+          1.54575,
+          0.1192,
+          1.01925,
+          1.9395,
+          0.11,
+          0.29605,
+          2.2698,
+          0.2315,
+          2.9898,
+          0.51655,
+          0.6621
+        ]
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/MemoryModelConfig"
+        }
+      ]
+    },
+    "modeling": {
+      "$ref": "#/definitions/ModelingConfig"
+    },
+    "monitoring": {
+      "$ref": "#/definitions/MonitoringConfig"
+    },
+    "mtp": {
+      "default": {
+        "knownMorphemeDecay": 0.9,
+        "maxKnownMorphemes": 500,
+        "morphemeBonusCap": 0.3,
+        "morphemeTransferCoeff": 0.15,
+        "newMorphemeInitialCoeff": 0.5
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/MtpConfig"
+        }
+      ]
+    },
+    "objectiveWeights": {
+      "$ref": "#/definitions/ObjectiveWeights"
+    },
+    "reward": {
+      "default": {
+        "expectedForgetCostWeight": 0.3,
+        "fatiguePenaltyScale": 0.3,
+        "fatiguePenaltyThreshold": 0.7,
+        "frustrationPenaltyScale": 0.2,
+        "frustrationPenaltyThreshold": -0.3,
+        "speedRewardScale": 0.5
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/RewardConfig"
+        }
+      ]
+    },
+    "ssp": {
+      "default": {
+        "base": 1.05,
+        "convergenceThreshold": 0.1,
+        "costParams": {
+          "forgetDCoeff": 0.0,
+          "forgetSCoeff": 0.0,
+          "recallDCoeff": 0.0,
+          "recallSCoeff": 0.0
+        },
+        "difficultyOffsetOnLapse": 1.0,
+        "discountFactor": 1.0,
+        "dualGridEnabled": true,
+        "dualGridThresholdDays": 10.0,
+        "forgetCost": 9.0,
+        "linearStepDays": 5.0,
+        "maxIndex": 122,
+        "maxIterations": 200000,
+        "minIndex": -30,
+        "rMax": 0.99,
+        "rMin": 0.7,
+        "rStep": 0.01,
+        "recallCost": 3.0,
+        "reviewRatingProbs": [
+          0.224,
+          0.631,
+          0.145
+        ],
+        "targetStabilityDays": 360.0
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/SspConfig"
+        }
+      ]
+    },
+    "swd": {
+      "default": {
+        "fallbackConfidence": 0.2,
+        "historyFilterThreshold": -0.5,
+        "maxHistorySize": 200,
+        "similarityCacheTtlSecs": 300
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/SwdConfig"
+        }
+      ]
+    },
+    "wordSelector": {
+      "default": {
+        "errorProneBonus": 0.3,
+        "newWordGaussianSigma": 0.3,
+        "optimalRecallCenter": 0.5,
+        "optimalRecallSigma": 0.3,
+        "recallMasteredThreshold": 0.7,
+        "recentlyMasteredBonus": 0.15,
+        "reviewUcbMaxBonus": 0.35,
+        "reviewUcbWeight": 0.12,
+        "sigmoidSteepness": 8.0,
+        "spacingCooldownSecs": 300.0
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/WordSelectorConfig"
+        }
+      ]
+    }
+  },
+  "definitions": {
+    "ClassifierConfig": {
+      "type": "object",
+      "required": [
+        "fastLearnerThreshold",
+        "memoryCapacityWeight",
+        "processingSpeedWeight",
+        "stabilityWeight",
+        "stableLearnerThreshold"
+      ],
+      "properties": {
+        "fastLearnerThreshold": {
+          "type": "number",
+          "format": "double"
+        },
+        "memoryCapacityWeight": {
+          "type": "number",
+          "format": "double"
+        },
+        "processingSpeedWeight": {
+          "type": "number",
+          "format": "double"
+        },
+        "stabilityWeight": {
+          "type": "number",
+          "format": "double"
+        },
+        "stableLearnerThreshold": {
+          "type": "number",
+          "format": "double"
+        }
+      }
+    },
+    "ColdStartConfig": {
+      "type": "object",
+      "required": [
+        "classifyToExploreConfidence",
+        "classifyToExploreEvents",
+        "exploreToExploitEvents"
+      ],
+      "properties": {
+        "classifyToExploreConfidence": {
+          "type": "number",
+          "format": "double"
+        },
+        "classifyToExploreEvents": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "exploreToExploitEvents": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "ConstraintConfig": {
+      "type": "object",
+      "required": [
+        "highFatigueThreshold",
+        "lowAttentionThreshold",
+        "lowMotivationThreshold",
+        "maxBatchSizeWhenFatigued",
+        "maxDifficultyWhenFatigued",
+        "maxNewRatioWhenFatigued"
+      ],
+      "properties": {
+        "highFatigueThreshold": {
+          "type": "number",
+          "format": "double"
+        },
+        "lowAttentionThreshold": {
+          "type": "number",
+          "format": "double"
+        },
+        "lowMotivationDifficultyDrop": {
+          "default": 0.1,
+          "type": "number",
+          "format": "double"
+        },
+        "lowMotivationRatioDrop": {
+          "default": 0.1,
+          "type": "number",
+          "format": "double"
+        },
+        "lowMotivationThreshold": {
+          "type": "number",
+          "format": "double"
+        },
+        "maxBatchSizeWhenFatigued": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "maxDifficultyWhenFatigued": {
+          "type": "number",
+          "format": "double"
+        },
+        "maxNewRatioWhenFatigued": {
+          "type": "number",
+          "format": "double"
+        },
+        "minDifficulty": {
+          "default": 0.1,
+          "type": "number",
+          "format": "double"
+        }
+      }
+    },
+    "EloConfig": {
+      "type": "object",
+      "required": [
+        "defaultElo",
+        "kFactor",
+        "noviceGameThreshold",
+        "noviceKMultiplier",
+        "zpdGaussianSigma",
+        "zpdOptimalOffset"
+      ],
+      "properties": {
+        "defaultElo": {
+          "type": "number",
+          "format": "double"
+        },
+        "kFactor": {
+          "type": "number",
+          "format": "double"
+        },
+        "maxElo": {
+          "default": 2400.0,
+          "type": "number",
+          "format": "double"
+        },
+        "minElo": {
+          "default": 400.0,
+          "type": "number",
+          "format": "double"
+        },
+        "noviceGameThreshold": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "noviceKMultiplier": {
+          "type": "number",
+          "format": "double"
+        },
+        "wordKFactorRatio": {
+          "default": 0.5,
+          "type": "number",
+          "format": "double"
+        },
+        "zpdGaussianSigma": {
+          "type": "number",
+          "format": "double"
+        },
+        "zpdOptimalOffset": {
+          "type": "number",
+          "format": "double"
+        }
+      }
+    },
+    "EnsembleConfig": {
+      "type": "object",
+      "required": [
+        "baseWeightHeuristic",
+        "baseWeightIge",
+        "baseWeightSwd",
+        "blendMax",
+        "blendScale",
+        "minWeight",
+        "warmupSamples"
+      ],
+      "properties": {
+        "baseWeightHeuristic": {
+          "type": "number",
+          "format": "double"
+        },
+        "baseWeightIge": {
+          "type": "number",
+          "format": "double"
+        },
+        "baseWeightSwd": {
+          "type": "number",
+          "format": "double"
+        },
+        "blendMax": {
+          "type": "number",
+          "format": "double"
+        },
+        "blendScale": {
+          "type": "number",
+          "format": "double"
+        },
+        "minWeight": {
+          "type": "number",
+          "format": "double"
+        },
+        "warmupHeuristicBoost": {
+          "default": 0.2,
+          "type": "number",
+          "format": "double"
+        },
+        "warmupSamples": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "EvmConfig": {
+      "type": "object",
+      "properties": {
+        "diversityBonusCap": {
+          "default": 0.3,
+          "type": "number",
+          "format": "double"
+        },
+        "diversityGrowthRate": {
+          "default": 0.2,
+          "type": "number",
+          "format": "double"
+        },
+        "diversityLogDivisor": {
+          "default": 5.0,
+          "type": "number",
+          "format": "double"
+        }
+      }
+    },
+    "FatigueDecayConfig": {
+      "type": "object",
+      "required": [
+        "decayStartThresholdSecs",
+        "decayTimeConstantSecs",
+        "fullResetThresholdSecs"
+      ],
+      "properties": {
+        "decayStartThresholdSecs": {
+          "type": "number",
+          "format": "double"
+        },
+        "decayTimeConstantSecs": {
+          "type": "number",
+          "format": "double"
+        },
+        "fullResetThresholdSecs": {
+          "type": "number",
+          "format": "double"
+        }
+      }
+    },
+    "FeatureConfig": {
+      "type": "object",
+      "required": [
+        "confidenceNegativeSignal",
+        "confidencePositiveSignal",
+        "hintPenalty",
+        "motivationNegativeSignal",
+        "motivationPositiveSignal",
+        "qualityAccuracyWeight",
+        "qualitySpeedWeight",
+        "temporalBoostBase",
+        "temporalBoostMax",
+        "temporalBoostMin",
+        "temporalBoostScale",
+        "temporalProfileAlpha",
+        "trustBaseLearningRate",
+        "trustWeightBlend"
+      ],
+      "properties": {
+        "confidenceNegativeSignal": {
+          "type": "number",
+          "format": "double"
+        },
+        "confidencePositiveSignal": {
+          "type": "number",
+          "format": "double"
+        },
+        "hintPenalty": {
+          "type": "number",
+          "format": "double"
+        },
+        "incorrectQualityScale": {
+          "default": 0.1,
+          "type": "number",
+          "format": "double"
+        },
+        "motivationNegativeSignal": {
+          "type": "number",
+          "format": "double"
+        },
+        "motivationPositiveSignal": {
+          "type": "number",
+          "format": "double"
+        },
+        "qualityAccuracyWeight": {
+          "type": "number",
+          "format": "double"
+        },
+        "qualitySpeedWeight": {
+          "type": "number",
+          "format": "double"
+        },
+        "temporalBoostBase": {
+          "type": "number",
+          "format": "double"
+        },
+        "temporalBoostMax": {
+          "type": "number",
+          "format": "double"
+        },
+        "temporalBoostMin": {
+          "type": "number",
+          "format": "double"
+        },
+        "temporalBoostScale": {
+          "type": "number",
+          "format": "double"
+        },
+        "temporalProfileAlpha": {
+          "type": "number",
+          "format": "double"
+        },
+        "trustBaseLearningRate": {
+          "type": "number",
+          "format": "double"
+        },
+        "trustWeightBlend": {
+          "type": "number",
+          "format": "double"
+        }
+      }
+    },
+    "FeatureFlags": {
+      "type": "object",
+      "required": [
+        "ensembleEnabled",
+        "heuristicEnabled",
+        "igeEnabled",
+        "mdmEnabled",
+        "swdEnabled"
+      ],
+      "properties": {
+        "ensembleEnabled": {
+          "type": "boolean"
+        },
+        "heuristicEnabled": {
+          "type": "boolean"
+        },
+        "iadEnabled": {
+          "description": "B38: Interference Aware Decay - 混淆词对干扰衰减",
+          "default": false,
+          "type": "boolean"
+        },
+        "igeEnabled": {
+          "type": "boolean"
+        },
+        "mdmEnabled": {
+          "type": "boolean"
+        },
+        "mtpEnabled": {
+          "description": "B37: Morpheme Transfer Prediction - 词素迁移预测",
+          "default": false,
+          "type": "boolean"
+        },
+        "sspEnabled": {
+          "description": "SSP-MMC: 最优间隔调度（离线 DP 预计算策略表）",
+          "default": false,
+          "type": "boolean"
+        },
+        "swdEnabled": {
+          "type": "boolean"
+        }
+      }
+    },
+    "HeuristicConfig": {
+      "type": "object",
+      "required": [
+        "accuracySpeedDifficultyBoost",
+        "coldStartBatchSize",
+        "coldStartDifficulty",
+        "coldStartEventThreshold",
+        "coldStartNewRatio",
+        "confidenceBase",
+        "confidenceDecayCap",
+        "confidenceDecayScale",
+        "confidenceMin",
+        "lowAccuracyDifficultyDrop",
+        "lowAccuracyRatioDrop",
+        "lowMotivationDifficultyDrop",
+        "lowMotivationMaxBatch"
+      ],
+      "properties": {
+        "accuracySpeedDifficultyBoost": {
+          "type": "number",
+          "format": "double"
+        },
+        "coldStartBatchSize": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "coldStartDifficulty": {
+          "type": "number",
+          "format": "double"
+        },
+        "coldStartEventThreshold": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "coldStartNewRatio": {
+          "type": "number",
+          "format": "double"
+        },
+        "confidenceBase": {
+          "type": "number",
+          "format": "double"
+        },
+        "confidenceDecayCap": {
+          "type": "number",
+          "format": "double"
+        },
+        "confidenceDecayScale": {
+          "type": "number",
+          "format": "double"
+        },
+        "confidenceMin": {
+          "type": "number",
+          "format": "double"
+        },
+        "lowAccuracyDifficultyDrop": {
+          "type": "number",
+          "format": "double"
+        },
+        "lowAccuracyRatioDrop": {
+          "type": "number",
+          "format": "double"
+        },
+        "lowMotivationDifficultyDrop": {
+          "type": "number",
+          "format": "double"
+        },
+        "lowMotivationMaxBatch": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      }
+    },
+    "IadConfig": {
+      "type": "object",
+      "required": [
+        "confusionUpdateIncrement",
+        "interferencePenaltyCap",
+        "interferencePenaltyFactor",
+        "intervalShorteningFactor",
+        "maxConfusionPairs",
+        "newConfusionInitialScore"
+      ],
+      "properties": {
+        "confusionDecayRate": {
+          "default": 0.05,
+          "type": "number",
+          "format": "double"
+        },
+        "confusionUpdateIncrement": {
+          "type": "number",
+          "format": "double"
+        },
+        "interferencePenaltyCap": {
+          "type": "number",
+          "format": "double"
+        },
+        "interferencePenaltyFactor": {
+          "type": "number",
+          "format": "double"
+        },
+        "intervalShorteningFactor": {
+          "type": "number",
+          "format": "double"
+        },
+        "maxConfusionPairs": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "newConfusionInitialScore": {
+          "type": "number",
+          "format": "double"
+        }
+      }
+    },
+    "IgeConfig": {
+      "type": "object",
+      "required": [
+        "batchSize",
+        "defaultConfidence",
+        "intervalScale",
+        "ucbConfidenceCoeff"
+      ],
+      "properties": {
+        "batchSize": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "defaultConfidence": {
+          "type": "number",
+          "format": "double"
+        },
+        "difficultyBinCount": {
+          "default": 20,
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "intervalScale": {
+          "type": "number",
+          "format": "double"
+        },
+        "pretrainedDifficultyRewards": {
+          "default": null,
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "number",
+            "format": "double"
+          }
+        },
+        "pretrainedRatioRewards": {
+          "default": null,
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "number",
+            "format": "double"
+          }
+        },
+        "ratioBinCount": {
+          "default": 16,
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "ucbConfidenceCoeff": {
+          "type": "number",
+          "format": "double"
+        }
+      }
+    },
+    "InterventionConfig": {
+      "type": "object",
+      "required": [
+        "attentionAlertThreshold",
+        "fatigueAlertThreshold",
+        "motivationAlertThreshold"
+      ],
+      "properties": {
+        "attentionAlertThreshold": {
+          "type": "number",
+          "format": "double"
+        },
+        "fatigueAlertThreshold": {
+          "type": "number",
+          "format": "double"
+        },
+        "motivationAlertThreshold": {
+          "type": "number",
+          "format": "double"
+        }
+      }
+    },
+    "LearningStrategyConfig": {
+      "type": "object",
+      "required": [
+        "confidenceBoostThreshold",
+        "confidenceDifficultyBoost",
+        "crossSessionHighAccuracy",
+        "crossSessionHighDifficulty",
+        "crossSessionLowDifficulty",
+        "crossSessionMediumAccuracy",
+        "crossSessionMediumDifficulty",
+        "difficultyBoostStep",
+        "difficultyDropStep",
+        "fatigueBatchScale",
+        "fatigueDifficultyDrop",
+        "fatigueReductionThreshold",
+        "motivationRatioBoost",
+        "motivationRatioThreshold",
+        "ratioBoostStep",
+        "ratioDropStep",
+        "sessionBoostAccuracy",
+        "sessionDropAccuracy",
+        "sprintMasteryRatio",
+        "sprintNewRatio"
+      ],
+      "properties": {
+        "confidenceBoostThreshold": {
+          "type": "number",
+          "format": "double"
+        },
+        "confidenceDifficultyBoost": {
+          "type": "number",
+          "format": "double"
+        },
+        "crossSessionHighAccuracy": {
+          "type": "number",
+          "format": "double"
+        },
+        "crossSessionHighDifficulty": {
+          "type": "number",
+          "format": "double"
+        },
+        "crossSessionLowDifficulty": {
+          "type": "number",
+          "format": "double"
+        },
+        "crossSessionMediumAccuracy": {
+          "type": "number",
+          "format": "double"
+        },
+        "crossSessionMediumDifficulty": {
+          "type": "number",
+          "format": "double"
+        },
+        "difficultyBoostStep": {
+          "type": "number",
+          "format": "double"
+        },
+        "difficultyDropStep": {
+          "type": "number",
+          "format": "double"
+        },
+        "fatigueBatchScale": {
+          "type": "number",
+          "format": "double"
+        },
+        "fatigueDifficultyDrop": {
+          "type": "number",
+          "format": "double"
+        },
+        "fatigueReductionThreshold": {
+          "type": "number",
+          "format": "double"
+        },
+        "motivationRatioBoost": {
+          "type": "number",
+          "format": "double"
+        },
+        "motivationRatioThreshold": {
+          "type": "number",
+          "format": "double"
+        },
+        "ratioBoostStep": {
+          "type": "number",
+          "format": "double"
+        },
+        "ratioDropStep": {
+          "type": "number",
+          "format": "double"
+        },
+        "sessionBoostAccuracy": {
+          "type": "number",
+          "format": "double"
+        },
+        "sessionDropAccuracy": {
+          "type": "number",
+          "format": "double"
+        },
+        "sprintMasteryRatio": {
+          "type": "number",
+          "format": "double"
+        },
+        "sprintNewRatio": {
+          "type": "number",
+          "format": "double"
+        }
+      }
+    },
+    "MemoryModelConfig": {
+      "type": "object",
+      "required": [
+        "compositeWeightLong",
+        "compositeWeightMedium",
+        "compositeWeightShort",
+        "consolidationBonus",
+        "consolidationRateScale",
+        "halfLifeBaseEpsilon",
+        "halfLifeTimeUnitSecs",
+        "longTermLearningRate",
+        "masteryAccuracyThreshold",
+        "masteryCompositeThreshold",
+        "masteryStreakThreshold",
+        "mediumTermLearningRate",
+        "recallRiskBonus",
+        "recallRiskThreshold",
+        "reviewingThreshold",
+        "shortTermLearningRate"
+      ],
+      "properties": {
+        "alphaMax": {
+          "default": 0.5,
+          "type": "number",
+          "format": "double"
+        },
+        "alphaMin": {
+          "default": 0.1,
+          "type": "number",
+          "format": "double"
+        },
+        "alphaScale": {
+          "default": 0.3,
+          "type": "number",
+          "format": "double"
+        },
+        "baseDesiredRetention": {
+          "default": 0.85,
+          "type": "number",
+          "format": "double"
+        },
+        "compositeWeightLong": {
+          "type": "number",
+          "format": "double"
+        },
+        "compositeWeightMedium": {
+          "type": "number",
+          "format": "double"
+        },
+        "compositeWeightShort": {
+          "type": "number",
+          "format": "double"
+        },
+        "consolidationBonus": {
+          "type": "number",
+          "format": "double"
+        },
+        "consolidationRateScale": {
+          "type": "number",
+          "format": "double"
+        },
+        "forgettingCurveDecay": {
+          "default": -0.5,
+          "type": "number",
+          "format": "double"
+        },
+        "forgettingCurveFactor": {
+          "default": 0.2345679012345679,
+          "type": "number",
+          "format": "double"
+        },
+        "forgettingCurveFloor": {
+          "description": "2021 MaiMemo study: forgetting curve has non-zero asymptote R→floor (not 0)",
+          "default": 0.1,
+          "type": "number",
+          "format": "double"
+        },
+        "forgettingThreshold": {
+          "default": 0.2,
+          "type": "number",
+          "format": "double"
+        },
+        "halfLifeBaseEpsilon": {
+          "type": "number",
+          "format": "double"
+        },
+        "halfLifePower": {
+          "default": 1.5,
+          "type": "number",
+          "format": "double"
+        },
+        "halfLifeTimeUnitSecs": {
+          "type": "number",
+          "format": "double"
+        },
+        "highAccuracyRetentionBoost": {
+          "default": 0.02,
+          "type": "number",
+          "format": "double"
+        },
+        "highAccuracyThreshold": {
+          "default": 0.9,
+          "type": "number",
+          "format": "double"
+        },
+        "highFatigueRetentionDrop": {
+          "default": 0.05,
+          "type": "number",
+          "format": "double"
+        },
+        "highFatigueThreshold": {
+          "default": 0.6,
+          "type": "number",
+          "format": "double"
+        },
+        "longTermLearningRate": {
+          "type": "number",
+          "format": "double"
+        },
+        "lowMotivationRetentionDrop": {
+          "default": 0.03,
+          "type": "number",
+          "format": "double"
+        },
+        "lowMotivationThreshold": {
+          "default": -0.2,
+          "type": "number",
+          "format": "double"
+        },
+        "masteryAccuracyThreshold": {
+          "type": "number",
+          "format": "double"
+        },
+        "masteryCompositeThreshold": {
+          "type": "number",
+          "format": "double"
+        },
+        "masteryStreakThreshold": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "masteryWindowSize": {
+          "default": 20,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "maxIntervalDays": {
+          "default": 90.0,
+          "type": "number",
+          "format": "double"
+        },
+        "mediumTermLearningRate": {
+          "type": "number",
+          "format": "double"
+        },
+        "minIntervalSecs": {
+          "default": 60,
+          "type": "integer",
+          "format": "int64"
+        },
+        "passiveDecayHalfLifeDays": {
+          "default": 30.0,
+          "type": "number",
+          "format": "double"
+        },
+        "passiveDecayPower": {
+          "default": 0.5,
+          "type": "number",
+          "format": "double"
+        },
+        "recallRiskBonus": {
+          "type": "number",
+          "format": "double"
+        },
+        "recallRiskThreshold": {
+          "type": "number",
+          "format": "double"
+        },
+        "retentionMax": {
+          "default": 0.95,
+          "type": "number",
+          "format": "double"
+        },
+        "retentionMin": {
+          "default": 0.7,
+          "type": "number",
+          "format": "double"
+        },
+        "reviewingThreshold": {
+          "type": "number",
+          "format": "double"
+        },
+        "shortTermLearningRate": {
+          "type": "number",
+          "format": "double"
+        },
+        "stabilityBaseDays": {
+          "description": "FSRS-style power-law forgetting curve: R = (1 + factor * t/S)^decay",
+          "default": 20.0,
+          "type": "number",
+          "format": "double"
+        },
+        "streakMinGapMs": {
+          "default": 1800000,
+          "type": "integer",
+          "format": "int64"
+        },
+        "w": {
+          "default": [
+            0.4072,
+            1.1829,
+            3.1262,
+            15.4722,
+            7.1949,
+            0.5345,
+            1.4604,
+            0.0046,
+            1.54575,
+            0.1192,
+            1.01925,
+            1.9395,
+            0.11,
+            0.29605,
+            2.2698,
+            0.2315,
+            2.9898,
+            0.51655,
+            0.6621
+          ],
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 19,
+          "minItems": 19
+        }
+      }
+    },
+    "ModelingConfig": {
+      "type": "object",
+      "required": [
+        "attentionSmoothing",
+        "confidenceDecay",
+        "fatigueIncreaseRate",
+        "fatigueRecoveryRate",
+        "minConfidence",
+        "motivationMomentum",
+        "visualFatigueWeight"
+      ],
+      "properties": {
+        "attentionSmoothing": {
+          "type": "number",
+          "format": "double"
+        },
+        "cognitiveProfileAlpha": {
+          "description": "认知画像平滑系数（EMA alpha）",
+          "default": 0.1,
+          "type": "number",
+          "format": "double"
+        },
+        "confidenceDecay": {
+          "type": "number",
+          "format": "double"
+        },
+        "engagementFocusLossBaseMs": {
+          "description": "engagement 中焦点丢失时长的归一化基准（毫秒）",
+          "default": 30000.0,
+          "type": "number",
+          "format": "double"
+        },
+        "engagementFocusLossPenaltyMax": {
+          "description": "engagement 中焦点丢失惩罚的上限",
+          "default": 0.3,
+          "type": "number",
+          "format": "double"
+        },
+        "engagementPausePenalty": {
+          "description": "engagement 中暂停次数的惩罚系数（每次暂停扣分）",
+          "default": 0.05,
+          "type": "number",
+          "format": "double"
+        },
+        "engagementPausePenaltyMax": {
+          "description": "engagement 中暂停惩罚的上限",
+          "default": 0.3,
+          "type": "number",
+          "format": "double"
+        },
+        "engagementSwitchPenalty": {
+          "description": "engagement 中切换次数的惩罚系数（每次切换扣分）",
+          "default": 0.1,
+          "type": "number",
+          "format": "double"
+        },
+        "engagementSwitchPenaltyMax": {
+          "description": "engagement 中切换惩罚的上限",
+          "default": 0.3,
+          "type": "number",
+          "format": "double"
+        },
+        "fatigueIncreaseRate": {
+          "type": "number",
+          "format": "double"
+        },
+        "fatigueQuitIncrease": {
+          "description": "用户退出时的疲劳增加量",
+          "default": 0.2,
+          "type": "number",
+          "format": "double"
+        },
+        "fatigueRecoveryRate": {
+          "type": "number",
+          "format": "double"
+        },
+        "minConfidence": {
+          "type": "number",
+          "format": "double"
+        },
+        "motivationMomentum": {
+          "type": "number",
+          "format": "double"
+        },
+        "responseSpeedMaxMs": {
+          "description": "response_speed 归一化的最大响应时间（毫秒）",
+          "default": 10000.0,
+          "type": "number",
+          "format": "double"
+        },
+        "trendAlpha": {
+          "description": "趋势状态平滑系数（EMA alpha）",
+          "default": 0.05,
+          "type": "number",
+          "format": "double"
+        },
+        "visualFatigueWeight": {
+          "description": "视觉疲劳信号在混合公式中的权重 (0.0-1.0) 行为信号权重 = 1.0 - visual_fatigue_weight",
+          "type": "number",
+          "format": "double"
+        }
+      }
+    },
+    "MonitoringConfig": {
+      "type": "object",
+      "required": [
+        "metricsFlushIntervalSecs",
+        "sampleRate"
+      ],
+      "properties": {
+        "metricsFlushIntervalSecs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "sampleRate": {
+          "type": "number",
+          "format": "double"
+        }
+      }
+    },
+    "MtpConfig": {
+      "type": "object",
+      "required": [
+        "knownMorphemeDecay",
+        "maxKnownMorphemes",
+        "morphemeBonusCap",
+        "morphemeTransferCoeff",
+        "newMorphemeInitialCoeff"
+      ],
+      "properties": {
+        "knownMorphemeDecay": {
+          "type": "number",
+          "format": "double"
+        },
+        "maxKnownMorphemes": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "morphemeBonusCap": {
+          "type": "number",
+          "format": "double"
+        },
+        "morphemeTransferCoeff": {
+          "type": "number",
+          "format": "double"
+        },
+        "newMorphemeInitialCoeff": {
+          "type": "number",
+          "format": "double"
+        }
+      }
+    },
+    "ObjectiveWeights": {
+      "type": "object",
+      "required": [
+        "accuracy",
+        "fatigue",
+        "frustration",
+        "retention",
+        "speed"
+      ],
+      "properties": {
+        "accuracy": {
+          "type": "number",
+          "format": "double"
+        },
+        "fatigue": {
+          "type": "number",
+          "format": "double"
+        },
+        "frustration": {
+          "type": "number",
+          "format": "double"
+        },
+        "retention": {
+          "type": "number",
+          "format": "double"
+        },
+        "speed": {
+          "type": "number",
+          "format": "double"
+        }
+      }
+    },
+    "RewardConfig": {
+      "type": "object",
+      "required": [
+        "fatiguePenaltyScale",
+        "fatiguePenaltyThreshold",
+        "frustrationPenaltyScale",
+        "frustrationPenaltyThreshold",
+        "speedRewardScale"
+      ],
+      "properties": {
+        "expectedForgetCostWeight": {
+          "default": 0.3,
+          "type": "number",
+          "format": "double"
+        },
+        "fatiguePenaltyScale": {
+          "type": "number",
+          "format": "double"
+        },
+        "fatiguePenaltyThreshold": {
+          "type": "number",
+          "format": "double"
+        },
+        "frustrationPenaltyScale": {
+          "type": "number",
+          "format": "double"
+        },
+        "frustrationPenaltyThreshold": {
+          "type": "number",
+          "format": "double"
+        },
+        "speedRewardScale": {
+          "type": "number",
+          "format": "double"
+        }
+      }
+    },
+    "SspConfig": {
+      "type": "object",
+      "required": [
+        "base",
+        "convergenceThreshold",
+        "difficultyOffsetOnLapse",
+        "forgetCost",
+        "maxIndex",
+        "maxIterations",
+        "minIndex",
+        "recallCost",
+        "targetStabilityDays"
+      ],
+      "properties": {
+        "base": {
+          "description": "离散化底数（与墨墨一致）",
+          "type": "number",
+          "format": "double"
+        },
+        "convergenceThreshold": {
+          "description": "DP 收敛阈值",
+          "type": "number",
+          "format": "double"
+        },
+        "costParams": {
+          "description": "参数化代价函数：recall/forget cost 随 S/D 调制",
+          "default": {
+            "forgetDCoeff": 0.0,
+            "forgetSCoeff": 0.0,
+            "recallDCoeff": 0.0,
+            "recallSCoeff": 0.0
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/SspCostParams"
+            }
+          ]
+        },
+        "difficultyOffsetOnLapse": {
+          "description": "遗忘后难度增量（映射到 D ∈ [1,10]）",
+          "type": "number",
+          "format": "double"
+        },
+        "discountFactor": {
+          "description": "Bellman 折扣因子 γ ∈ [0,1]，防止无穷代价堆积",
+          "default": 1.0,
+          "type": "number",
+          "format": "double"
+        },
+        "dualGridEnabled": {
+          "description": "双网格离散化：小 S 用 log 间距，大 S 用线性间距",
+          "default": false,
+          "type": "boolean"
+        },
+        "dualGridThresholdDays": {
+          "description": "双网格切换阈值（天）",
+          "default": 10.0,
+          "type": "number",
+          "format": "double"
+        },
+        "forgetCost": {
+          "type": "number",
+          "format": "double"
+        },
+        "linearStepDays": {
+          "description": "线性间距步长（天）",
+          "default": 5.0,
+          "type": "number",
+          "format": "double"
+        },
+        "maxIndex": {
+          "description": "stability log 等比 bins 的最大指数",
+          "type": "integer",
+          "format": "int32"
+        },
+        "maxIterations": {
+          "description": "DP 最大迭代次数",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "minIndex": {
+          "description": "stability log 等比 bins 的最小指数",
+          "type": "integer",
+          "format": "int32"
+        },
+        "rMax": {
+          "description": "3D 求解器：目标保持率搜索上界",
+          "default": 0.99,
+          "type": "number",
+          "format": "double"
+        },
+        "rMin": {
+          "description": "3D 求解器：目标保持率搜索下界",
+          "default": 0.7,
+          "type": "number",
+          "format": "double"
+        },
+        "rStep": {
+          "description": "3D 求解器：保持率离散步长",
+          "default": 0.01,
+          "type": "number",
+          "format": "double"
+        },
+        "recallCost": {
+          "type": "number",
+          "format": "double"
+        },
+        "reviewRatingProbs": {
+          "description": "评分概率分布 [Hard, Good, Easy]",
+          "default": [
+            0.224,
+            0.631,
+            0.145
+          ],
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "double"
+          },
+          "maxItems": 3,
+          "minItems": 3
+        },
+        "targetStabilityDays": {
+          "description": "目标 stability（天）：halflife 达到此值视为\"长期记住\"",
+          "type": "number",
+          "format": "double"
+        }
+      }
+    },
+    "SspCostParams": {
+      "type": "object",
+      "properties": {
+        "forgetDCoeff": {
+          "description": "difficulty 对 forget cost 的线性调制系数",
+          "default": 0.0,
+          "type": "number",
+          "format": "double"
+        },
+        "forgetSCoeff": {
+          "description": "stability 对 forget cost 的线性调制系数",
+          "default": 0.0,
+          "type": "number",
+          "format": "double"
+        },
+        "recallDCoeff": {
+          "description": "difficulty 对 recall cost 的线性调制系数",
+          "default": 0.0,
+          "type": "number",
+          "format": "double"
+        },
+        "recallSCoeff": {
+          "description": "stability 对 recall cost 的线性调制系数",
+          "default": 0.0,
+          "type": "number",
+          "format": "double"
+        }
+      }
+    },
+    "SwdConfig": {
+      "type": "object",
+      "required": [
+        "fallbackConfidence",
+        "historyFilterThreshold",
+        "maxHistorySize"
+      ],
+      "properties": {
+        "fallbackConfidence": {
+          "type": "number",
+          "format": "double"
+        },
+        "historyFilterThreshold": {
+          "type": "number",
+          "format": "double"
+        },
+        "maxHistorySize": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "similarityCacheTtlSecs": {
+          "default": 300,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "WordSelectorConfig": {
+      "type": "object",
+      "required": [
+        "errorProneBonus",
+        "newWordGaussianSigma",
+        "recallMasteredThreshold",
+        "recentlyMasteredBonus",
+        "reviewUcbMaxBonus",
+        "reviewUcbWeight"
+      ],
+      "properties": {
+        "errorProneBonus": {
+          "type": "number",
+          "format": "double"
+        },
+        "newWordGaussianSigma": {
+          "type": "number",
+          "format": "double"
+        },
+        "optimalRecallCenter": {
+          "default": 0.5,
+          "type": "number",
+          "format": "double"
+        },
+        "optimalRecallSigma": {
+          "default": 0.3,
+          "type": "number",
+          "format": "double"
+        },
+        "recallMasteredThreshold": {
+          "type": "number",
+          "format": "double"
+        },
+        "recentlyMasteredBonus": {
+          "type": "number",
+          "format": "double"
+        },
+        "reviewUcbMaxBonus": {
+          "type": "number",
+          "format": "double"
+        },
+        "reviewUcbWeight": {
+          "type": "number",
+          "format": "double"
+        },
+        "sigmoidSteepness": {
+          "default": 8.0,
+          "type": "number",
+          "format": "double"
+        },
+        "spacingCooldownSecs": {
+          "default": 300.0,
+          "type": "number",
+          "format": "double"
+        }
+      }
+    }
+  }
+}

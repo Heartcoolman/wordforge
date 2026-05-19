@@ -7,6 +7,7 @@ pub mod clients;
 pub mod elo;
 pub mod engine;
 pub mod extras;
+pub mod feedback;
 pub mod learning_sessions;
 pub mod notifications;
 pub mod records;
