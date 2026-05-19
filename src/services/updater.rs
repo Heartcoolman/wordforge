@@ -146,13 +146,19 @@ pub struct Updater {
     api_url: String,
     cache_ttl: std::time::Duration,
     cache: RwLock<UpdaterCache>,
+    /// API / metadata 调用：30s 总超时，适合短请求
     client: reqwest::Client,
+    /// 下载 release tarball / sha256：仅 per-chunk read timeout，不限总时长，
+    /// 适应国内服务器到 GitHub release CDN 的慢链路（实测 22 KB/s × 9MB ≈ 7 min）
+    download_client: reqwest::Client,
     github_token: Option<String>,
     allow_downgrade: bool,
     install_dir: PathBuf,
     max_tarball_bytes: u64,
     auto_check_enabled: bool,
     current_tag: String,
+    /// v0.5.4：可选 GitHub release 下载镜像前缀（如 `https://gh-proxy.com/`）
+    download_mirror_prefix: Option<String>,
 }
 
 impl Updater {
@@ -173,18 +179,28 @@ impl Updater {
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
+        // v0.5.4：下载用独立 client，不设总 timeout，只用 connect + per-chunk read
+        // timeout，适应国内服务器到 GitHub release CDN 的慢链路。
+        let download_client = reqwest::Client::builder()
+            .user_agent(USER_AGENT)
+            .connect_timeout(std::time::Duration::from_secs(15))
+            .read_timeout(std::time::Duration::from_secs(60))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
 
         let updater = Self {
             api_url: cfg.api_url.clone(),
             cache_ttl: std::time::Duration::from_secs(cfg.cache_ttl_secs),
             cache: RwLock::new(UpdaterCache::default()),
             client,
+            download_client,
             github_token: cfg.github_token.clone(),
             allow_downgrade: cfg.allow_downgrade,
             install_dir,
             max_tarball_bytes: cfg.max_tarball_bytes,
             auto_check_enabled: cfg.worker_enabled,
             current_tag: current_tag.to_string(),
+            download_mirror_prefix: cfg.download_mirror_prefix.clone(),
         };
 
         // 持久化 ETag（断言写盘失败不阻塞构造）
@@ -528,8 +544,19 @@ impl Updater {
         std::process::exit(0);
     }
 
+    /// v0.5.4：对 release.githubusercontent.com / github.com/.../releases/download/
+    /// 类 URL 拼接镜像 prefix（如 `https://gh-proxy.com/`）；前缀为空时返回原 URL。
+    /// 规则：`<prefix>/<原 url>`，与 gh-proxy.com / ghproxy.net 等镜像约定一致。
+    fn mirror(&self, url: &str) -> String {
+        match self.download_mirror_prefix.as_deref() {
+            Some(p) if !p.is_empty() => format!("{}/{}", p.trim_end_matches('/'), url),
+            _ => url.to_string(),
+        }
+    }
+
     async fn fetch_sha256(&self, url: &str) -> Result<String, UpdaterError> {
-        let mut req = self.client.get(url);
+        let mirrored = self.mirror(url);
+        let mut req = self.download_client.get(&mirrored);
         if let Some(ref token) = self.github_token {
             req = req.header("Authorization", format!("Bearer {token}"));
         }
@@ -565,7 +592,8 @@ impl Updater {
         progress: &ProgressSink,
         expected_size: u64,
     ) -> Result<String, UpdaterError> {
-        let mut req = self.client.get(url);
+        let mirrored = self.mirror(url);
+        let mut req = self.download_client.get(&mirrored);
         if let Some(ref token) = self.github_token {
             req = req.header("Authorization", format!("Bearer {token}"));
         }
@@ -939,5 +967,56 @@ mod tests {
         assert_eq!(parsed.tarball_size, 12345);
         assert!(parsed.tarball_url.ends_with(".tar.gz"));
         assert!(parsed.sha256_url.ends_with(".sha256"));
+    }
+
+    /// v0.5.4 镜像 prefix helper：无 prefix 走原 URL；有 prefix 时拼成
+    /// `<prefix>/<原 url>` 形式（gh-proxy 系列镜像约定）。
+    #[test]
+    fn mirror_helper_handles_prefix_variants() {
+        let cfg_no_mirror = UpdateCheckConfig {
+            api_url: String::new(),
+            cache_ttl_secs: 3600,
+            worker_enabled: false,
+            worker_interval_secs: 3600,
+            github_token: None,
+            allow_downgrade: false,
+            install_dir: Some(std::env::temp_dir()),
+            max_tarball_bytes: 1024,
+            download_mirror_prefix: None,
+        };
+        let u = Updater::new(&cfg_no_mirror, "v0.5.4").expect("build updater");
+        assert_eq!(
+            u.mirror("https://github.com/o/r/releases/download/v1/foo.tar.gz"),
+            "https://github.com/o/r/releases/download/v1/foo.tar.gz"
+        );
+
+        let cfg_with_mirror = UpdateCheckConfig {
+            download_mirror_prefix: Some("https://gh-proxy.com/".into()),
+            ..cfg_no_mirror.clone()
+        };
+        let u2 = Updater::new(&cfg_with_mirror, "v0.5.4").expect("build updater");
+        assert_eq!(
+            u2.mirror("https://github.com/o/r/releases/download/v1/foo.tar.gz"),
+            "https://gh-proxy.com/https://github.com/o/r/releases/download/v1/foo.tar.gz"
+        );
+
+        // 末尾带 / 与不带 / 行为应一致
+        let cfg_trailing = UpdateCheckConfig {
+            download_mirror_prefix: Some("https://gh-proxy.com".into()),
+            ..cfg_no_mirror.clone()
+        };
+        let u3 = Updater::new(&cfg_trailing, "v0.5.4").expect("build updater");
+        assert_eq!(
+            u3.mirror("https://github.com/o/r/foo"),
+            "https://gh-proxy.com/https://github.com/o/r/foo"
+        );
+
+        // 空字符串视同未配置
+        let cfg_empty = UpdateCheckConfig {
+            download_mirror_prefix: Some(String::new()),
+            ..cfg_no_mirror.clone()
+        };
+        let u4 = Updater::new(&cfg_empty, "v0.5.4").expect("build updater");
+        assert_eq!(u4.mirror("https://github.com/o"), "https://github.com/o");
     }
 }

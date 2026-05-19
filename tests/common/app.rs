@@ -111,6 +111,7 @@ async fn spawn_with_limits_inner(
             allow_downgrade: false,
             install_dir: None,
             max_tarball_bytes: 200 * 1024 * 1024,
+            download_mirror_prefix: None,
         },
         pagination: Default::default(),
         limits: Default::default(),

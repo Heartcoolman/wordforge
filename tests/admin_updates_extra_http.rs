@@ -30,6 +30,7 @@ fn make_updater(server_uri: &str, current_tag: &str, install_dir: &std::path::Pa
             allow_downgrade: false,
             install_dir: Some(install_dir.to_path_buf()),
             max_tarball_bytes: 200 * 1024 * 1024,
+            download_mirror_prefix: None,
         },
         current_tag,
     )

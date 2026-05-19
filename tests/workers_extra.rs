@@ -90,6 +90,7 @@ fn build_test_config(database_url: String) -> Config {
             allow_downgrade: false,
             install_dir: None,
             max_tarball_bytes: 200 * 1024 * 1024,
+            download_mirror_prefix: None,
         },
         pagination: Default::default(),
         strict_mode: Default::default(),
@@ -321,6 +322,7 @@ async fn update_checker_broadcasts_when_new_release_available() {
         allow_downgrade: false,
         install_dir: Some(tmp_install.path().to_path_buf()),
         max_tarball_bytes: 200 * 1024 * 1024,
+        download_mirror_prefix: None,
     };
     let updater = Updater::new(&cfg, "v0.0.1").expect("updater");
 
@@ -354,6 +356,7 @@ async fn update_checker_swallows_check_error() {
         allow_downgrade: false,
         install_dir: Some(tmp_install.path().to_path_buf()),
         max_tarball_bytes: 200 * 1024 * 1024,
+        download_mirror_prefix: None,
     };
     let updater = Updater::new(&cfg, "v0.0.1").expect("updater");
 
@@ -393,6 +396,7 @@ async fn update_checker_returns_early_when_no_update() {
         allow_downgrade: false,
         install_dir: Some(tmp_install.path().to_path_buf()),
         max_tarball_bytes: 200 * 1024 * 1024,
+        download_mirror_prefix: None,
     };
     let updater = Updater::new(&cfg, "v0.0.1").expect("updater");
 

@@ -271,6 +271,7 @@ mod tests {
                 allow_downgrade: false,
                 install_dir: None,
                 max_tarball_bytes: 200 * 1024 * 1024,
+                download_mirror_prefix: None,
             },
             pagination: Default::default(),
             strict_mode: Default::default(),
