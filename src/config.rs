@@ -258,7 +258,7 @@ impl Config {
             api_only: env_or_bool("API_ONLY", false),
             sqlite_busy_timeout_ms: env_or_parse("SQLITE_BUSY_TIMEOUT_MS", 5000_u64),
             sqlite_connection_timeout_ms: env_or_parse("SQLITE_CONNECTION_TIMEOUT_MS", 250_u64),
-            sqlite_pool_size: env_or_parse("SQLITE_POOL_SIZE", 4_u32),
+            sqlite_pool_size: env_or_parse("SQLITE_POOL_SIZE", 16_u32),
             jwt_secret,
             refresh_jwt_secret,
             jwt_expires_in_hours: env_or_parse("JWT_EXPIRES_IN_HOURS", 24_u64),
