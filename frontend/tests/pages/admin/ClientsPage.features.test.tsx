@@ -81,14 +81,15 @@ describe('ClientsPage — tabs, ban dialog, telemetry edge data', () => {
     await waitFor(() => expect(mockApi.getTelemetry).toHaveBeenCalled());
   });
 
-  it('clicking ban dialog backdrop closes it', async () => {
+  it('ban dialog cancel button closes it', async () => {
+    // ConfirmDialog 重构后用通用 Modal，cancel 按钮是稳定 UX 入口；
+    // backdrop click 关闭由 Modal 自己测试覆盖，不在此重复。
     mockApi.getClients.mockResolvedValue({ sseLive: [sseEntry], recentlyActive: [] });
     await renderPage();
     await waitFor(() => expect(screen.getByText('封禁')).toBeInTheDocument());
     fireEvent.click(screen.getByText('封禁'));
     await waitFor(() => expect(screen.getByText('确认封禁设备')).toBeInTheDocument());
-    const backdrop = document.querySelector('.fixed.inset-0.z-50') as HTMLDivElement;
-    fireEvent.click(backdrop);
+    fireEvent.click(screen.getByText('取消'));
     await waitFor(() => expect(screen.queryByText('确认封禁设备')).not.toBeInTheDocument());
   });
 

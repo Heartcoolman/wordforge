@@ -64,7 +64,10 @@ impl Store {
                 "PRAGMA journal_mode = WAL;
                  PRAGMA synchronous = NORMAL;
                  PRAGMA foreign_keys = ON;
-                 PRAGMA busy_timeout = {};",
+                 PRAGMA busy_timeout = {};
+                 PRAGMA cache_size = -64000;
+                 PRAGMA mmap_size = 268435456;
+                 PRAGMA temp_store = MEMORY;",
                 busy_timeout_ms
             ))
         });

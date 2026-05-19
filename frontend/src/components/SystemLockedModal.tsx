@@ -1,22 +1,10 @@
-import { onMount } from 'solid-js';
+import { Modal } from '@/components/ui/Modal';
 
+/** 系统锁定屏（数据损坏等场景）。无关闭按钮、点击/ESC 不可解除，需重启应用。 */
 export function SystemLockedModal() {
-  let overlayRef!: HTMLDivElement;
-
-  onMount(() => {
-    overlayRef.focus();
-  });
-
   return (
-    <div
-      ref={overlayRef}
-      tabIndex={0}
-      class="fixed inset-0 z-[9999] flex items-center justify-center bg-black/70 outline-none"
-      style="pointer-events: all"
-      onClick={(e) => e.stopPropagation()}
-      onKeyDown={(e) => { e.preventDefault(); e.stopPropagation(); }}
-    >
-      <div class="bg-surface-elevated rounded-2xl shadow-xl p-8 max-w-sm w-full mx-4 text-center">
+    <Modal open={true} onClose={() => {}} size="sm" hideClose>
+      <div class="text-center">
         <div class="flex justify-center mb-4">
           <div class="w-14 h-14 rounded-full bg-error/10 flex items-center justify-center">
             <svg class="w-8 h-8 text-error" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
@@ -30,6 +18,6 @@ export function SystemLockedModal() {
           客户端数据已损坏，请重启应用后再试。
         </p>
       </div>
-    </div>
+    </Modal>
   );
 }
