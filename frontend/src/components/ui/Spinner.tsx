@@ -12,21 +12,33 @@ interface SpinnerProps {
   class?: string;
 }
 
+/**
+ * 双环 Spinner — 外环为半圆 stroke 顺时针旋转，内圈为更细的 track（视觉锚点）
+ * 比单层 SVG path 更精致，CPU/GPU 开销持平。
+ */
 export function Spinner(props: SpinnerProps) {
   return (
-    <svg
-      class={cn('animate-spin text-accent', sizeMap[props.size ?? 'md'], props.class)}
-      fill="none"
-      viewBox="0 0 24 24"
+    <span
+      class={cn('relative inline-flex items-center justify-center', sizeMap[props.size ?? 'md'], props.class)}
       role="status"
       aria-label="加载中"
     >
-      <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
-      <path
-        class="opacity-75"
-        fill="currentColor"
-        d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
-      />
-    </svg>
+      {/* Track ring — 静态 */}
+      <svg class="absolute inset-0 w-full h-full text-content-tertiary/30" fill="none" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2.5" />
+      </svg>
+      {/* Spin ring — 旋转的 270° 弧（cap=round 更柔和） */}
+      <svg class="absolute inset-0 w-full h-full text-accent animate-spin" fill="none" viewBox="0 0 24 24">
+        <circle
+          cx="12"
+          cy="12"
+          r="10"
+          stroke="currentColor"
+          stroke-width="2.5"
+          stroke-linecap="round"
+          stroke-dasharray="47 63"
+        />
+      </svg>
+    </span>
   );
 }

@@ -24,8 +24,8 @@ export function Select(props: SelectProps) {
         {...rest}
         class={cn(
           'w-full h-10 px-3 rounded-lg text-sm bg-surface text-content appearance-none',
-          'border border-border transition-colors duration-150',
-          'hover:border-border-hover cursor-pointer',
+          'border border-border-hairline transition-[border-color,box-shadow,background-color] duration-fast ease-out-expo',
+          'hover:border-border cursor-pointer',
           'focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent',
           'bg-[url("data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'16\' height=\'16\' viewBox=\'0 0 24 24\' fill=\'none\' stroke=\'currentColor\' stroke-width=\'2\'%3E%3Cpath d=\'m6 9 6 6 6-6\'/%3E%3C/svg%3E")] bg-no-repeat bg-[right_0.75rem_center]',
           local.error && 'border-error',

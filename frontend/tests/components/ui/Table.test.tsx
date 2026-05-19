@@ -28,7 +28,8 @@ describe('Table', () => {
 
   it('shows loading skeleton', () => {
     const { container } = render(() => <Table columns={columns} data={[]} loading />);
-    expect(container.querySelectorAll('.animate-pulse').length).toBeGreaterThan(0);
+    // 升级：表格 loading 行从 animate-pulse 改为 animate-shimmer 复用 Skeleton 样式
+    expect(container.querySelectorAll('.animate-shimmer').length).toBeGreaterThan(0);
   });
 
   it('calls onRowClick', async () => {

@@ -7,16 +7,19 @@ interface ProgressBarProps {
   size?: 'sm' | 'md' | 'lg';
   color?: 'accent' | 'success' | 'warning' | 'error' | 'info';
   showLabel?: boolean;
+  /** 启用 striped 动画（适合"进行中"长任务） */
+  striped?: boolean;
   class?: string;
 }
 
 const heightMap = { sm: 'h-1.5', md: 'h-2.5', lg: 'h-4' };
-const colorMap = {
-  accent: 'bg-accent',
-  success: 'bg-success',
-  warning: 'bg-warning',
-  error: 'bg-error',
-  info: 'bg-info',
+// 渐变填充：顶层标准色 → 底层 hover 色，layered 感更精致
+const fillMap = {
+  accent: 'bg-gradient-to-b from-accent to-accent-hover',
+  success: 'bg-gradient-to-b from-success to-success/80',
+  warning: 'bg-gradient-to-b from-warning to-warning/80',
+  error: 'bg-gradient-to-b from-error to-error/80',
+  info: 'bg-gradient-to-b from-info to-info/80',
 };
 
 export function ProgressBar(props: ProgressBarProps) {
@@ -32,16 +35,21 @@ export function ProgressBar(props: ProgressBarProps) {
       >
         <div
           class={cn(
-            'h-full rounded-full transition-all duration-500 ease-out',
-            colorMap[props.color ?? 'accent'],
+            'h-full rounded-full transition-[width] duration-slow ease-out-expo relative overflow-hidden',
+            fillMap[props.color ?? 'accent'],
           )}
           style={{ width: `${percent()}%` }}
-        />
+        >
+          <Show when={props.striped}>
+            {/* striped overlay — 45° 斜条纹滑动，提示活动中 */}
+            <span aria-hidden="true" class="absolute inset-0 animate-progress-stripe" />
+          </Show>
+        </div>
       </div>
       <Show when={props.showLabel}>
         <div class="flex justify-between mt-1">
-          <span class="text-xs text-content-secondary">{props.value}/{props.max ?? 100}</span>
-          <span class="text-xs text-content-secondary">{percent().toFixed(0)}%</span>
+          <span class="text-xs text-content-secondary tabular-nums">{props.value}/{props.max ?? 100}</span>
+          <span class="text-xs text-content-secondary tabular-nums">{percent().toFixed(0)}%</span>
         </div>
       </Show>
     </div>
@@ -91,10 +99,10 @@ export function CircularProgress(props: CircularProgressProps) {
           stroke-linecap="round"
           stroke-dasharray={String(circumference())}
           stroke-dashoffset={offset()}
-          class="transition-all duration-500 ease-out"
+          class="transition-[stroke-dashoffset] duration-slow ease-out-expo"
         />
       </svg>
-      <span class="absolute text-xs font-medium text-content">
+      <span class="absolute text-xs font-medium text-content tabular-nums">
         {percent().toFixed(0)}%
       </span>
     </div>

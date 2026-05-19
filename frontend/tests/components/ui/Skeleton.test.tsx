@@ -18,6 +18,7 @@ describe('Skeleton', () => {
 describe('CardSkeleton', () => {
   it('renders skeleton elements', () => {
     const { container } = render(() => <CardSkeleton />);
-    expect(container.querySelectorAll('.animate-pulse').length).toBeGreaterThanOrEqual(3);
+    // 升级：animate-pulse → animate-shimmer（linear gradient + 横向位移动画）
+    expect(container.querySelectorAll('.animate-shimmer').length).toBeGreaterThanOrEqual(3);
   });
 });
