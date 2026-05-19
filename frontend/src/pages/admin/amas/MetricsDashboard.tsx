@@ -43,13 +43,20 @@ export function MetricsDashboard() {
       barGap: '5%',
     }));
     return {
-      grid: { left: 60, right: 60, top: 50, bottom: 40 },
-      legend: { top: 0, type: 'scroll' },
+      // 12 项 legend（6 算法 × 2 维度）+ 双 y 轴 name，top 留 96px 给两行 legend，避免与 axis name 重叠
+      grid: { left: 64, right: 64, top: 96, bottom: 40 },
+      legend: {
+        top: 4,
+        type: 'plain',          // 允许自动换行，比 scroll 模式更直观
+        itemGap: 14,
+        itemWidth: 14,
+        textStyle: { fontSize: 12 },
+      },
       tooltip: { trigger: 'axis' },
       xAxis: { type: 'category', data: dates },
       yAxis: [
-        { type: 'value', name: '延迟 ms', position: 'left' },
-        { type: 'value', name: '错误数', position: 'right', minInterval: 1 },
+        { type: 'value', name: '延迟 ms', position: 'left', nameGap: 12, nameTextStyle: { fontSize: 11 } },
+        { type: 'value', name: '错误数', position: 'right', minInterval: 1, nameGap: 12, nameTextStyle: { fontSize: 11 } },
       ],
       series: [...latencySeries, ...errorSeries],
     };
@@ -78,7 +85,7 @@ export function MetricsDashboard() {
         </div>
         <Show when={!series.loading} fallback={<div class="flex justify-center py-12"><Spinner /></div>}>
           <Show when={grouped().dates.length > 0} fallback={<Empty title="暂无聚合数据" description="algorithm_metrics_daily 表当前为空" />}>
-            <EChart option={option} height="380px" />
+            <EChart option={option} height="440px" />
           </Show>
         </Show>
       </Card>

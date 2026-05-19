@@ -50,7 +50,7 @@ export default function AdminDashboard() {
 
       {/* KPI 行 — 4 张卡 stagger 80ms 错开 + count-up 数字滚动 */}
       <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <div class="animate-fade-in-up" style={{ 'animation-fill-mode': 'backwards' }}>
+        <div class="animate-fade-in-up h-full" style={{ 'animation-fill-mode': 'backwards' }}>
           <Show when={stats()} fallback={<Skeleton height="100px" />}>
             {(s) => (
               <StatCard
@@ -64,7 +64,7 @@ export default function AdminDashboard() {
             )}
           </Show>
         </div>
-        <div class="animate-fade-in-up" style={{ 'animation-delay': '80ms', 'animation-fill-mode': 'backwards' }}>
+        <div class="animate-fade-in-up h-full" style={{ 'animation-delay': '80ms', 'animation-fill-mode': 'backwards' }}>
           <Show when={eng()} fallback={<Skeleton height="100px" />}>
             {(e) => (
               <StatCard
@@ -78,7 +78,7 @@ export default function AdminDashboard() {
             )}
           </Show>
         </div>
-        <div class="animate-fade-in-up" style={{ 'animation-delay': '160ms', 'animation-fill-mode': 'backwards' }}>
+        <div class="animate-fade-in-up h-full" style={{ 'animation-delay': '160ms', 'animation-fill-mode': 'backwards' }}>
           <Show when={overview()} fallback={<Skeleton height="100px" />}>
             {(o) => (
               <StatCard
@@ -91,7 +91,7 @@ export default function AdminDashboard() {
             )}
           </Show>
         </div>
-        <div class="animate-fade-in-up" style={{ 'animation-delay': '240ms', 'animation-fill-mode': 'backwards' }}>
+        <div class="animate-fade-in-up h-full" style={{ 'animation-delay': '240ms', 'animation-fill-mode': 'backwards' }}>
           <Show when={overview()} fallback={<Skeleton height="100px" />}>
             {(o) => (
               <StatCard
