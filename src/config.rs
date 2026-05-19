@@ -37,6 +37,29 @@ pub struct Config {
     pub pagination: PaginationConfig,
     pub limits: LimitsConfig,
     pub strict_mode: StrictModeConfig,
+    pub probe: ProbeConfig,
+}
+
+/// 远程探针配置：默认 enabled=false，避免未明确开启时被误用。
+#[derive(Debug, Clone)]
+pub struct ProbeConfig {
+    pub enabled: bool,
+    pub rate_limit_per_min: u32,
+    pub max_timeout_ms: u32,
+    pub default_timeout_ms: u32,
+    pub retention_days: u32,
+}
+
+impl Default for ProbeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            rate_limit_per_min: 10,
+            max_timeout_ms: 10_000,
+            default_timeout_ms: 3_000,
+            retention_days: 60,
+        }
+    }
 }
 
 /// §12 strict-mode 协议配置：
@@ -359,6 +382,13 @@ impl Config {
                 min_client_version: env::var("MIN_CLIENT_VERSION")
                     .ok()
                     .filter(|s| !s.is_empty()),
+            },
+            probe: ProbeConfig {
+                enabled: env_or_bool("PROBE_ENABLED", false),
+                rate_limit_per_min: env_or_parse("PROBE_RATE_LIMIT_PER_MIN", 10_u32),
+                max_timeout_ms: env_or_parse("PROBE_MAX_TIMEOUT_MS", 10_000_u32),
+                default_timeout_ms: env_or_parse("PROBE_DEFAULT_TIMEOUT_MS", 3_000_u32),
+                retention_days: env_or_parse("PROBE_RETENTION_DAYS", 60_u32),
             },
             limits: LimitsConfig {
                 max_batch_size: env_or_parse("LIMITS_MAX_BATCH_SIZE", 500_usize),
@@ -827,6 +857,7 @@ mod tests {
             },
             pagination: PaginationConfig::default(),
             strict_mode: StrictModeConfig::default(),
+            probe: ProbeConfig::default(),
             limits: LimitsConfig::default(),
         };
         mutate(&mut cfg);

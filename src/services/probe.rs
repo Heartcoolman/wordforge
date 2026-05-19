@@ -50,9 +50,15 @@ pub struct ProbeService {
     result_tx: Arc<DashMap<String, broadcast::Sender<ProbeResultPayload>>>,
     /// request_id → confirm ticket（TTL 60s，超时由 sweeper 清理）。
     pending_confirm: Arc<DashMap<String, ConfirmTicket>>,
-    /// M4 用：admin_id → 最近 60s 内调用时间戳。
-    #[allow(dead_code)]
+    /// admin_id → 最近 60s 内调用时间戳。in-memory，重启清零（设计接受）。
     admin_calls: Arc<DashMap<String, Vec<std::time::Instant>>>,
+}
+
+/// per-admin 限速错误。
+#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
+pub enum RateLimitError {
+    #[error("admin rate limit exceeded")]
+    Exceeded,
 }
 
 const BROADCAST_CAPACITY: usize = 256;
@@ -154,6 +160,40 @@ impl ProbeService {
     #[cfg(test)]
     pub fn pending_confirm_count(&self) -> usize {
         self.pending_confirm.len()
+    }
+
+    /// per-admin 滑动窗口限速：检查最近 60s 内调用次数 <= max_per_min；通过则
+    /// 记录本次时间戳。失败返回 Err(Exceeded)。
+    ///
+    /// 不持久化（重启清零）。每次调用顺带清理本 admin 的过期时间戳，避免内存
+    /// 无界增长。
+    pub fn check_and_record_admin_call(
+        &self,
+        admin_id: &str,
+        max_per_min: u32,
+    ) -> Result<(), RateLimitError> {
+        let now = std::time::Instant::now();
+        let window = std::time::Duration::from_secs(60);
+
+        let mut entry = self
+            .admin_calls
+            .entry(admin_id.to_string())
+            .or_default();
+        // 清理过期时间戳
+        entry.retain(|t| now.duration_since(*t) <= window);
+        if entry.len() as u32 >= max_per_min {
+            return Err(RateLimitError::Exceeded);
+        }
+        entry.push(now);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn admin_call_count(&self, admin_id: &str) -> usize {
+        self.admin_calls
+            .get(admin_id)
+            .map(|e| e.value().len())
+            .unwrap_or(0)
     }
 }
 
@@ -269,6 +309,25 @@ mod tests {
         let expired = svc.sweep_expired_confirms();
         assert_eq!(expired, vec!["r-old".to_string()]);
         assert_eq!(svc.pending_confirm_count(), 1);
+    }
+
+    #[test]
+    fn rate_limit_allows_under_threshold_and_blocks_at_threshold() {
+        let svc = ProbeService::new();
+        let max = 3_u32;
+        // 前 3 次通过
+        for _ in 0..3 {
+            assert!(svc.check_and_record_admin_call("admin-A", max).is_ok());
+        }
+        // 第 4 次被拒
+        let err = svc
+            .check_and_record_admin_call("admin-A", max)
+            .unwrap_err();
+        assert_eq!(err, RateLimitError::Exceeded);
+        // 不影响其他 admin
+        assert!(svc.check_and_record_admin_call("admin-B", max).is_ok());
+        assert_eq!(svc.admin_call_count("admin-A"), 3);
+        assert_eq!(svc.admin_call_count("admin-B"), 1);
     }
 
     #[test]

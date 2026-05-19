@@ -8,7 +8,7 @@
 use std::convert::Infallible;
 use std::time::Duration;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::{get, post};
 use axum::Router;
@@ -21,7 +21,7 @@ use crate::auth::AdminAuthUser;
 use crate::extractors::JsonBody;
 use crate::response::{ok, AppError};
 use crate::state::{AppState, SseEvent};
-use crate::store::operations::probe::ProbeInsert;
+use crate::store::operations::probe::{ProbeInsert, ProbeListFilter};
 
 /// 当前后端支持的 ctx schema 版本。客户端 ctx_version 不一致时回
 /// `unsupported_ctx_version`。新增 ctx 字段或方法 → 自增本常量 + 同步
@@ -30,16 +30,15 @@ pub const PROBE_CTX_VERSION_LATEST: u32 = 1;
 
 /// script 上限 16 KB（编辑器够用、SSE 推送轻、DB 落表轻）。
 const MAX_SCRIPT_BYTES: usize = 16 * 1024;
-/// timeout 上限 / 下限。
+/// timeout 下限（上限 / 默认值走 ProbeConfig）。
 const TIMEOUT_MS_MIN: u32 = 100;
-const TIMEOUT_MS_MAX: u32 = 10_000;
-const TIMEOUT_MS_DEFAULT: u32 = 3_000;
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/", post(dispatch_probe))
+        .route("/", post(dispatch_probe).get(list_probe))
         .route("/:batch_id/stream", get(batch_stream))
         .route("/:request_id/confirm", post(confirm_probe))
+        .route("/by-id/:request_id", get(get_probe))
 }
 
 #[derive(Debug, Deserialize)]
@@ -82,6 +81,28 @@ async fn dispatch_probe(
     State(state): State<AppState>,
     JsonBody(req): JsonBody<DispatchRequest>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
+    // ── kill switch ──
+    if !state.config().probe.enabled {
+        return Err(AppError::service_unavailable(
+            "PROBE_DISABLED",
+            "远程探针未启用，请联系系统管理员设置 PROBE_ENABLED=true",
+        ));
+    }
+
+    // ── per-admin 限速 ──
+    state
+        .probe_service()
+        .check_and_record_admin_call(
+            &admin.admin_id,
+            state.config().probe.rate_limit_per_min,
+        )
+        .map_err(|_| {
+            AppError::too_many_requests(&format!(
+                "admin 探针调用频率超限（{}/min）",
+                state.config().probe.rate_limit_per_min
+            ))
+        })?;
+
     // ── 输入校验 ──
     if req.script.len() > MAX_SCRIPT_BYTES {
         return Err(AppError::bad_request(
@@ -95,32 +116,41 @@ async fn dispatch_probe(
             "script 不能为空",
         ));
     }
-    let timeout_ms = req.timeout_ms.unwrap_or(TIMEOUT_MS_DEFAULT);
-    if !(TIMEOUT_MS_MIN..=TIMEOUT_MS_MAX).contains(&timeout_ms) {
+    let cfg_max_timeout = state.config().probe.max_timeout_ms;
+    let cfg_default_timeout = state.config().probe.default_timeout_ms;
+    let timeout_ms = req.timeout_ms.unwrap_or(cfg_default_timeout);
+    if !(TIMEOUT_MS_MIN..=cfg_max_timeout).contains(&timeout_ms) {
         return Err(AppError::bad_request(
             "PROBE_TIMEOUT_OUT_OF_RANGE",
-            "timeoutMs 必须在 [100, 10000] 范围内",
+            &format!("timeoutMs 必须在 [{TIMEOUT_MS_MIN}, {cfg_max_timeout}] 范围内"),
         ));
     }
 
-    // 目标集合：M1 仅 device_ids 路径；all_online 留给 M4。
-    if req.targets.all_online {
-        return Err(AppError::bad_request(
-            "PROBE_BROADCAST_NOT_READY",
-            "all_online 广播待 M4 开放，请使用 device_ids",
-        ));
-    }
-    let device_ids: Vec<String> = req
-        .targets
-        .device_ids
-        .into_iter()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
+    // 目标集合：device_ids 显式列表 + all_online 二选一。
+    let device_ids: Vec<String> = if req.targets.all_online {
+        state
+            .active_sse()
+            .iter()
+            .filter_map(|e| {
+                if e.value().is_empty() {
+                    None
+                } else {
+                    Some(e.key().clone())
+                }
+            })
+            .collect()
+    } else {
+        req.targets
+            .device_ids
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    };
     if device_ids.is_empty() {
         return Err(AppError::bad_request(
             "PROBE_INVALID_TARGETS",
-            "至少需要 1 个 deviceId 目标",
+            "至少需要 1 个 deviceId 目标（或开启 allOnline 但当前无在线设备）",
         ));
     }
 
@@ -302,6 +332,13 @@ async fn confirm_probe(
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     use crate::services::probe::ConfirmError;
 
+    if !state.config().probe.enabled {
+        return Err(AppError::service_unavailable(
+            "PROBE_DISABLED",
+            "远程探针未启用",
+        ));
+    }
+
     let ticket = state
         .probe_service()
         .consume_confirm(&request_id, &body.device_id_suffix)
@@ -358,11 +395,77 @@ async fn confirm_probe(
     Ok(ok(serde_json::json!({ "confirmed": true })))
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ListQuery {
+    batch_id: Option<String>,
+    device_id: Option<String>,
+    admin_id: Option<String>,
+    status: Option<String>,
+    limit: Option<u32>,
+    offset: Option<u32>,
+}
+
+async fn list_probe(
+    _admin: AdminAuthUser,
+    Query(q): Query<ListQuery>,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    if !state.config().probe.enabled {
+        return Err(AppError::service_unavailable(
+            "PROBE_DISABLED",
+            "远程探针未启用",
+        ));
+    }
+    let limit = q.limit.unwrap_or(50).min(200);
+    let offset = q.offset.unwrap_or(0);
+    let filter = ProbeListFilter {
+        batch_id: q.batch_id,
+        device_id: q.device_id,
+        admin_id: q.admin_id,
+        status: q.status,
+    };
+    let store = state.store().clone();
+    let (rows, total) = tokio::task::spawn_blocking(move || {
+        store.list_probe_executions(&filter, limit, offset)
+    })
+    .await
+    .map_err(|e| AppError::internal(&format!("spawn_blocking: {e}")))?
+    .map_err(|e| AppError::internal(&format!("list_probe_executions: {e}")))?;
+    Ok(ok(serde_json::json!({ "rows": rows, "total": total })))
+}
+
+async fn get_probe(
+    _admin: AdminAuthUser,
+    Path(request_id): Path<String>,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    if !state.config().probe.enabled {
+        return Err(AppError::service_unavailable(
+            "PROBE_DISABLED",
+            "远程探针未启用",
+        ));
+    }
+    let store = state.store().clone();
+    let row = tokio::task::spawn_blocking(move || store.get_probe_execution(&request_id))
+        .await
+        .map_err(|e| AppError::internal(&format!("spawn_blocking: {e}")))?
+        .map_err(|e| AppError::internal(&format!("get_probe_execution: {e}")))?
+        .ok_or_else(|| AppError::not_found("probe execution 不存在"))?;
+    Ok(ok(serde_json::json!(row)))
+}
+
 async fn batch_stream(
     _admin: AdminAuthUser,
     Path(batch_id): Path<String>,
     State(state): State<AppState>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, AppError> {
+    if !state.config().probe.enabled {
+        return Err(AppError::service_unavailable(
+            "PROBE_DISABLED",
+            "远程探针未启用",
+        ));
+    }
     let batch_id_for_total = batch_id.clone();
     let store = state.store().clone();
     let expected = tokio::task::spawn_blocking(move || store.count_probe_in_batch(&batch_id_for_total))

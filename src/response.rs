@@ -101,6 +101,15 @@ impl AppError {
         }
     }
 
+    pub fn service_unavailable(code: &str, message: &str) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: code.to_string(),
+            message: message.to_string(),
+            is_operational: true,
+        }
+    }
+
     pub fn internal(message: &str) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,

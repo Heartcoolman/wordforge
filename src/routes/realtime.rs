@@ -277,6 +277,7 @@ mod tests {
             },
             pagination: Default::default(),
             strict_mode: Default::default(),
+            probe: Default::default(),
             limits: Default::default(),
         };
         let store = Arc::new(

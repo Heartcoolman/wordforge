@@ -79,7 +79,13 @@ export default function ProbePage() {
         },
       });
     } catch (err: any) {
-      setErrMsg(err?.message ?? String(err));
+      // 后端 enabled=false 时 503 + code=PROBE_DISABLED；以友好提示展示
+      const code = err?.code ?? err?.data?.error?.code;
+      if (code === 'PROBE_DISABLED') {
+        setErrMsg('远程探针未启用。请联系系统管理员设置 PROBE_ENABLED=true 后重启服务。');
+      } else {
+        setErrMsg(err?.message ?? String(err));
+      }
       setSending(false);
     }
   };
