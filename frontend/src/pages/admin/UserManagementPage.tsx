@@ -3,6 +3,7 @@ import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Badge } from '@/components/ui/Badge';
 import { Modal } from '@/components/ui/Modal';
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
 import { Input } from '@/components/ui/Input';
 import { Pagination } from '@/components/ui/Pagination';
 import { Spinner } from '@/components/ui/Spinner';
@@ -140,23 +141,20 @@ export default function UserManagementPage() {
       {/* 确认弹窗 */}
       <Show when={confirmTarget()}>
         {(target) => (
-          <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => setConfirmTarget(null)}>
-            <Card variant="elevated" class="max-w-sm mx-4" onClick={(e: MouseEvent) => e.stopPropagation()}>
-              <h3 class="text-lg font-semibold text-content mb-2">
-                {target().isBanned ? '确认解封' : '确认封禁'}
-              </h3>
-              <p class="text-sm text-content-secondary mb-4">
+          <ConfirmDialog
+            open={true}
+            title={target().isBanned ? '确认解封' : '确认封禁'}
+            message={
+              <>
                 确定要{target().isBanned ? '解封' : '封禁'}用户 <span class="font-medium text-content">{target().username}</span> 吗？
                 {!target().isBanned && '封禁后该用户将无法登录，所有活跃会话将被撤销。'}
-              </p>
-              <div class="flex justify-end gap-2">
-                <Button size="sm" variant="ghost" onClick={() => setConfirmTarget(null)}>取消</Button>
-                <Button size="sm" variant={target().isBanned ? 'success' : 'danger'} onClick={confirmAction}>
-                  {target().isBanned ? '确认解封' : '确认封禁'}
-                </Button>
-              </div>
-            </Card>
-          </div>
+              </>
+            }
+            confirmText={target().isBanned ? '确认解封' : '确认封禁'}
+            variant={target().isBanned ? 'success' : 'danger'}
+            onConfirm={confirmAction}
+            onCancel={() => setConfirmTarget(null)}
+          />
         )}
       </Show>
 
