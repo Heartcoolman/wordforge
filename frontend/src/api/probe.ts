@@ -35,6 +35,27 @@ export interface ProbeResultEvent {
   truncated?: boolean;
 }
 
+export interface ProbeExecutionRow {
+  id: string;
+  batchId: string;
+  deviceId: string;
+  adminId: string;
+  adminUsername: string;
+  scriptBody: string;
+  scriptSha256: string;
+  hasCmdCall: boolean;
+  note: string | null;
+  timeoutMs: number;
+  status: string;
+  resultJson: string | null;
+  stderr: string | null;
+  durationMs: number | null;
+  truncated: boolean;
+  dispatchedAt: string;
+  confirmedAt: string | null;
+  completedAt: string | null;
+}
+
 export const probeApi = {
   dispatch: (body: DispatchRequest) =>
     api.post<DispatchResponse>('/api/admin/probe', body, { useAdminToken: true }),
@@ -44,6 +65,25 @@ export const probeApi = {
     api.post<{ confirmed: boolean }>(
       `/api/admin/probe/${encodeURIComponent(requestId)}/confirm`,
       body,
+      { useAdminToken: true },
+    ),
+  list: (params?: {
+    batchId?: string;
+    deviceId?: string;
+    adminId?: string;
+    status?: string;
+    limit?: number;
+    offset?: number;
+  }) =>
+    api.get<{ rows: ProbeExecutionRow[]; total: number }>(
+      '/api/admin/probe',
+      params as Record<string, string | number | undefined>,
+      { useAdminToken: true },
+    ),
+  get: (requestId: string) =>
+    api.get<ProbeExecutionRow>(
+      `/api/admin/probe/by-id/${encodeURIComponent(requestId)}`,
+      undefined,
       { useAdminToken: true },
     ),
 };
