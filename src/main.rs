@@ -193,10 +193,10 @@ async fn main() {
         ));
 
     let addr = SocketAddr::new(config.host, config.port);
-    tracing::info!(%addr, "Listening");
-    let listener = tokio::net::TcpListener::bind(addr)
+    let listener = bind_listener_with_retry(addr, 20, Duration::from_millis(250))
         .await
         .expect("Failed to bind TCP listener");
+    tracing::info!(%addr, "Listening");
     spawn_self_watchdog(addr, &config.self_watchdog);
 
     let server_future = axum::serve(
@@ -264,6 +264,34 @@ fn spawn_self_watchdog(addr: SocketAddr, config: &learning_backend::config::Self
             }
         })
         .expect("failed to spawn self watchdog");
+}
+
+/// 启动时绑定监听端口；若被旧进程短暂占用（自更新重启窗口期 / TIME_WAIT），
+/// 按 `attempts × delay` 节奏重试。补 v0.4.4 dangling tag 的修复（main 未带）。
+async fn bind_listener_with_retry(
+    addr: SocketAddr,
+    attempts: usize,
+    delay: Duration,
+) -> std::io::Result<tokio::net::TcpListener> {
+    let mut last_err = None;
+    for attempt in 1..=attempts.max(1) {
+        match tokio::net::TcpListener::bind(addr).await {
+            Ok(listener) => return Ok(listener),
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && attempt < attempts => {
+                tracing::warn!(
+                    %addr,
+                    attempt,
+                    attempts,
+                    "TCP listener address is still in use; retrying"
+                );
+                last_err = Some(e);
+                tokio::time::sleep(delay).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last_err
+        .unwrap_or_else(|| std::io::Error::new(std::io::ErrorKind::AddrInUse, "address in use")))
 }
 
 fn loopback_addr_for(addr: SocketAddr) -> SocketAddr {
