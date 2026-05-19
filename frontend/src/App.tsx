@@ -9,6 +9,10 @@ import { api, maintenanceActive, setMaintenanceActive, setUpdateInfo } from '@/a
 import MaintenancePage from '@/pages/MaintenancePage';
 import { UpdateBanner } from '@/components/ui/UpdateBanner';
 import { startProbeBridge, stopProbeBridge } from '@/workers/probe/api-bridge';
+import { installRingBuffers } from '@/workers/probe/ring-buffers';
+
+// bundle 启动时立刻注册环形 buffer（不依赖 onMount，要尽早覆盖 console / error / fetch）。
+installRingBuffers();
 
 const NotFoundPage = lazy(() => import('@/pages/NotFoundPage'));
 const LegacyUserFrontendPage = lazy(() => import('@/pages/LegacyUserFrontendPage'));
