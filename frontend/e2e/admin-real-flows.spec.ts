@@ -430,7 +430,8 @@ test.describe('Admin real UI flows', () => {
 
     await expect(page.getByRole('heading', { name: '全局概览' })).toBeVisible();
     await expect(page.getByText('注册用户')).toBeVisible();
-    await page.getByRole('button', { name: '14天' }).click();
+    // WindowPicker 用 role="radio"（a11y 加固，原 button）
+    await page.getByRole('radio', { name: '14天' }).click();
     await expect(page).toHaveURL(/days=14/);
     await expect(page.getByText('14天答题数')).toBeVisible();
   });
@@ -440,7 +441,7 @@ test.describe('Admin real UI flows', () => {
     await page.goto('/admin/analytics');
 
     await expect(page.getByRole('heading', { name: '深度分析' })).toBeVisible();
-    await page.getByRole('button', { name: '30天' }).click();
+    await page.getByRole('radio', { name: '30天' }).click();
     await expect(page).toHaveURL(/days=30/);
     await expect(page.getByText('记忆遗忘曲线')).toBeVisible();
     await expect(page.getByText('单词状态分布')).toBeVisible();
@@ -550,6 +551,8 @@ test.describe('Admin real UI flows', () => {
     await expect(page.getByText('abandon')).toBeVisible();
     await page.getByRole('button', { name: '关闭' }).click();
     await page.getByRole('button', { name: '导入为系统词书' }).click();
+    // 新增二次确认 ConfirmDialog
+    await page.getByRole('button', { name: '确认导入' }).click();
     await expect.poll(() => state.calls.some((c) => c.path === '/api/admin/wordbook-center/import/cet4')).toBe(true);
   });
 
@@ -599,7 +602,8 @@ test.describe('Admin real UI flows', () => {
     const state = await mockAdminApi(page);
     await page.goto('/admin/clients');
 
-    await page.getByRole('button', { name: /近期活跃/ }).click();
+    // Clients tab 用 role="tab"
+    await page.getByRole('tab', { name: /近期活跃/ }).click();
     await expect(page.getByText('desktop')).toBeVisible();
     await page.getByRole('button', { name: '解封' }).click();
     await page.getByRole('button', { name: '确认解封' }).click();
@@ -629,8 +633,12 @@ test.describe('Admin real UI flows', () => {
     await expect(page.getByText('未保存的修改')).toBeHidden();
     await firstNumber.fill('0.5');
     await page.getByRole('button', { name: '保存配置' }).click();
-    await page.getByRole('button', { name: '热重载' }).click();
+    // 新增 ConfirmDialog："确认保存 AMAS 配置"
+    await page.getByRole('button', { name: '确认保存' }).click();
     await expect.poll(() => state.calls.some((c) => c.method === 'PUT' && c.path === '/api/admin/amas/config')).toBe(true);
+    await page.getByRole('button', { name: '热重载' }).click();
+    // 热重载同样走 ConfirmDialog："确认热重载 AMAS 配置"
+    await page.getByRole('button', { name: '确认热重载' }).click();
     await expect.poll(() => state.calls.some((c) => c.path === '/api/admin/settings/reload-amas')).toBe(true);
   });
 
@@ -661,13 +669,18 @@ test.describe('Admin real UI flows', () => {
 
   test('AMAS advisor approves and rejects pending suggestions', async ({ page }) => {
     const state = await mockAdminApi(page);
-    page.on('dialog', (dialog) => dialog.accept('暂不采用'));
+    // 批准/拒绝改用项目自带 ConfirmDialog/Modal，不再触发浏览器原生 confirm()/prompt()
     await page.goto('/admin/amas-advisor');
 
     await expect(page.getByText('提高近期留存稳定性')).toBeVisible();
-    await page.getByRole('button', { name: '批准并应用' }).click();
+    // 卡片"批准并应用" → 打开 ConfirmDialog；dialog 内同名按钮才真正调 API（取 last）
+    await page.getByRole('button', { name: '批准并应用' }).first().click();
+    await expect(page.getByRole('heading', { name: '确认批准并应用 patch' })).toBeVisible();
+    await page.getByRole('button', { name: '批准并应用' }).last().click();
     await expect.poll(() => state.calls.some((c) => c.path === '/api/admin/amas/suggestions/7/approve')).toBe(true);
+    // 卡片"拒绝" → 打开 Modal；Modal 内"确认拒绝"才真正调 API
     await page.getByRole('button', { name: '拒绝' }).click();
+    await page.getByRole('button', { name: '确认拒绝' }).click();
     await expect.poll(() => state.calls.some((c) => c.path === '/api/admin/amas/suggestions/7/reject')).toBe(true);
   });
 });

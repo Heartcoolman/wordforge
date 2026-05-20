@@ -32,7 +32,7 @@ test.describe('Legacy user routes (auth surfaces)', () => {
   test('legacy notice surfaces missing VITE_USER_APP_URL hint', async ({ page }) => {
     await page.goto('/login');
     await expect(
-      page.getByText('未配置 `VITE_USER_APP_URL`，请使用独立部署的用户前端地址')
+      page.getByText('用户前端尚未上线，请联系管理员')
     ).toBeVisible();
   });
 
