@@ -636,6 +636,10 @@ test.describe('Admin real UI flows', () => {
     // 新增 ConfirmDialog："确认保存 AMAS 配置"
     await page.getByRole('button', { name: '确认保存' }).click();
     await expect.poll(() => state.calls.some((c) => c.method === 'PUT' && c.path === '/api/admin/amas/config')).toBe(true);
+    // 保存成功后 baseline 同步 → dirty=false → 热重载按钮被 disabled (title="无修改")
+    // 想触发热重载需再造一次脏修改
+    await firstNumber.fill('0.6');
+    await expect(page.getByText('未保存的修改')).toBeVisible();
     await page.getByRole('button', { name: '热重载' }).click();
     // 热重载同样走 ConfirmDialog："确认热重载 AMAS 配置"
     await page.getByRole('button', { name: '确认热重载' }).click();
