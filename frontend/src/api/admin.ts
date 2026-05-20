@@ -118,11 +118,12 @@ export const adminApi = {
   // 一键自更新（PR-auto-update）
   updatesStatus: () => api.get<AdminUpdateStatus>('/api/admin/updates/status', undefined, { useAdminToken: true }),
   updatesCheck: () => api.post<AdminUpdateStatus>('/api/admin/updates/check', undefined, { useAdminToken: true }),
-  // v0.5.2 起 apply 改为异步：返回 ApplyAccepted（含 taskId），前端通过 status 轮询拿进度
-  updatesApply: (targetVersion: string, confirmCurrentVersion: string) =>
+  // v0.5.2 起 apply 改为异步：返回 ApplyAccepted（含 taskId），前端通过 status 轮询拿进度。
+  // v0.6.0-beta.3：必传 channel（"stable" | "beta"），后端用它定位 cache.<channel> 校验 target_version。
+  updatesApply: (channel: 'stable' | 'beta', targetVersion: string, confirmCurrentVersion: string) =>
     api.post<ApplyAccepted>(
       '/api/admin/updates/apply',
-      { targetVersion, confirmCurrentVersion },
+      { channel, targetVersion, confirmCurrentVersion },
       { useAdminToken: true },
     ),
 

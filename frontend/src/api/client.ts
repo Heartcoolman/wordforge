@@ -225,8 +225,10 @@ export interface SseCallbacks {
   onMaintenance?: (active: boolean) => void;
   onTelemetryRequest?: (requestId: string) => void;
   onUpdateAvailable?: (payload: { version: string; message: string }) => void;
-  /** 后端 `release_available`：探测到 GitHub Releases 有新二进制版本（仅 admin 关心） */
-  onReleaseAvailable?: (payload: { latestTag: string }) => void;
+  /** 后端 `release_available`：探测到 GitHub Releases 有新二进制版本（仅 admin 关心）。
+   * v0.6.0-beta.3：payload 含 `channel`（stable / beta），admin UI 据此在对应通道卡片亮 badge。
+   * 旧后端无 channel 字段时 fallback 当 stable，保持渐进迁移。 */
+  onReleaseAvailable?: (payload: { latestTag: string; channel: 'stable' | 'beta' }) => void;
   /** 后端 `update_progress`：一键自更新执行进度（仅 admin 关心） */
   onUpdateProgress?: (payload: { phase: string; percent: number }) => void;
   /** 后端 `new_llm_suggestion`：LLM 调参建议生成（仅 admin 关心，advisor 页用） */
@@ -319,7 +321,8 @@ export function connectSseStream(callbacks: SseCallbacks): () => void {
                   setUpdateInfo({ version: data.version, message: data.message || '' });
                   callbacks.onUpdateAvailable?.({ version: data.version, message: data.message || '' });
                 } else if (eventType === 'release_available' && typeof data.latestTag === 'string') {
-                  callbacks.onReleaseAvailable?.({ latestTag: data.latestTag });
+                  const channel: 'stable' | 'beta' = data.channel === 'beta' ? 'beta' : 'stable';
+                  callbacks.onReleaseAvailable?.({ latestTag: data.latestTag, channel });
                 } else if (eventType === 'update_progress' && typeof data.phase === 'string') {
                   callbacks.onUpdateProgress?.({
                     phase: data.phase,

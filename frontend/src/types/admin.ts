@@ -84,17 +84,25 @@ export interface UpdateCheck {
   releaseNotes: string | null;
 }
 
-/// `/api/admin/updates/status` 与 `/check` 共用，比 legacy UpdateCheck 多了
-/// `canApply`/`lastCheckedAt`/`autoCheckEnabled`/`allowDowngrade` 等运维字段。
+/// 单通道视图：每个 channel 的最新 release 元数据 + 升级判定。
+/// v0.6.0-beta.3 起 Stable 与 Beta 通道并存，共用此结构。
+export interface ChannelStatus {
+  latestVersion: string;
+  latestPublishedAt: string | null;
+  releaseNotes: string;
+  releaseUrl: string;
+  hasUpdate: boolean;
+  /// 当前进程能否用这条 release 自更新：架构匹配 + 找到 tar.gz / sha256 资产对。
+  canApply: boolean;
+}
+
+/// `/api/admin/updates/status` 与 `/check` 共用。
+/// v0.6.0-beta.3：stable + beta 双通道嵌套替换原扁平 latestVersion 等字段。
 /// v0.5.2 起 status 端点同时返回 `applyTask` 后台任务状态。
 export interface AdminUpdateStatus {
   currentVersion: string;
-  latestVersion: string | null;
-  latestPublishedAt: string | null;
-  releaseNotes: string | null;
-  releaseUrl: string | null;
-  hasUpdate: boolean;
-  canApply: boolean;
+  stable: ChannelStatus | null;
+  beta: ChannelStatus | null;
   lastCheckedAt: string | null;
   autoCheckEnabled: boolean;
   allowDowngrade: boolean;

@@ -620,7 +620,7 @@ describe('connectSseStream', () => {
       'event: maintenance\ndata: {"active":true}\n\n',
       'event: telemetry_request\ndata: {"requestId":"req-9"}\n\n',
       'event: update_available\ndata: {"version":"1.2.0","message":"new"}\n\n',
-      'event: release_available\ndata: {"latestTag":"v1.3"}\n\n',
+      'event: release_available\ndata: {"latestTag":"v1.3","channel":"beta"}\n\n',
       'event: update_progress\ndata: {"phase":"download","percent":"42"}\n\n',
       'event: data_corrupted\ndata: {}\n\n',
     ];
@@ -654,7 +654,7 @@ describe('connectSseStream', () => {
     expect(onTelemetryRequest).toHaveBeenCalledWith('req-9');
     expect(onUpdateAvailable).toHaveBeenCalledWith({ version: '1.2.0', message: 'new' });
     expect(updateInfo()).toEqual({ version: '1.2.0', message: 'new' });
-    expect(onReleaseAvailable).toHaveBeenCalledWith({ latestTag: 'v1.3' });
+    expect(onReleaseAvailable).toHaveBeenCalledWith({ latestTag: 'v1.3', channel: 'beta' });
     expect(onUpdateProgress).toHaveBeenCalledWith({ phase: 'download', percent: 42 });
     expect(onDataCorrupted).toHaveBeenCalledTimes(1);
 
