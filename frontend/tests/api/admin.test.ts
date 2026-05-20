@@ -560,4 +560,57 @@ describe('adminApi', () => {
     const result = await adminApi.reloadAmas(config as any);
     expect(result).toEqual(config);
   });
+
+  // ─────────── 用户反馈契约（防 v0.6.0-beta.1 ErrorBoundary 回归） ───────────
+  // 历史教训：admin.ts 曾把 listFeedback 类型写成 `items: FeedbackItem[]`，
+  // 而后端 paginated() 返回 `data:{ data, total, page, perPage, totalPages }`，
+  // 运行时 resp.items === undefined → setItems(undefined) → undefined.length 抛错
+  // → AppErrorBoundary 全屏接住"出错了"。本组用例锁定契约。
+  it('listFeedback unwraps paginated payload with `data` field (regression)', async () => {
+    const feedbackItem = {
+      id: 'fb-1',
+      userId: 'u-1',
+      category: 'profile',
+      body: '请改进复习统计',
+      route: '/profile',
+      createdAt: '2026-05-20T11:00:00Z',
+    };
+    const payload = {
+      data: [feedbackItem],
+      total: 1,
+      page: 1,
+      perPage: 20,
+      totalPages: 1,
+    };
+    server.use(
+      http.get(`${BASE}/api/admin/feedback`, ({ request }) => {
+        const url = new URL(request.url);
+        expect(url.searchParams.get('page')).toBe('1');
+        expect(url.searchParams.get('perPage')).toBe('20');
+        return HttpResponse.json({ success: true, data: payload });
+      }),
+    );
+    const result = await adminApi.listFeedback({ page: 1, perPage: 20 });
+    // 列表字段必须是 `data` 而非 `items`
+    expect(result.data).toEqual([feedbackItem]);
+    expect((result as unknown as { items?: unknown }).items).toBeUndefined();
+    expect(result.total).toBe(1);
+    expect(result.page).toBe(1);
+    expect(result.perPage).toBe(20);
+    expect(result.totalPages).toBe(1);
+  });
+
+  it('listFeedback handles empty list without throwing', async () => {
+    server.use(
+      http.get(`${BASE}/api/admin/feedback`, () =>
+        HttpResponse.json({
+          success: true,
+          data: { data: [], total: 0, page: 1, perPage: 20, totalPages: 0 },
+        })),
+    );
+    const result = await adminApi.listFeedback({ page: 1, perPage: 20 });
+    expect(Array.isArray(result.data)).toBe(true);
+    expect(result.data).toHaveLength(0);
+    expect(result.total).toBe(0);
+  });
 });
