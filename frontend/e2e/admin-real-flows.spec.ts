@@ -328,10 +328,21 @@ async function mockAdminApi(page: Page, overrides: { wordbookUrl?: string } = {}
     }
 
     if (path === '/api/admin/updates/status') {
-      return json(ok({ currentVersion: '0.4.3', latestVersion: '0.4.4', latestPublishedAt: '2026-05-19T00:00:00Z', releaseNotes: 'Bug fixes', releaseUrl: 'https://example.test/release', hasUpdate: true, canApply: true, lastCheckedAt: '2026-05-19T00:00:00Z', autoCheckEnabled: true, allowDowngrade: false }));
+      // v0.6.0-beta.3：双通道嵌套结构。Stable 卡有 0.4.4 升级；Beta=null
+      return json(ok({
+        currentVersion: '0.4.3',
+        stable: { latestVersion: '0.4.4', latestPublishedAt: '2026-05-19T00:00:00Z', releaseNotes: 'Bug fixes', releaseUrl: 'https://example.test/release', hasUpdate: true, canApply: true },
+        beta: null,
+        lastCheckedAt: '2026-05-19T00:00:00Z', autoCheckEnabled: true, allowDowngrade: false,
+      }));
     }
     if (path === '/api/admin/updates/check') {
-      return json(ok({ currentVersion: '0.4.3', latestVersion: '0.4.4', latestPublishedAt: '2026-05-19T00:00:00Z', releaseNotes: 'Bug fixes', releaseUrl: 'https://example.test/release', hasUpdate: true, canApply: true, lastCheckedAt: '2026-05-19T00:00:00Z', autoCheckEnabled: true, allowDowngrade: false }));
+      return json(ok({
+        currentVersion: '0.4.3',
+        stable: { latestVersion: '0.4.4', latestPublishedAt: '2026-05-19T00:00:00Z', releaseNotes: 'Bug fixes', releaseUrl: 'https://example.test/release', hasUpdate: true, canApply: true },
+        beta: null,
+        lastCheckedAt: '2026-05-19T00:00:00Z', autoCheckEnabled: true, allowDowngrade: false,
+      }));
     }
 
     if (path === '/api/admin/amas/config' && method === 'GET') {
@@ -616,7 +627,7 @@ test.describe('Admin real UI flows', () => {
 
     await expect(page.getByText('当前版本')).toBeVisible();
     await page.getByRole('button', { name: '立即检查' }).click();
-    await page.getByRole('button', { name: /一键更新到 0.4.4/ }).click();
+    await page.getByRole('button', { name: /一键升级到 0\.4\.4/ }).click();
     await expect(page.getByRole('heading', { name: '确认一键更新' })).toBeVisible();
     await expect.poll(() => state.calls.some((c) => c.path === '/api/admin/updates/check')).toBe(true);
   });
