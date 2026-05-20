@@ -32,11 +32,42 @@ describe('Table', () => {
     expect(container.querySelectorAll('.animate-shimmer').length).toBeGreaterThan(0);
   });
 
-  it('calls onRowClick', async () => {
+  it('calls onRowClick on click', async () => {
     const onClick = vi.fn();
     const data = [{ name: 'Alice', age: 30 }];
     render(() => <Table columns={columns} data={data} onRowClick={onClick} />);
     await fireEvent.click(screen.getByText('Alice'));
     expect(onClick).toHaveBeenCalledWith(data[0]);
+  });
+
+  it('headers carry scope="col"', () => {
+    render(() => <Table columns={columns} data={[]} />);
+    expect(screen.getByText('Name').getAttribute('scope')).toBe('col');
+  });
+
+  it('renders sr-only caption when provided', () => {
+    const { container } = render(() => <Table columns={columns} data={[]} caption="用户列表" />);
+    const cap = container.querySelector('caption');
+    expect(cap?.textContent).toBe('用户列表');
+    expect(cap?.className).toContain('sr-only');
+  });
+
+  it('onRowClick rows gain role=button and Enter triggers click', async () => {
+    const onClick = vi.fn();
+    const data = [{ name: 'Alice', age: 30 }];
+    render(() => <Table columns={columns} data={data} onRowClick={onClick} />);
+    const row = screen.getByText('Alice').closest('tr')!;
+    expect(row.getAttribute('role')).toBe('button');
+    expect(row.getAttribute('tabindex')).toBe('0');
+    await fireEvent.keyDown(row, { key: 'Enter' });
+    expect(onClick).toHaveBeenCalledWith(data[0]);
+  });
+
+  it('non-clickable rows have no role/tabindex', () => {
+    const data = [{ name: 'Alice', age: 30 }];
+    render(() => <Table columns={columns} data={data} />);
+    const row = screen.getByText('Alice').closest('tr')!;
+    expect(row.getAttribute('role')).toBeNull();
+    expect(row.getAttribute('tabindex')).toBeNull();
   });
 });

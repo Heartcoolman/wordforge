@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { render, screen, fireEvent } from '@solidjs/testing-library';
 import { uiStore } from '@/stores/ui';
 import { Toaster } from '@/components/ui/Toast';
@@ -9,12 +9,19 @@ describe('Toaster extra — close handler', () => {
     while (uiStore.toasts().length) uiStore.removeToast(uiStore.toasts()[0].id);
   });
 
-  it('clicking close removes the toast', () => {
-    uiStore.addToast({ type: 'error', title: 'Err', duration: 60000 });
-    render(() => <Toaster />);
-    expect(uiStore.toasts().length).toBe(1);
-    fireEvent.click(screen.getByLabelText('关闭'));
-    expect(uiStore.toasts().length).toBe(0);
+  it('clicking close removes the toast (after exit animation)', () => {
+    vi.useFakeTimers();
+    try {
+      uiStore.addToast({ type: 'error', title: 'Err', duration: 60000 });
+      render(() => <Toaster />);
+      expect(uiStore.toasts().length).toBe(1);
+      fireEvent.click(screen.getByLabelText('关闭'));
+      // 点击触发 leaving 信号，出场动画结束后 (~220ms) 才从 store 剔除
+      vi.advanceTimersByTime(300);
+      expect(uiStore.toasts().length).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('renders all 4 toast types (success/error/warning/info icons)', () => {

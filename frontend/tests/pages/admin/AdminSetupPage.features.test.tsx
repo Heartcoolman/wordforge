@@ -41,7 +41,9 @@ describe('AdminSetupPage extra', () => {
     mockApi.checkStatus.mockResolvedValue({ initialized: false });
     await renderPage();
     await waitFor(() => expect(screen.getByRole('button', { name: '创建管理员' })).toBeInTheDocument());
-    fireEvent.click(screen.getByRole('button', { name: '创建管理员' }));
+    // 输入框 required + jsdom 原生 form 校验会拦截 click submit；用 fireEvent.submit 绕过
+    const form = document.querySelector('form') as HTMLFormElement;
+    fireEvent.submit(form);
     await waitFor(() => expect(screen.getByText('请填写所有字段')).toBeInTheDocument());
   });
 

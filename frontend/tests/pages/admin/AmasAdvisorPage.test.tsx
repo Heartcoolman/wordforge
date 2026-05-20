@@ -43,7 +43,8 @@ const mockHistory = [
 describe('AmasAdvisorPage', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    // 关键：所有交互测试都假设 confirm/prompt → 默认接受
+    // approve/reject 不再用原生 window.confirm/prompt，改用 ConfirmDialog + Modal
+    // 但 "approve aborts when confirm returns false" 仍依赖能拦截原生 confirm 形态，保留兼容（即便实际未调用）
     vi.spyOn(window, 'confirm').mockReturnValue(true);
     vi.spyOn(window, 'prompt').mockReturnValue('test reason');
   });
@@ -83,7 +84,13 @@ describe('AmasAdvisorPage', () => {
     await renderPage();
     await waitFor(() => expect(screen.getByText('增加稳定性参数以提升记忆')).toBeInTheDocument());
     expect(screen.getByText('memoryModel.w[0]')).toBeInTheDocument();
-    fireEvent.click(screen.getByText('批准并应用'));
+    // 卡片按钮：进入 ConfirmDialog
+    fireEvent.click(screen.getByRole('button', { name: '批准并应用' }));
+    // ConfirmDialog 标题确认弹出
+    await waitFor(() => expect(screen.getByText('确认批准并应用 patch')).toBeInTheDocument());
+    // 此时 "批准并应用" 出现在卡片按钮 + 弹窗确认按钮两处；取 ConfirmDialog 内的（最后一个）
+    const approveButtons = screen.getAllByRole('button', { name: '批准并应用' });
+    fireEvent.click(approveButtons[approveButtons.length - 1]);
     await waitFor(() => expect(mockApi.amasApproveSuggestion).toHaveBeenCalledWith(1));
     expect(mockToast.success).toHaveBeenCalled();
   });
@@ -94,7 +101,10 @@ describe('AmasAdvisorPage', () => {
     mockApi.amasApproveSuggestion.mockRejectedValue(new Error('500'));
     await renderPage();
     await waitFor(() => expect(screen.getByText('批准并应用')).toBeInTheDocument());
-    fireEvent.click(screen.getByText('批准并应用'));
+    fireEvent.click(screen.getByRole('button', { name: '批准并应用' }));
+    await waitFor(() => expect(screen.getByText('确认批准并应用 patch')).toBeInTheDocument());
+    const approveButtons = screen.getAllByRole('button', { name: '批准并应用' });
+    fireEvent.click(approveButtons[approveButtons.length - 1]);
     await waitFor(() => expect(mockToast.error).toHaveBeenCalled());
   });
 
@@ -113,8 +123,13 @@ describe('AmasAdvisorPage', () => {
     mockApi.amasListSuggestions.mockResolvedValue(mockPending);
     mockApi.amasRejectSuggestion.mockResolvedValue(undefined);
     await renderPage();
-    await waitFor(() => expect(screen.getByText('拒绝')).toBeInTheDocument());
-    fireEvent.click(screen.getByText('拒绝'));
+    await waitFor(() => expect(screen.getByRole('button', { name: '拒绝' })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: '拒绝' }));
+    // Modal 弹出后填写原因 + 确认拒绝
+    await waitFor(() => expect(screen.getByText('拒绝建议')).toBeInTheDocument());
+    const textarea = document.querySelector('textarea') as HTMLTextAreaElement;
+    fireEvent.input(textarea, { target: { value: 'test reason' } });
+    fireEvent.click(screen.getByRole('button', { name: '确认拒绝' }));
     await waitFor(() => expect(mockApi.amasRejectSuggestion).toHaveBeenCalled());
     expect(mockToast.success).toHaveBeenCalled();
   });
@@ -124,8 +139,10 @@ describe('AmasAdvisorPage', () => {
     mockApi.amasListSuggestions.mockResolvedValue(mockPending);
     mockApi.amasRejectSuggestion.mockRejectedValue(new Error('boom'));
     await renderPage();
-    await waitFor(() => expect(screen.getByText('拒绝')).toBeInTheDocument());
-    fireEvent.click(screen.getByText('拒绝'));
+    await waitFor(() => expect(screen.getByRole('button', { name: '拒绝' })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: '拒绝' }));
+    await waitFor(() => expect(screen.getByText('拒绝建议')).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: '确认拒绝' }));
     await waitFor(() => expect(mockToast.error).toHaveBeenCalled());
   });
 

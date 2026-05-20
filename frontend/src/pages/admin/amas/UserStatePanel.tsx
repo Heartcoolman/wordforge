@@ -1,4 +1,4 @@
-import { createResource, createSignal, For, Show } from 'solid-js';
+import { createResource, createSignal, createMemo, For, Show } from 'solid-js';
 import { Card } from '@/components/ui/Card';
 import { Spinner } from '@/components/ui/Spinner';
 import { Empty } from '@/components/ui/Empty';
@@ -38,7 +38,7 @@ export function UserStatePanel() {
     return {
       grid: { left: 40, right: 16, top: 16, bottom: 24 },
       tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
-      xAxis: { type: 'category', data: labels, axisLabel: { fontSize: 9, interval: Math.floor(h.bins.length / 6) } },
+      xAxis: { type: 'category', data: labels, axisLabel: { fontSize: 11, interval: Math.floor(h.bins.length / 6), rotate: 30 } },
       yAxis: { type: 'value', minInterval: 1 },
       series: [
         {
@@ -95,31 +95,37 @@ export function UserStatePanel() {
         </div>
       </div>
 
-      <Show when={!dist.loading} fallback={<div class="flex justify-center py-12"><Spinner /></div>}>
-        {(_) => {
-          const d = () => dist()!;
-          const fields: AmasUserStateHistogram[] = [d().attention, d().fatigue, d().motivation, d().confidence];
+      <Show
+        when={!dist.loading && dist()}
+        keyed
+        fallback={<div class="min-h-[440px] flex items-center justify-center"><Spinner /></div>}
+      >
+        {(d) => {
+          const fields: AmasUserStateHistogram[] = [d.attention, d.fatigue, d.motivation, d.confidence];
           return (
             <Show when={fields[0].sampleSize > 0} fallback={<Empty title="窗口内无采样" description="monitoring.sampleRate=0.05 默认 5% 采样；尝试拉长窗口" />}>
               <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
                 <For each={fields}>
-                  {(h) => (
-                    <Card variant="outlined" padding="sm">
-                      <div class="flex items-baseline justify-between mb-2 gap-2 flex-wrap">
-                        <span class="text-sm font-medium text-content">{FIELD_LABEL[h.field]}</span>
-                        <span class="text-[10px] text-content-tertiary tabular-nums">
-                          n={h.sampleSize} · 均值 {h.mean.toFixed(3)} · 中位 {h.median.toFixed(3)}
-                        </span>
-                      </div>
-                      <EChart option={() => histOption(h)} height="180px" />
-                    </Card>
-                  )}
+                  {(h) => {
+                    const option = createMemo(() => histOption(h));
+                    return (
+                      <Card variant="outlined" padding="sm">
+                        <div class="flex items-baseline justify-between mb-2 gap-2 flex-wrap">
+                          <span class="text-sm font-medium text-content">{FIELD_LABEL[h.field]}</span>
+                          <span class="text-[10px] text-content-tertiary tabular-nums">
+                            n={h.sampleSize} · 均值 {h.mean.toFixed(3)} · 中位 {h.median.toFixed(3)}
+                          </span>
+                        </div>
+                        <EChart option={option} height="180px" />
+                      </Card>
+                    );
+                  }}
                 </For>
               </div>
 
               <p class="text-xs text-content-tertiary mt-3 tabular-nums">
-                冷启动样本：explore <code class="font-mono">{d().coldStartExplore}</code>{' / '}
-                exploit <code class="font-mono">{d().coldStartExploit}</code>
+                冷启动样本：explore <code class="font-mono">{d.coldStartExplore}</code>{' / '}
+                exploit <code class="font-mono">{d.coldStartExploit}</code>
               </p>
             </Show>
           );

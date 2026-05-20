@@ -48,11 +48,11 @@ export default function AnalyticsPage() {
     <div class="space-y-6">
       <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-2 border-b border-border-hairline">
         <h1 class="text-title text-content">深度分析</h1>
-        <WindowPicker value={days} onChange={setDays} />
+        <WindowPicker value={days()} onChange={setDays} />
       </div>
 
-      {/* KPI 行 (6 张) — 中等宽度先 2 行 3 列，xl 再展开 6 卡，避免 lg 挤压 */}
-      <div class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
+      {/* KPI 行 (6 张) — 中等宽度先 2 行 3 列，lg/xl 展开 6 卡，避免 1024-1279 区间挤压 */}
+      <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 xl:grid-cols-6 gap-3">
         <Show when={eng()} fallback={<Skeleton height="84px" />}>
           {(e) => (
             <StatCard
@@ -202,8 +202,12 @@ export default function AnalyticsPage() {
                           grid: { left: 50, right: 20, top: 20, bottom: 30 },
                           tooltip: {
                             trigger: 'item',
-                            formatter: (p: any) =>
-                              `间隔: ${p.data[0]} 天<br/>留存率: ${(p.data[1] * 100).toFixed(1)}%<br/>样本量: ${p.data[2]}`,
+                            // echarts 回调可能传单值或数组（multi-axis tooltip）；scatter 单点，取首项后断言为元组
+                            formatter: (p) => {
+                              const param = Array.isArray(p) ? p[0] : p;
+                              const d = (param as unknown as { data: [number, number, number] }).data;
+                              return `间隔: ${d[0]} 天<br/>留存率: ${(d[1] * 100).toFixed(1)}%<br/>样本量: ${d[2]}`;
+                            },
                           },
                           xAxis: {
                             type: 'value',
@@ -279,7 +283,7 @@ export default function AnalyticsPage() {
                                 radius: ['55%', '78%'],
                                 avoidLabelOverlap: true,
                                 label: { show: false },
-                                itemStyle: { borderRadius: 4, borderColor: '#fff', borderWidth: 2 },
+                                itemStyle: { borderRadius: 4, borderColor: cssVar('--surface', '#fff'), borderWidth: 2 },
                                 data: STATE_LABELS.map((s) => ({
                                   value: data().states[s.key],
                                   name: s.label,

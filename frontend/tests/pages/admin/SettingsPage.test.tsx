@@ -47,7 +47,9 @@ describe('SettingsPage', () => {
   it('shows loading spinner initially', async () => {
     mockAdminApi.getSettings.mockReturnValue(new Promise(() => {}));
     await renderPage();
-    expect(screen.getByRole('status')).toBeInTheDocument();
+    // 设计语言升级：Spinner 改为 4 个 Skeleton 占位（每个 role="status"）
+    const placeholders = screen.getAllByRole('status');
+    expect(placeholders.length).toBeGreaterThanOrEqual(1);
   });
 
   it('shows settings form after loading', async () => {

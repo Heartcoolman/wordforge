@@ -69,11 +69,11 @@ describe('AdminDashboard — status & update banner', () => {
     primeBase();
     await renderPage();
     await waitFor(() => expect(screen.getByText('全局概览')).toBeInTheDocument());
-    const btn14 = screen.getAllByRole('button').find((b) => b.textContent === '14');
-    if (btn14) {
-      fireEvent.click(btn14);
-      await waitFor(() => expect(mockApi.getStudyOverview).toHaveBeenCalledWith(14));
-    }
+    // WindowPicker 升级为 radiogroup；按 14天 radio 触发切换
+    const btn14 = screen.getAllByRole('radio').find((b) => b.textContent === '14天');
+    expect(btn14).toBeDefined();
+    fireEvent.click(btn14!);
+    await waitFor(() => expect(mockApi.getStudyOverview).toHaveBeenCalledWith(14));
   });
 
   it('shows fallback empty when all resources fail', async () => {

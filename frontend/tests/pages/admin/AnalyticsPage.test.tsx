@@ -182,10 +182,10 @@ describe('AnalyticsPage', () => {
     primeMocks();
     await renderPage();
     await waitFor(() => expect(screen.getByText('深度分析')).toBeInTheDocument());
-    const btn14 = screen.getAllByRole('button').find((b) => b.textContent === '14 天');
-    if (btn14) {
-      fireEvent.click(btn14);
-      await waitFor(() => expect(mockAdminApi.getStudyOverview).toHaveBeenCalledWith(14));
-    }
+    // WindowPicker 升级为 radiogroup；按 14天 radio 触发切换
+    const btn14 = screen.getAllByRole('radio').find((b) => b.textContent === '14天');
+    expect(btn14).toBeDefined();
+    fireEvent.click(btn14!);
+    await waitFor(() => expect(mockAdminApi.getStudyOverview).toHaveBeenCalledWith(14));
   });
 });

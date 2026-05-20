@@ -6,6 +6,8 @@ import { Spinner } from '@/components/ui/Spinner';
 import { Empty } from '@/components/ui/Empty';
 import { Tabs } from '@/components/ui/Tabs';
 import { StatCard } from '@/components/ui/StatCard';
+import { Modal } from '@/components/ui/Modal';
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
 import { uiStore } from '@/stores/ui';
 import { adminApi, type AmasSuggestion, type AmasSuggestionStatus } from '@/api/admin';
 import { formatMoney } from '@/utils/formatters';
@@ -32,6 +34,10 @@ type TabId = 'pending' | 'history';
 export default function AmasAdvisorPage() {
   const [tab, setTab] = createSignal<TabId>('pending');
   const [decidingId, setDecidingId] = createSignal<number | null>(null);
+  // 替代原生 confirm/prompt：批准与拒绝走项目自带 ConfirmDialog / Modal
+  const [approveTarget, setApproveTarget] = createSignal<AmasSuggestion | null>(null);
+  const [rejectTarget, setRejectTarget] = createSignal<AmasSuggestion | null>(null);
+  const [rejectNote, setRejectNote] = createSignal('');
 
   const [pending, { refetch: refetchPending }] = createResource(
     () => tab() === 'pending',
@@ -44,8 +50,14 @@ export default function AmasAdvisorPage() {
 
   const [spend, { refetch: refetchSpend }] = createResource(async () => adminApi.amasSuggestionSpend());
 
-  async function approve(s: AmasSuggestion) {
-    if (!confirm(`将立即应用 patch 并新建版本：\n${formatPatch(s.patchJson)}\n确认？`)) return;
+  function approve(s: AmasSuggestion) {
+    setApproveTarget(s);
+  }
+
+  async function confirmApprove() {
+    const s = approveTarget();
+    if (!s) return;
+    setApproveTarget(null);
     setDecidingId(s.id);
     try {
       const r = await adminApi.amasApproveSuggestion(s.id);
@@ -60,8 +72,16 @@ export default function AmasAdvisorPage() {
     }
   }
 
-  async function reject(s: AmasSuggestion) {
-    const note = prompt('拒绝原因（可选）：') ?? undefined;
+  function reject(s: AmasSuggestion) {
+    setRejectNote('');
+    setRejectTarget(s);
+  }
+
+  async function confirmReject() {
+    const s = rejectTarget();
+    if (!s) return;
+    const note = rejectNote().trim() || undefined;
+    setRejectTarget(null);
     setDecidingId(s.id);
     try {
       await adminApi.amasRejectSuggestion(s.id, note);
@@ -83,7 +103,7 @@ export default function AmasAdvisorPage() {
       >
         <Show when={spend()} fallback={<Card variant="elevated"><Spinner size="sm" /></Card>}>
           {(s) => (
-            <div class="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+            <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
               <StatCard
                 title="今日花费 USD"
                 value={formatMoney(s().todayCostUsd, 4)}
@@ -128,7 +148,7 @@ export default function AmasAdvisorPage() {
           fallback={<Card variant="elevated"><Empty title="待审批列表加载失败" description={pending.error instanceof Error ? pending.error.message : '请稍后重试'} /></Card>}
         >
           <Show when={!pending.loading} fallback={<div class="flex justify-center py-12"><Spinner /></div>}>
-            <Show when={(pending() ?? []).length > 0} fallback={<Card variant="elevated"><Empty title="暂无待审批建议" description="LLM advisor worker 每 20 分钟产出一次；mock 模式启用后下一次会有 pending" /></Card>}>
+            <Show when={(pending() ?? []).length > 0} fallback={<Card variant="elevated"><Empty title="暂无待审批建议" description="LLM advisor worker 每 20 分钟产出一次" /></Card>}>
               <For each={pending() ?? []}>
                 {(s) => (
                   <SuggestionCard
@@ -144,6 +164,44 @@ export default function AmasAdvisorPage() {
         </Show>
       </Show>
 
+      {/* 批准确认：用 ConfirmDialog 替代浏览器原生 confirm()，patch 用 pre 渲染 */}
+      <ConfirmDialog
+        open={!!approveTarget()}
+        title="确认批准并应用 patch"
+        message={
+          <>
+            将立即应用 patch 并新建版本：
+            <Show when={approveTarget()}>
+              <pre class="mt-2 text-xs max-h-64 overflow-auto p-2 bg-surface-secondary rounded font-mono whitespace-pre">
+                {formatPatch(approveTarget()!.patchJson)}
+              </pre>
+            </Show>
+          </>
+        }
+        confirmText="批准并应用"
+        variant="warning"
+        onConfirm={confirmApprove}
+        onCancel={() => setApproveTarget(null)}
+      />
+
+      {/* 拒绝确认：用 Modal + textarea 替代浏览器原生 prompt() */}
+      <Modal open={!!rejectTarget()} onClose={() => setRejectTarget(null)} title="拒绝建议" size="sm">
+        <div class="space-y-3">
+          <p class="text-sm text-content-secondary">填写拒绝原因（可选）：</p>
+          <textarea
+            value={rejectNote()}
+            onInput={(e) => setRejectNote(e.currentTarget.value)}
+            rows={4}
+            placeholder="如：与当前线上版本冲突 / 风险过高 / 需要更多 evidence…"
+            class="w-full px-3 py-2 rounded-lg text-sm bg-surface text-content border border-border-hairline focus-ring-soft focus:border-accent placeholder:text-content-tertiary"
+          />
+          <div class="flex justify-end gap-2">
+            <Button size="sm" variant="ghost" onClick={() => setRejectTarget(null)}>取消</Button>
+            <Button size="sm" variant="danger" onClick={confirmReject}>确认拒绝</Button>
+          </div>
+        </div>
+      </Modal>
+
       <Show when={tab() === 'history'}>
         <Show
           when={!history.error}
@@ -152,32 +210,34 @@ export default function AmasAdvisorPage() {
           <Show when={!history.loading} fallback={<div class="flex justify-center py-12"><Spinner /></div>}>
             <Show when={(history() ?? []).length > 0} fallback={<Card variant="elevated"><Empty title="尚无历史" description="" /></Card>}>
             <Card variant="elevated">
-              <table class="w-full text-sm">
-                <thead>
-                  <tr class="bg-surface-secondary/60 backdrop-blur-sm border-b border-border-hairline">
-                    <th scope="col" class="px-3 py-2 text-left font-medium text-content-secondary">时间</th>
-                    <th scope="col" class="px-3 py-2 text-left font-medium text-content-secondary">状态</th>
-                    <th scope="col" class="px-3 py-2 text-left font-medium text-content-secondary">基础版本</th>
-                    <th scope="col" class="px-3 py-2 text-left font-medium text-content-secondary">理由（摘要）</th>
-                    <th scope="col" class="px-3 py-2 text-right font-medium text-content-secondary">cost</th>
-                    <th scope="col" class="px-3 py-2 text-left font-medium text-content-secondary">决策人</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <For each={history() ?? []}>
-                    {(s) => (
-                      <tr class="border-b border-border-hairline">
-                        <td class="px-3 py-2 text-xs text-content-tertiary tabular-nums whitespace-nowrap">{formatTime(s.createdAt)}</td>
-                        <td class="px-3 py-2"><Badge variant={STATUS_VARIANT[s.status]} size="sm">{STATUS_LABEL[s.status]}</Badge></td>
-                        <td class="px-3 py-2 font-mono text-xs tabular-nums">{s.basedOnVersionHash.slice(0, 10)}</td>
-                        <td class="px-3 py-2 text-xs text-content max-w-md truncate" title={s.rationale}>{s.rationale}</td>
-                        <td class="px-3 py-2 text-right font-mono text-xs tabular-nums">{s.costUsd != null ? formatMoney(s.costUsd, 4) : '—'}</td>
-                        <td class="px-3 py-2 text-xs text-content-tertiary">{s.decidedBy ?? '—'}</td>
-                      </tr>
-                    )}
-                  </For>
-                </tbody>
-              </table>
+              <div class="overflow-x-auto">
+                <table class="w-full text-sm">
+                  <thead>
+                    <tr class="bg-surface-secondary/60 backdrop-blur-sm border-b border-border-hairline">
+                      <th scope="col" class="px-3 py-2 text-left font-medium text-content-secondary">时间</th>
+                      <th scope="col" class="px-3 py-2 text-left font-medium text-content-secondary">状态</th>
+                      <th scope="col" class="px-3 py-2 text-left font-medium text-content-secondary">基础版本</th>
+                      <th scope="col" class="px-3 py-2 text-left font-medium text-content-secondary">理由（摘要）</th>
+                      <th scope="col" class="px-3 py-2 text-right font-medium text-content-secondary">cost</th>
+                      <th scope="col" class="px-3 py-2 text-left font-medium text-content-secondary">决策人</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <For each={history() ?? []}>
+                      {(s) => (
+                        <tr class="border-b border-border-hairline">
+                          <td class="px-3 py-2 text-xs text-content-tertiary tabular-nums whitespace-nowrap">{formatTime(s.createdAt)}</td>
+                          <td class="px-3 py-2"><Badge variant={STATUS_VARIANT[s.status]} size="sm">{STATUS_LABEL[s.status]}</Badge></td>
+                          <td class="px-3 py-2 font-mono text-xs tabular-nums">{s.basedOnVersionHash.slice(0, 10)}</td>
+                          <td class="px-3 py-2 text-xs text-content max-w-md truncate" title={s.rationale}>{s.rationale}</td>
+                          <td class="px-3 py-2 text-right font-mono text-xs tabular-nums">{s.costUsd != null ? formatMoney(s.costUsd, 4) : '—'}</td>
+                          <td class="px-3 py-2 text-xs text-content-tertiary">{s.decidedBy ?? '—'}</td>
+                        </tr>
+                      )}
+                    </For>
+                  </tbody>
+                </table>
+              </div>
             </Card>
             </Show>
           </Show>
@@ -230,7 +290,7 @@ function SuggestionCard(props: {
               {([path, value]) => (
                 <tr class="border-b border-border-hairline">
                   <td class="py-1 pr-2 text-content">{path}</td>
-                  <td class="py-1 text-right text-success tabular-nums">{typeof value === 'number' ? value.toFixed(6).replace(/0+$/, '').replace(/\.$/, '') : String(value)}</td>
+                  <td class="py-1 text-right text-success tabular-nums">{formatPatchValue(value)}</td>
                 </tr>
               )}
             </For>
@@ -243,7 +303,7 @@ function SuggestionCard(props: {
           {showEvidence() ? '隐藏' : '查看'} evidence
         </Button>
         <Show when={showEvidence()}>
-          <pre class="mt-2 p-2 bg-surface-secondary rounded text-[10px] overflow-x-auto font-mono max-h-64">
+          <pre class="mt-2 p-2 bg-surface-secondary rounded text-[10px] overflow-auto font-mono max-h-64">
             {JSON.stringify(props.s.evidenceJson, null, 2)}
           </pre>
         </Show>
@@ -261,5 +321,19 @@ function formatTime(iso: string): string {
 }
 
 function formatPatch(p: Record<string, number>): string {
-  return Object.entries(p).map(([k, v]) => `  ${k} → ${v}`).join('\n');
+  return Object.entries(p).map(([k, v]) => `  ${k} → ${formatPatchValue(v)}`).join('\n');
+}
+
+/**
+ * 数值显示策略：
+ * - 非有限数（NaN/Infinity）退回字符串；
+ * - |v| < 1e-4 用科学计数法（避免 toFixed(6) 截成 0.000000 丢精度）；
+ * - 其余用 6 位有效数字，去掉尾随 0。
+ */
+function formatPatchValue(value: unknown): string {
+  if (typeof value !== 'number') return String(value);
+  if (!Number.isFinite(value)) return String(value);
+  if (value === 0) return '0';
+  if (Math.abs(value) < 1e-4) return value.toExponential(2);
+  return value.toPrecision(6).replace(/\.?0+$/, '');
 }

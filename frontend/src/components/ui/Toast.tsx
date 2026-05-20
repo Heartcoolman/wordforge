@@ -1,4 +1,4 @@
-import { For, Show } from 'solid-js';
+import { For, Show, createSignal, onCleanup } from 'solid-js';
 import { Portal } from 'solid-js/web';
 import { cn } from '@/utils/cn';
 import { uiStore } from '@/stores/ui';
@@ -11,6 +11,9 @@ const bgMap: Record<string, string> = {
   warning: 'border-l-warning',
   info: 'border-l-info',
 };
+
+// 出场动画时长（毫秒）—与下面 Motion exit transition 对齐
+const LEAVE_MS = 220;
 
 function ToastIcon(props: { type: string }) {
   const paths: Record<string, string> = {
@@ -31,11 +34,32 @@ function ToastIcon(props: { type: string }) {
 }
 
 function SingleToast(props: { toast: ToastItemType }) {
+  const [leaving, setLeaving] = createSignal(false);
+  let leaveTimer: number | null = null;
+
+  // 出场动画：点击关闭时先做出场，再从 store 剔除；
+  // 注：store 的 addToast 自带 setTimeout 自动移除，那条路径会跳过出场动画，
+  // 这条路径仅服务"用户主动关闭"。hover/focus 暂停需要在 store 层重构 timer（DEFERRED）。
+  const triggerLeave = () => {
+    if (leaving()) return;
+    setLeaving(true);
+    leaveTimer = window.setTimeout(() => uiStore.removeToast(props.toast.id), LEAVE_MS);
+  };
+
+  onCleanup(() => {
+    if (leaveTimer !== null) clearTimeout(leaveTimer);
+  });
+
+  // role 区分：error/warning 用 alert（assertive），success/info 用 status（polite）
+  const isAlert = () => props.toast.type === 'error' || props.toast.type === 'warning';
+
   return (
     <Motion.div
       initial={{ opacity: 0, x: 40 }}
-      animate={{ opacity: 1, x: 0 }}
-      transition={{ duration: DURATION.base, easing: EASE.outExpo }}
+      animate={leaving() ? { opacity: 0, x: 40 } : { opacity: 1, x: 0 }}
+      transition={{ duration: leaving() ? LEAVE_MS / 1000 : DURATION.base, easing: EASE.outExpo }}
+      role={isAlert() ? 'alert' : 'status'}
+      aria-live={isAlert() ? 'assertive' : 'polite'}
       class={cn(
         'flex items-start gap-3 p-4 rounded-lg shadow-elevation-3',
         'bg-surface-elevated border border-border-hairline border-l-4 min-w-[280px] max-w-[420px]',
@@ -50,7 +74,7 @@ function SingleToast(props: { toast: ToastItemType }) {
         </Show>
       </div>
       <button
-        onClick={() => uiStore.removeToast(props.toast.id)}
+        onClick={triggerLeave}
         aria-label="关闭"
         class="flex-shrink-0 p-0.5 rounded text-content-tertiary hover:text-content cursor-pointer transition-colors duration-fast"
       >
@@ -65,9 +89,10 @@ function SingleToast(props: { toast: ToastItemType }) {
 export function Toaster() {
   return (
     <Portal>
-      <div role="region" aria-live="polite" class="fixed top-4 right-4 z-[100] flex flex-col gap-2">
+      {/* 容器只做布局；aria-live 由每条 toast 自身按 type 决定（assertive / polite） */}
+      <div class="fixed top-4 right-4 z-[100] flex flex-col gap-2">
         {/* 注：solid-motionone v1 的 <Presence> 是 single-child 设计，与 <For> 组合时只渲染首个子节点；
-            因此 toast 列表暂不使用 <Presence>，每条入场由各自 <Motion.div> 独立驱动；出场动画待后续优化 */}
+            因此 toast 列表暂不使用 <Presence>，出场由 SingleToast 内部 leaving 信号驱动 */}
         <For each={uiStore.toasts()}>{(t) => <SingleToast toast={t} />}</For>
       </div>
     </Portal>

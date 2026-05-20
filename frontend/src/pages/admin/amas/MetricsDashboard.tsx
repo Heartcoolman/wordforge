@@ -67,14 +67,16 @@ export function MetricsDashboard() {
       <Card variant="elevated">
         <div class="flex items-baseline justify-between mb-3">
           <h2 class="text-lg font-semibold text-content">算法延迟 / 错误率</h2>
-          <div class="flex items-center gap-1.5">
+          <div class="flex items-center gap-1.5" role="group" aria-label="时间窗口">
             <For each={[7, 14, 30] as const}>
               {(n) => (
                 <button
                   type="button"
                   onClick={() => setDays(n)}
-                  class={`px-2.5 py-1 text-xs rounded-md transition-colors ${
-                    days() === n ? 'bg-accent text-white' : 'bg-surface-secondary text-content-secondary hover:text-content'
+                  aria-pressed={days() === n}
+                  aria-label={`使用 ${n} 天窗口`}
+                  class={`focus-ring-soft px-2.5 py-1 text-xs rounded-md transition-colors ${
+                    days() === n ? 'bg-accent text-accent-content' : 'bg-surface-secondary text-content-secondary hover:text-content'
                   }`}
                 >
                   {n} 天
@@ -83,7 +85,7 @@ export function MetricsDashboard() {
             </For>
           </div>
         </div>
-        <Show when={!series.loading} fallback={<div class="flex justify-center py-12"><Spinner /></div>}>
+        <Show when={!series.loading} fallback={<div class="min-h-[440px] flex items-center justify-center"><Spinner /></div>}>
           <Show when={grouped().dates.length > 0} fallback={<Empty title="暂无聚合数据" description="algorithm_metrics_daily 表当前为空" />}>
             <EChart option={option} height="440px" />
           </Show>

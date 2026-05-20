@@ -1,6 +1,7 @@
 import { createSignal, Show, For, onMount, createMemo } from 'solid-js';
 import { Card } from '@/components/ui/Card';
 import { Badge } from '@/components/ui/Badge';
+import { Button } from '@/components/ui/Button';
 import { Spinner } from '@/components/ui/Spinner';
 import { Empty } from '@/components/ui/Empty';
 import { Pagination } from '@/components/ui/Pagination';
@@ -19,6 +20,8 @@ export default function FeedbackPage() {
   const [perPage] = createSignal(20);
   const [loading, setLoading] = createSignal(true);
   const [err, setErr] = createSignal('');
+  // 首次加载完成后翻页不再 stagger，避免瀑布
+  const [firstLoadDone, setFirstLoadDone] = createSignal(false);
 
   const totalPages = createMemo(() => Math.max(1, Math.ceil(total() / perPage())));
 
@@ -34,6 +37,7 @@ export default function FeedbackPage() {
       setErr(e instanceof Error ? e.message : '加载失败');
     } finally {
       setLoading(false);
+      setFirstLoadDone(true);
     }
   }
 
@@ -46,19 +50,36 @@ export default function FeedbackPage() {
           <h1 class="text-title text-content">反馈中心</h1>
           <p class="text-caption mt-1">用户通过 /api/feedback 提交的内容，按时间倒序展示</p>
         </div>
-        <Badge variant="accent" size="md">共 {total()} 条</Badge>
+        {/* loading 期间隐藏 Badge，避免显示"共 0 条" */}
+        <Show when={!loading()}>
+          <Badge variant="accent" size="md">共 {total()} 条</Badge>
+        </Show>
       </header>
 
       <Card padding="none">
         <Show when={!loading()} fallback={<div class="py-12 flex justify-center"><Spinner size="lg" /></div>}>
-          <Show when={!err()} fallback={<div class="py-12 px-4 text-center text-error text-sm">{err()}</div>}>
+          <Show
+            when={!err()}
+            fallback={
+              <div class="py-12 px-4 flex flex-col items-center gap-3 text-center">
+                <p class="text-error text-sm">{err()}</p>
+                <Button variant="ghost" size="sm" onClick={() => load(page())}>
+                  重试
+                </Button>
+              </div>
+            }
+          >
             <Show when={items().length > 0} fallback={<Empty title="暂无反馈" description="还没有用户提交过反馈" />}>
               <ul class="divide-y divide-border-hairline">
                 <For each={items()}>
                   {(it, idx) => (
                     <li
                       class="group p-4 transition-colors duration-fast ease-out-expo hover:bg-accent-light/40 animate-fade-in-up"
-                      style={{ 'animation-delay': `${Math.min(idx() * 40, 320)}ms`, 'animation-fill-mode': 'backwards' }}
+                      style={
+                        firstLoadDone()
+                          ? { 'animation-delay': '0ms', 'animation-fill-mode': 'backwards' }
+                          : { 'animation-delay': `${Math.min(idx() * 40, 320)}ms`, 'animation-fill-mode': 'backwards' }
+                      }
                     >
                       <div class="flex items-center justify-between gap-2 text-caption mb-2">
                         <div class="flex items-center gap-2">
@@ -77,15 +98,16 @@ export default function FeedbackPage() {
                   )}
                 </For>
               </ul>
-
-              <Show when={totalPages() > 1}>
-                <div class="flex items-center justify-between gap-2 p-3 border-t border-border-hairline">
-                  <span class="text-caption">第 {page()} / {totalPages()} 页</span>
-                  <Pagination page={page()} total={total()} pageSize={perPage()} onChange={load} />
-                </div>
-              </Show>
             </Show>
           </Show>
+        </Show>
+
+        {/* 分页器移到 Show 外：err / empty 状态也保留，方便重试后翻页 */}
+        <Show when={!loading() && totalPages() > 1}>
+          <div class="flex items-center justify-between gap-2 p-3 border-t border-border-hairline">
+            <span class="text-caption">第 {page()} / {totalPages()} 页</span>
+            <Pagination page={page()} total={total()} pageSize={perPage()} onChange={load} />
+          </div>
         </Show>
       </Card>
     </div>

@@ -14,7 +14,8 @@ describe('JsonAdvancedPanel', () => {
     const onChange = vi.fn();
     render(() => <JsonAdvancedPanel config={{ a: 1 }} onChange={onChange} />);
     const ta = document.querySelector('textarea') as HTMLTextAreaElement;
-    ta.value = '{"b": 2}';
+    // 非受控 + draft signal：必须通过 input 事件让 draft 更新，按钮才会变为可点
+    fireEvent.input(ta, { target: { value: '{"b": 2}' } });
     fireEvent.click(screen.getByText('应用到表单'));
     expect(onChange).toHaveBeenCalledWith({ b: 2 });
   });
@@ -23,7 +24,7 @@ describe('JsonAdvancedPanel', () => {
     const onChange = vi.fn();
     render(() => <JsonAdvancedPanel config={{ a: 1 }} onChange={onChange} />);
     const ta = document.querySelector('textarea') as HTMLTextAreaElement;
-    ta.value = '[1, 2, 3]';
+    fireEvent.input(ta, { target: { value: '[1, 2, 3]' } });
     fireEvent.click(screen.getByText('应用到表单'));
     expect(onChange).not.toHaveBeenCalled();
   });
@@ -32,7 +33,7 @@ describe('JsonAdvancedPanel', () => {
     const onChange = vi.fn();
     render(() => <JsonAdvancedPanel config={{ a: 1 }} onChange={onChange} />);
     const ta = document.querySelector('textarea') as HTMLTextAreaElement;
-    ta.value = '{bad';
+    fireEvent.input(ta, { target: { value: '{bad' } });
     fireEvent.click(screen.getByText('应用到表单'));
     expect(onChange).not.toHaveBeenCalled();
   });
@@ -41,7 +42,7 @@ describe('JsonAdvancedPanel', () => {
     const onChange = vi.fn();
     render(() => <JsonAdvancedPanel config={{ a: 1 }} onChange={onChange} />);
     const ta = document.querySelector('textarea') as HTMLTextAreaElement;
-    ta.value = 'null';
+    fireEvent.input(ta, { target: { value: 'null' } });
     fireEvent.click(screen.getByText('应用到表单'));
     expect(onChange).not.toHaveBeenCalled();
   });

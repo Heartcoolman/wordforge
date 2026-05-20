@@ -15,6 +15,15 @@ const DAYS_ALLOWED = [7, 14, 30] as const;
 const cssVar = (name: string, fallback: string) =>
   getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
 
+// KPI stagger 入场延迟，避免 4 张卡 fade-in-up 同时触发的"齐刷"感
+const STAGGER_FILL = 'backwards' as const;
+const STAGGER_DELAYS: Array<{ 'animation-delay'?: string; 'animation-fill-mode': typeof STAGGER_FILL }> = [
+  { 'animation-fill-mode': STAGGER_FILL },
+  { 'animation-delay': '80ms', 'animation-fill-mode': STAGGER_FILL },
+  { 'animation-delay': '160ms', 'animation-fill-mode': STAGGER_FILL },
+  { 'animation-delay': '240ms', 'animation-fill-mode': STAGGER_FILL },
+];
+
 export default function AdminDashboard() {
   const [searchParams, setSearchParams] = useSearchParams();
   const days = createMemo(() => {
@@ -24,13 +33,27 @@ export default function AdminDashboard() {
   const setDays = (d: number) => setSearchParams({ days: d.toString() });
 
   // Each resource is independent so a single failure doesn't black-out the page.
-  const [stats] = createResource(() => adminApi.getStats());
-  const [eng] = createResource(() => adminApi.getEngagement());
-  const [overview] = createResource(days, (d) => adminApi.getStudyOverview(d));
+  const [stats, { refetch: refetchStats }] = createResource(() => adminApi.getStats());
+  const [eng, { refetch: refetchEng }] = createResource(() => adminApi.getEngagement());
+  const [overview, { refetch: refetchOverview }] = createResource(days, (d) => adminApi.getStudyOverview(d));
   const [dau] = createResource(days, (d) => adminApi.getDailyActiveUsers(d));
   const [records] = createResource(days, (d) => adminApi.getDailyRecords(d));
   const [health] = createResource(() => adminApi.getHealth());
   const [updateInfo] = createResource(() => adminApi.checkUpdate());
+
+  // 单卡级错误降级：err → 简短错误 + 重试按钮，避免永远转圈的 Skeleton
+  const KpiErrorCell = (props: { onRetry: () => void }) => (
+    <div class="h-full p-3 rounded-lg border border-error/30 bg-error-light/30 flex flex-col items-start justify-between gap-1.5">
+      <p class="text-xs text-error">加载失败</p>
+      <button
+        type="button"
+        class="text-xs px-2 py-0.5 rounded bg-error/10 text-error hover:bg-error/20 transition-colors focus-ring-soft"
+        onClick={() => props.onRetry()}
+      >
+        重试
+      </button>
+    </div>
+  );
 
   const dauStats = createMemo(() => {
     const data = dau();
@@ -45,61 +68,81 @@ export default function AdminDashboard() {
     <div class="space-y-6">
       <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-2 border-b border-border-hairline">
         <h1 class="text-title text-content">全局概览</h1>
-        <WindowPicker value={days} onChange={setDays} />
+        <WindowPicker value={days()} onChange={setDays} />
       </div>
 
-      {/* KPI 行 — 4 张卡 stagger 80ms 错开 + count-up 数字滚动 */}
+      {/* KPI 行 — 4 张卡 stagger 80ms 错开；动画放在内层渲染节点，避免 Skeleton/StatCard 切换时闪动 */}
       <div class="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <div class="animate-fade-in-up h-full" style={{ 'animation-fill-mode': 'backwards' }}>
-          <Show when={stats()} fallback={<Skeleton height="100px" />}>
+        <div class="h-full">
+          <Show
+            when={stats()}
+            fallback={stats.error ? <KpiErrorCell onRetry={refetchStats} /> : <Skeleton height="100px" />}
+          >
             {(s) => (
-              <StatCard
-                title="注册用户"
-                value={s().users}
-                format={formatNumber}
-                color="accent"
-                icon="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z"
-                trend={s().trend?.users}
-              />
+              <div class="animate-fade-in-up h-full" style={STAGGER_DELAYS[0]}>
+                <StatCard
+                  title="注册用户"
+                  value={s().users}
+                  format={formatNumber}
+                  color="accent"
+                  icon="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z"
+                  trend={s().trend?.users}
+                />
+              </div>
             )}
           </Show>
         </div>
-        <div class="animate-fade-in-up h-full" style={{ 'animation-delay': '80ms', 'animation-fill-mode': 'backwards' }}>
-          <Show when={eng()} fallback={<Skeleton height="100px" />}>
+        <div class="h-full">
+          <Show
+            when={eng()}
+            fallback={eng.error ? <KpiErrorCell onRetry={refetchEng} /> : <Skeleton height="100px" />}
+          >
             {(e) => (
-              <StatCard
-                title="今日活跃"
-                value={e().activeToday}
-                format={formatNumber}
-                color="success"
-                icon="M13 10V3L4 14h7v7l9-11h-7z"
-                trend={e().trend?.activeToday}
-              />
+              <div class="animate-fade-in-up h-full" style={STAGGER_DELAYS[1]}>
+                <StatCard
+                  title="今日活跃"
+                  value={e().activeToday}
+                  format={formatNumber}
+                  color="success"
+                  icon="M13 10V3L4 14h7v7l9-11h-7z"
+                  trend={e().trend?.activeToday}
+                />
+              </div>
             )}
           </Show>
         </div>
-        <div class="animate-fade-in-up h-full" style={{ 'animation-delay': '160ms', 'animation-fill-mode': 'backwards' }}>
-          <Show when={overview()} fallback={<Skeleton height="100px" />}>
+        <div class="h-full">
+          <Show
+            when={overview()}
+            fallback={overview.error ? <KpiErrorCell onRetry={refetchOverview} /> : <Skeleton height="100px" />}
+          >
             {(o) => (
-              <StatCard
-                title={`${days()}天答题数`}
-                value={o().summary.recordCount}
-                format={formatNumber}
-                color="info"
-                icon="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"
-              />
+              <div class="animate-fade-in-up h-full" style={STAGGER_DELAYS[2]}>
+                <StatCard
+                  title={`${days()}天答题数`}
+                  value={o().summary.recordCount}
+                  format={formatNumber}
+                  color="info"
+                  icon="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"
+                />
+              </div>
             )}
           </Show>
         </div>
-        <div class="animate-fade-in-up h-full" style={{ 'animation-delay': '240ms', 'animation-fill-mode': 'backwards' }}>
-          <Show when={overview()} fallback={<Skeleton height="100px" />}>
+        <div class="h-full">
+          <Show
+            when={overview()}
+            fallback={overview.error ? <KpiErrorCell onRetry={refetchOverview} /> : <Skeleton height="100px" />}
+          >
             {(o) => (
-              <StatCard
-                title={`${days()}天正确率`}
-                value={formatAccuracy(o().summary.accuracy)}
-                color="warning"
-                icon="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
-              />
+              <div class="animate-fade-in-up h-full" style={STAGGER_DELAYS[3]}>
+                <StatCard
+                  title={`${days()}天正确率`}
+                  value={formatAccuracy(o().summary.accuracy)}
+                  color="warning"
+                  icon="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
+                />
+              </div>
             )}
           </Show>
         </div>
@@ -256,12 +299,12 @@ export default function AdminDashboard() {
                 <p class="text-content-secondary">状态</p>
                 <p class="font-medium flex items-center gap-1.5">
                   <span
-                    class={`w-2 h-2 rounded-full animate-ring-pulse ${
+                    class={`w-2 h-2 rounded-full ${
                       h().status === 'healthy'
-                        ? 'bg-success text-success'
+                        ? 'bg-success animate-ring-pulse'
                         : h().status === 'degraded'
-                        ? 'bg-warning text-warning'
-                        : 'bg-error text-error'
+                        ? 'bg-warning'
+                        : 'bg-error'
                     }`}
                   />
                   <span
@@ -294,7 +337,7 @@ export default function AdminDashboard() {
               <div>
                 <p class="text-content-secondary">版本</p>
                 <div class="flex items-center gap-2 min-w-0">
-                  <p class="font-medium text-content truncate" title={h().version}>{h().version}</p>
+                  <p class="font-medium text-content truncate max-w-[10ch]" title={h().version}>{h().version}</p>
                   <Show when={updateInfo()?.hasUpdate && updateInfo()?.releaseUrl}>
                     <a
                       href={updateInfo()!.releaseUrl!}
@@ -312,13 +355,7 @@ export default function AdminDashboard() {
         )}
       </Show>
 
-      <Show
-        when={
-          stats.error && eng.error && overview.error && dau.error && records.error && health.error
-        }
-      >
-        <Empty title="加载失败" description="无法获取仪表盘数据，请稍后重试" />
-      </Show>
+      {/* 各 Resource 已在自身位置展示降级（KPI 卡 / Panel / 系统状态），不再叠加"全失败"Empty */}
     </div>
   );
 }

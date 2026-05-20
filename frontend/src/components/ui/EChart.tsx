@@ -1,4 +1,4 @@
-import { onMount, onCleanup, createEffect } from 'solid-js';
+import { onMount, onCleanup, createEffect, Show, type JSX } from 'solid-js';
 import * as echarts from 'echarts/core';
 import { LineChart, BarChart, PieChart, ScatterChart } from 'echarts/charts';
 import { GridComponent, TooltipComponent, LegendComponent } from 'echarts/components';
@@ -16,6 +16,8 @@ interface EChartProps {
   option: () => EChartsOption;
   class?: string;
   height?: string;
+  /** 当 series 数据均为空时渲染的回退节点（不传则照常 render 图表） */
+  empty?: JSX.Element;
 }
 
 /**
@@ -35,25 +37,57 @@ function withDefaults(option: EChartsOption): EChartsOption {
   return { ...DEFAULT_ANIMATION, ...option };
 }
 
+function hasSeriesData(option: EChartsOption): boolean {
+  const series = option.series;
+  if (!series) return false;
+  const list = Array.isArray(series) ? series : [series];
+  return list.some((s) => {
+    const data = (s as { data?: unknown[] }).data;
+    return Array.isArray(data) && data.length > 0;
+  });
+}
+
 export function EChart(props: EChartProps) {
   let containerRef: HTMLDivElement | undefined;
   let instance: echarts.ECharts | null = null;
   let resizeOb: ResizeObserver | null = null;
 
+  // 创建或重建 instance（dispose + init），用于 theme 切换
+  const createInstance = () => {
+    if (!containerRef) return;
+    const theme = themeStore.effective() === 'dark' ? 'dark' : undefined;
+    instance = echarts.init(containerRef, theme);
+  };
+
   onMount(() => {
     if (!containerRef) return;
-
-    instance = echarts.init(containerRef);
-    instance.setOption(withDefaults(props.option()));
-
-    resizeOb = new ResizeObserver(() => instance?.resize());
+    createInstance();
+    // 容器尺寸为 0（父级 display:none）时跳过 resize 避免 ECharts warning，
+    // 后续 ResizeObserver 在变为可见时会自动追加 resize。
+    resizeOb = new ResizeObserver((entries) => {
+      if (entries[0]?.contentRect.width > 0) instance?.resize();
+    });
     resizeOb.observe(containerRef);
-
   });
 
+  // theme 切换：销毁实例重建以保证主题完全应用（避免 setOption notMerge 丢字段）
   createEffect(() => {
-    themeStore.effective();
-    instance?.setOption(withDefaults(props.option()), { notMerge: true });
+    const _theme = themeStore.effective();
+    if (instance) {
+      const last = props.option();
+      instance.dispose();
+      createInstance();
+      instance?.setOption(withDefaults(last));
+    }
+    // 引用一下 _theme 让 effect 跟踪
+    void _theme;
+  });
+
+  // option 变化：仅 setOption，merge 模式
+  createEffect(() => {
+    const opt = props.option();
+    if (!instance) return;
+    instance.setOption(withDefaults(opt));
   });
 
   onCleanup(() => {
@@ -63,10 +97,12 @@ export function EChart(props: EChartProps) {
   });
 
   return (
-    <div
-      ref={(el) => { containerRef = el; }}
-      class={props.class}
-      style={{ height: props.height ?? '320px' }}
-    />
+    <Show when={hasSeriesData(props.option()) || !props.empty} fallback={props.empty}>
+      <div
+        ref={(el) => { containerRef = el; }}
+        class={props.class}
+        style={{ height: props.height ?? '320px' }}
+      />
+    </Show>
   );
 }
