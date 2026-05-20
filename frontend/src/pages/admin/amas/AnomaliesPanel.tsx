@@ -64,49 +64,53 @@ export function AnomaliesPanel() {
             </For>
           </div>
         </div>
-        <Show when={!overview.loading} fallback={<div class="flex justify-center py-12"><Spinner /></div>}>
-          {(_) => {
-            const ov = () => overview()!;
+        <Show
+          when={!overview.loading && overview()}
+          keyed
+          fallback={<div class="min-h-[440px] flex items-center justify-center"><Spinner /></div>}
+        >
+          {(ov) => {
             return (
               <div class="space-y-4">
                 <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
                   <StatCard
                     title="总事件"
-                    value={ov().totalEvents}
+                    value={ov.totalEvents}
                     color="info"
                     icon="M4 6h16M4 10h16M4 14h16M4 18h16"
                   />
                   <StatCard
                     title="异常次数"
-                    value={ov().anomalyCount}
+                    value={ov.anomalyCount}
                     color="error"
                     icon="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L3.034 16.5c-.77.833.192 2.5 1.732 2.5z"
                   />
                   <StatCard
                     title="违反不变量"
-                    value={ov().violationCount}
+                    value={ov.violationCount}
                     color="warning"
                     icon="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z"
                   />
                   <StatCard
                     title="冷启动 explore/exploit"
-                    value={`${ov().coldStartExplore}/${ov().coldStartExploit}`}
+                    value={`${ov.coldStartExplore}/${ov.coldStartExploit}`}
                     color="success"
                     icon="M13 10V3L4 14h7v7l9-11h-7z"
                   />
                 </div>
 
-                <Show when={ov().byDay.length > 0} fallback={<Empty title="时间窗口内无事件" description="尝试拉长窗口或检查是否落库" />}>
+                <Show when={ov.byDay.length > 0} fallback={<Empty title="时间窗口内无事件" description="尝试拉长窗口或检查是否落库" />}>
                   <div>
                     <h3 class="text-sm font-medium text-content-secondary mb-2">按天</h3>
                     <EChart option={dailyOption} height="280px" />
                   </div>
                 </Show>
 
-                <Show when={ov().topViolationFields.length > 0}>
+                <Show when={ov.topViolationFields.length > 0}>
                   <div>
                     <h3 class="text-sm font-medium text-content-secondary mb-2">Top 违反字段</h3>
-                    <EChart option={fieldOption} height={`${Math.max(160, ov().topViolationFields.length * 28)}px`} />
+                    {/* TODO(Group F): EChart need resize on height prop change */}
+                    <EChart option={fieldOption} height={`${Math.max(160, ov.topViolationFields.length * 28)}px`} />
                   </div>
                 </Show>
               </div>

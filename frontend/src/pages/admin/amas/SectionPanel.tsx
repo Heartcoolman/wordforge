@@ -1,8 +1,8 @@
-import { For, createSignal, Show } from 'solid-js';
+import { For, createSignal, createMemo, Show } from 'solid-js';
 import { Card } from '@/components/ui/Card';
 import { Badge } from '@/components/ui/Badge';
 import { ParamField } from './ParamField';
-import { PARAM_DICT, getByPath, setByPath, type FieldError, type ParamMeta } from './schema';
+import { PARAM_DICT, getByPath, setByPath, type FieldError } from './schema';
 
 interface SectionPanelProps {
   config: Record<string, unknown>;
@@ -23,19 +23,25 @@ const SECTION_LABEL_ZH: Record<string, string> = {
 
 /** 分节配置：按 section 折叠，每节内一列 ParamField。 */
 export function SectionPanel(props: SectionPanelProps) {
-  const errorMap = () => new Map(props.errors.map((e) => [e.path, e.message]));
-  const [openSection, setOpenSection] = createSignal<string | null>('memoryModel');
   const sections = Object.keys(PARAM_DICT);
+  // path → 错误消息
+  const errorMap = createMemo(() => new Map(props.errors.map((e) => [e.path, e.message])));
+  // section → 错误数（预聚合，避免每渲染 filter）
+  const errorsBySection = createMemo(() => {
+    const m = new Map<string, number>();
+    for (const e of props.errors) {
+      const section = e.path.split('.')[0];
+      m.set(section, (m.get(section) ?? 0) + 1);
+    }
+    return m;
+  });
+
+  const [openSection, setOpenSection] = createSignal<string | null>(sections[0] ?? null);
 
   function setValue(path: string, v: unknown) {
     const next = structuredClone(props.config);
     setByPath(next, path, v);
     props.onChange(next);
-  }
-
-  function sectionErrorCount(section: string, paramsArr: ParamMeta[]): number {
-    const set = new Set(paramsArr.map((p) => p.path));
-    return props.errors.filter((e) => set.has(e.path) || e.path.startsWith(`${section}.`)).length;
   }
 
   return (
@@ -45,6 +51,7 @@ export function SectionPanel(props: SectionPanelProps) {
           const params = PARAM_DICT[section];
           const isOpen = () => openSection() === section;
           const panelId = `amas-section-${section}`;
+          const sectionErrors = () => errorsBySection().get(section) ?? 0;
           return (
             <Card variant="outlined" padding="none">
               <button
@@ -57,29 +64,39 @@ export function SectionPanel(props: SectionPanelProps) {
                 <span class="flex items-center gap-2 text-sm font-semibold text-content">
                   {SECTION_LABEL_ZH[section] ?? section}
                   <span class="text-xs text-content-tertiary font-normal">{params.length} 项</span>
-                  <Show when={sectionErrorCount(section, params) > 0}>
-                    <Badge variant="error" size="sm">{sectionErrorCount(section, params)} 错</Badge>
+                  <Show when={sectionErrors() > 0}>
+                    <Badge variant="error" size="sm">{sectionErrors()} 错</Badge>
                   </Show>
                 </span>
-                <span class="text-content-tertiary text-xs">{isOpen() ? '收起' : '展开'}</span>
+                <svg
+                  class={`w-4 h-4 text-content-tertiary transition-transform duration-200 ${isOpen() ? 'rotate-180' : ''}`}
+                  viewBox="0 0 20 20"
+                  fill="currentColor"
+                  aria-hidden="true"
+                >
+                  <path
+                    fill-rule="evenodd"
+                    d="M5.23 7.21a.75.75 0 011.06.02L10 11.06l3.71-3.83a.75.75 0 111.08 1.04l-4.25 4.39a.75.75 0 01-1.08 0L5.21 8.27a.75.75 0 01.02-1.06z"
+                    clip-rule="evenodd"
+                  />
+                </svg>
               </button>
-              <Show when={isOpen()}>
-                <div id={panelId} class="px-4 pb-4 pt-1 space-y-3 border-t border-border">
-                  <For each={params}>
-                    {(meta) => (
-                      <div class="border-b border-border/50 pb-3 last:border-b-0 last:pb-0">
-                        <ParamField
-                          meta={meta}
-                          value={getByPath(props.config, meta.path)}
-                          error={errorMap().get(meta.path)}
-                          onChange={(v) => setValue(meta.path, v)}
-                          compact
-                        />
-                      </div>
-                    )}
-                  </For>
-                </div>
-              </Show>
+              {/* 保留 DOM 以让 aria-controls 始终有效 */}
+              <div id={panelId} hidden={!isOpen()} class="px-4 pb-4 pt-1 space-y-3 border-t border-border">
+                <For each={params}>
+                  {(meta) => (
+                    <div class="border-b border-border/50 pb-3 last:border-b-0 last:pb-0">
+                      <ParamField
+                        meta={meta}
+                        value={getByPath(props.config, meta.path)}
+                        error={errorMap().get(meta.path)}
+                        onChange={(v) => setValue(meta.path, v)}
+                        compact
+                      />
+                    </div>
+                  )}
+                </For>
+              </div>
             </Card>
           );
         }}

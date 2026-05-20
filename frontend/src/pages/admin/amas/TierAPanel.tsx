@@ -1,4 +1,4 @@
-import { For } from 'solid-js';
+import { For, createMemo } from 'solid-js';
 import { Card } from '@/components/ui/Card';
 import { ParamField } from './ParamField';
 import { TIER_A_META, getByPath, setByPath, type FieldError } from './schema';
@@ -11,7 +11,7 @@ interface TierAPanelProps {
 
 /** 重点参数页：Tier-A 11 维，2026-05-15 验证收益最大的核心调参点。 */
 export function TierAPanel(props: TierAPanelProps) {
-  const errorMap = () => new Map(props.errors.map((e) => [e.path, e.message]));
+  const errorMap = createMemo(() => new Map(props.errors.map((e) => [e.path, e.message])));
 
   function setValue(path: string, v: unknown) {
     const next = structuredClone(props.config);
@@ -26,7 +26,7 @@ export function TierAPanel(props: TierAPanelProps) {
         其它参数对核心指标贡献较小，建议保持默认或在「分节配置」中谨慎调整。
       </div>
 
-      <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+      <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
         <For each={TIER_A_META}>
           {(meta) => (
             <Card variant="outlined" padding="sm">

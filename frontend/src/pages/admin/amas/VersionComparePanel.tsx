@@ -44,12 +44,12 @@ export function VersionComparePanel() {
     },
   );
 
-  const options = (): { value: string; label: string }[] => {
-    return (versions() ?? []).map((v: AmasConfigVersionRow) => ({
+  const options = createMemo<{ value: string; label: string }[]>(() =>
+    (versions() ?? []).map((v: AmasConfigVersionRow) => ({
       value: v.versionHash,
       label: `${v.versionHash.slice(0, 10)} · ${v.source} · ${formatTime(v.createdAt)}${v.note ? ` · ${v.note}` : ''}`,
-    }));
-  };
+    })),
+  );
 
   const barOption = (): import('echarts').EChartsOption => {
     const c = compare();
@@ -62,10 +62,11 @@ export function VersionComparePanel() {
       legend: { top: 0, data: ['A', 'B'] },
       tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
       xAxis: { type: 'value' },
-      yAxis: { type: 'category', data: labels, inverse: true },
+      // 不使用 inverse，按 METRICS 数组业务顺序自上而下展示
+      yAxis: { type: 'category', data: labels },
       series: [
-        { name: 'A', type: 'bar', data: aVals, itemStyle: { color: chartColor('accent') }, barGap: '10%' },
-        { name: 'B', type: 'bar', data: bVals, itemStyle: { color: chartColor('success') }, barGap: '10%' },
+        { name: 'A', type: 'bar', data: aVals, itemStyle: { color: chartColor('accent') } },
+        { name: 'B', type: 'bar', data: bVals, itemStyle: { color: chartColor('success') } },
       ],
     };
   };
@@ -100,7 +101,7 @@ export function VersionComparePanel() {
               </div>
             </div>
 
-            <div class="flex items-center gap-2 mt-3">
+            <div class="flex items-center flex-wrap gap-2 mt-3">
               <Button size="sm" variant="ghost" onClick={() => { setVersionA(initialPick().a); setVersionB(initialPick().b); }}>
                 还原为最近两个版本
               </Button>
@@ -112,7 +113,7 @@ export function VersionComparePanel() {
         </Show>
       </Card>
 
-      <Show when={!compare.loading && compare()} fallback={<Show when={compare.loading}><div class="flex justify-center py-12"><Spinner /></div></Show>}>
+      <Show when={!compare.loading && compare()} fallback={<Show when={compare.loading}><div class="min-h-[440px] flex items-center justify-center"><Spinner /></div></Show>}>
         {(_) => {
           const c = () => compare()!;
           const noData = () => c().a.eventCount === 0 && c().b.eventCount === 0;
@@ -120,7 +121,14 @@ export function VersionComparePanel() {
             <Show when={!noData()} fallback={<Card variant="elevated"><Empty title="两个版本均无 monitoring 事件" description="可能版本尚未上线或落库延迟" /></Card>}>
               <Card variant="elevated">
                 <h3 class="text-sm font-semibold text-content mb-3">指标对比柱状图</h3>
-                <EChart option={barOption} height="380px" />
+                <div class="relative">
+                  <EChart option={barOption} height="380px" />
+                  <Show when={compare.loading}>
+                    <div class="absolute inset-0 bg-bg-overlay/30 flex items-center justify-center">
+                      <Spinner />
+                    </div>
+                  </Show>
+                </div>
               </Card>
 
               <Card variant="elevated">
