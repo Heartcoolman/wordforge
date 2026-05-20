@@ -1,6 +1,7 @@
 import { Show } from 'solid-js';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
+import { ReleaseNotesMarkdown } from '@/components/admin/ReleaseNotesMarkdown';
 import type { ChannelStatus } from '@/types/admin';
 
 /**
@@ -62,15 +63,15 @@ export function UpdateChannelCard(props: Props) {
           <summary class="text-sm text-accent cursor-pointer select-none">
             Release Notes
           </summary>
-          <pre class="mt-2 whitespace-pre-wrap text-xs text-content-secondary font-mono leading-relaxed max-h-64 overflow-y-auto bg-surface-secondary/40 p-2 rounded">
-            {status()!.releaseNotes}
-          </pre>
+          <div class="mt-2 max-h-80 overflow-y-auto bg-surface-secondary/40 p-3 rounded">
+            <ReleaseNotesMarkdown content={status()!.releaseNotes} />
+          </div>
           <Show when={status()?.releaseUrl}>
             <a
               href={status()!.releaseUrl}
               target="_blank"
               rel="noopener"
-              class="text-xs text-accent hover:underline mt-1 inline-block"
+              class="text-xs text-accent hover:underline mt-2 inline-block"
             >
               在 GitHub 打开 ↗
             </a>
