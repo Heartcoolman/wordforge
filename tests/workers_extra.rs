@@ -95,6 +95,7 @@ fn build_test_config(database_url: String) -> Config {
         pagination: Default::default(),
         strict_mode: Default::default(),
         limits: Default::default(),
+        probe: Default::default(),
     }
 }
 
