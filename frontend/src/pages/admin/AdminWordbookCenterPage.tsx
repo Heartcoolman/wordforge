@@ -205,10 +205,10 @@ export default function AdminWordbookCenterPage() {
                     class="cursor-pointer"
                   >
                     <div class="flex items-start justify-between gap-2">
-                      <div class="min-w-0">
+                      <div class="flex-1 min-w-0">
                         <h3 class="font-semibold text-content truncate">{item.name}</h3>
                         <Show when={item.description}>
-                          <p class="text-sm text-content-secondary mt-1 line-clamp-2">{item.description}</p>
+                          <p class="text-sm text-content-secondary mt-0.5 line-clamp-2">{item.description}</p>
                         </Show>
                       </div>
                       <Show when={item.imported}>
@@ -217,19 +217,19 @@ export default function AdminWordbookCenterPage() {
                         </Badge>
                       </Show>
                     </div>
-                    <div class="flex items-center gap-3 mt-3 text-xs text-content-tertiary">
+                    <div class="flex items-center gap-3 mt-2 text-xs text-content-tertiary tabular-nums">
                       <span>{item.wordCount} 词</span>
                       <Show when={item.version}><span>v{item.version}</span></Show>
-                      <Show when={item.author}><span>{item.author}</span></Show>
+                      <Show when={item.author}><span class="truncate">{item.author}</span></Show>
                     </div>
                     <Show when={item.tags.length > 0}>
-                      <div class="flex flex-wrap gap-1 mt-2">
+                      <div class="flex flex-wrap gap-1 mt-1.5">
                         <For each={item.tags.slice(0, 3)}>
                           {(tag) => <Badge size="sm">{tag}</Badge>}
                         </For>
                       </div>
                     </Show>
-                    <div class="mt-3" onClick={(e: MouseEvent) => e.stopPropagation()}>
+                    <div class="mt-2.5" onClick={(e: MouseEvent) => e.stopPropagation()}>
                       <Show when={!item.imported}>
                         <Button
                           size="sm"

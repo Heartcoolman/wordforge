@@ -36,7 +36,8 @@ export function Badge(props: BadgeProps) {
     <span
       {...rest}
       class={cn(
-        'inline-flex items-center font-medium rounded-full tabular-nums',
+        // chip 永远单行，避免被 flex 兄弟挤压换行（如 wordbook 卡片右上"已导入"）
+        'inline-flex items-center font-medium rounded-full tabular-nums whitespace-nowrap shrink-0',
         local.size === 'sm' ? 'px-2 py-0.5 text-[10px] gap-1' : 'px-2.5 py-0.5 text-xs gap-1.5',
         variants[variant()],
         local.class,
