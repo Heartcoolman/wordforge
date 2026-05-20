@@ -19,7 +19,7 @@ use serde_json::json;
 use crate::auth::AdminAuthUser;
 use crate::extractors::JsonBody;
 use crate::response::{ok, AppError};
-use crate::services::updater::{Updater, UpdaterError, UpdatePhase};
+use crate::services::updater::{Channel, ChannelStatus, Updater, UpdaterError, UpdatePhase};
 use crate::state::{ApplyTaskStatus, AppState, SseEvent};
 
 pub fn router() -> Router<AppState> {
@@ -63,23 +63,40 @@ async fn force_check(
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     let updater = require_updater(&state).await?;
-    let prev = updater.snapshot().await.latest_version;
+    let prev = updater.snapshot().await;
     // 显式走 force 路径，跳过 TTL，仍带 ETag 节省额度
     let status = updater.force_check_latest().await.map_err(map_err)?;
-    // 缓存里的 latest 发生变化 → 顺手广播一次，省得用户等下次 worker tick
-    if status.has_update && status.latest_version != prev {
-        if let Some(ref tag) = status.latest_version {
-            state.broadcast_to_all_sse(SseEvent::ReleaseAvailable {
-                latest_tag: tag.clone(),
-            });
-        }
-    }
+    // v0.6.0-beta.3：stable / beta 各自有更新且 latest 变化 → 分别广播一次
+    broadcast_channel_change(&state, Channel::Stable, &prev.stable, &status.stable);
+    broadcast_channel_change(&state, Channel::Beta, &prev.beta, &status.beta);
     Ok(ok(status))
+}
+
+fn broadcast_channel_change(
+    state: &AppState,
+    channel: Channel,
+    prev: &Option<ChannelStatus>,
+    new: &Option<ChannelStatus>,
+) {
+    let Some(new) = new else {
+        return;
+    };
+    if !new.has_update {
+        return;
+    }
+    if prev.as_ref().map(|p| p.latest_version.as_str()) != Some(new.latest_version.as_str()) {
+        state.broadcast_to_all_sse(SseEvent::ReleaseAvailable {
+            latest_tag: new.latest_version.clone(),
+            channel,
+        });
+    }
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ApplyRequest {
+    /// v0.6.0-beta.3：必填，后端用它定位 cache.<channel> 校验 target_version
+    channel: Channel,
     target_version: String,
     confirm_current_version: String,
 }
@@ -137,6 +154,7 @@ async fn apply(
     let bg_updater = updater.clone();
     let bg_store = state.store().clone();
     let target = req.target_version.clone();
+    let channel = req.channel;
     tokio::spawn(async move {
         let progress_state = bg_state.clone();
         let sink: crate::services::updater::ProgressSink = Arc::new(move |phase| {
@@ -155,7 +173,7 @@ async fn apply(
             bg_store.backup_to(dst).map_err(UpdaterError::Store)
         };
 
-        match bg_updater.apply(&target, backup_cb, sink).await {
+        match bg_updater.apply(channel, &target, backup_cb, sink).await {
             Ok(()) => {
                 // 成功路径已 process::exit(0)，理论到不了这里；保底标记 completed
                 bg_state.update_apply_task(|t| {

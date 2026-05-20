@@ -323,13 +323,63 @@ describe('adminApi', () => {
         HttpResponse.json({ success: true, data: { state: 'checking' } })),
       http.post(`${BASE}/api/admin/updates/apply`, async ({ request }) => {
         const body = await request.json() as Record<string, unknown>;
-        expect(body).toEqual({ targetVersion: '1.2.3', confirmCurrentVersion: '1.2.2' });
+        // v0.6.0-beta.3：channel 必填
+        expect(body).toEqual({ channel: 'beta', targetVersion: '1.2.3', confirmCurrentVersion: '1.2.2' });
         return HttpResponse.json({ success: true, data: { restarting: true } });
       }),
     );
     expect(await adminApi.updatesStatus()).toEqual({ state: 'idle' });
     expect(await adminApi.updatesCheck()).toEqual({ state: 'checking' });
-    expect(await adminApi.updatesApply('1.2.3', '1.2.2')).toEqual({ restarting: true });
+    expect(await adminApi.updatesApply('beta', '1.2.3', '1.2.2')).toEqual({ restarting: true });
+  });
+
+  it('updatesStatus 返回双通道 ChannelStatus 嵌套结构', async () => {
+    const payload = {
+      currentVersion: 'v0.6.0-beta.2',
+      stable: {
+        latestVersion: 'v0.5.6',
+        latestPublishedAt: '2026-05-19T14:12:35Z',
+        releaseNotes: 'stable notes',
+        releaseUrl: 'https://example/r/v0.5.6',
+        hasUpdate: false,
+        canApply: false,
+      },
+      beta: {
+        latestVersion: 'v0.6.0-beta.3',
+        latestPublishedAt: '2026-05-20T20:17:07Z',
+        releaseNotes: 'beta notes',
+        releaseUrl: 'https://example/r/v0.6.0-beta.3',
+        hasUpdate: true,
+        canApply: true,
+      },
+      lastCheckedAt: '2026-05-20T20:30:00Z',
+      autoCheckEnabled: true,
+      allowDowngrade: false,
+    };
+    server.use(
+      http.get(`${BASE}/api/admin/updates/status`, () =>
+        HttpResponse.json({ success: true, data: payload })),
+    );
+    const result = await adminApi.updatesStatus();
+    expect(result.stable?.latestVersion).toBe('v0.5.6');
+    expect(result.beta?.latestVersion).toBe('v0.6.0-beta.3');
+    expect(result.beta?.hasUpdate).toBe(true);
+    expect(result.stable?.hasUpdate).toBe(false);
+  });
+
+  it('updatesApply 区分 stable / beta channel', async () => {
+    let capturedChannel = '';
+    server.use(
+      http.post(`${BASE}/api/admin/updates/apply`, async ({ request }) => {
+        const body = await request.json() as Record<string, unknown>;
+        capturedChannel = body.channel as string;
+        return HttpResponse.json({ success: true, data: { taskId: 't1', phase: 'pending', percent: 0 } });
+      }),
+    );
+    await adminApi.updatesApply('stable', 'v0.5.6', 'v0.5.5');
+    expect(capturedChannel).toBe('stable');
+    await adminApi.updatesApply('beta', 'v0.6.0-beta.3', 'v0.6.0-beta.2');
+    expect(capturedChannel).toBe('beta');
   });
 
   it('broadcastUpdate sends payload (or empty when absent)', async () => {

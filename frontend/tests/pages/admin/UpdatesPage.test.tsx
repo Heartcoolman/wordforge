@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { screen, waitFor, fireEvent } from '@solidjs/testing-library';
 import { renderWithProviders } from '../../helpers/render';
+import type { AdminUpdateStatus } from '@/types/admin';
 
 vi.mock('@/api/admin', () => ({
   adminApi: {
@@ -28,24 +29,32 @@ import { adminApi } from '@/api/admin';
 
 const mockAdminApi = adminApi as unknown as Record<string, ReturnType<typeof vi.fn>>;
 
-const mockStatusHasUpdate = {
+/// v0.6.0-beta.3：UpdateStatus 拆双通道嵌套。主区域始终是 Stable 卡，Beta 进折叠区。
+/// 这里用 stable 卡有更新 + beta=null 的典型 fixture。
+const mockStatusHasUpdate: AdminUpdateStatus = {
   currentVersion: 'v0.4.2',
-  latestVersion: 'v0.4.3',
-  latestPublishedAt: '2026-05-17T16:00:00Z',
-  releaseNotes: '## Changelog\n- bug fix',
-  releaseUrl: 'https://github.com/Heartcoolman/wordforge/releases/tag/v0.4.3',
-  hasUpdate: true,
-  canApply: true,
+  stable: {
+    latestVersion: 'v0.4.3',
+    latestPublishedAt: '2026-05-17T16:00:00Z',
+    releaseNotes: '## Changelog\n- bug fix',
+    releaseUrl: 'https://github.com/Heartcoolman/wordforge/releases/tag/v0.4.3',
+    hasUpdate: true,
+    canApply: true,
+  },
+  beta: null,
   lastCheckedAt: '2026-05-17T16:05:00Z',
   autoCheckEnabled: true,
   allowDowngrade: false,
 };
 
-const mockStatusNoUpdate = {
+const mockStatusNoUpdate: AdminUpdateStatus = {
   ...mockStatusHasUpdate,
-  latestVersion: 'v0.4.2',
-  hasUpdate: false,
-  canApply: false,
+  stable: {
+    ...mockStatusHasUpdate.stable!,
+    latestVersion: 'v0.4.2',
+    hasUpdate: false,
+    canApply: false,
+  },
 };
 
 describe('UpdatesPage', () => {
@@ -58,7 +67,7 @@ describe('UpdatesPage', () => {
     return renderWithProviders(() => <UpdatesPage />);
   }
 
-  it('shows current and latest version after loading', async () => {
+  it('shows current and stable-channel latest version after loading', async () => {
     mockAdminApi.updatesStatus.mockResolvedValue(mockStatusHasUpdate);
     await renderPage();
     await waitFor(() => {
@@ -67,7 +76,7 @@ describe('UpdatesPage', () => {
     expect(screen.getByText('v0.4.3')).toBeInTheDocument();
   });
 
-  it('shows release notes when present', async () => {
+  it('shows release notes label in stable card', async () => {
     mockAdminApi.updatesStatus.mockResolvedValue(mockStatusHasUpdate);
     await renderPage();
     await waitFor(() => {
@@ -75,22 +84,22 @@ describe('UpdatesPage', () => {
     });
   });
 
-  it('disables apply button when no update available', async () => {
+  it('disables apply button when stable channel has no update', async () => {
     mockAdminApi.updatesStatus.mockResolvedValue(mockStatusNoUpdate);
     await renderPage();
     await waitFor(() => {
-      const btn = screen.getByRole('button', { name: /一键更新到/ });
+      const btn = screen.getByRole('button', { name: /已是最新/ });
       expect(btn).toBeDisabled();
     });
   });
 
-  it('opens confirm modal on apply click', async () => {
+  it('opens confirm modal on stable apply click', async () => {
     mockAdminApi.updatesStatus.mockResolvedValue(mockStatusHasUpdate);
     await renderPage();
     await waitFor(() => {
       expect(screen.getByText('v0.4.3')).toBeInTheDocument();
     });
-    const applyBtn = screen.getByRole('button', { name: /一键更新到/ });
+    const applyBtn = screen.getByRole('button', { name: /一键升级到/ });
     fireEvent.click(applyBtn);
     await waitFor(() => {
       expect(screen.getByText('确认一键更新')).toBeInTheDocument();
@@ -107,7 +116,7 @@ describe('UpdatesPage', () => {
     );
     await renderPage();
     await waitFor(() => expect(screen.getByText('v0.4.3')).toBeInTheDocument());
-    fireEvent.click(screen.getByRole('button', { name: /一键更新到/ }));
+    fireEvent.click(screen.getByRole('button', { name: /一键升级到/ }));
     await waitFor(() => expect(screen.getByText('确认一键更新')).toBeInTheDocument());
     fireEvent.click(screen.getByRole('button', { name: '开始升级' }));
     await waitFor(() => {
@@ -118,9 +127,22 @@ describe('UpdatesPage', () => {
       );
       expect(matched).toBe(true);
     });
-    // 4xx 时应停在 error 分支后的 refetch 一次，不进 2 分钟 polling 循环；
+    // 4xx 时应停在 error 分支后的 refetch 一次，不进 polling 循环；
     // 初始 resource + refetch = ≤ 2 次，绝不会到 polling 的多次调用
     expect(mockAdminApi.updatesStatus.mock.calls.length).toBeLessThanOrEqual(2);
+  });
+
+  it('passes channel="stable" to updatesApply when clicking stable card', async () => {
+    mockAdminApi.updatesStatus.mockResolvedValue(mockStatusHasUpdate);
+    mockAdminApi.updatesApply.mockResolvedValue({ taskId: 't1', phase: 'pending', percent: 0 });
+    await renderPage();
+    await waitFor(() => expect(screen.getByText('v0.4.3')).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: /一键升级到/ }));
+    await waitFor(() => expect(screen.getByText('确认一键更新')).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: '开始升级' }));
+    await waitFor(() => {
+      expect(mockAdminApi.updatesApply).toHaveBeenCalledWith('stable', 'v0.4.3', 'v0.4.2');
+    });
   });
 
   it('triggers updatesCheck on 立即检查 click', async () => {

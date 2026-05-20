@@ -33,6 +33,9 @@ static/index.html
 .claude/worktrees/
 .claude/settings.json
 
+# Superpowers brainstorming visual companion mockups
+.superpowers/
+
 # Workspace crates
 crates/*/target/
 

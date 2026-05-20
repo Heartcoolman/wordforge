@@ -3,10 +3,12 @@ import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Modal } from '@/components/ui/Modal';
 import { Spinner } from '@/components/ui/Spinner';
+import { Collapsible } from '@/components/ui/Collapsible';
+import { UpdateChannelCard } from '@/components/admin/UpdateChannelCard';
 import { adminApi } from '@/api/admin';
 import { ApiError, connectSseStream } from '@/api/client';
 import { uiStore } from '@/stores/ui';
-import type { AdminUpdateStatus } from '@/types/admin';
+import type { AdminUpdateStatus, ChannelStatus } from '@/types/admin';
 
 // 仅 SSE 静默时回落轮询使用：SSE 正常推送时 progress 完全由事件驱动
 const POLL_AFTER_APPLY_MS = 2000;
@@ -27,10 +29,18 @@ const PHASE_LABEL: Record<string, string> = {
   failed: '失败',
 };
 
+const CHANNEL_LABEL: Record<'stable' | 'beta', string> = {
+  stable: '稳定通道',
+  beta: 'Beta 通道',
+};
+
 export default function UpdatesPage() {
-  const [status, { refetch }] = createResource<AdminUpdateStatus>(() => adminApi.updatesStatus());
+  const [status, { refetch }] = createResource<AdminUpdateStatus>(() =>
+    adminApi.updatesStatus(),
+  );
   const [checking, setChecking] = createSignal(false);
   const [applying, setApplying] = createSignal(false);
+  const [pendingChannel, setPendingChannel] = createSignal<'stable' | 'beta' | null>(null);
   const [confirmOpen, setConfirmOpen] = createSignal(false);
   const [progress, setProgress] = createSignal<{ phase: string; percent: number } | null>(null);
   // 终态标记：completed/failed 后 progress 保留显示（红/绿），不再被轮询清空
@@ -42,9 +52,11 @@ export default function UpdatesPage() {
   onMount(() => {
     setProgress(null);
     const disconnect = connectSseStream({
-      onReleaseAvailable: () => {
+      onReleaseAvailable: (payload) => {
         void refetch();
-        uiStore.toast.info('有新版本可用，已自动刷新');
+        uiStore.toast.info(
+          `${CHANNEL_LABEL[payload.channel]} 有新版本 ${payload.latestTag}，已刷新`,
+        );
       },
       onUpdateProgress: (p) => {
         lastSseAt = Date.now();
@@ -55,12 +67,19 @@ export default function UpdatesPage() {
     onCleanup(disconnect);
   });
 
+  /** 当前部署是否还应该提示「有更新」（任一通道 hasUpdate=true 即有） */
+  const anyHasUpdate = (s: AdminUpdateStatus | undefined): boolean =>
+    !!(s?.stable?.hasUpdate || s?.beta?.hasUpdate);
+
   async function handleCheck() {
     setChecking(true);
     try {
       const fresh = await adminApi.updatesCheck();
-      if (fresh.hasUpdate) {
-        uiStore.toast.success(`发现新版本 ${fresh.latestVersion}`);
+      const tags: string[] = [];
+      if (fresh.stable?.hasUpdate) tags.push(`stable ${fresh.stable.latestVersion}`);
+      if (fresh.beta?.hasUpdate) tags.push(`beta ${fresh.beta.latestVersion}`);
+      if (tags.length > 0) {
+        uiStore.toast.success(`发现新版本：${tags.join('、')}`);
       } else {
         uiStore.toast.info(`当前已是最新版本（${fresh.currentVersion}）`);
       }
@@ -72,15 +91,27 @@ export default function UpdatesPage() {
     }
   }
 
-  function openConfirm() {
+  function openConfirm(channel: 'stable' | 'beta') {
     const s = status();
-    if (!s || !s.latestVersion || !s.canApply) return;
+    if (!s) return;
+    const ch = channel === 'stable' ? s.stable : s.beta;
+    if (!ch || !ch.canApply) return;
+    setPendingChannel(channel);
     setConfirmOpen(true);
+  }
+
+  function currentChannelStatus(): ChannelStatus | null {
+    const ch = pendingChannel();
+    const s = status();
+    if (!ch || !s) return null;
+    return ch === 'stable' ? s.stable : s.beta;
   }
 
   async function confirmApply() {
     const s = status();
-    if (!s || !s.latestVersion) return;
+    const ch = pendingChannel();
+    const target = currentChannelStatus();
+    if (!s || !ch || !target) return;
     setConfirmOpen(false);
     setApplying(true);
     setTerminal(null);
@@ -89,7 +120,7 @@ export default function UpdatesPage() {
 
     // v0.5.2+ apply 立即返回 202（异步执行），不再阻塞 handler 等到 exit
     try {
-      await adminApi.updatesApply(s.latestVersion, s.currentVersion);
+      await adminApi.updatesApply(ch, target.latestVersion, s.currentVersion);
     } catch (err) {
       // 立即返回阶段的错误只可能是 4xx（参数 / 已在跑 / 版本不匹配等）
       if (err instanceof ApiError) {
@@ -99,16 +130,13 @@ export default function UpdatesPage() {
         await refetch();
         return;
       }
-      // 网络问题（请求都没发出去），停下来让用户重试
       setApplying(false);
       setProgress(null);
       uiStore.toast.error('请求未送达', err instanceof Error ? err.message : '未知网络错误');
       return;
     }
 
-    // apply 后优先信 SSE：onUpdateProgress 已经在 setProgress；
-    // 仅当 SSE 静默超过 SSE_SILENCE_FALLBACK_MS 才回落到 /status 轮询；
-    // SSE 推到 completed/failed 时主动 break。
+    // apply 后优先信 SSE；SSE 静默 >10s 才回落 /status 轮询
     const deadline = Date.now() + POLL_TIMEOUT_MS;
     let outcome: 'success' | 'failed' | 'timeout' = 'timeout';
     let failureMessage: string | undefined;
@@ -116,7 +144,6 @@ export default function UpdatesPage() {
     while (Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, POLL_AFTER_APPLY_MS));
 
-      // SSE 终态：phase 文案命中 completed/failed → 直接退出循环
       const p = progress();
       if (p) {
         if (p.phase === PHASE_LABEL.completed || p.percent >= 100) {
@@ -129,7 +156,6 @@ export default function UpdatesPage() {
         }
       }
 
-      // SSE 仍活跃（最近 N 秒内有推送）→ 不回落轮询
       if (Date.now() - lastSseAt < SSE_SILENCE_FALLBACK_MS) continue;
 
       try {
@@ -147,7 +173,7 @@ export default function UpdatesPage() {
             break;
           }
         }
-        if (fresh.currentVersion === s.latestVersion) {
+        if (fresh.currentVersion === target.latestVersion) {
           outcome = 'success';
           break;
         }
@@ -157,20 +183,24 @@ export default function UpdatesPage() {
     }
 
     setApplying(false);
+    setPendingChannel(null);
     if (outcome === 'success') {
       setProgress({ phase: PHASE_LABEL.completed, percent: 100 });
       setTerminal('success');
-      uiStore.toast.success(`升级成功，1.5 秒后自动刷新…（升级到 ${s.latestVersion}）`);
+      uiStore.toast.success(`升级成功，1.5 秒后自动刷新…（升级到 ${target.latestVersion}）`);
       setTimeout(() => window.location.reload(), 1500);
     } else if (outcome === 'failed') {
-      // 保留最后一帧 progress（红色显示），不清空
       const last = progress();
-      setProgress(last ? { phase: PHASE_LABEL.failed, percent: last.percent } : { phase: PHASE_LABEL.failed, percent: 0 });
+      setProgress(
+        last ? { phase: PHASE_LABEL.failed, percent: last.percent } : { phase: PHASE_LABEL.failed, percent: 0 },
+      );
       setTerminal('failed');
       uiStore.toast.error('升级失败', failureMessage ?? '后端 apply task 报错');
     } else {
       const last = progress();
-      setProgress(last ? { phase: PHASE_LABEL.failed, percent: last.percent } : { phase: PHASE_LABEL.failed, percent: 0 });
+      setProgress(
+        last ? { phase: PHASE_LABEL.failed, percent: last.percent } : { phase: PHASE_LABEL.failed, percent: 0 },
+      );
       setTerminal('failed');
       uiStore.toast.error('升级超时', '请检查后端日志，或 SSH 登录手动验证状态');
     }
@@ -178,105 +208,84 @@ export default function UpdatesPage() {
   }
 
   return (
-    <div class="space-y-6">
+    <div class="space-y-4">
       <Show when={!status.loading} fallback={<Spinner />}>
         <Show when={status()}>
           {(s) => (
             <>
-              <div class="grid grid-cols-1 md:grid-cols-2 gap-4 auto-rows-fr">
-                <Card>
-                  <p class="text-sm text-content-secondary mb-1">当前版本</p>
-                  <p class="text-2xl font-semibold text-content">{s().currentVersion}</p>
-                  <p class="text-xs text-content-tertiary mt-2">
-                    自动检查：{s().autoCheckEnabled ? '已开启（每小时）' : '已关闭'}
-                  </p>
-                </Card>
-                <Card>
-                  <p class="text-sm text-content-secondary mb-1">远端最新</p>
-                  <p class="text-2xl font-semibold text-content">
-                    {s().latestVersion ?? '尚未检查'}
-                  </p>
-                  <p class="text-xs text-content-tertiary mt-2">
-                    {s().lastCheckedAt
-                      ? `最近检查：${new Date(s().lastCheckedAt!).toLocaleString('zh-CN')}`
-                      : '从未检查'}
-                  </p>
-                </Card>
-              </div>
-
+              {/* 顶部：当前版本 + 立即检查 */}
               <Card>
-                <div class="flex items-center justify-between mb-4">
-                  <h2 class="text-headline text-content">操作</h2>
-                  <div class="flex gap-2">
-                    <Button variant="ghost" onClick={handleCheck} loading={checking()}>
-                      立即检查
-                    </Button>
-                    <Button
-                      onClick={openConfirm}
-                      disabled={
-                        !s().hasUpdate || !s().canApply || applying() || !s().latestVersion
-                      }
-                      loading={applying()}
-                    >
-                      一键更新到 {s().latestVersion ?? '...'}
-                    </Button>
+                <div class="flex items-start justify-between gap-4">
+                  <div>
+                    <p class="text-caption text-content-secondary mb-1">当前版本</p>
+                    <p class="text-2xl font-semibold text-content">{s().currentVersion}</p>
+                    <p class="text-xs text-content-tertiary mt-1">
+                      自动检查：{s().autoCheckEnabled ? '已开启（每小时）' : '已关闭'}
+                      <Show when={s().lastCheckedAt}>
+                        <span class="ml-3">
+                          最近检查：{new Date(s().lastCheckedAt!).toLocaleString('zh-CN')}
+                        </span>
+                      </Show>
+                    </p>
                   </div>
+                  <Button variant="ghost" onClick={handleCheck} loading={checking()}>
+                    立即检查
+                  </Button>
                 </div>
-
-                <Show when={!s().canApply && s().hasUpdate}>
-                  <p class="text-sm text-warning">
-                    远端发布了新版本，但 <strong>未找到匹配当前架构的产物</strong>。请检查 release.yml 是否覆盖此平台。
-                  </p>
-                </Show>
-
-                <Show when={progress() && (applying() || terminal())}>
-                  <div class="mt-4">
-                    <div class="flex items-center justify-between text-sm mb-1">
-                      <span class={terminal() === 'failed' ? 'text-error' : 'text-content-secondary'}>
-                        {progress()!.phase}
-                        <Show when={terminal() === 'failed'}>
-                          <span class="ml-2 text-xs text-content-tertiary">（升级未完成）</span>
-                        </Show>
-                      </span>
-                      <span class="text-content-tertiary font-mono">{progress()!.percent}%</span>
-                    </div>
-                    <div class="w-full bg-surface-secondary rounded-full h-2">
-                      <div
-                        class={`h-2 rounded-full transition-[width] duration-300 ease-out ${terminal() === 'failed' ? 'bg-error' : 'bg-accent'}`}
-                        style={{ width: `${progress()!.percent}%` }}
-                      />
-                    </div>
-                  </div>
-                </Show>
               </Card>
 
-              <Show when={s().releaseNotes}>
+              {/* 主区域：稳定通道 */}
+              <UpdateChannelCard
+                channel="stable"
+                status={s().stable}
+                applying={applying() && pendingChannel() === 'stable'}
+                onApply={() => openConfirm('stable')}
+              />
+
+              {/* 折叠区：Beta 通道；有新版本则在标题处亮 badge */}
+              <Collapsible
+                title="Beta 通道"
+                badge={s().beta?.hasUpdate ? s().beta!.latestVersion : null}
+              >
+                <UpdateChannelCard
+                  channel="beta"
+                  status={s().beta}
+                  applying={applying() && pendingChannel() === 'beta'}
+                  onApply={() => openConfirm('beta')}
+                />
+              </Collapsible>
+
+              {/* 升级进度（升级中或终态时显示） */}
+              <Show when={progress() && (applying() || terminal())}>
                 <Card>
-                  <div class="flex items-center justify-between mb-3">
-                    <h2 class="text-headline text-content">Release Notes</h2>
-                    <Show when={s().releaseUrl}>
-                      <a
-                        href={s().releaseUrl!}
-                        target="_blank"
-                        rel="noopener"
-                        class="text-sm text-accent hover:underline"
-                      >
-                        在 GitHub 打开 ↗
-                      </a>
-                    </Show>
+                  <div class="flex items-center justify-between text-sm mb-1">
+                    <span class={terminal() === 'failed' ? 'text-error' : 'text-content-secondary'}>
+                      {progress()!.phase}
+                      <Show when={terminal() === 'failed'}>
+                        <span class="ml-2 text-xs text-content-tertiary">（升级未完成）</span>
+                      </Show>
+                    </span>
+                    <span class="text-content-tertiary font-mono">{progress()!.percent}%</span>
                   </div>
-                  <pre class="whitespace-pre-wrap text-sm text-content-secondary font-mono leading-relaxed max-h-96 overflow-y-auto">
-                    {s().releaseNotes}
-                  </pre>
+                  <div class="w-full bg-surface-secondary rounded-full h-2">
+                    <div
+                      class={`h-2 rounded-full transition-[width] duration-300 ease-out ${
+                        terminal() === 'failed' ? 'bg-error' : 'bg-accent'
+                      }`}
+                      style={{ width: `${progress()!.percent}%` }}
+                    />
+                  </div>
                 </Card>
               </Show>
 
+              {/* 安全提示 */}
               <Card>
                 <h3 class="text-sm font-semibold text-content mb-2">安全提示</h3>
                 <ul class="text-xs text-content-tertiary space-y-1 list-disc pl-5">
                   <li>升级前会先 VACUUM INTO 备份当前数据库到 <code class="font-mono text-content">data/learning-{s().currentVersion}.backup.db</code></li>
                   <li>旧二进制会保留 2 份在安装目录（<code class="font-mono text-content">wordforge.{s().currentVersion}</code>）以便手动回滚</li>
                   <li>下载产物会校验 sha256；不匹配直接拒绝</li>
+                  <li>跨通道升级允许（stable→beta 试用 / beta→stable 回归），但任一方向都需严格 semver 向上</li>
                   <li>当前裸跑模式下，进程通过 fork-exec 自重启；如果有 systemd / supervisor，请确保它们配置了 <code class="font-mono text-content">Restart=on-failure</code></li>
                 </ul>
               </Card>
@@ -285,13 +294,23 @@ export default function UpdatesPage() {
         </Show>
       </Show>
 
-      <Modal open={confirmOpen()} onClose={() => setConfirmOpen(false)} title="确认一键更新">
-        <Show when={status()}>
-          {(s) => (
+      <Modal
+        open={confirmOpen()}
+        onClose={() => {
+          setConfirmOpen(false);
+          setPendingChannel(null);
+        }}
+        title="确认一键更新"
+      >
+        <Show when={status() && pendingChannel() && currentChannelStatus()}>
+          {(_) => (
             <div class="space-y-4">
               <p class="text-sm text-content-secondary">
-                即将从 <span class="font-mono text-content">{s().currentVersion}</span> 升级到{' '}
-                <span class="font-mono text-content font-semibold">{s().latestVersion}</span>。
+                即将从 <span class="font-mono text-content">{status()!.currentVersion}</span> 升级到{' '}
+                <span class="font-mono text-content font-semibold">
+                  {currentChannelStatus()!.latestVersion}
+                </span>
+                （{CHANNEL_LABEL[pendingChannel()!]}）。
               </p>
               <ul class="text-sm text-content-secondary space-y-1 list-disc pl-5">
                 <li>会先备份数据库</li>
@@ -300,7 +319,13 @@ export default function UpdatesPage() {
                 <li>升级期间不要刷新页面或重启进程</li>
               </ul>
               <div class="flex justify-end gap-2 pt-2">
-                <Button variant="ghost" onClick={() => setConfirmOpen(false)}>
+                <Button
+                  variant="ghost"
+                  onClick={() => {
+                    setConfirmOpen(false);
+                    setPendingChannel(null);
+                  }}
+                >
                   取消
                 </Button>
                 <Button onClick={confirmApply}>开始升级</Button>
@@ -309,6 +334,9 @@ export default function UpdatesPage() {
           )}
         </Show>
       </Modal>
+
+      {/* anyHasUpdate 当前不展示在 UI，但保留 helper 给将来 dashboard badge 用 */}
+      <Show when={false}>{anyHasUpdate(status())}</Show>
     </div>
   );
 }
