@@ -10,17 +10,20 @@ const variants = {
   info: 'bg-info-light text-info',
 } as const;
 
-const dotColorMap: Record<keyof typeof variants, string> = {
-  default: 'bg-content-tertiary',
-  accent: 'bg-accent',
-  success: 'bg-success',
-  warning: 'bg-warning',
-  error: 'bg-error',
-  info: 'bg-info',
+type Variant = keyof typeof variants;
+
+// dot + pulse 颜色统一在此映射，避免 inline style 与 class 不一致
+const dotColorMap: Record<Variant, { base: string; pulse: string }> = {
+  default: { base: 'bg-content-tertiary', pulse: 'shadow-[0_0_0_0_var(--content-tertiary)]' },
+  accent: { base: 'bg-accent', pulse: 'shadow-[0_0_0_0_var(--accent)]' },
+  success: { base: 'bg-success', pulse: 'shadow-[0_0_0_0_var(--success)]' },
+  warning: { base: 'bg-warning', pulse: 'shadow-[0_0_0_0_var(--warning)]' },
+  error: { base: 'bg-error', pulse: 'shadow-[0_0_0_0_var(--error)]' },
+  info: { base: 'bg-info', pulse: 'shadow-[0_0_0_0_var(--info)]' },
 };
 
 interface BadgeProps extends JSX.HTMLAttributes<HTMLSpanElement> {
-  variant?: keyof typeof variants;
+  variant?: Variant;
   size?: 'sm' | 'md';
   /** 左侧色点，常用于 status badge（如在线/离线） */
   dot?: boolean;
@@ -36,8 +39,8 @@ export function Badge(props: BadgeProps) {
     <span
       {...rest}
       class={cn(
-        // chip 永远单行，避免被 flex 兄弟挤压换行（如 wordbook 卡片右上"已导入"）
-        'inline-flex items-center font-medium rounded-full tabular-nums whitespace-nowrap shrink-0',
+        // chip 永远单行，长内容用 truncate + max-w 兜底，避免被 flex 兄弟挤压换行
+        'inline-flex items-center font-medium rounded-full tabular-nums whitespace-nowrap shrink-0 max-w-[10rem] truncate',
         local.size === 'sm' ? 'px-2 py-0.5 text-[10px] gap-1' : 'px-2.5 py-0.5 text-xs gap-1.5',
         variants[variant()],
         local.class,
@@ -47,12 +50,12 @@ export function Badge(props: BadgeProps) {
         <span
           aria-hidden="true"
           class={cn(
-            'inline-block rounded-full',
+            'inline-block rounded-full shrink-0',
             local.size === 'sm' ? 'h-1.5 w-1.5' : 'h-2 w-2',
-            dotColorMap[variant()],
+            dotColorMap[variant()].base,
             local.pulse && 'animate-ring-pulse',
+            local.pulse && dotColorMap[variant()].pulse,
           )}
-          style={local.pulse ? { color: `var(--${variant() === 'default' ? 'content-tertiary' : variant()})` } : undefined}
         />
       </Show>
       {local.children}

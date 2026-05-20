@@ -19,9 +19,13 @@ describe('Button', () => {
     expect(screen.getByRole('status')).toBeInTheDocument();
   });
 
-  it('disabled when loading', () => {
+  it('marks aria-busy/aria-disabled when loading (keeps focus)', () => {
     render(() => <Button loading>Save</Button>);
-    expect(screen.getByRole('button')).toBeDisabled();
+    const btn = screen.getByRole('button');
+    expect(btn).toHaveAttribute('aria-busy', 'true');
+    expect(btn).toHaveAttribute('aria-disabled', 'true');
+    // 不再使用 disabled 属性，避免按钮失焦键盘流断裂
+    expect(btn).not.toBeDisabled();
   });
 
   it('renders icon', () => {

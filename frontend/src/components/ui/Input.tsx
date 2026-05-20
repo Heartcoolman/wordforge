@@ -1,4 +1,4 @@
-import { type JSX, splitProps, Show } from 'solid-js';
+import { type JSX, splitProps, Show, createUniqueId, createEffect } from 'solid-js';
 import { cn } from '@/utils/cn';
 
 interface InputProps extends JSX.InputHTMLAttributes<HTMLInputElement> {
@@ -9,17 +9,24 @@ interface InputProps extends JSX.InputHTMLAttributes<HTMLInputElement> {
   rightIcon?: JSX.Element;
 }
 
-let inputIdCounter = 0;
-
 export function Input(props: InputProps) {
   const [local, rest] = splitProps(props, ['label', 'error', 'hint', 'icon', 'rightIcon', 'class', 'id']);
-  const inputId = local.id ?? `input-${++inputIdCounter}`;
-  const errorId = `${inputId}-error`;
+  const autoId = createUniqueId();
+  const inputId = () => local.id ?? autoId;
+  const errorId = () => `${inputId()}-error`;
+
+  // 受控防呆：在 dev 提示遗漏 onInput 的情况（生产 NOOP）
+  createEffect(() => {
+    if (import.meta.env.DEV && props.value !== undefined && !props.onInput) {
+      // eslint-disable-next-line no-console
+      console.warn('Input: value provided without onInput handler');
+    }
+  });
 
   return (
     <div class="flex flex-col gap-1.5">
       <Show when={local.label}>
-        <label for={inputId} class="text-sm font-medium text-content-secondary">{local.label}</label>
+        <label for={inputId()} class="text-sm font-medium text-content-secondary">{local.label}</label>
       </Show>
       <div class="relative">
         <Show when={local.icon}>
@@ -28,8 +35,8 @@ export function Input(props: InputProps) {
           </div>
         </Show>
         <input
-          id={inputId}
-          aria-describedby={local.error ? errorId : undefined}
+          id={inputId()}
+          aria-describedby={local.error ? errorId() : undefined}
           aria-invalid={local.error ? true : undefined}
           {...rest}
           class={cn(
@@ -52,7 +59,7 @@ export function Input(props: InputProps) {
         </Show>
       </div>
       <Show when={local.error}>
-        <p id={errorId} class="text-xs text-error" role="alert">{local.error}</p>
+        <p id={errorId()} class="text-xs text-error" role="alert">{local.error}</p>
       </Show>
       <Show when={local.hint && !local.error}>
         <p class="text-xs text-content-tertiary">{local.hint}</p>
@@ -68,15 +75,16 @@ interface TextAreaProps extends JSX.TextareaHTMLAttributes<HTMLTextAreaElement> 
 
 export function TextArea(props: TextAreaProps) {
   const [local, rest] = splitProps(props, ['label', 'error', 'class', 'id']);
-  const textareaId = local.id ?? `textarea-${++inputIdCounter}`;
+  const autoId = createUniqueId();
+  const textareaId = () => local.id ?? autoId;
 
   return (
     <div class="flex flex-col gap-1.5">
       <Show when={local.label}>
-        <label for={textareaId} class="text-sm font-medium text-content-secondary">{local.label}</label>
+        <label for={textareaId()} class="text-sm font-medium text-content-secondary">{local.label}</label>
       </Show>
       <textarea
-        id={textareaId}
+        id={textareaId()}
         {...rest}
         class={cn(
           'w-full px-3 py-2 rounded-lg text-sm bg-surface text-content',

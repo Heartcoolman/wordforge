@@ -4,7 +4,7 @@ import { render } from '@solidjs/testing-library';
 const setOption = vi.fn();
 const dispose = vi.fn();
 const resize = vi.fn();
-const initInstance = { setOption, dispose, resize };
+let initInstance = { setOption, dispose, resize };
 
 vi.mock('echarts/core', async () => {
   return {
@@ -24,6 +24,7 @@ beforeEach(() => {
   setOption.mockClear();
   dispose.mockClear();
   resize.mockClear();
+  initInstance = { setOption, dispose, resize };
 });
 
 import { EChart } from '@/components/ui/EChart';
@@ -64,5 +65,26 @@ describe('EChart', () => {
     render(() => <EChart option={() => ({})} />);
     expect(observer).not.toHaveBeenCalled();
     observer.mockRestore();
+  });
+
+  it('renders empty fallback when series data are empty', () => {
+    const { container, getByText } = render(() => (
+      <EChart
+        option={() => ({ series: [{ type: 'bar', data: [] }] })}
+        empty={<span>暂无</span>}
+      />
+    ));
+    expect(getByText('暂无')).toBeInTheDocument();
+    expect(container.querySelector('div[style]')).toBeNull();
+  });
+
+  it('renders chart container when series has data even with empty prop', () => {
+    const { container } = render(() => (
+      <EChart
+        option={() => ({ series: [{ type: 'bar', data: [1, 2, 3] }] })}
+        empty={<span>暂无</span>}
+      />
+    ));
+    expect(container.querySelector('div[style]')).not.toBeNull();
   });
 });

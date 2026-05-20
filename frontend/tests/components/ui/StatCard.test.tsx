@@ -20,8 +20,13 @@ describe('StatCard', () => {
     expect(screen.getByText(/↓/)).toBeInTheDocument();
   });
 
-  it('renders zero trend (right)', () => {
+  it('hides zero trend by default', () => {
     render(() => <StatCard title="X" value="1" icon="" color="info" trend={{ value: 0, label: 'WoW' }} />);
+    expect(screen.queryByText(/→/)).not.toBeInTheDocument();
+  });
+
+  it('renders zero trend (right) when showZero', () => {
+    render(() => <StatCard title="X" value="1" icon="" color="info" trend={{ value: 0, label: 'WoW', showZero: true }} />);
     expect(screen.getByText(/→/)).toBeInTheDocument();
   });
 

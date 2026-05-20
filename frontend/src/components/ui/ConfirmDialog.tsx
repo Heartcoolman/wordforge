@@ -26,6 +26,9 @@ interface ConfirmDialogProps {
 }
 
 export function ConfirmDialog(props: ConfirmDialogProps) {
+  // 危险或加载中的弹窗禁用遮罩点击关闭，避免误触；其他场景仍允许
+  const closeOnBackdrop = () => !(props.loading || props.variant === 'danger');
+
   return (
     <Modal
       open={props.open}
@@ -33,6 +36,7 @@ export function ConfirmDialog(props: ConfirmDialogProps) {
       title={props.title}
       size="sm"
       hideClose
+      closeOnBackdrop={closeOnBackdrop()}
     >
       <Show when={props.message}>
         <div class="text-sm text-content-secondary mb-4">{props.message}</div>
