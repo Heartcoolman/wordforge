@@ -9,6 +9,7 @@ import { healthApi, type PublicHealthStatus } from '@/api/health';
 import type { SystemHealth, DatabaseInfo } from '@/types/admin';
 import type { MonitoringEvent } from '@/types/amas';
 import { MONITORING_DEFAULT_LIMIT } from '@/lib/constants';
+import { formatBytes } from '@/utils/formatters';
 
 function formatUptime(secs: number): string {
   const d = Math.floor(secs / 86400);
@@ -108,7 +109,7 @@ export default function MonitoringPage() {
               return (
                 <Card variant="elevated">
                   <h2 class="text-headline text-content mb-3">系统健康</h2>
-                  <div class="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+                  <div class="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-4 gap-4 text-sm">
                     <MetricCell label="状态">
                       <span class="flex items-center gap-1.5">
                         <span class={`w-2 h-2 rounded-full ${st().dot}`} />
@@ -117,7 +118,7 @@ export default function MonitoringPage() {
                     </MetricCell>
                     <MetricCell label="版本">{h().version}</MetricCell>
                     <MetricCell label="运行时间">{formatUptime(h().uptimeSecs)}</MetricCell>
-                    <MetricCell label="数据库大小">{(h().dbSizeBytes / 1024 / 1024).toFixed(2)} MB</MetricCell>
+                    <MetricCell label="数据库大小">{formatBytes(h().dbSizeBytes)}</MetricCell>
                   </div>
                 </Card>
               );
@@ -136,7 +137,7 @@ export default function MonitoringPage() {
                 <div class="flex items-center gap-2 mb-3">
                   <Badge variant={ph().status === 'ok' ? 'success' : 'error'}>{ph().status}</Badge>
                 </div>
-                <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <div class="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-4 gap-3">
                   <For each={Object.entries(ph().services)}>
                     {([name, svc]) => (
                       <div class="flex items-center gap-2 text-sm">
@@ -161,8 +162,8 @@ export default function MonitoringPage() {
             {(d) => (
               <Card variant="elevated">
                 <h2 class="text-headline text-content mb-3">数据库信息</h2>
-                <div class="grid grid-cols-2 md:grid-cols-3 gap-4">
-                  <MetricCell label="大小">{(d().sizeOnDisk / 1024 / 1024).toFixed(2)} MB</MetricCell>
+                <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4">
+                  <MetricCell label="大小">{formatBytes(d().sizeOnDisk)}</MetricCell>
                   <MetricCell label="表数量">{d().tableCount}</MetricCell>
                   <MetricCell label="页大小">{d().pageSize} bytes</MetricCell>
                   <MetricCell label="页数量">{d().pageCount}</MetricCell>
@@ -185,17 +186,17 @@ export default function MonitoringPage() {
             {(events) => (
               <Card variant="elevated">
                 <h2 class="text-headline text-content mb-3">AMAS 监控事件</h2>
-                <Show when={events().length > 0} fallback={<p class="text-sm text-content-secondary">暂无事件</p>}>
+                <Show when={events().length > 0} fallback={<Empty title="暂无 AMAS 监控事件" description="近期没有可显示的监控事件" />}>
                   <div class="max-h-96 overflow-y-auto space-y-2">
                     <For each={events()}>
                       {(event) => (
-                        <div class="border border-border/50 rounded-lg p-3">
-                          <div class="flex items-center gap-2 mb-2">
-                            <span class="text-xs text-content-tertiary">{new Date(event.timestamp).toLocaleString()}</span>
+                        <Card variant="outlined" padding="sm">
+                          <div class="flex items-center gap-2 mb-2 flex-wrap">
+                            <span class="text-xs text-content-tertiary tabular-nums">{new Date(event.timestamp).toLocaleString()}</span>
                             <Badge variant="accent" size="sm">{event.eventType}</Badge>
                           </div>
                           <RecursiveKV data={event.data} />
-                        </div>
+                        </Card>
                       )}
                     </For>
                   </div>

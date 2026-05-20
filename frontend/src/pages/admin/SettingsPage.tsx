@@ -1,6 +1,6 @@
 import { createSignal, Show, onMount } from 'solid-js';
 import { Card } from '@/components/ui/Card';
-import { Input } from '@/components/ui/Input';
+import { Input, TextArea } from '@/components/ui/Input';
 import { Button } from '@/components/ui/Button';
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
 import { Switch } from '@/components/ui/Switch';
@@ -250,33 +250,35 @@ export default function SettingsPage() {
 
         <Card variant="elevated">
           <h2 class="text-headline text-content mb-4">广播消息</h2>
-          <div class="space-y-3">
-            <Input label="标题" value={broadcastTitle()} onInput={(e) => setBroadcastTitle(e.currentTarget.value)} placeholder="通知标题" />
-            <div class="flex flex-col gap-1.5">
-              <label class="text-sm font-medium text-content-secondary">内容</label>
-              <textarea
-                class="w-full px-3 py-2 rounded-lg text-sm bg-surface text-content border border-border focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent resize-y min-h-[80px]"
-                value={broadcastMsg()}
-                onInput={(e) => setBroadcastMsg(e.currentTarget.value)}
-                placeholder="通知内容"
-              />
-            </div>
+          <div class="space-y-4">
+            <Input
+              label="标题"
+              value={broadcastTitle()}
+              disabled={broadcasting()}
+              onInput={(e) => setBroadcastTitle(e.currentTarget.value)}
+              placeholder="通知标题"
+            />
+            <TextArea
+              label="内容"
+              value={broadcastMsg()}
+              disabled={broadcasting()}
+              onInput={(e) => setBroadcastMsg(e.currentTarget.value)}
+              placeholder="通知内容"
+            />
             <Button onClick={handleBroadcastClick} loading={broadcasting()} variant="warning">发送广播</Button>
           </div>
         </Card>
 
         <Card variant="elevated">
           <h2 class="text-headline text-content mb-4">更新通知</h2>
-          <div class="space-y-3">
-            <div class="flex flex-col gap-1.5">
-              <label class="text-sm font-medium text-content-secondary">提示信息（可选）</label>
-              <textarea
-                class="w-full px-3 py-2 rounded-lg text-sm bg-surface text-content border border-border focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent resize-y min-h-[80px]"
-                value={updateMsg()}
-                onInput={(e) => setUpdateMsg(e.currentTarget.value)}
-                placeholder="有新版本可用，请刷新页面获取最新内容"
-              />
-            </div>
+          <div class="space-y-4">
+            <TextArea
+              label="提示信息（可选）"
+              value={updateMsg()}
+              disabled={sendingUpdate()}
+              onInput={(e) => setUpdateMsg(e.currentTarget.value)}
+              placeholder="有新版本可用，请刷新页面获取最新内容"
+            />
             <Button onClick={() => setShowUpdateConfirm(true)} loading={sendingUpdate()} variant="warning">发送更新通知</Button>
           </div>
         </Card>

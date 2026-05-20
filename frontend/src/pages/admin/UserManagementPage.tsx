@@ -12,6 +12,16 @@ import { uiStore } from '@/stores/ui';
 import { adminApi } from '@/api/admin';
 import type { AdminUser } from '@/types/admin';
 
+// 重置模式选择卡片：复用 Card interactive variant 的标准 hover/elevation
+function ResetModeCard(props: { title: string; description: string; onClick: () => void }) {
+  return (
+    <Card variant="interactive" padding="md" onClick={props.onClick}>
+      <p class="font-medium text-content">{props.title}</p>
+      <p class="text-caption mt-1">{props.description}</p>
+    </Card>
+  );
+}
+
 /** 对邮箱进行部分脱敏，如 test@example.com -> t***@example.com */
 function maskEmail(email: string): string {
   const atIndex = email.indexOf('@');
@@ -27,6 +37,8 @@ export default function UserManagementPage() {
   const [page, setPage] = createSignal(1);
   const [loading, setLoading] = createSignal(true);
   const [confirmTarget, setConfirmTarget] = createSignal<AdminUser | null>(null);
+  // 行级 busy 标记：防止用户在某一行操作进行中重复点击（AdminUser.id 是 string）
+  const [busyUserId, setBusyUserId] = createSignal<string | null>(null);
 
   // 密码重置 Modal 状态
   const [resetTarget, setResetTarget] = createSignal<AdminUser | null>(null);
@@ -66,19 +78,21 @@ export default function UserManagementPage() {
   onMount(load);
 
   async function toggleBan(user: AdminUser) {
+    setBusyUserId(user.id);
     try {
       if (user.isBanned) {
         await adminApi.unbanUser(user.id);
-        uiStore.toast.success('已解封');
+        uiStore.toast.success(`已解封 ${user.username}`);
       } else {
         await adminApi.banUser(user.id);
-        uiStore.toast.success('已封禁');
+        uiStore.toast.success(`已封禁 ${user.username}`);
       }
       load();
     } catch (err: unknown) {
-      uiStore.toast.error('操作失败', err instanceof Error ? err.message : '');
+      uiStore.toast.error(`${user.isBanned ? '解封' : '封禁'} ${user.username} 失败`, err instanceof Error ? err.message : '');
     } finally {
       setConfirmTarget(null);
+      setBusyUserId(null);
     }
   }
 
@@ -186,10 +200,21 @@ export default function UserManagementPage() {
                         </td>
                         <td class="px-4 py-3">
                           <div class="flex items-center justify-end gap-2">
-                            <Button size="xs" variant="outline" onClick={() => { closeResetModal(); setResetTarget(user); }}>
+                            <Button
+                              size="xs"
+                              variant="outline"
+                              disabled={busyUserId() === user.id}
+                              onClick={() => { closeResetModal(); setResetTarget(user); }}
+                            >
                               重置密码
                             </Button>
-                            <Button size="xs" variant={user.isBanned ? 'success' : 'danger'} onClick={() => handleBanClick(user)}>
+                            <Button
+                              size="xs"
+                              variant={user.isBanned ? 'success' : 'danger'}
+                              loading={busyUserId() === user.id}
+                              disabled={busyUserId() !== null && busyUserId() !== user.id}
+                              onClick={() => handleBanClick(user)}
+                            >
                               {user.isBanned ? '解封' : '封禁'}
                             </Button>
                           </div>
@@ -212,20 +237,16 @@ export default function UserManagementPage() {
         {/* 选择模式 */}
         <Show when={resetMode() === 'choose'}>
           <div class="space-y-3 mt-2">
-            <button
-              class="w-full p-4 rounded-xl border border-border-hairline hover:border-accent bg-surface-elevated text-left cursor-pointer shadow-elevation-1 transition-[transform,box-shadow,border-color] duration-base ease-out-expo hover:-translate-y-0.5 hover:shadow-elevation-3"
+            <ResetModeCard
+              title="直接重置密码"
+              description="由管理员设定新密码，用户现有会话将被注销"
               onClick={() => setResetMode('direct')}
-            >
-              <p class="font-medium text-content">直接重置密码</p>
-              <p class="text-caption mt-1">由管理员设定新密码，用户现有会话将被注销</p>
-            </button>
-            <button
-              class="w-full p-4 rounded-xl border border-border-hairline hover:border-accent bg-surface-elevated text-left cursor-pointer shadow-elevation-1 transition-[transform,box-shadow,border-color] duration-base ease-out-expo hover:-translate-y-0.5 hover:shadow-elevation-3"
+            />
+            <ResetModeCard
+              title="生成重置密钥"
+              description="生成一次性密钥发送给用户，由用户自行修改密码"
               onClick={() => { setResetMode('key-result'); handleGenerateKey(); }}
-            >
-              <p class="font-medium text-content">生成重置密钥</p>
-              <p class="text-caption mt-1">生成一次性密钥发送给用户，由用户自行修改密码</p>
-            </button>
+            />
           </div>
         </Show>
 
@@ -237,6 +258,7 @@ export default function UserManagementPage() {
               type="password"
               placeholder="输入新密码"
               value={directPassword()}
+              disabled={directLoading()}
               onInput={(e) => setDirectPassword(e.currentTarget.value)}
             />
             <Input
@@ -244,11 +266,12 @@ export default function UserManagementPage() {
               type="password"
               placeholder="再次输入新密码"
               value={directConfirm()}
+              disabled={directLoading()}
               onInput={(e) => setDirectConfirm(e.currentTarget.value)}
             />
             <Show when={directError()}><p class="text-sm text-error text-center">{directError()}</p></Show>
             <div class="flex justify-end gap-2 pt-2">
-              <Button variant="ghost" onClick={() => { setResetMode('choose'); setDirectError(''); setDirectPassword(''); setDirectConfirm(''); }}>返回</Button>
+              <Button variant="ghost" disabled={directLoading()} onClick={() => { setResetMode('choose'); setDirectError(''); setDirectPassword(''); setDirectConfirm(''); }}>返回</Button>
               <Button type="submit" loading={directLoading()}>确认重置</Button>
             </div>
           </form>
@@ -262,8 +285,8 @@ export default function UserManagementPage() {
             </Show>
             <Show when={generatedKey()}>
               <p class="text-sm text-content-secondary">请将以下密钥发送给用户：</p>
-              <div class="flex items-center gap-2 p-3 rounded-lg bg-surface-secondary border border-border">
-                <code class="flex-1 text-sm font-mono text-content break-all select-all">{generatedKey()}</code>
+              <div class="flex items-center gap-2 p-3 rounded-lg bg-surface-secondary border border-border min-w-0">
+                <code class="flex-1 min-w-0 text-sm font-mono text-content break-all select-all">{generatedKey()}</code>
                 <Button
                   size="xs"
                   variant="outline"

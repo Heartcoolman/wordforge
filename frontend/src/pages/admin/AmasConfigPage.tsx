@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/Button';
 import { Spinner } from '@/components/ui/Spinner';
 import { Tabs } from '@/components/ui/Tabs';
 import { Badge } from '@/components/ui/Badge';
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
 import { uiStore } from '@/stores/ui';
 import { amasApi } from '@/api/amas';
 import { adminApi } from '@/api/admin';
@@ -28,6 +29,9 @@ export default function AmasConfigPage() {
   const [reloading, setReloading] = createSignal(false);
   const [tab, setTab] = createSignal<TabId>('tier-a');
   const [versionDrawerOpen, setVersionDrawerOpen] = createSignal(false);
+  // 危险操作二次确认
+  const [showSaveConfirm, setShowSaveConfirm] = createSignal(false);
+  const [showReloadConfirm, setShowReloadConfirm] = createSignal(false);
 
   onMount(async () => {
     const [c, m] = await Promise.allSettled([amasApi.getConfig(), amasApi.getMetrics()]);
@@ -44,13 +48,28 @@ export default function AmasConfigPage() {
 
   const errors = createMemo(() => validateConfig(config()));
   const dirty = createMemo(() => diffKnown(baseline(), config()).length > 0);
+  const dirtyCount = createMemo(() => diffKnown(baseline(), config()).length);
 
-  async function saveConfig() {
+  function requestSave() {
     const errs = errors();
     if (errs.length > 0) {
       uiStore.toast.error('校验未通过', `${errs.length} 个字段需要修正`);
       return;
     }
+    setShowSaveConfirm(true);
+  }
+
+  function requestReload() {
+    const errs = errors();
+    if (errs.length > 0) {
+      uiStore.toast.error('校验未通过', `${errs.length} 个字段需要修正`);
+      return;
+    }
+    setShowReloadConfirm(true);
+  }
+
+  async function saveConfig() {
+    setShowSaveConfirm(false);
     try {
       setSaving(true);
       await amasApi.updateConfig(config() as unknown as AmasConfig);
@@ -64,11 +83,7 @@ export default function AmasConfigPage() {
   }
 
   async function reloadAmasConfig() {
-    const errs = errors();
-    if (errs.length > 0) {
-      uiStore.toast.error('校验未通过', `${errs.length} 个字段需要修正`);
-      return;
-    }
+    setShowReloadConfirm(false);
     try {
       setReloading(true);
       const latest = await adminApi.reloadAmas(config() as unknown as AmasConfig);
@@ -112,10 +127,10 @@ export default function AmasConfigPage() {
                 <Button size="sm" variant="ghost" onClick={() => setVersionDrawerOpen(true)}>
                   版本历史
                 </Button>
-                <Button size="sm" variant="outline" onClick={reloadAmasConfig} loading={reloading()} disabled={errors().length > 0}>
+                <Button size="sm" variant="outline" onClick={requestReload} loading={reloading()} disabled={errors().length > 0 || saving()}>
                   热重载
                 </Button>
-                <Button size="sm" onClick={saveConfig} loading={saving()} disabled={errors().length > 0 || !dirty()}>
+                <Button size="sm" onClick={requestSave} loading={saving()} disabled={errors().length > 0 || !dirty() || reloading()}>
                   保存配置
                 </Button>
               </div>
@@ -153,6 +168,38 @@ export default function AmasConfigPage() {
             setBaseline(structuredClone(next));
             setConfig(structuredClone(next));
           }}
+        />
+
+        {/* 保存确认：写入新版本，对所有在线用户生效 */}
+        <ConfirmDialog
+          open={showSaveConfirm()}
+          title="确认保存 AMAS 配置"
+          message={
+            <>
+              将保存 <span class="font-medium text-content tabular-nums">{dirtyCount()}</span> 处参数修改并写入新版本。
+              <br />新配置对所有在线用户立即生效，回滚需在「版本历史」中手动操作。
+            </>
+          }
+          confirmText="确认保存"
+          variant="warning"
+          onConfirm={saveConfig}
+          onCancel={() => setShowSaveConfirm(false)}
+        />
+
+        {/* 热重载确认：跳过版本化直接覆盖 */}
+        <ConfirmDialog
+          open={showReloadConfirm()}
+          title="确认热重载 AMAS 配置"
+          message={
+            <>
+              将立即把当前编辑值推送到运行时（绕过版本化），所有在线请求下一次调用时使用新参数。
+              <br />此操作不会生成版本快照，仅用于排错与即时调参；务必先确认无误。
+            </>
+          }
+          confirmText="确认热重载"
+          variant="danger"
+          onConfirm={reloadAmasConfig}
+          onCancel={() => setShowReloadConfirm(false)}
         />
 
         <Show when={metrics()}>

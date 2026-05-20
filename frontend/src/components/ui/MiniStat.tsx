@@ -23,9 +23,9 @@ export function MiniStat(props: MiniStatProps) {
   const trendArrow = (v: number) => (v > 0 ? '↑' : v < 0 ? '↓' : '→');
 
   return (
-    <div class="rounded-lg bg-surface-secondary border border-border-hairline p-3 transition-[transform,box-shadow] duration-base ease-out-expo hover:-translate-y-0.5 hover:shadow-elevation-1">
-      <p class="text-caption font-medium text-content-secondary mb-1">{props.label}</p>
-      <p class={cn('text-2xl font-bold tracking-tight tabular-nums', tone())}>{props.value}</p>
+    <div class="rounded-lg bg-surface-secondary border border-border-hairline p-3 transition-[transform,box-shadow] duration-base ease-out-expo hover:-translate-y-0.5 hover:shadow-elevation-1 min-w-0">
+      <p class="text-caption font-medium text-content-secondary mb-1 truncate" title={props.label}>{props.label}</p>
+      <p class={cn('text-2xl font-bold tracking-tight tabular-nums truncate', tone())} title={String(props.value)}>{props.value}</p>
       <Show when={props.trend}>
         {(t) => (
           <p class={cn('text-xs mt-1.5 flex items-center gap-1 tabular-nums', trendClass(t().value))}>

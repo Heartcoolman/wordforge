@@ -44,9 +44,9 @@ function SingleToast(props: { toast: ToastItemType }) {
     >
       <div class="flex-shrink-0 mt-0.5"><ToastIcon type={props.toast.type} /></div>
       <div class="flex-1 min-w-0">
-        <p class="text-sm font-medium text-content">{props.toast.title}</p>
+        <p class="text-sm font-medium text-content break-words">{props.toast.title}</p>
         <Show when={props.toast.message}>
-          <p class="text-xs text-content-secondary mt-0.5">{props.toast.message}</p>
+          <p class="text-xs text-content-secondary mt-0.5 line-clamp-3 break-words" title={props.toast.message}>{props.toast.message}</p>
         </Show>
       </div>
       <button

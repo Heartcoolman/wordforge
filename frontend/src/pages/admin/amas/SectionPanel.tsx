@@ -1,5 +1,6 @@
 import { For, createSignal, Show } from 'solid-js';
 import { Card } from '@/components/ui/Card';
+import { Badge } from '@/components/ui/Badge';
 import { ParamField } from './ParamField';
 import { PARAM_DICT, getByPath, setByPath, type FieldError, type ParamMeta } from './schema';
 
@@ -43,27 +44,27 @@ export function SectionPanel(props: SectionPanelProps) {
         {(section) => {
           const params = PARAM_DICT[section];
           const isOpen = () => openSection() === section;
+          const panelId = `amas-section-${section}`;
           return (
             <Card variant="outlined" padding="none">
               <button
                 type="button"
-                class="w-full flex items-center justify-between px-4 py-3 hover:bg-surface-secondary/50 transition-colors"
+                class="focus-ring-soft w-full flex items-center justify-between px-4 py-3 hover:bg-surface-secondary/50 transition-colors"
                 onClick={() => setOpenSection(isOpen() ? null : section)}
                 aria-expanded={isOpen()}
+                aria-controls={panelId}
               >
                 <span class="flex items-center gap-2 text-sm font-semibold text-content">
                   {SECTION_LABEL_ZH[section] ?? section}
                   <span class="text-xs text-content-tertiary font-normal">{params.length} 项</span>
                   <Show when={sectionErrorCount(section, params) > 0}>
-                    <span class="inline-flex items-center px-1.5 py-0.5 rounded-full bg-error-light text-error text-[10px]">
-                      {sectionErrorCount(section, params)} 错
-                    </span>
+                    <Badge variant="error" size="sm">{sectionErrorCount(section, params)} 错</Badge>
                   </Show>
                 </span>
                 <span class="text-content-tertiary text-xs">{isOpen() ? '收起' : '展开'}</span>
               </button>
               <Show when={isOpen()}>
-                <div class="px-4 pb-4 pt-1 space-y-3 border-t border-border">
+                <div id={panelId} class="px-4 pb-4 pt-1 space-y-3 border-t border-border">
                   <For each={params}>
                     {(meta) => (
                       <div class="border-b border-border/50 pb-3 last:border-b-0 last:pb-0">

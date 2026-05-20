@@ -86,3 +86,22 @@ export function truncate(text: string, maxLength: number): string {
   if (text.length <= maxLength) return text;
   return text.slice(0, maxLength) + '...';
 }
+
+/** Format bytes to human-readable string (KB/MB/GB/TB)，保留 2 位小数 */
+export function formatBytes(bytes: number | null | undefined): string {
+  if (bytes == null || !isFinite(bytes) || bytes < 0) return '-';
+  if (bytes < 1024) return `${bytes} B`;
+  const kb = bytes / 1024;
+  if (kb < 1024) return `${kb.toFixed(2)} KB`;
+  const mb = kb / 1024;
+  if (mb < 1024) return `${mb.toFixed(2)} MB`;
+  const gb = mb / 1024;
+  if (gb < 1024) return `${gb.toFixed(2)} GB`;
+  return `${(gb / 1024).toFixed(2)} TB`;
+}
+
+/** Format USD amount with $ prefix；decimals 默认 4 适合 token spend，2 适合大额 */
+export function formatMoney(value: number | null | undefined, decimals = 4): string {
+  if (value == null || !isFinite(value)) return '-';
+  return `$${value.toFixed(decimals)}`;
+}

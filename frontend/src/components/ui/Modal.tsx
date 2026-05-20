@@ -117,7 +117,7 @@ export function Modal(props: ModalProps) {
               <Show when={props.title || !props.hideClose}>
                 <div class="flex items-center justify-between px-6 pt-5 pb-2">
                   <Show when={props.title}>
-                    <h2 class="text-lg font-semibold text-content">{props.title}</h2>
+                    <h2 class="text-lg font-semibold text-content truncate min-w-0 flex-1 pr-2" title={props.title}>{props.title}</h2>
                   </Show>
                   <Show when={!props.hideClose}>
                     <button

@@ -1,6 +1,7 @@
 import { createMemo } from 'solid-js';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
+import { TextArea } from '@/components/ui/Input';
 
 interface JsonAdvancedPanelProps {
   /** 当前 source-of-truth（已经包含未在字典中的所有字段） */
@@ -37,11 +38,12 @@ export function JsonAdvancedPanel(props: JsonAdvancedPanelProps) {
         <h3 class="text-sm font-semibold text-content">JSON 高级</h3>
         <span class="text-xs text-content-tertiary">含所有 ~295 个参数，未在表单中精雕的字段在此编辑</span>
       </div>
-      <textarea
+      <TextArea
         ref={textareaRef}
-        class="w-full h-[480px] px-3 py-2 rounded-lg text-xs font-mono bg-surface border border-border text-content focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent resize-y"
+        class="h-[480px] font-mono text-xs"
         value={text()}
         spellcheck={false}
+        aria-label="AMAS 配置 JSON 编辑器"
       />
       <div class="flex items-center justify-between mt-2">
         <p class="text-xs text-content-tertiary">在此修改后点「应用到表单」会同步到表单视图。保存按钮在页面顶部。</p>

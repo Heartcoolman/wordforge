@@ -46,14 +46,16 @@ export function AnomaliesPanel() {
       <Card variant="elevated">
         <div class="flex items-baseline justify-between mb-3">
           <h2 class="text-lg font-semibold text-content">异常 / 不变量违反</h2>
-          <div class="flex items-center gap-1.5">
+          <div class="flex items-center gap-1.5" role="group" aria-label="选择时间窗口">
             <For each={[7, 14, 30] as const}>
               {(n) => (
                 <button
                   type="button"
                   onClick={() => setDays(n)}
-                  class={`px-2.5 py-1 text-xs rounded-md transition-colors ${
-                    days() === n ? 'bg-accent text-white' : 'bg-surface-secondary text-content-secondary hover:text-content'
+                  aria-pressed={days() === n}
+                  aria-label={`使用 ${n} 天窗口`}
+                  class={`focus-ring-soft px-2.5 py-1 text-xs rounded-md transition-colors ${
+                    days() === n ? 'bg-accent text-accent-content' : 'bg-surface-secondary text-content-secondary hover:text-content'
                   }`}
                 >
                   {n} 天

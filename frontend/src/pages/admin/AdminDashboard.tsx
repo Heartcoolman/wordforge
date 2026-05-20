@@ -9,7 +9,7 @@ import { WindowPicker } from '@/components/ui/WindowPicker';
 import { Panel } from '@/components/ui/Panel';
 import { MiniStat } from '@/components/ui/MiniStat';
 import { adminApi } from '@/api/admin';
-import { formatNumber, formatDuration, formatAccuracy } from '@/utils/formatters';
+import { formatNumber, formatDuration, formatAccuracy, formatBytes } from '@/utils/formatters';
 
 const DAYS_ALLOWED = [7, 14, 30] as const;
 const cssVar = (name: string, fallback: string) =>
@@ -49,7 +49,7 @@ export default function AdminDashboard() {
       </div>
 
       {/* KPI 行 — 4 张卡 stagger 80ms 错开 + count-up 数字滚动 */}
-      <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div class="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <div class="animate-fade-in-up h-full" style={{ 'animation-fill-mode': 'backwards' }}>
           <Show when={stats()} fallback={<Skeleton height="100px" />}>
             {(s) => (
@@ -251,7 +251,7 @@ export default function AdminDashboard() {
         {(h) => (
           <Card variant="elevated">
             <h2 class="text-lg font-semibold text-content mb-3">系统状态</h2>
-            <div class="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+            <div class="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-4 gap-4 text-sm">
               <div>
                 <p class="text-content-secondary">状态</p>
                 <p class="font-medium flex items-center gap-1.5">
@@ -283,18 +283,18 @@ export default function AdminDashboard() {
               </div>
               <div>
                 <p class="text-content-secondary">数据库大小</p>
-                <p class="font-medium text-content">
-                  {(h().dbSizeBytes / 1024 / 1024).toFixed(2)} MB
+                <p class="font-medium text-content tabular-nums">
+                  {formatBytes(h().dbSizeBytes)}
                 </p>
               </div>
               <div>
                 <p class="text-content-secondary">运行时间</p>
-                <p class="font-medium text-content">{formatDuration(h().uptimeSecs)}</p>
+                <p class="font-medium text-content tabular-nums">{formatDuration(h().uptimeSecs)}</p>
               </div>
               <div>
                 <p class="text-content-secondary">版本</p>
-                <div class="flex items-center gap-2">
-                  <p class="font-medium text-content">{h().version}</p>
+                <div class="flex items-center gap-2 min-w-0">
+                  <p class="font-medium text-content truncate" title={h().version}>{h().version}</p>
                   <Show when={updateInfo()?.hasUpdate && updateInfo()?.releaseUrl}>
                     <a
                       href={updateInfo()!.releaseUrl!}

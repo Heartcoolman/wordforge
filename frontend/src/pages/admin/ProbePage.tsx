@@ -16,7 +16,7 @@ import ScriptEditor from '@/components/probe/ScriptEditor';
 import { PROBE_TEMPLATES } from './probe-templates';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
-import { Input } from '@/components/ui/Input';
+import { Input, TextArea } from '@/components/ui/Input';
 import { Empty } from '@/components/ui/Empty';
 
 interface ResultCardData extends ProbeResultEvent {
@@ -217,11 +217,9 @@ export default function ProbePage() {
                   />
                 </Show>
                 <Show when={mode() === 'multi'}>
-                  <textarea
+                  <TextArea
                     rows={3}
-                    class="w-full rounded-lg border border-border-hairline bg-surface px-3 py-2 font-mono text-xs text-content
-                           transition-[border-color,box-shadow] duration-fast ease-out-expo
-                           hover:border-border focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent"
+                    class="font-mono text-xs"
                     value={multiDeviceIds()}
                     onInput={(e) => setMultiDeviceIds(e.currentTarget.value)}
                     placeholder="多个 deviceId，用空格 / 逗号分隔"
@@ -239,13 +237,15 @@ export default function ProbePage() {
 
               {/* script + 模板 */}
               <div class="space-y-2">
-                <div class="flex items-center justify-between">
-                  <span class="text-sm font-medium text-content-secondary">script</span>
+                <div class="flex items-center justify-between gap-2">
+                  <label for="probe-template-select" class="text-sm font-medium text-content-secondary">script</label>
                   <select
+                    id="probe-template-select"
+                    aria-label="选择脚本模板"
                     class="h-8 pl-2.5 pr-7 text-xs rounded-md border border-border-hairline bg-surface text-content
                            transition-[border-color,box-shadow] duration-fast ease-out-expo
                            hover:border-border cursor-pointer
-                           focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent
+                           focus-ring-soft focus:border-accent
                            appearance-none bg-no-repeat bg-[right_0.5rem_center]
                            bg-[url('data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2212%22 height=%2212%22 viewBox=%220 0 24 24%22 fill=%22none%22 stroke=%22currentColor%22 stroke-width=%222%22%3E%3Cpath d=%22m6 9 6 6 6-6%22/%3E%3C/svg%3E')]"
                     onChange={(e) => {
