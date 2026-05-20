@@ -55,11 +55,11 @@ describe('LegacyUserFrontendPage', () => {
     expect(screen.getByText(/旧路径是.*\/learning/)).toBeInTheDocument();
   });
 
-  it('shows 未配置 hint when VITE_USER_APP_URL is empty', () => {
+  it('shows 尚未上线 hint when VITE_USER_APP_URL is empty', () => {
     // 默认 import.meta.env 未设置 VITE_USER_APP_URL（fallback 分支）
     if (!(import.meta.env as Record<string, unknown>).VITE_USER_APP_URL) {
       renderWithProviders(() => <LegacyUserFrontendPage />);
-      expect(screen.getByText(/未配置/)).toBeInTheDocument();
+      expect(screen.getByText(/尚未上线/)).toBeInTheDocument();
     } else {
       // CI 注入了该 env 时跳过严格断言，仍要保证渲染不抛错
       renderWithProviders(() => <LegacyUserFrontendPage />);
