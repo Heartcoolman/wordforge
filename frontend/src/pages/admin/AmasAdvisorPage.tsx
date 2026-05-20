@@ -79,10 +79,30 @@ export default function AmasAdvisorPage() {
       <Show when={spend()} fallback={<Card variant="elevated"><Spinner size="sm" /></Card>}>
         {(s) => (
           <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
-            <StatCard title="今日花费 USD" value={`$${s().todayCostUsd.toFixed(4)}`} icon="" color="info" />
-            <StatCard title="日额度上限" value={`$${s().dailyCapUsd.toFixed(2)}`} icon="" color="accent" />
-            <StatCard title="剩余额度" value={`$${s().remainingUsd.toFixed(4)}`} icon="" color={s().remainingUsd < 0.1 ? 'error' : 'success'} />
-            <StatCard title="今日 token (in/out)" value={`${s().todayTokensInput}/${s().todayTokensOutput}`} icon="" color="info" />
+            <StatCard
+              title="今日花费 USD"
+              value={`$${s().todayCostUsd.toFixed(4)}`}
+              color="info"
+              icon="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+            />
+            <StatCard
+              title="日额度上限"
+              value={`$${s().dailyCapUsd.toFixed(2)}`}
+              color="accent"
+              icon="M11 3.055A9.001 9.001 0 1020.945 13H11V3.055zM20.488 9H15V3.512A9.025 9.025 0 0120.488 9z"
+            />
+            <StatCard
+              title="剩余额度"
+              value={`$${s().remainingUsd.toFixed(4)}`}
+              color={s().remainingUsd < 0.1 ? 'error' : 'success'}
+              icon="M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z"
+            />
+            <StatCard
+              title="今日 token (in/out)"
+              value={`${s().todayTokensInput}/${s().todayTokensOutput}`}
+              color="info"
+              icon="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4"
+            />
           </div>
         )}
       </Show>
