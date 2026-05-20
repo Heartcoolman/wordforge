@@ -51,11 +51,12 @@ export default function AnalyticsPage() {
         <WindowPicker value={days} onChange={setDays} />
       </div>
 
-      {/* KPI 行 (6 张) */}
-      <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
-        <Show when={eng()} fallback={<Skeleton height="100px" />}>
+      {/* KPI 行 (6 张) — 中等宽度先 2 行 3 列，xl 再展开 6 卡，避免 lg 挤压 */}
+      <div class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
+        <Show when={eng()} fallback={<Skeleton height="84px" />}>
           {(e) => (
             <StatCard
+              size="sm"
               title="总用户"
               value={formatNumber(e().totalUsers)}
               color="accent"
@@ -63,9 +64,10 @@ export default function AnalyticsPage() {
             />
           )}
         </Show>
-        <Show when={eng()} fallback={<Skeleton height="100px" />}>
+        <Show when={eng()} fallback={<Skeleton height="84px" />}>
           {(e) => (
             <StatCard
+              size="sm"
               title="今日活跃"
               value={formatNumber(e().activeToday)}
               color="success"
@@ -74,9 +76,10 @@ export default function AnalyticsPage() {
             />
           )}
         </Show>
-        <Show when={learning()} fallback={<Skeleton height="100px" />}>
+        <Show when={learning()} fallback={<Skeleton height="84px" />}>
           {(l) => (
             <StatCard
+              size="sm"
               title="累计答题"
               value={formatNumber(l().totalRecords)}
               color="info"
@@ -85,9 +88,10 @@ export default function AnalyticsPage() {
             />
           )}
         </Show>
-        <Show when={learning()} fallback={<Skeleton height="100px" />}>
+        <Show when={learning()} fallback={<Skeleton height="84px" />}>
           {(l) => (
             <StatCard
+              size="sm"
               title="累计正确率"
               value={formatPercent(l().overallAccuracy)}
               color="warning"
@@ -96,9 +100,10 @@ export default function AnalyticsPage() {
             />
           )}
         </Show>
-        <Show when={overview()} fallback={<Skeleton height="100px" />}>
+        <Show when={overview()} fallback={<Skeleton height="84px" />}>
           {(o) => (
             <StatCard
+              size="sm"
               title={`${days()}天学习时长`}
               value={formatDuration(o().summary.totalDurationSecs)}
               color="accent"
@@ -106,9 +111,10 @@ export default function AnalyticsPage() {
             />
           )}
         </Show>
-        <Show when={overview()} fallback={<Skeleton height="100px" />}>
+        <Show when={overview()} fallback={<Skeleton height="84px" />}>
           {(o) => (
             <StatCard
+              size="sm"
               title={`${days()}天新词`}
               value={formatNumber(o().summary.newWords)}
               color="info"
