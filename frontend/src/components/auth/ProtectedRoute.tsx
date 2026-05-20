@@ -1,13 +1,14 @@
 import { type ParentProps, Show, createSignal, onMount, onCleanup } from 'solid-js';
-import { Navigate, useNavigate } from '@solidjs/router';
+import { Navigate } from '@solidjs/router';
 import { tokenManager } from '@/lib/token';
 import { adminApi } from '@/api/admin';
+import { uiStore } from '@/stores/ui';
 import { Spinner } from '@/components/ui/Spinner';
 
+// 30 秒节流，与 token 实际过期解耦；如需全局调整可迁到 @/lib/constants 集中管理
 const VALIDATION_THROTTLE_MS = 30_000;
 
 export function AdminProtectedRoute(props: ParentProps) {
-  const navigate = useNavigate();
   const [verified, setVerified] = createSignal(false);
   const [loading, setLoading] = createSignal(true);
   let lastValidated = 0;
@@ -15,7 +16,7 @@ export function AdminProtectedRoute(props: ParentProps) {
   async function verifyAdmin() {
     const token = tokenManager.getAdminToken();
     if (!token) {
-      navigate('/admin/login', { replace: true });
+      // 无 token → 走 fallback <Navigate> 统一跳转，避免与 onMount navigate 双重重定向
       setLoading(false);
       return;
     }
@@ -25,7 +26,7 @@ export function AdminProtectedRoute(props: ParentProps) {
       lastValidated = Date.now();
     } catch {
       tokenManager.clearAdminToken();
-      navigate('/admin/login', { replace: true });
+      // 失败时让 fallback <Navigate> 接管跳转
     } finally {
       setLoading(false);
     }
@@ -36,15 +37,14 @@ export function AdminProtectedRoute(props: ParentProps) {
       lastValidated = Date.now();
       adminApi.verifyToken().catch(() => {
         tokenManager.clearAdminToken();
+        uiStore.toast.warning('登录已过期，请重新登录');
         setVerified(false);
-        navigate('/admin/login', { replace: true });
       });
     }
   };
 
   const handleUnauthorized = () => {
     setVerified(false);
-    navigate('/admin/login', { replace: true });
   };
 
   onMount(() => {

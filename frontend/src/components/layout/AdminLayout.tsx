@@ -7,6 +7,12 @@ import { uiStore } from '@/stores/ui';
 import { Skeleton } from '@/components/ui/Skeleton';
 import { useIndicatorTrack } from '@/lib/motion';
 
+// Sidebar 宽度 / 主区 margin 集中常量；Tailwind 类不能动态拼接，仍保留字符串字面量
+const SIDEBAR_W_OPEN = 'md:w-56';
+const SIDEBAR_W_COLLAPSED = 'md:w-16';
+const MAIN_ML_OPEN = 'md:ml-56';
+const MAIN_ML_COLLAPSED = 'md:ml-16';
+
 const sidebarLinks = [
   { href: '/admin', label: '仪表盘', icon: 'M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zm10 0a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zm10 0a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z', exact: true },
   { href: '/admin/users', label: '用户管理', icon: 'M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z' },
@@ -67,20 +73,20 @@ export function AdminLayout(props: ParentProps) {
   return (
     <div class="min-h-screen flex bg-surface-secondary">
       <Show when={mobileOpen()}>
-        <button
-          type="button"
-          aria-label="关闭导航菜单"
+        <div
+          role="presentation"
+          aria-hidden="true"
           class="fixed inset-0 z-20 bg-black/40 backdrop-blur-sm md:hidden animate-fade-in"
           onClick={() => setMobileOpen(false)}
         />
       </Show>
 
-      {/* Sidebar */}
+      {/* Sidebar — overflow-hidden 兜底，避免折叠态 icon hover scale 溢出到容器外 */}
       <aside class={cn(
-        'fixed left-0 top-0 h-screen bg-surface border-r border-border-hairline flex flex-col z-30',
+        'fixed left-0 top-0 h-screen bg-surface border-r border-border-hairline flex flex-col z-30 overflow-hidden',
         'transition-[width,transform] duration-base ease-out-expo',
-        'w-72 md:w-56',
-        collapsed() && 'md:w-16',
+        'w-72',
+        collapsed() ? SIDEBAR_W_COLLAPSED : SIDEBAR_W_OPEN,
         mobileOpen() ? 'translate-x-0' : '-translate-x-full md:translate-x-0',
       )}>
         <div class="h-14 flex items-center justify-between px-4 border-b border-border-hairline">
@@ -104,8 +110,11 @@ export function AdminLayout(props: ParentProps) {
           </button>
         </div>
 
+        {/* 退出按钮放在顶栏（header）而非 sidebar footer，与现有 admin 设计一致；
+            sidebar 折叠态空间紧张，避免再增加额外区域。 */}
         <nav ref={navRef} class="relative flex-1 py-3 px-2 space-y-1 overflow-y-auto">
-          {/* Indicator — 完整跟随测量值（left/top/width/height），避免高度/宽度溢出到邻居 */}
+          {/* Indicator — 完整跟随测量值（left/top/width/height），避免高度/宽度溢出到邻居；
+              已知限制：nav scroll 容器滚动时不重新测量（useIndicatorTrack 仅监听 ResizeObserver） → DEFERRED 到 lib/motion 修复 */}
           <div
             aria-hidden="true"
             class="absolute left-0 top-0 rounded-lg bg-accent-light pointer-events-none transition-[transform,width,height,opacity] duration-base ease-out-expo"
@@ -121,6 +130,7 @@ export function AdminLayout(props: ParentProps) {
             <A
               href={link.href}
               data-sidebar-active={isActive(link.href, link.exact) ? 'true' : undefined}
+              aria-current={isActive(link.href, link.exact) ? 'page' : undefined}
               class={cn(
                 'group relative flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium',
                 'transition-colors duration-fast ease-out-expo',
@@ -148,7 +158,7 @@ export function AdminLayout(props: ParentProps) {
       </aside>
 
       {/* Main */}
-      <div class={cn('flex-1 min-w-0 transition-[margin] duration-base ease-out-expo', collapsed() ? 'md:ml-16' : 'md:ml-56')}>
+      <div class={cn('flex-1 min-w-0 transition-[margin] duration-base ease-out-expo', collapsed() ? MAIN_ML_COLLAPSED : MAIN_ML_OPEN)}>
         <header class="sticky top-0 z-10 h-14 bg-surface/80 backdrop-blur-md border-b border-border-hairline flex items-center justify-between gap-3 px-4 sm:px-6">
           <div class="flex items-center gap-3 min-w-0">
             <button

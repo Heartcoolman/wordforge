@@ -45,8 +45,16 @@ describe('AmasVersionDrawer', () => {
   }
 
   it('not rendered when open=false', async () => {
-    await renderDrawer({ open: false });
-    expect(screen.queryByText('版本历史')).not.toBeInTheDocument();
+    const { container } = await renderDrawer({ open: false });
+    // Drawer 常驻 DOM + translate-x-full + aria-hidden + pointer-events-none 表示「视觉与可达性上不可见」
+    // 旧断言用 not.toBeInTheDocument 已不适用；改为校验可达性标志
+    const dialog = container.querySelector('[role="dialog"]') as HTMLElement | null;
+    expect(dialog).toBeTruthy();
+    expect(dialog!.className).toContain('translate-x-full');
+    expect(dialog!.className).toContain('pointer-events-none');
+    // 外层容器 aria-hidden=true，对 AT 屏蔽
+    const outer = container.querySelector('[aria-hidden="true"]');
+    expect(outer).toBeTruthy();
   });
 
   it('shows empty state when no versions', async () => {

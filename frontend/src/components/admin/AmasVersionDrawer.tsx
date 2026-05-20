@@ -1,4 +1,4 @@
-import { createSignal, For, Show, createResource } from 'solid-js';
+import { createSignal, For, Show, createResource, createMemo, createEffect, onCleanup } from 'solid-js';
 import { Button } from '@/components/ui/Button';
 import { Badge } from '@/components/ui/Badge';
 import { Spinner } from '@/components/ui/Spinner';
@@ -6,6 +6,7 @@ import { Empty } from '@/components/ui/Empty';
 import { adminApi, type AmasConfigVersionRow, type AmasConfigVersionSource } from '@/api/admin';
 import { uiStore } from '@/stores/ui';
 import { diffKnown } from '@/pages/admin/amas/schema';
+import { formatVal } from '@/pages/admin/amas/PresetSelector';
 
 interface AmasVersionDrawerProps {
   open: boolean;
@@ -27,10 +28,17 @@ const SOURCE_VARIANT: Record<AmasConfigVersionSource, 'default' | 'info' | 'warn
   llm_auto: 'warning',
 };
 
+type VersionDetail = Awaited<ReturnType<typeof adminApi.amasGetVersion>>;
+
+// 模块级 hash → detail 缓存，避免重复展开重复拉取
+const detailCache = new Map<string, VersionDetail>();
+
 export function AmasVersionDrawer(props: AmasVersionDrawerProps) {
   const [expanded, setExpanded] = createSignal<string | null>(null);
   const [confirming, setConfirming] = createSignal<{ hash: string; label: string } | null>(null);
   const [restoring, setRestoring] = createSignal(false);
+  let drawerRef: HTMLDivElement | undefined;
+  let confirmRef: HTMLDivElement | undefined;
 
   // 拉取版本列表；open 切换为 true 时自动获取
   const [versions, { refetch }] = createResource(
@@ -38,17 +46,29 @@ export function AmasVersionDrawer(props: AmasVersionDrawerProps) {
     async (open) => (open ? await adminApi.amasListVersions(50) : []),
   );
 
-  // 展开某版本：拉详情，做 diff
+  // 展开某版本：拉详情，做 diff；使用模块级缓存
   const [detail] = createResource(expanded, async (hash) => {
     if (!hash) return null;
-    return await adminApi.amasGetVersion(hash);
+    const cached = detailCache.get(hash);
+    if (cached) return cached;
+    const data = await adminApi.amasGetVersion(hash);
+    detailCache.set(hash, data);
+    return data;
   });
 
-  const diff = () => {
+  const diffMemo = createMemo(() => {
     const d = detail();
     if (!d) return [];
     return diffKnown(props.currentConfig, d.snapshotJson);
-  };
+  });
+
+  // 关闭 Drawer 时复位 confirming 与 expanded
+  createEffect(() => {
+    if (!props.open) {
+      setConfirming(null);
+      setExpanded(null);
+    }
+  });
 
   async function performRestore(hash: string) {
     setRestoring(true);
@@ -67,19 +87,99 @@ export function AmasVersionDrawer(props: AmasVersionDrawerProps) {
     }
   }
 
+  // a11y：Drawer 打开时 body 锁滚 + ESC + focus trap（drawer 与 confirm 模态各自一套）
+  createEffect(() => {
+    if (!props.open) return;
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        // confirm 模态打开时，ESC 优先关 confirm
+        if (confirming()) {
+          if (!restoring()) setConfirming(null);
+        } else {
+          props.onClose();
+        }
+        return;
+      }
+      if (e.key === 'Tab') {
+        const scope = confirming() ? confirmRef : drawerRef;
+        if (!scope) return;
+        const focusables = scope.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        );
+        if (focusables.length === 0) return;
+        const first = focusables[0];
+        const last = focusables[focusables.length - 1];
+        if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
+    }
+    document.addEventListener('keydown', onKey);
+
+    requestAnimationFrame(() => {
+      drawerRef?.querySelector<HTMLElement>('button:not([aria-label="关闭"]),input,select')?.focus();
+    });
+
+    onCleanup(() => {
+      document.removeEventListener('keydown', onKey);
+      document.body.style.overflow = prevOverflow;
+    });
+  });
+
+  // confirm 模态打开时把首焦点移到取消按钮
+  createEffect(() => {
+    if (!confirming()) return;
+    requestAnimationFrame(() => {
+      confirmRef?.querySelector<HTMLElement>('button')?.focus();
+    });
+  });
+
   return (
-    <Show when={props.open}>
-      <div class="fixed inset-0 z-40 flex justify-end animate-fade-in" onClick={props.onClose}>
+    <>
+      {/* Drawer 容器始终挂载，通过 translate 控制进出，便于过渡动画 */}
+      <div
+        class={`fixed inset-0 z-40 flex justify-end pointer-events-none ${props.open ? '' : ''}`}
+        aria-hidden={!props.open}
+      >
+        {/* backdrop */}
         <div
-          class="bg-surface-elevated w-full max-w-md h-full shadow-2xl overflow-hidden flex flex-col"
+          class={`absolute inset-0 bg-black/40 transition-opacity duration-200 ${
+            props.open ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'
+          }`}
+          onClick={props.onClose}
+        />
+        {/* panel */}
+        <div
+          ref={drawerRef}
+          class={`relative bg-surface-elevated w-full max-w-md h-full shadow-2xl overflow-hidden flex flex-col transform transition-transform duration-300 ease-out ${
+            props.open ? 'translate-x-0 pointer-events-auto' : 'translate-x-full pointer-events-none'
+          }`}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="amas-version-drawer-title"
           onClick={(e) => e.stopPropagation()}
         >
           <div class="px-5 py-4 border-b border-border flex items-baseline justify-between">
             <div>
-              <h3 class="text-base font-semibold text-content">版本历史</h3>
+              <h3 id="amas-version-drawer-title" class="text-base font-semibold text-content">版本历史</h3>
               <p class="text-xs text-content-tertiary mt-0.5">最近 50 个变更；点击展开可查看 diff 与回滚</p>
             </div>
-            <button type="button" class="text-content-tertiary hover:text-content text-xl" onClick={props.onClose}>×</button>
+            <button
+              type="button"
+              class="focus-ring-soft min-w-[40px] min-h-[40px] flex items-center justify-center rounded-md text-content-tertiary hover:text-content text-xl"
+              aria-label="关闭"
+              onClick={props.onClose}
+            >
+              <span aria-hidden="true">×</span>
+            </button>
           </div>
 
           <div class="flex-1 overflow-y-auto px-3 py-3 space-y-2">
@@ -93,7 +193,7 @@ export function AmasVersionDrawer(props: AmasVersionDrawerProps) {
                       expanded={expanded() === v.versionHash}
                       onToggle={() => setExpanded(expanded() === v.versionHash ? null : v.versionHash)}
                       detailLoading={expanded() === v.versionHash && detail.loading}
-                      diff={expanded() === v.versionHash ? diff() : []}
+                      diff={expanded() === v.versionHash ? diffMemo() : []}
                       onRestore={() => setConfirming({ hash: v.versionHash, label: shortHash(v.versionHash) })}
                     />
                   )}
@@ -106,10 +206,24 @@ export function AmasVersionDrawer(props: AmasVersionDrawerProps) {
 
       <Show when={confirming()}>
         {(c) => (
-          <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => setConfirming(null)}>
-            <div class="bg-surface-elevated rounded-xl shadow-2xl max-w-md w-full mx-4" onClick={(e) => e.stopPropagation()}>
+          <div
+            class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 animate-fade-in"
+            onClick={(e) => {
+              // 阻止冒泡到 Drawer backdrop，避免误关 Drawer
+              e.stopPropagation();
+              if (!restoring()) setConfirming(null);
+            }}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="amas-rollback-title"
+          >
+            <div
+              ref={confirmRef}
+              class="bg-surface-elevated rounded-xl shadow-2xl max-w-md w-full mx-4"
+              onClick={(e) => e.stopPropagation()}
+            >
               <div class="px-5 py-4 border-b border-border">
-                <h3 class="text-base font-semibold text-content">回滚至版本 {c().label}</h3>
+                <h3 id="amas-rollback-title" class="text-base font-semibold text-content">回滚至版本 {c().label}</h3>
               </div>
               <div class="px-5 py-4 text-sm text-content-secondary leading-relaxed space-y-2">
                 <p>该操作将：</p>
@@ -128,7 +242,7 @@ export function AmasVersionDrawer(props: AmasVersionDrawerProps) {
           </div>
         )}
       </Show>
-    </Show>
+    </>
   );
 }
 
@@ -178,22 +292,31 @@ function VersionItem(props: VersionItemProps) {
               </Show>
             </div>
             <Show when={props.diff.length > 0} fallback={<p class="text-xs text-content-tertiary py-2 text-center">字典范围内无差异</p>}>
-              <table class="w-full text-[11px] font-mono">
-                <tbody>
-                  <For each={props.diff}>
-                    {(d) => (
-                      <tr class="border-b border-border/40 last:border-b-0">
-                        <td class="py-1 pr-2 text-content-secondary">
-                          <div class="text-content text-xs font-sans">{d.label_zh}</div>
-                          <div class="text-[10px] text-content-tertiary">{d.path}</div>
-                        </td>
-                        <td class="py-1 pr-2 text-right text-content-tertiary">{formatVal(d.before)}</td>
-                        <td class="py-1 text-right text-success">{formatVal(d.after)}</td>
-                      </tr>
-                    )}
-                  </For>
-                </tbody>
-              </table>
+              <div class="overflow-x-auto">
+                <table class="w-full text-[11px] font-mono">
+                  <thead>
+                    <tr class="text-content-tertiary border-b border-border">
+                      <th class="text-left py-1 pr-2 font-medium font-sans text-[10px]">字段</th>
+                      <th class="text-right py-1 pr-2 font-medium font-sans text-[10px]">当前</th>
+                      <th class="text-right py-1 font-medium font-sans text-[10px]">→ 该版本</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <For each={props.diff}>
+                      {(d) => (
+                        <tr class="border-b border-border/40 last:border-b-0">
+                          <td class="py-1 pr-2 text-content-secondary">
+                            <div class="text-content text-xs font-sans">{d.label_zh}</div>
+                            <div class="text-[10px] text-content-tertiary">{d.path}</div>
+                          </td>
+                          <td class="py-1 pr-2 text-right text-content-tertiary">{formatVal(d.before)}</td>
+                          <td class="py-1 text-right text-success">{formatVal(d.after)}</td>
+                        </tr>
+                      )}
+                    </For>
+                  </tbody>
+                </table>
+              </div>
             </Show>
           </Show>
         </div>
@@ -212,11 +335,4 @@ function formatTime(iso: string): string {
   } catch {
     return iso;
   }
-}
-
-function formatVal(v: unknown): string {
-  if (typeof v === 'boolean') return v ? 'true' : 'false';
-  if (typeof v === 'number') return Number.isInteger(v) ? String(v) : v.toFixed(6).replace(/0+$/, '').replace(/\.$/, '');
-  if (v === undefined) return '—';
-  return JSON.stringify(v);
 }
