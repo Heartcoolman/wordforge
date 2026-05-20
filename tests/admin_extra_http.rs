@@ -613,12 +613,13 @@ async fn it_admin_updates_disabled_returns_503() {
         assert_eq!(body["code"], "UPDATER_DISABLED");
     }
 
-    // apply 需要 body
+    // apply 需要 body（v0.6.0-beta.3 起 channel 必填）
     let resp = request(
         &app.app,
         Method::POST,
         "/api/admin/updates/apply",
         Some(serde_json::json!({
+            "channel": "beta",
             "targetVersion": "v9.9.9",
             "confirmCurrentVersion": "v0.0.0"
         })),

@@ -43,11 +43,14 @@ pub enum SseEvent {
         suggestion_id: i64,
     },
     /// 自更新 worker 探测到 GitHub Releases 有新二进制版本（与 broadcast_update 的
-    /// `update_available` 区分，后者是给所有用户"刷新页面"的通知）
+    /// `update_available` 区分，后者是给所有用户"刷新页面"的通知）。
+    /// v0.6.0-beta.3：payload 含 `channel`（stable / beta），前端 admin 后台据此
+    /// 在对应通道卡片亮 badge。
     #[serde(rename = "release_available")]
     ReleaseAvailable {
         #[serde(rename = "latestTag")]
         latest_tag: String,
+        channel: crate::services::updater::Channel,
     },
     /// 一键更新执行过程中推给前端的阶段进度（0–100）
     #[serde(rename = "update_progress")]

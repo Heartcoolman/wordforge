@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use chrono::{DateTime, Utc};
 use fs2::FileExt;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::RwLock;
@@ -75,6 +75,23 @@ pub enum UpdaterError {
     Config(String),
 }
 
+/// 更新通道：stable 排除 prerelease，beta 包含所有（含 stable 自身）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Channel {
+    Stable,
+    Beta,
+}
+
+impl Channel {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Channel::Stable => "stable",
+            Channel::Beta => "beta",
+        }
+    }
+}
+
 /// 平台架构 → asset 命名后缀。返回 `Some("x86_64")` / `Some("aarch64")`，其它返回 `None`。
 fn current_arch_token() -> Option<&'static str> {
     #[cfg(target_os = "linux")]
@@ -91,18 +108,29 @@ fn current_arch_token() -> Option<&'static str> {
     }
 }
 
-/// 暴露给前端的版本视图，三个 API 都返回它。
+/// 单通道视图：每个 channel 的最新 release 元数据 + 升级判定。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelStatus {
+    pub latest_version: String,
+    pub latest_published_at: Option<DateTime<Utc>>,
+    pub release_notes: String,
+    pub release_url: String,
+    pub has_update: bool,
+    /// 当前进程是否能用这条 release 自更新：架构匹配 + 找到 tar.gz / sha256 资产对。
+    pub can_apply: bool,
+}
+
+/// 暴露给前端的版本视图，三个 admin updates API 都返回它。
+///
+/// v0.6.0-beta.3 起 stable / beta 双通道；后端单次 `/releases?per_page=10`
+/// 调用分流出两个 latest，前端 admin 后台同时展示 + 可分别一键升级。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateStatus {
     pub current_version: String,
-    pub latest_version: Option<String>,
-    pub latest_published_at: Option<DateTime<Utc>>,
-    pub release_notes: Option<String>,
-    pub release_url: Option<String>,
-    pub has_update: bool,
-    /// 当前进程是否能用这条 release 自更新：架构匹配 + 找到 tar.gz / sha256 资产对。
-    pub can_apply: bool,
+    pub stable: Option<ChannelStatus>,
+    pub beta: Option<ChannelStatus>,
     pub last_checked_at: Option<DateTime<Utc>>,
     pub auto_check_enabled: bool,
     pub allow_downgrade: bool,
@@ -138,7 +166,10 @@ pub type ProgressSink = Arc<dyn Fn(UpdatePhase) + Send + Sync>;
 struct UpdaterCache {
     last_checked_at: Option<DateTime<Utc>>,
     last_checked_instant: Option<Instant>,
-    latest: Option<CachedRelease>,
+    /// stable_latest = max semver where prerelease=false
+    stable: Option<CachedRelease>,
+    /// beta_latest = max semver overall（含 prerelease，即"任何 release 里能拿到的最高"）
+    beta: Option<CachedRelease>,
     etag: Option<String>,
 }
 
@@ -265,10 +296,11 @@ impl Updater {
 
         // Codex P1 (2nd pass): etag 仅在内存 latest 也在时才发；进程重启后
         // .update_etag 被还原但 latest=None，此时若发条件请求拿到 304 就永远
-        // 看不到任何版本元数据。
+        // 看不到任何版本元数据。v0.6.0-beta.3：cache 拆 stable + beta，
+        // 任一有缓存即可带 If-None-Match。
         let etag_now = {
             let cache = self.cache.read().await;
-            if cache.latest.is_some() {
+            if cache.stable.is_some() || cache.beta.is_some() {
                 cache.etag.clone()
             } else {
                 None
@@ -289,16 +321,15 @@ impl Updater {
         let status = resp.status();
 
         if status.as_u16() == 304 {
-            // 304 时必须保证 cache.latest 非空（上面的守门已经保证了 etag
-            // 仅在 latest 存在时才发），但加一道防御性 assert 让逻辑更稳。
+            // 304 时必须保证 cache 双通道至少一项非空（上面的守门已经保证）。
+            // 加一道防御性检查让逻辑更稳：若都空则丢 etag 让下次重新拉。
             let mut cache = self.cache.write().await;
             cache.last_checked_at = Some(Utc::now());
             cache.last_checked_instant = Some(Instant::now());
-            if cache.latest.is_none() {
-                // 理论不可达；万一被外部清空了 cache.latest，丢 etag 让下次重新拉
+            if cache.stable.is_none() && cache.beta.is_none() {
                 cache.etag = None;
                 tracing::warn!(
-                    "304 received but cache.latest is empty; dropping etag for next call"
+                    "304 received but both channel caches empty; dropping etag for next call"
                 );
             }
             return Ok(self.status_from(&cache));
@@ -320,7 +351,7 @@ impl Updater {
             .and_then(|v| v.to_str().ok())
             .map(str::to_string);
         let body: serde_json::Value = resp.json().await?;
-        let parsed = parse_release_payload(&body);
+        let parsed = parse_release_list_payload(&body);
 
         let mut cache = self.cache.write().await;
         cache.last_checked_at = Some(Utc::now());
@@ -335,14 +366,17 @@ impl Updater {
                 tracing::warn!("persist etag: {e}");
             }
         }
-        cache.latest = parsed;
+        cache.stable = parsed.stable;
+        cache.beta = parsed.beta;
         Ok(self.status_from(&cache))
     }
 
-    /// 跑一次完整的自更新流程。target_tag 必须等于当前缓存的 latest_tag，否则 `InvalidTarget`。
+    /// 跑一次完整的自更新流程。`channel` 决定从 stable / beta 哪条缓存读 latest；
+    /// `target_tag` 必须等于该通道缓存的 latest_tag，否则 `InvalidTarget`。
     /// 成功后 fork-exec 启动新进程 + exit(0)，**调用方不再返回**。
     pub async fn apply<F>(
         &self,
+        channel: Channel,
         target_tag: &str,
         backup_callback: F,
         progress: ProgressSink,
@@ -352,14 +386,23 @@ impl Updater {
     {
         let latest = {
             let cache = self.cache.read().await;
-            cache.latest.clone().ok_or_else(|| {
-                UpdaterError::InvalidTarget("no cached release; check first".into())
+            let opt = match channel {
+                Channel::Stable => cache.stable.clone(),
+                Channel::Beta => cache.beta.clone(),
+            };
+            opt.ok_or_else(|| {
+                UpdaterError::InvalidTarget(format!(
+                    "no cached release for channel {}; check first",
+                    channel.as_str()
+                ))
             })?
         };
         if latest.tag != target_tag {
             return Err(UpdaterError::InvalidTarget(format!(
-                "latest cached tag is {}, not {}",
-                latest.tag, target_tag
+                "channel {} latest cached tag is {}, not {}",
+                channel.as_str(),
+                latest.tag,
+                target_tag
             )));
         }
         // Codex P3: 资产缺失要在 apply 入口就明确报错，否则会在 fetch_sha256 阶段
@@ -681,28 +724,25 @@ impl Updater {
     }
 
     fn status_from(&self, cache: &UpdaterCache) -> UpdateStatus {
-        let (latest_version, published_at, notes, url, can_apply) = match &cache.latest {
-            Some(r) => (
-                Some(r.tag.clone()),
-                r.published_at,
-                Some(r.body.clone()),
-                Some(r.html_url.clone()),
-                !r.tarball_url.is_empty() && !r.sha256_url.is_empty(),
-            ),
-            None => (None, None, None, None, false),
+        let current = &self.current_tag;
+        let to_channel = |opt: &Option<CachedRelease>| -> Option<ChannelStatus> {
+            opt.as_ref().map(|r| {
+                let has_update = is_strictly_newer(&r.tag, current);
+                let assets_ok = !r.tarball_url.is_empty() && !r.sha256_url.is_empty();
+                ChannelStatus {
+                    latest_version: r.tag.clone(),
+                    latest_published_at: r.published_at,
+                    release_notes: r.body.clone(),
+                    release_url: r.html_url.clone(),
+                    has_update,
+                    can_apply: has_update && assets_ok,
+                }
+            })
         };
-        let has_update = latest_version
-            .as_ref()
-            .map(|tag| is_strictly_newer(tag, &self.current_tag))
-            .unwrap_or(false);
         UpdateStatus {
             current_version: self.current_tag.clone(),
-            latest_version,
-            latest_published_at: published_at,
-            release_notes: notes,
-            release_url: url,
-            has_update,
-            can_apply,
+            stable: to_channel(&cache.stable),
+            beta: to_channel(&cache.beta),
             last_checked_at: cache.last_checked_at,
             auto_check_enabled: self.auto_check_enabled,
             allow_downgrade: self.allow_downgrade,
@@ -771,6 +811,72 @@ fn parse_release_payload(body: &serde_json::Value) -> Option<CachedRelease> {
         sha256_url: sha_url,
         tarball_size: tar_size,
     })
+}
+
+/// 单次 `/releases?per_page=N` 解析结果。
+/// - `stable` = max semver where `prerelease=false`
+/// - `beta`   = max semver overall（含 prerelease；即"任何 release 里能拿到的最高"，因此 `beta_latest_semver >= stable_latest_semver`）
+struct ParsedReleaseList {
+    stable: Option<CachedRelease>,
+    beta: Option<CachedRelease>,
+}
+
+/// 解析 GitHub `/releases?per_page=N` 数组，分别取出 stable / beta 通道的 latest。
+///
+/// 设计要点：
+/// - 输入是 JSON array；若意外传入单 release object 走 fallback 走老逻辑（视作 stable=beta=同一项），
+///   保留对早期 `/releases/latest` 端点的兼容
+/// - `parse_release_payload` 完成单 release 的字段提取与 asset 匹配（架构 / sha256 / size）
+/// - tag 不可 semver 解析的 release 被跳过（不影响其它项）
+fn parse_release_list_payload(body: &serde_json::Value) -> ParsedReleaseList {
+    let items = match body.as_array() {
+        Some(a) => a,
+        None => {
+            // fallback：单 object 当作单一 release，两通道指向同一项
+            let single = parse_release_payload(body);
+            return ParsedReleaseList {
+                stable: single.clone(),
+                beta: single,
+            };
+        }
+    };
+    let mut stable_best: Option<(semver::Version, CachedRelease)> = None;
+    let mut beta_best: Option<(semver::Version, CachedRelease)> = None;
+    for item in items {
+        let Some(parsed) = parse_release_payload(item) else {
+            continue;
+        };
+        let ver = match semver::Version::parse(parsed.tag.trim_start_matches('v')) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let is_prerelease = item
+            .get("prerelease")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        // beta_latest = max semver overall（含 stable）
+        let beta_take = match &beta_best {
+            None => true,
+            Some((cur, _)) => ver > *cur,
+        };
+        if beta_take {
+            beta_best = Some((ver.clone(), parsed.clone()));
+        }
+        // stable_latest = max semver where prerelease=false
+        if !is_prerelease {
+            let stable_take = match &stable_best {
+                None => true,
+                Some((cur, _)) => ver > *cur,
+            };
+            if stable_take {
+                stable_best = Some((ver, parsed));
+            }
+        }
+    }
+    ParsedReleaseList {
+        stable: stable_best.map(|(_, r)| r),
+        beta: beta_best.map(|(_, r)| r),
+    }
 }
 
 /// 严格 newer：semver 解析失败时回退到字符串比较，仍要求 latest != current。
@@ -1018,5 +1124,94 @@ mod tests {
         };
         let u4 = Updater::new(&cfg_empty, "v0.5.4").expect("build updater");
         assert_eq!(u4.mirror("https://github.com/o"), "https://github.com/o");
+    }
+
+    /// v0.6.0-beta.3 双通道核心：list 输入下分别取 stable / beta latest。
+    #[test]
+    fn channel_serde_lowercase_roundtrip() {
+        let s: Channel = serde_json::from_str("\"stable\"").unwrap();
+        assert!(matches!(s, Channel::Stable));
+        let b: Channel = serde_json::from_str("\"beta\"").unwrap();
+        assert!(matches!(b, Channel::Beta));
+        assert_eq!(serde_json::to_string(&Channel::Stable).unwrap(), "\"stable\"");
+        assert_eq!(serde_json::to_string(&Channel::Beta).unwrap(), "\"beta\"");
+    }
+
+    fn release_json(arch: &str, tag: &str, prerelease: bool) -> serde_json::Value {
+        serde_json::json!({
+            "tag_name": tag,
+            "html_url": format!("https://example.com/r/{tag}"),
+            "body": format!("notes {tag}"),
+            "published_at": "2026-05-20T00:00:00Z",
+            "prerelease": prerelease,
+            "assets": [
+                {"name": format!("wordforge-linux-{arch}.tar.gz"), "browser_download_url": format!("https://example.com/{tag}.tar.gz"), "size": 1000},
+                {"name": format!("wordforge-linux-{arch}.tar.gz.sha256"), "browser_download_url": format!("https://example.com/{tag}.sha256"), "size": 64},
+            ],
+        })
+    }
+
+    #[test]
+    fn parse_release_list_picks_max_semver_per_channel() {
+        if current_arch_token().is_none() {
+            return; // 非 Linux 平台 parse_release_payload 永远返 None；该测试只验 Linux 路径
+        }
+        let arch = current_arch_token().unwrap();
+        let body = serde_json::Value::Array(vec![
+            release_json(arch, "v0.6.0-beta.3", true),
+            release_json(arch, "v0.6.0-beta.2", true),
+            release_json(arch, "v0.5.6", false),
+            release_json(arch, "v0.5.5", false),
+        ]);
+        let parsed = parse_release_list_payload(&body);
+        assert_eq!(parsed.stable.as_ref().unwrap().tag, "v0.5.6");
+        assert_eq!(parsed.beta.as_ref().unwrap().tag, "v0.6.0-beta.3");
+    }
+
+    #[test]
+    fn parse_release_list_beta_superset_of_stable_when_only_stable() {
+        if current_arch_token().is_none() {
+            return;
+        }
+        let arch = current_arch_token().unwrap();
+        let body = serde_json::Value::Array(vec![release_json(arch, "v1.0.0", false)]);
+        let parsed = parse_release_list_payload(&body);
+        // 只有 stable release 时 beta_latest 也等于 stable_latest（beta 是 overall max）
+        assert_eq!(parsed.stable.as_ref().unwrap().tag, "v1.0.0");
+        assert_eq!(parsed.beta.as_ref().unwrap().tag, "v1.0.0");
+    }
+
+    #[test]
+    fn parse_release_list_handles_empty_array() {
+        let parsed = parse_release_list_payload(&serde_json::Value::Array(vec![]));
+        assert!(parsed.stable.is_none() && parsed.beta.is_none());
+    }
+
+    #[test]
+    fn parse_release_list_skips_unparsable_tags() {
+        if current_arch_token().is_none() {
+            return;
+        }
+        let arch = current_arch_token().unwrap();
+        let body = serde_json::Value::Array(vec![
+            release_json(arch, "not-a-semver", false),
+            release_json(arch, "v0.5.6", false),
+        ]);
+        let parsed = parse_release_list_payload(&body);
+        assert_eq!(parsed.stable.as_ref().unwrap().tag, "v0.5.6");
+        assert_eq!(parsed.beta.as_ref().unwrap().tag, "v0.5.6");
+    }
+
+    #[test]
+    fn parse_release_list_fallback_for_single_object() {
+        // 老 /releases/latest 端点返单 object 时仍能 work：stable=beta=same
+        if current_arch_token().is_none() {
+            return;
+        }
+        let arch = current_arch_token().unwrap();
+        let body = release_json(arch, "v0.5.6", false);
+        let parsed = parse_release_list_payload(&body);
+        assert_eq!(parsed.stable.as_ref().unwrap().tag, "v0.5.6");
+        assert_eq!(parsed.beta.as_ref().unwrap().tag, "v0.5.6");
     }
 }

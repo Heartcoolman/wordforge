@@ -98,8 +98,10 @@ async fn it_admin_updates_force_check_broadcasts_when_new_release() {
     // 仅 Linux 平台能解析出 asset → latest_version + has_update。
     // 其它平台 parse_release_payload 返回 None，二者为默认值。
     if cfg!(target_os = "linux") {
-        assert_eq!(body["data"]["hasUpdate"], true);
-        assert_eq!(body["data"]["latestVersion"], "v99.0.0");
+        // v0.6.0-beta.3：UpdateStatus 拆 stable/beta 嵌套；单 release object 走
+        // parse_release_list_payload fallback → stable=beta=same。
+        assert_eq!(body["data"]["beta"]["hasUpdate"], true);
+        assert_eq!(body["data"]["beta"]["latestVersion"], "v99.0.0");
     }
 }
 
@@ -136,7 +138,14 @@ async fn it_admin_updates_force_check_no_update() {
     .await;
     let (status, _, body) = response_json(resp).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["data"]["hasUpdate"], false);
+    // v0.6.0-beta.3：双通道嵌套。Linux 平台 parse_release_payload 返回 Some
+    // → cache.beta=Some，current==latest 故 has_update=false；
+    // 非 Linux 平台 parse_release_payload 返回 None（无 arch token）→ cache.beta=None。
+    if cfg!(target_os = "linux") {
+        assert_eq!(body["data"]["beta"]["hasUpdate"], false);
+    } else {
+        assert!(body["data"]["beta"].is_null());
+    }
 }
 
 #[tokio::test]
@@ -153,6 +162,7 @@ async fn it_admin_updates_apply_rejects_version_mismatch() {
         Method::POST,
         "/api/admin/updates/apply",
         Some(serde_json::json!({
+            "channel": "beta",
             "targetVersion": "v2.0.0",
             "confirmCurrentVersion": "v0.0.1"  // 与实际不匹配
         })),
@@ -193,6 +203,7 @@ async fn it_admin_updates_apply_propagates_no_asset_error() {
         Method::POST,
         "/api/admin/updates/apply",
         Some(serde_json::json!({
+            "channel": "beta",
             "targetVersion": "v9.9.9",
             "confirmCurrentVersion": "v0.0.1"
         })),

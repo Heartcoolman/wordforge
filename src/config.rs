@@ -354,9 +354,12 @@ impl Config {
                 output_price_per_mtok_usd: env_or_parse("LLM_OUTPUT_PRICE_PER_MTOK_USD", 2.19_f64),
             },
             update_check: UpdateCheckConfig {
+                // v0.6.0-beta.3：list 端点用于后端单次拉取后分流 stable / beta latest，
+                // /releases/latest 会跳过所有 prerelease，beta 通道拿不到 — 见
+                // docs/superpowers/specs/2026-05-20-admin-beta-channel-design.md
                 api_url: env_or(
                     "UPDATE_CHECK_API_URL",
-                    "https://api.github.com/repos/Heartcoolman/wordforge/releases/latest",
+                    "https://api.github.com/repos/Heartcoolman/wordforge/releases?per_page=10",
                 ),
                 cache_ttl_secs: env_or_parse("UPDATE_CHECK_CACHE_TTL_SECS", 3600_u64),
                 worker_enabled: env_or_bool("ENABLE_UPDATE_CHECKER_WORKER", true),
