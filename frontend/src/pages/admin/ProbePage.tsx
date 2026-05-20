@@ -14,6 +14,10 @@ import ConfirmDialog from '@/components/probe/ConfirmDialog';
 import ResultCard from '@/components/probe/ResultCard';
 import ScriptEditor from '@/components/probe/ScriptEditor';
 import { PROBE_TEMPLATES } from './probe-templates';
+import { Card } from '@/components/ui/Card';
+import { Button } from '@/components/ui/Button';
+import { Input } from '@/components/ui/Input';
+import { Empty } from '@/components/ui/Empty';
 
 interface ResultCardData extends ProbeResultEvent {
   receivedAt: number;
@@ -160,196 +164,220 @@ export default function ProbePage() {
   };
 
   return (
-    <div class="space-y-6">
+    <div class="space-y-6 animate-fade-in">
       <header class="space-y-1">
-        <h1 class="text-2xl font-semibold">远程探针</h1>
-        <p class="text-sm text-content-secondary">
+        <h1 class="text-title text-content">远程探针</h1>
+        <p class="text-body text-content-secondary max-w-3xl">
           在客户端 Worker 沙箱里执行 JS 表达式，通过白名单 ctx 读取诊断信息。
           含 D 类受控写（reload/clearCache/signOut）需二次确认。
         </p>
       </header>
 
-      <div class="grid gap-6 md:grid-cols-[1fr_280px]">
+      <div class="grid gap-6 md:grid-cols-[1fr_300px]">
         <div class="space-y-6">
-          <section class="rounded-lg border border-border-hairline bg-surface p-4 space-y-3">
-            <h2 class="font-medium">下发</h2>
+          <Card variant="elevated" padding="md">
+            <div class="space-y-5">
+              <h2 class="text-headline text-content">下发</h2>
 
-            <div class="space-y-2">
-              <div class="text-sm text-content-secondary">Target</div>
-              <div class="flex flex-wrap items-center gap-3 text-sm">
-                <For each={[['single', '单设备'], ['multi', '多设备'], ['allOnline', '全部在线']] as const}>
-                  {([v, label]) => (
-                    <label class="flex items-center gap-1.5 cursor-pointer">
-                      <input
-                        type="radio"
-                        name="target-mode"
-                        checked={mode() === v}
-                        onChange={() => setMode(v)}
-                      />
-                      <span>{label}</span>
-                    </label>
-                  )}
-                </For>
-              </div>
-              <Show when={mode() === 'single'}>
-                <input
-                  class="w-full rounded border border-border-hairline bg-surface-secondary px-2 py-1.5 font-mono text-xs"
-                  value={singleDeviceId()}
-                  onInput={(e) => setSingleDeviceId(e.currentTarget.value)}
-                  placeholder="设备 ID"
-                />
-              </Show>
-              <Show when={mode() === 'multi'}>
-                <textarea
-                  rows={3}
-                  class="w-full rounded border border-border-hairline bg-surface-secondary px-2 py-1.5 font-mono text-xs"
-                  value={multiDeviceIds()}
-                  onInput={(e) => setMultiDeviceIds(e.currentTarget.value)}
-                  placeholder="多个 deviceId，用空格 / 逗号分隔"
-                />
-              </Show>
-              <Show when={mode() === 'allOnline'}>
-                <p class="rounded bg-status-warning-light px-2 py-1.5 text-xs text-status-warning">
-                  ⚠ 将下发到当前所有在线设备
-                </p>
-              </Show>
-            </div>
-
-            <div class="space-y-1">
-              <div class="flex items-center justify-between text-sm">
-                <span class="text-content-secondary">script</span>
-                <select
-                  class="text-xs rounded border border-border-hairline bg-surface-secondary px-2 py-1"
-                  onChange={(e) => {
-                    const tpl = PROBE_TEMPLATES.find((t) => t.name === e.currentTarget.value);
-                    if (tpl) setScript(tpl.body);
-                    e.currentTarget.value = '';
-                  }}
-                >
-                  <option value="">📋 模板</option>
-                  <For each={PROBE_TEMPLATES}>
-                    {(tpl) => (
-                      <option value={tpl.name} title={tpl.description}>
-                        {tpl.name}
-                      </option>
+              {/* Target — segmented control，与 WindowPicker 同设计语言 */}
+              <div class="space-y-2.5">
+                <div class="text-sm font-medium text-content-secondary">Target</div>
+                <div class="inline-flex items-center gap-1 rounded-lg bg-surface-secondary p-1">
+                  <For
+                    each={
+                      [
+                        ['single', '单设备'],
+                        ['multi', '多设备'],
+                        ['allOnline', '全部在线'],
+                      ] as const
+                    }
+                  >
+                    {([v, label]) => (
+                      <button
+                        type="button"
+                        onClick={() => setMode(v)}
+                        class={`px-3 py-1.5 text-sm rounded-md transition-[background-color,color,box-shadow] duration-fast ease-out-expo ${
+                          mode() === v
+                            ? 'bg-surface-elevated text-content shadow-elevation-1'
+                            : 'text-content-secondary hover:text-content'
+                        }`}
+                      >
+                        {label}
+                      </button>
                     )}
                   </For>
-                </select>
-              </div>
-              <ScriptEditor value={script()} onChange={setScript} minHeightPx={200} />
-            </div>
+                </div>
 
-            <div class="grid gap-3 sm:grid-cols-2">
-              <label class="flex flex-col gap-1 text-sm">
-                <span class="text-content-secondary">timeout (ms)</span>
-                <input
+                <Show when={mode() === 'single'}>
+                  <Input
+                    class="font-mono text-xs"
+                    value={singleDeviceId()}
+                    onInput={(e) => setSingleDeviceId(e.currentTarget.value)}
+                    placeholder="设备 ID"
+                  />
+                </Show>
+                <Show when={mode() === 'multi'}>
+                  <textarea
+                    rows={3}
+                    class="w-full rounded-lg border border-border-hairline bg-surface px-3 py-2 font-mono text-xs text-content
+                           transition-[border-color,box-shadow] duration-fast ease-out-expo
+                           hover:border-border focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent"
+                    value={multiDeviceIds()}
+                    onInput={(e) => setMultiDeviceIds(e.currentTarget.value)}
+                    placeholder="多个 deviceId，用空格 / 逗号分隔"
+                  />
+                </Show>
+                <Show when={mode() === 'allOnline'}>
+                  <div class="flex items-start gap-2 rounded-lg border border-warning/30 bg-warning-light px-3 py-2 text-sm text-warning animate-fade-in">
+                    <svg class="w-4 h-4 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L3.034 16.5c-.77.833.192 2.5 1.732 2.5z" />
+                    </svg>
+                    <span>将下发到当前所有在线设备</span>
+                  </div>
+                </Show>
+              </div>
+
+              {/* script + 模板 */}
+              <div class="space-y-2">
+                <div class="flex items-center justify-between">
+                  <span class="text-sm font-medium text-content-secondary">script</span>
+                  <select
+                    class="h-8 pl-2.5 pr-7 text-xs rounded-md border border-border-hairline bg-surface text-content
+                           transition-[border-color,box-shadow] duration-fast ease-out-expo
+                           hover:border-border cursor-pointer
+                           focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent
+                           appearance-none bg-no-repeat bg-[right_0.5rem_center]
+                           bg-[url('data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2212%22 height=%2212%22 viewBox=%220 0 24 24%22 fill=%22none%22 stroke=%22currentColor%22 stroke-width=%222%22%3E%3Cpath d=%22m6 9 6 6 6-6%22/%3E%3C/svg%3E')]"
+                    onChange={(e) => {
+                      const tpl = PROBE_TEMPLATES.find((t) => t.name === e.currentTarget.value);
+                      if (tpl) setScript(tpl.body);
+                      e.currentTarget.value = '';
+                    }}
+                  >
+                    <option value="">📋 模板</option>
+                    <For each={PROBE_TEMPLATES}>
+                      {(tpl) => (
+                        <option value={tpl.name} title={tpl.description}>
+                          {tpl.name}
+                        </option>
+                      )}
+                    </For>
+                  </select>
+                </div>
+                <div class="rounded-lg border border-border-hairline overflow-hidden focus-within:ring-2 focus-within:ring-accent/30 focus-within:border-accent transition-[border-color,box-shadow] duration-fast">
+                  <ScriptEditor value={script()} onChange={setScript} minHeightPx={200} />
+                </div>
+              </div>
+
+              <div class="grid gap-3 sm:grid-cols-2">
+                <Input
+                  label="timeout (ms)"
                   type="number"
                   min={100}
                   max={10000}
-                  class="rounded border border-border-hairline bg-surface-secondary px-2 py-1.5 font-mono text-xs"
+                  class="font-mono"
                   value={timeoutMs()}
                   onInput={(e) => setTimeoutMs(Number(e.currentTarget.value) || 3000)}
                 />
-              </label>
-              <label class="flex flex-col gap-1 text-sm">
-                <span class="text-content-secondary">note（可选）</span>
-                <input
-                  class="rounded border border-border-hairline bg-surface-secondary px-2 py-1.5 text-xs"
+                <Input
+                  label="note（可选）"
                   value={note()}
                   onInput={(e) => setNote(e.currentTarget.value)}
                   placeholder="排查 X 用户的 OOM"
                 />
-              </label>
-            </div>
+              </div>
 
-            <div class="flex items-center gap-3">
-              <button
-                type="button"
-                class="rounded bg-accent px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50"
-                disabled={sending()}
-                onClick={handleSend}
+              <div class="flex items-center gap-3 flex-wrap">
+                <Button variant="primary" disabled={sending()} loading={sending()} onClick={handleSend}>
+                  {sending() ? '发送中' : '发送'}
+                </Button>
+                <Show when={errMsg()}>
+                  <div class="flex items-center gap-1.5 rounded-md border border-error/30 bg-error-light px-2.5 py-1 text-xs text-error animate-fade-in">
+                    <svg class="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01M5.07 19h13.86c1.54 0 2.5-1.67 1.73-3L13.73 4a2 2 0 0 0-3.46 0L3.34 16c-.77 1.33.19 3 1.73 3z" />
+                    </svg>
+                    <span>{errMsg()}</span>
+                  </div>
+                </Show>
+              </div>
+            </div>
+          </Card>
+
+          <Card variant="elevated" padding="md">
+            <div class="space-y-3">
+              <div class="flex items-center justify-between gap-2">
+                <h2 class="text-headline text-content">结果</h2>
+                <div class="flex items-center gap-2">
+                  <Show when={currentBatch()}>
+                    <span class="font-mono text-xs text-content-tertiary">
+                      batch={currentBatch()!.slice(0, 8)}…
+                      <Show when={completed()}>
+                        {' '}· {completed()!.received}/{completed()!.expected}
+                      </Show>
+                    </span>
+                  </Show>
+                  <Show when={results().length > 0}>
+                    <Button variant="ghost" size="xs" onClick={exportBatchJson}>
+                      导出 JSON
+                    </Button>
+                  </Show>
+                </div>
+              </div>
+              <Show
+                when={results().length > 0}
+                fallback={<Empty title="尚无结果" description="点击发送后，实时结果会在这里以卡片网格展示" />}
               >
-                {sending() ? '发送中…' : '发送'}
-              </button>
-              <Show when={errMsg()}>
-                <span class="text-sm text-status-danger">{errMsg()}</span>
+                <div class="grid gap-3 md:grid-cols-2">
+                  <For each={results()}>
+                    {(r) => (
+                      <ResultCard
+                        deviceId={r.deviceId}
+                        requestId={r.requestId}
+                        status={r.status}
+                        durationMs={r.durationMs}
+                        truncated={r.truncated}
+                        resultJson={r.resultJson}
+                        stderr={r.stderr}
+                        onConfirmClick={() => setConfirmTarget(r)}
+                      />
+                    )}
+                  </For>
+                </div>
               </Show>
             </div>
-          </section>
-
-          <section class="rounded-lg border border-border-hairline bg-surface p-4 space-y-3">
-            <div class="flex items-baseline justify-between">
-              <h2 class="font-medium">结果</h2>
-              <div class="flex items-center gap-2">
-                <Show when={currentBatch()}>
-                  <span class="font-mono text-xs text-content-tertiary">
-                    batch={currentBatch()}
-                    <Show when={completed()}>
-                      {' '}· 完成 {completed()!.received}/{completed()!.expected}
-                    </Show>
-                  </span>
-                </Show>
-                <Show when={results().length > 0}>
-                  <button
-                    type="button"
-                    class="rounded border border-border-hairline px-2 py-0.5 text-xs hover:bg-surface-secondary"
-                    onClick={exportBatchJson}
-                  >
-                    导出 JSON
-                  </button>
-                </Show>
-              </div>
-            </div>
-            <Show when={results().length > 0} fallback={<p class="text-sm text-content-tertiary">尚无结果</p>}>
-              <div class="grid gap-3 md:grid-cols-2">
-                <For each={results()}>
-                  {(r) => (
-                    <ResultCard
-                      deviceId={r.deviceId}
-                      requestId={r.requestId}
-                      status={r.status}
-                      durationMs={r.durationMs}
-                      truncated={r.truncated}
-                      resultJson={r.resultJson}
-                      stderr={r.stderr}
-                      onConfirmClick={() => setConfirmTarget(r)}
-                    />
-                  )}
-                </For>
-              </div>
-            </Show>
-          </section>
+          </Card>
         </div>
 
-        <aside class="rounded-lg border border-border-hairline bg-surface p-4 space-y-2 md:sticky md:top-4 md:self-start">
-          <h3 class="text-sm font-medium">最近 batch</h3>
-          <Show when={recentBatches().length > 0} fallback={<p class="text-xs text-content-tertiary">无历史</p>}>
-            <ul class="space-y-2 text-xs">
-              <For each={recentBatches()}>
-                {(row) => (
-                  <li class="rounded border border-border-hairline p-2 space-y-1">
-                    <div class="flex justify-between gap-2">
-                      <span class="font-mono truncate">{row.batchId.slice(0, 8)}…</span>
-                      <span class="text-content-tertiary">{formatTime(row.dispatchedAt)}</span>
-                    </div>
-                    <Show when={row.note}>
-                      <p class="text-content-secondary truncate" title={row.note ?? ''}>
-                        {row.note}
-                      </p>
-                    </Show>
-                    <button
-                      type="button"
-                      class="w-full rounded border border-border-hairline px-2 py-0.5 hover:bg-surface-secondary"
-                      onClick={() => replayBatch(row)}
-                    >
-                      回放此 script
-                    </button>
-                  </li>
-                )}
-              </For>
-            </ul>
-          </Show>
-        </aside>
+        <Card variant="elevated" padding="md" class="md:sticky md:top-4 md:self-start">
+          <div class="space-y-3">
+            <h3 class="text-sm font-semibold text-content">最近 batch</h3>
+            <Show
+              when={recentBatches().length > 0}
+              fallback={<p class="text-xs text-content-tertiary py-2">无历史</p>}
+            >
+              <ul class="space-y-2">
+                <For each={recentBatches()}>
+                  {(row) => (
+                    <li class="rounded-lg border border-border-hairline p-2.5 space-y-1.5 transition-[border-color,background-color] duration-fast hover:border-border hover:bg-surface-secondary">
+                      <div class="flex items-center justify-between gap-2 text-xs">
+                        <span class="font-mono text-content truncate">{row.batchId.slice(0, 8)}…</span>
+                        <span class="text-content-tertiary tabular-nums shrink-0">{formatTime(row.dispatchedAt)}</span>
+                      </div>
+                      <Show when={row.note}>
+                        <p class="text-xs text-content-secondary truncate" title={row.note ?? ''}>
+                          {row.note}
+                        </p>
+                      </Show>
+                      <Button variant="ghost" size="xs" class="w-full" onClick={() => replayBatch(row)}>
+                        回放此 script
+                      </Button>
+                    </li>
+                  )}
+                </For>
+              </ul>
+            </Show>
+          </div>
+        </Card>
       </div>
 
       <Show when={confirmTarget()}>
