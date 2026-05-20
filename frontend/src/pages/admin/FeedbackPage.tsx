@@ -30,7 +30,8 @@ export default function FeedbackPage() {
     setErr('');
     try {
       const resp = await adminApi.listFeedback({ page: targetPage, perPage: perPage() });
-      setItems(resp.items);
+      // 后端 paginated() 包装结构：列表在 `data`，total/page/perPage 平铺
+      setItems(resp.data);
       setTotal(resp.total);
       setPage(resp.page);
     } catch (e) {

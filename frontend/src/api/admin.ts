@@ -159,8 +159,11 @@ export const adminApi = {
     api.post<SyncResult>(`/api/admin/wordbook-center/updates/${id}/sync`, undefined, { useAdminToken: true }),
 
   // ─────────── 用户反馈（PR-feedback） ───────────
+  // 后端 paginated() 返回 {success, data:{ data, total, page, perPage, totalPages }}，
+  // client.ts unwrap 剥外层 success/data 后，列表字段是 `data` 而非 `items`
+  // —— v0.6.0-beta.1 这里曾错写 items，导致 FeedbackPage 渲染期 undefined.length 触发 ErrorBoundary。
   listFeedback: (params?: { page?: number; perPage?: number }) =>
-    api.get<{ items: FeedbackItem[]; total: number; page: number; perPage: number }>(
+    api.get<{ data: FeedbackItem[]; total: number; page: number; perPage: number; totalPages: number }>(
       '/api/admin/feedback',
       params as Record<string, string | number | boolean | undefined>,
       { useAdminToken: true },
