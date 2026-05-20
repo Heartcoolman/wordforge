@@ -8,8 +8,11 @@ import { ApiError, connectSseStream } from '@/api/client';
 import { uiStore } from '@/stores/ui';
 import type { AdminUpdateStatus } from '@/types/admin';
 
+// 仅 SSE 静默时回落轮询使用：SSE 正常推送时 progress 完全由事件驱动
 const POLL_AFTER_APPLY_MS = 2000;
 const POLL_TIMEOUT_MS = 300_000; // 5 分钟（异步化后给低性能机更宽容窗口）
+// SSE 静默回落阈值：超过该窗口未收到 progress 才回落到 /status 轮询
+const SSE_SILENCE_FALLBACK_MS = 10_000;
 
 /// 把后端 apply task 的 phase 标识转成中文短句
 const PHASE_LABEL: Record<string, string> = {
@@ -30,20 +33,26 @@ export default function UpdatesPage() {
   const [applying, setApplying] = createSignal(false);
   const [confirmOpen, setConfirmOpen] = createSignal(false);
   const [progress, setProgress] = createSignal<{ phase: string; percent: number } | null>(null);
+  // 终态标记：completed/failed 后 progress 保留显示（红/绿），不再被轮询清空
+  const [terminal, setTerminal] = createSignal<'success' | 'failed' | null>(null);
+  // SSE 最近一次推送时间，用于判断是否进入静默
+  let lastSseAt = 0;
 
-  // SSE: 订阅 release_available / update_progress
-  const disconnect = connectSseStream({
-    onReleaseAvailable: () => {
-      void refetch();
-      uiStore.toast.info('有新版本可用，已自动刷新');
-    },
-    onUpdateProgress: (p) => setProgress(p),
-  });
-  onCleanup(disconnect);
-
-  // 进度推送只在 applying 时显示；apply 结束后清空
+  // SSE: 订阅 release_available / update_progress；放进 onMount 避免 HMR/路由切换重复 connect
   onMount(() => {
     setProgress(null);
+    const disconnect = connectSseStream({
+      onReleaseAvailable: () => {
+        void refetch();
+        uiStore.toast.info('有新版本可用，已自动刷新');
+      },
+      onUpdateProgress: (p) => {
+        lastSseAt = Date.now();
+        setTerminal(null);
+        setProgress(p);
+      },
+    });
+    onCleanup(disconnect);
   });
 
   async function handleCheck() {
@@ -74,6 +83,8 @@ export default function UpdatesPage() {
     if (!s || !s.latestVersion) return;
     setConfirmOpen(false);
     setApplying(true);
+    setTerminal(null);
+    lastSseAt = Date.now();
     setProgress({ phase: PHASE_LABEL.pending, percent: 0 });
 
     // v0.5.2+ apply 立即返回 202（异步执行），不再阻塞 handler 等到 exit
@@ -95,15 +106,32 @@ export default function UpdatesPage() {
       return;
     }
 
-    // 轮询 /status，从 applyTask.phase + .percent 取后端真实进度；
-    // 完成判据：currentVersion 切到 target 或 applyTask.phase === 'completed'；
-    // 失败判据：applyTask.error 非空（直接终止并报错）。
+    // apply 后优先信 SSE：onUpdateProgress 已经在 setProgress；
+    // 仅当 SSE 静默超过 SSE_SILENCE_FALLBACK_MS 才回落到 /status 轮询；
+    // SSE 推到 completed/failed 时主动 break。
     const deadline = Date.now() + POLL_TIMEOUT_MS;
     let outcome: 'success' | 'failed' | 'timeout' = 'timeout';
     let failureMessage: string | undefined;
 
     while (Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, POLL_AFTER_APPLY_MS));
+
+      // SSE 终态：phase 文案命中 completed/failed → 直接退出循环
+      const p = progress();
+      if (p) {
+        if (p.phase === PHASE_LABEL.completed || p.percent >= 100) {
+          outcome = 'success';
+          break;
+        }
+        if (p.phase === PHASE_LABEL.failed) {
+          outcome = 'failed';
+          break;
+        }
+      }
+
+      // SSE 仍活跃（最近 N 秒内有推送）→ 不回落轮询
+      if (Date.now() - lastSseAt < SSE_SILENCE_FALLBACK_MS) continue;
+
       try {
         const fresh = await adminApi.updatesStatus();
         if (fresh.applyTask) {
@@ -131,13 +159,19 @@ export default function UpdatesPage() {
     setApplying(false);
     if (outcome === 'success') {
       setProgress({ phase: PHASE_LABEL.completed, percent: 100 });
-      uiStore.toast.success(`已升级到 ${s.latestVersion}，刷新页面以加载新前端`);
+      setTerminal('success');
+      uiStore.toast.success(`升级成功，1.5 秒后自动刷新…（升级到 ${s.latestVersion}）`);
       setTimeout(() => window.location.reload(), 1500);
     } else if (outcome === 'failed') {
-      setProgress(null);
+      // 保留最后一帧 progress（红色显示），不清空
+      const last = progress();
+      setProgress(last ? { phase: PHASE_LABEL.failed, percent: last.percent } : { phase: PHASE_LABEL.failed, percent: 0 });
+      setTerminal('failed');
       uiStore.toast.error('升级失败', failureMessage ?? '后端 apply task 报错');
     } else {
-      setProgress(null);
+      const last = progress();
+      setProgress(last ? { phase: PHASE_LABEL.failed, percent: last.percent } : { phase: PHASE_LABEL.failed, percent: 0 });
+      setTerminal('failed');
       uiStore.toast.error('升级超时', '请检查后端日志，或 SSH 登录手动验证状态');
     }
     await refetch();
@@ -149,7 +183,7 @@ export default function UpdatesPage() {
         <Show when={status()}>
           {(s) => (
             <>
-              <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div class="grid grid-cols-1 md:grid-cols-2 gap-4 auto-rows-fr">
                 <Card>
                   <p class="text-sm text-content-secondary mb-1">当前版本</p>
                   <p class="text-2xl font-semibold text-content">{s().currentVersion}</p>
@@ -191,19 +225,24 @@ export default function UpdatesPage() {
 
                 <Show when={!s().canApply && s().hasUpdate}>
                   <p class="text-sm text-warning">
-                    远端发布了新版本，但**未找到匹配当前架构的产物**。请检查 release.yml 是否覆盖此平台。
+                    远端发布了新版本，但 <strong>未找到匹配当前架构的产物</strong>。请检查 release.yml 是否覆盖此平台。
                   </p>
                 </Show>
 
-                <Show when={applying() && progress()}>
+                <Show when={progress() && (applying() || terminal())}>
                   <div class="mt-4">
                     <div class="flex items-center justify-between text-sm mb-1">
-                      <span class="text-content-secondary">{progress()!.phase}</span>
+                      <span class={terminal() === 'failed' ? 'text-error' : 'text-content-secondary'}>
+                        {progress()!.phase}
+                        <Show when={terminal() === 'failed'}>
+                          <span class="ml-2 text-xs text-content-tertiary">（升级未完成）</span>
+                        </Show>
+                      </span>
                       <span class="text-content-tertiary font-mono">{progress()!.percent}%</span>
                     </div>
                     <div class="w-full bg-surface-secondary rounded-full h-2">
                       <div
-                        class="bg-accent h-2 rounded-full transition-all duration-300"
+                        class={`h-2 rounded-full transition-[width] duration-300 ease-out ${terminal() === 'failed' ? 'bg-error' : 'bg-accent'}`}
                         style={{ width: `${progress()!.percent}%` }}
                       />
                     </div>
@@ -226,7 +265,7 @@ export default function UpdatesPage() {
                       </a>
                     </Show>
                   </div>
-                  <pre class="whitespace-pre-wrap text-sm text-content-secondary font-mono leading-relaxed">
+                  <pre class="whitespace-pre-wrap text-sm text-content-secondary font-mono leading-relaxed max-h-96 overflow-y-auto">
                     {s().releaseNotes}
                   </pre>
                 </Card>
@@ -235,10 +274,10 @@ export default function UpdatesPage() {
               <Card>
                 <h3 class="text-sm font-semibold text-content mb-2">安全提示</h3>
                 <ul class="text-xs text-content-tertiary space-y-1 list-disc pl-5">
-                  <li>升级前会先 VACUUM INTO 备份当前数据库到 `data/learning-{s().currentVersion}.backup.db`</li>
-                  <li>旧二进制会保留 2 份在安装目录（`wordforge.{s().currentVersion}`）以便手动回滚</li>
+                  <li>升级前会先 VACUUM INTO 备份当前数据库到 <code class="font-mono text-content">data/learning-{s().currentVersion}.backup.db</code></li>
+                  <li>旧二进制会保留 2 份在安装目录（<code class="font-mono text-content">wordforge.{s().currentVersion}</code>）以便手动回滚</li>
                   <li>下载产物会校验 sha256；不匹配直接拒绝</li>
-                  <li>当前裸跑模式下，进程通过 fork-exec 自重启；如果有 systemd / supervisor，请确保它们配置了 `Restart=on-failure`</li>
+                  <li>当前裸跑模式下，进程通过 fork-exec 自重启；如果有 systemd / supervisor，请确保它们配置了 <code class="font-mono text-content">Restart=on-failure</code></li>
                 </ul>
               </Card>
             </>

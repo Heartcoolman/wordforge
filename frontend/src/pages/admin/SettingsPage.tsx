@@ -1,27 +1,32 @@
-import { createSignal, Show, onMount } from 'solid-js';
+import { createSignal, Show, onMount, onCleanup, createMemo } from 'solid-js';
 import { Card } from '@/components/ui/Card';
 import { Input, TextArea } from '@/components/ui/Input';
 import { Button } from '@/components/ui/Button';
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
 import { Switch } from '@/components/ui/Switch';
-import { Spinner } from '@/components/ui/Spinner';
+import { Skeleton } from '@/components/ui/Skeleton';
 import { uiStore } from '@/stores/ui';
 import { adminApi } from '@/api/admin';
 import { SETTINGS_MAX_USERS, SETTINGS_MAX_DAILY_WORDS } from '@/lib/constants';
 
+type SettingsShape = {
+  maxUsers: number;
+  registrationEnabled: boolean;
+  maintenanceMode: boolean;
+  defaultDailyWords: number;
+  wordbookCenterUrl?: string;
+  amasAutoApplyEnabled: boolean;
+  amasAutoApplyMaxPerDay: number;
+  amasAutoApplyMinConfidence: number;
+};
+
 export default function SettingsPage() {
-  const [settings, setSettings] = createSignal<{
-    maxUsers: number;
-    registrationEnabled: boolean;
-    maintenanceMode: boolean;
-    defaultDailyWords: number;
-    wordbookCenterUrl?: string;
-    amasAutoApplyEnabled: boolean;
-    amasAutoApplyMaxPerDay: number;
-    amasAutoApplyMinConfidence: number;
-  } | null>(null);
+  const [settings, setSettings] = createSignal<SettingsShape | null>(null);
+  const [baseline, setBaseline] = createSignal<SettingsShape | null>(null);
   const [loading, setLoading] = createSignal(true);
-  const [saving, setSaving] = createSignal(false);
+  // 拆分基本/AMAS 两块的 saving 标志，避免共用一个 signal 同时 spin
+  const [savingBasic, setSavingBasic] = createSignal(false);
+  const [savingAmas, setSavingAmas] = createSignal(false);
   const [broadcastTitle, setBroadcastTitle] = createSignal('');
   const [broadcastMsg, setBroadcastMsg] = createSignal('');
   const [broadcasting, setBroadcasting] = createSignal(false);
@@ -32,31 +37,79 @@ export default function SettingsPage() {
 
   const [showMaintenanceConfirm, setShowMaintenanceConfirm] = createSignal(false);
 
+  // 数字字段 string 缓存：避免清空时被 || 默认值立即回填
+  const [maxUsersInput, setMaxUsersInput] = createSignal('');
+  const [defaultDailyWordsInput, setDefaultDailyWordsInput] = createSignal('');
+  const [maxPerDayInput, setMaxPerDayInput] = createSignal('');
+  const [minConfidenceInput, setMinConfidenceInput] = createSignal('');
+
+  const isDirty = createMemo(() => {
+    const cur = settings();
+    const base = baseline();
+    if (!cur || !base) return false;
+    return JSON.stringify(cur) !== JSON.stringify(base);
+  });
+
+  function beforeUnloadHandler(e: BeforeUnloadEvent) {
+    if (isDirty()) {
+      e.preventDefault();
+      // Chrome 需要 returnValue 才会弹原生确认
+      e.returnValue = '';
+    }
+  }
+
   onMount(async () => {
     try {
       const s = await adminApi.getSettings();
       setSettings(s);
+      setBaseline({ ...s });
+      // 同步 string 缓存
+      setMaxUsersInput(String(s.maxUsers));
+      setDefaultDailyWordsInput(String(s.defaultDailyWords));
+      setMaxPerDayInput(String(s.amasAutoApplyMaxPerDay));
+      setMinConfidenceInput(String(s.amasAutoApplyMinConfidence));
     } catch (e) {
       uiStore.toast.error('加载失败', e instanceof Error ? e.message : '未知错误');
     }
     setLoading(false);
+    window.addEventListener('beforeunload', beforeUnloadHandler);
   });
 
-  async function saveSettings() {
-    if (!settings()) return;
-    const s = settings()!;
+  onCleanup(() => {
+    window.removeEventListener('beforeunload', beforeUnloadHandler);
+  });
+
+  // 将当前 string 缓存合并回 settings 后再校验
+  function resolveSettingsForSave(): SettingsShape | null {
+    const cur = settings();
+    if (!cur) return null;
+    return {
+      ...cur,
+      maxUsers: Number(maxUsersInput()) || cur.maxUsers,
+      defaultDailyWords: Number(defaultDailyWordsInput()) || cur.defaultDailyWords,
+      amasAutoApplyMaxPerDay: Number(maxPerDayInput()) || cur.amasAutoApplyMaxPerDay,
+      amasAutoApplyMinConfidence: Number(minConfidenceInput()) || cur.amasAutoApplyMinConfidence,
+    };
+  }
+
+  async function saveSettings(section: 'basic' | 'amas') {
+    const merged = resolveSettingsForSave();
+    if (!merged) return;
     // 范围校验
-    if (s.maxUsers < 1 || s.maxUsers > SETTINGS_MAX_USERS) {
+    if (merged.maxUsers < 1 || merged.maxUsers > SETTINGS_MAX_USERS) {
       uiStore.toast.warning(`最大用户数应在 1 ~ ${SETTINGS_MAX_USERS} 之间`);
       return;
     }
-    if (s.defaultDailyWords < 1 || s.defaultDailyWords > SETTINGS_MAX_DAILY_WORDS) {
+    if (merged.defaultDailyWords < 1 || merged.defaultDailyWords > SETTINGS_MAX_DAILY_WORDS) {
       uiStore.toast.warning(`默认每日单词数应在 1 ~ ${SETTINGS_MAX_DAILY_WORDS} 之间`);
       return;
     }
+    const setSaving = section === 'basic' ? setSavingBasic : setSavingAmas;
     setSaving(true);
     try {
-      await adminApi.updateSettings(s);
+      await adminApi.updateSettings(merged);
+      setSettings(merged);
+      setBaseline({ ...merged });
       uiStore.toast.success('设置已保存');
     } catch (err: unknown) {
       uiStore.toast.error('保存失败', err instanceof Error ? err.message : '');
@@ -161,8 +214,26 @@ export default function SettingsPage() {
         onCancel={() => setShowMaintenanceConfirm(false)}
       />
 
-      <Show when={!loading()} fallback={<div class="flex justify-center py-12"><Spinner size="lg" /></div>}>
-        <Show when={settings()}>
+      <Show
+        when={!loading()}
+        fallback={
+          <div class="space-y-3">
+            <Skeleton height="2.5rem" />
+            <Skeleton height="2.5rem" />
+            <Skeleton height="2.5rem" />
+            <Skeleton height="2.5rem" />
+          </div>
+        }
+      >
+        <Show
+          when={settings()}
+          fallback={
+            <div class="space-y-3">
+              <Skeleton height="2rem" />
+              <Skeleton height="2rem" />
+            </div>
+          }
+        >
           {(s) => (
             <Card variant="elevated">
               <h2 class="text-headline text-content mb-4">基本设置</h2>
@@ -172,16 +243,16 @@ export default function SettingsPage() {
                   type="number"
                   min={1}
                   max={100000}
-                  value={String(s().maxUsers)}
-                  onInput={(e) => updateField('maxUsers', parseInt(e.currentTarget.value) || 0)}
+                  value={maxUsersInput()}
+                  onInput={(e) => setMaxUsersInput(e.currentTarget.value)}
                 />
                 <Input
                   label="默认每日单词数"
                   type="number"
                   min={1}
                   max={500}
-                  value={String(s().defaultDailyWords)}
-                  onInput={(e) => updateField('defaultDailyWords', parseInt(e.currentTarget.value) || 20)}
+                  value={defaultDailyWordsInput()}
+                  onInput={(e) => setDefaultDailyWordsInput(e.currentTarget.value)}
                 />
                 <Switch
                   checked={s().registrationEnabled}
@@ -200,7 +271,9 @@ export default function SettingsPage() {
                   placeholder="https://cdn.example.com/wordbooks"
                 />
                 <div class="pt-2">
-                  <Button onClick={saveSettings} loading={saving()}>保存设置</Button>
+                  <Button onClick={() => saveSettings('basic')} loading={savingBasic()} disabled={savingBasic()}>
+                    保存设置
+                  </Button>
                 </div>
               </div>
             </Card>
@@ -226,8 +299,8 @@ export default function SettingsPage() {
                   type="number"
                   min={0}
                   max={20}
-                  value={String(s().amasAutoApplyMaxPerDay)}
-                  onInput={(e) => updateField('amasAutoApplyMaxPerDay', parseInt(e.currentTarget.value) || 1)}
+                  value={maxPerDayInput()}
+                  onInput={(e) => setMaxPerDayInput(e.currentTarget.value)}
                   hint="超过此值的当日 patch 自动落 pending"
                 />
                 <Input
@@ -236,12 +309,14 @@ export default function SettingsPage() {
                   min={0}
                   max={1}
                   step={0.05}
-                  value={String(s().amasAutoApplyMinConfidence)}
-                  onInput={(e) => updateField('amasAutoApplyMinConfidence', parseFloat(e.currentTarget.value) || 0.8)}
+                  value={minConfidenceInput()}
+                  onInput={(e) => setMinConfidenceInput(e.currentTarget.value)}
                   hint="LLM 自评 confidence 低于此值时自动转 pending"
                 />
                 <div class="pt-2">
-                  <Button onClick={saveSettings} loading={saving()}>保存设置</Button>
+                  <Button onClick={() => saveSettings('amas')} loading={savingAmas()} disabled={savingAmas()}>
+                    保存设置
+                  </Button>
                 </div>
               </div>
             </Card>
@@ -265,7 +340,14 @@ export default function SettingsPage() {
               onInput={(e) => setBroadcastMsg(e.currentTarget.value)}
               placeholder="通知内容"
             />
-            <Button onClick={handleBroadcastClick} loading={broadcasting()} variant="warning">发送广播</Button>
+            <Button
+              onClick={handleBroadcastClick}
+              loading={broadcasting()}
+              disabled={broadcasting() || showBroadcastConfirm()}
+              variant="warning"
+            >
+              发送广播
+            </Button>
           </div>
         </Card>
 
@@ -279,7 +361,14 @@ export default function SettingsPage() {
               onInput={(e) => setUpdateMsg(e.currentTarget.value)}
               placeholder="有新版本可用，请刷新页面获取最新内容"
             />
-            <Button onClick={() => setShowUpdateConfirm(true)} loading={sendingUpdate()} variant="warning">发送更新通知</Button>
+            <Button
+              onClick={() => setShowUpdateConfirm(true)}
+              loading={sendingUpdate()}
+              disabled={sendingUpdate() || showUpdateConfirm()}
+              variant="warning"
+            >
+              发送更新通知
+            </Button>
           </div>
         </Card>
       </Show>

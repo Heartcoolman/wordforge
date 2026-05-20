@@ -10,6 +10,13 @@ type TabId = 'metrics' | 'compare' | 'anomalies' | 'user-state';
 export default function AmasMetricsPage() {
   const [tab, setTab] = createSignal<TabId>('metrics');
 
+  // 强转保护：onChange 透传的 id 是 string，走 switch 校验后再写回
+  const handleTabChange = (id: string) => {
+    if (id === 'metrics' || id === 'compare' || id === 'anomalies' || id === 'user-state') {
+      setTab(id);
+    }
+  };
+
   return (
     <div class="space-y-4">
       <Tabs
@@ -20,20 +27,20 @@ export default function AmasMetricsPage() {
           { id: 'user-state', label: '用户状态分布' },
         ]}
         active={tab()}
-        onChange={(id) => setTab(id as TabId)}
+        onChange={handleTabChange}
       />
 
       <Show when={tab() === 'metrics'}>
-        <MetricsDashboard />
+        <div class="animate-fade-in"><MetricsDashboard /></div>
       </Show>
       <Show when={tab() === 'compare'}>
-        <VersionComparePanel />
+        <div class="animate-fade-in"><VersionComparePanel /></div>
       </Show>
       <Show when={tab() === 'anomalies'}>
-        <AnomaliesPanel />
+        <div class="animate-fade-in"><AnomaliesPanel /></div>
       </Show>
       <Show when={tab() === 'user-state'}>
-        <UserStatePanel />
+        <div class="animate-fade-in"><UserStatePanel /></div>
       </Show>
     </div>
   );

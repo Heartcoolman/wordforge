@@ -25,10 +25,13 @@ export default function AmasConfigPage() {
   const [baseline, setBaseline] = createSignal<Record<string, unknown>>({});
   const [metrics, setMetrics] = createSignal<unknown>(null);
   const [loading, setLoading] = createSignal(true);
+  const [loadError, setLoadError] = createSignal<string>('');
   const [saving, setSaving] = createSignal(false);
   const [reloading, setReloading] = createSignal(false);
   const [tab, setTab] = createSignal<TabId>('tier-a');
   const [versionDrawerOpen, setVersionDrawerOpen] = createSignal(false);
+  // drawer 打开前 dirty 二次确认
+  const [showDirtyDrawerConfirm, setShowDirtyDrawerConfirm] = createSignal(false);
   // 危险操作二次确认
   const [showSaveConfirm, setShowSaveConfirm] = createSignal(false);
   const [showReloadConfirm, setShowReloadConfirm] = createSignal(false);
@@ -40,11 +43,22 @@ export default function AmasConfigPage() {
       setBaseline(structuredClone(cfg));
       setConfig(structuredClone(cfg));
     } else {
-      uiStore.toast.error('加载失败', '无法获取 AMAS 配置');
+      // 加载失败时不再让空对象 {} 成为可保存/可热重载的状态，标记 loadError 锁定按钮
+      const msg = c.reason instanceof Error ? c.reason.message : '无法获取 AMAS 配置';
+      setLoadError(msg);
+      uiStore.toast.error('加载失败', msg);
     }
     if (m.status === 'fulfilled') setMetrics(m.value);
     setLoading(false);
   });
+
+  function openVersionDrawer() {
+    if (dirty()) {
+      setShowDirtyDrawerConfirm(true);
+      return;
+    }
+    setVersionDrawerOpen(true);
+  }
 
   const errors = createMemo(() => validateConfig(config()));
   const dirty = createMemo(() => diffKnown(baseline(), config()).length > 0);
@@ -105,6 +119,15 @@ export default function AmasConfigPage() {
   return (
     <div class="space-y-4">
       <Show when={!loading()} fallback={<div class="flex justify-center py-12"><Spinner size="lg" /></div>}>
+        <Show when={!loadError()} fallback={
+          <Card variant="elevated">
+            <div class="flex flex-col items-center justify-center py-12 text-center gap-3">
+              <p class="text-headline text-content">加载失败，请重试</p>
+              <p class="text-sm text-content-secondary">{loadError()}</p>
+              <Button size="sm" variant="outline" onClick={() => window.location.reload()}>刷新页面</Button>
+            </div>
+          </Card>
+        }>
         <Card variant="elevated">
           <div class="flex flex-col gap-3">
             <div class="flex items-baseline justify-between flex-wrap gap-3">
@@ -114,7 +137,7 @@ export default function AmasConfigPage() {
                   共 ~295 个参数，先在「重点参数」调 11 维核心、其余在「分节配置」或「JSON 高级」编辑
                 </p>
               </div>
-              <div class="flex items-center gap-3 flex-wrap">
+              <div class="flex items-center gap-3 flex-wrap min-w-0">
                 <Show when={errors().length > 0}>
                   <Badge variant="error">{errors().length} 处校验错误</Badge>
                 </Show>
@@ -124,13 +147,26 @@ export default function AmasConfigPage() {
                 <Show when={dirty()}>
                   <Button size="sm" variant="ghost" onClick={discardChanges}>放弃修改</Button>
                 </Show>
-                <Button size="sm" variant="ghost" onClick={() => setVersionDrawerOpen(true)}>
+                <Button size="sm" variant="ghost" onClick={openVersionDrawer}>
                   版本历史
                 </Button>
-                <Button size="sm" variant="outline" onClick={requestReload} loading={reloading()} disabled={errors().length > 0 || saving()}>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={requestReload}
+                  loading={reloading()}
+                  disabled={errors().length > 0 || saving() || !dirty()}
+                  title={!dirty() ? '无修改' : undefined}
+                >
                   热重载
                 </Button>
-                <Button size="sm" onClick={requestSave} loading={saving()} disabled={errors().length > 0 || !dirty() || reloading()}>
+                <Button
+                  size="sm"
+                  onClick={requestSave}
+                  loading={saving()}
+                  disabled={errors().length > 0 || !dirty() || reloading()}
+                  class="flex-shrink-0"
+                >
                   保存配置
                 </Button>
               </div>
@@ -202,6 +238,20 @@ export default function AmasConfigPage() {
           onCancel={() => setShowReloadConfirm(false)}
         />
 
+        {/* 打开版本历史前，提示未保存修改会丢失 */}
+        <ConfirmDialog
+          open={showDirtyDrawerConfirm()}
+          title="存在未保存的修改"
+          message="打开版本历史后，未保存修改将无法恢复，确认继续？"
+          confirmText="继续打开"
+          variant="warning"
+          onConfirm={() => {
+            setShowDirtyDrawerConfirm(false);
+            setVersionDrawerOpen(true);
+          }}
+          onCancel={() => setShowDirtyDrawerConfirm(false)}
+        />
+
         <Show when={metrics()}>
           {(m) => {
             const entries = () => Object.entries(m() as Record<string, { callCount: number; totalLatencyUs: number; errorCount: number }>);
@@ -222,7 +272,7 @@ export default function AmasConfigPage() {
                       <tbody>
                         <For each={entries()}>
                           {([name, snapshot]) => (
-                            <tr class="border-b border-border-hairline hover:bg-accent-light/40 transition-colors duration-fast ease-out-expo">
+                            <tr class="border-b border-border-hairline hover:bg-accent-light/40 transition-colors duration-150 ease-out">
                               <td class="px-4 py-2 font-mono text-sm">{name}</td>
                               <td class="px-4 py-2 text-right">{snapshot.callCount}</td>
                               <td class="px-4 py-2 text-right">
@@ -241,6 +291,7 @@ export default function AmasConfigPage() {
               </Card>
             );
           }}
+        </Show>
         </Show>
       </Show>
     </div>

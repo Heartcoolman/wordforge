@@ -144,11 +144,19 @@ describe('UpdatesPage — apply polling loop', () => {
     fireEvent.click(screen.getByText(/一键更新到/));
     await waitFor(() => expect(screen.getByText('确认一键更新')).toBeInTheDocument());
 
+    // 新行为：apply 后优先信 SSE，SSE 静默 SSE_SILENCE_FALLBACK_MS=10s 才回落 /status 轮询；
+    // 用 fake timers 把虚拟 Date 推进过静默阈值，触发回落轮询。
     vi.useFakeTimers();
     fireEvent.click(screen.getByText('开始升级'));
-    await vi.advanceTimersByTimeAsync(0);
+    // 第一次循环 await setTimeout(2000) → 解锁
+    await vi.advanceTimersByTimeAsync(2000);
+    // 推进虚拟时间到 SSE 静默阈值之外（lastSseAt 在 apply 开始时被 Date.now() 设值，
+    // useFakeTimers 默认 mock Date.now，因此与虚拟时钟同步）
+    await vi.advanceTimersByTimeAsync(11_000);
+    // 再 advance 几轮让 polling 拿到 upgradedStatus
     await vi.advanceTimersByTimeAsync(2000);
     await vi.advanceTimersByTimeAsync(2000);
+    // 最后那个 1500ms 是 setTimeout(reload) 的等待
     await vi.advanceTimersByTimeAsync(1500);
     vi.useRealTimers();
 
@@ -158,9 +166,8 @@ describe('UpdatesPage — apply polling loop', () => {
   it('shows timeout error toast when polling never matches latest', async () => {
     mockApi.updatesStatus.mockResolvedValueOnce(baseStatus);
     mockApi.updatesApply.mockResolvedValue(undefined);
-    mockApi.updatesStatus
-      .mockRejectedValueOnce(new Error('server restarting'))
-      .mockResolvedValue(baseStatus);
+    // 一直返回 baseStatus，永远不会匹配 latestVersion
+    mockApi.updatesStatus.mockResolvedValue(baseStatus);
 
     const realSetTimeout = global.setTimeout;
     const stSpy = vi
@@ -175,11 +182,22 @@ describe('UpdatesPage — apply polling loop', () => {
         return realSetTimeout(fn as never, ms as never, ...(args as []));
       }) as typeof setTimeout);
 
+    // 新行为：apply 内 lastSseAt = Date.now() 先调用一次；
+    // 然后每轮循环 1) 进入循环开头查 progress() 2) 查 Date.now() - lastSseAt
+    // 3) 若超过静默阈值才回落到 adminApi.updatesStatus()，4) 通过 Date.now() < deadline 判断
+    // 为了快速超时：
+    //   - 第 1 次 Date.now() (lastSseAt 设置)：返回 0
+    //   - 第 2 次 Date.now() (deadline 计算 deadline = Date.now() + 300_000)：返回 0 → deadline = 300_000
+    //   - 第 3 次 (while 条件)：返回 1，循环进入
+    //   - 第 4 次 (静默判断)：返回大值（> SSE_SILENCE_FALLBACK_MS），触发轮询
+    //   - 第 5 次 (while 条件)：返回 > 300_000，跳出 → 触发 timeout
     const realNow = Date.now.bind(Date);
     let nowCall = 0;
     const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => {
       nowCall += 1;
-      if (nowCall === 1) return realNow();
+      // 前两次保持基线（lastSseAt 和 deadline 计算）
+      if (nowCall <= 2) return realNow();
+      // 之后全部跳到 deadline 之外，立即结束循环并进入 timeout 分支
       return realNow() + 9_999_999;
     });
 

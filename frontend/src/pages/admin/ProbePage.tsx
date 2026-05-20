@@ -36,8 +36,10 @@ export default function ProbePage() {
   const [singleDeviceId, setSingleDeviceId] = createSignal('');
   const [multiDeviceIds, setMultiDeviceIds] = createSignal('');
   const [script, setScript] = createSignal(DEFAULT_SCRIPT);
-  const [timeoutMs, setTimeoutMs] = createSignal(3000);
+  // string 缓存中间态：避免清空时被 ||3000 立即回填
+  const [timeoutMsInput, setTimeoutMsInput] = createSignal('3000');
   const [note, setNote] = createSignal('');
+  const [templateKey, setTemplateKey] = createSignal('');
   const [sending, setSending] = createSignal(false);
   const [errMsg, setErrMsg] = createSignal<string | null>(null);
   const [results, setResults] = createSignal<ResultCardData[]>([]);
@@ -46,6 +48,8 @@ export default function ProbePage() {
   const [confirmTarget, setConfirmTarget] = createSignal<ResultCardData | null>(null);
   const [recentBatches, setRecentBatches] = createSignal<ProbeExecutionRow[]>([]);
   let stopStream: (() => void) | undefined;
+  // batch 防越界：旧 SSE 回调被新 handleSend 覆盖后必须直接丢弃
+  let batchSeq = 0;
 
   onMount(() => void loadRecent());
   onCleanup(() => stopStream?.());
@@ -86,6 +90,7 @@ export default function ProbePage() {
     setResults([]);
     setCompleted(null);
     stopStream?.();
+    const myBatch = ++batchSeq;
 
     const targets = resolvedTargets();
     if (!targets) {
@@ -97,14 +102,18 @@ export default function ProbePage() {
       return;
     }
 
+    // submit 时一次性把缓存的 string → number（clamp 到 [100,10000]）
+    const timeoutMs = Math.max(100, Math.min(10000, Number(timeoutMsInput()) || 3000));
+
     setSending(true);
     try {
       const res = await probeApi.dispatch({
         targets,
         script: script(),
-        timeoutMs: timeoutMs(),
+        timeoutMs,
         note: note().trim() || undefined,
       });
+      if (myBatch !== batchSeq) return; // 已被新 send 覆盖
       setCurrentBatch(res.batchId);
 
       if (res.dispatched.length === 0) {
@@ -115,6 +124,7 @@ export default function ProbePage() {
 
       stopStream = connectProbeBatchStream(res.batchId, {
         onResult: (payload) => {
+          if (myBatch !== batchSeq) return;
           // 同 requestId 的新结果覆盖旧的（confirm_required → ok 等场景）
           setResults((prev) => {
             const without = prev.filter((r) => r.requestId !== payload.requestId);
@@ -122,16 +132,19 @@ export default function ProbePage() {
           });
         },
         onCompleted: (payload) => {
+          if (myBatch !== batchSeq) return;
           setCompleted(payload);
           setSending(false);
           void loadRecent();
         },
         onError: (err) => {
+          if (myBatch !== batchSeq) return;
           setErrMsg(`SSE 错误：${String(err)}`);
           setSending(false);
         },
       });
     } catch (err: any) {
+      if (myBatch !== batchSeq) return;
       const code = err?.code ?? err?.data?.error?.code;
       if (code === 'PROBE_DISABLED') {
         setErrMsg('远程探针未启用。请联系系统管理员设置 PROBE_ENABLED=true 后重启服务。');
@@ -159,7 +172,7 @@ export default function ProbePage() {
 
   const replayBatch = (row: ProbeExecutionRow) => {
     setScript(row.scriptBody);
-    setTimeoutMs(row.timeoutMs);
+    setTimeoutMsInput(String(row.timeoutMs));
     setNote(row.note ?? '');
   };
 
@@ -173,7 +186,7 @@ export default function ProbePage() {
         </p>
       </header>
 
-      <div class="grid gap-6 md:grid-cols-[1fr_300px]">
+      <div class="grid gap-6 lg:grid-cols-[1fr_300px]">
         <div class="space-y-6">
           <Card variant="elevated" padding="md">
             <div class="space-y-5">
@@ -208,61 +221,81 @@ export default function ProbePage() {
                   </For>
                 </div>
 
-                <Show when={mode() === 'single'}>
-                  <Input
-                    class="font-mono text-xs"
-                    value={singleDeviceId()}
-                    onInput={(e) => setSingleDeviceId(e.currentTarget.value)}
-                    placeholder="设备 ID"
-                  />
-                </Show>
-                <Show when={mode() === 'multi'}>
-                  <TextArea
-                    rows={3}
-                    class="font-mono text-xs"
-                    value={multiDeviceIds()}
-                    onInput={(e) => setMultiDeviceIds(e.currentTarget.value)}
-                    placeholder="多个 deviceId，用空格 / 逗号分隔"
-                  />
-                </Show>
-                <Show when={mode() === 'allOnline'}>
-                  <div class="flex items-start gap-2 rounded-lg border border-warning/30 bg-warning-light px-3 py-2 text-sm text-warning animate-fade-in">
-                    <svg class="w-4 h-4 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-                      <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L3.034 16.5c-.77.833.192 2.5 1.732 2.5z" />
-                    </svg>
-                    <span>将下发到当前所有在线设备</span>
-                  </div>
-                </Show>
+                {/* 三态切换：min-h 防止 mode 切换时高度跳变，wrapper 加 fade-in */}
+                <div class="min-h-[4.5rem]">
+                  <Show when={mode() === 'single'}>
+                    <div class="animate-fade-in">
+                      <Input
+                        class="font-mono text-xs"
+                        value={singleDeviceId()}
+                        onInput={(e) => setSingleDeviceId(e.currentTarget.value)}
+                        placeholder="设备 ID"
+                      />
+                    </div>
+                  </Show>
+                  <Show when={mode() === 'multi'}>
+                    <div class="animate-fade-in">
+                      <TextArea
+                        rows={3}
+                        class="font-mono text-xs"
+                        value={multiDeviceIds()}
+                        onInput={(e) => setMultiDeviceIds(e.currentTarget.value)}
+                        placeholder="多个 deviceId，用空格 / 逗号分隔"
+                      />
+                    </div>
+                  </Show>
+                  <Show when={mode() === 'allOnline'}>
+                    <div class="flex items-start gap-2 rounded-lg border border-warning/30 bg-warning-light px-3 py-2 text-sm text-warning animate-fade-in">
+                      <svg class="w-4 h-4 mt-0.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L3.034 16.5c-.77.833.192 2.5 1.732 2.5z" />
+                      </svg>
+                      <span>将下发到当前所有在线设备</span>
+                    </div>
+                  </Show>
+                </div>
               </div>
 
               {/* script + 模板 */}
               <div class="space-y-2">
                 <div class="flex items-center justify-between gap-2">
                   <label for="probe-template-select" class="text-sm font-medium text-content-secondary">script</label>
-                  <select
-                    id="probe-template-select"
-                    aria-label="选择脚本模板"
-                    class="h-8 pl-2.5 pr-7 text-xs rounded-md border border-border-hairline bg-surface text-content
-                           transition-[border-color,box-shadow] duration-fast ease-out-expo
-                           hover:border-border cursor-pointer
-                           focus-ring-soft focus:border-accent
-                           appearance-none bg-no-repeat bg-[right_0.5rem_center]
-                           bg-[url('data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2212%22 height=%2212%22 viewBox=%220 0 24 24%22 fill=%22none%22 stroke=%22currentColor%22 stroke-width=%222%22%3E%3Cpath d=%22m6 9 6 6 6-6%22/%3E%3C/svg%3E')]"
-                    onChange={(e) => {
-                      const tpl = PROBE_TEMPLATES.find((t) => t.name === e.currentTarget.value);
-                      if (tpl) setScript(tpl.body);
-                      e.currentTarget.value = '';
-                    }}
-                  >
-                    <option value="">📋 模板</option>
-                    <For each={PROBE_TEMPLATES}>
-                      {(tpl) => (
-                        <option value={tpl.name} title={tpl.description}>
-                          {tpl.name}
-                        </option>
-                      )}
-                    </For>
-                  </select>
+                  <div class="relative">
+                    <select
+                      id="probe-template-select"
+                      aria-label="选择脚本模板"
+                      value={templateKey()}
+                      class="h-8 pl-2.5 pr-7 text-xs rounded-md border border-border-hairline bg-surface text-content
+                             transition-[border-color,box-shadow] duration-fast ease-out-expo
+                             hover:border-border cursor-pointer
+                             focus-ring-soft focus:border-accent
+                             appearance-none"
+                      onChange={(e) => {
+                        const tpl = PROBE_TEMPLATES.find((t) => t.name === e.currentTarget.value);
+                        if (tpl) setScript(tpl.body);
+                        setTemplateKey('');
+                      }}
+                    >
+                      <option value="">📋 模板</option>
+                      <For each={PROBE_TEMPLATES}>
+                        {(tpl) => (
+                          <option value={tpl.name} title={tpl.description}>
+                            {tpl.name}
+                          </option>
+                        )}
+                      </For>
+                    </select>
+                    {/* 自渲染下拉箭头，跟随 currentColor，避免 dark mode 黑色箭头 */}
+                    <svg
+                      aria-hidden="true"
+                      class="absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none w-3 h-3 text-content-secondary"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="2"
+                    >
+                      <path stroke-linecap="round" stroke-linejoin="round" d="m6 9 6 6 6-6" />
+                    </svg>
+                  </div>
                 </div>
                 <div class="rounded-lg border border-border-hairline overflow-hidden focus-within:ring-2 focus-within:ring-accent/30 focus-within:border-accent transition-[border-color,box-shadow] duration-fast">
                   <ScriptEditor value={script()} onChange={setScript} minHeightPx={200} />
@@ -276,8 +309,8 @@ export default function ProbePage() {
                   min={100}
                   max={10000}
                   class="font-mono"
-                  value={timeoutMs()}
-                  onInput={(e) => setTimeoutMs(Number(e.currentTarget.value) || 3000)}
+                  value={timeoutMsInput()}
+                  onInput={(e) => setTimeoutMsInput(e.currentTarget.value)}
                 />
                 <Input
                   label="note（可选）"
@@ -320,6 +353,9 @@ export default function ProbePage() {
                     <Button variant="ghost" size="xs" onClick={exportBatchJson}>
                       导出 JSON
                     </Button>
+                    <Button variant="ghost" size="xs" onClick={() => setResults([])}>
+                      清空
+                    </Button>
                   </Show>
                 </div>
               </div>
@@ -348,7 +384,7 @@ export default function ProbePage() {
           </Card>
         </div>
 
-        <Card variant="elevated" padding="md" class="md:sticky md:top-4 md:self-start">
+        <Card variant="elevated" padding="md" class="lg:sticky lg:top-4 lg:self-start lg:max-h-[calc(100vh-2rem)] lg:overflow-y-auto">
           <div class="space-y-3">
             <h3 class="text-sm font-semibold text-content">最近 batch</h3>
             <Show
@@ -382,13 +418,17 @@ export default function ProbePage() {
 
       <Show when={confirmTarget()}>
         <ConfirmDialog
-          open={true}
+          open={confirmTarget() !== null}
           requestId={confirmTarget()!.requestId}
           deviceId={confirmTarget()!.deviceId}
           actionsPreview={extractActionsPreview(confirmTarget()!.resultJson)}
           onClose={() => setConfirmTarget(null)}
           onConfirmed={() => {
-            setResults((prev) => prev.filter((r) => r.requestId !== confirmTarget()!.requestId));
+            // ConfirmDialog 内部已调用 probeApi.confirm(requestId, { deviceIdSuffix });
+            // 这里只负责本地结果剔除 + 历史刷新（SSE 会推后续 ok/err 事件）
+            const reqId = confirmTarget()!.requestId;
+            setResults((prev) => prev.filter((r) => r.requestId !== reqId));
+            void loadRecent();
           }}
         />
       </Show>
@@ -407,7 +447,19 @@ function extractActionsPreview(resultJson: unknown): string[] {
 function formatTime(iso: string): string {
   try {
     const d = new Date(iso);
-    return `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`;
+    const hh = String(d.getHours()).padStart(2, '0');
+    const mm = String(d.getMinutes()).padStart(2, '0');
+    const hhmm = `${hh}:${mm}`;
+    const now = new Date();
+    const isSameDay = (a: Date, b: Date) =>
+      a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+    if (isSameDay(d, now)) return hhmm;
+    const yesterday = new Date(now);
+    yesterday.setDate(now.getDate() - 1);
+    if (isSameDay(d, yesterday)) return `昨天 ${hhmm}`;
+    const mo = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    return `${mo}-${dd} ${hhmm}`;
   } catch {
     return iso;
   }

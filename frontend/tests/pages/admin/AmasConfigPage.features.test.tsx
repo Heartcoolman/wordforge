@@ -99,6 +99,10 @@ describe('AmasConfigPage — CRUD & error fallbacks', () => {
     mockAdmin.reloadAmas.mockResolvedValue(baseConfig);
     await renderPage();
     await waitFor(() => expect(screen.getByRole('button', { name: '热重载' })).toBeInTheDocument());
+    // 热重载按钮新增 disabled={!dirty()} 守护：先模拟一次输入进入 dirty 状态
+    const input = document.querySelector('input[type="number"]') as HTMLInputElement;
+    fireEvent.input(input, { target: { value: '0.85' } });
+    await waitFor(() => expect(screen.getByText('未保存的修改')).toBeInTheDocument());
     fireEvent.click(screen.getByRole('button', { name: '热重载' }));
     // 弹出 ConfirmDialog
     await waitFor(() => expect(screen.getByText('确认热重载 AMAS 配置')).toBeInTheDocument());
@@ -113,6 +117,10 @@ describe('AmasConfigPage — CRUD & error fallbacks', () => {
     mockAdmin.reloadAmas.mockRejectedValue(new Error('reload fail'));
     await renderPage();
     await waitFor(() => expect(screen.getByRole('button', { name: '热重载' })).toBeInTheDocument());
+    // 同上：先 dirty 才能点热重载
+    const input = document.querySelector('input[type="number"]') as HTMLInputElement;
+    fireEvent.input(input, { target: { value: '0.85' } });
+    await waitFor(() => expect(screen.getByText('未保存的修改')).toBeInTheDocument());
     fireEvent.click(screen.getByRole('button', { name: '热重载' }));
     await waitFor(() => expect(screen.getByText('确认热重载 AMAS 配置')).toBeInTheDocument());
     fireEvent.click(screen.getByRole('button', { name: '确认热重载' }));
@@ -123,8 +131,9 @@ describe('AmasConfigPage — CRUD & error fallbacks', () => {
     mockAmas.getConfig.mockResolvedValue(baseConfig);
     mockAmas.getMetrics.mockResolvedValue({});
     await renderPage();
-    await waitFor(() => expect(screen.getByText('版本历史')).toBeInTheDocument());
-    fireEvent.click(screen.getByText('版本历史'));
+    // Drawer 改为常驻 DOM（open=false 时仍渲染版本历史标题）；按钮用 role 精确选取
+    await waitFor(() => expect(screen.getByRole('button', { name: '版本历史' })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: '版本历史' }));
   });
 
   it('blocks save with validation errors', async () => {
@@ -178,13 +187,19 @@ describe('AmasConfigPage — tabs / preset / drawer', () => {
   it('opens then closes version drawer via × button', async () => {
     mockAmas.getConfig.mockResolvedValue(baseConfig);
     mockAmas.getMetrics.mockResolvedValue({});
-    await renderPage();
-    await waitFor(() => expect(screen.getByText('版本历史')).toBeInTheDocument());
-    fireEvent.click(screen.getByText('版本历史'));
+    const { container } = await renderPage();
+    // Drawer 常驻，"版本历史"文案在 Drawer 标题与按钮里各有一份；用 role 精确选取按钮
+    await waitFor(() => expect(screen.getByRole('button', { name: '版本历史' })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: '版本历史' }));
     await waitFor(() => expect(screen.getByText('尚无版本')).toBeInTheDocument());
-    const closeBtns = screen.getAllByText('×');
-    fireEvent.click(closeBtns[0]);
-    await waitFor(() => expect(screen.queryByText('尚无版本')).not.toBeInTheDocument());
+    // 打开时 dialog 应在 translate-x-0
+    const dialog = () => container.querySelector('[role="dialog"]') as HTMLElement | null;
+    expect(dialog()?.className).toContain('translate-x-0');
+    // 关闭按钮现在有 aria-label="关闭"
+    fireEvent.click(screen.getByRole('button', { name: '关闭' }));
+    // Drawer 常驻 DOM：关闭后内容仍在，但 dialog 改为 translate-x-full + pointer-events-none
+    await waitFor(() => expect(dialog()?.className).toContain('translate-x-full'));
+    expect(dialog()?.className).toContain('pointer-events-none');
   });
 
   it('applies a preset via PresetSelector confirm button', async () => {

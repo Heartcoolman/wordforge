@@ -60,8 +60,11 @@ describe('AdminLoginPage extra branches', () => {
 
   it('shows error when submit empty form', async () => {
     await renderPage();
-    fireEvent.click(screen.getByRole('button', { name: '登录' }));
-    await waitFor(() => expect(screen.getByText('请填写邮箱和密码')).toBeInTheDocument());
+    // Input required + jsdom 原生 form 校验会拦截 click submit；用 fireEvent.submit 绕过
+    const form = document.querySelector('form') as HTMLFormElement;
+    fireEvent.submit(form);
+    // 拆分后：邮箱空时只触发 emailError（字段级），文案改为"请填写邮箱"
+    await waitFor(() => expect(screen.getByText('请填写邮箱')).toBeInTheDocument());
   });
 
   it('submits successfully', async () => {
@@ -112,12 +115,17 @@ describe('AdminLoginPage extra branches', () => {
     const inputs = document.querySelectorAll('input');
     fireEvent.input(inputs[0], { target: { value: 'a@b.c' } });
     fireEvent.input(inputs[1], { target: { value: 'x' } });
-    fireEvent.click(screen.getByRole('button', { name: '登录' }));
+    // 第一次失败后按钮文案变为"锁定中 Xs"，且按钮 disabled；
+    // 用 form submit 模拟键盘 Enter 绕过 disabled，进入"请等待"分支
+    const form = document.querySelector('form') as HTMLFormElement;
+    fireEvent.submit(form);
     await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
-    // 第二次立即点击 → 在锁定窗口内
-    fireEvent.click(screen.getByRole('button', { name: '登录' }));
+    // 第二次立即 submit → 在锁定窗口内
+    fireEvent.submit(form);
     await waitFor(() => {
-      expect(screen.getByRole('alert').textContent).toMatch(/请等待/);
+      // 锁定提示 formError 渲染在顶部 alert 容器中；可能存在多个 role="alert"（字段级），
+      // 用文案匹配；"请等待 X 秒后重试"
+      expect(screen.getByText(/请等待/)).toBeInTheDocument();
     });
   });
 });

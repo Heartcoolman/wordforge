@@ -1,4 +1,4 @@
-import { createSignal, onMount } from 'solid-js';
+import { createSignal, onMount, onCleanup, Show } from 'solid-js';
 import { useNavigate } from '@solidjs/router';
 import { Input } from '@/components/ui/Input';
 import { Button } from '@/components/ui/Button';
@@ -13,11 +13,21 @@ export default function AdminLoginPage() {
   const [email, setEmail] = createSignal('');
   const [password, setPassword] = createSignal('');
   const [loading, setLoading] = createSignal(false);
-  const [error, setError] = createSignal('');
+  // 拆分：emailError 显示在邮箱框，formError 显示在表单顶部统一区
+  const [emailError, setEmailError] = createSignal('');
+  const [formError, setFormError] = createSignal('');
   const [failCount, setFailCount] = createSignal(0);
   const [lockUntil, setLockUntil] = createSignal(0);
+  // setInterval 驱动倒计时，每秒重算一次
+  const [lockSeconds, setLockSeconds] = createSignal(0);
+  let lockTimer: ReturnType<typeof setInterval> | undefined;
 
   onMount(async () => {
+    lockTimer = setInterval(() => {
+      const remaining = Math.ceil((lockUntil() - Date.now()) / 1000);
+      setLockSeconds(remaining > 0 ? remaining : 0);
+    }, 1000);
+
     const existingToken = tokenManager.getAdminToken();
     if (existingToken) {
       try {
@@ -38,29 +48,30 @@ export default function AdminLoginPage() {
     } catch { /* ignore */ }
   });
 
-  function getRemainingLockSeconds(): number {
-    const remaining = Math.ceil((lockUntil() - Date.now()) / 1000);
-    return remaining > 0 ? remaining : 0;
-  }
+  onCleanup(() => {
+    if (lockTimer) clearInterval(lockTimer);
+  });
 
   async function handleSubmit(e: Event) {
     e.preventDefault();
-    if (!email() || !password()) { setError('请填写邮箱和密码'); return; }
+    setEmailError('');
+    setFormError('');
+    if (!email()) { setEmailError('请填写邮箱'); return; }
+    if (!password()) { setFormError('请填写密码'); return; }
 
     // 检查前端锁定
-    const remaining = getRemainingLockSeconds();
-    if (remaining > 0) {
-      setError(`请等待 ${remaining} 秒后重试`);
+    if (lockSeconds() > 0) {
+      setFormError(`请等待 ${lockSeconds()} 秒后重试`);
       return;
     }
 
     setLoading(true);
-    setError('');
     try {
       const res = await adminApi.login({ email: email(), password: password() });
       setPassword('');
       setFailCount(0);
       setLockUntil(0);
+      setLockSeconds(0);
       tokenManager.setAdminToken(res.token);
       uiStore.toast.success('管理员登录成功');
       navigate('/admin', { replace: true });
@@ -70,15 +81,24 @@ export default function AdminLoginPage() {
       // 递增等待：第1次失败等1秒，第2次等2秒，依此类推，最多30秒
       const waitSeconds = Math.min(count, ADMIN_MAX_LOCK_WAIT_SECS);
       setLockUntil(Date.now() + waitSeconds * 1000);
+      setLockSeconds(waitSeconds);
       const msg = err instanceof Error ? err.message : '登录失败';
-      setError(count >= 3 ? `${msg}（已失败 ${count} 次，请等待 ${waitSeconds} 秒）` : msg);
+      setFormError(count >= 3 ? `${msg}（已失败 ${count} 次，请等待 ${waitSeconds} 秒）` : msg);
     } finally {
       setLoading(false);
     }
   }
 
   return (
-    <div class="relative min-h-screen flex items-center justify-center p-4 overflow-hidden bg-surface-secondary">
+    <div
+      class="relative min-h-screen flex items-center justify-center p-4 overflow-hidden bg-surface-secondary"
+      style={{
+        'padding-top': 'max(1rem, env(safe-area-inset-top))',
+        'padding-bottom': 'max(1rem, env(safe-area-inset-bottom))',
+        'padding-left': 'max(1rem, env(safe-area-inset-left))',
+        'padding-right': 'max(1rem, env(safe-area-inset-right))',
+      }}
+    >
       {/* Hero 装饰：左上 accent 软光晕 + 右下 surface 渐变铺底 */}
       <div aria-hidden="true" class="absolute inset-0 bg-gradient-accent-soft pointer-events-none" />
       <div aria-hidden="true" class="absolute -top-32 -left-32 w-96 h-96 rounded-full bg-accent/10 blur-3xl pointer-events-none" />
@@ -95,14 +115,42 @@ export default function AdminLoginPage() {
           <p class="text-caption animate-fade-in-up" style={{ 'animation-delay': '160ms', 'animation-fill-mode': 'backwards' }}>管理后台登录</p>
         </div>
         <form onSubmit={handleSubmit} class="space-y-4">
+          {/* 表单顶部统一错误条：承载登录失败 / 锁定提示，与字段级 emailError 分离 */}
+          <Show when={formError()}>
+            <div
+              role="alert"
+              class="rounded-md border border-error/30 bg-error-light px-3 py-2 text-sm text-error animate-fade-in"
+            >
+              {formError()}
+            </div>
+          </Show>
           <div class="animate-fade-in-up" style={{ 'animation-delay': '240ms', 'animation-fill-mode': 'backwards' }}>
-            <Input label="管理员邮箱" type="email" autocomplete="email" value={email()} onInput={(e) => setEmail(e.currentTarget.value)} />
+            <Input
+              label="管理员邮箱"
+              type="email"
+              required
+              autocomplete="email"
+              disabled={loading() || lockSeconds() > 0}
+              value={email()}
+              onInput={(e) => setEmail(e.currentTarget.value)}
+              error={emailError() || undefined}
+            />
           </div>
           <div class="animate-fade-in-up" style={{ 'animation-delay': '320ms', 'animation-fill-mode': 'backwards' }}>
-            <Input label="密码" type="password" autocomplete="current-password" value={password()} onInput={(e) => setPassword(e.currentTarget.value)} error={error() || undefined} />
+            <Input
+              label="密码"
+              type="password"
+              required
+              autocomplete="current-password"
+              disabled={loading() || lockSeconds() > 0}
+              value={password()}
+              onInput={(e) => setPassword(e.currentTarget.value)}
+            />
           </div>
           <div class="animate-fade-in-up" style={{ 'animation-delay': '400ms', 'animation-fill-mode': 'backwards' }}>
-            <Button type="submit" fullWidth loading={loading()}>登录</Button>
+            <Button type="submit" fullWidth loading={loading()} disabled={loading() || lockSeconds() > 0}>
+              {lockSeconds() > 0 ? `锁定中 ${lockSeconds()}s` : '登录'}
+            </Button>
           </div>
         </form>
       </Card>

@@ -1,4 +1,4 @@
-import { createSignal, Show, For, onMount } from 'solid-js';
+import { createSignal, createMemo, createEffect, Show, For, onMount, onCleanup } from 'solid-js';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Badge } from '@/components/ui/Badge';
@@ -35,10 +35,28 @@ export default function UserManagementPage() {
   const [users, setUsers] = createSignal<AdminUser[]>([]);
   const [total, setTotal] = createSignal(0);
   const [page, setPage] = createSignal(1);
+  // 首次进入用 loading（整页 Spinner），翻页用 pageChanging（覆盖层不闪表格）
   const [loading, setLoading] = createSignal(true);
+  const [pageChanging, setPageChanging] = createSignal(false);
   const [confirmTarget, setConfirmTarget] = createSignal<AdminUser | null>(null);
   // 行级 busy 标记：防止用户在某一行操作进行中重复点击（AdminUser.id 是 string）
   const [busyUserId, setBusyUserId] = createSignal<string | null>(null);
+
+  // 搜索过滤（前端 filter；列表 API 暂无 query 参数）
+  const [searchQuery, setSearchQuery] = createSignal('');
+  const [debouncedQuery, setDebouncedQuery] = createSignal('');
+  let searchTimer: ReturnType<typeof setTimeout> | undefined;
+  function onSearchInput(v: string) {
+    setSearchQuery(v);
+    if (searchTimer) clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => setDebouncedQuery(v.trim().toLowerCase()), 300);
+  }
+  onCleanup(() => { if (searchTimer) clearTimeout(searchTimer); });
+  const filteredUsers = createMemo(() => {
+    const q = debouncedQuery();
+    if (!q) return users();
+    return users().filter((u) => u.username.toLowerCase().includes(q));
+  });
 
   // 密码重置 Modal 状态
   const [resetTarget, setResetTarget] = createSignal<AdminUser | null>(null);
@@ -49,6 +67,14 @@ export default function UserManagementPage() {
   const [directLoading, setDirectLoading] = createSignal(false);
   const [generatedKey, setGeneratedKey] = createSignal('');
   const [keyLoading, setKeyLoading] = createSignal(false);
+  // Modal title 缓存：避免关闭瞬间 resetTarget 置 null 导致 title 闪空
+  const [resetTitle, setResetTitle] = createSignal('重置密码');
+  createEffect(() => {
+    const u = resetTarget()?.username;
+    if (u) setResetTitle(`重置密码 - ${u}`);
+  });
+  // 关闭 key-result 时若密钥未复制，弹二次确认
+  const [showCloseKeyConfirm, setShowCloseKeyConfirm] = createSignal(false);
   const pageSize = 20;
 
   function closeResetModal() {
@@ -62,8 +88,10 @@ export default function UserManagementPage() {
     setKeyLoading(false);
   }
 
-  async function load(p?: number) {
-    setLoading(true);
+  // 翻页时使用 pageChanging（覆盖层）而非 loading（整页 Spinner），避免表格闪烁
+  async function load(p?: number, opts?: { paging?: boolean }) {
+    const paging = opts?.paging ?? false;
+    if (paging) setPageChanging(true); else setLoading(true);
     try {
       const res = await adminApi.getUsers({ page: p ?? page(), perPage: pageSize });
       setUsers(res.data);
@@ -71,11 +99,11 @@ export default function UserManagementPage() {
     } catch (err: unknown) {
       uiStore.toast.error('加载失败', err instanceof Error ? err.message : '');
     } finally {
-      setLoading(false);
+      if (paging) setPageChanging(false); else setLoading(false);
     }
   }
 
-  onMount(load);
+  onMount(() => { void load(); });
 
   async function toggleBan(user: AdminUser) {
     setBusyUserId(user.id);
@@ -122,6 +150,7 @@ export default function UserManagementPage() {
   }
 
   async function handleGenerateKey() {
+    if (keyLoading()) return; // 防抖：重复点击直接 return
     const target = resetTarget();
     if (!target) return;
     setKeyLoading(true);
@@ -146,7 +175,16 @@ export default function UserManagementPage() {
 
   function handlePageChange(nextPage: number) {
     setPage(nextPage);
-    load(nextPage);
+    void load(nextPage, { paging: true });
+  }
+
+  // 关闭 reset Modal：若处于 key-result 且已生成 key，需要二次确认（密钥不可恢复）
+  function handleCloseResetModal() {
+    if (resetMode() === 'key-result' && generatedKey()) {
+      setShowCloseKeyConfirm(true);
+      return;
+    }
+    closeResetModal();
   }
 
   return (
@@ -177,7 +215,22 @@ export default function UserManagementPage() {
           <Empty title="暂无用户" description="目前还没有注册用户" />
         }>
           <div class="space-y-3">
-            <div class="overflow-x-auto rounded-xl border border-border-hairline shadow-elevation-1">
+            {/* 顶部搜索 toolbar：debounce 300ms 后过滤当前页 */}
+            <div class="flex items-center gap-2">
+              <div class="w-full max-w-xs">
+                <Input
+                  placeholder="搜索用户名…"
+                  value={searchQuery()}
+                  onInput={(e) => onSearchInput(e.currentTarget.value)}
+                />
+              </div>
+              <Show when={debouncedQuery()}>
+                <span class="text-xs text-content-tertiary">
+                  当前页匹配 {filteredUsers().length}/{users().length}
+                </span>
+              </Show>
+            </div>
+            <div class="relative overflow-x-auto rounded-xl border border-border-hairline shadow-elevation-1">
               <table class="w-full text-sm">
                 <thead>
                   <tr class="bg-surface-secondary/60 backdrop-blur-sm border-b border-border-hairline">
@@ -188,7 +241,7 @@ export default function UserManagementPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  <For each={users()}>
+                  <For each={filteredUsers()}>
                     {(user) => (
                       <tr class="border-b border-border-hairline last:border-b-0 hover:bg-accent-light/40 transition-colors duration-fast ease-out-expo">
                         <td class="px-4 py-3 font-medium text-content">{user.username}</td>
@@ -224,6 +277,12 @@ export default function UserManagementPage() {
                   </For>
                 </tbody>
               </table>
+              {/* 翻页时覆盖层：保留旧数据，避免整表替换为 Spinner 的 flicker */}
+              <Show when={pageChanging()}>
+                <div class="absolute inset-0 bg-bg-overlay/50 flex items-center justify-center">
+                  <Spinner />
+                </div>
+              </Show>
             </div>
             <div class="flex justify-between items-center">
               <Pagination page={page()} total={total()} pageSize={pageSize} onChange={handlePageChange} />
@@ -233,7 +292,7 @@ export default function UserManagementPage() {
       </Show>
 
       {/* 密码重置 Modal */}
-      <Modal open={!!resetTarget()} onClose={closeResetModal} title={`重置密码 - ${resetTarget()?.username ?? ''}`} size="sm">
+      <Modal open={!!resetTarget()} onClose={handleCloseResetModal} title={resetTitle()} size="sm">
         {/* 选择模式 */}
         <Show when={resetMode() === 'choose'}>
           <div class="space-y-3 mt-2">
@@ -245,7 +304,11 @@ export default function UserManagementPage() {
             <ResetModeCard
               title="生成重置密钥"
               description="生成一次性密钥发送给用户，由用户自行修改密码"
-              onClick={() => { setResetMode('key-result'); handleGenerateKey(); }}
+              onClick={() => {
+                if (keyLoading()) return;
+                setResetMode('key-result');
+                void handleGenerateKey();
+              }}
             />
           </div>
         </Show>
@@ -289,7 +352,8 @@ export default function UserManagementPage() {
                 <code class="flex-1 min-w-0 text-sm font-mono text-content break-all select-all">{generatedKey()}</code>
                 <Button
                   size="xs"
-                  variant="outline"
+                  variant="ghost"
+                  class="px-2"
                   onClick={async () => {
                     try {
                       await navigator.clipboard.writeText(generatedKey());
@@ -307,12 +371,23 @@ export default function UserManagementPage() {
             <div class="flex justify-end gap-2 pt-2">
               <Show when={!keyLoading()}>
                 <Button variant="ghost" onClick={() => { setResetMode('choose'); setGeneratedKey(''); }}>返回</Button>
-                <Button onClick={closeResetModal}>关闭</Button>
+                <Button onClick={handleCloseResetModal}>关闭</Button>
               </Show>
             </div>
           </div>
         </Show>
       </Modal>
+
+      {/* 关闭 key-result 时密钥未复制 → 二次确认（密钥不可恢复） */}
+      <ConfirmDialog
+        open={showCloseKeyConfirm()}
+        title="密钥关闭后将丢失"
+        message="未复制密钥，关闭后将丢失（无法再次查看），确认关闭？"
+        confirmText="确认关闭"
+        variant="danger"
+        onConfirm={() => { setShowCloseKeyConfirm(false); closeResetModal(); }}
+        onCancel={() => setShowCloseKeyConfirm(false)}
+      />
     </div>
   );
 }

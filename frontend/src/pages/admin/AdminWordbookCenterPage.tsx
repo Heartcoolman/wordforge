@@ -69,6 +69,9 @@ export default function AdminWordbookCenterPage() {
 
   onMount(loadItems);
 
+  // 任一 import/sync 在飞 → 禁用所有 mutating 按钮，避免并发请求
+  const mutating = () => importing() !== null || syncing() !== null;
+
   const filteredItems = () => {
     let list = items();
     const q = search().toLowerCase().trim();
@@ -129,6 +132,11 @@ export default function AdminWordbookCenterPage() {
     }
   }
 
+  function closePreview() {
+    setShowPreview(false);
+    setPreview(null);
+  }
+
   return (
     <div class="space-y-6">
       <div class="flex items-center justify-between flex-wrap gap-2 pb-2 border-b border-border-hairline">
@@ -149,30 +157,32 @@ export default function AdminWordbookCenterPage() {
         </Card>
       </Show>
 
-      {/* Updates banner */}
+      {/* Updates banner — items-start 防紧贴 + 按钮组与文字间距充足 */}
       <Show when={updates().length > 0}>
         <Card variant="outlined" class="border-accent/50 bg-accent-light/30">
-          <div class="flex items-center justify-between">
-            <div>
-              <p class="font-medium text-content">{updates().length} 本词书有更新</p>
-              <p class="text-sm text-content-secondary">
-                {updates().map((u) => u.name).join('、')}
-              </p>
+          <div class="flex flex-col gap-4">
+            <div class="flex items-start justify-between gap-3">
+              <div>
+                <p class="font-medium text-content">{updates().length} 本词书有更新</p>
+                <p class="text-sm text-content-secondary">
+                  {updates().map((u) => u.name).join('、')}
+                </p>
+              </div>
             </div>
-          </div>
-          <div class="flex flex-wrap gap-2 mt-3">
-            <For each={updates()}>
-              {(u) => (
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => handleSync(u.remoteId, u.name)}
-                  loading={syncing() === u.remoteId}
-                >
-                  同步「{u.name}」
-                </Button>
-              )}
-            </For>
+            <div class="flex flex-wrap gap-2">
+              <For each={updates()}>
+                {(u) => (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => handleSync(u.remoteId, u.name)}
+                    loading={syncing() === u.remoteId}
+                  >
+                    同步「{u.name}」
+                  </Button>
+                )}
+              </For>
+            </div>
           </div>
         </Card>
       </Show>
@@ -194,7 +204,7 @@ export default function AdminWordbookCenterPage() {
                   <button
                     type="button"
                     aria-pressed={!selectedTag()}
-                    class={`focus-ring-soft px-2 py-0.5 rounded-full text-xs whitespace-nowrap transition-colors duration-fast ${!selectedTag() ? 'bg-accent text-accent-content' : 'bg-surface-tertiary text-content-secondary hover:bg-surface-secondary'}`}
+                    class={`focus-ring-soft px-2 py-0.5 rounded-full text-xs whitespace-nowrap transition-all duration-fast ${!selectedTag() ? 'bg-accent text-accent-content' : 'bg-surface-tertiary text-content-secondary hover:bg-surface-secondary'}`}
                     onClick={() => setSelectedTag(null)}
                   >
                     全部
@@ -204,7 +214,7 @@ export default function AdminWordbookCenterPage() {
                       <button
                         type="button"
                         aria-pressed={selectedTag() === tag}
-                        class={`focus-ring-soft px-2 py-0.5 rounded-full text-xs whitespace-nowrap transition-colors duration-fast ${selectedTag() === tag ? 'bg-accent text-accent-content' : 'bg-surface-tertiary text-content-secondary hover:bg-surface-secondary'}`}
+                        class={`focus-ring-soft px-2 py-0.5 rounded-full text-xs whitespace-nowrap transition-all duration-fast ${selectedTag() === tag ? 'bg-accent text-accent-content' : 'bg-surface-tertiary text-content-secondary hover:bg-surface-secondary'}`}
                         onClick={() => setSelectedTag(selectedTag() === tag ? null : tag)}
                       >
                         {tag}
@@ -235,7 +245,16 @@ export default function AdminWordbookCenterPage() {
                     hover
                     padding="md"
                     onClick={() => handlePreview(item.id)}
-                    class="cursor-pointer"
+                    onKeyDown={(e: KeyboardEvent) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        handlePreview(item.id);
+                      }
+                    }}
+                    role="button"
+                    tabindex="0"
+                    aria-label={`预览词书 ${item.name}`}
+                    class="cursor-pointer focus-ring-soft"
                   >
                     <div class="flex items-start justify-between gap-2">
                       <div class="flex-1 min-w-0">
@@ -268,7 +287,7 @@ export default function AdminWordbookCenterPage() {
                           size="sm"
                           onClick={() => setImportTarget(item)}
                           loading={importing() === item.id}
-                          disabled={importing() !== null}
+                          disabled={mutating()}
                         >
                           导入为系统词书
                         </Button>
@@ -279,6 +298,7 @@ export default function AdminWordbookCenterPage() {
                           variant="ghost"
                           onClick={() => handleSync(item.id, item.name)}
                           loading={syncing() === item.id}
+                          disabled={mutating()}
                         >
                           同步更新
                         </Button>
@@ -313,10 +333,15 @@ export default function AdminWordbookCenterPage() {
         )}
       </Show>
 
-      {/* Preview modal */}
-      <Show when={preview()}>
-        {(p) => (
-          <Modal open={showPreview()} onClose={() => setShowPreview(false)} title={p().name} size="lg">
+      {/* Preview modal — 单一 open 控制；onClose 同步清 preview，避免下次打开闪旧数据 */}
+      <Modal
+        open={showPreview() && preview() !== null}
+        onClose={closePreview}
+        title={preview()?.name ?? ''}
+        size="lg"
+      >
+        <Show when={preview()}>
+          {(p) => (
             <div class="space-y-4 mt-2">
               <Show when={p().description}>
                 <p class="text-sm text-content-secondary">{p().description}</p>
@@ -349,9 +374,9 @@ export default function AdminWordbookCenterPage() {
                 </p>
               </Show>
             </div>
-          </Modal>
-        )}
-      </Show>
+          )}
+        </Show>
+      </Modal>
     </div>
   );
 }

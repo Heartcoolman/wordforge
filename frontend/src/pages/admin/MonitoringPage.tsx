@@ -1,6 +1,7 @@
-import { createSignal, Show, For, onMount } from 'solid-js';
+import { createSignal, Show, For, onMount, onCleanup } from 'solid-js';
 import { Card } from '@/components/ui/Card';
 import { Badge } from '@/components/ui/Badge';
+import { Button } from '@/components/ui/Button';
 import { Spinner } from '@/components/ui/Spinner';
 import { Empty } from '@/components/ui/Empty';
 import { adminApi } from '@/api/admin';
@@ -40,16 +41,18 @@ function RecursiveKV(props: { data: unknown; depth?: number }) {
   if (Array.isArray(props.data)) {
     if (props.data.length === 0) return <span class="text-content-tertiary">[]</span>;
     if (props.data.every(v => typeof v !== 'object')) return <span>{props.data.join(', ')}</span>;
-    return <For each={props.data}>{(item, i) => <RecursiveKV data={item} depth={depth + 1} />}</For>;
+    return <For each={props.data}>{(item) => <RecursiveKV data={item} depth={depth + 1} />}</For>;
   }
+  // summary 缩进与 depth 联动；最大 16rem 防止过度缩进
+  const summaryPadLeft = `${Math.min(depth, 16)}rem`;
   return (
-    <div class={depth > 0 ? 'ml-4' : ''}>
+    <div class={depth > 0 ? 'ml-4 space-y-1' : 'space-y-1'}>
       <For each={Object.entries(props.data as Record<string, unknown>)}>
         {([key, value]) => (
           <Show when={typeof value === 'object' && value !== null}
-            fallback={<div class="flex gap-2 text-xs py-0.5"><span class="text-content-tertiary">{key}:</span><span>{String(value)}</span></div>}>
+            fallback={<div class="flex gap-2 text-xs py-0.5" style={{ 'padding-left': summaryPadLeft }}><span class="text-content-tertiary">{key}:</span><span>{String(value)}</span></div>}>
             <details class="text-xs py-0.5">
-              <summary class="text-content-tertiary cursor-pointer">{key}</summary>
+              <summary class="text-content-tertiary cursor-pointer" style={{ 'padding-left': summaryPadLeft }}>{key}</summary>
               <RecursiveKV data={value} depth={depth + 1} />
             </details>
           </Show>
@@ -59,42 +62,68 @@ function RecursiveKV(props: { data: unknown; depth?: number }) {
   );
 }
 
+const POLL_INTERVAL_MS = 30_000;
+
 export default function MonitoringPage() {
   const [health, setHealth] = createSignal<SystemHealth | null>(null);
   const [publicHealth, setPublicHealth] = createSignal<PublicHealthStatus | null>(null);
   const [db, setDb] = createSignal<DatabaseInfo | null>(null);
   const [monitoring, setMonitoring] = createSignal<MonitoringEvent[] | null>(null);
   const [loading, setLoading] = createSignal(true);
+  const [refreshing, setRefreshing] = createSignal(false);
   const [allFailed, setAllFailed] = createSignal(false);
   const [healthErr, setHealthErr] = createSignal('');
   const [publicHealthErr, setPublicHealthErr] = createSignal('');
   const [dbErr, setDbErr] = createSignal('');
   const [monitoringErr, setMonitoringErr] = createSignal('');
+  const [lastUpdated, setLastUpdated] = createSignal<Date | null>(null);
 
-  onMount(async () => {
+  async function fetchAll() {
     const [h, ph, d, m] = await Promise.allSettled([
       adminApi.getHealth(),
       healthApi.getStatus(),
       adminApi.getDatabase(),
       amasApi.getMonitoring(MONITORING_DEFAULT_LIMIT),
     ]);
-    if (h.status === 'fulfilled') setHealth(h.value);
+    if (h.status === 'fulfilled') { setHealth(h.value); setHealthErr(''); }
     else setHealthErr(h.reason instanceof Error ? h.reason.message : '加载失败');
-    if (ph.status === 'fulfilled') setPublicHealth(ph.value);
+    if (ph.status === 'fulfilled') { setPublicHealth(ph.value); setPublicHealthErr(''); }
     else setPublicHealthErr(ph.reason instanceof Error ? ph.reason.message : '加载失败');
-    if (d.status === 'fulfilled') setDb(d.value);
+    if (d.status === 'fulfilled') { setDb(d.value); setDbErr(''); }
     else setDbErr(d.reason instanceof Error ? d.reason.message : '加载失败');
-    if (m.status === 'fulfilled') setMonitoring(m.value);
+    if (m.status === 'fulfilled') { setMonitoring(m.value); setMonitoringErr(''); }
     else setMonitoringErr(m.reason instanceof Error ? m.reason.message : '加载失败');
-    if (h.status === 'rejected' && ph.status === 'rejected' && d.status === 'rejected' && m.status === 'rejected') {
-      setAllFailed(true);
-    }
+    const allRejected = h.status === 'rejected' && ph.status === 'rejected' && d.status === 'rejected' && m.status === 'rejected';
+    setAllFailed(allRejected);
+    if (!allRejected) setLastUpdated(new Date());
+  }
+
+  async function handleRefresh() {
+    if (refreshing()) return;
+    setRefreshing(true);
+    try { await fetchAll(); } finally { setRefreshing(false); }
+  }
+
+  function formatTime(d: Date | null): string {
+    if (!d) return '—';
+    return d.toLocaleTimeString('zh-CN', { hour12: false });
+  }
+
+  onMount(async () => {
+    await fetchAll();
     setLoading(false);
+    const timer = setInterval(() => { void fetchAll(); }, POLL_INTERVAL_MS);
+    onCleanup(() => clearInterval(timer));
   });
 
   return (
     <div class="space-y-6">
       <Show when={!loading()} fallback={<div class="flex justify-center py-12"><Spinner size="lg" /></div>}>
+        {/* 顶部 toolbar：手动刷新 + 上次更新时间戳 */}
+        <div class="flex items-center justify-between">
+          <p class="text-xs text-content-tertiary">更新于 {formatTime(lastUpdated())}（每 30 秒自动刷新）</p>
+          <Button size="sm" variant="ghost" loading={refreshing()} onClick={handleRefresh}>刷新</Button>
+        </div>
         <Show when={!allFailed()} fallback={
           <Empty title="加载失败" description="无法获取任何监控数据，请检查后端服务状态后重试" />
         }>
@@ -109,7 +138,7 @@ export default function MonitoringPage() {
               return (
                 <Card variant="elevated">
                   <h2 class="text-headline text-content mb-3">系统健康</h2>
-                  <div class="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-4 gap-4 text-sm">
+                  <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 text-sm">
                     <MetricCell label="状态">
                       <span class="flex items-center gap-1.5">
                         <span class={`w-2 h-2 rounded-full ${st().dot}`} />
@@ -134,10 +163,11 @@ export default function MonitoringPage() {
             {(ph) => (
               <Card variant="elevated">
                 <h2 class="text-headline text-content mb-3">公开健康探针</h2>
-                <div class="flex items-center gap-2 mb-3">
+                <div class="flex items-center justify-between gap-2 mb-3 flex-wrap">
                   <Badge variant={ph().status === 'ok' ? 'success' : 'error'}>{ph().status}</Badge>
+                  <span class="text-xs text-content-tertiary">更新于 {formatTime(lastUpdated())}</span>
                 </div>
-                <div class="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
                   <For each={Object.entries(ph().services)}>
                     {([name, svc]) => (
                       <div class="flex items-center gap-2 text-sm">
