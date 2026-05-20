@@ -45,7 +45,7 @@ test.describe('User Profile (legacy redirect)', () => {
   test('profile notice shows config hint', async ({ page }) => {
     await page.goto('/profile');
     await expect(
-      page.getByText('未配置 `VITE_USER_APP_URL`，请使用独立部署的用户前端地址')
+      page.getByText('用户前端尚未上线，请联系管理员')
     ).toBeVisible();
   });
 
