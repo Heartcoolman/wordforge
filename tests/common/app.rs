@@ -25,14 +25,40 @@ pub async fn spawn_test_app_with_strict_mode(
     spawn_with_limits_inner(100, 10, strict).await
 }
 
+/// 启用远程探针的 TestApp。spawn_with_limits_inner_with_probe 把 probe.enabled
+/// 注入 Config，直接构造 AppState + Router；不复用主路径以避免 Arc<Config> 改写难题。
+pub async fn spawn_test_app_with_probe_enabled() -> TestApp {
+    spawn_with_limits_inner_with_probe(100, 10, Default::default(), true).await
+}
+
 async fn spawn_with_limits(api_limit: u64, auth_limit: u64) -> TestApp {
     spawn_with_limits_inner(api_limit, auth_limit, Default::default()).await
+}
+
+async fn spawn_with_limits_inner_with_probe(
+    api_limit: u64,
+    auth_limit: u64,
+    strict_mode: learning_backend::config::StrictModeConfig,
+    probe_enabled: bool,
+) -> TestApp {
+    let mut probe = learning_backend::config::ProbeConfig::default();
+    probe.enabled = probe_enabled;
+    spawn_with_full_config(api_limit, auth_limit, strict_mode, probe).await
 }
 
 async fn spawn_with_limits_inner(
     api_limit: u64,
     auth_limit: u64,
     strict_mode: learning_backend::config::StrictModeConfig,
+) -> TestApp {
+    spawn_with_full_config(api_limit, auth_limit, strict_mode, Default::default()).await
+}
+
+async fn spawn_with_full_config(
+    api_limit: u64,
+    auth_limit: u64,
+    strict_mode: learning_backend::config::StrictModeConfig,
+    probe: learning_backend::config::ProbeConfig,
 ) -> TestApp {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     // 直接构造 Config，避免使用 set_var 造成多线程测试环境变量竞态
@@ -116,6 +142,7 @@ async fn spawn_with_limits_inner(
         pagination: Default::default(),
         limits: Default::default(),
         strict_mode,
+        probe,
     };
 
     let store = Arc::new(

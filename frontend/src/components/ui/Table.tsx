@@ -21,13 +21,13 @@ interface TableProps<T> {
 
 export function Table<T extends Record<string, unknown>>(props: TableProps<T>) {
   return (
-    <div class={cn('overflow-x-auto rounded-xl border border-border', props.class)}>
+    <div class={cn('overflow-x-auto rounded-xl border border-border-hairline shadow-elevation-1', props.class)}>
       <table class="w-full text-sm" aria-label={props['aria-label']}>
         <thead>
-          <tr class="border-b border-border bg-surface-secondary">
+          <tr class="border-b border-border-hairline bg-surface-secondary/60 backdrop-blur-sm">
             <For each={props.columns}>
               {(col) => (
-                <th class={cn('px-4 py-3 text-left font-medium text-content-secondary', col.class)}>
+                <th class={cn('px-4 py-3 text-left font-medium text-content-secondary text-caption uppercase tracking-wide', col.class)}>
                   {col.title}
                 </th>
               )}
@@ -38,11 +38,11 @@ export function Table<T extends Record<string, unknown>>(props: TableProps<T>) {
           <Show when={props.loading}>
             <For each={Array.from({ length: props.loadingRows ?? 3 }, (_, i) => i)}>
               {() => (
-                <tr class="border-b border-border last:border-b-0">
+                <tr class="border-b border-border-hairline last:border-b-0">
                   <For each={props.columns}>
                     {() => (
                       <td class="px-4 py-3">
-                        <div class="h-4 bg-surface-secondary rounded animate-pulse" />
+                        <div class="h-4 animate-shimmer rounded" />
                       </td>
                     )}
                   </For>
@@ -62,8 +62,9 @@ export function Table<T extends Record<string, unknown>>(props: TableProps<T>) {
               {(row, index) => (
                 <tr
                   class={cn(
-                    'border-b border-border last:border-b-0 transition-colors',
-                    props.onRowClick && 'hover:bg-surface-secondary cursor-pointer',
+                    'border-b border-border-hairline last:border-b-0',
+                    'transition-colors duration-fast ease-out-expo',
+                    props.onRowClick && 'hover:bg-accent-light/40 cursor-pointer',
                   )}
                   onClick={() => props.onRowClick?.(row)}
                 >

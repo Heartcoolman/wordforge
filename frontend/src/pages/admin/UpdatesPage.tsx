@@ -172,7 +172,7 @@ export default function UpdatesPage() {
 
               <Card>
                 <div class="flex items-center justify-between mb-4">
-                  <h2 class="text-lg font-semibold text-content">操作</h2>
+                  <h2 class="text-headline text-content">操作</h2>
                   <div class="flex gap-2">
                     <Button variant="ghost" onClick={handleCheck} loading={checking()}>
                       立即检查
@@ -214,7 +214,7 @@ export default function UpdatesPage() {
               <Show when={s().releaseNotes}>
                 <Card>
                   <div class="flex items-center justify-between mb-3">
-                    <h2 class="text-lg font-semibold text-content">Release Notes</h2>
+                    <h2 class="text-headline text-content">Release Notes</h2>
                     <Show when={s().releaseUrl}>
                       <a
                         href={s().releaseUrl!}

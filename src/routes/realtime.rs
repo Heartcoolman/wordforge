@@ -175,6 +175,8 @@ pub async fn sse_handler(
                                     crate::state::SseEvent::NewLlmSuggestion { .. } => "new_llm_suggestion",
                                     crate::state::SseEvent::ReleaseAvailable { .. } => "release_available",
                                     crate::state::SseEvent::UpdateProgress { .. } => "update_progress",
+                                    crate::state::SseEvent::ProbeRequest { .. } => "probe_request",
+                                    crate::state::SseEvent::ProbeConfirm { .. } => "probe_confirm",
                                 };
                                 yield Ok(Event::default().event(event_name).data(json));
                             }
@@ -275,6 +277,7 @@ mod tests {
             },
             pagination: Default::default(),
             strict_mode: Default::default(),
+            probe: Default::default(),
             limits: Default::default(),
         };
         let store = Arc::new(

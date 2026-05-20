@@ -5,18 +5,18 @@ export function UpdateBanner() {
   return (
     <Show when={updateInfo()}>
       {(info) => (
-        <div class="fixed top-0 left-0 right-0 z-40 bg-accent/10 border-b border-accent/30 text-accent px-4 py-3 flex items-center justify-between shadow-sm">
+        <div class="fixed top-0 left-0 right-0 z-40 bg-accent/10 backdrop-blur-md border-b border-accent/30 text-accent px-4 py-3 flex items-center justify-between shadow-elevation-1 animate-slide-down">
           <span class="text-sm font-medium">{info().message}</span>
           <div class="flex items-center gap-3">
             <button
               onClick={() => window.location.reload()}
-              class="text-sm font-semibold hover:underline"
+              class="text-sm font-semibold hover:underline transition-opacity duration-fast"
             >
               刷新
             </button>
             <button
               onClick={() => setUpdateInfo(null)}
-              class="text-sm font-semibold opacity-80 hover:opacity-100"
+              class="text-sm font-semibold opacity-80 hover:opacity-100 transition-opacity duration-fast"
             >
               关闭
             </button>

@@ -34,11 +34,12 @@ export function Input(props: InputProps) {
           {...rest}
           class={cn(
             'w-full h-10 px-3 rounded-lg text-sm bg-surface text-content',
-            'border border-border transition-colors duration-150',
+            'border border-border-hairline transition-[border-color,box-shadow,background-color] duration-fast ease-out-expo',
             'placeholder:text-content-tertiary',
-            'hover:border-border-hover',
-            'focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent',
-            local.error && 'border-error focus:ring-error/30 focus:border-error',
+            'hover:border-border',
+            'focus-ring-soft focus:border-accent',
+            'disabled:cursor-not-allowed disabled:opacity-60 disabled:bg-surface-secondary',
+            local.error && 'border-error focus:border-error',
             local.icon && 'pl-10',
             local.rightIcon && 'pr-10',
             local.class,
@@ -79,10 +80,11 @@ export function TextArea(props: TextAreaProps) {
         {...rest}
         class={cn(
           'w-full px-3 py-2 rounded-lg text-sm bg-surface text-content',
-          'border border-border transition-colors duration-150',
+          'border border-border-hairline transition-[border-color,box-shadow,background-color] duration-fast ease-out-expo',
           'placeholder:text-content-tertiary',
-          'hover:border-border-hover',
-          'focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent',
+          'hover:border-border',
+          'focus-ring-soft focus:border-accent',
+          'disabled:cursor-not-allowed disabled:opacity-60 disabled:bg-surface-secondary',
           'resize-y min-h-[80px]',
           local.error && 'border-error',
           local.class,

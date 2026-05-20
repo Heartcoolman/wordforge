@@ -47,10 +47,11 @@
   --surface-tertiary: #f1f5f9;
   --surface-elevated: #ffffff;
 
-  /* Content — text */
+  /* Content — text (4 级对比) */
   --content: #0f172a;
   --content-secondary: #475569;
   --content-tertiary: #94a3b8;
+  --content-quaternary: #cbd5e1;
   --content-inverse: #ffffff;
 
   /* Accent — primary action */
@@ -69,15 +70,27 @@
   --info: #3b82f6;
   --info-light: #eff6ff;
 
-  /* Border */
+  /* Border (含 hairline) */
   --border: #e2e8f0;
   --border-hover: #cbd5e1;
+  --border-hairline: rgba(15, 23, 42, 0.08);
 
-  /* Shadows */
+  /* Shadows — legacy 单层 */
   --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
   --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.1);
   --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -4px rgba(0, 0, 0, 0.1);
   --shadow-xl: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.1);
+
+  /* Shadows — layered elevation (Linear / Vercel 风) */
+  --shadow-elevation-1: 0 0 0 1px rgba(15, 23, 42, 0.04), 0 1px 2px rgba(15, 23, 42, 0.04);
+  --shadow-elevation-2: 0 0 0 1px rgba(15, 23, 42, 0.05), 0 2px 4px rgba(15, 23, 42, 0.04), 0 4px 8px rgba(15, 23, 42, 0.04);
+  --shadow-elevation-3: 0 0 0 1px rgba(15, 23, 42, 0.06), 0 4px 8px rgba(15, 23, 42, 0.05), 0 12px 20px rgba(15, 23, 42, 0.06);
+  --shadow-elevation-4: 0 0 0 1px rgba(15, 23, 42, 0.06), 0 8px 16px rgba(15, 23, 42, 0.06), 0 24px 40px rgba(15, 23, 42, 0.08);
+
+  /* Subtle gradients */
+  --gradient-surface-subtle: linear-gradient(180deg, var(--surface) 0%, var(--surface-secondary) 100%);
+  --gradient-accent-soft: linear-gradient(135deg, color-mix(in oklab, var(--accent) 10%, transparent) 0%, transparent 100%);
+  --gradient-accent-strong: linear-gradient(180deg, var(--accent) 0%, var(--accent-hover) 100%);
 
   /* Radius */
   --radius-sm: 0.375rem;
@@ -86,6 +99,16 @@
   --radius-xl: 1rem;
   --radius-2xl: 1.5rem;
   --radius-full: 9999px;
+
+  /* Motion — duration */
+  --duration-fast: 150ms;
+  --duration-base: 220ms;
+  --duration-slow: 320ms;
+
+  /* Motion — easing */
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-spring: cubic-bezier(0.5, 1.4, 0.5, 1);
+  --ease-in-out-quart: cubic-bezier(0.76, 0, 0.24, 1);
 }
 
 .dark {
@@ -97,6 +120,7 @@
   --content: #f1f5f9;
   --content-secondary: #94a3b8;
   --content-tertiary: #64748b;
+  --content-quaternary: #475569;
   --content-inverse: #0f172a;
 
   --accent: #818cf8;
@@ -115,11 +139,21 @@
 
   --border: #334155;
   --border-hover: #475569;
+  --border-hairline: rgba(255, 255, 255, 0.08);
 
   --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.3);
   --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.4), 0 2px 4px -2px rgba(0, 0, 0, 0.3);
   --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.4), 0 4px 6px -4px rgba(0, 0, 0, 0.3);
   --shadow-xl: 0 20px 25px -5px rgba(0, 0, 0, 0.4), 0 8px 10px -6px rgba(0, 0, 0, 0.3);
+
+  /* Dark elevation: 顶层用 inner glow ring，底层加深 */
+  --shadow-elevation-1: 0 0 0 1px rgba(255, 255, 255, 0.06), 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-elevation-2: 0 0 0 1px rgba(255, 255, 255, 0.06), 0 2px 4px rgba(0, 0, 0, 0.4), 0 4px 8px rgba(0, 0, 0, 0.4);
+  --shadow-elevation-3: 0 0 0 1px rgba(255, 255, 255, 0.07), 0 4px 8px rgba(0, 0, 0, 0.5), 0 12px 20px rgba(0, 0, 0, 0.5);
+  --shadow-elevation-4: 0 0 0 1px rgba(255, 255, 255, 0.08), 0 8px 16px rgba(0, 0, 0, 0.5), 0 24px 40px rgba(0, 0, 0, 0.6);
+
+  --gradient-accent-soft: linear-gradient(135deg, color-mix(in oklab, var(--accent) 20%, transparent) 0%, transparent 100%);
+  --gradient-accent-strong: linear-gradient(180deg, var(--accent) 0%, var(--accent-hover) 100%);
 }
 
 /* ═══════════════════════════════════════════
@@ -135,10 +169,11 @@
   --color-surface-tertiary: var(--surface-tertiary);
   --color-surface-elevated: var(--surface-elevated);
 
-  /* Content */
+  /* Content (4 级) */
   --color-content: var(--content);
   --color-content-secondary: var(--content-secondary);
   --color-content-tertiary: var(--content-tertiary);
+  --color-content-quaternary: var(--content-quaternary);
   --color-content-inverse: var(--content-inverse);
 
   /* Accent */
@@ -160,12 +195,17 @@
   /* Border */
   --color-border: var(--border);
   --color-border-hover: var(--border-hover);
+  --color-border-hairline: var(--border-hairline);
 
   /* Shadows */
   --shadow-sm: var(--shadow-sm);
   --shadow-md: var(--shadow-md);
   --shadow-lg: var(--shadow-lg);
   --shadow-xl: var(--shadow-xl);
+  --shadow-elevation-1: var(--shadow-elevation-1);
+  --shadow-elevation-2: var(--shadow-elevation-2);
+  --shadow-elevation-3: var(--shadow-elevation-3);
+  --shadow-elevation-4: var(--shadow-elevation-4);
 
   /* Radius */
   --radius-sm: var(--radius-sm);
@@ -174,10 +214,6 @@
   --radius-xl: var(--radius-xl);
   --radius-2xl: var(--radius-2xl);
   --radius-full: var(--radius-full);
-
-  /* Transition */
-  --transition-fast: color 150ms ease, background-color 150ms ease, border-color 150ms ease, opacity 150ms ease;
-  --transition-normal: color 250ms ease, background-color 250ms ease, border-color 250ms ease, opacity 250ms ease;
 }
 
 /* ═══════════════════════════════════════════
@@ -204,16 +240,23 @@ body {
   min-height: 100dvh;
 }
 
-/* Focus ring */
+/* Focus ring (Linear 风：稍大 offset + 微弱圆角对齐) */
 :focus-visible {
   outline: 2px solid var(--accent);
+  outline-offset: 2.5px;
+  border-radius: var(--radius-sm);
+}
+
+/* Focus ring soft — 给次级元素 / hover-only 元素用 */
+.focus-ring-soft:focus-visible {
+  outline: 2px solid color-mix(in oklab, var(--accent) 55%, transparent);
   outline-offset: 2px;
 }
 
-/* Scrollbar styling */
+/* Scrollbar — 内缩感 */
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 8px;
+  height: 8px;
 }
 ::-webkit-scrollbar-track {
   background: transparent;
@@ -221,15 +264,94 @@ body {
 ::-webkit-scrollbar-thumb {
   background: var(--content-tertiary);
   border-radius: var(--radius-full);
+  border: 2px solid transparent;
+  background-clip: padding-box;
 }
 ::-webkit-scrollbar-thumb:hover {
   background: var(--content-secondary);
+  background-clip: padding-box;
 }
 
 /* ═══════════════════════════════════════════
-   Animations
+   Motion — Easing & Duration Utilities
+   (Tailwind v4 自带 ease-linear/in/out/in-out 与 duration-150 等数值类；
+    此处提供项目语义化别名，与 Tailwind 自带类不冲突)
    ═══════════════════════════════════════════ */
 
+.ease-out-expo {
+  transition-timing-function: var(--ease-out-expo);
+}
+.ease-spring {
+  transition-timing-function: var(--ease-spring);
+}
+.ease-in-out-quart {
+  transition-timing-function: var(--ease-in-out-quart);
+}
+
+.duration-fast {
+  transition-duration: var(--duration-fast);
+}
+.duration-base {
+  transition-duration: var(--duration-base);
+}
+.duration-slow {
+  transition-duration: var(--duration-slow);
+}
+
+/* ═══════════════════════════════════════════
+   Typography — Semantic Levels
+   ═══════════════════════════════════════════ */
+
+.text-display {
+  font-size: 2rem;
+  line-height: 1.2;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+.text-title {
+  font-size: 1.5rem;
+  line-height: 1.3;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+}
+.text-headline {
+  font-size: 1.125rem;
+  line-height: 1.4;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.text-body {
+  font-size: 0.875rem;
+  line-height: 1.5;
+  font-weight: 400;
+}
+.text-caption {
+  font-size: 0.75rem;
+  line-height: 1.4;
+  font-weight: 400;
+  color: var(--content-tertiary);
+}
+
+/* ═══════════════════════════════════════════
+   Surface gradient utilities (Tailwind v4 不识别 gradient token，
+   提供 bg-* class 直接挂载)
+   ═══════════════════════════════════════════ */
+
+.bg-gradient-surface-subtle {
+  background-image: var(--gradient-surface-subtle);
+}
+.bg-gradient-accent-soft {
+  background-image: var(--gradient-accent-soft);
+}
+.bg-gradient-accent-strong {
+  background-image: var(--gradient-accent-strong);
+}
+
+/* ═══════════════════════════════════════════
+   Animations — Keyframes (legacy 8 + new 8)
+   ═══════════════════════════════════════════ */
+
+/* Legacy — 保持兼容 */
 @keyframes fade-in {
   from { opacity: 0; }
   to { opacity: 1; }
@@ -272,6 +394,48 @@ body {
   100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
 }
 
+/* New — 列表 / Tab / 反馈 */
+@keyframes list-item-enter {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes list-item-leave {
+  from { opacity: 1; transform: translateY(0); }
+  to { opacity: 0; transform: translateY(-8px); }
+}
+
+@keyframes tab-content-slide {
+  from { opacity: 0; transform: translateX(8px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes slide-down {
+  from { opacity: 0; transform: translateY(-12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+@keyframes ripple {
+  to { transform: scale(2.4); opacity: 0; }
+}
+
+@keyframes progress-stripe {
+  from { background-position: 0 0; }
+  to { background-position: 40px 0; }
+}
+
+@keyframes ring-pulse {
+  0% { box-shadow: 0 0 0 0 currentColor; opacity: 0.6; }
+  70% { box-shadow: 0 0 0 8px transparent; opacity: 0; }
+  100% { box-shadow: 0 0 0 0 transparent; opacity: 0; }
+}
+
+/* Animation utilities — legacy */
 .animate-fade-in { animation: fade-in 200ms ease-out; }
 .animate-fade-in-up { animation: fade-in-up 300ms ease-out; }
 .animate-slide-in-right { animation: slide-in-right 300ms ease-out; }
@@ -281,8 +445,59 @@ body {
 .animate-pulse-success { animation: pulse-success 1s ease-out; }
 .animate-pulse-error { animation: pulse-error 1s ease-out; }
 
+/* Animation utilities — new */
+.animate-list-item-enter { animation: list-item-enter var(--duration-base) var(--ease-out-expo); }
+.animate-list-item-leave { animation: list-item-leave var(--duration-fast) var(--ease-out-expo) forwards; }
+.animate-tab-content-slide { animation: tab-content-slide var(--duration-base) var(--ease-out-expo); }
+.animate-slide-down { animation: slide-down var(--duration-base) var(--ease-out-expo); }
+
+.animate-shimmer {
+  background: linear-gradient(
+    90deg,
+    var(--surface-tertiary) 0%,
+    var(--surface-secondary) 50%,
+    var(--surface-tertiary) 100%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.4s linear infinite;
+}
+
+.animate-progress-stripe {
+  background-image: linear-gradient(
+    45deg,
+    rgba(255, 255, 255, 0.18) 25%,
+    transparent 25%,
+    transparent 50%,
+    rgba(255, 255, 255, 0.18) 50%,
+    rgba(255, 255, 255, 0.18) 75%,
+    transparent 75%,
+    transparent
+  );
+  background-size: 40px 40px;
+  animation: progress-stripe 1.2s linear infinite;
+}
+
+.animate-ring-pulse {
+  animation: ring-pulse 1.6s var(--ease-out-expo) infinite;
+}
+
 /* ═══════════════════════════════════════════
-   Flashcard 3D Flip
+   Accessibility — Reduced motion
+   ═══════════════════════════════════════════ */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ═══════════════════════════════════════════
+   Flashcard 3D Flip (学习端专用，不动)
    ═══════════════════════════════════════════ */
 
 .perspective { perspective: 1000px; }

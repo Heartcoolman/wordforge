@@ -55,22 +55,33 @@ export default function AdminSetupPage() {
   }
 
   return (
-    <div class="min-h-screen flex items-center justify-center bg-surface-secondary p-4">
+    <div class="relative min-h-screen flex items-center justify-center p-4 overflow-hidden bg-surface-secondary">
+      <div aria-hidden="true" class="absolute inset-0 bg-gradient-accent-soft pointer-events-none" />
+      <div aria-hidden="true" class="absolute -top-32 -left-32 w-96 h-96 rounded-full bg-accent/10 blur-3xl pointer-events-none" />
+      <div aria-hidden="true" class="absolute -bottom-32 -right-32 w-96 h-96 rounded-full bg-info/10 blur-3xl pointer-events-none" />
+
       <Show when={!checking()} fallback={<Spinner size="lg" />}>
         <Show when={!checkError()} fallback={
-          <Card variant="elevated" class="w-full max-w-sm">
+          <Card variant="elevated" class="relative w-full max-w-sm shadow-elevation-4 border border-border-hairline">
             <Empty title="连接失败" description={checkError()} />
           </Card>
         }>
-          <Card variant="elevated" class="w-full max-w-sm animate-fade-in-up">
-            <h1 class="text-2xl font-bold text-center text-content mb-2">初始化管理后台</h1>
-            <p class="text-sm text-content-secondary text-center mb-6">首次使用，请创建管理员账户</p>
+          <Card variant="elevated" class="relative w-full max-w-sm animate-fade-in-up shadow-elevation-4 border border-border-hairline">
+            <h1 class="text-display text-content mb-2 text-center">初始化管理后台</h1>
+            <p class="text-caption text-center mb-6">首次使用，请创建管理员账户</p>
             <form onSubmit={handleSubmit} class="space-y-4">
-              <Input label="管理员邮箱" type="email" autocomplete="email" value={email()} onInput={(e) => setEmail(e.currentTarget.value)} />
-              <Input label="密码" type="password" autocomplete="new-password" placeholder={`至少 ${MIN_PASSWORD_LENGTH} 位`} value={password()} onInput={(e) => setPassword(e.currentTarget.value)} />
-              <Input label="确认密码" type="password" autocomplete="new-password" value={confirm()} onInput={(e) => setConfirm(e.currentTarget.value)} />
-              {error() && <p class="text-sm text-error text-center" role="alert">{error()}</p>}
-              <Button type="submit" fullWidth loading={loading()}>创建管理员</Button>
+              <div class="animate-fade-in-up" style={{ 'animation-delay': '80ms', 'animation-fill-mode': 'backwards' }}>
+                <Input label="管理员邮箱" type="email" autocomplete="email" value={email()} onInput={(e) => setEmail(e.currentTarget.value)} />
+              </div>
+              <div class="animate-fade-in-up" style={{ 'animation-delay': '160ms', 'animation-fill-mode': 'backwards' }}>
+                <Input label="密码" type="password" autocomplete="new-password" placeholder={`至少 ${MIN_PASSWORD_LENGTH} 位`} value={password()} onInput={(e) => setPassword(e.currentTarget.value)} />
+              </div>
+              <div class="animate-fade-in-up" style={{ 'animation-delay': '240ms', 'animation-fill-mode': 'backwards' }}>
+                <Input label="确认密码" type="password" autocomplete="new-password" value={confirm()} onInput={(e) => setConfirm(e.currentTarget.value)} error={error() || undefined} />
+              </div>
+              <div class="animate-fade-in-up" style={{ 'animation-delay': '320ms', 'animation-fill-mode': 'backwards' }}>
+                <Button type="submit" fullWidth loading={loading()}>创建管理员</Button>
+              </div>
             </form>
           </Card>
         </Show>

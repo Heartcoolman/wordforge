@@ -60,6 +60,9 @@ describe('AmasConfigPage — CRUD & error fallbacks', () => {
     fireEvent.input(input, { target: { value: '0.85' } });
     await waitFor(() => expect(screen.getByText('未保存的修改')).toBeInTheDocument());
     fireEvent.click(screen.getByRole('button', { name: '保存配置' }));
+    // 弹出 ConfirmDialog 二次确认
+    await waitFor(() => expect(screen.getByText('确认保存 AMAS 配置')).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: '确认保存' }));
     await waitFor(() => expect(mockAmas.updateConfig).toHaveBeenCalled());
     expect(mockToast.success).toHaveBeenCalled();
   });
@@ -73,6 +76,8 @@ describe('AmasConfigPage — CRUD & error fallbacks', () => {
     const input = document.querySelector('input[type="number"]') as HTMLInputElement;
     fireEvent.input(input, { target: { value: '0.85' } });
     fireEvent.click(screen.getByRole('button', { name: '保存配置' }));
+    await waitFor(() => expect(screen.getByText('确认保存 AMAS 配置')).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: '确认保存' }));
     await waitFor(() => expect(mockToast.error).toHaveBeenCalledWith('保存失败', 'save fail'));
   });
 
@@ -93,8 +98,11 @@ describe('AmasConfigPage — CRUD & error fallbacks', () => {
     mockAmas.getMetrics.mockResolvedValue({});
     mockAdmin.reloadAmas.mockResolvedValue(baseConfig);
     await renderPage();
-    await waitFor(() => expect(screen.getByText('热重载')).toBeInTheDocument());
-    fireEvent.click(screen.getByText('热重载'));
+    await waitFor(() => expect(screen.getByRole('button', { name: '热重载' })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: '热重载' }));
+    // 弹出 ConfirmDialog
+    await waitFor(() => expect(screen.getByText('确认热重载 AMAS 配置')).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: '确认热重载' }));
     await waitFor(() => expect(mockAdmin.reloadAmas).toHaveBeenCalled());
     expect(mockToast.success).toHaveBeenCalledWith('AMAS 配置已热重载');
   });
@@ -104,8 +112,10 @@ describe('AmasConfigPage — CRUD & error fallbacks', () => {
     mockAmas.getMetrics.mockResolvedValue({});
     mockAdmin.reloadAmas.mockRejectedValue(new Error('reload fail'));
     await renderPage();
-    await waitFor(() => expect(screen.getByText('热重载')).toBeInTheDocument());
-    fireEvent.click(screen.getByText('热重载'));
+    await waitFor(() => expect(screen.getByRole('button', { name: '热重载' })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: '热重载' }));
+    await waitFor(() => expect(screen.getByText('确认热重载 AMAS 配置')).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: '确认热重载' }));
     await waitFor(() => expect(mockToast.error).toHaveBeenCalledWith('热重载失败', 'reload fail'));
   });
 

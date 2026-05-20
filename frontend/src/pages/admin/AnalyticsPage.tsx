@@ -45,17 +45,18 @@ export default function AnalyticsPage() {
   const [states] = createResource(() => adminApi.getWordStateDistribution());
 
   return (
-    <div class="space-y-6 animate-fade-in-up">
-      <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-2 border-b border-border">
-        <h1 class="text-xl font-bold text-content">深度分析</h1>
+    <div class="space-y-6">
+      <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-2 border-b border-border-hairline">
+        <h1 class="text-title text-content">深度分析</h1>
         <WindowPicker value={days} onChange={setDays} />
       </div>
 
-      {/* KPI 行 (6 张) */}
-      <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
-        <Show when={eng()} fallback={<Skeleton height="100px" />}>
+      {/* KPI 行 (6 张) — 中等宽度先 2 行 3 列，xl 再展开 6 卡，避免 lg 挤压 */}
+      <div class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
+        <Show when={eng()} fallback={<Skeleton height="84px" />}>
           {(e) => (
             <StatCard
+              size="sm"
               title="总用户"
               value={formatNumber(e().totalUsers)}
               color="accent"
@@ -63,9 +64,10 @@ export default function AnalyticsPage() {
             />
           )}
         </Show>
-        <Show when={eng()} fallback={<Skeleton height="100px" />}>
+        <Show when={eng()} fallback={<Skeleton height="84px" />}>
           {(e) => (
             <StatCard
+              size="sm"
               title="今日活跃"
               value={formatNumber(e().activeToday)}
               color="success"
@@ -74,9 +76,10 @@ export default function AnalyticsPage() {
             />
           )}
         </Show>
-        <Show when={learning()} fallback={<Skeleton height="100px" />}>
+        <Show when={learning()} fallback={<Skeleton height="84px" />}>
           {(l) => (
             <StatCard
+              size="sm"
               title="累计答题"
               value={formatNumber(l().totalRecords)}
               color="info"
@@ -85,9 +88,10 @@ export default function AnalyticsPage() {
             />
           )}
         </Show>
-        <Show when={learning()} fallback={<Skeleton height="100px" />}>
+        <Show when={learning()} fallback={<Skeleton height="84px" />}>
           {(l) => (
             <StatCard
+              size="sm"
               title="累计正确率"
               value={formatPercent(l().overallAccuracy)}
               color="warning"
@@ -96,9 +100,10 @@ export default function AnalyticsPage() {
             />
           )}
         </Show>
-        <Show when={overview()} fallback={<Skeleton height="100px" />}>
+        <Show when={overview()} fallback={<Skeleton height="84px" />}>
           {(o) => (
             <StatCard
+              size="sm"
               title={`${days()}天学习时长`}
               value={formatDuration(o().summary.totalDurationSecs)}
               color="accent"
@@ -106,9 +111,10 @@ export default function AnalyticsPage() {
             />
           )}
         </Show>
-        <Show when={overview()} fallback={<Skeleton height="100px" />}>
+        <Show when={overview()} fallback={<Skeleton height="84px" />}>
           {(o) => (
             <StatCard
+              size="sm"
               title={`${days()}天新词`}
               value={formatNumber(o().summary.newWords)}
               color="info"
@@ -120,7 +126,7 @@ export default function AnalyticsPage() {
 
       {/* Panel: 学习构成 */}
       <Card variant="elevated">
-        <h2 class="text-lg font-semibold text-content mb-4">学习构成（学习 vs 复习）</h2>
+        <h2 class="text-headline text-content mb-4">学习构成（学习 vs 复习）</h2>
         <Show
           when={!recordTypes.error}
           fallback={<Empty title="加载失败" description="无法获取学习构成数据" />}
@@ -173,7 +179,7 @@ export default function AnalyticsPage() {
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <Card variant="elevated">
           <div class="flex items-center justify-between mb-4">
-            <h2 class="text-lg font-semibold text-content">记忆遗忘曲线</h2>
+            <h2 class="text-headline text-content">记忆遗忘曲线</h2>
             <Show when={retention()?.averageRetention != null}>
               <span class="text-xs text-content-secondary">
                 平均留存 {formatAccuracy(retention()!.averageRetention)}
@@ -245,7 +251,7 @@ export default function AnalyticsPage() {
 
         <Card variant="elevated">
           <div class="flex items-center justify-between mb-4">
-            <h2 class="text-lg font-semibold text-content">单词状态分布</h2>
+            <h2 class="text-headline text-content">单词状态分布</h2>
             <Show when={states()}>
               <span class="text-xs text-content-secondary">
                 跟踪 {formatNumber(states()!.totals.trackedWords)}，已收藏 {formatNumber(states()!.totals.bookmarkedWords)}

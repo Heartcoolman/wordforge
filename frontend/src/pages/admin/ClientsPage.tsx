@@ -1,8 +1,12 @@
 import { createSignal, onMount, Show, For } from 'solid-js';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
+import { Badge } from '@/components/ui/Badge';
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
+import { Input } from '@/components/ui/Input';
 import { Spinner } from '@/components/ui/Spinner';
+import { Empty } from '@/components/ui/Empty';
+import { Tabs } from '@/components/ui/Tabs';
 import { adminApi, type SseLiveEntry, type RecentlyActiveEntry, type TelemetrySummary, type DataChannelValue } from '@/api/admin';
 import { uiStore } from '@/stores/ui';
 
@@ -12,10 +16,10 @@ const CHANNEL_LABELS: Record<string, string> = {
   telemetry: '遥测',
 };
 
-const STATUS_COLORS: Record<DataChannelValue, string> = {
-  uploaded: 'bg-success-light text-success',
-  nil: 'bg-warning-light text-warning',
-  none: 'bg-error-light text-error',
+const CHANNEL_VARIANT: Record<DataChannelValue, 'success' | 'warning' | 'error'> = {
+  uploaded: 'success',
+  nil: 'warning',
+  none: 'error',
 };
 
 const STATUS_TEXT: Record<DataChannelValue, string> = {
@@ -26,17 +30,14 @@ const STATUS_TEXT: Record<DataChannelValue, string> = {
 
 function DataChannelBadge(props: { channel: string; status: DataChannelValue }) {
   return (
-    <span
-      class={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium ${STATUS_COLORS[props.status]}`}
+    <Badge
+      variant={CHANNEL_VARIANT[props.status]}
+      size="sm"
+      dot
       title={`${CHANNEL_LABELS[props.channel]}: ${STATUS_TEXT[props.status]}`}
     >
-      <span class="w-1.5 h-1.5 rounded-full" classList={{
-        'bg-success': props.status === 'uploaded',
-        'bg-warning': props.status === 'nil',
-        'bg-error': props.status === 'none',
-      }} />
       {CHANNEL_LABELS[props.channel]}
-    </span>
+    </Badge>
   );
 }
 
@@ -64,7 +65,7 @@ export default function ClientsPage() {
       setSseLive(data.sseLive);
       setRecentlyActive(data.recentlyActive);
     } catch (e: any) {
-      uiStore.toast.error('加载失败', e.message);
+      uiStore.toast.error('加载客户端列表失败', e.message);
     } finally {
       setLoading(false);
     }
@@ -73,28 +74,30 @@ export default function ClientsPage() {
   const handleBan = async () => {
     const t = banTarget();
     if (!t) return;
+    const shortId = truncateId(t.id);
     try {
       if (t.action === 'ban') {
         await adminApi.banClient(t.id, banReason() || undefined);
-        uiStore.toast.success('已封禁设备');
+        uiStore.toast.success(`已封禁设备 ${shortId}`);
       } else {
         await adminApi.unbanClient(t.id);
-        uiStore.toast.success('已解封设备');
+        uiStore.toast.success(`已解封设备 ${shortId}`);
       }
       setBanTarget(null);
       setBanReason('');
       loadClients();
     } catch (e: any) {
-      uiStore.toast.error('操作失败', e.message);
+      uiStore.toast.error(`${t.action === 'ban' ? '封禁' : '解封'} ${shortId} 失败`, e.message);
     }
   };
 
   const requestTelemetry = async (deviceId: string) => {
+    const shortId = truncateId(deviceId);
     try {
       await adminApi.requestTelemetry(deviceId);
-      uiStore.toast.success('已发送遥测请求');
+      uiStore.toast.success(`已向 ${shortId} 发送遥测请求`);
     } catch (e: any) {
-      uiStore.toast.error('遥测请求失败', e.message);
+      uiStore.toast.error(`向 ${shortId} 请求遥测失败`, e.message);
     }
   };
 
@@ -111,7 +114,7 @@ export default function ClientsPage() {
       setTelemetryTotal(data.total);
     } catch (e: any) {
       if (requestId !== telemetryRequestId) return;
-      uiStore.toast.error('加载遥测数据失败', e.message);
+      uiStore.toast.error(`加载 ${truncateId(deviceId)} 遥测数据失败`, e.message);
     } finally {
       if (requestId === telemetryRequestId) {
         setTelemetryLoading(false);
@@ -121,10 +124,10 @@ export default function ClientsPage() {
 
   onMount(loadClients);
 
-  const truncateId = (id: string | null | undefined) => {
+  function truncateId(id: string | null | undefined) {
     if (!id) return '';
     return id.length > 12 ? `${id.slice(0, 8)}...${id.slice(-4)}` : id;
-  };
+  }
 
   return (
     <div class="space-y-6">
@@ -134,28 +137,22 @@ export default function ClientsPage() {
 
       <Show when={!loading()} fallback={<div class="flex justify-center py-12"><Spinner size="lg" /></div>}>
         {/* Tabs */}
-        <div class="flex gap-2 border-b border-border">
-          <button
-            class={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${tab() === 'sse' ? 'border-accent text-accent' : 'border-transparent text-content-secondary hover:text-content'}`}
-            onClick={() => setTab('sse')}
-          >
-            SSE 实时连接 ({sseLive().length})
-          </button>
-          <button
-            class={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${tab() === 'recent' ? 'border-accent text-accent' : 'border-transparent text-content-secondary hover:text-content'}`}
-            onClick={() => setTab('recent')}
-          >
-            近期活跃 ({recentlyActive().length})
-          </button>
-        </div>
+        <Tabs
+          tabs={[
+            { id: 'sse', label: `SSE 实时连接 (${sseLive().length})` },
+            { id: 'recent', label: `近期活跃 (${recentlyActive().length})` },
+          ]}
+          active={tab()}
+          onChange={(id) => setTab(id as 'sse' | 'recent')}
+        />
 
         {/* SSE Live */}
         <Show when={tab() === 'sse'}>
-          <Show when={sseLive().length > 0} fallback={<p class="text-content-secondary text-sm py-4">暂无活跃 SSE 连接</p>}>
+          <Show when={sseLive().length > 0} fallback={<Card variant="outlined" padding="lg"><Empty title="暂无活跃 SSE 连接" description="实时连接数为 0；用户登录后会出现在这里" /></Card>}>
             <div class="overflow-x-auto">
               <table class="w-full text-sm">
                 <thead>
-<tr class="border-b border-border text-left text-content-secondary">
+<tr class="border-b border-border-hairline text-left text-caption uppercase tracking-wide text-content-secondary">
                      <th class="py-2 pr-4">设备 ID</th>
                      <th class="py-2 pr-4">平台</th>
                      <th class="py-2 pr-4">用户</th>
@@ -168,20 +165,20 @@ export default function ClientsPage() {
                 <tbody>
                   <For each={sseLive()}>
                     {(entry) => (
-                      <tr class="border-b border-border/50 hover:bg-surface-secondary/50 transition-colors">
-                        <td class="py-2 pr-4 font-mono text-xs" title={entry.deviceId}>{truncateId(entry.deviceId)}</td>
+                      <tr class="border-b border-border-hairline hover:bg-accent-light/40 transition-colors duration-fast ease-out-expo">
+                        <td class="py-2 pr-4 font-mono text-xs tabular-nums" title={entry.deviceId}>{truncateId(entry.deviceId)}</td>
                         <td class="py-2 pr-4">{entry.platform}</td>
-                        <td class="py-2 pr-4 font-mono text-xs">{truncateId(entry.userId)}</td>
-                        <td class="py-2 pr-4">{Math.floor(entry.connectedSecs / 60)}m</td>
-<td class="py-2 pr-4">{entry.connectionCount}</td>
+                        <td class="py-2 pr-4 font-mono text-xs tabular-nums">{truncateId(entry.userId)}</td>
+                        <td class="py-2 pr-4 tabular-nums">{Math.floor(entry.connectedSecs / 60)}m</td>
+                        <td class="py-2 pr-4 tabular-nums">{entry.connectionCount}</td>
                          <td class="py-2 pr-4">
-                           <div class="flex gap-1">
+                           <div class="flex flex-wrap gap-1">
                              <DataChannelBadge channel="amas" status={entry.dataChannels.amas} />
                              <DataChannelBadge channel="learning" status={entry.dataChannels.learning} />
                              <DataChannelBadge channel="telemetry" status={entry.dataChannels.telemetry} />
                            </div>
                          </td>
-                         <td class="py-2 flex gap-1">
+                         <td class="py-2 flex gap-1 flex-wrap">
                           <Show when={entry.isBanned} fallback={
                             <Button size="xs" variant="danger" onClick={() => setBanTarget({ id: entry.deviceId, action: 'ban' })}>封禁</Button>
                           }>
@@ -201,11 +198,11 @@ export default function ClientsPage() {
 
         {/* Recently Active */}
         <Show when={tab() === 'recent'}>
-          <Show when={recentlyActive().length > 0} fallback={<p class="text-content-secondary text-sm py-4">暂无近期活跃设备</p>}>
+          <Show when={recentlyActive().length > 0} fallback={<Card variant="outlined" padding="lg"><Empty title="暂无近期活跃设备" description="最近 24h 内没有设备上报过活动" /></Card>}>
             <div class="overflow-x-auto">
               <table class="w-full text-sm">
                 <thead>
-<tr class="border-b border-border text-left text-content-secondary">
+<tr class="border-b border-border-hairline text-left text-caption uppercase tracking-wide text-content-secondary">
                      <th class="py-2 pr-4">设备 ID</th>
                      <th class="py-2 pr-4">平台</th>
                      <th class="py-2 pr-4">用户</th>
@@ -218,24 +215,24 @@ export default function ClientsPage() {
                 <tbody>
                   <For each={recentlyActive()}>
                     {(entry) => (
-                      <tr class="border-b border-border/50 hover:bg-surface-secondary/50 transition-colors">
-                        <td class="py-2 pr-4 font-mono text-xs" title={entry.deviceId}>{truncateId(entry.deviceId)}</td>
+                      <tr class="border-b border-border-hairline hover:bg-accent-light/40 transition-colors duration-fast ease-out-expo">
+                        <td class="py-2 pr-4 font-mono text-xs tabular-nums" title={entry.deviceId}>{truncateId(entry.deviceId)}</td>
                         <td class="py-2 pr-4">{entry.platform}</td>
-                        <td class="py-2 pr-4 font-mono text-xs">{entry.userId ? truncateId(entry.userId) : '-'}</td>
-                        <td class="py-2 pr-4 text-xs">{new Date(entry.lastSeenAt.replace(' ', 'T') + 'Z').toLocaleString()}</td>
-<td class="py-2 pr-4">
-                           <span class={`inline-block px-2 py-0.5 rounded text-xs font-medium ${entry.isBanned ? 'bg-error-light text-error' : 'bg-success-light text-success'}`}>
+                        <td class="py-2 pr-4 font-mono text-xs tabular-nums">{entry.userId ? truncateId(entry.userId) : '-'}</td>
+                        <td class="py-2 pr-4 text-xs tabular-nums whitespace-nowrap">{new Date(entry.lastSeenAt.replace(' ', 'T') + 'Z').toLocaleString()}</td>
+                        <td class="py-2 pr-4">
+                           <Badge variant={entry.isBanned ? 'error' : 'success'} size="sm" dot>
                              {entry.isBanned ? '已封禁' : '正常'}
-                           </span>
+                           </Badge>
                          </td>
                          <td class="py-2 pr-4">
-                           <div class="flex gap-1">
+                           <div class="flex flex-wrap gap-1">
                              <DataChannelBadge channel="amas" status={entry.dataChannels.amas} />
                              <DataChannelBadge channel="learning" status={entry.dataChannels.learning} />
                              <DataChannelBadge channel="telemetry" status={entry.dataChannels.telemetry} />
                            </div>
                          </td>
-                         <td class="py-2 flex gap-1">
+                         <td class="py-2 flex gap-1 flex-wrap">
                           <Show when={entry.isBanned} fallback={
                             <Button size="xs" variant="danger" onClick={() => setBanTarget({ id: entry.deviceId, action: 'ban' })}>封禁</Button>
                           }>
@@ -260,14 +257,14 @@ export default function ClientsPage() {
               <Button size="xs" variant="ghost" onClick={() => setTelemetryDevice(null)}>关闭</Button>
             </div>
             <Show when={!telemetryLoading()} fallback={<div class="flex justify-center py-4"><Spinner /></div>}>
-              <Show when={telemetryRecords().length > 0} fallback={<p class="text-content-secondary text-sm">暂无遥测记录</p>}>
+              <Show when={telemetryRecords().length > 0} fallback={<Empty title="暂无遥测记录" description="该设备尚未上传遥测数据" />}>
                 <div class="space-y-2 max-h-80 overflow-y-auto">
                   <For each={telemetryRecords()}>
                     {(record) => (
-                      <div class="text-xs border border-border/50 rounded p-2 space-y-2">
-                        <div class="flex justify-between text-content-secondary">
-                          <span class="font-medium">{record.eventType}</span>
-                          <span>{new Date(record.serverTs.replace(' ', 'T') + 'Z').toLocaleString()}</span>
+                      <Card variant="outlined" padding="sm" class="text-xs space-y-2">
+                        <div class="flex justify-between items-center text-content-secondary gap-2 min-w-0">
+                          <Badge variant="accent" size="sm">{record.eventType}</Badge>
+                          <span class="tabular-nums whitespace-nowrap">{new Date(record.serverTs.replace(' ', 'T') + 'Z').toLocaleString()}</span>
                         </div>
                         {/* 设备信息 */}
                         <Show when={record.deviceProfile.osName || record.deviceProfile.browserName}>
@@ -349,12 +346,12 @@ export default function ClientsPage() {
                             </div>
                             <div class="flex gap-3 flex-wrap">
                               <For each={Object.entries(record.featureUsage)}>
-                                {([k, v]) => <span><span class="text-content-tertiary">{k} </span>{v}</span>}
+                                {([k, v]) => <span class="tabular-nums"><span class="text-content-tertiary">{k} </span>{v}</span>}
                               </For>
                             </div>
                           </div>
                         </Show>
-                      </div>
+                      </Card>
                     )}
                   </For>
                 </div>
@@ -377,12 +374,11 @@ export default function ClientsPage() {
             onCancel={() => { setBanTarget(null); setBanReason(''); }}
           >
             <Show when={target().action === 'ban'}>
-              <input
+              <Input
                 type="text"
                 placeholder="封禁原因（可选）"
                 value={banReason()}
                 onInput={(e) => setBanReason(e.currentTarget.value)}
-                class="w-full px-3 py-2 text-sm border border-border rounded-lg bg-surface text-content"
                 maxlength={500}
               />
             </Show>

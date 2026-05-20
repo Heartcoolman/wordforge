@@ -3,6 +3,7 @@ import { Card } from '@/components/ui/Card';
 import { Badge } from '@/components/ui/Badge';
 import { Spinner } from '@/components/ui/Spinner';
 import { Empty } from '@/components/ui/Empty';
+import { Pagination } from '@/components/ui/Pagination';
 import { adminApi } from '@/api/admin';
 import type { FeedbackItem } from '@/types/admin';
 
@@ -40,46 +41,48 @@ export default function FeedbackPage() {
 
   return (
     <div class="space-y-4">
-      <header class="flex items-center justify-between">
+      <header class="flex items-center justify-between pb-2 border-b border-border-hairline">
         <div>
-          <h1 class="text-2xl font-semibold text-content">反馈中心</h1>
-          <p class="text-sm text-content-tertiary mt-1">用户通过 /api/feedback 提交的内容，按时间倒序展示。</p>
+          <h1 class="text-title text-content">反馈中心</h1>
+          <p class="text-caption mt-1">用户通过 /api/feedback 提交的内容，按时间倒序展示</p>
         </div>
-        <Badge>共 {total()} 条</Badge>
+        <Badge variant="accent" size="md">共 {total()} 条</Badge>
       </header>
 
-      <Card>
-        <Show when={!loading()} fallback={<div class="py-8 flex justify-center"><Spinner /></div>}>
-          <Show when={!err()} fallback={<div class="py-8 text-error text-sm">{err()}</div>}>
-            <Show when={items().length > 0} fallback={<Empty title="暂无反馈" />}>
-              <div class="divide-y divide-border">
+      <Card padding="none">
+        <Show when={!loading()} fallback={<div class="py-12 flex justify-center"><Spinner size="lg" /></div>}>
+          <Show when={!err()} fallback={<div class="py-12 px-4 text-center text-error text-sm">{err()}</div>}>
+            <Show when={items().length > 0} fallback={<Empty title="暂无反馈" description="还没有用户提交过反馈" />}>
+              <ul class="divide-y divide-border-hairline">
                 <For each={items()}>
-                  {(it) => (
-                    <article class="py-3">
-                      <div class="flex items-center justify-between gap-2 text-xs text-content-tertiary">
+                  {(it, idx) => (
+                    <li
+                      class="group p-4 transition-colors duration-fast ease-out-expo hover:bg-accent-light/40 animate-fade-in-up"
+                      style={{ 'animation-delay': `${Math.min(idx() * 40, 320)}ms`, 'animation-fill-mode': 'backwards' }}
+                    >
+                      <div class="flex items-center justify-between gap-2 text-caption mb-2">
                         <div class="flex items-center gap-2">
                           <Show when={it.category}>
-                            <Badge variant="info">{it.category}</Badge>
+                            <Badge variant="info" dot>{it.category}</Badge>
                           </Show>
                           <Show when={it.route}>
-                            <span class="font-mono">{it.route}</span>
+                            <span class="font-mono text-content-tertiary">{it.route}</span>
                           </Show>
                         </div>
-                        <time>{new Date(it.createdAt).toLocaleString('zh-CN')}</time>
+                        <time class="tabular-nums">{new Date(it.createdAt).toLocaleString('zh-CN')}</time>
                       </div>
-                      <p class="mt-1.5 text-sm text-content whitespace-pre-wrap break-words">{it.body}</p>
-                      <p class="mt-1 text-xs text-content-tertiary">用户 ID：<span class="font-mono">{it.userId}</span></p>
-                    </article>
+                      <p class="text-sm text-content whitespace-pre-wrap break-words leading-relaxed">{it.body}</p>
+                      <p class="mt-2 text-caption">用户 ID：<span class="font-mono">{it.userId}</span></p>
+                    </li>
                   )}
                 </For>
-              </div>
+              </ul>
 
               <Show when={totalPages() > 1}>
-                <nav class="flex items-center justify-end gap-2 pt-3 text-sm">
-                  <button class="btn btn-ghost btn-sm" disabled={page() <= 1} onClick={() => load(page() - 1)}>上一页</button>
-                  <span class="text-content-tertiary">第 {page()} / {totalPages()} 页</span>
-                  <button class="btn btn-ghost btn-sm" disabled={page() >= totalPages()} onClick={() => load(page() + 1)}>下一页</button>
-                </nav>
+                <div class="flex items-center justify-between gap-2 p-3 border-t border-border-hairline">
+                  <span class="text-caption">第 {page()} / {totalPages()} 页</span>
+                  <Pagination page={page()} total={total()} pageSize={perPage()} onChange={load} />
+                </div>
               </Show>
             </Show>
           </Show>

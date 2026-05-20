@@ -82,11 +82,13 @@ if (!navigator.sendBeacon) {
   });
 }
 
-// Mock matchMedia
+// Mock matchMedia — `prefers-reduced-motion: reduce` 默认 matches=true，
+// 让所有动画（含 useCountUp / Motion One）在测试环境直接跳到 target，
+// 避免断言时机依赖动画进度
 Object.defineProperty(window, 'matchMedia', {
   writable: true,
   value: vi.fn().mockImplementation((query: string) => ({
-    matches: false,
+    matches: /prefers-reduced-motion:\s*reduce/i.test(query),
     media: query,
     onchange: null,
     addListener: vi.fn(),

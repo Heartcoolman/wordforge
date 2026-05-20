@@ -11,8 +11,8 @@ interface PanelProps {
 export function Panel(props: PanelProps) {
   return (
     <Card variant="elevated" class="flex flex-col">
-      <div class="flex items-center justify-between mb-4">
-        <h2 class="text-lg font-semibold text-content">{props.title}</h2>
+      <div class="flex items-center justify-between pb-4 mb-4 border-b border-border-hairline">
+        <h2 class="text-headline text-content">{props.title}</h2>
         <Show when={props.actions}>{props.actions}</Show>
       </div>
       <div class="grid grid-cols-1 lg:grid-cols-4 gap-4">

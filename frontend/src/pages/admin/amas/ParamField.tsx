@@ -1,6 +1,7 @@
 import { Show, createSignal } from 'solid-js';
 import { Switch } from '@/components/ui/Switch';
 import { Badge } from '@/components/ui/Badge';
+import { Input } from '@/components/ui/Input';
 import { adminApi } from '@/api/admin';
 import { uiStore } from '@/stores/ui';
 import type { ParamMeta } from './schema';
@@ -84,23 +85,25 @@ export function ParamField(props: ParamFieldProps) {
 
       <Show when={isNumber}>
         <div class="flex items-center gap-2">
-          <input
+          <Input
             type="number"
-            class="w-28 h-9 px-2 rounded-md text-sm bg-surface border border-border focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent font-mono"
+            class="w-28 h-9 font-mono"
             min={m.min}
             max={m.max}
             step={m.step ?? (m.type === 'integer' ? 1 : 0.01)}
             value={numericValue()}
+            aria-label={`${m.label_zh}（数值输入）`}
             onInput={(e) => handleNumberInput(e.currentTarget.value)}
           />
           <Show when={showSlider()}>
             <input
               type="range"
-              class="flex-1 accent-accent"
+              class="flex-1 accent-accent focus-ring-soft"
               min={m.min}
               max={m.max}
               step={m.step ?? (m.type === 'integer' ? 1 : 0.01)}
               value={numericValue()}
+              aria-label={`${m.label_zh}（滑块）`}
               onInput={(e) => handleNumberInput(e.currentTarget.value)}
             />
           </Show>
@@ -110,8 +113,9 @@ export function ParamField(props: ParamFieldProps) {
       <div class="flex items-center gap-2 flex-wrap text-xs">
         <button
           type="button"
-          class="text-content-tertiary hover:text-accent transition-colors underline-offset-2 hover:underline"
+          class="focus-ring-soft px-1.5 py-0.5 rounded -mx-1 text-content-tertiary hover:text-accent transition-colors underline-offset-2 hover:underline"
           title="恢复为出厂默认"
+          aria-label={`恢复 ${m.label_zh} 为出厂默认值 ${formatChip(m.default)}`}
           onClick={() => props.onChange(m.default)}
         >
           默认 {formatChip(m.default)}
@@ -119,8 +123,9 @@ export function ParamField(props: ParamFieldProps) {
         <Show when={m.tuned_2026_05_15 !== undefined}>
           <button
             type="button"
-            class="text-content-tertiary hover:text-success transition-colors underline-offset-2 hover:underline"
+            class="focus-ring-soft px-1.5 py-0.5 rounded -mx-1 text-content-tertiary hover:text-success transition-colors underline-offset-2 hover:underline"
             title="应用 2026-05-15 已调优值"
+            aria-label={`应用 ${m.label_zh} 的 2026-05-15 调优值 ${formatChip(m.tuned_2026_05_15!)}`}
             onClick={() => props.onChange(m.tuned_2026_05_15)}
           >
             已调优 {formatChip(m.tuned_2026_05_15!)}
@@ -131,8 +136,8 @@ export function ParamField(props: ParamFieldProps) {
         </Show>
         <button
           type="button"
-          class="text-content-tertiary hover:text-accent transition-colors"
-          title="让 DeepSeek 用一句话解释这个参数"
+          class="focus-ring-soft px-1.5 py-0.5 rounded -mx-1 text-content-tertiary hover:text-accent transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+          aria-label={`让 AI 用一句话解释 ${m.label_zh}`}
           disabled={askingAi()}
           onClick={askAi}
         >

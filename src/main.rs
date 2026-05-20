@@ -129,6 +129,16 @@ async fn main() {
         shutdown_tx.subscribe(),
     ));
 
+    tokio::spawn(learning_backend::workers::probe_confirm_sweeper::run(
+        state.clone(),
+        shutdown_tx.subscribe(),
+    ));
+
+    tokio::spawn(learning_backend::workers::probe_cleanup::run(
+        state.clone(),
+        shutdown_tx.subscribe(),
+    ));
+
     tokio::spawn(rate_limit_cleanup_loop(
         state.rate_limit().clone(),
         config.rate_limit.window_secs,

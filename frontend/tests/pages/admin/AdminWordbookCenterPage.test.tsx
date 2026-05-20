@@ -131,8 +131,10 @@ describe('AdminWordbookCenterPage', () => {
     mockApi.wbCenterImport.mockResolvedValue({ wordbook: { name: 'CET-4 核心' }, wordsImported: 1500 });
     await renderPage();
     await waitFor(() => expect(screen.getByText('CET-4 核心')).toBeInTheDocument());
-    const importBtn = screen.getByText('导入为系统词书');
-    fireEvent.click(importBtn);
+    fireEvent.click(screen.getByText('导入为系统词书'));
+    // 弹出 ConfirmDialog，需点确认
+    await waitFor(() => expect(screen.getByText('确认导入词书')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('确认导入'));
     await waitFor(() => expect(mockToast.success).toHaveBeenCalled());
   });
 
@@ -143,6 +145,8 @@ describe('AdminWordbookCenterPage', () => {
     await renderPage();
     await waitFor(() => expect(screen.getByText('CET-4 核心')).toBeInTheDocument());
     fireEvent.click(screen.getByText('导入为系统词书'));
+    await waitFor(() => expect(screen.getByText('确认导入词书')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('确认导入'));
     await waitFor(() => expect(mockToast.error).toHaveBeenCalled());
   });
 
@@ -190,9 +194,10 @@ describe('AdminWordbookCenterPage', () => {
   });
 
   it('handles browse failure gracefully', async () => {
+    // 已配置 URL 但远端 fetch 失败：仍认为 configured，只是 items 空 + 弹错误 toast
     mockApi.getSettings.mockResolvedValue({ wordbookCenterUrl: 'https://x.com' });
     mockApi.wbCenterBrowse.mockRejectedValue(new Error('500'));
     await renderPage();
-    await waitFor(() => expect(screen.getByText('尚未配置词书中心 URL')).toBeInTheDocument());
+    await waitFor(() => expect(mockToast.error).toHaveBeenCalledWith('加载词书中心失败', '500'));
   });
 });

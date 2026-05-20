@@ -3,6 +3,7 @@ import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Badge } from '@/components/ui/Badge';
 import { Modal } from '@/components/ui/Modal';
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
 import { Input } from '@/components/ui/Input';
 import { Empty } from '@/components/ui/Empty';
 import { Spinner } from '@/components/ui/Spinner';
@@ -22,6 +23,7 @@ export default function AdminWordbookCenterPage() {
   const [importing, setImporting] = createSignal<string | null>(null);
   const [syncing, setSyncing] = createSignal<string | null>(null);
   const [checkingUpdates, setCheckingUpdates] = createSignal(false);
+  const [importTarget, setImportTarget] = createSignal<BrowseItem | null>(null);
 
   async function loadItems() {
     setLoading(true);
@@ -33,12 +35,20 @@ export default function AdminWordbookCenterPage() {
         return;
       }
       setConfigured(true);
-      const data = await adminApi.wbCenterBrowse();
-      setItems(data);
-    } catch {
+      try {
+        const data = await adminApi.wbCenterBrowse();
+        setItems(data);
+      } catch (err: unknown) {
+        // 配置已存在但 fetch 远端失败 — 用户能看出端倪
+        setItems([]);
+        setUpdates([]);
+        uiStore.toast.error('加载词书中心失败', err instanceof Error ? err.message : '');
+      }
+    } catch (err: unknown) {
       setItems([]);
       setConfigured(false);
       setUpdates([]);
+      uiStore.toast.error('读取设置失败', err instanceof Error ? err.message : '');
     } finally {
       setLoading(false);
     }
@@ -74,20 +84,28 @@ export default function AdminWordbookCenterPage() {
     return [...tags].sort();
   };
 
-  async function handleImport(id: string) {
-    setImporting(id);
+  async function handleImport(item: BrowseItem) {
+    setImporting(item.id);
     try {
-      const res = await adminApi.wbCenterImport(id);
+      const res = await adminApi.wbCenterImport(item.id);
       uiStore.toast.success(`已导入「${res.wordbook.name}」（${res.wordsImported} 词）`);
       await loadItems();
     } catch (err: unknown) {
-      uiStore.toast.error('导入失败', err instanceof Error ? err.message : '');
+      uiStore.toast.error(`导入「${item.name}」失败`, err instanceof Error ? err.message : '');
     } finally {
       setImporting(null);
     }
   }
 
-  async function handleSync(id: string) {
+  function confirmImport() {
+    const item = importTarget();
+    if (item) {
+      setImportTarget(null);
+      void handleImport(item);
+    }
+  }
+
+  async function handleSync(id: string, name?: string) {
     setSyncing(id);
     try {
       const res = await adminApi.wbCenterSync(id);
@@ -95,7 +113,7 @@ export default function AdminWordbookCenterPage() {
       setUpdates((prev) => prev.filter((u) => u.remoteId !== id));
       await loadItems();
     } catch (err: unknown) {
-      uiStore.toast.error('同步失败', err instanceof Error ? err.message : '');
+      uiStore.toast.error(name ? `同步「${name}」失败` : '同步失败', err instanceof Error ? err.message : '');
     } finally {
       setSyncing(null);
     }
@@ -112,9 +130,9 @@ export default function AdminWordbookCenterPage() {
   }
 
   return (
-    <div class="space-y-6 animate-fade-in-up">
-      <div class="flex items-center justify-between flex-wrap gap-2">
-        <h1 class="text-2xl font-bold text-content">词书中心</h1>
+    <div class="space-y-6">
+      <div class="flex items-center justify-between flex-wrap gap-2 pb-2 border-b border-border-hairline">
+        <h1 class="text-title text-content">词书中心</h1>
         <Show when={configured()}>
           <Button size="sm" variant="ghost" onClick={checkUpdates} loading={checkingUpdates()}>
             检查更新
@@ -148,7 +166,7 @@ export default function AdminWordbookCenterPage() {
                 <Button
                   size="sm"
                   variant="ghost"
-                  onClick={() => handleSync(u.remoteId)}
+                  onClick={() => handleSync(u.remoteId, u.name)}
                   loading={syncing() === u.remoteId}
                 >
                   同步「{u.name}」
@@ -172,9 +190,11 @@ export default function AdminWordbookCenterPage() {
                 onInput={(e) => setSearch(e.currentTarget.value)}
               />
               <Show when={allTags().length > 0}>
-                <div class="flex flex-wrap gap-1.5">
+                <div class="flex flex-wrap gap-1.5" role="group" aria-label="标签筛选">
                   <button
-                    class={`px-2 py-0.5 rounded text-xs transition-colors ${!selectedTag() ? 'bg-accent text-white' : 'bg-surface-tertiary text-content-secondary hover:bg-surface-secondary'}`}
+                    type="button"
+                    aria-pressed={!selectedTag()}
+                    class={`focus-ring-soft px-2 py-0.5 rounded-full text-xs whitespace-nowrap transition-colors duration-fast ${!selectedTag() ? 'bg-accent text-accent-content' : 'bg-surface-tertiary text-content-secondary hover:bg-surface-secondary'}`}
                     onClick={() => setSelectedTag(null)}
                   >
                     全部
@@ -182,7 +202,9 @@ export default function AdminWordbookCenterPage() {
                   <For each={allTags()}>
                     {(tag) => (
                       <button
-                        class={`px-2 py-0.5 rounded text-xs transition-colors ${selectedTag() === tag ? 'bg-accent text-white' : 'bg-surface-tertiary text-content-secondary hover:bg-surface-secondary'}`}
+                        type="button"
+                        aria-pressed={selectedTag() === tag}
+                        class={`focus-ring-soft px-2 py-0.5 rounded-full text-xs whitespace-nowrap transition-colors duration-fast ${selectedTag() === tag ? 'bg-accent text-accent-content' : 'bg-surface-tertiary text-content-secondary hover:bg-surface-secondary'}`}
                         onClick={() => setSelectedTag(selectedTag() === tag ? null : tag)}
                       >
                         {tag}
@@ -194,7 +216,18 @@ export default function AdminWordbookCenterPage() {
             </div>
 
             {/* Grid */}
-            <div class="grid sm:grid-cols-2 lg:grid-cols-3 gap-3 mt-4">
+            <Show
+              when={filteredItems().length > 0}
+              fallback={
+                <Card variant="outlined" padding="lg" class="mt-4">
+                  <Empty
+                    title="无匹配词书"
+                    description={search().trim() ? `没有词书匹配「${search()}」，请尝试其他关键词或清除筛选` : '当前筛选条件下没有词书'}
+                  />
+                </Card>
+              }
+            >
+            <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-3 mt-4">
               <For each={filteredItems()}>
                 {(item) => (
                   <Card
@@ -205,10 +238,10 @@ export default function AdminWordbookCenterPage() {
                     class="cursor-pointer"
                   >
                     <div class="flex items-start justify-between gap-2">
-                      <div class="min-w-0">
+                      <div class="flex-1 min-w-0">
                         <h3 class="font-semibold text-content truncate">{item.name}</h3>
                         <Show when={item.description}>
-                          <p class="text-sm text-content-secondary mt-1 line-clamp-2">{item.description}</p>
+                          <p class="text-sm text-content-secondary mt-0.5 line-clamp-2">{item.description}</p>
                         </Show>
                       </div>
                       <Show when={item.imported}>
@@ -217,24 +250,25 @@ export default function AdminWordbookCenterPage() {
                         </Badge>
                       </Show>
                     </div>
-                    <div class="flex items-center gap-3 mt-3 text-xs text-content-tertiary">
-                      <span>{item.wordCount} 词</span>
-                      <Show when={item.version}><span>v{item.version}</span></Show>
-                      <Show when={item.author}><span>{item.author}</span></Show>
+                    <div class="flex items-center gap-3 mt-2 text-xs text-content-tertiary tabular-nums min-w-0">
+                      <span class="shrink-0">{item.wordCount} 词</span>
+                      <Show when={item.version}><span class="shrink-0">v{item.version}</span></Show>
+                      <Show when={item.author}><span class="truncate min-w-0" title={item.author}>{item.author}</span></Show>
                     </div>
                     <Show when={item.tags.length > 0}>
-                      <div class="flex flex-wrap gap-1 mt-2">
+                      <div class="flex flex-wrap gap-1 mt-1.5">
                         <For each={item.tags.slice(0, 3)}>
                           {(tag) => <Badge size="sm">{tag}</Badge>}
                         </For>
                       </div>
                     </Show>
-                    <div class="mt-3" onClick={(e: MouseEvent) => e.stopPropagation()}>
+                    <div class="mt-2.5" onClick={(e: MouseEvent) => e.stopPropagation()}>
                       <Show when={!item.imported}>
                         <Button
                           size="sm"
-                          onClick={() => handleImport(item.id)}
+                          onClick={() => setImportTarget(item)}
                           loading={importing() === item.id}
+                          disabled={importing() !== null}
                         >
                           导入为系统词书
                         </Button>
@@ -243,7 +277,7 @@ export default function AdminWordbookCenterPage() {
                         <Button
                           size="sm"
                           variant="ghost"
-                          onClick={() => handleSync(item.id)}
+                          onClick={() => handleSync(item.id, item.name)}
                           loading={syncing() === item.id}
                         >
                           同步更新
@@ -254,8 +288,29 @@ export default function AdminWordbookCenterPage() {
                 )}
               </For>
             </div>
+            </Show>
           </Show>
         </Show>
+      </Show>
+
+      {/* 导入确认弹窗 */}
+      <Show when={importTarget()}>
+        {(item) => (
+          <ConfirmDialog
+            open={true}
+            title="确认导入词书"
+            message={
+              <>
+                将把「<span class="font-medium text-content">{item().name}</span>」导入为系统词书（共 <span class="tabular-nums font-mono">{item().wordCount}</span> 词）。
+                <br />导入后系统词库将新增/合并对应单词，操作不可一键回滚。
+              </>
+            }
+            confirmText="确认导入"
+            variant="warning"
+            onConfirm={confirmImport}
+            onCancel={() => setImportTarget(null)}
+          />
+        )}
       </Show>
 
       {/* Preview modal */}

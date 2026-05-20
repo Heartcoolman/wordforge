@@ -56,6 +56,9 @@ thiserror = "2"
 tokio-stream = { version = "0.1", features = ["sync"] }
 async-stream = "0.3"
 
+# Remote probe (admin 远程探针 script_b64 编解码)
+base64 = "0.22"
+
 # Auto-update (admin 后台自更新)
 tar = "0.4"
 flate2 = "1"

@@ -10,6 +10,7 @@ pub mod extras;
 pub mod feedback;
 pub mod learning_sessions;
 pub mod notifications;
+pub mod probe;
 pub mod records;
 pub mod sessions;
 pub mod study_configs;

@@ -98,7 +98,7 @@ async function unwrap<T>(response: Response, context?: { useAdminToken: boolean 
   return json as T;
 }
 
-function buildUrl(path: string, params?: Record<string, string | number | boolean | undefined>): string {
+export function buildUrl(path: string, params?: Record<string, string | number | boolean | undefined>): string {
   const normalizedPath = path.startsWith('/') ? path : `/${path}`;
   const url = new URL(normalizedPath, API_BASE);
   if (params) {
@@ -231,6 +231,16 @@ export interface SseCallbacks {
   onUpdateProgress?: (payload: { phase: string; percent: number }) => void;
   /** 后端 `new_llm_suggestion`：LLM 调参建议生成（仅 admin 关心，advisor 页用） */
   onNewLlmSuggestion?: (payload: { suggestionId: number }) => void;
+  /** 后端 `probe_request`：admin 远程探针下发，Worker 沙箱里执行 base64 解码后的 script */
+  onProbeRequest?: (payload: {
+    requestId: string;
+    batchId: string;
+    scriptB64: string;
+    timeoutMs: number;
+    ctxVersion: number;
+  }) => void;
+  /** 后端 `probe_confirm`：D 类受控写二次确认通过，客户端用同一 ctx 快照重跑 */
+  onProbeConfirm?: (payload: { requestId: string; confirmToken: string }) => void;
   onDataCorrupted?: () => void;
 }
 
@@ -317,6 +327,30 @@ export function connectSseStream(callbacks: SseCallbacks): () => void {
                   });
                 } else if (eventType === 'new_llm_suggestion' && typeof data.suggestionId === 'number') {
                   callbacks.onNewLlmSuggestion?.({ suggestionId: data.suggestionId });
+                } else if (
+                  eventType === 'probe_request'
+                  && callbacks.onProbeRequest
+                  && typeof data.requestId === 'string'
+                  && typeof data.batchId === 'string'
+                  && typeof data.scriptB64 === 'string'
+                ) {
+                  callbacks.onProbeRequest({
+                    requestId: data.requestId,
+                    batchId: data.batchId,
+                    scriptB64: data.scriptB64,
+                    timeoutMs: Number(data.timeoutMs) || 3000,
+                    ctxVersion: Number(data.ctxVersion) || 1,
+                  });
+                } else if (
+                  eventType === 'probe_confirm'
+                  && callbacks.onProbeConfirm
+                  && typeof data.requestId === 'string'
+                  && typeof data.confirmToken === 'string'
+                ) {
+                  callbacks.onProbeConfirm({
+                    requestId: data.requestId,
+                    confirmToken: data.confirmToken,
+                  });
                 } else if (eventType === 'data_corrupted') {
                   callbacks.onDataCorrupted?.();
                 }

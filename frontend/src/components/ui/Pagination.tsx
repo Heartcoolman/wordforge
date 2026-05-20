@@ -37,7 +37,7 @@ export function Pagination(props: PaginationProps) {
           disabled={!hasPrev()}
           onClick={() => props.onChange(props.page - 1)}
           aria-label="上一页"
-          class="p-2 rounded-lg text-content-secondary hover:bg-surface-secondary disabled:opacity-40 disabled:pointer-events-none transition-colors cursor-pointer"
+          class="p-2 rounded-lg text-content-secondary hover:bg-surface-secondary hover:text-content disabled:opacity-40 disabled:pointer-events-none transition-colors duration-fast cursor-pointer"
         >
           <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
             <path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7" />
@@ -53,10 +53,11 @@ export function Pagination(props: PaginationProps) {
                 aria-label={`第 ${item} 页`}
                 aria-current={props.page === item ? 'page' : undefined}
                 class={cn(
-                  'w-8 h-8 rounded-lg text-sm font-medium transition-colors cursor-pointer',
+                  'w-8 h-8 rounded-lg text-sm font-medium cursor-pointer',
+                  'transition-[background-color,color,box-shadow,transform] duration-fast ease-out-expo',
                   props.page === item
-                    ? 'bg-accent text-accent-content'
-                    : 'text-content-secondary hover:bg-surface-secondary',
+                    ? 'bg-gradient-accent-strong text-accent-content shadow-elevation-1'
+                    : 'text-content-secondary hover:bg-surface-secondary hover:text-content',
                 )}
               >
                 {item}
@@ -68,7 +69,7 @@ export function Pagination(props: PaginationProps) {
           disabled={!hasNext()}
           onClick={() => props.onChange(props.page + 1)}
           aria-label="下一页"
-          class="p-2 rounded-lg text-content-secondary hover:bg-surface-secondary disabled:opacity-40 disabled:pointer-events-none transition-colors cursor-pointer"
+          class="p-2 rounded-lg text-content-secondary hover:bg-surface-secondary hover:text-content disabled:opacity-40 disabled:pointer-events-none transition-colors duration-fast cursor-pointer"
         >
           <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
             <path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7" />

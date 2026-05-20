@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/Button';
 import { Spinner } from '@/components/ui/Spinner';
 import { Tabs } from '@/components/ui/Tabs';
 import { Badge } from '@/components/ui/Badge';
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
 import { uiStore } from '@/stores/ui';
 import { amasApi } from '@/api/amas';
 import { adminApi } from '@/api/admin';
@@ -28,6 +29,9 @@ export default function AmasConfigPage() {
   const [reloading, setReloading] = createSignal(false);
   const [tab, setTab] = createSignal<TabId>('tier-a');
   const [versionDrawerOpen, setVersionDrawerOpen] = createSignal(false);
+  // 危险操作二次确认
+  const [showSaveConfirm, setShowSaveConfirm] = createSignal(false);
+  const [showReloadConfirm, setShowReloadConfirm] = createSignal(false);
 
   onMount(async () => {
     const [c, m] = await Promise.allSettled([amasApi.getConfig(), amasApi.getMetrics()]);
@@ -44,13 +48,28 @@ export default function AmasConfigPage() {
 
   const errors = createMemo(() => validateConfig(config()));
   const dirty = createMemo(() => diffKnown(baseline(), config()).length > 0);
+  const dirtyCount = createMemo(() => diffKnown(baseline(), config()).length);
 
-  async function saveConfig() {
+  function requestSave() {
     const errs = errors();
     if (errs.length > 0) {
       uiStore.toast.error('校验未通过', `${errs.length} 个字段需要修正`);
       return;
     }
+    setShowSaveConfirm(true);
+  }
+
+  function requestReload() {
+    const errs = errors();
+    if (errs.length > 0) {
+      uiStore.toast.error('校验未通过', `${errs.length} 个字段需要修正`);
+      return;
+    }
+    setShowReloadConfirm(true);
+  }
+
+  async function saveConfig() {
+    setShowSaveConfirm(false);
     try {
       setSaving(true);
       await amasApi.updateConfig(config() as unknown as AmasConfig);
@@ -64,11 +83,7 @@ export default function AmasConfigPage() {
   }
 
   async function reloadAmasConfig() {
-    const errs = errors();
-    if (errs.length > 0) {
-      uiStore.toast.error('校验未通过', `${errs.length} 个字段需要修正`);
-      return;
-    }
+    setShowReloadConfirm(false);
     try {
       setReloading(true);
       const latest = await adminApi.reloadAmas(config() as unknown as AmasConfig);
@@ -88,13 +103,13 @@ export default function AmasConfigPage() {
   }
 
   return (
-    <div class="space-y-4 animate-fade-in-up">
+    <div class="space-y-4">
       <Show when={!loading()} fallback={<div class="flex justify-center py-12"><Spinner size="lg" /></div>}>
         <Card variant="elevated">
           <div class="flex flex-col gap-3">
             <div class="flex items-baseline justify-between flex-wrap gap-3">
               <div>
-                <h2 class="text-lg font-semibold text-content">AMAS 调参</h2>
+                <h2 class="text-headline text-content">AMAS 调参</h2>
                 <p class="text-xs text-content-tertiary mt-0.5">
                   共 ~295 个参数，先在「重点参数」调 11 维核心、其余在「分节配置」或「JSON 高级」编辑
                 </p>
@@ -112,10 +127,10 @@ export default function AmasConfigPage() {
                 <Button size="sm" variant="ghost" onClick={() => setVersionDrawerOpen(true)}>
                   版本历史
                 </Button>
-                <Button size="sm" variant="outline" onClick={reloadAmasConfig} loading={reloading()} disabled={errors().length > 0}>
+                <Button size="sm" variant="outline" onClick={requestReload} loading={reloading()} disabled={errors().length > 0 || saving()}>
                   热重载
                 </Button>
-                <Button size="sm" onClick={saveConfig} loading={saving()} disabled={errors().length > 0 || !dirty()}>
+                <Button size="sm" onClick={requestSave} loading={saving()} disabled={errors().length > 0 || !dirty() || reloading()}>
                   保存配置
                 </Button>
               </div>
@@ -155,17 +170,49 @@ export default function AmasConfigPage() {
           }}
         />
 
+        {/* 保存确认：写入新版本，对所有在线用户生效 */}
+        <ConfirmDialog
+          open={showSaveConfirm()}
+          title="确认保存 AMAS 配置"
+          message={
+            <>
+              将保存 <span class="font-medium text-content tabular-nums">{dirtyCount()}</span> 处参数修改并写入新版本。
+              <br />新配置对所有在线用户立即生效，回滚需在「版本历史」中手动操作。
+            </>
+          }
+          confirmText="确认保存"
+          variant="warning"
+          onConfirm={saveConfig}
+          onCancel={() => setShowSaveConfirm(false)}
+        />
+
+        {/* 热重载确认：跳过版本化直接覆盖 */}
+        <ConfirmDialog
+          open={showReloadConfirm()}
+          title="确认热重载 AMAS 配置"
+          message={
+            <>
+              将立即把当前编辑值推送到运行时（绕过版本化），所有在线请求下一次调用时使用新参数。
+              <br />此操作不会生成版本快照，仅用于排错与即时调参；务必先确认无误。
+            </>
+          }
+          confirmText="确认热重载"
+          variant="danger"
+          onConfirm={reloadAmasConfig}
+          onCancel={() => setShowReloadConfirm(false)}
+        />
+
         <Show when={metrics()}>
           {(m) => {
             const entries = () => Object.entries(m() as Record<string, { callCount: number; totalLatencyUs: number; errorCount: number }>);
             return (
               <Card variant="elevated">
-                <h2 class="text-lg font-semibold text-content mb-3">算法指标</h2>
+                <h2 class="text-headline text-content mb-3">算法指标</h2>
                 <Show when={entries().length > 0} fallback={<p class="text-sm text-content-secondary">暂无指标数据</p>}>
                   <div class="overflow-x-auto">
                     <table class="w-full text-sm">
                       <thead>
-                        <tr class="bg-surface-secondary border-b border-border">
+                        <tr class="bg-surface-secondary/60 backdrop-blur-sm border-b border-border-hairline">
                           <th scope="col" class="px-4 py-2 text-left font-medium text-content-secondary">算法名称</th>
                           <th scope="col" class="px-4 py-2 text-right font-medium text-content-secondary">调用次数</th>
                           <th scope="col" class="px-4 py-2 text-right font-medium text-content-secondary">平均延迟</th>
@@ -175,7 +222,7 @@ export default function AmasConfigPage() {
                       <tbody>
                         <For each={entries()}>
                           {([name, snapshot]) => (
-                            <tr class="border-b border-border/50 hover:bg-surface-secondary/50 transition-colors">
+                            <tr class="border-b border-border-hairline hover:bg-accent-light/40 transition-colors duration-fast ease-out-expo">
                               <td class="px-4 py-2 font-mono text-sm">{name}</td>
                               <td class="px-4 py-2 text-right">{snapshot.callCount}</td>
                               <td class="px-4 py-2 text-right">

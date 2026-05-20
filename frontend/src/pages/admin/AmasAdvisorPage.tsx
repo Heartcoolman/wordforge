@@ -8,6 +8,7 @@ import { Tabs } from '@/components/ui/Tabs';
 import { StatCard } from '@/components/ui/StatCard';
 import { uiStore } from '@/stores/ui';
 import { adminApi, type AmasSuggestion, type AmasSuggestionStatus } from '@/api/admin';
+import { formatMoney } from '@/utils/formatters';
 
 const STATUS_LABEL: Record<AmasSuggestionStatus, string> = {
   pending: '待审批',
@@ -75,16 +76,41 @@ export default function AmasAdvisorPage() {
   }
 
   return (
-    <div class="space-y-4 animate-fade-in-up">
-      <Show when={spend()} fallback={<Card variant="elevated"><Spinner size="sm" /></Card>}>
-        {(s) => (
-          <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
-            <StatCard title="今日花费 USD" value={`$${s().todayCostUsd.toFixed(4)}`} icon="" color="info" />
-            <StatCard title="日额度上限" value={`$${s().dailyCapUsd.toFixed(2)}`} icon="" color="accent" />
-            <StatCard title="剩余额度" value={`$${s().remainingUsd.toFixed(4)}`} icon="" color={s().remainingUsd < 0.1 ? 'error' : 'success'} />
-            <StatCard title="今日 token (in/out)" value={`${s().todayTokensInput}/${s().todayTokensOutput}`} icon="" color="info" />
-          </div>
-        )}
+    <div class="space-y-4">
+      <Show
+        when={!spend.error}
+        fallback={<Card variant="elevated"><Empty title="额度信息加载失败" description={spend.error instanceof Error ? spend.error.message : '请稍后重试'} /></Card>}
+      >
+        <Show when={spend()} fallback={<Card variant="elevated"><Spinner size="sm" /></Card>}>
+          {(s) => (
+            <div class="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+              <StatCard
+                title="今日花费 USD"
+                value={formatMoney(s().todayCostUsd, 4)}
+                color="info"
+                icon="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+              />
+              <StatCard
+                title="日额度上限"
+                value={formatMoney(s().dailyCapUsd, 2)}
+                color="accent"
+                icon="M11 3.055A9.001 9.001 0 1020.945 13H11V3.055zM20.488 9H15V3.512A9.025 9.025 0 0120.488 9z"
+              />
+              <StatCard
+                title="剩余额度"
+                value={formatMoney(s().remainingUsd, 4)}
+                color={s().remainingUsd < 0.1 ? 'error' : 'success'}
+                icon="M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z"
+              />
+              <StatCard
+                title="今日 token (in/out)"
+                value={`${s().todayTokensInput}/${s().todayTokensOutput}`}
+                color="info"
+                icon="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4"
+              />
+            </div>
+          )}
+        </Show>
       </Show>
 
       <Tabs
@@ -97,29 +123,38 @@ export default function AmasAdvisorPage() {
       />
 
       <Show when={tab() === 'pending'}>
-        <Show when={!pending.loading} fallback={<div class="flex justify-center py-12"><Spinner /></div>}>
-          <Show when={(pending() ?? []).length > 0} fallback={<Card variant="elevated"><Empty title="暂无待审批建议" description="LLM advisor worker 每 20 分钟产出一次；mock 模式启用后下一次会有 pending" /></Card>}>
-            <For each={pending() ?? []}>
-              {(s) => (
-                <SuggestionCard
-                  s={s}
-                  busy={decidingId() === s.id}
-                  onApprove={() => approve(s)}
-                  onReject={() => reject(s)}
-                />
-              )}
-            </For>
+        <Show
+          when={!pending.error}
+          fallback={<Card variant="elevated"><Empty title="待审批列表加载失败" description={pending.error instanceof Error ? pending.error.message : '请稍后重试'} /></Card>}
+        >
+          <Show when={!pending.loading} fallback={<div class="flex justify-center py-12"><Spinner /></div>}>
+            <Show when={(pending() ?? []).length > 0} fallback={<Card variant="elevated"><Empty title="暂无待审批建议" description="LLM advisor worker 每 20 分钟产出一次；mock 模式启用后下一次会有 pending" /></Card>}>
+              <For each={pending() ?? []}>
+                {(s) => (
+                  <SuggestionCard
+                    s={s}
+                    busy={decidingId() === s.id}
+                    onApprove={() => approve(s)}
+                    onReject={() => reject(s)}
+                  />
+                )}
+              </For>
+            </Show>
           </Show>
         </Show>
       </Show>
 
       <Show when={tab() === 'history'}>
-        <Show when={!history.loading} fallback={<div class="flex justify-center py-12"><Spinner /></div>}>
-          <Show when={(history() ?? []).length > 0} fallback={<Card variant="elevated"><Empty title="尚无历史" description="" /></Card>}>
+        <Show
+          when={!history.error}
+          fallback={<Card variant="elevated"><Empty title="历史加载失败" description={history.error instanceof Error ? history.error.message : '请稍后重试'} /></Card>}
+        >
+          <Show when={!history.loading} fallback={<div class="flex justify-center py-12"><Spinner /></div>}>
+            <Show when={(history() ?? []).length > 0} fallback={<Card variant="elevated"><Empty title="尚无历史" description="" /></Card>}>
             <Card variant="elevated">
               <table class="w-full text-sm">
                 <thead>
-                  <tr class="bg-surface-secondary border-b border-border">
+                  <tr class="bg-surface-secondary/60 backdrop-blur-sm border-b border-border-hairline">
                     <th scope="col" class="px-3 py-2 text-left font-medium text-content-secondary">时间</th>
                     <th scope="col" class="px-3 py-2 text-left font-medium text-content-secondary">状态</th>
                     <th scope="col" class="px-3 py-2 text-left font-medium text-content-secondary">基础版本</th>
@@ -131,12 +166,12 @@ export default function AmasAdvisorPage() {
                 <tbody>
                   <For each={history() ?? []}>
                     {(s) => (
-                      <tr class="border-b border-border/40">
-                        <td class="px-3 py-2 text-xs text-content-tertiary">{formatTime(s.createdAt)}</td>
+                      <tr class="border-b border-border-hairline">
+                        <td class="px-3 py-2 text-xs text-content-tertiary tabular-nums whitespace-nowrap">{formatTime(s.createdAt)}</td>
                         <td class="px-3 py-2"><Badge variant={STATUS_VARIANT[s.status]} size="sm">{STATUS_LABEL[s.status]}</Badge></td>
-                        <td class="px-3 py-2 font-mono text-xs">{s.basedOnVersionHash.slice(0, 10)}</td>
+                        <td class="px-3 py-2 font-mono text-xs tabular-nums">{s.basedOnVersionHash.slice(0, 10)}</td>
                         <td class="px-3 py-2 text-xs text-content max-w-md truncate" title={s.rationale}>{s.rationale}</td>
-                        <td class="px-3 py-2 text-right font-mono text-xs">{s.costUsd != null ? `$${s.costUsd.toFixed(4)}` : '—'}</td>
+                        <td class="px-3 py-2 text-right font-mono text-xs tabular-nums">{s.costUsd != null ? formatMoney(s.costUsd, 4) : '—'}</td>
                         <td class="px-3 py-2 text-xs text-content-tertiary">{s.decidedBy ?? '—'}</td>
                       </tr>
                     )}
@@ -144,6 +179,7 @@ export default function AmasAdvisorPage() {
                 </tbody>
               </table>
             </Card>
+            </Show>
           </Show>
         </Show>
       </Show>
@@ -169,7 +205,7 @@ function SuggestionCard(props: {
             <Badge variant="info" size="sm">置信 {(props.s.confidence! * 100).toFixed(0)}%</Badge>
           </Show>
           <Show when={props.s.costUsd != null}>
-            <span class="text-xs text-content-tertiary">${props.s.costUsd!.toFixed(4)}</span>
+            <span class="text-xs text-content-tertiary tabular-nums">{formatMoney(props.s.costUsd!, 4)}</span>
           </Show>
         </div>
         <div class="flex gap-2 shrink-0">
@@ -184,7 +220,7 @@ function SuggestionCard(props: {
         <h4 class="text-xs font-medium text-content-secondary">Patch（{Object.keys(props.s.patchJson).length} 项）</h4>
         <table class="w-full text-xs font-mono">
           <thead>
-            <tr class="text-content-tertiary border-b border-border/40">
+            <tr class="text-content-tertiary border-b border-border-hairline">
               <th class="text-left py-1 pr-2">字段</th>
               <th class="text-right py-1">建议值</th>
             </tr>
@@ -192,9 +228,9 @@ function SuggestionCard(props: {
           <tbody>
             <For each={Object.entries(props.s.patchJson)}>
               {([path, value]) => (
-                <tr class="border-b border-border/30">
+                <tr class="border-b border-border-hairline">
                   <td class="py-1 pr-2 text-content">{path}</td>
-                  <td class="py-1 text-right text-success">{typeof value === 'number' ? value.toFixed(6).replace(/0+$/, '').replace(/\.$/, '') : String(value)}</td>
+                  <td class="py-1 text-right text-success tabular-nums">{typeof value === 'number' ? value.toFixed(6).replace(/0+$/, '').replace(/\.$/, '') : String(value)}</td>
                 </tr>
               )}
             </For>
@@ -203,13 +239,9 @@ function SuggestionCard(props: {
       </div>
 
       <div class="mt-2">
-        <button
-          type="button"
-          class="text-xs text-content-tertiary hover:text-accent"
-          onClick={() => setShowEvidence(!showEvidence())}
-        >
+        <Button size="xs" variant="ghost" onClick={() => setShowEvidence(!showEvidence())}>
           {showEvidence() ? '隐藏' : '查看'} evidence
-        </button>
+        </Button>
         <Show when={showEvidence()}>
           <pre class="mt-2 p-2 bg-surface-secondary rounded text-[10px] overflow-x-auto font-mono max-h-64">
             {JSON.stringify(props.s.evidenceJson, null, 2)}

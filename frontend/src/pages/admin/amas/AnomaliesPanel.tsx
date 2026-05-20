@@ -46,14 +46,16 @@ export function AnomaliesPanel() {
       <Card variant="elevated">
         <div class="flex items-baseline justify-between mb-3">
           <h2 class="text-lg font-semibold text-content">异常 / 不变量违反</h2>
-          <div class="flex items-center gap-1.5">
+          <div class="flex items-center gap-1.5" role="group" aria-label="选择时间窗口">
             <For each={[7, 14, 30] as const}>
               {(n) => (
                 <button
                   type="button"
                   onClick={() => setDays(n)}
-                  class={`px-2.5 py-1 text-xs rounded-md transition-colors ${
-                    days() === n ? 'bg-accent text-white' : 'bg-surface-secondary text-content-secondary hover:text-content'
+                  aria-pressed={days() === n}
+                  aria-label={`使用 ${n} 天窗口`}
+                  class={`focus-ring-soft px-2.5 py-1 text-xs rounded-md transition-colors ${
+                    days() === n ? 'bg-accent text-accent-content' : 'bg-surface-secondary text-content-secondary hover:text-content'
                   }`}
                 >
                   {n} 天
@@ -68,10 +70,30 @@ export function AnomaliesPanel() {
             return (
               <div class="space-y-4">
                 <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
-                  <StatCard title="总事件" value={ov().totalEvents} icon="" color="info" />
-                  <StatCard title="异常次数" value={ov().anomalyCount} icon="" color="error" />
-                  <StatCard title="违反不变量" value={ov().violationCount} icon="" color="warning" />
-                  <StatCard title="冷启动 explore/exploit" value={`${ov().coldStartExplore}/${ov().coldStartExploit}`} icon="" color="success" />
+                  <StatCard
+                    title="总事件"
+                    value={ov().totalEvents}
+                    color="info"
+                    icon="M4 6h16M4 10h16M4 14h16M4 18h16"
+                  />
+                  <StatCard
+                    title="异常次数"
+                    value={ov().anomalyCount}
+                    color="error"
+                    icon="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L3.034 16.5c-.77.833.192 2.5 1.732 2.5z"
+                  />
+                  <StatCard
+                    title="违反不变量"
+                    value={ov().violationCount}
+                    color="warning"
+                    icon="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z"
+                  />
+                  <StatCard
+                    title="冷启动 explore/exploit"
+                    value={`${ov().coldStartExplore}/${ov().coldStartExploit}`}
+                    color="success"
+                    icon="M13 10V3L4 14h7v7l9-11h-7z"
+                  />
                 </div>
 
                 <Show when={ov().byDay.length > 0} fallback={<Empty title="时间窗口内无事件" description="尝试拉长窗口或检查是否落库" />}>

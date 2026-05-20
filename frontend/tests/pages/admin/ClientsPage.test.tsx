@@ -145,7 +145,8 @@ describe('ClientsPage', () => {
     await renderPage();
     await waitFor(() => expect(screen.getByText('拉取遥测')).toBeInTheDocument());
     fireEvent.click(screen.getByText('拉取遥测'));
-    await waitFor(() => expect(mockToast.success).toHaveBeenCalledWith('已发送遥测请求'));
+    // toast 文案现在带 device id 前缀
+    await waitFor(() => expect(mockToast.success).toHaveBeenCalledWith(expect.stringContaining('发送遥测请求')));
   });
 
   it('handles requestTelemetry failure', async () => {
