@@ -1,7 +1,14 @@
 //! B79: V1 compatibility routes
 //! Thin wrappers mapping /api/v1/* to existing handlers.
-//! V1 routes do NOT invoke the AMAS engine; they provide a lightweight
-//! compatibility layer for clients that do not need adaptive learning.
+//!
+//! ⚠️  **设计警告（P3#6）**：V1 路由刻意**绕过 AMAS 引擎**——
+//!     - POST /api/v1/records 仅做 5 秒去重，不更新 user_state/ELO/word_state；
+//!     - POST /api/v1/learning/session 仅 create-or-resume，不计算 cross-session hint；
+//!     - GET /api/v1/* 与 /api/* 等价。
+//!
+//!   现行客户端（iOS）一律调用 /api/* 主端点，无 v1 调用。如果未来有新客户端
+//!   误用 v1，会**静默退化为非自适应学习**——届时务必显式弃用而非补打 AMAS 调用，
+//!   否则等于把"轻量兼容层"重新做成主端点的副本。
 
 use axum::extract::{Path, Query, State};
 use axum::routing::{get, post};
