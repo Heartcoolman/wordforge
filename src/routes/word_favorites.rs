@@ -4,7 +4,7 @@ use axum::Router;
 use serde::{Deserialize, Serialize};
 
 use crate::auth::AuthUser;
-use crate::response::{ok, AppError};
+use crate::response::{ok, paginated, AppError};
 use crate::routes::words::WordPublic;
 use crate::state::AppState;
 use crate::store::operations::word_interactions::WordFavorite;
@@ -67,8 +67,11 @@ async fn list_favorites(
     let limit = per_page as usize;
     let offset = ((page - 1) * per_page) as usize;
     let user_id = auth.user_id.clone();
-    let items = state
+    // P3#5: 原 handler 接受 page/per_page 却用 ok() 返回扁平数组，参数被静默忽略。
+    // 改为 paginated()，与 /api/wordbooks/{id}/words 等列表端点风格一致。
+    let (items, total) = state
         .run_store_task("word_favorites.list", move |store| -> Result<_, AppError> {
+            let total = store.count_word_favorites(&user_id)?;
             let favorites = store.list_word_favorites(&user_id, limit, offset)?;
             let word_ids: Vec<String> = favorites.iter().map(|fav| fav.word_id.clone()).collect();
             let words = store.get_words_by_ids(&word_ids)?;
@@ -83,10 +86,10 @@ async fn list_favorites(
                     })
                 })
                 .collect::<Vec<_>>();
-            Ok(items)
+            Ok((items, total))
         })
         .await??;
-    Ok(ok(items))
+    Ok(paginated(items, total, page, per_page))
 }
 
 async fn favorite_status(
