@@ -19,8 +19,13 @@ pub struct WordLearningState {
     pub updated_at: DateTime<Utc>,
 }
 
+/// P3#7：wire 上以 lowercase 序列化（与 SessionStatus 风格一致）。
+/// 注意：DB 持久化层仍用大写字符串（schema CHECK 限定 'NEW'/'MASTERED'/…，以及一批 SQL
+/// 聚合用了 state = 'MASTERED' 形式），由独立的 `as_str` / `from_str` 维持兼容。换言之：
+///   wire 出/入 = lowercase（serde 控制）
+///   DB  出/入 = uppercase（as_str / from_str 控制）
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[serde(rename_all = "lowercase")]
 pub enum WordState {
     New,
     Learning,

@@ -321,7 +321,7 @@ async fn it_learning_wordbooks_word_states_and_study_config_flow() {
     .await;
     let (mastered_status, _, mastered_body) = response_json(mark_mastered).await;
     assert_eq!(mastered_status, StatusCode::OK);
-    assert_eq!(mastered_body["data"]["state"], "MASTERED");
+    assert_eq!(mastered_body["data"]["state"], "mastered");
 
     let reset_word = request(
         &app.app,
@@ -333,7 +333,7 @@ async fn it_learning_wordbooks_word_states_and_study_config_flow() {
     .await;
     let (reset_status, _, reset_body) = response_json(reset_word).await;
     assert_eq!(reset_status, StatusCode::OK);
-    assert_eq!(reset_body["data"]["state"], "NEW");
+    assert_eq!(reset_body["data"]["state"], "new");
 
     let too_large_query_ids: Vec<String> = (0..501).map(|idx| format!("w-{idx}")).collect();
     let too_large_batch_query = request(
@@ -379,8 +379,8 @@ async fn it_learning_wordbooks_word_states_and_study_config_flow() {
         "/api/word-states/batch-update",
         Some(serde_json::json!({
             "updates": [
-                { "wordId": word_id_1, "state": "LEARNING", "masteryLevel": 2.0 },
-                { "wordId": word_id_2, "state": "REVIEWING", "masteryLevel": -1.0 }
+                { "wordId": word_id_1, "state": "learning", "masteryLevel": 2.0 },
+                { "wordId": word_id_2, "state": "reviewing", "masteryLevel": -1.0 }
             ]
         })),
         &[("authorization", auth_header(&token))],
