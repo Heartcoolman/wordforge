@@ -21,6 +21,7 @@ fn migrations() -> Vec<(&'static str, MigrationFn)> {
             m013_learning_record_self_rating,
         ),
         ("014_probe_executions", m014_probe_executions),
+        ("015_gdpr_export_rate_limit", m015_gdpr_export_rate_limit),
     ]
 }
 
@@ -398,6 +399,18 @@ fn m014_probe_executions(store: &Store) -> Result<(), StoreError> {
         CREATE INDEX IF NOT EXISTS idx_probe_exec_pending
             ON probe_executions(status, dispatched_at)
             WHERE status IN ('pending', 'confirm_pending');",
+    )?;
+    Ok(())
+}
+
+fn m015_gdpr_export_rate_limit(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS gdpr_export_log (
+            user_id TEXT NOT NULL,
+            exported_at TEXT NOT NULL,
+            PRIMARY KEY (user_id)
+        );",
     )?;
     Ok(())
 }

@@ -8,6 +8,7 @@ pub mod elo;
 pub mod engine;
 pub mod extras;
 pub mod feedback;
+pub mod gdpr_export;
 pub mod learning_sessions;
 pub mod notifications;
 pub mod probe;
