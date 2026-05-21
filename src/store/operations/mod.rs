@@ -24,4 +24,5 @@ pub mod wb_center;
 pub mod word_interactions;
 pub mod word_states;
 pub mod wordbooks;
+pub mod worker_last_run;
 pub mod words;

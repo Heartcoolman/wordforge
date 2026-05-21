@@ -178,6 +178,7 @@ pub async fn sse_handler(
                                     crate::state::SseEvent::ProbeRequest { .. } => "probe_request",
                                     crate::state::SseEvent::ProbeConfirm { .. } => "probe_confirm",
                                     crate::state::SseEvent::Incident { .. } => "incident",
+                                    crate::state::SseEvent::WorkerMissed { .. } => "worker_missed",
                                     crate::state::SseEvent::LlmBudgetExceeded { .. } => "llm_budget_exceeded",
                                 };
                                 yield Ok(Event::default().event(event_name).data(json));

@@ -25,6 +25,7 @@ fn migrations() -> Vec<(&'static str, MigrationFn)> {
         ("016_llm_cost_ledger", m016_llm_cost_ledger),
         ("017_update_audit_log", m017_update_audit_log),
         ("018_feedback_priority_status", m018_feedback_priority_status),
+        ("019_worker_last_run", m019_worker_last_run),
     ]
 }
 
@@ -486,6 +487,21 @@ fn m018_feedback_priority_status(store: &Store) -> Result<(), StoreError> {
             )?;
         }
     }
+    Ok(())
+}
+
+/// M1-A5：worker 执行时间上报表。
+fn m019_worker_last_run(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS worker_last_run (
+            worker_name      TEXT NOT NULL PRIMARY KEY,
+            last_run_at      INTEGER NOT NULL,
+            last_duration_ms INTEGER NOT NULL DEFAULT 0,
+            last_error       TEXT,
+            last_outcome     TEXT NOT NULL CHECK (last_outcome IN ('success','failure','skipped'))
+        );",
+    )?;
     Ok(())
 }
 

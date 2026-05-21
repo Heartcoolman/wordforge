@@ -92,6 +92,16 @@ pub enum SseEvent {
         #[serde(rename = "windowSecs")]
         window_secs: u64,
     },
+    /// M1-A5：worker 连续 3 个调度周期未上报，调度器健康告警。
+    #[serde(rename = "worker_missed")]
+    WorkerMissed {
+        /// 连续未上报的 worker 名称
+        #[serde(rename = "workerName")]
+        worker_name: String,
+        /// 已连续错过的调度次数
+        #[serde(rename = "missCount")]
+        miss_count: u32,
+    },
     /// M1-G2：LLM advisor 月度人民币成本超上限，当月 worker 已自动停跑。
     #[serde(rename = "llm_budget_exceeded")]
     LlmBudgetExceeded {

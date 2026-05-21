@@ -166,7 +166,10 @@ async fn main() {
             &config.worker,
         )
         .with_llm_config(config.llm.clone())
-        .with_llm_advisor_state(state.clone());
+        .with_llm_advisor_state(state.clone())
+        // M0-P4 + M1-A5：注入 AppState 以启用 error_rate_watchdog 和调度器健康告警
+        .with_watchdog_state(state.clone())
+        .with_health_state(state.clone());
         if let Some(u) = updater.clone() {
             worker_manager = worker_manager.with_update_checker(
                 u,
