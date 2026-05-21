@@ -280,6 +280,13 @@ fn map_err(e: UpdaterError) -> AppError {
             message: e.to_string(),
             is_operational: true,
         },
+        // M0-P5：phase watchdog 超时 → 503，前端可展示明确错误并提示用户重试
+        UpdaterError::PhaseTimeout { .. } => AppError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "UPDATE_PHASE_TIMEOUT".into(),
+            message: e.to_string(),
+            is_operational: true,
+        },
         other => AppError::internal(&other.to_string()),
     }
 }

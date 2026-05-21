@@ -29,6 +29,9 @@ const ASSET_SUFFIX_SHA: &str = ".tar.gz.sha256";
 const ASSET_SUFFIX_SIG: &str = ".tar.gz.minisig";
 /// M0-R3：fork-exec 后子进程健康自检超时（秒）
 const HEALTH_CHECK_TIMEOUT_SECS: u64 = 60;
+/// M0-P5：每个 apply phase 的独立 watchdog 超时（秒）。
+/// 超过此值未推进到下一 phase 则强制 abort + 回滚。
+const PHASE_TIMEOUT_SECS: u64 = 300; // 5 分钟
 /// M0-R4：maintenance 模式持久化 flag 文件名（install_dir 下）。
 /// 新进程启动时若发现此文件，说明上次自更新途中崩溃，应立即清理 maintenance。
 pub const MAINTENANCE_FLAG: &str = ".maintenance.flag";
@@ -83,6 +86,9 @@ pub enum UpdaterError {
     /// M0-R2：minisign 签名校验失败（tarball 可能已被篡改）
     #[error("minisign signature invalid: {0}")]
     SignatureInvalid(String),
+    /// M0-P5：phase 超过 watchdog 限制（5 分钟）未推进，强制 abort
+    #[error("phase timeout: {phase} 超过 {timeout_secs}s 未完成")]
+    PhaseTimeout { phase: &'static str, timeout_secs: u64 },
 }
 
 /// 更新通道：stable 排除 prerelease，beta 包含所有（含 stable 自身）。
@@ -504,22 +510,26 @@ impl Updater {
             current_arch_token().unwrap_or("x86_64")
         ));
 
-        // 1) 下载 sha256
-        let sha_expected = self.fetch_sha256(&latest.sha256_url).await?;
+        // M0-P5：per-phase watchdog 辅助闭包——将 async future 包裹在 PHASE_TIMEOUT_SECS 超时内。
+        // 超时返回 PhaseTimeout 而非 Elapsed，确保错误码在前端可读。
+        let phase_timeout = std::time::Duration::from_secs(PHASE_TIMEOUT_SECS);
 
-        // 2) 流式下载 + 计算 sha256
+        // 1) 下载 sha256
+        let sha_expected = tokio::time::timeout(phase_timeout, self.fetch_sha256(&latest.sha256_url))
+            .await
+            .map_err(|_| UpdaterError::PhaseTimeout { phase: "downloading_sha256", timeout_secs: PHASE_TIMEOUT_SECS })??;
+
+        // 2) 流式下载 + 计算 sha256（M0-P5 watchdog 覆盖整体下载，per-chunk 由 download_client.read_timeout 兜底）
         progress(UpdatePhase::Downloading {
             downloaded: 0,
             total: latest.tarball_size,
         });
-        let actual_sha = self
-            .stream_download(
-                &latest.tarball_url,
-                &tarball_path,
-                &progress,
-                latest.tarball_size,
-            )
-            .await?;
+        let actual_sha = tokio::time::timeout(
+            phase_timeout,
+            self.stream_download(&latest.tarball_url, &tarball_path, &progress, latest.tarball_size),
+        )
+        .await
+        .map_err(|_| UpdaterError::PhaseTimeout { phase: "downloading", timeout_secs: PHASE_TIMEOUT_SECS })??;
         progress(UpdatePhase::Verifying);
         if !actual_sha.eq_ignore_ascii_case(&sha_expected) {
             let _ = blocking_io(|| {
@@ -533,7 +543,9 @@ impl Updater {
         }
 
         // 2b) minisign 验签（M0-R2）
-        self.verify_minisign_tarball(&latest.sig_url, &tarball_path).await?;
+        tokio::time::timeout(phase_timeout, self.verify_minisign_tarball(&latest.sig_url, &tarball_path))
+            .await
+            .map_err(|_| UpdaterError::PhaseTimeout { phase: "verifying_signature", timeout_secs: PHASE_TIMEOUT_SECS })??;
 
         // 3) 解压到 staging
         progress(UpdatePhase::Extracting);
@@ -1399,5 +1411,37 @@ mod tests {
         let parsed = parse_release_list_payload(&body);
         assert_eq!(parsed.stable.as_ref().unwrap().tag, "v0.5.6");
         assert_eq!(parsed.beta.as_ref().unwrap().tag, "v0.5.6");
+    }
+
+    /// M0-P5：PhaseTimeout 错误消息格式符合前端预期（含 phase 名与秒数）。
+    #[test]
+    fn phase_timeout_error_message_format() {
+        let e = UpdaterError::PhaseTimeout {
+            phase: "downloading",
+            timeout_secs: 300,
+        };
+        let msg = e.to_string();
+        assert!(msg.contains("downloading"), "消息应包含 phase 名：{msg}");
+        assert!(msg.contains("300"), "消息应包含超时秒数：{msg}");
+    }
+
+    /// M0-P5：tokio::time::timeout 超时后映射为 PhaseTimeout（使用即时超时模拟慢 future）。
+    #[tokio::test]
+    async fn phase_timeout_wraps_elapsed() {
+        let result: Result<(), UpdaterError> =
+            tokio::time::timeout(std::time::Duration::from_millis(1), async {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                Ok(())
+            })
+            .await
+            .map_err(|_| UpdaterError::PhaseTimeout {
+                phase: "test_phase",
+                timeout_secs: 0,
+            })
+            .and_then(|r| r);
+        assert!(
+            matches!(result, Err(UpdaterError::PhaseTimeout { phase: "test_phase", .. })),
+            "超时应映射为 PhaseTimeout"
+        );
     }
 }
