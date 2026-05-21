@@ -2367,11 +2367,16 @@ Server-Sent Events（SSE）持久连接，用于接收服务端实时推送。
 |---|---|---|
 | `amas_state` | AMAS 引擎状态变化（服务端每 5 秒轮询，仅当 `totalEventCount` 增长时推送） | `{"type": "state_change", "attention": 0.72, "fatigue": 0.28, "motivation": 0.65, "confidence": 0.54, "sessionEventCount": 12, "totalEventCount": 834}` |
 | `maintenance` | 维护模式变化 | `{"type": "maintenance", "active": true}` |
-| `update_available` | 新版本可用 | `{"version": "v0.3.3", "message": "新版本已发布"}` |
+| `update_available` | 新版本可用（面向所有用户的刷新提示，由 `broadcast_update` 发出；与管理员专属的 `release_available` 不同） | `{"version": "v0.3.3", "message": "新版本已发布"}` |
 | `telemetry_request` | 服务器请求遥测上报 | `{"type": "telemetry_request", "requestId": "<uuid>"}` |
 | `banned` | 账号被封禁 | `{"type": "banned"}` |
 | `unbanned` | 账号解封 | `{"type": "unbanned"}` |
 | `data_corrupted` | 数据异常通知 | `{"type": "data_corrupted"}` |
+| `new_llm_suggestion` | 新的 LLM 调参建议到达（管理员专属，advisor 页可立即刷新） | `{"type": "new_llm_suggestion", "suggestionId": 42}` |
+| `release_available` | 自更新 worker 探测到 GitHub Releases 有新二进制；v0.6.0-beta.3 起含 `channel`（管理员专属） | `{"type": "release_available", "latestTag": "v0.5.6", "channel": "stable"}` |
+| `update_progress` | 一键更新执行阶段进度（管理员专属，0–100） | `{"type": "update_progress", "phase": "downloading", "percent": 35}` |
+| `probe_request` | 远程探针脚本下发：admin 通过 `POST /api/admin/probe` 派发，客户端在 Worker 沙箱 eval 后回传结果 | `{"type": "probe_request", "requestId": "<uuid>", "batchId": "<uuid>", "scriptB64": "...", "timeoutMs": 3000, "ctxVersion": 1}` |
+| `probe_confirm` | 远程探针二次确认：客户端首次返回 `confirm_required` 后，admin 输入设备后 5 位确认，后端推此事件 | `{"type": "probe_confirm", "requestId": "<uuid>", "confirmToken": "<uuid>"}` |
 
 > 服务端 SSE Keep-alive 文本行 `: keepalive` 每 15 秒发送一次。连接数达到服务器上限（默认 1000）时返回 `429 RATE_LIMITED`。
 
