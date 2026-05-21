@@ -14,6 +14,7 @@ use std::time::Instant;
 use chrono::{DateTime, Utc};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
+use minisign_verify::{PublicKey, Signature};
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::RwLock;
@@ -25,6 +26,7 @@ const USER_AGENT: &str = "wordforge-updater";
 const ASSET_PREFIX: &str = "wordforge-linux-";
 const ASSET_SUFFIX_TAR: &str = ".tar.gz";
 const ASSET_SUFFIX_SHA: &str = ".tar.gz.sha256";
+const ASSET_SUFFIX_SIG: &str = ".tar.gz.minisig";
 const STAGING_DIR: &str = ".update-staging";
 const TMP_DIR: &str = ".update-tmp";
 const LOCK_FILE: &str = ".update.lock";
@@ -73,6 +75,9 @@ pub enum UpdaterError {
     InvalidTarget(String),
     #[error("config: {0}")]
     Config(String),
+    /// M0-R2：minisign 签名校验失败（tarball 可能已被篡改）
+    #[error("minisign signature invalid: {0}")]
+    SignatureInvalid(String),
 }
 
 /// 更新通道：stable 排除 prerelease，beta 包含所有（含 stable 自身）。
@@ -145,6 +150,8 @@ struct CachedRelease {
     html_url: String,
     tarball_url: String,
     sha256_url: String,
+    /// M0-R2：minisign 签名文件 URL（.tar.gz.minisig）；旧 release 无此 asset 时为空。
+    sig_url: String,
     tarball_size: u64,
 }
 
@@ -499,6 +506,9 @@ impl Updater {
             });
         }
 
+        // 2b) minisign 验签（M0-R2）
+        self.verify_minisign_tarball(&latest.sig_url, &tarball_path).await?;
+
         // 3) 解压到 staging
         progress(UpdatePhase::Extracting);
         let staging_dir = self.install_dir.join(STAGING_DIR);
@@ -626,6 +636,56 @@ impl Updater {
             });
         }
         Ok(hex)
+    }
+
+    /// M0-R2：从 sig_url 下载 .minisig 文件并验签 tarball。
+    ///
+    /// 决策 O5-a：公钥编译期嵌入（`env!("MINISIGN_PUBKEY")`）。
+    /// - 公钥为空（本地开发）→ warn 跳过，不阻断。
+    /// - sig_url 为空（旧 release 无签名 asset）→ warn 跳过，不阻断。
+    /// - 公钥/签名格式错误或验签失败 → `SignatureInvalid` 错误，阻断 apply。
+    async fn verify_minisign_tarball(
+        &self,
+        sig_url: &str,
+        tarball_path: &Path,
+    ) -> Result<(), UpdaterError> {
+        const PUBKEY_STR: &str = env!("MINISIGN_PUBKEY");
+        if PUBKEY_STR.is_empty() {
+            tracing::warn!("MINISIGN_PUBKEY 未设置，跳过签名校验（非生产构建）");
+            return Ok(());
+        }
+        if sig_url.is_empty() {
+            tracing::warn!("release 无 .minisig asset，跳过签名校验（旧版 release）");
+            return Ok(());
+        }
+
+        let pk = PublicKey::from_base64(PUBKEY_STR)
+            .map_err(|e| UpdaterError::SignatureInvalid(format!("公钥格式非法: {e}")))?;
+
+        let sig_text = {
+            let mirrored = self.mirror(sig_url);
+            let mut req = self.download_client.get(&mirrored);
+            if let Some(ref token) = self.github_token {
+                req = req.header("Authorization", format!("Bearer {token}"));
+            }
+            let resp = req.send().await?;
+            let status = resp.status();
+            if !status.is_success() {
+                let body = resp.text().await.unwrap_or_default();
+                return Err(UpdaterError::Api { status: status.as_u16(), body });
+            }
+            resp.text().await?
+        };
+
+        let sig = Signature::decode(&sig_text)
+            .map_err(|e| UpdaterError::SignatureInvalid(format!("签名文件解析失败: {e}")))?;
+
+        let tarball_bytes = blocking_io(|| std::fs::read(tarball_path).map_err(Into::into))?;
+        pk.verify(&tarball_bytes, &sig, false)
+            .map_err(|e| UpdaterError::SignatureInvalid(format!("验签失败: {e}")))?;
+
+        tracing::info!(tag = %sig_url, "minisign 签名验证通过");
+        Ok(())
     }
 
     async fn stream_download(
@@ -771,9 +831,11 @@ fn parse_release_payload(body: &serde_json::Value) -> Option<CachedRelease> {
     let arch = current_arch_token()?;
     let want_tar = format!("{ASSET_PREFIX}{arch}{ASSET_SUFFIX_TAR}");
     let want_sha = format!("{ASSET_PREFIX}{arch}{ASSET_SUFFIX_SHA}");
+    let want_sig = format!("{ASSET_PREFIX}{arch}{ASSET_SUFFIX_SIG}");
 
     let mut tar_url = String::new();
     let mut sha_url = String::new();
+    let mut sig_url = String::new();
     let mut tar_size: u64 = 0;
     if let Some(assets) = body.get("assets").and_then(|v| v.as_array()) {
         for a in assets {
@@ -787,6 +849,8 @@ fn parse_release_payload(body: &serde_json::Value) -> Option<CachedRelease> {
                 tar_size = a.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
             } else if name == want_sha {
                 sha_url = url.to_string();
+            } else if name == want_sig {
+                sig_url = url.to_string();
             }
         }
     }
@@ -809,6 +873,7 @@ fn parse_release_payload(body: &serde_json::Value) -> Option<CachedRelease> {
         html_url,
         tarball_url: tar_url,
         sha256_url: sha_url,
+        sig_url,
         tarball_size: tar_size,
     })
 }
@@ -1073,6 +1138,41 @@ mod tests {
         assert_eq!(parsed.tarball_size, 12345);
         assert!(parsed.tarball_url.ends_with(".tar.gz"));
         assert!(parsed.sha256_url.ends_with(".sha256"));
+    }
+
+    /// M0-R2：parse_release_payload 应解析 .minisig asset URL。
+    #[test]
+    fn parse_release_payload_finds_minisig_asset() {
+        if current_arch_token().is_none() {
+            return;
+        }
+        let arch = current_arch_token().unwrap();
+        let body = serde_json::json!({
+            "tag_name": "v1.0.0",
+            "html_url": "https://example.com/r/v1.0.0",
+            "body": "",
+            "published_at": "2026-05-21T00:00:00Z",
+            "assets": [
+                {"name": format!("wordforge-linux-{arch}.tar.gz"), "browser_download_url": "https://example.com/t.tar.gz", "size": 9000000},
+                {"name": format!("wordforge-linux-{arch}.tar.gz.sha256"), "browser_download_url": "https://example.com/t.sha256", "size": 64},
+                {"name": format!("wordforge-linux-{arch}.tar.gz.minisig"), "browser_download_url": "https://example.com/t.minisig", "size": 128},
+            ],
+        });
+        let parsed = parse_release_payload(&body).expect("parsed");
+        assert_eq!(parsed.sig_url, "https://example.com/t.minisig");
+        // 旧 release 无 .minisig，sig_url 应为空（不阻断 can_apply）
+        let body_no_sig = serde_json::json!({
+            "tag_name": "v0.9.0",
+            "html_url": "https://example.com/r/v0.9.0",
+            "body": "",
+            "published_at": "2026-05-21T00:00:00Z",
+            "assets": [
+                {"name": format!("wordforge-linux-{arch}.tar.gz"), "browser_download_url": "https://example.com/t.tar.gz", "size": 9000000},
+                {"name": format!("wordforge-linux-{arch}.tar.gz.sha256"), "browser_download_url": "https://example.com/t.sha256", "size": 64},
+            ],
+        });
+        let parsed_no_sig = parse_release_payload(&body_no_sig).expect("parsed");
+        assert!(parsed_no_sig.sig_url.is_empty());
     }
 
     /// v0.5.4 镜像 prefix helper：无 prefix 走原 URL；有 prefix 时拼成

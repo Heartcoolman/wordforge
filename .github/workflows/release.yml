@@ -85,6 +85,9 @@ jobs:
       - uses: taiki-e/install-action@cross
 
       - name: Build
+        # M0-R2：注入 minisign 公钥，build.rs 将其编译为 MINISIGN_PUBKEY 常量。
+        env:
+          MINISIGN_PUBLIC_KEY: ${{ secrets.MINISIGN_PUBLIC_KEY }}
         run: cross build --release --target ${{ matrix.target }}
 
       - name: Package
@@ -114,11 +117,27 @@ jobs:
           path: dist/
           merge-multiple: true
 
+      # M0-R2：minisign 签名。私钥从 GH secret MINISIGN_PRIVATE_KEY 注入；
+      # 公钥（MINISIGN_PUBLIC_KEY）仅用于 build.rs 编译期嵌入，不在此使用。
+      # 私钥泄露应急：见 docs/runbook/key-rotation.md（M0-D7 副产）。
+      - name: Sign release assets (minisign)
+        env:
+          MINISIGN_PRIVATE_KEY: ${{ secrets.MINISIGN_PRIVATE_KEY }}
+        run: |
+          curl -sSfL https://github.com/jedisct1/minisign/releases/download/0.11/minisign-0.11-linux.tar.gz \
+            | tar xz --strip-components=2 -C /usr/local/bin minisign-linux/x86_64/minisign
+          echo "$MINISIGN_PRIVATE_KEY" > /tmp/minisign.key
+          for f in dist/*.tar.gz; do
+            minisign -S -s /tmp/minisign.key -m "$f" -x "${f}.minisig"
+          done
+          rm -f /tmp/minisign.key
+
       - uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/*.tar.gz
             dist/*.tar.gz.sha256
+            dist/*.tar.gz.minisig
           generate_release_notes: true
           # v0.6.0-beta.3：显式 prerelease 规则。
           # tag 含 '-'（如 v0.6.0-beta.N / v1.0.0-rc.1）→ Pre-release；
