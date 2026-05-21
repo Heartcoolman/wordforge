@@ -6,6 +6,18 @@
 
 ---
 
+## [Unreleased] — M1-A3
+
+### 移除
+
+- **删除 4 个 stub worker**（`monitoring_aggregate` / `etymology_generation` / `embedding_generation` / `word_clustering`）
+  - 这 4 个 worker 自引入起始终 `enabled: false`，从未在生产环境运行
+  - `monitoring_aggregate`：依赖未实现的 `insert_monitoring_timeseries` 存储接口；已由 M0-P4 `error_rate_watchdog` 覆盖实时监控需求
+  - `etymology_generation` / `embedding_generation` / `word_clustering`：依赖外部 LLM provider，provider 集成未完成；功能规划移至 M2+ 阶段重新设计
+  - 删除对应源文件（4 个 `.rs`）及 `mod.rs` 中的模块声明、`WorkerName` 枚举变体、`planned_jobs()` 条目、`register_jobs()` match arm
+
+---
+
 ## [v0.6.0-beta.4] — 2026-05-20 · Pre-release
 
 ### 改进

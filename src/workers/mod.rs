@@ -4,16 +4,13 @@ pub mod config_watcher;
 pub mod confusion_pair_cache;
 pub mod daily_aggregation;
 pub mod delayed_reward;
-pub mod embedding_generation;
 pub mod error_rate_watchdog;
-pub mod etymology_generation;
 pub mod forgetting_alert;
 pub mod health_analysis;
 pub mod heartbeat_watchdog;
 pub mod llm_advisor;
 pub mod log_export;
 pub mod metrics_flush;
-pub mod monitoring_aggregate;
 pub mod monitoring_retention;
 pub mod password_reset_cleanup;
 pub mod probe_cleanup;
@@ -21,7 +18,6 @@ pub mod probe_confirm_sweeper;
 pub mod session_cleanup;
 pub mod update_checker;
 pub mod weekly_report;
-pub mod word_clustering;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -49,7 +45,6 @@ pub enum WorkerName {
     MetricsFlush,
     SessionCleanup,
     PasswordResetCleanup,
-    MonitoringAggregate,
     LlmAdvisor,
     DelayedReward,
     ForgettingAlert,
@@ -57,9 +52,6 @@ pub enum WorkerName {
     CacheCleanup,
     DailyAggregation,
     HealthAnalysis,
-    EtymologyGeneration,
-    EmbeddingGeneration,
-    WordClustering,
     ConfusionPairCache,
     WeeklyReport,
     LogExport,
@@ -76,7 +68,6 @@ impl WorkerName {
             Self::MetricsFlush => "metrics_flush",
             Self::SessionCleanup => "session_cleanup",
             Self::PasswordResetCleanup => "password_reset_cleanup",
-            Self::MonitoringAggregate => "monitoring_aggregate",
             Self::LlmAdvisor => "llm_advisor",
             Self::DelayedReward => "delayed_reward",
             Self::ForgettingAlert => "forgetting_alert",
@@ -84,9 +75,6 @@ impl WorkerName {
             Self::CacheCleanup => "cache_cleanup",
             Self::DailyAggregation => "daily_aggregation",
             Self::HealthAnalysis => "health_analysis",
-            Self::EtymologyGeneration => "etymology_generation",
-            Self::EmbeddingGeneration => "embedding_generation",
-            Self::WordClustering => "word_clustering",
             Self::ConfusionPairCache => "confusion_pair_cache",
             Self::WeeklyReport => "weekly_report",
             Self::LogExport => "log_export",
@@ -192,7 +180,7 @@ impl WorkerManager {
             },
             JobSpec {
                 name: WorkerName::DelayedReward,
-                cron: "0 */5 * * * *", // 降频: 每分钟 -> 每5分钟
+                cron: "0 */5 * * * *",
                 enabled: true,
             },
             JobSpec {
@@ -222,8 +210,7 @@ impl WorkerManager {
             },
             JobSpec {
                 name: WorkerName::ConfusionPairCache,
-                // cron crate (zslayton/cron) day-of-week 范围 1-7，不接受 0；
-                // 用 SUN 字符串明确表示「每周日」，与官方 example `Mon,Wed,Fri` 风格一致。
+                // cron crate day-of-week 范围 1-7，用 SUN 字符串明确表示「每周日」
                 cron: "0 0 5 * * SUN",
                 enabled: true,
             },
@@ -244,19 +231,13 @@ impl WorkerManager {
                 enabled: self.config.enable_monitoring,
             },
             JobSpec {
-                name: WorkerName::MonitoringAggregate,
-                cron: "0 */15 * * * *",
-                // WIP: 待监控聚合实现完成后启用
-                enabled: false,
-            },
-            JobSpec {
                 name: WorkerName::LlmAdvisor,
                 cron: "0 */20 * * * *",
                 enabled: self.config.enable_llm_advisor,
             },
             JobSpec {
                 name: WorkerName::UpdateChecker,
-                cron: "0 0 */1 * * *", // 每小时整点检查一次
+                cron: "0 0 */1 * * *",
                 enabled: self
                     .update_checker_ctx
                     .as_ref()
@@ -274,27 +255,6 @@ impl WorkerManager {
                 name: WorkerName::ErrorRateWatchdog,
                 cron: "0 * * * * *",
                 enabled: self.watchdog_state.is_some(),
-            },
-            // Stub workers —— 默认禁用
-            JobSpec {
-                name: WorkerName::EtymologyGeneration,
-                cron: "0 30 3 * * *",
-                // WIP: 待 LLM provider 就绪后启用
-                enabled: false,
-            },
-            JobSpec {
-                name: WorkerName::EmbeddingGeneration,
-                cron: "0 */5 * * * *",
-                // WIP: 待 LLM provider 就绪后启用
-                enabled: false,
-            },
-            JobSpec {
-                name: WorkerName::WordClustering,
-                // day-of-week 用 SUN 字符串，避免 cron crate 拒绝 0；
-                // 见 ConfusionPairCache 同处说明。
-                cron: "0 0 4 * * SUN",
-                // WIP: 待 LLM provider 就绪后启用
-                enabled: false,
             },
         ]
     }
@@ -368,15 +328,6 @@ impl WorkerManager {
                     })
                     .await;
                 }
-                WorkerName::MonitoringAggregate => {
-                    add_job(scheduler, spec.cron, name_str, move || {
-                        let store = store.clone();
-                        async move {
-                            monitoring_aggregate::run(&store).await;
-                        }
-                    })
-                    .await;
-                }
                 WorkerName::LlmAdvisor => {
                     let llm = self.llm_config.clone();
                     let engine_cloned = engine.clone();
@@ -441,33 +392,6 @@ impl WorkerManager {
                         let store = store.clone();
                         async move {
                             health_analysis::run(&store).await;
-                        }
-                    })
-                    .await;
-                }
-                WorkerName::EtymologyGeneration => {
-                    add_job(scheduler, spec.cron, name_str, move || {
-                        let store = store.clone();
-                        async move {
-                            etymology_generation::run(&store).await;
-                        }
-                    })
-                    .await;
-                }
-                WorkerName::EmbeddingGeneration => {
-                    add_job(scheduler, spec.cron, name_str, move || {
-                        let store = store.clone();
-                        async move {
-                            embedding_generation::run(&store).await;
-                        }
-                    })
-                    .await;
-                }
-                WorkerName::WordClustering => {
-                    add_job(scheduler, spec.cron, name_str, move || {
-                        let store = store.clone();
-                        async move {
-                            word_clustering::run(&store).await;
                         }
                     })
                     .await;
@@ -605,8 +529,6 @@ mod tests {
 
     use super::*;
 
-    /// 确保 Config::from_env() 不因缺失安全 secret 而 panic。
-    /// 多个 worker 测试并发跑时不能依赖其它测试设置的 env var。
     fn ensure_safe_secrets_in_env() {
         let secret = "test_secret_that_is_at_least_32_characters_long_ok";
         if std::env::var("JWT_SECRET")
@@ -665,7 +587,6 @@ mod tests {
         worker_cfg.is_leader = false;
 
         let manager = WorkerManager::new(store, amas, tx.subscribe(), &worker_cfg);
-        // start() now returns Result; non-leader returns Ok(())
         manager
             .start()
             .await
@@ -676,6 +597,7 @@ mod tests {
 
     #[tokio::test]
     async fn stub_workers_disabled_by_default() {
+        // M1-A3：4 个 stub worker 已删除；验证 LlmAdvisor 条件禁用
         ensure_safe_secrets_in_env(); let cfg = Config::from_env();
         let tmp = tempfile::tempdir().expect("tempdir");
         let store = Arc::new(
@@ -697,32 +619,19 @@ mod tests {
         let manager = WorkerManager::new(store, amas, tx.subscribe(), &worker_cfg);
         let jobs = manager.planned_jobs();
 
-        let stub_names = [
-            WorkerName::EtymologyGeneration,
-            WorkerName::EmbeddingGeneration,
-            WorkerName::WordClustering,
-            WorkerName::MonitoringAggregate,
-            WorkerName::LlmAdvisor,
-        ];
-
-        for stub in &stub_names {
-            let spec = jobs.iter().find(|j| j.name == *stub);
-            assert!(
-                spec.map_or(true, |s| !s.enabled),
-                "{:?} should be disabled",
-                stub
-            );
-        }
+        let spec = jobs.iter().find(|j| j.name == WorkerName::LlmAdvisor);
+        assert!(
+            spec.map_or(true, |s| !s.enabled),
+            "LlmAdvisor should be disabled"
+        );
     }
 
     #[tokio::test]
     async fn all_worker_names_have_str() {
-        // 确保 WorkerName 枚举的每个变体都有对应的 as_str 映射
         let names = [
             WorkerName::MetricsFlush,
             WorkerName::SessionCleanup,
             WorkerName::PasswordResetCleanup,
-            WorkerName::MonitoringAggregate,
             WorkerName::LlmAdvisor,
             WorkerName::DelayedReward,
             WorkerName::ForgettingAlert,
@@ -730,9 +639,6 @@ mod tests {
             WorkerName::CacheCleanup,
             WorkerName::DailyAggregation,
             WorkerName::HealthAnalysis,
-            WorkerName::EtymologyGeneration,
-            WorkerName::EmbeddingGeneration,
-            WorkerName::WordClustering,
             WorkerName::ConfusionPairCache,
             WorkerName::WeeklyReport,
             WorkerName::LogExport,
@@ -743,9 +649,6 @@ mod tests {
         }
     }
 
-    /// 回归：所有 planned_jobs 的 cron 表达式必须能被 tokio_cron_scheduler 解析。
-    /// 历史 bug：confusion_pair_cache 用了 `0 0 5 * * 0`，cron crate (1-7 范围) 拒绝 0，
-    /// 启动期 ERROR 但服务继续跑，导致该 worker 永远不触发。
     #[tokio::test]
     async fn all_planned_jobs_have_parseable_cron() {
         use tokio_cron_scheduler::Job;
@@ -782,7 +685,6 @@ mod tests {
         }
     }
 
-    /// 验证 builder method `with_llm_config` —— 仅修改字段，不影响 planned_jobs 数量
     #[tokio::test]
     async fn with_llm_config_sets_field() {
         ensure_safe_secrets_in_env(); let cfg = Config::from_env();
@@ -800,7 +702,7 @@ mod tests {
 
         let mut worker_cfg = cfg.worker.clone();
         worker_cfg.is_leader = true;
-        worker_cfg.enable_llm_advisor = true; // 让 LlmAdvisor 进入 enabled 路径
+        worker_cfg.enable_llm_advisor = true;
 
         let llm = cfg.llm.clone();
         let manager =
@@ -813,7 +715,6 @@ mod tests {
         assert!(llm_job.enabled);
     }
 
-    /// 验证 builder method `with_update_checker` —— 启用时 UpdateChecker.enabled = true
     #[tokio::test]
     async fn with_update_checker_enables_update_job() {
         use crate::config::UpdateCheckConfig;
@@ -861,8 +762,6 @@ mod tests {
         assert!(update_job.enabled);
     }
 
-    /// 验证 builder method `with_update_checker` enabled=false 路径 —— 仍然挂载 ctx
-    /// 但 planned_jobs 中 UpdateChecker.enabled=false，被 register 时 skip
     #[tokio::test]
     async fn with_update_checker_disabled_keeps_job_disabled() {
         use crate::config::UpdateCheckConfig;
@@ -910,7 +809,6 @@ mod tests {
         assert!(!update_job.enabled);
     }
 
-    /// Leader 模式启动 → 立即广播 shutdown → 触发 drain + scheduler.shutdown 全路径
     #[tokio::test]
     async fn leader_start_and_shutdown_full_path() {
         ensure_safe_secrets_in_env(); let cfg = Config::from_env();
@@ -928,25 +826,14 @@ mod tests {
 
         let mut worker_cfg = cfg.worker.clone();
         worker_cfg.is_leader = true;
-        // 打开 monitoring 让 MetricsFlush 也走 add_job
         worker_cfg.enable_monitoring = true;
-        // 不开 llm_advisor：避免极端情况下 cron 触发 llm_advisor::run 走到回写
-        // amas_config.toml 的路径（虽然 LLMConfig.enabled=false 会立即 return，
-        // 但为了 0 风险，整条 llm 链路在测试中保持关闭）
         worker_cfg.enable_llm_advisor = false;
 
         let manager = WorkerManager::new(store, amas, tx.subscribe(), &worker_cfg);
 
-        // 启动 worker
         let handle = tokio::spawn(manager.start());
-
-        // 等 scheduler 启动稳定
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        // 广播 shutdown
         let _ = tx.send(());
-
-        // worker 应在 drain + shutdown 后退出
         tokio::time::timeout(std::time::Duration::from_secs(5), handle)
             .await
             .expect("worker exits within 5s")
@@ -954,7 +841,6 @@ mod tests {
             .expect("start returns Ok");
     }
 
-    /// Leader 模式启动 + UpdateChecker 完整路径
     #[tokio::test]
     async fn leader_start_with_update_checker() {
         use crate::config::UpdateCheckConfig;
@@ -1006,7 +892,6 @@ mod tests {
             .expect("start returns Ok");
     }
 
-    /// add_job 调度 + 真实触发 —— 用每秒触发的 cron + 短等待，让闭包真的跑一次
     #[tokio::test]
     async fn add_job_invokes_inner_closure_when_scheduler_fires() {
         use std::sync::atomic::AtomicUsize;
@@ -1015,7 +900,6 @@ mod tests {
         let counter_clone = counter.clone();
 
         let mut scheduler = JobScheduler::new().await.expect("scheduler");
-        // "* * * * * *" 每秒触发
         add_job(&scheduler, "* * * * * *", "test_worker", move || {
             let c = counter_clone.clone();
             async move {
@@ -1025,7 +909,6 @@ mod tests {
         .await;
 
         scheduler.start().await.expect("start");
-        // 等 ~1.5s 让 cron 至少触发一次
         tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
         let _ = scheduler.shutdown().await;
 
@@ -1035,8 +918,6 @@ mod tests {
         );
     }
 
-    /// add_job 重入保护 —— guard.compare_exchange 失败分支
-    /// 让闭包阻塞 ≥1.5s，期间下一轮 cron 触发被 skip
     #[tokio::test]
     async fn add_job_skips_when_previous_run_in_progress() {
         use std::sync::atomic::AtomicUsize;
@@ -1059,35 +940,26 @@ mod tests {
         .await;
 
         scheduler.start().await.expect("start");
-        // 等约 3.5s — 期间应触发 3 次 cron，但 started 顶多 +2（第二轮在第一轮跑完后才放行）
         tokio::time::sleep(std::time::Duration::from_millis(3500)).await;
         let _ = scheduler.shutdown().await;
 
         let s = started.load(Ordering::SeqCst);
         let f = finished.load(Ordering::SeqCst);
-        // 起码触发 1 次；重入保护下 started 不会等于 cron 触发次数
-        assert!(s >= 1, "expected ≥1 start, got {s}");
-        assert!(s <= 2, "expected ≤2 starts due to reentrancy guard, got {s}");
-        // 完成数可能为 0（被 shutdown 截断），仅断言不超过 started
+        assert!(s >= 1, "expected >=1 start, got {s}");
+        assert!(s <= 2, "expected <=2 starts due to reentrancy guard, got {s}");
         assert!(f <= s);
     }
 
-    /// add_job cron 解析失败 —— 进入 Err 分支
     #[tokio::test]
     async fn add_job_handles_invalid_cron_gracefully() {
         let mut scheduler = JobScheduler::new().await.expect("scheduler");
-        // 故意给一个非法 cron
         add_job(&scheduler, "not a cron", "bad_cron_worker", || async {}).await;
-        // 不应 panic；scheduler 仍可正常启停
         scheduler.start().await.expect("start");
         let _ = scheduler.shutdown().await;
     }
 
-    /// register_jobs 全分支覆盖 —— 通过反复构造不同 worker_cfg，触发 enabled 与 disabled
-    /// 这里直接对 leader 模式下调用 register_jobs（间接通过 start + 立即 shutdown）
     #[tokio::test]
     async fn register_jobs_covers_all_enabled_branches() {
-        // 通过启用 monitoring + llm_advisor + update_checker 覆盖所有"条件 worker"
         ensure_safe_secrets_in_env(); let cfg = Config::from_env();
         let tmp = tempfile::tempdir().expect("tempdir");
         let store = Arc::new(
@@ -1104,23 +976,17 @@ mod tests {
         let mut worker_cfg = cfg.worker.clone();
         worker_cfg.is_leader = true;
         worker_cfg.enable_monitoring = true;
-        // 仍然不启用 llm_advisor —— 防止 cron 边界条件下 register 的 LlmAdvisor job
-        // 触发到回写 amas_config.toml 的代码路径
         worker_cfg.enable_llm_advisor = false;
 
         let scheduler = JobScheduler::new().await.expect("scheduler");
         let manager = WorkerManager::new(store, amas, tx.subscribe(), &worker_cfg);
 
         manager.register_jobs(&scheduler).await;
-        // 启动并立即 shutdown，验证不 panic
         let mut sched = scheduler;
         sched.start().await.expect("start");
         let _ = sched.shutdown().await;
     }
 
-    /// register_jobs 的 UpdateChecker continue 分支 —— update_checker_ctx=None 但 planned 中
-    /// 该 worker.enabled=false 已被 skip，所以走不到 None 分支；这里直接构造 update_checker_ctx=None
-    /// 配合 planned_jobs 不会进入 UpdateChecker 分支。验证 register_jobs 在没有 ctx 时安全。
     #[tokio::test]
     async fn register_jobs_no_update_checker_ctx_is_safe() {
         ensure_safe_secrets_in_env(); let cfg = Config::from_env();
