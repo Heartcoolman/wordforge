@@ -5,6 +5,7 @@ pub mod confusion_pair_cache;
 pub mod daily_aggregation;
 pub mod delayed_reward;
 pub mod embedding_generation;
+pub mod error_rate_watchdog;
 pub mod etymology_generation;
 pub mod forgetting_alert;
 pub mod health_analysis;
@@ -65,6 +66,8 @@ pub enum WorkerName {
     UpdateChecker,
     /// M0-P3：monitoring_events retention + 月度 VACUUM
     MonitoringRetention,
+    /// M0-P4：滚动 5 分钟 5xx 错误率告警，超过 1% 广播 incident SSE 事件
+    ErrorRateWatchdog,
 }
 
 impl WorkerName {
@@ -89,6 +92,7 @@ impl WorkerName {
             Self::LogExport => "log_export",
             Self::UpdateChecker => "update_checker",
             Self::MonitoringRetention => "monitoring_retention",
+            Self::ErrorRateWatchdog => "error_rate_watchdog",
         }
     }
 }
@@ -107,6 +111,8 @@ pub struct WorkerManager {
     config: WorkerConfig,
     llm_config: Option<crate::config::LLMConfig>,
     update_checker_ctx: Option<UpdateCheckerCtx>,
+    /// M0-P4：error_rate_watchdog 需要 AppState 广播 SSE incident 事件
+    watchdog_state: Option<crate::state::AppState>,
 }
 
 #[derive(Clone)]
@@ -130,7 +136,14 @@ impl WorkerManager {
             config: config.clone(),
             llm_config: None,
             update_checker_ctx: None,
+            watchdog_state: None,
         }
+    }
+
+    /// M0-P4：注入 AppState 以启用 error_rate_watchdog。
+    pub fn with_watchdog_state(mut self, state: crate::state::AppState) -> Self {
+        self.watchdog_state = Some(state);
+        self
     }
 
     pub fn with_llm_config(mut self, llm: crate::config::LLMConfig) -> Self {
@@ -248,6 +261,12 @@ impl WorkerManager {
                 name: WorkerName::MonitoringRetention,
                 cron: "0 0 3 1 * *",
                 enabled: true,
+            },
+            // M0-P4：5xx 错误率滚动监控，每分钟采样，超 1% 广播 incident SSE 事件
+            JobSpec {
+                name: WorkerName::ErrorRateWatchdog,
+                cron: "0 * * * * *",
+                enabled: self.watchdog_state.is_some(),
             },
             // Stub workers —— 默认禁用
             JobSpec {
@@ -493,6 +512,20 @@ impl WorkerManager {
                         let store = store.clone();
                         async move {
                             monitoring_retention::run(&store).await;
+                        }
+                    })
+                    .await;
+                }
+                // M0-P4：5xx 错误率 watchdog
+                WorkerName::ErrorRateWatchdog => {
+                    let watchdog_state = match self.watchdog_state.clone() {
+                        Some(s) => s,
+                        None => continue,
+                    };
+                    add_job(scheduler, spec.cron, name_str, move || {
+                        let state = watchdog_state.clone();
+                        async move {
+                            error_rate_watchdog::run(&state).await;
                         }
                     })
                     .await;

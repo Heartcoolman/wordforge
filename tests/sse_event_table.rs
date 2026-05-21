@@ -20,6 +20,7 @@ const DOCUMENTED_EVENTS: &[&str] = &[
     "update_progress",
     "probe_request",
     "probe_confirm",
+    "incident",
 ];
 
 /// SseEvent 变体的穷举列表，用于序列化验证。
@@ -53,6 +54,10 @@ fn all_sse_event_samples() -> Vec<SseEvent> {
         SseEvent::ProbeConfirm {
             request_id: "req".to_string(),
             confirm_token: "tok".to_string(),
+        },
+        SseEvent::Incident {
+            error_rate: 0.025,
+            window_secs: 300,
         },
     ]
 }

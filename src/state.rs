@@ -81,6 +81,18 @@ pub enum SseEvent {
         #[serde(rename = "confirmToken")]
         confirm_token: String,
     },
+    /// M0-P4：5xx 错误率超阈值，admin 告警事件。
+    /// error_rate_watchdog 在滚动 5 分钟内 5xx/total > 1% 时广播给所有 admin SSE 连接。
+    /// 同一时间窗口内不重复推送（dedup 5 分钟）。
+    #[serde(rename = "incident")]
+    Incident {
+        /// 滚动 5 分钟内 5xx 错误率，范围 [0.0, 1.0]
+        #[serde(rename = "errorRate")]
+        error_rate: f64,
+        /// 计算窗口长度（秒）
+        #[serde(rename = "windowSecs")]
+        window_secs: u64,
+    },
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

@@ -40,6 +40,10 @@ pub async fn request_id_middleware(req: Request, next: Next) -> Response {
         response.headers_mut().insert("x-request-id", value);
     }
 
+    // M0-P4：全局 HTTP 请求计数，供 error_rate_watchdog 计算 5xx 错误率
+    let is_5xx = response.status().is_server_error();
+    crate::metrics_counters::record_request(is_5xx);
+
     if !response.status().is_success() {
         if is_json_content_type(&response) {
             // Existing JSON error: inject traceId
