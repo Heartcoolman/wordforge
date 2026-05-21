@@ -1,4 +1,5 @@
 /// M0-C4：验证 /api/v1/* 端点响应包含正确的 Deprecation / Sunset header（RFC 8594）。
+/// M0-C5：v1 端点现在返回 410 Gone，header 验证仍有效。
 mod common;
 
 use axum::http::{Method, StatusCode};
@@ -24,7 +25,8 @@ async fn v1_words_response_has_deprecation_and_sunset_headers() {
     )
     .await;
 
-    assert_eq!(response.status(), StatusCode::OK);
+    // M0-C5 后端点返回 410 Gone
+    assert_eq!(response.status(), StatusCode::GONE);
 
     let deprecation = response
         .headers()
@@ -66,7 +68,8 @@ async fn v1_study_config_response_has_deprecation_headers() {
     )
     .await;
 
-    assert_eq!(response.status(), StatusCode::OK);
+    // M0-C5 后端点返回 410 Gone
+    assert_eq!(response.status(), StatusCode::GONE);
     assert!(
         response.headers().contains_key("Deprecation"),
         "Deprecation header 应存在"
