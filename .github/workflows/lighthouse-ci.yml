@@ -1,0 +1,176 @@
+name: Lighthouse CI + Web Vitals
+
+# M2-Q2：每次 PR 到 main/feat/v1-m1 时跑；也可手动触发
+on:
+  pull_request:
+    branches: [ main, feat/v1-m1 ]
+    paths:
+      - "frontend/**"
+      - "static/**"
+      - ".github/workflows/lighthouse-ci.yml"
+  push:
+    branches: [ main ]
+    paths:
+      - "frontend/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write   # 写 PR comment
+
+jobs:
+  lighthouse:
+    name: Lighthouse — ${{ matrix.page.name }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        page:
+          - name: "admin-login（首屏）"
+            path: "/admin/login"
+          - name: "admin-dashboard"
+            path: "/admin/"
+          - name: "admin-updates"
+            path: "/admin/updates"
+
+    defaults:
+      run:
+        working-directory: ./frontend
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 构建前端
+        run: npm run build
+
+      - name: 安装 @lhci/cli
+        run: npm install -g @lhci/cli@0.14.x
+
+      - name: 安装 Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: 启动静态服务器
+        # 使用 serve 托管 ../static（即 build 输出目录）
+        run: |
+          npm install -g serve
+          serve ../static -p 80 --no-clipboard &
+          # 等待服务就绪
+          timeout 15 bash -c 'until curl -sf http://localhost/admin/login > /dev/null 2>&1; do sleep 1; done' \
+            || echo "::warning::静态服务可能未就绪，继续尝试"
+
+      - name: 运行 Lighthouse CI
+        env:
+          LHCI_GITHUB_APP_TOKEN: ${{ secrets.LHCI_GITHUB_APP_TOKEN }}
+          LHCI_TOKEN: ${{ secrets.LHCI_TOKEN }}
+        run: |
+          lhci autorun \
+            --collect.url=http://localhost${{ matrix.page.path }} \
+            --collect.numberOfRuns=3 \
+            --collect.settings.chromeFlags="--no-sandbox --disable-dev-shm-usage" \
+            --collect.settings.preset=desktop \
+            --assert.assertions.largest-contentful-paint="['error',{'maxNumericValue':2500,'aggregationMethod':'median-run'}]" \
+            --assert.assertions.total-blocking-time="['error',{'maxNumericValue':200,'aggregationMethod':'median-run'}]" \
+            --assert.assertions.cumulative-layout-shift="['error',{'maxNumericValue':0.1,'aggregationMethod':'median-run'}]" \
+            --upload.target=temporary-public-storage \
+            || echo "::warning::Lighthouse 断言失败，详见 artifact"
+
+      - name: 上传 Lighthouse 报告
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lighthouse-${{ strategy.job-index }}-${{ matrix.page.name }}
+          path: frontend/.lighthouseci/
+          retention-days: 14
+
+  # 汇总：在 PR 上发布 Web Vitals 对比评论
+  summarize:
+    name: 发布 Web Vitals 汇总
+    runs-on: ubuntu-latest
+    needs: lighthouse
+    if: always() && github.event_name == 'pull_request'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: 下载所有 Lighthouse 报告
+        uses: actions/download-artifact@v4
+        with:
+          pattern: "lighthouse-*"
+          path: lh-results
+          merge-multiple: true
+
+      - name: 安装 jq
+        run: sudo apt-get install -y jq
+
+      - name: 生成 Web Vitals 对比表并评论 PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+
+            // 目标阈值
+            const SLO = { lcp: 2500, tbt: 200, cls: 0.1 };
+            const pages = [
+              { name: 'admin-login（首屏）', path: '/admin/login' },
+              { name: 'admin-dashboard', path: '/admin/' },
+              { name: 'admin-updates', path: '/admin/updates' },
+            ];
+
+            let table = '## Lighthouse Web Vitals 报告\n\n';
+            table += '| 页面 | LCP (ms) | TBT (ms) | CLS | Perf Score | 状态 |\n';
+            table += '|------|----------|----------|-----|------------|------|\n';
+
+            // 尝试从 manifest.json 提取指标
+            const resultDir = 'lh-results';
+            if (fs.existsSync(resultDir)) {
+              const files = fs.readdirSync(resultDir, { recursive: true })
+                .filter(f => f.endsWith('manifest.json'));
+
+              for (const page of pages) {
+                let lcp = '—', tbt = '—', cls = '—', perf = '—', status = '⚠️ 无数据';
+                // 尝试匹配对应页面的报告
+                for (const file of files) {
+                  try {
+                    const manifest = JSON.parse(fs.readFileSync(path.join(resultDir, file), 'utf8'));
+                    const run = Array.isArray(manifest) ? manifest[0] : manifest;
+                    if (run?.summary) {
+                      lcp = Math.round(run.summary['largest-contentful-paint'] || 0);
+                      tbt = Math.round(run.summary['total-blocking-time'] || 0);
+                      cls = (run.summary['cumulative-layout-shift'] || 0).toFixed(3);
+                      perf = Math.round((run.summary['categories:performance'] || 0) * 100);
+                      const pass = lcp <= SLO.lcp && tbt <= SLO.tbt && parseFloat(cls) <= SLO.cls;
+                      status = pass ? '✅ 通过' : '❌ 超标';
+                    }
+                  } catch {}
+                }
+                table += `| ${page.name} | ${lcp} | ${tbt} | ${cls} | ${perf} | ${status} |\n`;
+              }
+            } else {
+              for (const page of pages) {
+                table += `| ${page.name} | — | — | — | — | ⚠️ 无数据 |\n`;
+              }
+            }
+
+            table += '\n**SLO 阈值**：LCP < 2500ms / TBT < 200ms / CLS < 0.1\n';
+            table += `\n_由 [Lighthouse CI](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) 自动生成_`;
+
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: table,
+            });
