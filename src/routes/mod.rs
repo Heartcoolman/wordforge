@@ -5,6 +5,7 @@ pub mod content;
 pub mod feedback;
 pub mod health;
 pub mod learning;
+pub mod metrics;
 pub mod notifications;
 pub mod probe_results;
 pub mod realtime;
@@ -111,7 +112,9 @@ pub fn build_router(state: AppState) -> Router {
 
     let mut app = Router::new()
         .nest("/api", api_routes)
-        .nest("/health", health::router());
+        .nest("/health", health::router())
+        // M0-P1: Prometheus /metrics 端点（admin 鉴权，独立于 /api 中间件链）
+        .route("/metrics", axum::routing::get(metrics::metrics_handler));
 
     if !state.config().api_only {
         let static_files = ServeDir::new("static").append_index_html_on_directories(false);
