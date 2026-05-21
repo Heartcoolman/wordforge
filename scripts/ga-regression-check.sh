@@ -230,9 +230,20 @@ check_m1() {
     else
         fail "M1-A1 src/services/wordbook.rs 未删除"
     fi
+    # M1-A1 验收：routes/ 中 services/ 引用仅剩 probe/updater/llm_provider 三个
+    STRAY=$(grep -rn "services/" "${PROJECT_ROOT}/src/routes/" 2>/dev/null \
+        | grep -v "probe\|updater\|llm_provider" | grep -v "^Binary" || true)
+    if [[ -z "$STRAY" ]]; then
+        pass "M1-A1 routes/ 仅剩 probe/updater/llm_provider 三处 services/ 引用"
+    else
+        fail "M1-A1 routes/ 中仍有多余 services/ 引用：$(echo "$STRAY" | head -3 | tr '\n' ' ')"
+    fi
 
     check_file       "M1-A2 amas_poison_recovery 测试存在" \
         "tests/amas_poison_recovery.rs"
+    # M1-A2 验收：engine.rs 已切换到 parking_lot 或使用 unwrap_or_else（不再裸 unwrap）
+    check_contains   "M1-A2 engine.rs 使用 parking_lot 或 unwrap_or_else" \
+        "src/amas/engine.rs" "parking_lot|unwrap_or_else|PoisonError"
 
     # M1-A3：4 个 stub worker 已删（检查 workers/mod.rs 不再注册）
     check_not_contains "M1-A3 etymology_generation worker 已删" \
@@ -242,6 +253,13 @@ check_m1() {
     check_not_contains "M1-A3 word_clustering worker 已删" \
         "src/workers/mod.rs" "word_clustering"
 
+    # M1-A3 补充：monitoring_aggregate worker 文件已删（M0-P3 选路径 b 后退场）
+    if [[ ! -f "${PROJECT_ROOT}/src/workers/monitoring_aggregate.rs" ]]; then
+        pass "M1-A3 monitoring_aggregate.rs 已删"
+    else
+        fail "M1-A3 monitoring_aggregate.rs 未删除（应在 M1-A3 随其他 stub worker 一起清理）"
+    fi
+
     # M1-A4：sled 依赖已删
     check_not_contains "M1-A4 Cargo.toml sled 依赖已删" \
         "Cargo.toml" "^sled"
@@ -250,6 +268,26 @@ check_m1() {
     else
         fail "M1-A4 migrate_sled_to_sqlite.rs 未删除"
     fi
+    # M1-A4 验收：store/keys.rs 已删
+    if [[ ! -f "${PROJECT_ROOT}/src/store/keys.rs" ]]; then
+        pass "M1-A4 src/store/keys.rs 已删"
+    else
+        fail "M1-A4 src/store/keys.rs 未删除（sled migration 残留）"
+    fi
+
+    # M1-A5：cron scheduler 健康监测
+    check_contains   "M1-A5 worker_last_run 表 migration 存在" \
+        "src/store/migrate.rs" "worker_last_run"
+    check_contains   "M1-A5 /metrics 暴露 worker_last_run_seconds（非 stub）" \
+        "src/routes/metrics.rs" "worker_last_run_seconds"
+    check_file       "M1-A5 workers_extra 或 workers_coverage 测试覆盖 worker 上报" \
+        "tests/workers_extra.rs"
+
+    # M1-A6：strict-mode / maintenance 豁免改路由元数据驱动
+    check_contains   "M1-A6 RouteMetadata 定义存在" \
+        "src/middleware/strict_mode.rs" "RouteMetadata|strict_mode_exempt|metadata"
+    check_file       "M1-A6 middleware_exemption 集成测试存在" \
+        "tests/middleware_exemption.rs"
 
     # M1-A7：queryClient 死依赖已删
     if [[ ! -f "${PROJECT_ROOT}/frontend/src/lib/queryClient.ts" ]]; then
@@ -269,10 +307,16 @@ check_m1() {
     # M1-G2：LLM 月度成本上限
     check_contains   "M1-G2 llm_advisor_cost_ledger migration 存在" \
         "src/store/migrate.rs" "llm_advisor_cost_ledger|monthly.*cost|cost_ledger"
+    check_contains   "M1-G2 MonthlyBudgetExceeded 错误类型定义" \
+        "src/services/llm_provider.rs" "MonthlyBudgetExceeded|monthly_budget|max_cost_per_month"
+    check_contains   "M1-G2 llm_advisor_max_cost_per_month config 存在" \
+        "src/config.rs" "max_cost_per_month|monthly_budget"
 
     # M1-G3：feedback_items 扩展字段
     check_contains   "M1-G3 feedback_items priority 字段 migration 存在" \
         "src/store/migrate.rs" "priority.*normal|feedback.*priority"
+    check_contains   "M1-G3 feedback admin 路由支持 status 更新" \
+        "src/routes/admin/feedback.rs" "status|priority"
 
     # M1 全量 cargo test
     if [[ "$SKIP_CARGO" == "false" ]]; then
@@ -285,6 +329,11 @@ check_m1() {
         run_check "M1 cargo test --test workers_coverage" \
             cargo test --manifest-path "${PROJECT_ROOT}/Cargo.toml" \
             --test workers_coverage -- --test-threads=1
+        if [[ -f "${PROJECT_ROOT}/tests/middleware_exemption.rs" ]]; then
+            run_check "M1 cargo test --test middleware_exemption" \
+                cargo test --manifest-path "${PROJECT_ROOT}/Cargo.toml" \
+                --test middleware_exemption -- --test-threads=1
+        fi
     else
         skip "M1 cargo test（--skip-cargo）"
     fi
