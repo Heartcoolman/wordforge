@@ -225,7 +225,15 @@ impl Store {
         }
 
         if set_parts.is_empty() && resolved_at_sql.is_empty() {
-            return self.get_feedback(id);
+            return Ok(conn
+                .query_row(
+                    "SELECT id, user_id, category, body, route, created_at,
+                            priority, status, assignee_admin_id, resolved_at, resolution
+                     FROM feedback_items WHERE id = ?1",
+                    params![id],
+                    feedback_from_row,
+                )
+                .optional()?);
         }
 
         let set_clause = format!(
@@ -242,7 +250,16 @@ impl Store {
         stmt.execute(rusqlite::params_from_iter(
             std::iter::once(Some(id.to_string())).chain(bind_values),
         ))?;
-        self.get_feedback(id)
+        // 在同一连接内读回更新后的记录，避免 pool_size=1 时二次 conn() 死锁
+        Ok(conn
+            .query_row(
+                "SELECT id, user_id, category, body, route, created_at,
+                        priority, status, assignee_admin_id, resolved_at, resolution
+                 FROM feedback_items WHERE id = ?1",
+                params![id],
+                feedback_from_row,
+            )
+            .optional()?)
     }
 }
 
