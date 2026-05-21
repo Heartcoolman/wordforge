@@ -16,12 +16,13 @@ pub mod password_reset_cleanup;
 pub mod probe_cleanup;
 pub mod probe_confirm_sweeper;
 pub mod session_cleanup;
+pub mod scheduler_health_watchdog;
 pub mod update_checker;
 pub mod weekly_report;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::broadcast;
 use tokio_cron_scheduler::{Job, JobScheduler};
@@ -60,6 +61,8 @@ pub enum WorkerName {
     MonitoringRetention,
     /// M0-P4：滚动 5 分钟 5xx 错误率告警，超过 1% 广播 incident SSE 事件
     ErrorRateWatchdog,
+    /// M1-A5：调度器健康监测，检测连续 3 周期未上报的 worker
+    SchedulerHealthWatchdog,
 }
 
 impl WorkerName {
@@ -81,6 +84,7 @@ impl WorkerName {
             Self::UpdateChecker => "update_checker",
             Self::MonitoringRetention => "monitoring_retention",
             Self::ErrorRateWatchdog => "error_rate_watchdog",
+            Self::SchedulerHealthWatchdog => "scheduler_health_watchdog",
         }
     }
 }
@@ -102,6 +106,8 @@ pub struct WorkerManager {
     /// M0-P4：error_rate_watchdog 需要 AppState 广播 SSE incident 事件
     watchdog_state: Option<crate::state::AppState>,
     llm_advisor_state: Option<crate::state::AppState>,
+    /// M1-A5：调度器健康监测需要 AppState 广播 worker_missed SSE 事件
+    health_state: Option<crate::state::AppState>,
 }
 
 #[derive(Clone)]
@@ -127,7 +133,14 @@ impl WorkerManager {
             update_checker_ctx: None,
             watchdog_state: None,
             llm_advisor_state: None,
+            health_state: None,
         }
+    }
+
+    /// M1-A5：注入 AppState 以启用调度器健康监测 SSE 告警。
+    pub fn with_health_state(mut self, state: crate::state::AppState) -> Self {
+        self.health_state = Some(state);
+        self
     }
 
     /// M0-P4：注入 AppState 以启用 error_rate_watchdog。
@@ -256,6 +269,12 @@ impl WorkerManager {
                 cron: "0 * * * * *",
                 enabled: self.watchdog_state.is_some(),
             },
+            // M1-A5：调度器健康监测，每分钟检测 worker 上报状态（time-based 补充检测）
+            JobSpec {
+                name: WorkerName::SchedulerHealthWatchdog,
+                cron: "0 * * * * *",
+                enabled: self.health_state.is_some(),
+            },
         ]
     }
 
@@ -297,11 +316,14 @@ impl WorkerManager {
             let store = self.store.clone();
             let engine = self.amas_engine.clone();
             let name_str = spec.name.as_str();
+            // M1-A5：每个 job 共享一个 miss counter，由 add_job 管理；health_state 用于广播 SSE 告警。
+            let job_store = self.store.clone();
+            let health_state = self.health_state.clone();
 
             match spec.name {
                 WorkerName::MetricsFlush => {
                     let registry = engine.metrics_registry().clone();
-                    add_job(scheduler, spec.cron, name_str, move || {
+                    add_job(scheduler, spec.cron, name_str, job_store, health_state, move || {
                         let store = store.clone();
                         let registry = registry.clone();
                         async move {
@@ -311,7 +333,7 @@ impl WorkerManager {
                     .await;
                 }
                 WorkerName::SessionCleanup => {
-                    add_job(scheduler, spec.cron, name_str, move || {
+                    add_job(scheduler, spec.cron, name_str, job_store, health_state, move || {
                         let store = store.clone();
                         async move {
                             session_cleanup::run(&store).await;
@@ -320,7 +342,7 @@ impl WorkerManager {
                     .await;
                 }
                 WorkerName::PasswordResetCleanup => {
-                    add_job(scheduler, spec.cron, name_str, move || {
+                    add_job(scheduler, spec.cron, name_str, job_store, health_state, move || {
                         let store = store.clone();
                         async move {
                             password_reset_cleanup::run(&store).await;
@@ -331,7 +353,7 @@ impl WorkerManager {
                 WorkerName::LlmAdvisor => {
                     let llm = self.llm_config.clone();
                     let engine_cloned = engine.clone();
-                    add_job(scheduler, spec.cron, name_str, move || {
+                    add_job(scheduler, spec.cron, name_str, job_store, health_state, move || {
                         let store = store.clone();
                         let llm = llm.clone();
                         let engine = engine_cloned.clone();
@@ -342,7 +364,7 @@ impl WorkerManager {
                     .await;
                 }
                 WorkerName::DelayedReward => {
-                    add_job(scheduler, spec.cron, name_str, move || {
+                    add_job(scheduler, spec.cron, name_str, job_store, health_state, move || {
                         let store = store.clone();
                         async move {
                             delayed_reward::run(&store).await;
@@ -351,7 +373,7 @@ impl WorkerManager {
                     .await;
                 }
                 WorkerName::ForgettingAlert => {
-                    add_job(scheduler, spec.cron, name_str, move || {
+                    add_job(scheduler, spec.cron, name_str, job_store, health_state, move || {
                         let store = store.clone();
                         async move {
                             forgetting_alert::run(&store).await;
@@ -360,7 +382,7 @@ impl WorkerManager {
                     .await;
                 }
                 WorkerName::AlgorithmOptimization => {
-                    add_job(scheduler, spec.cron, name_str, move || {
+                    add_job(scheduler, spec.cron, name_str, job_store, health_state, move || {
                         let store = store.clone();
                         let engine = engine.clone();
                         async move {
@@ -370,7 +392,7 @@ impl WorkerManager {
                     .await;
                 }
                 WorkerName::CacheCleanup => {
-                    add_job(scheduler, spec.cron, name_str, move || {
+                    add_job(scheduler, spec.cron, name_str, job_store, health_state, move || {
                         let store = store.clone();
                         async move {
                             cache_cleanup::run(&store).await;
@@ -379,7 +401,7 @@ impl WorkerManager {
                     .await;
                 }
                 WorkerName::DailyAggregation => {
-                    add_job(scheduler, spec.cron, name_str, move || {
+                    add_job(scheduler, spec.cron, name_str, job_store, health_state, move || {
                         let store = store.clone();
                         async move {
                             daily_aggregation::run(&store).await;
@@ -388,7 +410,7 @@ impl WorkerManager {
                     .await;
                 }
                 WorkerName::HealthAnalysis => {
-                    add_job(scheduler, spec.cron, name_str, move || {
+                    add_job(scheduler, spec.cron, name_str, job_store, health_state, move || {
                         let store = store.clone();
                         async move {
                             health_analysis::run(&store).await;
@@ -397,7 +419,7 @@ impl WorkerManager {
                     .await;
                 }
                 WorkerName::ConfusionPairCache => {
-                    add_job(scheduler, spec.cron, name_str, move || {
+                    add_job(scheduler, spec.cron, name_str, job_store, health_state, move || {
                         let store = store.clone();
                         async move {
                             confusion_pair_cache::run(&store).await;
@@ -406,7 +428,7 @@ impl WorkerManager {
                     .await;
                 }
                 WorkerName::WeeklyReport => {
-                    add_job(scheduler, spec.cron, name_str, move || {
+                    add_job(scheduler, spec.cron, name_str, job_store, health_state, move || {
                         let store = store.clone();
                         async move {
                             weekly_report::run(&store).await;
@@ -415,7 +437,7 @@ impl WorkerManager {
                     .await;
                 }
                 WorkerName::LogExport => {
-                    add_job(scheduler, spec.cron, name_str, move || {
+                    add_job(scheduler, spec.cron, name_str, job_store, health_state, move || {
                         let store = store.clone();
                         async move {
                             log_export::run(&store).await;
@@ -428,7 +450,7 @@ impl WorkerManager {
                         Some(ctx) => ctx,
                         None => continue,
                     };
-                    add_job(scheduler, spec.cron, name_str, move || {
+                    add_job(scheduler, spec.cron, name_str, job_store, health_state, move || {
                         let updater = ctx.updater.clone();
                         let state = ctx.state.clone();
                         async move {
@@ -439,7 +461,7 @@ impl WorkerManager {
                 }
                 // M0-P3：monitoring_events retention + 月度 VACUUM
                 WorkerName::MonitoringRetention => {
-                    add_job(scheduler, spec.cron, name_str, move || {
+                    add_job(scheduler, spec.cron, name_str, job_store, health_state, move || {
                         let store = store.clone();
                         async move {
                             monitoring_retention::run(&store).await;
@@ -453,10 +475,26 @@ impl WorkerManager {
                         Some(s) => s,
                         None => continue,
                     };
-                    add_job(scheduler, spec.cron, name_str, move || {
+                    add_job(scheduler, spec.cron, name_str, job_store, health_state, move || {
                         let state = watchdog_state.clone();
                         async move {
                             error_rate_watchdog::run(&state).await;
+                        }
+                    })
+                    .await;
+                }
+                // M1-A5：调度器健康 watchdog（time-based，补充 add_job 内置 skip-based 告警）
+                WorkerName::SchedulerHealthWatchdog => {
+                    let hw_state = match self.health_state.clone() {
+                        Some(s) => s,
+                        None => continue,
+                    };
+                    let hw_store = store.clone();
+                    add_job(scheduler, spec.cron, name_str, job_store, health_state, move || {
+                        let state = hw_state.clone();
+                        let s = hw_store.clone();
+                        async move {
+                            scheduler_health_watchdog::run(&s, &state).await;
                         }
                     })
                     .await;
@@ -467,40 +505,87 @@ impl WorkerManager {
     }
 }
 
-/// Add a job to the scheduler with an overlap guard and timeout wrapper.
-async fn add_job<Fut, F>(scheduler: &JobScheduler, cron: &str, name: &'static str, mut run: F)
+/// 连续 skip 次数达到此阈值时广播 worker_missed SSE 事件（M1-A5）。
+const WORKER_MISS_THRESHOLD: u32 = 3;
+
+/// Add a job to the scheduler with an overlap guard, timeout wrapper, and timing upsert (M1-A5).
+///
+/// - 每次成功/超时完成后 upsert `worker_last_run`，连续 skip 计数重置。
+/// - 连续 skip 达到 `WORKER_MISS_THRESHOLD` 次时广播 `WorkerMissed` SSE 事件。
+async fn add_job<Fut, F>(
+    scheduler: &JobScheduler,
+    cron: &str,
+    name: &'static str,
+    store: Arc<Store>,
+    health_state: Option<crate::state::AppState>,
+    mut run: F,
+)
 where
     F: FnMut() -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = ()> + Send + 'static,
 {
     let running = Arc::new(AtomicBool::new(false));
+    let miss_count = Arc::new(AtomicU32::new(0));
 
     let job = Job::new_async(cron, move |_uuid, _lock| {
         let guard = running.clone();
+        let store = store.clone();
+        let health_state = health_state.clone();
+        let miss_count = miss_count.clone();
 
         if guard
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .is_err()
         {
+            // 上次调度仍在运行，本次 skip
+            let misses = miss_count.fetch_add(1, Ordering::SeqCst) + 1;
             tracing::warn!(
                 worker = name,
+                miss_count = misses,
                 "Skipping worker invocation: previous run still in progress"
             );
+            if misses >= WORKER_MISS_THRESHOLD {
+                if let Some(state) = health_state {
+                    state.broadcast_to_all_sse(crate::state::SseEvent::WorkerMissed {
+                        worker_name: name.to_string(),
+                        miss_count: misses,
+                    });
+                }
+            }
+            // 写 skipped 记录
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            let _ = store.upsert_worker_last_run(name, now, 0, "skipped", None);
             return Box::pin(async {});
         }
 
         let fut = run();
         Box::pin(async move {
-            match tokio::time::timeout(WORKER_TIMEOUT, fut).await {
-                Ok(()) => {}
+            let start = std::time::Instant::now();
+            let now_ts = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+
+            let (outcome, error_msg) = match tokio::time::timeout(WORKER_TIMEOUT, fut).await {
+                Ok(()) => ("success", None),
                 Err(_) => {
                     tracing::error!(
                         worker = name,
                         timeout_secs = WORKER_TIMEOUT.as_secs(),
                         "Worker timed out"
                     );
+                    ("failure", Some("timeout"))
                 }
-            }
+            };
+
+            let duration_ms = start.elapsed().as_millis() as i64;
+            // 成功或失败都重置 miss 计数
+            miss_count.store(0, Ordering::SeqCst);
+            let _ = store.upsert_worker_last_run(name, now_ts, duration_ms, outcome, error_msg);
+
             guard.store(false, Ordering::SeqCst);
         })
     });
@@ -900,7 +985,7 @@ mod tests {
         let counter_clone = counter.clone();
 
         let mut scheduler = JobScheduler::new().await.expect("scheduler");
-        add_job(&scheduler, "* * * * * *", "test_worker", move || {
+        add_job(&scheduler, "* * * * * *", "test_worker", Arc::new(crate::store::Store::open(":memory:", 5000, 1).unwrap()), None, move || {
             let c = counter_clone.clone();
             async move {
                 c.fetch_add(1, Ordering::SeqCst);
@@ -928,7 +1013,7 @@ mod tests {
         let f_clone = finished.clone();
 
         let mut scheduler = JobScheduler::new().await.expect("scheduler");
-        add_job(&scheduler, "* * * * * *", "slow_worker", move || {
+        add_job(&scheduler, "* * * * * *", "slow_worker", Arc::new(crate::store::Store::open(":memory:", 5000, 1).unwrap()), None, move || {
             let s = s_clone.clone();
             let f = f_clone.clone();
             async move {
@@ -953,7 +1038,7 @@ mod tests {
     #[tokio::test]
     async fn add_job_handles_invalid_cron_gracefully() {
         let mut scheduler = JobScheduler::new().await.expect("scheduler");
-        add_job(&scheduler, "not a cron", "bad_cron_worker", || async {}).await;
+        add_job(&scheduler, "not a cron", "bad_cron_worker", Arc::new(crate::store::Store::open(":memory:", 5000, 1).unwrap()), None, || async {}).await;
         scheduler.start().await.expect("start");
         let _ = scheduler.shutdown().await;
     }
