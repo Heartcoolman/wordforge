@@ -829,7 +829,7 @@
 | `memoryStrength` | number | 记忆强度，范围 0.0–1.0 |
 | `recallProbability` | number | 当前回忆概率，范围 0.0–1.0 |
 | `nextReviewIntervalSecs` | number | 下次复习间隔（秒），用于回填 `WordLearningState.nextReviewDate` |
-| `masteryLevel` | enum | `"NEW" / "LEARNING" / "REVIEWING" / "MASTERED" / "FORGOTTEN"`，**SCREAMING_SNAKE_CASE**，与 `WordLearningState.state` 同一份枚举 |
+| `masteryLevel` | enum | `"NEW" / "LEARNING" / "REVIEWING" / "MASTERED" / "FORGOTTEN"`，**SCREAMING_SNAKE_CASE**；注意与 `WordLearningState.state`（lowercase）是**不同枚举**，不可混用 |
 
 `amasResult.coldStartPhase` 是 `"Classify" | "Explore" | null`（**PascalCase**，不带 rename）；`null` 表示已进入稳定期。
 
@@ -1232,7 +1232,7 @@
 {
   "userId": "<uuid>",
   "wordId": "<uuid>",
-  "state": "MASTERED",
+  "state": "mastered",
   "masteryLevel": 0.95,
   "nextReviewDate": "2024-01-20T08:00:00Z",
   "halfLife": 72.0,
@@ -1332,14 +1332,14 @@
   "updates": [
     {
       "wordId": "<id>",
-      "state": "REVIEWING",
+      "state": "reviewing",
       "masteryLevel": 0.6
     }
   ]
 }
 ```
 
-`state` 和 `masteryLevel` 均为可选；所有 `wordId` 必须已存在。
+`state` 和 `masteryLevel` 均为可选；所有 `wordId` 必须已存在。`state` 枚举值为 lowercase（`"new"/"learning"/"reviewing"/"mastered"/"forgotten"`，v0.6.0-beta.4 P3#7 起）。
 
 **响应 200：**
 ```json
@@ -2278,7 +2278,7 @@ AMAS（Adaptive Multi-level Adjustment System）是服务端自适应学习引�
 | `memoryStrength` | number | 记忆强度，范围 0.0–1.0 |
 | `recallProbability` | number | 当前回忆概率，范围 0.0–1.0 |
 | `nextReviewIntervalSecs` | number | 下次复习间隔（秒），用于回填 `WordLearningState.nextReviewDate` |
-| `masteryLevel` | enum | `"NEW" / "LEARNING" / "REVIEWING" / "MASTERED" / "FORGOTTEN"`，**SCREAMING_SNAKE_CASE**，与 `WordLearningState.state` 同一份枚举 |
+| `masteryLevel` | enum | `"NEW" / "LEARNING" / "REVIEWING" / "MASTERED" / "FORGOTTEN"`，**SCREAMING_SNAKE_CASE**；注意与 `WordLearningState.state`（lowercase）是**不同枚举**，不可混用 |
 
 > `POST /api/records` 响应中的 `data.amasResult` 与本端点返回的 `data` 同构；区别仅在于 `/api/records` 同时把记录写入 `learning_records` 表并触发 ELO/word-state 持久化。
 
@@ -2663,18 +2663,24 @@ AMAS 算法指标快照（需 Admin Token）。
 ```json
 {
   "success": true,
-  "data": [
-    {
-      "wordId": "<uuid>",
-      "favorited": true,
-      "createdAt": "2024-01-15T08:00:00Z",
-      "word": { "id": "<uuid>", "text": "abandon", "meaning": "..." }
-    }
-  ]
+  "data": {
+    "data": [
+      {
+        "wordId": "<uuid>",
+        "favorited": true,
+        "createdAt": "2024-01-15T08:00:00Z",
+        "word": { "id": "<uuid>", "text": "abandon", "meaning": "..." }
+      }
+    ],
+    "total": 1,
+    "page": 1,
+    "perPage": 20,
+    "totalPages": 1
+  }
 }
 ```
 
-> `word` 为 `WordPublic` 投影；若收藏的单词已被删除，该条目会被过滤。
+> `word` 为 `WordPublic` 投影；若收藏的单词已被删除，该条目会被过滤。v0.6.0-beta.4 P3#5 起改为分页响应（`paginated()` 格式），列表字段为 `data.data`（非 `data.items`）。
 
 ---
 

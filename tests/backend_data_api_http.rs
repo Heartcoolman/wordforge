@@ -209,7 +209,8 @@ async fn wordbook_progress_favorites_and_notes_work_for_current_user() {
     .await;
     let (status, _, body) = response_json(favorites).await;
     assert_eq!(status, StatusCode::OK, "favorites body: {body}");
-    assert_eq!(body["data"][0]["word"]["id"], words[0].id);
+    // P3#5：list_favorites 改 paginated()，列表在 data.data 而非 data 直接为数组
+    assert_eq!(body["data"]["data"][0]["word"]["id"], words[0].id);
 
     let create_note = request(
         &app.app,
