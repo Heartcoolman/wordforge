@@ -24,6 +24,7 @@ fn migrations() -> Vec<(&'static str, MigrationFn)> {
         ("015_gdpr_export_rate_limit", m015_gdpr_export_rate_limit),
         ("016_llm_cost_ledger", m016_llm_cost_ledger),
         ("017_update_audit_log", m017_update_audit_log),
+        ("018_feedback_priority_status", m018_feedback_priority_status),
     ]
 }
 
@@ -459,6 +460,31 @@ fn m016_llm_cost_ledger(store: &Store) -> Result<(), StoreError> {
              llm_advisor_max_cost_per_month_yuan REAL NOT NULL DEFAULT 100.0",
             [],
         )?;
+    }
+    Ok(())
+}
+
+
+fn m018_feedback_priority_status(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    for (col, ddl) in [
+        ("priority", "TEXT NOT NULL DEFAULT 'normal'"),
+        ("status", "TEXT NOT NULL DEFAULT 'open'"),
+        ("assignee_admin_id", "INTEGER"),
+        ("resolved_at", "TEXT"),
+        ("resolution", "TEXT"),
+    ] {
+        let has: bool = conn
+            .prepare("PRAGMA table_info(feedback_items)")?
+            .query_map([], |r| r.get::<_, String>(1))?
+            .filter_map(Result::ok)
+            .any(|name| name == col);
+        if !has {
+            conn.execute(
+                &format!("ALTER TABLE feedback_items ADD COLUMN {} {}", col, ddl),
+                [],
+            )?;
+        }
     }
     Ok(())
 }
