@@ -152,7 +152,7 @@ async fn set_maintenance(
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     let active = req.active;
     state
-        .run_store_task("admin.settings.set_maintenance", move |store| {
+        .run_store_task("admin.settings.set_maintenance", move |store| -> Result<_, AppError> {
             let mut settings = store.get_system_settings()?;
             settings.maintenance_mode = active;
             store.save_system_settings(&settings)?;

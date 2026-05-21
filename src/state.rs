@@ -8,7 +8,6 @@ use tokio::sync::{broadcast, mpsc, RwLock};
 use crate::amas::engine::AMASEngine;
 use crate::config::Config;
 use crate::middleware::rate_limit::{AuthRateLimitState, RateLimitState};
-use crate::services::{admin::AdminService, learning::LearningService, wordbook::WordbookService};
 use crate::store::Store;
 
 #[derive(Debug, Clone)]
@@ -132,9 +131,6 @@ impl ApplyTaskStatus {
 pub struct AppState {
     store: Arc<Store>,
     amas_engine: Arc<AMASEngine>,
-    admin_service: AdminService,
-    learning_service: LearningService,
-    wordbook_service: WordbookService,
     runtime: Arc<RuntimeConfig>,
     rate_limit: Arc<RateLimitState>,
     auth_rate_limit: Arc<AuthRateLimitState>,
@@ -179,16 +175,9 @@ impl AppState {
         let (maintenance_tx, _) = broadcast::channel(16);
         let (update_tx, _) = broadcast::channel(16);
 
-        let admin_service = AdminService::new(store.clone());
-        let learning_service = LearningService::new(store.clone(), amas_engine.clone());
-        let wordbook_service = WordbookService::new(store.clone());
-
         Self {
             store,
             amas_engine,
-            admin_service,
-            learning_service,
-            wordbook_service,
             runtime,
             rate_limit,
             auth_rate_limit,
@@ -249,18 +238,6 @@ impl AppState {
 
     pub fn store(&self) -> &Store {
         &self.store
-    }
-
-    pub fn admin_service(&self) -> &AdminService {
-        &self.admin_service
-    }
-
-    pub fn learning_service(&self) -> &LearningService {
-        &self.learning_service
-    }
-
-    pub fn wordbook_service(&self) -> &WordbookService {
-        &self.wordbook_service
     }
 
     pub async fn run_store_task<T, F>(
