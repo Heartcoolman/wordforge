@@ -64,3 +64,10 @@ print("\n".join(lines))
 PYEOF
 
 echo "已生成 ${OUT}"
+
+# 同步到 docs/changelog.md（VitePress symlink 无法跨 docs/ 外解析，改用实体文件副本）
+DOCS_OUT="docs/changelog.md"
+if [ -f "$DOCS_OUT" ] || [ -L "$DOCS_OUT" ]; then
+  cp "$OUT" "$DOCS_OUT"
+  echo "已同步 ${DOCS_OUT}"
+fi
