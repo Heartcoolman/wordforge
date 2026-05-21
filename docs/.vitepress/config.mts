@@ -14,6 +14,7 @@ export default defineConfig({
       { text: '指南', link: '/guide/introduction' },
       { text: 'API', link: '/api-endpoints' },
       { text: 'AMAS', link: '/amas-admin-console' },
+      { text: '用户', link: '/user/installation-web' },
     ],
 
     sidebar: {
@@ -28,6 +29,17 @@ export default defineConfig({
           ],
         },
       ],
+      '/user/': [
+        {
+          text: '用户文档',
+          items: [
+            { text: 'Web 客户端安装', link: '/user/installation-web' },
+            { text: 'iOS 客户端安装', link: '/user/installation-ios' },
+            { text: '常见问题', link: '/user/faq' },
+            { text: '隐私与数据', link: '/user/privacy' },
+          ],
+        },
+      ],
       '/': [
         {
           text: '入门',
@@ -38,6 +50,16 @@ export default defineConfig({
             { text: '架构概览', link: '/guide/architecture' },
             { text: 'AMAS 入门', link: '/guide/amas-intro' },
             { text: '更新日志', link: '/changelog' },
+          ],
+        },
+        {
+          text: '用户文档',
+          collapsed: false,
+          items: [
+            { text: 'Web 客户端安装', link: '/user/installation-web' },
+            { text: 'iOS 客户端安装', link: '/user/installation-ios' },
+            { text: '常见问题', link: '/user/faq' },
+            { text: '隐私与数据', link: '/user/privacy' },
           ],
         },
         {
