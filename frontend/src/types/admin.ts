@@ -257,6 +257,7 @@ export interface RetentionCurve {
 /**
  * 用户反馈条目，对应后端 `FeedbackItem`（src/store/operations/feedback.rs）。
  * 后端 list_feedback 暴露在 /api/admin/feedback。
+ * M1-G3：补全 priority / status / assigneeAdminId / resolvedAt / resolution 字段。
  */
 export interface FeedbackItem {
   id: string;
@@ -265,4 +266,14 @@ export interface FeedbackItem {
   body: string;
   route: string | null;
   createdAt: string;
+  /** 优先级：'low' | 'normal' | 'high' | 'urgent'，后端默认 'normal' */
+  priority: string;
+  /** 处理状态：'open' | 'in_progress' | 'resolved' | 'closed'，后端默认 'open' */
+  status: string;
+  /** 处理人 admin ID，可为 null */
+  assigneeAdminId: string | null;
+  /** 解决时间，ISO 8601，可为 null */
+  resolvedAt: string | null;
+  /** 解决备注，可为 null */
+  resolution: string | null;
 }

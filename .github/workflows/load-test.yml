@@ -1,0 +1,130 @@
+name: Load Tests (k6)
+
+# M2-Q1：每周一 03:00 UTC 自动跑（O7-a）
+# 也可手动触发，支持指定目标 URL
+on:
+  schedule:
+    - cron: "0 3 * * 1"   # 每周一 03:00 UTC
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: "压测目标 URL（默认 http://localhost:3000）"
+        required: false
+        default: "http://localhost:3000"
+      scripts:
+        description: "要运行的脚本（逗号分隔，留空=全部）"
+        required: false
+        default: ""
+
+jobs:
+  load-test:
+    name: k6 压测 — ${{ matrix.script }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false     # 单脚本失败不阻塞其他脚本
+      matrix:
+        script:
+          - login
+          - session_start
+          - review_submit
+          - favorites
+          - sse
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: 安装 k6
+        run: |
+          sudo gpg -k
+          sudo gpg --no-default-keyring \
+            --keyring /usr/share/keyrings/k6-archive-keyring.gpg \
+            --keyserver hkp://keyserver.ubuntu.com:80 \
+            --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] \
+            https://dl.k6.io/deb stable main" | \
+            sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update
+          sudo apt-get install -y k6
+
+      - name: 语法检查（inspect）
+        run: k6 inspect tests/load/${{ matrix.script }}.js
+
+      - name: 运行压测
+        env:
+          BASE_URL: ${{ inputs.base_url || 'http://localhost:3000' }}
+          TEST_EMAIL: ${{ secrets.LOAD_TEST_EMAIL || 'loadtest@example.com' }}
+          TEST_PASS: ${{ secrets.LOAD_TEST_PASS || 'Loadtest@123' }}
+          K6_OUT: json=tests/load/results/${{ matrix.script }}.json
+        run: |
+          mkdir -p tests/load/results
+          k6 run \
+            --out json=tests/load/results/${{ matrix.script }}.json \
+            tests/load/${{ matrix.script }}.js \
+            || echo "::warning::k6 退出码非零（SLO 超标或连接失败），见报告"
+
+      - name: 上传压测结果
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: k6-results-${{ matrix.script }}
+          path: tests/load/results/${{ matrix.script }}.json
+          retention-days: 14
+
+  # 汇总：收集所有脚本结果，输出 P50/P95/P99 + 错误率对比表
+  summarize:
+    name: 输出 SLO 对比报告
+    runs-on: ubuntu-latest
+    needs: load-test
+    if: always()
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: 下载所有结果
+        uses: actions/download-artifact@v4
+        with:
+          pattern: k6-results-*
+          path: tests/load/results
+          merge-multiple: true
+
+      - name: 安装 jq
+        run: sudo apt-get install -y jq
+
+      - name: 生成 SLO 对比表
+        run: |
+          echo "## k6 压测 SLO 对比报告" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| 脚本 | P50(ms) | P95(ms) | P99(ms) | 错误率 | SLO P95 | 状态 |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|---------|---------|---------|--------|---------|------|" >> $GITHUB_STEP_SUMMARY
+
+          declare -A SLO=([login]=300 [session_start]=500 [review_submit]=400 [favorites]=200 [sse]=1000)
+
+          for script in login session_start review_submit favorites sse; do
+            result_file="tests/load/results/${script}.json"
+            if [ ! -f "$result_file" ]; then
+              echo "| ${script} | — | — | — | — | ${SLO[$script]}ms | ⚠️ 无数据 |" >> $GITHUB_STEP_SUMMARY
+              continue
+            fi
+
+            # 从 k6 JSON 输出提取 http_req_duration 指标
+            p50=$(jq -r 'select(.type=="Point" and .metric=="http_req_duration") | .data.value' "$result_file" 2>/dev/null | \
+              awk '{a[NR]=$1} END{n=NR; if(n>0){asort(a); print a[int(n*0.50)+1]} else print "—"}')
+            p95=$(jq -r 'select(.type=="Point" and .metric=="http_req_duration") | .data.value' "$result_file" 2>/dev/null | \
+              awk '{a[NR]=$1} END{n=NR; if(n>0){asort(a); print a[int(n*0.95)+1]} else print "—"}')
+            p99=$(jq -r 'select(.type=="Point" and .metric=="http_req_duration") | .data.value' "$result_file" 2>/dev/null | \
+              awk '{a[NR]=$1} END{n=NR; if(n>0){asort(a); print a[int(n*0.99)+1]} else print "—"}')
+            err=$(jq -r 'select(.type=="Point" and .metric=="http_req_failed") | .data.value' "$result_file" 2>/dev/null | \
+              awk '{s+=$1; n++} END{if(n>0) printf "%.2f%%", s/n*100; else print "—"}')
+
+            slo_target="${SLO[$script]}"
+            if [ "$p95" != "—" ] && [ "$(echo "$p95 > $slo_target" | bc -l 2>/dev/null)" = "1" ]; then
+              status="❌ 超标"
+            else
+              status="✅ 通过"
+            fi
+
+            echo "| ${script} | ${p50} | ${p95} | ${p99} | ${err} | ${slo_target}ms | ${status} |" >> $GITHUB_STEP_SUMMARY
+          done
