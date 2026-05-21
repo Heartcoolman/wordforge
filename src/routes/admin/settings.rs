@@ -13,6 +13,7 @@ use crate::state::AppState;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(get_settings).put(update_settings))
+        .route("/maintenance", post(set_maintenance))
         .route("/reload-amas", post(reload_amas_config))
 }
 
@@ -136,6 +137,39 @@ async fn update_settings(
     );
 
     Ok(ok(settings))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetMaintenanceRequest {
+    active: bool,
+}
+
+async fn set_maintenance(
+    admin: AdminAuthUser,
+    State(state): State<AppState>,
+    JsonBody(req): JsonBody<SetMaintenanceRequest>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let active = req.active;
+    state
+        .run_store_task("admin.settings.set_maintenance", move |store| {
+            let mut settings = store.get_system_settings()?;
+            settings.maintenance_mode = active;
+            store.save_system_settings(&settings)?;
+            Ok(settings)
+        })
+        .await??;
+
+    state.set_maintenance(active);
+
+    tracing::info!(
+        admin_id = %admin.admin_id,
+        action = "set_maintenance",
+        active,
+        "管理员切换维护模式"
+    );
+
+    Ok(ok(serde_json::json!({ "active": active })))
 }
 
 async fn reload_amas_config(

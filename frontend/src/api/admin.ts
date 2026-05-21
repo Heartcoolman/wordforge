@@ -131,6 +131,7 @@ export const adminApi = {
   broadcast: (data: { title: string; message: string }) => api.post<{ sent: number }>('/api/admin/broadcast', data, { useAdminToken: true }),
   getSettings: () => api.get<SystemSettings>('/api/admin/settings', undefined, { useAdminToken: true }),
   updateSettings: (data: Partial<SystemSettings>) => api.put<SystemSettings>('/api/admin/settings', data, { useAdminToken: true }),
+  setMaintenance: (active: boolean) => api.post<{ active: boolean }>('/api/admin/settings/maintenance', { active }, { useAdminToken: true }),
   reloadAmas: (data: AmasConfig) => api.post<AmasConfig>('/api/admin/settings/reload-amas', data, { useAdminToken: true }),
   broadcastUpdate: (data?: { message?: string; version?: string }) =>
     api.post<{ broadcasted: boolean }>('/api/admin/broadcast-update', data || {}, { useAdminToken: true }),

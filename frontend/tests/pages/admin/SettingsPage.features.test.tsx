@@ -6,6 +6,7 @@ vi.mock('@/api/admin', () => ({
   adminApi: {
     getSettings: vi.fn(),
     updateSettings: vi.fn(),
+    setMaintenance: vi.fn(),
     broadcast: vi.fn(),
     broadcastUpdate: vi.fn(),
   },
@@ -155,14 +156,17 @@ describe('SettingsPage — load, save, validation, broadcast, maintenance', () =
     await waitFor(() => expect(mockToast.error).toHaveBeenCalled());
   });
 
-  it('toggles maintenance mode with confirm', async () => {
+  it('toggles maintenance mode with confirm and calls setMaintenance API', async () => {
     mockApi.getSettings.mockResolvedValue(baseSettings);
+    mockApi.setMaintenance.mockResolvedValue({ active: true });
     await renderPage();
     await waitFor(() => expect(screen.getByText('维护模式')).toBeInTheDocument());
     const switches = document.querySelectorAll('button[role="switch"]');
     fireEvent.click(switches[1] as HTMLButtonElement);
     await waitFor(() => expect(screen.getByText('确认开启维护模式')).toBeInTheDocument());
     fireEvent.click(screen.getByText('确认开启'));
+    await waitFor(() => expect(mockApi.setMaintenance).toHaveBeenCalledWith(true));
+    expect(mockToast.success).toHaveBeenCalled();
   });
 
   it('cancels maintenance confirm', async () => {
@@ -174,6 +178,18 @@ describe('SettingsPage — load, save, validation, broadcast, maintenance', () =
     await waitFor(() => expect(screen.getByText('确认开启维护模式')).toBeInTheDocument());
     fireEvent.click(screen.getByText('取消'));
     await waitFor(() => expect(screen.queryByText('确认开启维护模式')).not.toBeInTheDocument());
+  });
+
+  it('shows error toast when setMaintenance fails', async () => {
+    mockApi.getSettings.mockResolvedValue(baseSettings);
+    mockApi.setMaintenance.mockRejectedValue(new Error('网络错误'));
+    await renderPage();
+    await waitFor(() => expect(screen.getByText('维护模式')).toBeInTheDocument());
+    const switches = document.querySelectorAll('button[role="switch"]');
+    fireEvent.click(switches[1]);
+    await waitFor(() => expect(screen.getByText('确认开启维护模式')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('确认开启'));
+    await waitFor(() => expect(mockToast.error).toHaveBeenCalled());
   });
 });
 
@@ -208,17 +224,16 @@ describe('SettingsPage — input handlers & AMAS toggles', () => {
     expect(mockApi.updateSettings.mock.calls[0][0].registrationEnabled).toBe(false);
   });
 
-  it('disables maintenance via switch (skips confirm dialog)', async () => {
+  it('disables maintenance via switch (skips confirm, calls setMaintenance immediately)', async () => {
     mockApi.getSettings.mockResolvedValue({ ...baseSettings, maintenanceMode: true });
+    mockApi.setMaintenance.mockResolvedValue({ active: false });
     await renderPage();
     await waitFor(() => expect(screen.getByText('维护模式')).toBeInTheDocument());
     const switches = document.querySelectorAll('button[role="switch"]');
     fireEvent.click(switches[1] as HTMLButtonElement);
     expect(screen.queryByText('确认开启维护模式')).not.toBeInTheDocument();
-    mockApi.updateSettings.mockResolvedValue(undefined);
-    fireEvent.click(screen.getAllByText('保存设置')[0]);
-    await waitFor(() => expect(mockApi.updateSettings).toHaveBeenCalled());
-    expect(mockApi.updateSettings.mock.calls[0][0].maintenanceMode).toBe(false);
+    await waitFor(() => expect(mockApi.setMaintenance).toHaveBeenCalledWith(false));
+    expect(mockToast.success).toHaveBeenCalled();
   });
 
   it('toggles amasAutoApplyEnabled and updates numeric AMAS inputs', async () => {

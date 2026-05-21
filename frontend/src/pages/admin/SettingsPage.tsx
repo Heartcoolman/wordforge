@@ -36,6 +36,7 @@ export default function SettingsPage() {
   const [showUpdateConfirm, setShowUpdateConfirm] = createSignal(false);
 
   const [showMaintenanceConfirm, setShowMaintenanceConfirm] = createSignal(false);
+  const [savingMaintenance, setSavingMaintenance] = createSignal(false);
 
   // 数字字段 string 缓存：避免清空时被 || 默认值立即回填
   const [maxUsersInput, setMaxUsersInput] = createSignal('');
@@ -160,12 +161,26 @@ export default function SettingsPage() {
       setShowMaintenanceConfirm(true);
       return;
     }
-    updateField('maintenanceMode', value);
+    void applyMaintenance(false);
+  }
+
+  async function applyMaintenance(active: boolean) {
+    setSavingMaintenance(true);
+    try {
+      await adminApi.setMaintenance(active);
+      updateField('maintenanceMode', active);
+      setBaseline((b) => b ? { ...b, maintenanceMode: active } : b);
+      uiStore.toast.success(active ? '维护模式已开启' : '维护模式已关闭');
+    } catch (err: unknown) {
+      uiStore.toast.error('切换失败', err instanceof Error ? err.message : '');
+    } finally {
+      setSavingMaintenance(false);
+    }
   }
 
   function confirmMaintenance() {
     setShowMaintenanceConfirm(false);
-    updateField('maintenanceMode', true);
+    void applyMaintenance(true);
   }
 
   function updateField(key: string, value: unknown) {
@@ -262,6 +277,7 @@ export default function SettingsPage() {
                 <Switch
                   checked={s().maintenanceMode}
                   onChange={handleMaintenanceToggle}
+                  disabled={savingMaintenance()}
                   label="维护模式"
                 />
                 <Input
