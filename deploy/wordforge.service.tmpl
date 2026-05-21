@@ -1,0 +1,32 @@
+# WordForge systemd unit 模板
+# install.sh 用 sed 将 {{INSTALL_DIR}} / {{SVC_USER}} 替换为实际值后写到
+# /etc/systemd/system/wordforge.service
+#
+# M0-R3 注意事项（修第 4 坑点）：
+# - Restart=always：fork-exec 自更新时父进程 exit(0)，systemd 需要 always
+#   才能在父退 0 后兜底拉起（若子进程也异常退出）；on-failure 不触发 exit 0。
+# - 若仍需区分正常退出与崩溃，可设 SuccessExitStatus=0 并保留 Restart=always，
+#   systemd 会在 60s 内不超过 StartLimitBurst 次自动拉起。
+[Unit]
+Description=WordForge Learning Backend
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory={{INSTALL_DIR}}
+ExecStart={{INSTALL_DIR}}/wordforge
+EnvironmentFile={{INSTALL_DIR}}/.env
+Environment=ENABLE_SELF_WATCHDOG=true
+Environment=SELF_WATCHDOG_INTERVAL_SECS=15
+Environment=SELF_WATCHDOG_FAILURE_THRESHOLD=3
+Restart=always
+RestartSec=5
+TimeoutStopSec=15
+User={{SVC_USER}}
+Group={{SVC_USER}}
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths={{INSTALL_DIR}}
+
+[Install]
+WantedBy=multi-user.target

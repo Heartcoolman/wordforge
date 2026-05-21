@@ -27,6 +27,8 @@ const ASSET_PREFIX: &str = "wordforge-linux-";
 const ASSET_SUFFIX_TAR: &str = ".tar.gz";
 const ASSET_SUFFIX_SHA: &str = ".tar.gz.sha256";
 const ASSET_SUFFIX_SIG: &str = ".tar.gz.minisig";
+/// M0-R3：fork-exec 后子进程健康自检超时（秒）
+const HEALTH_CHECK_TIMEOUT_SECS: u64 = 60;
 const STAGING_DIR: &str = ".update-staging";
 const TMP_DIR: &str = ".update-tmp";
 const LOCK_FILE: &str = ".update.lock";
@@ -163,6 +165,8 @@ pub enum UpdatePhase {
     Extracting,
     BackingUpDb,
     Swapping,
+    /// M0-R3：子进程健康自检（等待 /health 返回 200）
+    HealthChecking,
     Restarting,
 }
 
@@ -381,12 +385,17 @@ impl Updater {
     /// 跑一次完整的自更新流程。`channel` 决定从 stable / beta 哪条缓存读 latest；
     /// `target_tag` 必须等于该通道缓存的 latest_tag，否则 `InvalidTarget`。
     /// 成功后 fork-exec 启动新进程 + exit(0)，**调用方不再返回**。
+    ///
+    /// M0-R3：`health_url` 是新进程的 `/health` 端点（`http://127.0.0.1:{port}/health`），
+    /// fork-exec 后父进程轮询 60 秒；成功则 exit(0)，失败则回滚二进制并调 `on_rollback` 告警。
     pub async fn apply<F>(
         &self,
         channel: Channel,
         target_tag: &str,
         backup_callback: F,
         progress: ProgressSink,
+        health_url: &str,
+        on_rollback: impl Fn(String) + Send + 'static,
     ) -> Result<(), UpdaterError>
     where
         F: FnOnce(&Path) -> Result<(), UpdaterError> + Send,
@@ -448,7 +457,13 @@ impl Updater {
         })?;
 
         let outcome = self
-            .apply_locked(&latest, backup_callback, progress.clone())
+            .apply_locked(
+                &latest,
+                backup_callback,
+                progress.clone(),
+                health_url,
+                on_rollback,
+            )
             .await;
         // 失败时锁随 file drop 自动释放；成功时进程 exit 也会自动释放
         if let Err(ref e) = outcome {
@@ -462,6 +477,8 @@ impl Updater {
         latest: &CachedRelease,
         backup_callback: F,
         progress: ProgressSink,
+        health_url: &str,
+        on_rollback: impl Fn(String) + Send + 'static,
     ) -> Result<(), UpdaterError>
     where
         F: FnOnce(&Path) -> Result<(), UpdaterError> + Send,
@@ -592,9 +609,51 @@ impl Updater {
         // 6) fork-exec 自重启
         progress(UpdatePhase::Restarting);
         blocking_io(|| spawn_replacement(&bin_path))?;
-        // 给子进程 500ms 抢端口，让父释放 SocketAddr
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        std::process::exit(0);
+
+        // M0-R3：健康自检。父进程保持存活最多 60s，轮询子进程 /health。
+        // 子进程成功响应 200 → 父进程退出；超时未响应 → 回滚二进制并报警。
+        progress(UpdatePhase::HealthChecking);
+        let health_deadline = tokio::time::Instant::now()
+            + std::time::Duration::from_secs(HEALTH_CHECK_TIMEOUT_SECS);
+        // 初始等待：给子进程 1s 抢端口 + 初始化完成
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        let child_healthy = loop {
+            if tokio::time::Instant::now() >= health_deadline {
+                break false;
+            }
+            let ok = self.client
+                .get(health_url)
+                .timeout(std::time::Duration::from_secs(3))
+                .send()
+                .await
+                .map(|r| r.status().is_success())
+                .unwrap_or(false);
+            if ok {
+                break true;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        };
+
+        if child_healthy {
+            tracing::info!("新进程健康自检通过，父进程退出");
+            std::process::exit(0);
+        }
+
+        // 子进程启动失败 → 回滚二进制（static 不回滚，因为变更通常向后兼容）
+        let alert_msg = format!(
+            "自更新回滚：新进程 {} 启动 {}s 内未通过 /health 检查，已还原 {}",
+            latest.tag, HEALTH_CHECK_TIMEOUT_SECS, self.current_tag
+        );
+        tracing::error!("{}", alert_msg);
+        blocking_io(|| {
+            if bin_backup.exists() {
+                std::fs::rename(&bin_backup, &bin_path)?;
+                tracing::info!("回滚：已还原 {:?} → {:?}", bin_backup, bin_path);
+            }
+            Ok(())
+        })?;
+        on_rollback(alert_msg.clone());
+        Err(UpdaterError::RolledBack(alert_msg))
     }
 
     /// v0.5.4：对 release.githubusercontent.com / github.com/.../releases/download/

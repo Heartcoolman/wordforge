@@ -155,6 +155,11 @@ async fn apply(
     let bg_store = state.store().clone();
     let target = req.target_version.clone();
     let channel = req.channel;
+    // M0-R3：构造子进程健康自检 URL
+    let health_url = format!(
+        "http://127.0.0.1:{}/health",
+        state.config().port
+    );
     tokio::spawn(async move {
         let progress_state = bg_state.clone();
         let sink: crate::services::updater::ProgressSink = Arc::new(move |phase| {
@@ -173,7 +178,16 @@ async fn apply(
             bg_store.backup_to(dst).map_err(UpdaterError::Store)
         };
 
-        match bg_updater.apply(channel, &target, backup_cb, sink).await {
+        // M0-R3：回滚告警回调，通过 SSE 广播给 admin 前端
+        let rollback_state = bg_state.clone();
+        let on_rollback = move |msg: String| {
+            rollback_state.broadcast_to_all_sse(SseEvent::UpdateProgress {
+                phase: format!("rollback: {msg}"),
+                percent: 0,
+            });
+        };
+
+        match bg_updater.apply(channel, &target, backup_cb, sink, &health_url, on_rollback).await {
             Ok(()) => {
                 // 成功路径已 process::exit(0)，理论到不了这里；保底标记 completed
                 bg_state.update_apply_task(|t| {
@@ -221,6 +235,7 @@ fn phase_label_percent(phase: &UpdatePhase) -> (String, u8) {
         UpdatePhase::Extracting => ("extracting".into(), 80),
         UpdatePhase::BackingUpDb => ("backing_up_db".into(), 85),
         UpdatePhase::Swapping => ("swapping".into(), 95),
+        UpdatePhase::HealthChecking => ("health_checking".into(), 97),
         UpdatePhase::Restarting => ("restarting".into(), 99),
     }
 }
