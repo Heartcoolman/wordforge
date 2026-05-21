@@ -29,6 +29,9 @@ const ASSET_SUFFIX_SHA: &str = ".tar.gz.sha256";
 const ASSET_SUFFIX_SIG: &str = ".tar.gz.minisig";
 /// M0-R3：fork-exec 后子进程健康自检超时（秒）
 const HEALTH_CHECK_TIMEOUT_SECS: u64 = 60;
+/// M0-R4：maintenance 模式持久化 flag 文件名（install_dir 下）。
+/// 新进程启动时若发现此文件，说明上次自更新途中崩溃，应立即清理 maintenance。
+pub const MAINTENANCE_FLAG: &str = ".maintenance.flag";
 const STAGING_DIR: &str = ".update-staging";
 const TMP_DIR: &str = ".update-tmp";
 const LOCK_FILE: &str = ".update.lock";
@@ -388,6 +391,9 @@ impl Updater {
     ///
     /// M0-R3：`health_url` 是新进程的 `/health` 端点（`http://127.0.0.1:{port}/health`），
     /// fork-exec 后父进程轮询 60 秒；成功则 exit(0)，失败则回滚二进制并调 `on_rollback` 告警。
+    ///
+    /// M0-R4：`on_maintenance(true/false)` 在 Swapping 时被调用为 true（开维护模式），
+    /// failed/rollback 时调 false；成功路径 exit(0) 前不调（新进程启动时靠 flag 文件清理）。
     pub async fn apply<F>(
         &self,
         channel: Channel,
@@ -396,6 +402,7 @@ impl Updater {
         progress: ProgressSink,
         health_url: &str,
         on_rollback: impl Fn(String) + Send + 'static,
+        on_maintenance: impl Fn(bool) + Send + 'static,
     ) -> Result<(), UpdaterError>
     where
         F: FnOnce(&Path) -> Result<(), UpdaterError> + Send,
@@ -463,6 +470,7 @@ impl Updater {
                 progress.clone(),
                 health_url,
                 on_rollback,
+                on_maintenance,
             )
             .await;
         // 失败时锁随 file drop 自动释放；成功时进程 exit 也会自动释放
@@ -479,6 +487,7 @@ impl Updater {
         progress: ProgressSink,
         health_url: &str,
         on_rollback: impl Fn(String) + Send + 'static,
+        on_maintenance: impl Fn(bool) + Send + 'static,
     ) -> Result<(), UpdaterError>
     where
         F: FnOnce(&Path) -> Result<(), UpdaterError> + Send,
@@ -550,7 +559,16 @@ impl Updater {
         })?;
 
         // 5) 原子替换二进制和 static/
+        // M0-R4：进入 Swapping 前开启 maintenance 模式，写 flag 文件（新进程启动时清理）。
         progress(UpdatePhase::Swapping);
+        on_maintenance(true);
+        let flag_path = self.install_dir.join(MAINTENANCE_FLAG);
+        let _ = blocking_io(|| {
+            std::fs::write(&flag_path, b"").map_err(|e| {
+                tracing::warn!("写 maintenance flag 失败: {e}");
+                UpdaterError::Io(e)
+            })
+        });
         let bin_path = self.install_dir.join("wordforge");
         let bin_backup = self
             .install_dir
@@ -560,7 +578,7 @@ impl Updater {
             .install_dir
             .join(format!("static.{}", self.current_tag));
 
-        blocking_io(|| {
+        let swap_result = blocking_io(|| {
             let mut steps_done: Vec<UndoStep> = Vec::new();
             if bin_path.exists() {
                 std::fs::rename(&bin_path, &bin_backup)?;
@@ -593,7 +611,13 @@ impl Updater {
             let _ = std::fs::remove_dir_all(&staging_dir);
             let _ = std::fs::remove_dir_all(&tmp_dir);
             Ok(())
-        })?;
+        });
+        // M0-R4：swap 失败 → 关闭 maintenance 模式（flag 删除 + 回调）再传播错误
+        if let Err(e) = swap_result {
+            let _ = std::fs::remove_file(&flag_path);
+            on_maintenance(false);
+            return Err(e);
+        }
 
         // 旧版本保留数控制
         if let Err(e) = blocking_io(|| self.prune_old_backups("wordforge.").map_err(Into::into)) {
@@ -650,8 +674,11 @@ impl Updater {
                 std::fs::rename(&bin_backup, &bin_path)?;
                 tracing::info!("回滚：已还原 {:?} → {:?}", bin_backup, bin_path);
             }
+            // M0-R4：回滚后关闭 maintenance 并删除 flag
+            let _ = std::fs::remove_file(&flag_path);
             Ok(())
         })?;
+        on_maintenance(false);
         on_rollback(alert_msg.clone());
         Err(UpdaterError::RolledBack(alert_msg))
     }
