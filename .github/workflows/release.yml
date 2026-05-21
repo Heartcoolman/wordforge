@@ -11,6 +11,14 @@ env:
   BINARY_NAME: learning-backend
 
 jobs:
+  verify-env-example:
+    # M0-P2：.env.example 与代码默认值对齐校验，阻止失同步的 .env.example 进入 release 包。
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify .env.example defaults
+        run: bash scripts/verify-env-example.sh
+
   tag-lint:
     # tag 格式校验：含 '-' 必须是 pre-release 格式，不含 '-' 必须是 stable 格式。
     # 阻止如 v1.0.0-foo / v1.0 / v1.0.0-beta 等格式的 tag 触发后续构建。
@@ -33,7 +41,7 @@ jobs:
           echo "Tag '$TAG' 格式验证通过。"
 
   build-assets:
-    needs: tag-lint
+    needs: [tag-lint, verify-env-example]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
