@@ -11,7 +11,29 @@ env:
   BINARY_NAME: learning-backend
 
 jobs:
+  tag-lint:
+    # tag 格式校验：含 '-' 必须是 pre-release 格式，不含 '-' 必须是 stable 格式。
+    # 阻止如 v1.0.0-foo / v1.0 / v1.0.0-beta 等格式的 tag 触发后续构建。
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate tag format
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          if [[ "$TAG" == *-* ]]; then
+            if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-(alpha|beta|rc)\.[0-9]+$ ]]; then
+              echo "::error::Pre-release tag '$TAG' 格式非法。期望：^v\\d+\\.\\d+\\.\\d+-(alpha|beta|rc)\\.\\d+$（如 v1.0.0-beta.1）"
+              exit 1
+            fi
+          else
+            if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::Stable tag '$TAG' 格式非法。期望：^v\\d+\\.\\d+\\.\\d+$（如 v1.0.0）"
+              exit 1
+            fi
+          fi
+          echo "Tag '$TAG' 格式验证通过。"
+
   build-assets:
+    needs: tag-lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
