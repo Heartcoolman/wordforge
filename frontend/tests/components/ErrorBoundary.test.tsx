@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen } from '@solidjs/testing-library';
 import { AppErrorBoundary } from '@/components/ErrorBoundary';
 
@@ -7,6 +7,13 @@ function ThrowingComponent(): never {
 }
 
 describe('AppErrorBoundary', () => {
+  beforeEach(() => {
+    // 静默 fetch：避免 ECONNREFUSED 日志噪声，reportError 是 fire-and-forget
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true }));
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
   it('renders children when no error', () => {
     render(() => <AppErrorBoundary><p>Safe content</p></AppErrorBoundary>);
     expect(screen.getByText('Safe content')).toBeInTheDocument();

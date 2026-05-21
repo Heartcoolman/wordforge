@@ -13,7 +13,35 @@ use crate::store::operations::telemetry::TelemetrySummaryInput;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", post(submit_telemetry))
+        // 无鉴权错误上报：只记 tracing log，不落库；火焰即忘，失败不影响 UX
+        .route("/error", post(report_client_error))
         .layer(DefaultBodyLimit::max(64 * 1024))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClientErrorReport {
+    message: String,
+    stack: Option<String>,
+    url: Option<String>,
+    user_agent: Option<String>,
+    component_stack: Option<String>,
+}
+
+async fn report_client_error(
+    JsonBody(body): JsonBody<ClientErrorReport>,
+) -> impl IntoResponse {
+    let stack = body.stack.as_deref().unwrap_or("");
+    let url = body.url.as_deref().unwrap_or("");
+    let ua = body.user_agent.as_deref().unwrap_or("");
+    tracing::warn!(
+        message = %body.message,
+        stack = %stack,
+        url = %url,
+        user_agent = %ua,
+        "前端 ErrorBoundary 捕获异常"
+    );
+    ok(serde_json::json!({ "received": true }))
 }
 
 #[derive(serde::Deserialize)]
