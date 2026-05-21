@@ -8,6 +8,8 @@ export default defineConfig({
   lastUpdated: true,
   cleanUrls: true,
   ignoreDeadLinks: true,
+  // 开发内部目录（设计草稿 / 调研报告），含泛型尖括号会导致 markdown-it 报未闭合 HTML 错误
+  srcExclude: ['superpowers/**', 'v1-research/**'],
 
   themeConfig: {
     nav: [
