@@ -40,10 +40,17 @@ fn parse_dt(s: String) -> rusqlite::Result<DateTime<Utc>> {
 }
 
 fn parse_dt_opt(s: Option<String>) -> rusqlite::Result<Option<DateTime<Utc>>> {
-    match s {
-        None => Ok(None),
-        Some(v) => parse_dt(v).map(Some),
+    let Some(v) = s else { return Ok(None) };
+    // 优先尝试 RFC3339（写入路径），回退到 SQLite datetime() 格式 "YYYY-MM-DD HH:MM:SS"
+    if let Ok(dt) = DateTime::parse_from_rfc3339(&v) {
+        return Ok(Some(dt.with_timezone(&Utc)));
     }
+    use chrono::NaiveDateTime;
+    NaiveDateTime::parse_from_str(&v, "%Y-%m-%d %H:%M:%S")
+        .map(|ndt| Some(ndt.and_utc()))
+        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(
+            0, rusqlite::types::Type::Text, Box::new(e),
+        ))
 }
 
 fn feedback_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FeedbackItem> {
@@ -106,26 +113,29 @@ impl Store {
         let conn = self.conn()?;
         let offset = page.saturating_sub(1).saturating_mul(per_page);
 
-        // 动态 WHERE 子句
-        let mut where_parts: Vec<&str> = Vec::new();
-        if category.is_some() {
-            where_parts.push("category = ?3");
+        // 过滤参数占位从 ?1 起，LIMIT/OFFSET 跟在末尾
+        let mut filter_params: Vec<String> = Vec::new();
+        let mut where_parts: Vec<String> = Vec::new();
+        if let Some(c) = category {
+            filter_params.push(c.to_string());
+            where_parts.push(format!("category = ?{}", filter_params.len()));
         }
-        if status.is_some() {
-            where_parts.push("status = ?4");
+        if let Some(s) = status {
+            filter_params.push(s.to_string());
+            where_parts.push(format!("status = ?{}", filter_params.len()));
         }
         let where_clause = if where_parts.is_empty() {
             String::new()
         } else {
             format!("WHERE {}", where_parts.join(" AND "))
         };
+        let limit_idx = filter_params.len() + 1;
+        let offset_idx = filter_params.len() + 2;
 
         let count_sql = format!("SELECT COUNT(*) FROM feedback_items {}", where_clause);
         let total: i64 = conn.query_row(
             &count_sql,
-            rusqlite::params_from_iter(
-                [category, status].iter().filter_map(|v| *v),
-            ),
+            rusqlite::params_from_iter(filter_params.iter()),
             |row| row.get(0),
         )?;
 
@@ -135,25 +145,20 @@ impl Store {
              FROM feedback_items
              {}
              ORDER BY created_at DESC, id DESC
-             LIMIT ?1 OFFSET ?2",
-            where_clause
+             LIMIT ?{limit_idx} OFFSET ?{offset_idx}",
+            where_clause,
         );
         let mut stmt = conn.prepare(&list_sql)?;
-        // bind per_page, offset first, then optional filter params
-        let items: Vec<FeedbackItem> = match (category, status) {
-            (None, None) => stmt
-                .query_map(params![per_page as i64, offset as i64], feedback_from_row)?
-                .collect::<Result<_, _>>()?,
-            (Some(c), None) => stmt
-                .query_map(params![per_page as i64, offset as i64, c], feedback_from_row)?
-                .collect::<Result<_, _>>()?,
-            (None, Some(s)) => stmt
-                .query_map(params![per_page as i64, offset as i64, s], feedback_from_row)?
-                .collect::<Result<_, _>>()?,
-            (Some(c), Some(s)) => stmt
-                .query_map(params![per_page as i64, offset as i64, c, s], feedback_from_row)?
-                .collect::<Result<_, _>>()?,
-        };
+        let items: Vec<FeedbackItem> = stmt
+            .query_map(
+                rusqlite::params_from_iter(
+                    filter_params.iter().map(|s| s.as_str())
+                        .chain([per_page as i64, offset as i64]
+                            .iter().map(|n| n.to_string()).collect::<Vec<_>>().iter().map(|s| s.as_str()))
+                ),
+                feedback_from_row,
+            )?
+            .collect::<Result<_, _>>()?;
         Ok((items, total as u64))
     }
 
