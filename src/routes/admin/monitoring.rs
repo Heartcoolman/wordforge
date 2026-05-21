@@ -48,12 +48,21 @@ async fn system_health(
         "healthy"
     };
 
+    // M0-P1 全局计数器快照：计算生命周期内 5xx 错误率（0.0–1.0）
+    let (total_req, total_5xx) = crate::metrics_counters::snapshot();
+    let error_rate = if total_req > 0 {
+        total_5xx as f64 / total_req as f64
+    } else {
+        0.0
+    };
+
     Ok(ok(serde_json::json!({
         "status": status,
         "storeProbeOk": store_probe_ok,
         "dbSizeBytes": size_on_disk,
         "uptimeSecs": uptime_secs,
         "version": env!("GIT_VERSION"),
+        "errorRate": error_rate,
         "services": {
             "amas": { "healthy": amas_healthy },
             "sse": {

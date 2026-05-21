@@ -65,6 +65,8 @@ export interface SystemHealth {
   dbSizeBytes: number;
   uptimeSecs: number;
   version: string;
+  /** 生命周期内 5xx 错误率（0.0–1.0），M0-P1 计数器实装 */
+  errorRate: number;
 }
 
 export interface DatabaseInfo {
