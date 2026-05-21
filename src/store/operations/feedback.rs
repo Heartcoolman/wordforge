@@ -183,59 +183,65 @@ impl Store {
 
         if let Some(ref p) = req.priority {
             if !VALID_PRIORITIES.contains(&p.as_str()) {
-                return Err(StoreError::Validation {
-                    field: "priority".to_string(),
-                    message: format!("invalid priority: {}", p),
-                });
+                return Err(StoreError::Validation(format!("invalid priority: {}", p)));
             }
         }
         if let Some(ref s) = req.status {
             if !VALID_STATUSES.contains(&s.as_str()) {
-                return Err(StoreError::Validation {
-                    field: "status".to_string(),
-                    message: format!("invalid status: {}", s),
-                });
+                return Err(StoreError::Validation(format!("invalid status: {}", s)));
             }
         }
 
-        // 仅在 status 切换为 resolved 时写 resolved_at
-        let resolved_at_update = match req.status.as_deref() {
-            Some("resolved") => "resolved_at = datetime('now'),",
-            Some(s) if s != "resolved" => "resolved_at = NULL,",
-            _ => "",
+        // 仅在 status 切换为 resolved 时更新 resolved_at
+        let resolved_at_sql = match req.status.as_deref() {
+            Some("resolved") => " resolved_at = datetime('now'),",
+            Some(_) => " resolved_at = NULL,",
+            None => "",
         };
 
-        let mut sets = Vec::new();
-        if req.priority.is_some() { sets.push("priority = ?2"); }
-        if req.status.is_some() { sets.push("status = ?3"); }
-        if req.assignee_admin_id.is_some() { sets.push("assignee_admin_id = ?4"); }
-        if req.resolution.is_some() { sets.push("resolution = ?5"); }
+        // 构造参数列表：先收集实际要 SET 的值，?1 固定为 id
+        let mut set_parts: Vec<String> = Vec::new();
+        let mut bind_values: Vec<Option<String>> = Vec::new();
+        let mut idx = 2usize;
 
-        if sets.is_empty() && resolved_at_update.is_empty() {
-            // 无字段更新，直接返回当前记录
+        if let Some(ref p) = req.priority {
+            set_parts.push(format!("priority = ?{idx}"));
+            bind_values.push(Some(p.clone()));
+            idx += 1;
+        }
+        if let Some(ref s) = req.status {
+            set_parts.push(format!("status = ?{idx}"));
+            bind_values.push(Some(s.clone()));
+            idx += 1;
+        }
+        if let Some(ref a) = req.assignee_admin_id {
+            set_parts.push(format!("assignee_admin_id = ?{idx}"));
+            bind_values.push(a.clone());
+            idx += 1;
+        }
+        if let Some(ref r) = req.resolution {
+            set_parts.push(format!("resolution = ?{idx}"));
+            bind_values.push(Some(r.clone()));
+        }
+
+        if set_parts.is_empty() && resolved_at_sql.is_empty() {
             return self.get_feedback(id);
         }
 
         let set_clause = format!(
             "{} {}",
-            resolved_at_update,
-            sets.join(", ")
-        ).trim().to_string();
+            resolved_at_sql,
+            set_parts.join(", ")
+        )
+        .trim()
+        .trim_end_matches(',')
+        .to_string();
 
-        let sql = format!(
-            "UPDATE feedback_items SET {} WHERE id = ?1",
-            set_clause
-        );
-        conn.execute(
-            &sql,
-            rusqlite::params_from_iter(vec![
-                Some(id.to_string()),
-                req.priority.clone(),
-                req.status.clone(),
-                req.assignee_admin_id.clone().flatten(),
-                req.resolution.clone(),
-            ].into_iter().filter_map(|v| v)),
-        )?;
+        let sql = format!("UPDATE feedback_items SET {} WHERE id = ?1", set_clause);
+        let mut stmt = conn.prepare(&sql)?;
+        stmt.execute(rusqlite::params_from_iter(
+            std::iter::once(Some(id.to_string())).chain(bind_values),
+        ))?;
         self.get_feedback(id)
     }
 }
