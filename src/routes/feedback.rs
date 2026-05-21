@@ -53,6 +53,11 @@ async fn create_feedback(
         body: body.to_string(),
         route,
         created_at: Utc::now(),
+        priority: "normal".to_string(),
+        status: "open".to_string(),
+        assignee_admin_id: None,
+        resolved_at: None,
+        resolution: None,
     };
     let response = item.clone();
     state
