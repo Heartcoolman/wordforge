@@ -121,6 +121,23 @@ pub async fn metrics_handler(
         );
     }
 
+    // --- M0-P4：HTTP 请求计数（供 error_rate_watchdog 和外部监控消费）---
+    let (total_req, total_5xx) = crate::metrics_counters::snapshot();
+    counter(
+        &mut out,
+        "http_requests",
+        "进入 request_id_middleware 的 HTTP 请求总数（不含健康检查）",
+        "",
+        total_req as f64,
+    );
+    counter(
+        &mut out,
+        "http_5xx",
+        "产生 5xx 响应的 HTTP 请求总数",
+        "",
+        total_5xx as f64,
+    );
+
     // --- 是否处于维护模式 ---
     gauge(
         &mut out,
