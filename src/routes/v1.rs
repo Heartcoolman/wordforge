@@ -19,17 +19,27 @@ use serde::Deserialize;
 
 use crate::auth::AuthUser;
 use crate::constants::DEFAULT_PAGE_SIZE_RECORDS;
+use crate::middleware::deprecation::{
+    make_deprecation_layer, V1_DEPRECATION_DATE, V1_LINK_URL, V1_SUNSET_DATE,
+};
 use crate::response::{ok, paginated, AppError};
 use crate::routes::words::WordPublic;
 use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
+    // M0-C4：在整个 /api/v1/* 路由器上注入 Deprecation + Sunset header（RFC 8594）。
+    // 所有 v1 端点响应都会携带这两个 header，iOS/Web 客户端 logger 应据此告警。
     Router::new()
         .route("/words", get(list_words))
         .route("/words/:id", get(get_word))
         .route("/records", get(list_records).post(create_record))
         .route("/study-config", get(get_study_config))
         .route("/learning/session", post(create_session))
+        .layer(axum::middleware::from_fn(make_deprecation_layer(
+            V1_DEPRECATION_DATE,
+            V1_SUNSET_DATE,
+            Some(V1_LINK_URL),
+        )))
 }
 
 #[derive(Debug, Deserialize)]

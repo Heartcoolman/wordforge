@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use axum::extract::State;
 use axum::http::StatusCode;
+use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Json, Router};
 
@@ -81,7 +82,22 @@ pub fn router() -> Router<AppState> {
         .route("/metrics", get(metrics))
 }
 
-pub async fn health_check(State(state): State<AppState>) -> impl axum::response::IntoResponse {
+pub async fn health_check(
+    State(state): State<AppState>,
+) -> impl axum::response::IntoResponse {
+    // M0-R4：apply swapping 期间维护模式激活，/health 返回 503 告知负载均衡器下线。
+    // fork-exec 后新进程启动完成（.maintenance.flag 清理）再恢复 200。
+    if state.is_maintenance() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "maintenance": true,
+                "message": "服务器升级中，请稍后重试"
+            })),
+        )
+            .into_response();
+    }
+
     let store_healthy = store_probe_ok(&state).await;
     let amas_healthy = state.amas().is_healthy();
     let sse_healthy = sse_probe_ok(&state);
@@ -95,23 +111,27 @@ pub async fn health_check(State(state): State<AppState>) -> impl axum::response:
         "ok"
     };
 
-    Json(serde_json::json!({
-        "status": status,
-        "uptimeSecs": startup_instant().elapsed().as_secs(),
-        "services": {
-            "store": { "healthy": store_healthy },
-            "amas": { "healthy": amas_healthy },
-            "sse": {
-                "healthy": sse_healthy,
-                "activeConnections": SSE_CONNECTION_COUNT.load(Ordering::Relaxed),
-                "activeDevices": state.active_sse().len(),
-            },
-            "wordbookCenter": {
-                "healthy": wbc_healthy,
-                "probeSkipped": wbc_probe_skipped
-            },
-        }
-    }))
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": status,
+            "uptimeSecs": startup_instant().elapsed().as_secs(),
+            "services": {
+                "store": { "healthy": store_healthy },
+                "amas": { "healthy": amas_healthy },
+                "sse": {
+                    "healthy": sse_healthy,
+                    "activeConnections": SSE_CONNECTION_COUNT.load(Ordering::Relaxed),
+                    "activeDevices": state.active_sse().len(),
+                },
+                "wordbookCenter": {
+                    "healthy": wbc_healthy,
+                    "probeSkipped": wbc_probe_skipped
+                },
+            }
+        })),
+    )
+        .into_response()
 }
 
 pub async fn liveness() -> StatusCode {

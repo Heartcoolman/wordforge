@@ -2581,9 +2581,20 @@ AMAS 算法指标快照（需 Admin Token）。
 
 ## 18. V1 兼容层
 
+> **⚠️ 永久冻结 / 已弃用 — 新客户端禁止接入**
+>
+> `/api/v1/*` 为历史兼容层，于 **v0.6.0-beta.4（2026-05-21）起正式标记弃用**，预计在 **v2.0.0（2027-01-01）随 major bump 一并移除**。
+>
+> - **不接受任何新功能或破坏性变更**：字段集永久冻结，不会同步 AMAS 算法改进。
+> - **不触发 AMAS 自适应引擎**：`POST /api/v1/records` 仅做 5 秒去重，不更新 ELO / word_state；使用 v1 层意味着**静默退化为非自适应学习**。
+> - **运行时弃用信号**：所有 v1 端点响应均携带 `Deprecation` + `Sunset` header（RFC 8594），客户端 logger 应据此告警并引导升级。
+> - **现有调用方**：当前 iOS / Web 客户端**均已迁移至 `/api/*` 主端点**，无任何生产流量经过 v1 层。
+>
+> **迁移指引**：将 `/api/v1/words` → `/api/words`，`/api/v1/records` → `/api/records`，`/api/v1/study-config` → `/api/study-config`，`/api/v1/learning/session` → `/api/learning/sessions`。
+
 **路径前缀：** `/api/v1`
 **认证：** Bearer Token（必须）
-**说明：** 不触发 AMAS 自适应引擎，适合不需要自适应功能的轻量客户端
+**说明：** 历史兼容层，永久冻结，不触发 AMAS 自适应引擎
 
 ---
 

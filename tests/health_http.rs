@@ -74,3 +74,46 @@ async fn it_public_health_reports_unreachable_wordbook_center() {
     assert_eq!(body["services"]["wordbookCenter"]["healthy"], false);
     assert_eq!(body["services"]["wordbookCenter"]["probeSkipped"], false);
 }
+
+/// M0-R4：maintenance 模式集成测试。
+///
+/// apply swapping 期间 state.set_maintenance(true) 被调用，maintenance_middleware
+/// 拦截所有非豁免路径并返回 503。/health 不在豁免列表，应被拦截。
+/// apply 完成或回滚后 set_maintenance(false)，/health 恢复 200。
+#[tokio::test]
+async fn health_returns_503_during_maintenance_and_200_after() {
+    let app = spawn_test_server().await;
+
+    // 正常状态：/health 返回 200
+    let resp = request(&app.app, Method::GET, "/health", None, &[]).await;
+    let (status, _, _) = response_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "初始状态 /health 应为 200");
+
+    // 模拟 apply swapping 阶段开启 maintenance 模式
+    app.state.set_maintenance(true);
+
+    // maintenance 期间：/health 应返回 503，body 含 MAINTENANCE code
+    let resp = request(&app.app, Method::GET, "/health", None, &[]).await;
+    let (status, _, body) = response_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "maintenance 期间 /health 应为 503，实际：{status}"
+    );
+    assert_eq!(
+        body["maintenance"], true,
+        "maintenance 响应 body 应含 maintenance=true，实际：{body}"
+    );
+
+    // 模拟 apply 完成（新进程启动清理 flag）或回滚后关闭 maintenance
+    app.state.set_maintenance(false);
+
+    // 恢复后：/health 重新返回 200
+    let resp = request(&app.app, Method::GET, "/health", None, &[]).await;
+    let (status, _, _) = response_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "maintenance 解除后 /health 应恢复 200"
+    );
+}
