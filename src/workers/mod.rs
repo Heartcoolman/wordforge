@@ -13,6 +13,7 @@ pub mod llm_advisor;
 pub mod log_export;
 pub mod metrics_flush;
 pub mod monitoring_aggregate;
+pub mod monitoring_retention;
 pub mod password_reset_cleanup;
 pub mod probe_cleanup;
 pub mod probe_confirm_sweeper;
@@ -62,6 +63,8 @@ pub enum WorkerName {
     WeeklyReport,
     LogExport,
     UpdateChecker,
+    /// M0-P3：monitoring_events retention + 月度 VACUUM
+    MonitoringRetention,
 }
 
 impl WorkerName {
@@ -85,6 +88,7 @@ impl WorkerName {
             Self::WeeklyReport => "weekly_report",
             Self::LogExport => "log_export",
             Self::UpdateChecker => "update_checker",
+            Self::MonitoringRetention => "monitoring_retention",
         }
     }
 }
@@ -238,6 +242,12 @@ impl WorkerManager {
                     .as_ref()
                     .map(|c| c.enabled)
                     .unwrap_or(false),
+            },
+            // M0-P3：monitoring_events 30 天 retention + 月度 VACUUM（每月 1 日 UTC 03:00）
+            JobSpec {
+                name: WorkerName::MonitoringRetention,
+                cron: "0 0 3 1 * *",
+                enabled: true,
             },
             // Stub workers —— 默认禁用
             JobSpec {
@@ -473,6 +483,16 @@ impl WorkerManager {
                         let state = ctx.state.clone();
                         async move {
                             update_checker::run(updater, state).await;
+                        }
+                    })
+                    .await;
+                }
+                // M0-P3：monitoring_events retention + 月度 VACUUM
+                WorkerName::MonitoringRetention => {
+                    add_job(scheduler, spec.cron, name_str, move || {
+                        let store = store.clone();
+                        async move {
+                            monitoring_retention::run(&store).await;
                         }
                     })
                     .await;

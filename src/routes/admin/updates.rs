@@ -187,7 +187,13 @@ async fn apply(
             });
         };
 
-        match bg_updater.apply(channel, &target, backup_cb, sink, &health_url, on_rollback).await {
+        // M0-R4：Swapping 前开启维护模式，完成后关闭（防止写入期间的数据一致性问题）
+        let maintenance_state = bg_state.clone();
+        let on_maintenance = move |active: bool| {
+            maintenance_state.set_maintenance(active);
+        };
+
+        match bg_updater.apply(channel, &target, backup_cb, sink, &health_url, on_rollback, on_maintenance).await {
             Ok(()) => {
                 // 成功路径已 process::exit(0)，理论到不了这里；保底标记 completed
                 bg_state.update_apply_task(|t| {
