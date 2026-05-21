@@ -1,0 +1,62 @@
+name: OpenAPI Drift Check
+
+# 防止 docs/openapi.yaml 与 src/openapi.rs 产生规格漂移（drift）。
+# 每次 PR 或 push 到 main/feat/v1-m0 时：
+#   1. 运行 cargo test --test openapi_export（重新导出 docs/openapi.yaml）
+#   2. git diff --exit-code docs/openapi.yaml（若有差异则失败，提示开发者先本地运行测试）
+
+on:
+  push:
+    branches: [ main, feat/v1-m0 ]
+    paths:
+      - 'src/openapi.rs'
+      - 'docs/openapi.yaml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  pull_request:
+    paths:
+      - 'src/openapi.rs'
+      - 'docs/openapi.yaml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+
+permissions:
+  contents: read
+
+jobs:
+  openapi-drift:
+    name: OpenAPI Drift Check
+    runs-on: ubuntu-latest
+    env:
+      JWT_SECRET: test_secret_key_for_jwt_signing_minimum_64_characters_long_abcd
+      ADMIN_JWT_SECRET: test_admin_secret_key_for_jwt_signing_minimum_64_chars_long
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-openapi-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-openapi-
+
+      - name: 导出 OpenAPI 规格
+        run: cargo test --test openapi_export
+
+      - name: 检查规格漂移（drift）
+        run: |
+          if ! git diff --exit-code docs/openapi.yaml; then
+            echo ""
+            echo "❌ docs/openapi.yaml 与 src/openapi.rs 不同步！"
+            echo "请在本地运行以下命令更新规格文件后重新提交："
+            echo "  cargo test --test openapi_export"
+            exit 1
+          fi
+          echo "✅ docs/openapi.yaml 与 src/openapi.rs 同步，无漂移。"
