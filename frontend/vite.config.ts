@@ -30,7 +30,6 @@ export default defineConfig({
         manualChunks: {
           'vendor-solid': ['solid-js', 'solid-js/web', 'solid-js/store'],
           'vendor-router': ['@solidjs/router'],
-          'vendor-query': ['@tanstack/solid-query'],
           'vendor-mediapipe': ['@mediapipe/tasks-vision'],
         },
       },
