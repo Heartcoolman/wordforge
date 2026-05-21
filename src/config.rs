@@ -67,21 +67,11 @@ impl Default for ProbeConfig {
 /// - `enabled=true` + `hard_block=false`：仅 tracing warn，不拒绝请求
 /// - `enabled=true` + `hard_block=true`：违规返回 400 + 错误码
 /// - `min_client_version=Some("1.0.0")`：低于该版本的客户端被 CLIENT_OUTDATED 拒绝
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct StrictModeConfig {
     pub enabled: bool,
     pub hard_block: bool,
     pub min_client_version: Option<String>,
-}
-
-impl Default for StrictModeConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            hard_block: false,
-            min_client_version: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone)]

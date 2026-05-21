@@ -338,6 +338,7 @@ impl AMASEngine {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build_process_result(
         user_id: &str,
         raw_event: &RawEvent,
@@ -974,6 +975,7 @@ impl AMASEngine {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn update_memory(
         &self,
         user_id: &str,
@@ -1190,6 +1192,7 @@ impl AMASEngine {
         strategy
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn update_trust_scores(
         &self,
         algo_states: &mut AlgoStates,

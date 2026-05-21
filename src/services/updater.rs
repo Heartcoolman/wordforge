@@ -182,6 +182,16 @@ pub enum UpdatePhase {
 /// 进度回调；apply 阶段调用，供 SSE 转发。
 pub type ProgressSink = Arc<dyn Fn(UpdatePhase) + Send + Sync>;
 
+/// apply() 的上下文参数包：将 channel / target_tag / health_url / on_rollback /
+/// on_maintenance 5 个参数合并为一个结构体，消除 clippy::too_many_arguments。
+pub struct ApplyContext {
+    pub channel: Channel,
+    pub target_tag: String,
+    pub health_url: String,
+    pub on_rollback: Box<dyn Fn(String) + Send + 'static>,
+    pub on_maintenance: Box<dyn Fn(bool) + Send + 'static>,
+}
+
 #[derive(Default)]
 struct UpdaterCache {
     last_checked_at: Option<DateTime<Utc>>,
@@ -402,17 +412,20 @@ impl Updater {
     /// failed/rollback 时调 false；成功路径 exit(0) 前不调（新进程启动时靠 flag 文件清理）。
     pub async fn apply<F>(
         &self,
-        channel: Channel,
-        target_tag: &str,
+        ctx: ApplyContext,
         backup_callback: F,
         progress: ProgressSink,
-        health_url: &str,
-        on_rollback: impl Fn(String) + Send + 'static,
-        on_maintenance: impl Fn(bool) + Send + 'static,
     ) -> Result<(), UpdaterError>
     where
         F: FnOnce(&Path) -> Result<(), UpdaterError> + Send,
     {
+        let ApplyContext {
+            channel,
+            target_tag,
+            health_url,
+            on_rollback,
+            on_maintenance,
+        } = ctx;
         let latest = {
             let cache = self.cache.read().await;
             let opt = match channel {
@@ -474,7 +487,7 @@ impl Updater {
                 &latest,
                 backup_callback,
                 progress.clone(),
-                health_url,
+                &health_url,
                 on_rollback,
                 on_maintenance,
             )

@@ -243,12 +243,12 @@ async fn gdpr_export(
             "code": "GDPR_EXPORT_RATE_LIMITED",
             "message": "每 24 小时只能导出一次数据",
         });
-        return Ok(Response::builder()
+        return Response::builder()
             .status(StatusCode::TOO_MANY_REQUESTS)
             .header(header::CONTENT_TYPE, "application/json")
             .header("retry-after", secs.to_string())
             .body(Body::from(body.to_string()))
-            .map_err(|e| AppError::internal(&e.to_string()))?);
+            .map_err(|e| AppError::internal(&e.to_string()));
     }
 
     // 记录本次导出（先记录，再读取；冷却从此刻开始计算）
@@ -362,7 +362,7 @@ async fn gdpr_export(
     }
 
     let body_str = lines.join("\n") + "\n";
-    Ok(Response::builder()
+    Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/x-ndjson")
         .header(
@@ -370,7 +370,7 @@ async fn gdpr_export(
             HeaderValue::from_static("attachment; filename=\"wordforge-export.ndjson\""),
         )
         .body(Body::from(body_str))
-        .map_err(|e| AppError::internal(&e.to_string()))?)
+        .map_err(|e| AppError::internal(&e.to_string()))
 }
 
 /// 序列化一个数据块为 JSON Lines 行。

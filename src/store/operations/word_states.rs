@@ -375,6 +375,7 @@ mod tests {
     use super::{WordLearningState, WordState};
     use crate::store::Store;
     use chrono::{Duration, Utc};
+    use std::str::FromStr;
 
     fn test_store() -> Store {
         Store::open(":memory:", 5000, 1).unwrap()

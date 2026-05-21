@@ -79,7 +79,7 @@ pub struct AdminDailyRegisteredUsersRow {
 /// bound directly to range predicates and the b-tree index is used.
 fn window_since_date(days: u32) -> String {
     let today = Utc::now().date_naive();
-    let start = today - Duration::days(days.saturating_sub(1).max(0) as i64);
+    let start = today - Duration::days(days.saturating_sub(1) as i64);
     start.format("%Y-%m-%d").to_string()
 }
 

@@ -554,7 +554,7 @@ fn last_review_at(
     mdm_state
         .and_then(|mdm_state| mdm_state.last_review_at)
         .and_then(DateTime::<Utc>::from_timestamp_millis)
-        .or_else(|| {
+        .or({
             if state.total_attempts > 0 {
                 Some(state.updated_at)
             } else {

@@ -191,7 +191,7 @@ async fn register(
                 let user = User {
                     id: uuid::Uuid::new_v4().to_string(),
                     email: email_for_lookup,
-                    username: username,
+                    username,
                     password_hash,
                     is_banned: false,
                     created_at: now,

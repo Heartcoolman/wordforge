@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use learning_backend::config::UpdateCheckConfig;
-use learning_backend::services::updater::{Channel, ProgressSink, Updater, UpdaterError};
+use learning_backend::services::updater::{ApplyContext, Channel, ProgressSink, Updater, UpdaterError};
 use sha2::{Digest, Sha256};
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -110,6 +110,16 @@ fn build_cfg(install_dir: &Path, api_url: &str) -> UpdateCheckConfig {
 
 fn noop_sink() -> ProgressSink {
     Arc::new(|_| {})
+}
+
+fn noop_ctx(channel: Channel, tag: &str) -> ApplyContext {
+    ApplyContext {
+        channel,
+        target_tag: tag.to_string(),
+        health_url: String::new(),
+        on_rollback: Box::new(|_| {}),
+        on_maintenance: Box::new(|_| {}),
+    }
 }
 
 fn skip_unless_supported_arch() -> bool {
@@ -223,7 +233,7 @@ async fn apply_rejects_sha256_mismatch() {
     let _ = updater.check_latest().await.unwrap();
     let backup = |_dst: &Path| Ok(());
     let err = updater
-        .apply(Channel::Beta, "v9.9.9", backup, noop_sink(), "", |_| {}, |_| {})
+        .apply(noop_ctx(Channel::Beta, "v9.9.9"), backup, noop_sink())
         .await
         .unwrap_err();
     assert!(matches!(err, UpdaterError::Sha256Mismatch { .. }), "got {err:?}");
@@ -249,7 +259,7 @@ async fn apply_rejects_downgrade_by_default() {
     let _ = updater.check_latest().await.unwrap();
     let backup = |_dst: &Path| Ok(());
     let err = updater
-        .apply(Channel::Beta, "v0.1.0", backup, noop_sink(), "", |_| {}, |_| {})
+        .apply(noop_ctx(Channel::Beta, "v0.1.0"), backup, noop_sink())
         .await
         .unwrap_err();
     assert!(matches!(err, UpdaterError::DowngradeRefused { .. }), "got {err:?}");
@@ -274,7 +284,7 @@ async fn apply_rejects_invalid_target_tag() {
     let _ = updater.check_latest().await.unwrap();
     let backup = |_dst: &Path| Ok(());
     let err = updater
-        .apply(Channel::Beta, "v0.0.999", backup, noop_sink(), "", |_| {}, |_| {})
+        .apply(noop_ctx(Channel::Beta, "v0.0.999"), backup, noop_sink())
         .await
         .unwrap_err();
     assert!(matches!(err, UpdaterError::InvalidTarget(_)), "got {err:?}");
@@ -319,7 +329,7 @@ async fn apply_runs_until_backup_callback_when_sha_matches() {
     };
 
     let err = updater
-        .apply(Channel::Beta, "v9.9.9", backup, noop_sink(), "", |_| {}, |_| {})
+        .apply(noop_ctx(Channel::Beta, "v9.9.9"), backup, noop_sink())
         .await
         .unwrap_err();
     assert!(matches!(err, UpdaterError::Config(_)));
@@ -397,7 +407,7 @@ async fn apply_rejects_tarball_with_symlink_entries() {
     let _ = updater.check_latest().await.unwrap();
     let backup = |_dst: &Path| Ok(());
     let err = updater
-        .apply(Channel::Beta, "v9.9.9", backup, noop_sink(), "", |_| {}, |_| {})
+        .apply(noop_ctx(Channel::Beta, "v9.9.9"), backup, noop_sink())
         .await
         .unwrap_err();
     assert!(matches!(err, UpdaterError::UnsafePath(_)), "got {err:?}");
@@ -485,7 +495,7 @@ async fn apply_rejects_release_missing_assets() {
 
     let backup = |_dst: &Path| Ok(());
     let err = updater
-        .apply(Channel::Beta, "v9.9.9", backup, noop_sink(), "", |_| {}, |_| {})
+        .apply(noop_ctx(Channel::Beta, "v9.9.9"), backup, noop_sink())
         .await
         .unwrap_err();
     assert!(matches!(err, UpdaterError::NoAsset { .. }), "got {err:?}");

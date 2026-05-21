@@ -108,7 +108,7 @@ source {script}
     perms.set_mode(0o755);
     fs::set_permissions(&wrap_path, perms).unwrap();
 
-    let output = Command::new("bash")
+    let status = Command::new("bash")
         .arg(script_path("collect_5xx_rate.sh"))
         .args([
             "--url", "http://mock",

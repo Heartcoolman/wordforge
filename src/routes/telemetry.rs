@@ -25,6 +25,7 @@ struct ClientErrorReport {
     stack: Option<String>,
     url: Option<String>,
     user_agent: Option<String>,
+    #[allow(dead_code)]
     component_stack: Option<String>,
 }
 
