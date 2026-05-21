@@ -829,7 +829,7 @@
 | `memoryStrength` | number | 记忆强度，范围 0.0–1.0 |
 | `recallProbability` | number | 当前回忆概率，范围 0.0–1.0 |
 | `nextReviewIntervalSecs` | number | 下次复习间隔（秒），用于回填 `WordLearningState.nextReviewDate` |
-| `masteryLevel` | enum | `"NEW" / "LEARNING" / "REVIEWING" / "MASTERED" / "FORGOTTEN"`，**SCREAMING_SNAKE_CASE**，与 `WordLearningState.state` 同一份枚举 |
+| `masteryLevel` | enum | `"NEW" / "LEARNING" / "REVIEWING" / "MASTERED" / "FORGOTTEN"`，**SCREAMING_SNAKE_CASE**；注意与 `WordLearningState.state`（lowercase）是**不同枚举**，不可混用 |
 
 `amasResult.coldStartPhase` 是 `"Classify" | "Explore" | null`（**PascalCase**，不带 rename）；`null` 表示已进入稳定期。
 
@@ -1232,7 +1232,7 @@
 {
   "userId": "<uuid>",
   "wordId": "<uuid>",
-  "state": "MASTERED",
+  "state": "mastered",
   "masteryLevel": 0.95,
   "nextReviewDate": "2024-01-20T08:00:00Z",
   "halfLife": 72.0,
@@ -1332,14 +1332,14 @@
   "updates": [
     {
       "wordId": "<id>",
-      "state": "REVIEWING",
+      "state": "reviewing",
       "masteryLevel": 0.6
     }
   ]
 }
 ```
 
-`state` 和 `masteryLevel` 均为可选；所有 `wordId` 必须已存在。
+`state` 和 `masteryLevel` 均为可选；所有 `wordId` 必须已存在。`state` 枚举值为 lowercase（`"new"/"learning"/"reviewing"/"mastered"/"forgotten"`，v0.6.0-beta.4 P3#7 起）。
 
 **响应 200：**
 ```json
@@ -2278,7 +2278,7 @@ AMAS（Adaptive Multi-level Adjustment System）是服务端自适应学习引�
 | `memoryStrength` | number | 记忆强度，范围 0.0–1.0 |
 | `recallProbability` | number | 当前回忆概率，范围 0.0–1.0 |
 | `nextReviewIntervalSecs` | number | 下次复习间隔（秒），用于回填 `WordLearningState.nextReviewDate` |
-| `masteryLevel` | enum | `"NEW" / "LEARNING" / "REVIEWING" / "MASTERED" / "FORGOTTEN"`，**SCREAMING_SNAKE_CASE**，与 `WordLearningState.state` 同一份枚举 |
+| `masteryLevel` | enum | `"NEW" / "LEARNING" / "REVIEWING" / "MASTERED" / "FORGOTTEN"`，**SCREAMING_SNAKE_CASE**；注意与 `WordLearningState.state`（lowercase）是**不同枚举**，不可混用 |
 
 > `POST /api/records` 响应中的 `data.amasResult` 与本端点返回的 `data` 同构；区别仅在于 `/api/records` 同时把记录写入 `learning_records` 表并触发 ELO/word-state 持久化。
 
@@ -2367,11 +2367,16 @@ Server-Sent Events（SSE）持久连接，用于接收服务端实时推送。
 |---|---|---|
 | `amas_state` | AMAS 引擎状态变化（服务端每 5 秒轮询，仅当 `totalEventCount` 增长时推送） | `{"type": "state_change", "attention": 0.72, "fatigue": 0.28, "motivation": 0.65, "confidence": 0.54, "sessionEventCount": 12, "totalEventCount": 834}` |
 | `maintenance` | 维护模式变化 | `{"type": "maintenance", "active": true}` |
-| `update_available` | 新版本可用 | `{"version": "v0.3.3", "message": "新版本已发布"}` |
+| `update_available` | 新版本可用（面向所有用户的刷新提示，由 `broadcast_update` 发出；与管理员专属的 `release_available` 不同） | `{"version": "v0.3.3", "message": "新版本已发布"}` |
 | `telemetry_request` | 服务器请求遥测上报 | `{"type": "telemetry_request", "requestId": "<uuid>"}` |
 | `banned` | 账号被封禁 | `{"type": "banned"}` |
 | `unbanned` | 账号解封 | `{"type": "unbanned"}` |
 | `data_corrupted` | 数据异常通知 | `{"type": "data_corrupted"}` |
+| `new_llm_suggestion` | 新的 LLM 调参建议到达（管理员专属，advisor 页可立即刷新） | `{"type": "new_llm_suggestion", "suggestionId": 42}` |
+| `release_available` | 自更新 worker 探测到 GitHub Releases 有新二进制；v0.6.0-beta.3 起含 `channel`（管理员专属） | `{"type": "release_available", "latestTag": "v0.5.6", "channel": "stable"}` |
+| `update_progress` | 一键更新执行阶段进度（管理员专属，0–100） | `{"type": "update_progress", "phase": "downloading", "percent": 35}` |
+| `probe_request` | 远程探针脚本下发：admin 通过 `POST /api/admin/probe` 派发，客户端在 Worker 沙箱 eval 后回传结果 | `{"type": "probe_request", "requestId": "<uuid>", "batchId": "<uuid>", "scriptB64": "...", "timeoutMs": 3000, "ctxVersion": 1}` |
+| `probe_confirm` | 远程探针二次确认：客户端首次返回 `confirm_required` 后，admin 输入设备后 5 位确认，后端推此事件 | `{"type": "probe_confirm", "requestId": "<uuid>", "confirmToken": "<uuid>"}` |
 
 > 服务端 SSE Keep-alive 文本行 `: keepalive` 每 15 秒发送一次。连接数达到服务器上限（默认 1000）时返回 `429 RATE_LIMITED`。
 
@@ -2576,9 +2581,20 @@ AMAS 算法指标快照（需 Admin Token）。
 
 ## 18. V1 兼容层
 
+> **⚠️ 永久冻结 / 已弃用 — 新客户端禁止接入**
+>
+> `/api/v1/*` 为历史兼容层，于 **v0.6.0-beta.4（2026-05-21）起正式标记弃用**，预计在 **v2.0.0（2027-01-01）随 major bump 一并移除**。
+>
+> - **不接受任何新功能或破坏性变更**：字段集永久冻结，不会同步 AMAS 算法改进。
+> - **不触发 AMAS 自适应引擎**：`POST /api/v1/records` 仅做 5 秒去重，不更新 ELO / word_state；使用 v1 层意味着**静默退化为非自适应学习**。
+> - **运行时弃用信号**：所有 v1 端点响应均携带 `Deprecation` + `Sunset` header（RFC 8594），客户端 logger 应据此告警并引导升级。
+> - **现有调用方**：当前 iOS / Web 客户端**均已迁移至 `/api/*` 主端点**，无任何生产流量经过 v1 层。
+>
+> **迁移指引**：将 `/api/v1/words` → `/api/words`，`/api/v1/records` → `/api/records`，`/api/v1/study-config` → `/api/study-config`，`/api/v1/learning/session` → `/api/learning/sessions`。
+
 **路径前缀：** `/api/v1`
 **认证：** Bearer Token（必须）
-**说明：** 不触发 AMAS 自适应引擎，适合不需要自适应功能的轻量客户端
+**说明：** 历史兼容层，永久冻结，不触发 AMAS 自适应引擎
 
 ---
 
@@ -2663,18 +2679,24 @@ AMAS 算法指标快照（需 Admin Token）。
 ```json
 {
   "success": true,
-  "data": [
-    {
-      "wordId": "<uuid>",
-      "favorited": true,
-      "createdAt": "2024-01-15T08:00:00Z",
-      "word": { "id": "<uuid>", "text": "abandon", "meaning": "..." }
-    }
-  ]
+  "data": {
+    "data": [
+      {
+        "wordId": "<uuid>",
+        "favorited": true,
+        "createdAt": "2024-01-15T08:00:00Z",
+        "word": { "id": "<uuid>", "text": "abandon", "meaning": "..." }
+      }
+    ],
+    "total": 1,
+    "page": 1,
+    "perPage": 20,
+    "totalPages": 1
+  }
 }
 ```
 
-> `word` 为 `WordPublic` 投影；若收藏的单词已被删除，该条目会被过滤。
+> `word` 为 `WordPublic` 投影；若收藏的单词已被删除，该条目会被过滤。v0.6.0-beta.4 P3#5 起改为分页响应（`paginated()` 格式），列表字段为 `data.data`（非 `data.items`）。
 
 ---
 

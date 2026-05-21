@@ -815,6 +815,8 @@ async fn it_user_profile_notifications_content_and_v1_flow() {
     assert_eq!(confusion_status, StatusCode::OK);
     assert!(confusion_body["data"]["confusionPairs"].is_array());
 
+    // M0-C5：/api/v1/* 全部端点已改为 410 Gone，断言同步更新。
+    // 完整的端点级 410 + JSON 错误体断言见 tests/v1_gone.rs。
     let v1_words = request(
         &app.app,
         Method::GET,
@@ -824,7 +826,7 @@ async fn it_user_profile_notifications_content_and_v1_flow() {
     )
     .await;
     let (v1_words_status, _, _) = response_json(v1_words).await;
-    assert_eq!(v1_words_status, StatusCode::OK);
+    assert_eq!(v1_words_status, StatusCode::GONE);
 
     let v1_word = request(
         &app.app,
@@ -835,7 +837,7 @@ async fn it_user_profile_notifications_content_and_v1_flow() {
     )
     .await;
     let (v1_word_status, _, _) = response_json(v1_word).await;
-    assert_eq!(v1_word_status, StatusCode::OK);
+    assert_eq!(v1_word_status, StatusCode::GONE);
 
     let v1_create_record = request(
         &app.app,
@@ -850,7 +852,7 @@ async fn it_user_profile_notifications_content_and_v1_flow() {
     )
     .await;
     let (v1_record_status, _, _) = response_json(v1_create_record).await;
-    assert_eq!(v1_record_status, StatusCode::OK);
+    assert_eq!(v1_record_status, StatusCode::GONE);
 
     let v1_records = request(
         &app.app,
@@ -860,9 +862,8 @@ async fn it_user_profile_notifications_content_and_v1_flow() {
         &[("authorization", auth_header(&token))],
     )
     .await;
-    let (v1_records_status, _, v1_records_body) = response_json(v1_records).await;
-    assert_eq!(v1_records_status, StatusCode::OK);
-    assert!(v1_records_body["data"]["data"].is_array());
+    let (v1_records_status, _, _) = response_json(v1_records).await;
+    assert_eq!(v1_records_status, StatusCode::GONE);
 
     let v1_config = request(
         &app.app,
@@ -873,7 +874,7 @@ async fn it_user_profile_notifications_content_and_v1_flow() {
     )
     .await;
     let (v1_config_status, _, _) = response_json(v1_config).await;
-    assert_eq!(v1_config_status, StatusCode::OK);
+    assert_eq!(v1_config_status, StatusCode::GONE);
 
     let v1_create_session = request(
         &app.app,
@@ -883,9 +884,8 @@ async fn it_user_profile_notifications_content_and_v1_flow() {
         &[("authorization", auth_header(&token))],
     )
     .await;
-    let (v1_session_status, _, v1_session_body) = response_json(v1_create_session).await;
-    assert_eq!(v1_session_status, StatusCode::OK);
-    assert!(v1_session_body["data"]["sessionId"].is_string());
+    let (v1_session_status, _, _) = response_json(v1_create_session).await;
+    assert_eq!(v1_session_status, StatusCode::GONE);
 
     let v1_resume_session = request(
         &app.app,
@@ -895,9 +895,8 @@ async fn it_user_profile_notifications_content_and_v1_flow() {
         &[("authorization", auth_header(&token))],
     )
     .await;
-    let (v1_resume_status, _, v1_resume_body) = response_json(v1_resume_session).await;
-    assert_eq!(v1_resume_status, StatusCode::OK);
-    assert_eq!(v1_resume_body["data"]["resumed"], true);
+    let (v1_resume_status, _, _) = response_json(v1_resume_session).await;
+    assert_eq!(v1_resume_status, StatusCode::GONE);
 }
 
 #[tokio::test]

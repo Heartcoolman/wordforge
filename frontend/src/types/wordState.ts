@@ -1,4 +1,5 @@
-export type WordStateType = 'NEW' | 'LEARNING' | 'REVIEWING' | 'MASTERED' | 'FORGOTTEN';
+// P3#7：后端 wire 序列化改为 lowercase（`#[serde(rename_all = "lowercase")]`）
+export type WordStateType = 'new' | 'learning' | 'reviewing' | 'mastered' | 'forgotten';
 
 export interface WordLearningState {
   userId: string;

@@ -1,0 +1,103 @@
+# 发版日历与兼容窗口
+
+本页登记三个关联仓库（后端 + admin、Web 学习端、iOS 客户端）的发版节奏与 API 兼容窗口，供跨仓协作时参考。
+
+---
+
+## 本仓（wordforge · 后端 + admin）
+
+### 发版节奏
+
+| 阶段 | 节奏 | 说明 |
+|---|---|---|
+| **Alpha / Beta** | 按需，无固定周期 | 每个功能迭代完成即发；tag 含 `-` 自动标 Pre-release |
+| **Release Candidate（rc）** | 质量门达标后发 | 仅走 beta 通道（O9 决策）；`v1.0-rc.x` |
+| **Stable GA** | 无预设固定时间窗 | 质量门决定（O3 决策 D3）：无 P0 漏洞 + 基准测试达标 |
+| **Patch（bugfix）** | 72 小时内响应 P0 | 安全漏洞或数据损坏类问题强制快速发版 |
+
+### 历史发版记录（v0.x）
+
+| 版本 | 发布日期 | 类型 | 摘要 |
+|---|---|---|---|
+| v0.1.0 | 2026-02-12 | stable | 全量功能首发 |
+| v0.1.1 | 2026-02-14 | patch | 前端功能完善 |
+| v0.1.2 | 2026-02-14 | patch | 审查修复 + 管理员密码重置 |
+| v0.1.3 | 2026-02-14 | patch | 版本更新检查 + 全局中文化 |
+| v0.1.4 | 2026-02-15 | patch | 性能优化 + AMAS 准确度提升 |
+| v0.2.0 | 2026-03-24 | minor | AMAS v2 — 全新 DSR 架构 |
+| v0.2.5 | 2026-04-09 | patch | 存储层重构 + AMAS 增强 |
+| v0.2.6 | 2026-04-10 | patch | 服务端选词接口 + OpenAPI 规范页面 |
+| v0.2.7 | 2026-04-11 | patch | SSE 重连 + 遥测 worker 修复 |
+| v0.2.8 | 2026-04-14 | patch | 遥测增强 + 客户端管理 + 心跳看门狗 |
+| v0.2.9 | 2026-04-15 | patch | 稳定性修复 |
+| v0.3.0 | 2026-04-17 | minor | async runtime 防阻塞改造 |
+| v0.3.1 | 2026-04-24 | patch | release.yml + install.sh |
+| v0.3.2–3.4 | 2026-04-25–29 | patch | 稳定性修复 |
+| v0.4.0 | 2026-05-02 | minor | admin 自更新 + AMAS 调参后台 |
+| v0.4.1 | 2026-05-17 | patch | AMAS 11 维 Tier-A 调参 + 学习模式扩展 |
+| v0.4.2 | 2026-05-17 | patch | worker cron 修复 + schema init 修复 |
+| v0.4.3 | 2026-05-18 | patch | updater code review 修复 |
+| v0.4.4 | 2026-05-18 | patch | updater 端口竞态修复 |
+| v0.5.0–5.6 | 2026-05-19 | patch | admin 一键升级链路七连发 |
+| v0.6.0-beta.1 | 2026-05-20 | pre | Probe REPL + UI 全量加固 |
+| v0.6.0-beta.2 | 2026-05-20 | pre | feedback ErrorBoundary 修复 |
+| v0.6.0-beta.3 | 2026-05-20 | pre | admin/updates 双通道 + prerelease 规则 |
+| v0.6.0-beta.4 | 2026-05-20 | pre | Release Notes markdown 渲染 |
+
+### API 兼容窗口（v1 稳定版承诺）
+
+> 以下规则在 v1.0 GA 发布后正式生效。
+
+| 等级 | 变更纪律 | 弃用公告窗口 |
+|---|---|---|
+| **v1 stable** | 禁止破坏性变更；新增字段必须可选 + default | ≥ 2 个 minor（约 6 个月） |
+| **v1beta** | 可加新必填字段 / 改 enum；变更须出现在 release notes Breaking 段 | ≥ 1 个 minor |
+| **v0 / internal** | 无承诺，随时可改 | — |
+
+弃用端点会在 response 加 `Deprecation: <date>` + `Sunset: <date>` header（RFC 8594）。
+
+#### 已明确的立即生效条款（v1.0 发布时）
+
+| 端点 | 状态 | Sunset |
+|---|---|---|
+| `GET /api/v1/*` | v1.0 发布起返回 410 Gone；永久冻结至删除 | v1.0 + 12 个月 |
+| `GET /api/admin/monitoring/check-update` | v1.0 deprecated（被 `/admin/updates/*` 取代） | v1.1 删除 |
+
+---
+
+## wordforge-web（Web 学习端）
+
+> 本表由 wordforge-web 仓库维护者填写。
+
+| 版本 | 发布日期 | 最低后端版本要求 | 说明 |
+|---|---|---|---|
+| — | — | — | _待填写_ |
+
+**后端 API 兼容要求**：wordforge-web 依赖 `/api/*` v1 stable 端点，升级后端前请确认 release notes 无 Breaking 变更。
+
+---
+
+## iOS 客户端
+
+> 本表由 iOS 客户端维护者填写。
+
+| 版本 | TestFlight 发布日 | 最低后端版本要求 | App Store 状态 | 说明 |
+|---|---|---|---|---|
+| — | — | — | — | _待填写_ |
+
+**后端 API 兼容要求**：iOS 客户端仅调用 `/api/*` v1 stable 端点（不走 `/api/v1/*`），理论上兼容 v0.6.0+ 后端。strict-mode 启用时，客户端 User-Agent 必须符合 `WordForge-iOS/<semver>` 格式。
+
+---
+
+## 跨仓发版协调流程
+
+1. 后端发布 stable 版本 → 维护者在此页更新"历史发版记录"表
+2. wordforge-web / iOS 维护者评估 release notes 中的 Breaking 变更：
+   - 有 Breaking → 更新客户端并指定最低后端版本
+   - 无 Breaking → 沿用现有最低版本
+3. 有新的 API 弃用公告 → 各客户端在下一个 minor 版本内迁移到新端点
+4. v1.0 GA 发布前，三方联合冒烟测试：后端 + Web + iOS 端到端流程全通
+
+---
+
+_本页最后更新：2026-05-21_

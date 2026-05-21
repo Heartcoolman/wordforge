@@ -3,6 +3,8 @@ set -euo pipefail
 
 OLD_TAG="${OLD_TAG:-v0.4.2}"
 NEW_TAG="${NEW_TAG:-v0.4.3}"
+# M0-C6：双通道升级时指定通道；stable 为默认，beta 测试时设 CHANNEL=beta
+CHANNEL="${CHANNEL:-stable}"
 ARCH="${ARCH:-x86_64}"
 PORT="${PORT:-31080}"
 BASE="http://127.0.0.1:${PORT}"
@@ -75,7 +77,8 @@ LOG_DIR=${INSTALL_DIR}/logs
 API_ONLY=false
 LLM_ENABLED=false
 LLM_MOCK=true
-UPDATE_CHECK_API_URL=https://api.github.com/repos/Heartcoolman/wordforge/releases/latest
+# M0-C6：beta.3 双通道后后端需要列表端点分流 stable/beta；禁止 hardcode /tags/...
+UPDATE_CHECK_API_URL=https://api.github.com/repos/Heartcoolman/wordforge/releases?per_page=10
 ENABLE_UPDATE_CHECKER_WORKER=true
 UPDATE_CHECK_CACHE_TTL_SECS=3600
 UPDATE_INSTALL_DIR=${INSTALL_DIR}
@@ -113,16 +116,19 @@ echo "${status_before}" | jq -e \
 
 check_response="$(curl -fsS -X POST -H "Authorization: Bearer ${token}" "${BASE}/api/admin/updates/check")"
 echo "Manual check response: ${check_response}"
+# M0-C6：beta.3 双通道后 check 响应 latestVersion/hasUpdate/canApply 移入 .data.stable/.data.beta 子对象
 echo "${check_response}" | jq -e \
   --arg current "${OLD_TAG}" \
   --arg latest "${NEW_TAG}" \
-  '.data.currentVersion == $current and .data.latestVersion == $latest and .data.hasUpdate == true and .data.canApply == true' >/dev/null
+  --arg ch "${CHANNEL}" \
+  '.data.currentVersion == $current and .data[$ch].latestVersion == $latest and .data[$ch].hasUpdate == true and .data[$ch].canApply == true' >/dev/null
 
 set +e
+# M0-C6：beta.3 新增 channel 必填字段（"stable" | "beta"）
 apply_response="$(curl -sS -m 20 -X POST "${BASE}/api/admin/updates/apply" \
   -H "Authorization: Bearer ${token}" \
   -H 'Content-Type: application/json' \
-  -d "{\"targetVersion\":\"${NEW_TAG}\",\"confirmCurrentVersion\":\"${OLD_TAG}\"}" 2>&1)"
+  -d "{\"targetVersion\":\"${NEW_TAG}\",\"confirmCurrentVersion\":\"${OLD_TAG}\",\"channel\":\"${CHANNEL}\"}" 2>&1)"
 apply_code=$?
 set -e
 echo "Apply curl exit code: ${apply_code}"

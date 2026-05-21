@@ -104,6 +104,14 @@ async fn main() {
         env!("GIT_VERSION"),
     ) {
         Ok(u) => {
+            // M0-R4：启动时检查 maintenance flag。上次自更新在 Swapping 阶段后崩溃
+            // 或新进程健康检查超时回滚，父进程 exit 前无法清除 flag，由新进程代劳。
+            let flag_path = u.install_dir().join(learning_backend::services::updater::MAINTENANCE_FLAG);
+            if flag_path.exists() {
+                tracing::warn!(path = ?flag_path, "发现 maintenance flag，上次自更新异常；清理 maintenance 模式");
+                state.set_maintenance(false);
+                let _ = std::fs::remove_file(&flag_path);
+            }
             state.set_updater(u.clone());
             Some(u)
         }

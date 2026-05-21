@@ -155,6 +155,11 @@ async fn apply(
     let bg_store = state.store().clone();
     let target = req.target_version.clone();
     let channel = req.channel;
+    // M0-R3：构造子进程健康自检 URL
+    let health_url = format!(
+        "http://127.0.0.1:{}/health",
+        state.config().port
+    );
     tokio::spawn(async move {
         let progress_state = bg_state.clone();
         let sink: crate::services::updater::ProgressSink = Arc::new(move |phase| {
@@ -173,7 +178,22 @@ async fn apply(
             bg_store.backup_to(dst).map_err(UpdaterError::Store)
         };
 
-        match bg_updater.apply(channel, &target, backup_cb, sink).await {
+        // M0-R3：回滚告警回调，通过 SSE 广播给 admin 前端
+        let rollback_state = bg_state.clone();
+        let on_rollback = move |msg: String| {
+            rollback_state.broadcast_to_all_sse(SseEvent::UpdateProgress {
+                phase: format!("rollback: {msg}"),
+                percent: 0,
+            });
+        };
+
+        // M0-R4：Swapping 前开启维护模式，完成后关闭（防止写入期间的数据一致性问题）
+        let maintenance_state = bg_state.clone();
+        let on_maintenance = move |active: bool| {
+            maintenance_state.set_maintenance(active);
+        };
+
+        match bg_updater.apply(channel, &target, backup_cb, sink, &health_url, on_rollback, on_maintenance).await {
             Ok(()) => {
                 // 成功路径已 process::exit(0)，理论到不了这里；保底标记 completed
                 bg_state.update_apply_task(|t| {
@@ -221,6 +241,7 @@ fn phase_label_percent(phase: &UpdatePhase) -> (String, u8) {
         UpdatePhase::Extracting => ("extracting".into(), 80),
         UpdatePhase::BackingUpDb => ("backing_up_db".into(), 85),
         UpdatePhase::Swapping => ("swapping".into(), 95),
+        UpdatePhase::HealthChecking => ("health_checking".into(), 97),
         UpdatePhase::Restarting => ("restarting".into(), 99),
     }
 }
@@ -256,6 +277,13 @@ fn map_err(e: UpdaterError) -> AppError {
         UpdaterError::Api { status, .. } => AppError {
             status: StatusCode::BAD_GATEWAY,
             code: format!("GITHUB_API_{status}"),
+            message: e.to_string(),
+            is_operational: true,
+        },
+        // M0-P5：phase watchdog 超时 → 503，前端可展示明确错误并提示用户重试
+        UpdaterError::PhaseTimeout { .. } => AppError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "UPDATE_PHASE_TIMEOUT".into(),
             message: e.to_string(),
             is_operational: true,
         },

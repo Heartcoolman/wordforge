@@ -244,7 +244,8 @@ async fn it_word_favorites_full_flow() {
     .await;
     let (status, _, body) = response_json(resp).await;
     assert_eq!(status, StatusCode::OK);
-    let items = body["data"].as_array().expect("items array");
+    // P3#5：list_favorites 改 paginated()，列表在 data.data 而非 data 直接为数组
+    let items = body["data"]["data"].as_array().expect("items array");
     assert_eq!(items.len(), 1);
     assert_eq!(items[0]["wordId"], word_id);
 
@@ -624,6 +625,7 @@ async fn it_word_states_full_flow() {
     assert_eq!(body["code"], "WORD_NOT_FOUND");
 
     // batch_update: ok with both state and mastery_level
+    // P3#7：WordState wire 序列化改为 lowercase，此处须用 "learning" 而非 "LEARNING"
     let resp = request(
         &app.app,
         Method::POST,
@@ -631,7 +633,7 @@ async fn it_word_states_full_flow() {
         Some(serde_json::json!({
             "updates": [{
                 "wordId": word_id,
-                "state": "LEARNING",
+                "state": "learning",
                 "masteryLevel": 0.5
             }]
         })),

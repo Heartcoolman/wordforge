@@ -119,6 +119,16 @@ impl Store {
         Ok(())
     }
 
+    /// 在线 VACUUM：重建 DB 文件，回收删除后产生的空页，收缩磁盘占用。
+    /// 月度 retention cron 在删除大量旧 monitoring 事件后调用。
+    /// 注意：VACUUM 会短暂阻塞写入（WAL 模式下其他读可以并发），
+    /// 因此调度在低峰时段（UTC 03:00 月初 1 日）。
+    pub fn vacuum_db(&self) -> Result<(), StoreError> {
+        let conn = self.conn()?;
+        conn.execute_batch("VACUUM;")?;
+        Ok(())
+    }
+
     pub fn connection(
         &self,
     ) -> Result<r2d2::PooledConnection<SqliteConnectionManager>, StoreError> {

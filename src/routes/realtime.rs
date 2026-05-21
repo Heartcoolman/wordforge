@@ -177,6 +177,7 @@ pub async fn sse_handler(
                                     crate::state::SseEvent::UpdateProgress { .. } => "update_progress",
                                     crate::state::SseEvent::ProbeRequest { .. } => "probe_request",
                                     crate::state::SseEvent::ProbeConfirm { .. } => "probe_confirm",
+                                    crate::state::SseEvent::Incident { .. } => "incident",
                                 };
                                 yield Ok(Event::default().event(event_name).data(json));
                             }

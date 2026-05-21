@@ -1,93 +1,1019 @@
 openapi: 3.1.0
 info:
   title: WordForge API
-  version: 0.4.3
-  description: Core public and admin API surface for generated clients.
+  description: |-
+    WordForge 后端 API — v1-stable 端点。
+
+    路径基础路径 `/api`（见 servers[0].url）。
+    本规格由 `src/openapi.rs` 自动生成，通过 `cargo test --test openapi_export` 导出，CI 以 `git diff --exit-code docs/openapi.yaml` 防止规格漂移（drift）。
+  version: 0.6.0-beta.4
 servers:
-  - url: /api
-security:
-  - bearerAuth: []
+- url: /api
 paths:
+  /analytics/dashboard:
+    get:
+      tags:
+      - analytics
+      summary: 学习统计 dashboard
+      description: 支持 `?range=day|week|month`，时区固定为 Asia/Shanghai。
+      parameters:
+      - name: range
+        in: query
+        required: false
+        schema:
+          type: string
+          enum:
+          - day
+          - week
+          - month
+      responses:
+        '200':
+          description: Dashboard 统计数据，含 summary / daily 数组
+          content:
+            application/json:
+              schema:
+                allOf:
+                - type: object
+                  required:
+                  - success
+                  properties:
+                    success:
+                      type: boolean
+                - type: object
+                  required:
+                  - data
+                  properties:
+                    data:
+                      type: object
+        '401':
+          description: 令牌缺失或已过期 — AUTH_UNAUTHORIZED
+      security:
+      - bearerAuth: []
+  /auth/forgot-password:
+    post:
+      tags:
+      - auth
+      summary: 请求重置密码邮件
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ForgotPasswordRequest'
+        required: true
+      responses:
+        '200':
+          description: 邮件已发送（无论邮箱是否存在均返回 200）
+          content:
+            application/json:
+              schema:
+                allOf:
+                - type: object
+                  required:
+                  - success
+                  properties:
+                    success:
+                      type: boolean
+                - type: object
+                  required:
+                  - data
+                  properties:
+                    data:
+                      type: object
   /auth/login:
     post:
-      summary: User login
-      x-frontend-response-type: unknown
+      tags:
+      - auth
+      summary: 用户登录
+      description: 返回 accessToken，写入 refresh cookie。
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+        required: true
       responses:
-        "200":
-          description: User access and refresh tokens.
+        '200':
+          description: 登录成功，含 accessToken 和用户信息
+          content:
+            application/json:
+              schema:
+                allOf:
+                - type: object
+                  required:
+                  - success
+                  properties:
+                    success:
+                      type: boolean
+                - type: object
+                  required:
+                  - data
+                  properties:
+                    data:
+                      type: object
+        '400':
+          description: 请求体校验失败 — VALIDATION_ERROR / INVALID_REQUEST_BODY
+        '401':
+          description: 令牌缺失或已过期 — AUTH_UNAUTHORIZED
+        '429':
+          description: 认证限流或账号锁定 — RATE_LIMITED / AUTH_RATE_LIMITED
+  /auth/logout:
+    post:
+      tags:
+      - auth
+      summary: 登出
+      description: 撤销当前 session token，清除 refresh cookie。
+      responses:
+        '200':
+          description: 登出成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                - type: object
+                  required:
+                  - success
+                  properties:
+                    success:
+                      type: boolean
+                - type: object
+                  required:
+                  - data
+                  properties:
+                    data:
+                      type: object
+        '401':
+          description: 令牌缺失或已过期 — AUTH_UNAUTHORIZED
+      security:
+      - bearerAuth: []
   /auth/refresh:
     post:
-      summary: Rotate refresh token and issue a new access token
-      x-frontend-response-type: unknown
+      tags:
+      - auth
+      summary: 刷新 Access Token
+      description: 凭 refresh_token（header 或 cookie）换取新的 accessToken。旧 token 立即失效（一次性使用）。
       responses:
-        "200":
-          description: New token pair.
-  /admin/auth/login:
+        '200':
+          description: 新 accessToken
+          content:
+            application/json:
+              schema:
+                allOf:
+                - type: object
+                  required:
+                  - success
+                  properties:
+                    success:
+                      type: boolean
+                - type: object
+                  required:
+                  - data
+                  properties:
+                    data:
+                      type: object
+        '401':
+          description: 令牌缺失或已过期 — AUTH_UNAUTHORIZED
+  /auth/register:
     post:
-      summary: Admin login
-      x-frontend-response-type: unknown
+      tags:
+      - auth
+      summary: 注册新用户
+      description: 创建账号，返回 accessToken + refresh cookie。
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+        required: true
       responses:
-        "200":
-          description: Admin access token.
-        "429":
-          description: Admin account lockout or auth rate limit.
-  /admin/users:
+        '201':
+          description: 注册成功，含 accessToken 和用户信息
+          content:
+            application/json:
+              schema:
+                allOf:
+                - type: object
+                  required:
+                  - success
+                  properties:
+                    success:
+                      type: boolean
+                - type: object
+                  required:
+                  - data
+                  properties:
+                    data:
+                      type: object
+        '400':
+          description: 请求体校验失败 — VALIDATION_ERROR / INVALID_REQUEST_BODY
+        '409':
+          description: 邮箱已注册 — CONFLICT
+  /auth/reset-password:
+    post:
+      tags:
+      - auth
+      summary: 重置密码
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResetPasswordRequest'
+        required: true
+      responses:
+        '200':
+          description: 密码重置成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                - type: object
+                  required:
+                  - success
+                  properties:
+                    success:
+                      type: boolean
+                - type: object
+                  required:
+                  - data
+                  properties:
+                    data:
+                      type: object
+        '400':
+          description: 请求体校验失败 — VALIDATION_ERROR / INVALID_REQUEST_BODY
+  /feedback:
+    post:
+      tags:
+      - misc
+      summary: 提交用户反馈
+      responses:
+        '201':
+          description: 已提交反馈
+          content:
+            application/json:
+              schema:
+                allOf:
+                - type: object
+                  required:
+                  - success
+                  properties:
+                    success:
+                      type: boolean
+                - type: object
+                  required:
+                  - data
+                  properties:
+                    data:
+                      type: object
+        '401':
+          description: 令牌缺失或已过期 — AUTH_UNAUTHORIZED
+      security:
+      - bearerAuth: []
+  /health:
     get:
-      summary: List users for admin management
-      x-frontend-response-type: import('./admin').AdminUsersPage
-      security:
-        - adminBearerAuth: []
+      tags:
+      - misc
+      summary: 健康检查
+      description: LB / k8s 探针。不使用统一 success/data 包装，直接返回健康数据。
       responses:
-        "200":
-          description: Paged user list.
-  /admin/amas/config:
+        '200':
+          description: 服务正常
+        '503':
+          description: 服务异常或维护中
+  /learning/sessions:
+    post:
+      tags:
+      - learning
+      summary: 开始新学习会话
+      responses:
+        '201':
+          description: 已创建会话
+          content:
+            application/json:
+              schema:
+                allOf:
+                - type: object
+                  required:
+                  - success
+                  properties:
+                    success:
+                      type: boolean
+                - type: object
+                  required:
+                  - data
+                  properties:
+                    data:
+                      type: object
+        '401':
+          description: 令牌缺失或已过期 — AUTH_UNAUTHORIZED
+      security:
+      - bearerAuth: []
+  /realtime/events:
     get:
-      summary: Read current AMAS configuration
-      x-frontend-response-type: import('./amas').AmasConfig
-      security:
-        - adminBearerAuth: []
+      tags:
+      - realtime
+      summary: SSE 实时事件流
+      description: |-
+        Server-Sent Events 持久连接。
+
+        事件类型（`event:` 字段）：
+        - `maintenance`、`telemetry_request`、`banned`、`unbanned`、`data_corrupted` — v1 stable
+        - `update_available` — v1 stable（面向所有用户，由 broadcast_update 发出）
+        - `release_available`、`update_progress` — v1 stable，管理员专属
+        - `new_llm_suggestion` — v1beta，管理员专属
+        - `probe_request`、`probe_confirm` — v0/internal
+
+        Keep-alive 行 `: keepalive` 每 15 秒发送一次。
       responses:
-        "200":
-          description: AMAS configuration.
-    put:
-      summary: Update AMAS configuration
-      x-frontend-response-type: "{ updated: boolean; versionHash?: string; versionId?: number }"
+        '200':
+          description: text/event-stream 持久连接
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        '401':
+          description: 令牌缺失或已过期 — AUTH_UNAUTHORIZED
+        '429':
+          description: 连接数超限 — RATE_LIMITED
       security:
-        - adminBearerAuth: []
-      responses:
-        "200":
-          description: Saved configuration version.
-  /admin/amas/metrics/timeseries:
+      - bearerAuth: []
+  /records:
     get:
-      summary: AMAS algorithm latency and error metrics
-      x-frontend-response-type: import('../api/admin').AmasMetricsTimeseriesPoint[]
-      security:
-        - adminBearerAuth: []
+      tags:
+      - learning
+      summary: 获取学习记录列表
       parameters:
-        - name: days
-          in: query
-          schema:
-            type: integer
-            default: 7
+      - name: page
+        in: query
+        required: false
+        schema:
+          type: integer
+      - name: perPage
+        in: query
+        required: false
+        schema:
+          type: integer
       responses:
-        "200":
-          description: Daily algorithm metrics.
-  /admin/updates/status:
-    get:
-      summary: Read self-update status
-      x-frontend-response-type: import('./admin').AdminUpdateStatus
+        '200':
+          description: 分页学习记录
+          content:
+            application/json:
+              schema:
+                allOf:
+                - type: object
+                  required:
+                  - success
+                  properties:
+                    success:
+                      type: boolean
+                - type: object
+                  required:
+                  - data
+                  properties:
+                    data:
+                      type: object
+        '401':
+          description: 令牌缺失或已过期 — AUTH_UNAUTHORIZED
       security:
-        - adminBearerAuth: []
+      - bearerAuth: []
+    post:
+      tags:
+      - learning
+      summary: 提交学习记录
+      description: 记录一次单词作答。`recordType` 缺省落库 `all`；`selfRating` 可选。
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateRecordRequest'
+        required: true
       responses:
-        "200":
-          description: Current and latest release status.
+        '201':
+          description: 已创建学习记录
+          content:
+            application/json:
+              schema:
+                allOf:
+                - type: object
+                  required:
+                  - success
+                  properties:
+                    success:
+                      type: boolean
+                - type: object
+                  required:
+                  - data
+                  properties:
+                    data:
+                      type: object
+        '400':
+          description: 请求体校验失败 — VALIDATION_ERROR / INVALID_REQUEST_BODY
+        '401':
+          description: 令牌缺失或已过期 — AUTH_UNAUTHORIZED
+      security:
+      - bearerAuth: []
+  /status:
+    get:
+      tags:
+      - misc
+      summary: 版本探测
+      description: 返回服务器版本号；客户端用于最低版本门检查。无需认证。
+      responses:
+        '200':
+          description: 服务器版本信息
+          content:
+            application/json:
+              schema:
+                allOf:
+                - type: object
+                  required:
+                  - success
+                  properties:
+                    success:
+                      type: boolean
+                - type: object
+                  required:
+                  - data
+                  properties:
+                    data:
+                      type: object
+  /study-config:
+    get:
+      tags:
+      - config
+      summary: 获取学习配置
+      responses:
+        '200':
+          description: 当前学习配置
+          content:
+            application/json:
+              schema:
+                allOf:
+                - type: object
+                  required:
+                  - success
+                  properties:
+                    success:
+                      type: boolean
+                - type: object
+                  required:
+                  - data
+                  properties:
+                    data:
+                      type: object
+        '401':
+          description: 令牌缺失或已过期 — AUTH_UNAUTHORIZED
+      security:
+      - bearerAuth: []
+    put:
+      tags:
+      - config
+      summary: 更新学习配置
+      responses:
+        '200':
+          description: 更新后的学习配置
+          content:
+            application/json:
+              schema:
+                allOf:
+                - type: object
+                  required:
+                  - success
+                  properties:
+                    success:
+                      type: boolean
+                - type: object
+                  required:
+                  - data
+                  properties:
+                    data:
+                      type: object
+        '401':
+          description: 令牌缺失或已过期 — AUTH_UNAUTHORIZED
+      security:
+      - bearerAuth: []
+  /user-profile:
+    get:
+      tags:
+      - user
+      summary: 获取当前用户 profile
+      responses:
+        '200':
+          description: 用户 profile
+          content:
+            application/json:
+              schema:
+                allOf:
+                - type: object
+                  required:
+                  - success
+                  properties:
+                    success:
+                      type: boolean
+                - type: object
+                  required:
+                  - data
+                  properties:
+                    data:
+                      type: object
+        '401':
+          description: 令牌缺失或已过期 — AUTH_UNAUTHORIZED
+      security:
+      - bearerAuth: []
+    put:
+      tags:
+      - user
+      summary: 更新当前用户 profile
+      responses:
+        '200':
+          description: 更新后的用户 profile
+          content:
+            application/json:
+              schema:
+                allOf:
+                - type: object
+                  required:
+                  - success
+                  properties:
+                    success:
+                      type: boolean
+                - type: object
+                  required:
+                  - data
+                  properties:
+                    data:
+                      type: object
+        '401':
+          description: 令牌缺失或已过期 — AUTH_UNAUTHORIZED
+      security:
+      - bearerAuth: []
+  /word-favorites:
+    get:
+      tags:
+      - favorites
+      summary: 获取收藏单词列表
+      description: v0.6.0-beta.4 P3#5 起返回分页结构，列表在 `data.data`（非 `data` 直接为数组）。
+      parameters:
+      - name: page
+        in: query
+        required: false
+        schema:
+          type: integer
+      - name: perPage
+        in: query
+        required: false
+        schema:
+          type: integer
+      responses:
+        '200':
+          description: 分页收藏列表（data.data）
+          content:
+            application/json:
+              schema:
+                allOf:
+                - type: object
+                  required:
+                  - success
+                  properties:
+                    success:
+                      type: boolean
+                - type: object
+                  required:
+                  - data
+                  properties:
+                    data:
+                      type: object
+        '401':
+          description: 令牌缺失或已过期 — AUTH_UNAUTHORIZED
+      security:
+      - bearerAuth: []
+  /word-favorites/{wordId}:
+    post:
+      tags:
+      - favorites
+      summary: 切换单词收藏状态
+      parameters:
+      - name: wordId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: '收藏结果，含 `favorited: bool`'
+          content:
+            application/json:
+              schema:
+                allOf:
+                - type: object
+                  required:
+                  - success
+                  properties:
+                    success:
+                      type: boolean
+                - type: object
+                  required:
+                  - data
+                  properties:
+                    data:
+                      type: object
+        '401':
+          description: 令牌缺失或已过期 — AUTH_UNAUTHORIZED
+      security:
+      - bearerAuth: []
+  /word-notes:
+    get:
+      tags:
+      - notes
+      summary: 获取单词笔记列表
+      responses:
+        '200':
+          description: 分页笔记列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                - type: object
+                  required:
+                  - success
+                  properties:
+                    success:
+                      type: boolean
+                - type: object
+                  required:
+                  - data
+                  properties:
+                    data:
+                      type: object
+        '401':
+          description: 令牌缺失或已过期 — AUTH_UNAUTHORIZED
+      security:
+      - bearerAuth: []
+    post:
+      tags:
+      - notes
+      summary: 创建单词笔记
+      responses:
+        '201':
+          description: 已创建笔记
+          content:
+            application/json:
+              schema:
+                allOf:
+                - type: object
+                  required:
+                  - success
+                  properties:
+                    success:
+                      type: boolean
+                - type: object
+                  required:
+                  - data
+                  properties:
+                    data:
+                      type: object
+        '401':
+          description: 令牌缺失或已过期 — AUTH_UNAUTHORIZED
+      security:
+      - bearerAuth: []
+  /word-states/{wordId}:
+    get:
+      tags:
+      - word-states
+      summary: 获取单词学习状态
+      description: |-
+        `state` 枚举值为 lowercase：`new/learning/reviewing/mastered/forgotten`
+        （v0.6.0-beta.4 P3#7 起；与 MasteryLevel SCREAMING_SNAKE_CASE 是不同枚举）
+      parameters:
+      - name: wordId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: 单词学习状态（WordLearningState）
+          content:
+            application/json:
+              schema:
+                allOf:
+                - type: object
+                  required:
+                  - success
+                  properties:
+                    success:
+                      type: boolean
+                - type: object
+                  required:
+                  - data
+                  properties:
+                    data:
+                      type: object
+        '401':
+          description: 令牌缺失或已过期 — AUTH_UNAUTHORIZED
+        '404':
+          description: 资源不存在 — NOT_FOUND
+      security:
+      - bearerAuth: []
+    put:
+      tags:
+      - word-states
+      summary: 更新单词学习状态
+      parameters:
+      - name: wordId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: 更新后的单词学习状态
+          content:
+            application/json:
+              schema:
+                allOf:
+                - type: object
+                  required:
+                  - success
+                  properties:
+                    success:
+                      type: boolean
+                - type: object
+                  required:
+                  - data
+                  properties:
+                    data:
+                      type: object
+        '401':
+          description: 令牌缺失或已过期 — AUTH_UNAUTHORIZED
+      security:
+      - bearerAuth: []
+  /wordbooks:
+    get:
+      tags:
+      - wordbooks
+      summary: 获取词书列表
+      responses:
+        '200':
+          description: 词书列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                - type: object
+                  required:
+                  - success
+                  properties:
+                    success:
+                      type: boolean
+                - type: object
+                  required:
+                  - data
+                  properties:
+                    data:
+                      type: object
+        '401':
+          description: 令牌缺失或已过期 — AUTH_UNAUTHORIZED
+      security:
+      - bearerAuth: []
+  /words:
+    get:
+      tags:
+      - words
+      summary: 分页获取单词列表
+      parameters:
+      - name: page
+        in: query
+        required: false
+        schema:
+          type: integer
+      - name: perPage
+        in: query
+        required: false
+        schema:
+          type: integer
+      responses:
+        '200':
+          description: 分页单词列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                - type: object
+                  required:
+                  - success
+                  properties:
+                    success:
+                      type: boolean
+                - type: object
+                  required:
+                  - data
+                  properties:
+                    data:
+                      type: object
+        '401':
+          description: 令牌缺失或已过期 — AUTH_UNAUTHORIZED
+      security:
+      - bearerAuth: []
+  /words/{wordId}:
+    get:
+      tags:
+      - words
+      summary: 获取单个单词详情
+      parameters:
+      - name: wordId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: 单词详情
+          content:
+            application/json:
+              schema:
+                allOf:
+                - type: object
+                  required:
+                  - success
+                  properties:
+                    success:
+                      type: boolean
+                - type: object
+                  required:
+                  - data
+                  properties:
+                    data:
+                      type: object
+        '401':
+          description: 令牌缺失或已过期 — AUTH_UNAUTHORIZED
+        '404':
+          description: 资源不存在 — NOT_FOUND
+      security:
+      - bearerAuth: []
 components:
+  schemas:
+    CreateRecordRequest:
+      type: object
+      required:
+      - wordId
+      - isCorrect
+      - responseTimeMs
+      properties:
+        isCorrect:
+          type: boolean
+        recordType:
+          type: string
+          enum:
+          - learning
+          - review
+          - all
+        responseTimeMs:
+          type: integer
+        selfRating:
+          type: integer
+        sessionId:
+          type: string
+          format: uuid
+        wordId:
+          type: string
+          format: uuid
+    FavoriteItem:
+      type: object
+      properties:
+        createdAt:
+          type: string
+          format: date-time
+          description: ISO 8601 UTC
+        favorited:
+          type: boolean
+        wordId:
+          type: string
+          format: uuid
+    ForgotPasswordRequest:
+      type: object
+      required:
+      - email
+      properties:
+        email:
+          type: string
+    LoginRequest:
+      type: object
+      required:
+      - email
+      - password
+      properties:
+        email:
+          type: string
+        password:
+          type: string
+    PaginatedFavorites:
+      type: object
+      required:
+      - data
+      - total
+      - page
+      - perPage
+      - totalPages
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/FavoriteItem'
+        page:
+          type: integer
+        perPage:
+          type: integer
+        total:
+          type: integer
+        totalPages:
+          type: integer
+    RegisterRequest:
+      type: object
+      required:
+      - email
+      - username
+      - password
+      properties:
+        email:
+          type: string
+        password:
+          type: string
+        username:
+          type: string
+    ResetPasswordRequest:
+      type: object
+      required:
+      - token
+      - newPassword
+      properties:
+        newPassword:
+          type: string
+        token:
+          type: string
+    WordLearningState:
+      type: object
+      properties:
+        correctStreak:
+          type: integer
+        halfLife:
+          type: number
+        masteryLevel:
+          type: number
+        nextReviewDate:
+          type: string
+          format: date-time
+          description: ISO 8601 UTC
+        state:
+          type: string
+          description: lowercase；v0.6.0-beta.4 P3#7 起。与 MasteryLevel（SCREAMING_SNAKE_CASE）是不同枚举，不可混用
+          enum:
+          - new
+          - learning
+          - reviewing
+          - mastered
+          - forgotten
+        totalAttempts:
+          type: integer
+        updatedAt:
+          type: string
+          format: date-time
+          description: ISO 8601 UTC
+        userId:
+          type: string
+          format: uuid
+        wordId:
+          type: string
+          format: uuid
   securitySchemes:
     bearerAuth:
       type: http
       scheme: bearer
       bearerFormat: JWT
-    adminBearerAuth:
-      type: http
-      scheme: bearer
-      bearerFormat: JWT
+tags:
+- name: auth
+  description: 认证与授权
+- name: user
+  description: 用户 profile
+- name: words
+  description: 单词资源
+- name: learning
+  description: 学习记录与会话
+- name: word-states
+  description: 单词学习状态
+- name: favorites
+  description: 收藏管理
+- name: notes
+  description: 单词笔记
+- name: wordbooks
+  description: 词书
+- name: config
+  description: 学习配置
+- name: analytics
+  description: 统计分析
+- name: realtime
+  description: SSE 实时推送
+- name: misc
+  description: 反馈 / 状态 / 健康检查

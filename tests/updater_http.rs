@@ -222,7 +222,10 @@ async fn apply_rejects_sha256_mismatch() {
     let updater = Updater::new(&cfg, "v0.4.2").unwrap();
     let _ = updater.check_latest().await.unwrap();
     let backup = |_dst: &Path| Ok(());
-    let err = updater.apply(Channel::Beta, "v9.9.9", backup, noop_sink()).await.unwrap_err();
+    let err = updater
+        .apply(Channel::Beta, "v9.9.9", backup, noop_sink(), "", |_| {}, |_| {})
+        .await
+        .unwrap_err();
     assert!(matches!(err, UpdaterError::Sha256Mismatch { .. }), "got {err:?}");
 }
 
@@ -245,7 +248,10 @@ async fn apply_rejects_downgrade_by_default() {
     let updater = Updater::new(&cfg, "v9.9.9").unwrap();
     let _ = updater.check_latest().await.unwrap();
     let backup = |_dst: &Path| Ok(());
-    let err = updater.apply(Channel::Beta, "v0.1.0", backup, noop_sink()).await.unwrap_err();
+    let err = updater
+        .apply(Channel::Beta, "v0.1.0", backup, noop_sink(), "", |_| {}, |_| {})
+        .await
+        .unwrap_err();
     assert!(matches!(err, UpdaterError::DowngradeRefused { .. }), "got {err:?}");
 }
 
@@ -268,7 +274,7 @@ async fn apply_rejects_invalid_target_tag() {
     let _ = updater.check_latest().await.unwrap();
     let backup = |_dst: &Path| Ok(());
     let err = updater
-        .apply(Channel::Beta, "v0.0.999", backup, noop_sink())
+        .apply(Channel::Beta, "v0.0.999", backup, noop_sink(), "", |_| {}, |_| {})
         .await
         .unwrap_err();
     assert!(matches!(err, UpdaterError::InvalidTarget(_)), "got {err:?}");
@@ -312,7 +318,10 @@ async fn apply_runs_until_backup_callback_when_sha_matches() {
         Err(UpdaterError::Config("intentional test abort".into()))
     };
 
-    let err = updater.apply(Channel::Beta, "v9.9.9", backup, noop_sink()).await.unwrap_err();
+    let err = updater
+        .apply(Channel::Beta, "v9.9.9", backup, noop_sink(), "", |_| {}, |_| {})
+        .await
+        .unwrap_err();
     assert!(matches!(err, UpdaterError::Config(_)));
     assert!(called.load(std::sync::atomic::Ordering::SeqCst));
     // tarball 应已校验通过，staging 应被建出
@@ -387,7 +396,10 @@ async fn apply_rejects_tarball_with_symlink_entries() {
     let updater = Updater::new(&cfg, "v0.4.2").unwrap();
     let _ = updater.check_latest().await.unwrap();
     let backup = |_dst: &Path| Ok(());
-    let err = updater.apply(Channel::Beta, "v9.9.9", backup, noop_sink()).await.unwrap_err();
+    let err = updater
+        .apply(Channel::Beta, "v9.9.9", backup, noop_sink(), "", |_| {}, |_| {})
+        .await
+        .unwrap_err();
     assert!(matches!(err, UpdaterError::UnsafePath(_)), "got {err:?}");
     // /tmp/wf-evil-target 不应被任何东西创建出来
     assert!(!std::path::Path::new("/tmp/wf-evil-target").exists());
@@ -472,7 +484,10 @@ async fn apply_rejects_release_missing_assets() {
     assert_eq!(status.beta.as_ref().map(|c| c.latest_version.as_str()), Some("v9.9.9"));
 
     let backup = |_dst: &Path| Ok(());
-    let err = updater.apply(Channel::Beta, "v9.9.9", backup, noop_sink()).await.unwrap_err();
+    let err = updater
+        .apply(Channel::Beta, "v9.9.9", backup, noop_sink(), "", |_| {}, |_| {})
+        .await
+        .unwrap_err();
     assert!(matches!(err, UpdaterError::NoAsset { .. }), "got {err:?}");
 }
 

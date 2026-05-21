@@ -14,6 +14,7 @@ use std::time::Instant;
 use chrono::{DateTime, Utc};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
+use minisign_verify::{PublicKey, Signature};
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::RwLock;
@@ -25,6 +26,15 @@ const USER_AGENT: &str = "wordforge-updater";
 const ASSET_PREFIX: &str = "wordforge-linux-";
 const ASSET_SUFFIX_TAR: &str = ".tar.gz";
 const ASSET_SUFFIX_SHA: &str = ".tar.gz.sha256";
+const ASSET_SUFFIX_SIG: &str = ".tar.gz.minisig";
+/// M0-R3：fork-exec 后子进程健康自检超时（秒）
+const HEALTH_CHECK_TIMEOUT_SECS: u64 = 60;
+/// M0-P5：每个 apply phase 的独立 watchdog 超时（秒）。
+/// 超过此值未推进到下一 phase 则强制 abort + 回滚。
+const PHASE_TIMEOUT_SECS: u64 = 300; // 5 分钟
+/// M0-R4：maintenance 模式持久化 flag 文件名（install_dir 下）。
+/// 新进程启动时若发现此文件，说明上次自更新途中崩溃，应立即清理 maintenance。
+pub const MAINTENANCE_FLAG: &str = ".maintenance.flag";
 const STAGING_DIR: &str = ".update-staging";
 const TMP_DIR: &str = ".update-tmp";
 const LOCK_FILE: &str = ".update.lock";
@@ -73,6 +83,12 @@ pub enum UpdaterError {
     InvalidTarget(String),
     #[error("config: {0}")]
     Config(String),
+    /// M0-R2：minisign 签名校验失败（tarball 可能已被篡改）
+    #[error("minisign signature invalid: {0}")]
+    SignatureInvalid(String),
+    /// M0-P5：phase 超过 watchdog 限制（5 分钟）未推进，强制 abort
+    #[error("phase timeout: {phase} 超过 {timeout_secs}s 未完成")]
+    PhaseTimeout { phase: &'static str, timeout_secs: u64 },
 }
 
 /// 更新通道：stable 排除 prerelease，beta 包含所有（含 stable 自身）。
@@ -145,6 +161,8 @@ struct CachedRelease {
     html_url: String,
     tarball_url: String,
     sha256_url: String,
+    /// M0-R2：minisign 签名文件 URL（.tar.gz.minisig）；旧 release 无此 asset 时为空。
+    sig_url: String,
     tarball_size: u64,
 }
 
@@ -156,6 +174,8 @@ pub enum UpdatePhase {
     Extracting,
     BackingUpDb,
     Swapping,
+    /// M0-R3：子进程健康自检（等待 /health 返回 200）
+    HealthChecking,
     Restarting,
 }
 
@@ -374,12 +394,21 @@ impl Updater {
     /// 跑一次完整的自更新流程。`channel` 决定从 stable / beta 哪条缓存读 latest；
     /// `target_tag` 必须等于该通道缓存的 latest_tag，否则 `InvalidTarget`。
     /// 成功后 fork-exec 启动新进程 + exit(0)，**调用方不再返回**。
+    ///
+    /// M0-R3：`health_url` 是新进程的 `/health` 端点（`http://127.0.0.1:{port}/health`），
+    /// fork-exec 后父进程轮询 60 秒；成功则 exit(0)，失败则回滚二进制并调 `on_rollback` 告警。
+    ///
+    /// M0-R4：`on_maintenance(true/false)` 在 Swapping 时被调用为 true（开维护模式），
+    /// failed/rollback 时调 false；成功路径 exit(0) 前不调（新进程启动时靠 flag 文件清理）。
     pub async fn apply<F>(
         &self,
         channel: Channel,
         target_tag: &str,
         backup_callback: F,
         progress: ProgressSink,
+        health_url: &str,
+        on_rollback: impl Fn(String) + Send + 'static,
+        on_maintenance: impl Fn(bool) + Send + 'static,
     ) -> Result<(), UpdaterError>
     where
         F: FnOnce(&Path) -> Result<(), UpdaterError> + Send,
@@ -441,7 +470,14 @@ impl Updater {
         })?;
 
         let outcome = self
-            .apply_locked(&latest, backup_callback, progress.clone())
+            .apply_locked(
+                &latest,
+                backup_callback,
+                progress.clone(),
+                health_url,
+                on_rollback,
+                on_maintenance,
+            )
             .await;
         // 失败时锁随 file drop 自动释放；成功时进程 exit 也会自动释放
         if let Err(ref e) = outcome {
@@ -455,6 +491,9 @@ impl Updater {
         latest: &CachedRelease,
         backup_callback: F,
         progress: ProgressSink,
+        health_url: &str,
+        on_rollback: impl Fn(String) + Send + 'static,
+        on_maintenance: impl Fn(bool) + Send + 'static,
     ) -> Result<(), UpdaterError>
     where
         F: FnOnce(&Path) -> Result<(), UpdaterError> + Send,
@@ -471,22 +510,26 @@ impl Updater {
             current_arch_token().unwrap_or("x86_64")
         ));
 
-        // 1) 下载 sha256
-        let sha_expected = self.fetch_sha256(&latest.sha256_url).await?;
+        // M0-P5：per-phase watchdog 辅助闭包——将 async future 包裹在 PHASE_TIMEOUT_SECS 超时内。
+        // 超时返回 PhaseTimeout 而非 Elapsed，确保错误码在前端可读。
+        let phase_timeout = std::time::Duration::from_secs(PHASE_TIMEOUT_SECS);
 
-        // 2) 流式下载 + 计算 sha256
+        // 1) 下载 sha256
+        let sha_expected = tokio::time::timeout(phase_timeout, self.fetch_sha256(&latest.sha256_url))
+            .await
+            .map_err(|_| UpdaterError::PhaseTimeout { phase: "downloading_sha256", timeout_secs: PHASE_TIMEOUT_SECS })??;
+
+        // 2) 流式下载 + 计算 sha256（M0-P5 watchdog 覆盖整体下载，per-chunk 由 download_client.read_timeout 兜底）
         progress(UpdatePhase::Downloading {
             downloaded: 0,
             total: latest.tarball_size,
         });
-        let actual_sha = self
-            .stream_download(
-                &latest.tarball_url,
-                &tarball_path,
-                &progress,
-                latest.tarball_size,
-            )
-            .await?;
+        let actual_sha = tokio::time::timeout(
+            phase_timeout,
+            self.stream_download(&latest.tarball_url, &tarball_path, &progress, latest.tarball_size),
+        )
+        .await
+        .map_err(|_| UpdaterError::PhaseTimeout { phase: "downloading", timeout_secs: PHASE_TIMEOUT_SECS })??;
         progress(UpdatePhase::Verifying);
         if !actual_sha.eq_ignore_ascii_case(&sha_expected) {
             let _ = blocking_io(|| {
@@ -498,6 +541,11 @@ impl Updater {
                 actual: actual_sha,
             });
         }
+
+        // 2b) minisign 验签（M0-R2）
+        tokio::time::timeout(phase_timeout, self.verify_minisign_tarball(&latest.sig_url, &tarball_path))
+            .await
+            .map_err(|_| UpdaterError::PhaseTimeout { phase: "verifying_signature", timeout_secs: PHASE_TIMEOUT_SECS })??;
 
         // 3) 解压到 staging
         progress(UpdatePhase::Extracting);
@@ -523,7 +571,16 @@ impl Updater {
         })?;
 
         // 5) 原子替换二进制和 static/
+        // M0-R4：进入 Swapping 前开启 maintenance 模式，写 flag 文件（新进程启动时清理）。
         progress(UpdatePhase::Swapping);
+        on_maintenance(true);
+        let flag_path = self.install_dir.join(MAINTENANCE_FLAG);
+        let _ = blocking_io(|| {
+            std::fs::write(&flag_path, b"").map_err(|e| {
+                tracing::warn!("写 maintenance flag 失败: {e}");
+                UpdaterError::Io(e)
+            })
+        });
         let bin_path = self.install_dir.join("wordforge");
         let bin_backup = self
             .install_dir
@@ -533,7 +590,7 @@ impl Updater {
             .install_dir
             .join(format!("static.{}", self.current_tag));
 
-        blocking_io(|| {
+        let swap_result = blocking_io(|| {
             let mut steps_done: Vec<UndoStep> = Vec::new();
             if bin_path.exists() {
                 std::fs::rename(&bin_path, &bin_backup)?;
@@ -566,7 +623,13 @@ impl Updater {
             let _ = std::fs::remove_dir_all(&staging_dir);
             let _ = std::fs::remove_dir_all(&tmp_dir);
             Ok(())
-        })?;
+        });
+        // M0-R4：swap 失败 → 关闭 maintenance 模式（flag 删除 + 回调）再传播错误
+        if let Err(e) = swap_result {
+            let _ = std::fs::remove_file(&flag_path);
+            on_maintenance(false);
+            return Err(e);
+        }
 
         // 旧版本保留数控制
         if let Err(e) = blocking_io(|| self.prune_old_backups("wordforge.").map_err(Into::into)) {
@@ -582,9 +645,54 @@ impl Updater {
         // 6) fork-exec 自重启
         progress(UpdatePhase::Restarting);
         blocking_io(|| spawn_replacement(&bin_path))?;
-        // 给子进程 500ms 抢端口，让父释放 SocketAddr
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        std::process::exit(0);
+
+        // M0-R3：健康自检。父进程保持存活最多 60s，轮询子进程 /health。
+        // 子进程成功响应 200 → 父进程退出；超时未响应 → 回滚二进制并报警。
+        progress(UpdatePhase::HealthChecking);
+        let health_deadline = tokio::time::Instant::now()
+            + std::time::Duration::from_secs(HEALTH_CHECK_TIMEOUT_SECS);
+        // 初始等待：给子进程 1s 抢端口 + 初始化完成
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        let child_healthy = loop {
+            if tokio::time::Instant::now() >= health_deadline {
+                break false;
+            }
+            let ok = self.client
+                .get(health_url)
+                .timeout(std::time::Duration::from_secs(3))
+                .send()
+                .await
+                .map(|r| r.status().is_success())
+                .unwrap_or(false);
+            if ok {
+                break true;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        };
+
+        if child_healthy {
+            tracing::info!("新进程健康自检通过，父进程退出");
+            std::process::exit(0);
+        }
+
+        // 子进程启动失败 → 回滚二进制（static 不回滚，因为变更通常向后兼容）
+        let alert_msg = format!(
+            "自更新回滚：新进程 {} 启动 {}s 内未通过 /health 检查，已还原 {}",
+            latest.tag, HEALTH_CHECK_TIMEOUT_SECS, self.current_tag
+        );
+        tracing::error!("{}", alert_msg);
+        blocking_io(|| {
+            if bin_backup.exists() {
+                std::fs::rename(&bin_backup, &bin_path)?;
+                tracing::info!("回滚：已还原 {:?} → {:?}", bin_backup, bin_path);
+            }
+            // M0-R4：回滚后关闭 maintenance 并删除 flag
+            let _ = std::fs::remove_file(&flag_path);
+            Ok(())
+        })?;
+        on_maintenance(false);
+        on_rollback(alert_msg.clone());
+        Err(UpdaterError::RolledBack(alert_msg))
     }
 
     /// v0.5.4：对 release.githubusercontent.com / github.com/.../releases/download/
@@ -626,6 +734,62 @@ impl Updater {
             });
         }
         Ok(hex)
+    }
+
+    /// M0-R2：从 sig_url 下载 .minisig 文件并验签 tarball。
+    ///
+    /// 决策 O5-a：公钥编译期嵌入（`env!("MINISIGN_PUBKEY")`）。
+    /// - 公钥为空（本地开发）→ warn 跳过，不阻断。
+    /// - 公钥非空（生产构建）+ sig_url 为空 → `SignatureInvalid` 阻断 apply。
+    ///   攻击者可能通过控制 GitHub API 响应去掉 .minisig 资产 URL 来绕过验签；
+    ///   生产构建必须拒绝无签名的 release（降级攻击防御）。
+    /// - 公钥/签名格式错误或验签失败 → `SignatureInvalid` 错误，阻断 apply。
+    async fn verify_minisign_tarball(
+        &self,
+        sig_url: &str,
+        tarball_path: &Path,
+    ) -> Result<(), UpdaterError> {
+        const PUBKEY_STR: &str = env!("MINISIGN_PUBKEY");
+        if PUBKEY_STR.is_empty() {
+            tracing::warn!("MINISIGN_PUBKEY 未设置，跳过签名校验（非生产构建）");
+            return Ok(());
+        }
+        // 公钥非空 = 生产构建，必须验签。
+        // sig_url 空意味着 release assets 列表里没有 .minisig 文件——
+        // 可能是攻击者控制 API 响应去掉了该字段，按降级攻击处理，直接阻断。
+        if sig_url.is_empty() {
+            return Err(UpdaterError::SignatureInvalid(
+                "release 无 .minisig asset，疑似降级攻击".into(),
+            ));
+        }
+
+        let pk = PublicKey::from_base64(PUBKEY_STR)
+            .map_err(|e| UpdaterError::SignatureInvalid(format!("公钥格式非法: {e}")))?;
+
+        let sig_text = {
+            let mirrored = self.mirror(sig_url);
+            let mut req = self.download_client.get(&mirrored);
+            if let Some(ref token) = self.github_token {
+                req = req.header("Authorization", format!("Bearer {token}"));
+            }
+            let resp = req.send().await?;
+            let status = resp.status();
+            if !status.is_success() {
+                let body = resp.text().await.unwrap_or_default();
+                return Err(UpdaterError::Api { status: status.as_u16(), body });
+            }
+            resp.text().await?
+        };
+
+        let sig = Signature::decode(&sig_text)
+            .map_err(|e| UpdaterError::SignatureInvalid(format!("签名文件解析失败: {e}")))?;
+
+        let tarball_bytes = blocking_io(|| std::fs::read(tarball_path).map_err(Into::into))?;
+        pk.verify(&tarball_bytes, &sig, false)
+            .map_err(|e| UpdaterError::SignatureInvalid(format!("验签失败: {e}")))?;
+
+        tracing::info!(tag = %sig_url, "minisign 签名验证通过");
+        Ok(())
     }
 
     async fn stream_download(
@@ -771,9 +935,11 @@ fn parse_release_payload(body: &serde_json::Value) -> Option<CachedRelease> {
     let arch = current_arch_token()?;
     let want_tar = format!("{ASSET_PREFIX}{arch}{ASSET_SUFFIX_TAR}");
     let want_sha = format!("{ASSET_PREFIX}{arch}{ASSET_SUFFIX_SHA}");
+    let want_sig = format!("{ASSET_PREFIX}{arch}{ASSET_SUFFIX_SIG}");
 
     let mut tar_url = String::new();
     let mut sha_url = String::new();
+    let mut sig_url = String::new();
     let mut tar_size: u64 = 0;
     if let Some(assets) = body.get("assets").and_then(|v| v.as_array()) {
         for a in assets {
@@ -787,6 +953,8 @@ fn parse_release_payload(body: &serde_json::Value) -> Option<CachedRelease> {
                 tar_size = a.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
             } else if name == want_sha {
                 sha_url = url.to_string();
+            } else if name == want_sig {
+                sig_url = url.to_string();
             }
         }
     }
@@ -809,6 +977,7 @@ fn parse_release_payload(body: &serde_json::Value) -> Option<CachedRelease> {
         html_url,
         tarball_url: tar_url,
         sha256_url: sha_url,
+        sig_url,
         tarball_size: tar_size,
     })
 }
@@ -1075,6 +1244,41 @@ mod tests {
         assert!(parsed.sha256_url.ends_with(".sha256"));
     }
 
+    /// M0-R2：parse_release_payload 应解析 .minisig asset URL。
+    #[test]
+    fn parse_release_payload_finds_minisig_asset() {
+        if current_arch_token().is_none() {
+            return;
+        }
+        let arch = current_arch_token().unwrap();
+        let body = serde_json::json!({
+            "tag_name": "v1.0.0",
+            "html_url": "https://example.com/r/v1.0.0",
+            "body": "",
+            "published_at": "2026-05-21T00:00:00Z",
+            "assets": [
+                {"name": format!("wordforge-linux-{arch}.tar.gz"), "browser_download_url": "https://example.com/t.tar.gz", "size": 9000000},
+                {"name": format!("wordforge-linux-{arch}.tar.gz.sha256"), "browser_download_url": "https://example.com/t.sha256", "size": 64},
+                {"name": format!("wordforge-linux-{arch}.tar.gz.minisig"), "browser_download_url": "https://example.com/t.minisig", "size": 128},
+            ],
+        });
+        let parsed = parse_release_payload(&body).expect("parsed");
+        assert_eq!(parsed.sig_url, "https://example.com/t.minisig");
+        // 旧 release 无 .minisig，sig_url 应为空（不阻断 can_apply）
+        let body_no_sig = serde_json::json!({
+            "tag_name": "v0.9.0",
+            "html_url": "https://example.com/r/v0.9.0",
+            "body": "",
+            "published_at": "2026-05-21T00:00:00Z",
+            "assets": [
+                {"name": format!("wordforge-linux-{arch}.tar.gz"), "browser_download_url": "https://example.com/t.tar.gz", "size": 9000000},
+                {"name": format!("wordforge-linux-{arch}.tar.gz.sha256"), "browser_download_url": "https://example.com/t.sha256", "size": 64},
+            ],
+        });
+        let parsed_no_sig = parse_release_payload(&body_no_sig).expect("parsed");
+        assert!(parsed_no_sig.sig_url.is_empty());
+    }
+
     /// v0.5.4 镜像 prefix helper：无 prefix 走原 URL；有 prefix 时拼成
     /// `<prefix>/<原 url>` 形式（gh-proxy 系列镜像约定）。
     #[test]
@@ -1213,5 +1417,109 @@ mod tests {
         let parsed = parse_release_list_payload(&body);
         assert_eq!(parsed.stable.as_ref().unwrap().tag, "v0.5.6");
         assert_eq!(parsed.beta.as_ref().unwrap().tag, "v0.5.6");
+    }
+
+    /// M0-P5：PhaseTimeout 错误消息格式符合前端预期（含 phase 名与秒数）。
+    #[test]
+    fn phase_timeout_error_message_format() {
+        let e = UpdaterError::PhaseTimeout {
+            phase: "downloading",
+            timeout_secs: 300,
+        };
+        let msg = e.to_string();
+        assert!(msg.contains("downloading"), "消息应包含 phase 名：{msg}");
+        assert!(msg.contains("300"), "消息应包含超时秒数：{msg}");
+    }
+
+    /// M0-P5：tokio::time::timeout 超时后映射为 PhaseTimeout（使用即时超时模拟慢 future）。
+    #[tokio::test]
+    async fn phase_timeout_wraps_elapsed() {
+        let result: Result<(), UpdaterError> =
+            tokio::time::timeout(std::time::Duration::from_millis(1), async {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                Ok(())
+            })
+            .await
+            .map_err(|_| UpdaterError::PhaseTimeout {
+                phase: "test_phase",
+                timeout_secs: 0,
+            })
+            .and_then(|r| r);
+        assert!(
+            matches!(result, Err(UpdaterError::PhaseTimeout { phase: "test_phase", .. })),
+            "超时应映射为 PhaseTimeout"
+        );
+    }
+
+    /// M0-R2 降级攻击防御：生产构建（PUBKEY 非空）+ sig_url 空 → 必须返回 SignatureInvalid。
+    /// 注意：此测试在 CI 生产构建（MINISIGN_PUBKEY 非空）下才触发阻断路径；
+    /// 本地 dev 构建 PUBKEY 为空时两种分支都走"跳过"路径，验证略有不同。
+    #[tokio::test]
+    async fn verify_minisign_rejects_missing_signature_in_production() {
+        let cfg = UpdateCheckConfig {
+            api_url: String::new(),
+            cache_ttl_secs: 3600,
+            worker_enabled: false,
+            worker_interval_secs: 3600,
+            github_token: None,
+            allow_downgrade: false,
+            install_dir: Some(std::env::temp_dir()),
+            max_tarball_bytes: 1024 * 1024 * 100,
+            download_mirror_prefix: None,
+        };
+        let updater = Updater::new(&cfg, "v0.0.0").expect("build updater");
+
+        // 用一个不存在的临时文件路径——只需走到 sig_url 判断，不会真正读文件
+        let dummy_path = std::env::temp_dir().join("dummy_tarball_nonexistent.tar.gz");
+
+        const PUBKEY_STR: &str = env!("MINISIGN_PUBKEY");
+        let result = updater.verify_minisign_tarball("", &dummy_path).await;
+
+        if PUBKEY_STR.is_empty() {
+            // 本地开发：公钥为空，跳过验签，返回 Ok
+            assert!(result.is_ok(), "本地开发构建应跳过验签");
+        } else {
+            // 生产构建：公钥非空 + sig_url 空 → 必须阻断
+            assert!(
+                matches!(result, Err(UpdaterError::SignatureInvalid(_))),
+                "生产构建应拒绝无签名 release，实际结果：{result:?}"
+            );
+        }
+    }
+
+    /// M0-R2：验签层拒绝篡改 tarball。
+    ///
+    /// 使用 minisign-verify crate 文档中的标准测试密钥对（对 b"test" 签名），
+    /// 直接调用底层 pk.verify()，验证签名与文件内容不匹配时返回错误。
+    /// 这是 verify_minisign_tarball() 内部 pk.verify() 调用的单元测试。
+    #[test]
+    fn verify_minisign_rejects_tampered_tarball() {
+        use minisign_verify::{PublicKey, Signature};
+
+        // 来自 minisign-verify crate 文档的标准测试密钥对，对 b"test" 签名
+        let pubkey_b64 = "RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3";
+        let sig_text = "untrusted comment: signature from minisign secret key\n\
+RUQf6LRCGA9i559r3g7V1qNyJDApGip8MfqcadIgT9CuhV3EMhHoN1mGTkUidF/\
+z7SrlQgXdy8ofjb7bNJJylDOocrCo8KLzZwo=\n\
+trusted comment: timestamp:1633700835\tfile:test\tprehashed\n\
+wLMDjy9FLAuxZ3q4NlEvkgtyhrr0gtTu6KC4KBJdITbbOeAi1zBIYo0v4iTgt8jJpIidRJnp94ABQkJAgAooBQ==";
+
+        let pk = PublicKey::from_base64(pubkey_b64).expect("测试公钥应有效");
+        let sig = Signature::decode(sig_text).expect("测试签名应可解析");
+
+        // 原始内容通过验签
+        let original: &[u8] = b"test";
+        assert!(
+            pk.verify(original, &sig, false).is_ok(),
+            "原始内容应通过验签"
+        );
+
+        // 篡改后的 tarball 内容必须被拒绝
+        let tampered: &[u8] = b"tampered content - simulates in-flight modification of tarball";
+        let result = pk.verify(tampered, &sig, false);
+        assert!(
+            result.is_err(),
+            "篡改后的 tarball 内容应被 minisign 验签拒绝，实际：{result:?}"
+        );
     }
 }

@@ -8,12 +8,17 @@ export default defineConfig({
   lastUpdated: true,
   cleanUrls: true,
   ignoreDeadLinks: true,
+  // 开发内部目录（设计草稿 / 调研报告），含泛型尖括号会导致 markdown-it 报未闭合 HTML 错误
+  srcExclude: ['superpowers/**', 'v1-research/**'],
 
   themeConfig: {
     nav: [
       { text: '指南', link: '/guide/introduction' },
       { text: 'API', link: '/api-endpoints' },
       { text: 'AMAS', link: '/amas-admin-console' },
+      { text: '用户', link: '/user/installation-web' },
+      { text: '运维', link: '/auto-update' },
+      { text: '开发者', link: '/alignment' },
     ],
 
     sidebar: {
@@ -25,6 +30,31 @@ export default defineConfig({
             { text: '快速开始', link: '/guide/getting-started' },
             { text: '架构概览', link: '/guide/architecture' },
             { text: 'AMAS 入门', link: '/guide/amas-intro' },
+            { text: '单词状态机', link: '/guide/word-states' },
+          ],
+        },
+      ],
+      '/user/': [
+        {
+          text: '用户文档',
+          items: [
+            { text: 'Web 客户端安装', link: '/user/installation-web' },
+            { text: 'iOS 客户端安装', link: '/user/installation-ios' },
+            { text: '常见问题', link: '/user/faq' },
+            { text: '隐私与数据', link: '/user/privacy' },
+          ],
+        },
+      ],
+      '/runbook/': [
+        {
+          text: '运维 Runbook',
+          items: [
+            { text: '后端自更新', link: '/auto-update' },
+            { text: '备份与恢复', link: '/runbook/backup-restore' },
+            { text: '密钥轮换', link: '/runbook/key-rotation' },
+            { text: '故障处理', link: '/runbook/incident-response' },
+            { text: '容量规划', link: '/runbook/scaling' },
+            { text: '监控对接', link: '/runbook/monitoring-setup' },
           ],
         },
       ],
@@ -37,6 +67,19 @@ export default defineConfig({
             { text: '快速开始', link: '/guide/getting-started' },
             { text: '架构概览', link: '/guide/architecture' },
             { text: 'AMAS 入门', link: '/guide/amas-intro' },
+            { text: '单词状态机', link: '/guide/word-states' },
+            { text: '更新日志', link: '/changelog' },
+            { text: '发版日历', link: '/release-calendar' },
+          ],
+        },
+        {
+          text: '用户文档',
+          collapsed: false,
+          items: [
+            { text: 'Web 客户端安装', link: '/user/installation-web' },
+            { text: 'iOS 客户端安装', link: '/user/installation-ios' },
+            { text: '常见问题', link: '/user/faq' },
+            { text: '隐私与数据', link: '/user/privacy' },
           ],
         },
         {
@@ -62,6 +105,27 @@ export default defineConfig({
                 { text: 'Adapter 扩展分析', link: '/amas-tuning-2026-05-15/03-adapter-analysis' },
               ],
             },
+          ],
+        },
+        {
+          text: '运维 Runbook',
+          collapsed: false,
+          items: [
+            { text: '后端自更新', link: '/auto-update' },
+            { text: '备份与恢复', link: '/runbook/backup-restore' },
+            { text: '密钥轮换', link: '/runbook/key-rotation' },
+            { text: '故障处理', link: '/runbook/incident-response' },
+            { text: '容量规划', link: '/runbook/scaling' },
+            { text: '监控对接', link: '/runbook/monitoring-setup' },
+          ],
+        },
+        {
+          text: '开发者参考',
+          collapsed: false,
+          items: [
+            { text: '契约对齐审计', link: '/alignment' },
+            { text: 'AMAS Schema Codegen', link: '/amas-schema-codegen' },
+            { text: 'UI 审计报告', link: '/ui-audit' },
           ],
         },
       ],

@@ -271,7 +271,7 @@ accessToken 过期 → POST /api/auth/refresh（携带 refresh_token）
 | 时间戳 | ISO 8601 UTC，如 `"2024-01-15T08:30:00Z"` |
 | 浮点数 | IEEE 754 f64 |
 | 概率/比率 | 0.0 ~ 1.0 的 f64 |
-| 单词学习状态枚举 | `"NEW"` / `"LEARNING"` / `"REVIEWING"` / `"MASTERED"` / `"FORGOTTEN"` |
+| 单词学习状态枚举 | `"new"` / `"learning"` / `"reviewing"` / `"mastered"` / `"forgotten"`（lowercase；v0.6.0-beta.4 P3#7 起；`WordLearningState.state` 字段）<br>注意：`WordMasteryDecision.masteryLevel` 是**不同枚举**，仍为 `"NEW"/"LEARNING"` 等 SCREAMING_SNAKE_CASE |
 | 会话状态枚举 | `"active"` / `"completed"` / `"abandoned"` |
 | 单词本类型枚举 | `"system"` / `"user"`（字段名为 `type`） |
 | 学习记录类型枚举 | `"learning"` / `"review"` / `"all"`（字段名为 `recordType`，写入端可选；缺省落库 `"all"`） |

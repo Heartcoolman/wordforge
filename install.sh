@@ -82,32 +82,20 @@ fi
 
 chown -R "$SVC_USER:$SVC_USER" "$INSTALL_DIR"
 
-# --- systemd ---
-cat > "/etc/systemd/system/${SERVICE}.service" << EOF
-[Unit]
-Description=WordForge Learning Backend
-After=network.target
-
-[Service]
-Type=simple
-WorkingDirectory=${INSTALL_DIR}
-ExecStart=${INSTALL_DIR}/wordforge
-EnvironmentFile=${INSTALL_DIR}/.env
-Environment=ENABLE_SELF_WATCHDOG=true
-Environment=SELF_WATCHDOG_INTERVAL_SECS=15
-Environment=SELF_WATCHDOG_FAILURE_THRESHOLD=3
-Restart=on-failure
-RestartSec=5
-TimeoutStopSec=15
-User=${SVC_USER}
-Group=${SVC_USER}
-NoNewPrivileges=true
-ProtectSystem=strict
-ReadWritePaths=${INSTALL_DIR}
-
-[Install]
-WantedBy=multi-user.target
-EOF
+# --- systemd（M0-R3：从仓库模板生成，Restart=always 修第 4 坑点）---
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SVC_TMPL="${SCRIPT_DIR}/deploy/wordforge.service.tmpl"
+if [ ! -f "$SVC_TMPL" ]; then
+  # 回退：直接从 GitHub 拉取模板（install.sh 单文件运行场景）
+  SVC_TMPL="$(mktemp)"
+  curl -sfL \
+    "https://raw.githubusercontent.com/${REPO}/main/deploy/wordforge.service.tmpl" \
+    -o "$SVC_TMPL"
+fi
+sed \
+  -e "s|{{INSTALL_DIR}}|${INSTALL_DIR}|g" \
+  -e "s|{{SVC_USER}}|${SVC_USER}|g" \
+  "$SVC_TMPL" > "/etc/systemd/system/${SERVICE}.service"
 
 systemctl daemon-reload
 systemctl enable "$SERVICE"

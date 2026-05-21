@@ -11,7 +11,37 @@ env:
   BINARY_NAME: learning-backend
 
 jobs:
+  verify-env-example:
+    # M0-P2：.env.example 与代码默认值对齐校验，阻止失同步的 .env.example 进入 release 包。
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify .env.example defaults
+        run: bash scripts/verify-env-example.sh
+
+  tag-lint:
+    # tag 格式校验：含 '-' 必须是 pre-release 格式，不含 '-' 必须是 stable 格式。
+    # 阻止如 v1.0.0-foo / v1.0 / v1.0.0-beta 等格式的 tag 触发后续构建。
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate tag format
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          if [[ "$TAG" == *-* ]]; then
+            if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-(alpha|beta|rc)\.[0-9]+$ ]]; then
+              echo "::error::Pre-release tag '$TAG' 格式非法。期望：^v\\d+\\.\\d+\\.\\d+-(alpha|beta|rc)\\.\\d+$（如 v1.0.0-beta.1）"
+              exit 1
+            fi
+          else
+            if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::Stable tag '$TAG' 格式非法。期望：^v\\d+\\.\\d+\\.\\d+$（如 v1.0.0）"
+              exit 1
+            fi
+          fi
+          echo "Tag '$TAG' 格式验证通过。"
+
   build-assets:
+    needs: [tag-lint, verify-env-example]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -63,6 +93,9 @@ jobs:
       - uses: taiki-e/install-action@cross
 
       - name: Build
+        # M0-R2：注入 minisign 公钥，build.rs 将其编译为 MINISIGN_PUBKEY 常量。
+        env:
+          MINISIGN_PUBLIC_KEY: ${{ secrets.MINISIGN_PUBLIC_KEY }}
         run: cross build --release --target ${{ matrix.target }}
 
       - name: Package
@@ -92,11 +125,27 @@ jobs:
           path: dist/
           merge-multiple: true
 
+      # M0-R2：minisign 签名。私钥从 GH secret MINISIGN_PRIVATE_KEY 注入；
+      # 公钥（MINISIGN_PUBLIC_KEY）仅用于 build.rs 编译期嵌入，不在此使用。
+      # 私钥泄露应急：见 docs/runbook/key-rotation.md（M0-D7 副产）。
+      - name: Sign release assets (minisign)
+        env:
+          MINISIGN_PRIVATE_KEY: ${{ secrets.MINISIGN_PRIVATE_KEY }}
+        run: |
+          curl -sSfL https://github.com/jedisct1/minisign/releases/download/0.11/minisign-0.11-linux.tar.gz \
+            | tar xz --strip-components=2 -C /usr/local/bin minisign-linux/x86_64/minisign
+          echo "$MINISIGN_PRIVATE_KEY" > /tmp/minisign.key
+          for f in dist/*.tar.gz; do
+            minisign -S -s /tmp/minisign.key -m "$f" -x "${f}.minisig"
+          done
+          rm -f /tmp/minisign.key
+
       - uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/*.tar.gz
             dist/*.tar.gz.sha256
+            dist/*.tar.gz.minisig
           generate_release_notes: true
           # v0.6.0-beta.3：显式 prerelease 规则。
           # tag 含 '-'（如 v0.6.0-beta.N / v1.0.0-rc.1）→ Pre-release；

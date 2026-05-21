@@ -64,6 +64,10 @@ tar = "0.4"
 flate2 = "1"
 semver = "1"
 fs2 = "0.4"
+# M0-R2：minisign 验签（纯 Rust，无 C 依赖）
+minisign-verify = "0.2"
+# utoipa：OpenAPI 3.1 自动生成（M0-C2）；yaml feature 用于测试导出 docs/openapi.yaml
+utoipa = { version = "5.5.0", features = ["uuid", "chrono", "yaml"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
