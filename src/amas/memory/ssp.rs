@@ -209,9 +209,9 @@ pub fn precompute(
 
     // 终止条件：S >= target 的状态 cost = 0
     let target_s_idx = s_to_idx(config.target_stability_days);
-    for d_idx in 0..10 {
-        for s_idx in target_s_idx..s_len {
-            value[d_idx][s_idx] = 0.0;
+    for row in value.iter_mut().take(10) {
+        for cell in row.iter_mut().skip(target_s_idx) {
+            *cell = 0.0;
         }
     }
 

@@ -4,6 +4,23 @@ use serde::{Deserialize, Serialize};
 
 use crate::store::{Store, StoreError};
 
+type SuggestionRow = (
+    i64,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<f64>,
+    Option<i64>,
+    Option<i64>,
+    Option<f64>,
+);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SuggestionStatus {
@@ -82,22 +99,7 @@ fn parse_dt(s: String) -> Result<DateTime<Utc>, StoreError> {
 
 fn row_to_suggestion(
     row: &rusqlite::Row<'_>,
-) -> rusqlite::Result<(
-    i64,
-    String,
-    String,
-    String,
-    String,
-    String,
-    String,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<f64>,
-    Option<i64>,
-    Option<i64>,
-    Option<f64>,
-)> {
+) -> rusqlite::Result<SuggestionRow> {
     Ok((
         row.get::<_, i64>(0)?,
         row.get::<_, String>(1)?,
@@ -132,22 +134,7 @@ fn build(
         tin,
         tout,
         conf,
-    ): (
-        i64,
-        String,
-        String,
-        String,
-        String,
-        String,
-        String,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<f64>,
-        Option<i64>,
-        Option<i64>,
-        Option<f64>,
-    ),
+    ): SuggestionRow,
 ) -> Result<TuningSuggestionRow, StoreError> {
     Ok(TuningSuggestionRow {
         id,

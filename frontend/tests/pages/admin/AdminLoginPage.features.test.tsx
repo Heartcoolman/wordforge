@@ -87,26 +87,35 @@ describe('AdminLoginPage extra branches', () => {
     await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
   });
 
-  // TODO(frontend-pages): rate-lock window 让 3 次失败被吞，导致 failCount 只到 1，
-  // 需要把 Date.now mock 改成 vi.useFakeTimers + advanceTimersByTime，或等 1s 真实间隔
-  it.skip('shows count-aware message after 3 failures', async () => {
-    mockApi.login.mockRejectedValue(new Error('错'));
-    await renderPage();
-    const inputs = document.querySelectorAll('input');
-    fireEvent.input(inputs[0], { target: { value: 'a@b.c' } });
-    fireEvent.input(inputs[1], { target: { value: 'x' } });
-    for (let i = 0; i < 3; i++) {
-      // 推进虚拟时间让锁解除
-      const realNow = Date.now;
-      Date.now = () => realNow() + 60_000;
-      fireEvent.click(screen.getByRole('button', { name: '登录' }));
-      await new Promise((r) => setTimeout(r, 0));
-      Date.now = realNow;
+  it('shows count-aware message after 3 failures', async () => {
+    // 第 i 次（1-based）失败后 lockSeconds = i，需推进 >i 秒让 setInterval 归零
+    // 用 vi.useFakeTimers 同时 mock Date.now，保证 lockUntil 比较正确
+    vi.useFakeTimers();
+    try {
+      mockApi.login.mockRejectedValue(new Error('错'));
+      await renderPage();
+      const inputs = document.querySelectorAll('input');
+      fireEvent.input(inputs[0], { target: { value: 'a@b.c' } });
+      fireEvent.input(inputs[1], { target: { value: 'x' } });
+
+      for (let i = 0; i < 3; i++) {
+        // 按钮可能是"登录"（未锁）或前一轮已清零后的"登录"
+        fireEvent.click(screen.getByRole('button', { name: /^(登录|锁定中)/ }));
+        // 排空微任务：让 handleSubmit 的 catch 分支（Promise rejection）完成
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+        // 推进 setInterval：(i+1)*1000ms 解锁 + 额外 1500ms 确保至少一次 tick
+        await vi.advanceTimersByTimeAsync((i + 1) * 1000 + 1500);
+      }
+
+      await waitFor(() => {
+        const alert = screen.queryByRole('alert');
+        expect(alert?.textContent).toMatch(/已失败/);
+      });
+    } finally {
+      vi.useRealTimers();
     }
-    await waitFor(() => {
-      const alert = screen.queryByRole('alert');
-      expect(alert?.textContent).toMatch(/已失败/);
-    });
   });
 
   it('rejects submit when within lock window', async () => {

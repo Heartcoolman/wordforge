@@ -1,0 +1,122 @@
+# WordForge nginx 反向代理配置示例
+# 部署路径：/etc/nginx/sites-available/wordforge
+# 启用：ln -s /etc/nginx/sites-available/wordforge /etc/nginx/sites-enabled/
+#
+# 前提：
+#   - WordForge 运行在 127.0.0.1:3000（默认，由 .env PORT= 控制）
+#   - 已通过 certbot 申请 TLS 证书（见 docs/runbook/nginx-tls.md）
+#   - 已执行 `nginx -t && systemctl reload nginx`
+#
+# 特殊处理：
+#   1. SSE（/api/realtime/events）：关闭 proxy_buffering，长连接保活
+#   2. 自更新下载（/api/admin/updates/apply）：apply 立即返回 taskId，
+#      实际下载由后台任务执行；前端通过 /api/admin/updates/status 轮询进度。
+#      此路由本身 timeout 无需特殊延长，保持默认 60s 足够。
+#   3. gzip：静态资源 + API JSON 均压缩；SSE 路径排除（流式不可压缩）
+#   4. HSTS / 安全头：生产必开
+
+# HTTP → HTTPS 重定向
+server {
+    listen 80;
+    listen [::]:80;
+    server_name example.com;           # ← 替换为实际域名
+
+    # certbot renew 校验路径（ACME challenge）
+    location /.well-known/acme-challenge/ {
+        root /var/www/html;
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+# HTTPS 主 server
+server {
+    # nginx 1.25.1+ 用 http2 on; 指令（Ubuntu 24.04 apt 默认为 1.24.x，需用旧形式）
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name example.com;           # ← 替换为实际域名
+
+    # TLS 证书（certbot 填充）
+    ssl_certificate     /etc/letsencrypt/live/example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/example.com/privkey.pem;
+    include             /etc/letsencrypt/options-ssl-nginx.conf;
+    ssl_dhparam         /etc/letsencrypt/ssl-dhparams.pem;
+
+    # 安全头
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Content-Type-Options    nosniff                                always;
+    add_header X-Frame-Options           SAMEORIGIN                             always;
+    add_header Referrer-Policy           "strict-origin-when-cross-origin"      always;
+
+    # gzip（排除 SSE 路径）
+    gzip            on;
+    gzip_types      text/plain text/css application/json application/javascript
+                    text/javascript image/svg+xml;
+    gzip_min_length 1024;
+    gzip_vary       on;
+
+    # ── SSE：/api/realtime/events ──────────────────────────────────────────
+    # 关闭缓冲，确保 event-stream 实时推送；keepalive 15s 与后端一致
+    location /api/realtime/events {
+        proxy_pass         http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Real-IP         $remote_addr;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+        proxy_set_header   Connection        "";    # 长连接，不传 Upgrade
+
+        # SSE 必须关闭缓冲，否则 nginx 会攒包后一次性推送
+        proxy_buffering    off;
+        proxy_cache        off;
+
+        # 客户端断线后保持后端连接 15s（与后端 KeepAlive 一致），减少频繁重连
+        proxy_read_timeout 75s;
+
+        # SSE 路径关闭 gzip（流式无法压缩）
+        gzip               off;
+    }
+
+    # ── 通用 API (/api) ────────────────────────────────────────────────────
+    location /api/ {
+        proxy_pass         http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Real-IP         $remote_addr;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+        proxy_set_header   Connection        "";
+
+        proxy_read_timeout 60s;
+        proxy_send_timeout 60s;
+
+        # 上传 wordbook / 导入词表：最大 10 MB
+        client_max_body_size 10m;
+    }
+
+    # ── 健康检查（无鉴权）────────────────────────────────────────────────
+    location /health {
+        proxy_pass         http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header   Host $host;
+        access_log         off;
+    }
+
+    # ── 静态前端资源 (/assets, /favicon.ico …) ───────────────────────────
+    # 由 axum 内置 ServeDir 托管；nginx 直接转发即可，无需 root 指令。
+    # 若未来迁移到独立 CDN，在此替换为 root 指令后删除 proxy_pass。
+    location / {
+        proxy_pass         http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Real-IP         $remote_addr;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+        proxy_set_header   Connection        "";
+
+        # 静态资源 1 年缓存（axum 设置了 Cache-Control：immutable + hash）
+        # 动态路由（SPA fallback）由后端处理，Cache-Control 由后端返回
+    }
+}

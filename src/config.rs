@@ -67,21 +67,11 @@ impl Default for ProbeConfig {
 /// - `enabled=true` + `hard_block=false`：仅 tracing warn，不拒绝请求
 /// - `enabled=true` + `hard_block=true`：违规返回 400 + 错误码
 /// - `min_client_version=Some("1.0.0")`：低于该版本的客户端被 CLIENT_OUTDATED 拒绝
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct StrictModeConfig {
     pub enabled: bool,
     pub hard_block: bool,
     pub min_client_version: Option<String>,
-}
-
-impl Default for StrictModeConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            hard_block: false,
-            min_client_version: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -192,6 +182,8 @@ pub struct LLMConfig {
     pub daily_cost_cap_usd: f64,
     pub input_price_per_mtok_usd: f64,
     pub output_price_per_mtok_usd: f64,
+    pub max_cost_per_month_yuan: f64,
+    pub usd_to_cny_rate: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -352,6 +344,8 @@ impl Config {
                 daily_cost_cap_usd: env_or_parse("LLM_DAILY_COST_CAP_USD", 1.0_f64),
                 input_price_per_mtok_usd: env_or_parse("LLM_INPUT_PRICE_PER_MTOK_USD", 0.55_f64),
                 output_price_per_mtok_usd: env_or_parse("LLM_OUTPUT_PRICE_PER_MTOK_USD", 2.19_f64),
+                max_cost_per_month_yuan: env_or_parse("LLM_MAX_COST_PER_MONTH_YUAN", 100.0_f64),
+                usd_to_cny_rate: env_or_parse("LLM_USD_TO_CNY_RATE", 7.3_f64),
             },
             update_check: UpdateCheckConfig {
                 // v0.6.0-beta.3：list 端点用于后端单次拉取后分流 stable / beta latest，
@@ -846,6 +840,8 @@ mod tests {
                 daily_cost_cap_usd: 1.0,
                 input_price_per_mtok_usd: 0.55,
                 output_price_per_mtok_usd: 2.19,
+                max_cost_per_month_yuan: 100.0,
+                usd_to_cny_rate: 7.3,
             },
             update_check: UpdateCheckConfig {
                 api_url: String::new(),

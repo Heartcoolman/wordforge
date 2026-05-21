@@ -94,6 +94,7 @@ pub struct TelemetrySummaryInput {
 }
 
 impl Store {
+    #[allow(clippy::too_many_arguments)]
     pub fn insert_telemetry(
         &self,
         id: &str,
@@ -113,6 +114,7 @@ impl Store {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn insert_telemetry_and_summary(
         &self,
         id: &str,

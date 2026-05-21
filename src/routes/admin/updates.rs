@@ -6,6 +6,8 @@
 //! v0.5.2 起 apply 不再阻塞 handler，避免前端 fetch 超时（HTTP 499）中断 axum
 //! handler、连带打断升级流程的设计缺陷。前端发起后立即拿到 taskId，再通过
 //! `/api/admin/updates/status` 轮询拿 phase / percent / error。
+//!
+//!   GET  /api/admin/updates/history  S5：升级历史列表（最近 50 条审计记录）
 
 use std::sync::Arc;
 
@@ -19,14 +21,16 @@ use serde_json::json;
 use crate::auth::AdminAuthUser;
 use crate::extractors::JsonBody;
 use crate::response::{ok, AppError};
-use crate::services::updater::{Channel, ChannelStatus, Updater, UpdaterError, UpdatePhase};
+use crate::services::updater::{ApplyContext, Channel, ChannelStatus, Updater, UpdaterError, UpdatePhase};
 use crate::state::{ApplyTaskStatus, AppState, SseEvent};
+use crate::store::operations::update_audit::UpdateAuditEntry;
 
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/status", get(get_status))
         .route("/check", post(force_check))
         .route("/apply", post(apply))
+        .route("/history", get(get_history))
 }
 
 async fn require_updater(state: &AppState) -> Result<Arc<Updater>, AppError> {
@@ -149,6 +153,19 @@ async fn apply(
         "管理员触发一键自更新（异步执行）",
     );
 
+    // S5：写入审计记录（fire-and-forget，失败只记日志不阻塞流程）
+    {
+        let from = updater.current_tag().to_owned();
+        let store = state.store().clone();
+        let audit_id = task_id.clone();
+        let audit_admin_id = admin.admin_id.clone();
+        let to = req.target_version.clone();
+        let ch = format!("{:?}", req.channel).to_lowercase();
+        if let Err(e) = store.insert_update_audit(&audit_id, &audit_admin_id, &from, &to, &ch) {
+            tracing::warn!(error=%e, "写入 update_audit_log 失败（不影响升级流程）");
+        }
+    }
+
     // spawn 后台 task，handler 立即返回，避免前端 fetch 超时中断 axum handler
     let bg_state = state.clone();
     let bg_updater = updater.clone();
@@ -174,6 +191,8 @@ async fn apply(
             });
         });
 
+        // S5：audit_store 供后续 complete_update_audit 使用（bg_store 被 backup_cb move 消耗）
+        let audit_store = bg_store.clone();
         let backup_cb = move |dst: &std::path::Path| -> Result<(), UpdaterError> {
             bg_store.backup_to(dst).map_err(UpdaterError::Store)
         };
@@ -193,9 +212,17 @@ async fn apply(
             maintenance_state.set_maintenance(active);
         };
 
-        match bg_updater.apply(channel, &target, backup_cb, sink, &health_url, on_rollback, on_maintenance).await {
+        let ctx = ApplyContext {
+            channel,
+            target_tag: target,
+            health_url,
+            on_rollback: Box::new(on_rollback),
+            on_maintenance: Box::new(on_maintenance),
+        };
+        match bg_updater.apply(ctx, backup_cb, sink).await {
             Ok(()) => {
                 // 成功路径已 process::exit(0)，理论到不了这里；保底标记 completed
+                let _ = audit_store.complete_update_audit(&task_id, "success", None);
                 bg_state.update_apply_task(|t| {
                     t.phase = "completed".into();
                     t.percent = 100;
@@ -205,6 +232,7 @@ async fn apply(
             Err(e) => {
                 let msg = e.to_string();
                 tracing::error!(task_id=%task_id, error=%msg, "apply 后台 task 失败");
+                let _ = audit_store.complete_update_audit(&task_id, "failed", Some(msg.as_str()));
                 bg_state.update_apply_task(|t| {
                     t.phase = "failed".into();
                     t.completed_at = Some(chrono::Utc::now());
@@ -289,4 +317,16 @@ fn map_err(e: UpdaterError) -> AppError {
         },
         other => AppError::internal(&other.to_string()),
     }
+}
+
+/// S5：GET /api/admin/updates/history — 最近 50 条升级审计记录（倒序）。
+async fn get_history(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let entries: Vec<UpdateAuditEntry> = state
+        .store()
+        .list_update_audit(50)
+        .map_err(|e| AppError::internal(&e.to_string()))?;
+    Ok(ok(json!({ "entries": entries })))
 }

@@ -39,23 +39,17 @@ describe('LegacyUserFrontendPage extra (USER_APP_URL configured)', () => {
   async function loadFresh() {
     vi.resetModules();
     // 必须在 resetModules 之后整组 dynamic import：渲染库 + 路由 + 业务组件
-    const [{ render }, { Router, Route }, { QueryClient, QueryClientProvider }, pageMod] =
+    const [{ render }, { Router, Route }, pageMod] =
       await Promise.all([
         import('@solidjs/testing-library'),
         import('@solidjs/router'),
-        import('@tanstack/solid-query'),
         import('@/pages/LegacyUserFrontendPage'),
       ]);
     const Page = pageMod.default;
-    const queryClient = new QueryClient({
-      defaultOptions: { queries: { retry: false, gcTime: 0 }, mutations: { retry: false } },
-    });
     return render(() => (
-      <QueryClientProvider client={queryClient}>
-        <Router>
-          <Route path="*" component={() => <Page />} />
-        </Router>
-      </QueryClientProvider>
+      <Router>
+        <Route path="*" component={() => <Page />} />
+      </Router>
     ));
   }
 

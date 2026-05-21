@@ -1,3 +1,5 @@
+use std::str::FromStr;
+
 use chrono::{DateTime, Utc};
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -45,7 +47,12 @@ impl WordState {
         }
     }
 
-    pub fn from_str(s: &str) -> Result<Self, StoreError> {
+}
+
+impl std::str::FromStr for WordState {
+    type Err = StoreError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "NEW" => Ok(Self::New),
             "LEARNING" => Ok(Self::Learning),
@@ -368,6 +375,7 @@ mod tests {
     use super::{WordLearningState, WordState};
     use crate::store::Store;
     use chrono::{Duration, Utc};
+    use std::str::FromStr;
 
     fn test_store() -> Store {
         Store::open(":memory:", 5000, 1).unwrap()

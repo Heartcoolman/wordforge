@@ -1,5 +1,7 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::Arc;
+
+use parking_lot::{Mutex, RwLock};
 
 use crate::amas::config::AMASConfig;
 use crate::amas::constants::{SIGNAL_THRESHOLD, TREND_BASELINE, USER_LOCK_CLEANUP_THRESHOLD};
@@ -101,19 +103,19 @@ impl AMASEngine {
         } else {
             None
         };
-        *self.config.write().unwrap() = Arc::new(new_config);
-        *self.config_hash.write().unwrap() = hash;
-        *self.ssp_policy.write().unwrap() = new_ssp;
+        *self.config.write() = Arc::new(new_config);
+        *self.config_hash.write() = hash;
+        *self.ssp_policy.write() = new_ssp;
         tracing::info!("AMAS config reloaded");
         Ok(())
     }
 
     pub fn ssp_policy(&self) -> Option<Arc<ssp::SspPolicy>> {
-        self.ssp_policy.read().unwrap().clone()
+        self.ssp_policy.read().clone()
     }
 
     pub fn get_config(&self) -> AMASConfig {
-        self.config.read().unwrap().as_ref().clone()
+        self.config.read().as_ref().clone()
     }
 
     pub fn metrics_registry(&self) -> &Arc<metrics::MetricsRegistry> {
@@ -132,7 +134,7 @@ impl AMASEngine {
     }
 
     fn acquire_user_lock_blocking(&self, user_id: &str) -> Arc<Mutex<()>> {
-        let mut locks = self.user_locks.lock().unwrap();
+        let mut locks = self.user_locks.lock();
 
         if locks.len() > USER_LOCK_CLEANUP_THRESHOLD {
             let before = locks.len();
@@ -175,10 +177,10 @@ impl AMASEngine {
         let start = std::time::Instant::now();
 
         let user_lock = self.acquire_user_lock_blocking(user_id);
-        let _guard = user_lock.lock().unwrap();
+        let _guard = user_lock.lock();
 
         let config = {
-            let guard = self.config.read().unwrap();
+            let guard = self.config.read();
             Arc::clone(&guard)
         };
         let now = chrono::Utc::now();
@@ -216,7 +218,7 @@ impl AMASEngine {
         );
 
         let latency_ms = start.elapsed().as_millis() as i64;
-        let config_version = self.config_hash.read().unwrap().clone();
+        let config_version = self.config_hash.read().clone();
         drop(_guard);
         self.emit_monitoring(
             user_id,
@@ -283,7 +285,7 @@ impl AMASEngine {
         context: &ProcessingContext,
         strategy: &StrategySelection,
     ) -> Result<MemoryScoring, AppError> {
-        let ssp_arc = self.ssp_policy.read().unwrap().clone();
+        let ssp_arc = self.ssp_policy.read().clone();
         let word_mastery = self.update_memory(
             user_id,
             raw_event,
@@ -336,6 +338,7 @@ impl AMASEngine {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build_process_result(
         user_id: &str,
         raw_event: &RawEvent,
@@ -381,10 +384,10 @@ impl AMASEngine {
         visual_score: f64,
     ) -> Result<UserState, AppError> {
         let user_lock = self.acquire_user_lock_blocking(user_id);
-        let _guard = user_lock.lock().unwrap();
+        let _guard = user_lock.lock();
 
         let config = {
-            let guard = self.config.read().unwrap();
+            let guard = self.config.read();
             Arc::clone(&guard)
         };
         let mut user_state = self.load_or_init_state(user_id)?;
@@ -428,7 +431,7 @@ impl AMASEngine {
             .config
             .try_read()
             .map(|c| Arc::clone(&c))
-            .unwrap_or_else(|_| Arc::new(AMASConfig::default()));
+            .unwrap_or_else(|| Arc::new(AMASConfig::default()));
         self.compute_strategy_from_state_with_config(user_state, &config)
     }
 
@@ -462,7 +465,7 @@ impl AMASEngine {
         crate::blocking::run_blocking("amas.get_phase", move || {
             let state = engine.load_or_init_state(&user_id)?;
             let config = {
-                let guard = engine.config.read().unwrap();
+                let guard = engine.config.read();
                 Arc::clone(&guard)
             };
             Ok(engine.determine_cold_start_phase(&state, &config))
@@ -529,10 +532,10 @@ impl AMASEngine {
         mastery_efficiency: f64,
     ) -> Result<(), AppError> {
         let user_lock = self.acquire_user_lock_blocking(user_id);
-        let _guard = user_lock.lock().unwrap();
+        let _guard = user_lock.lock();
 
         let config = {
-            let guard = self.config.read().unwrap();
+            let guard = self.config.read();
             Arc::clone(&guard)
         };
         let mut user_state = self.load_or_init_state(user_id)?;
@@ -570,7 +573,7 @@ impl AMASEngine {
             .config
             .try_read()
             .map(|c| Arc::clone(&c))
-            .unwrap_or_else(|_| Arc::new(AMASConfig::default()));
+            .unwrap_or_else(|| Arc::new(AMASConfig::default()));
         let state = self.load_or_init_state(user_id)?;
         let stats = &state.habit_profile.temporal_performance;
         let idx = (hour as usize).min(23);
@@ -803,7 +806,7 @@ impl AMASEngine {
             .config
             .try_read()
             .map(|c| Arc::clone(&c))
-            .unwrap_or_else(|_| Arc::new(AMASConfig::default()));
+            .unwrap_or_else(|| Arc::new(AMASConfig::default()));
         let state = self.load_or_init_state(user_id)?;
         let cp = &state.cognitive_profile;
         let cl = &config.classifier;
@@ -972,6 +975,7 @@ impl AMASEngine {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn update_memory(
         &self,
         user_id: &str,
@@ -1188,6 +1192,7 @@ impl AMASEngine {
         strategy
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn update_trust_scores(
         &self,
         algo_states: &mut AlgoStates,
@@ -1605,7 +1610,7 @@ mod tests {
         let mut new_cfg = AMASConfig::default();
         new_cfg.feature_flags.ssp_enabled = true;
         // 直接写入 config 而不调用 reload_config —— 模拟 policy 缺失
-        *engine.config.write().unwrap() = Arc::new(new_cfg);
+        *engine.config.write() = Arc::new(new_cfg);
         // 不重建 ssp_policy
         assert!(!engine.is_healthy());
     }

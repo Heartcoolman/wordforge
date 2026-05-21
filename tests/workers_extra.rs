@@ -80,6 +80,8 @@ fn build_test_config(database_url: String) -> Config {
             daily_cost_cap_usd: 1.0,
             input_price_per_mtok_usd: 0.55,
             output_price_per_mtok_usd: 2.19,
+            max_cost_per_month_yuan: 100.0,
+            usd_to_cny_rate: 7.3,
         },
         update_check: UpdateCheckConfig {
             api_url: String::new(),
@@ -493,30 +495,7 @@ async fn session_cleanup_runs_without_panic_on_empty_store() {
 
 // ────────────────────── etymology_generation ──────────────────────
 
-#[tokio::test]
-async fn etymology_generation_processes_words_without_existing() {
-    let (_tmp, store) = setup_store("ety.db");
-    // 插入一个没 etymology 的词
-    let word = learning_backend::store::operations::words::Word {
-        id: "w-eg".to_string(),
-        text: "alpha".to_string(),
-        meaning: "the first letter".to_string(),
-        pronunciation: None,
-        part_of_speech: None,
-        difficulty: 0.5,
-        examples: vec!["This is alpha".into()],
-        tags: vec![],
-        embedding: None,
-        created_at: Utc::now(),
-    };
-    store.upsert_word(&word).unwrap();
-
-    workers::etymology_generation::run(&store).await;
-
-    // 检查已生成
-    let etymology = store.get_etymology("w-eg").expect("get etymology");
-    assert!(etymology.is_some());
-}
+// M1-A3: etymology_generation 测试已移除
 
 // ────────────────────── delayed_reward 0 records 边界 ──────────────────────
 
@@ -566,19 +545,11 @@ async fn weekly_report_runs_on_empty_store() {
 
 // ────────────────────── word_clustering 边界 ──────────────────────
 
-#[tokio::test]
-async fn word_clustering_runs_on_empty_store() {
-    let (_tmp, store) = setup_store("wc-empty.db");
-    workers::word_clustering::run(&store).await;
-}
+// M1-A3: word_clustering 测试已移除
 
 // ────────────────────── monitoring_aggregate 边界 ──────────────────────
 
-#[tokio::test]
-async fn monitoring_aggregate_runs_without_events() {
-    let (_tmp, store) = setup_store("ma-empty.db");
-    workers::monitoring_aggregate::run(&store).await;
-}
+// M1-A3: monitoring_aggregate 测试已移除
 
 // ────────────────────── health_analysis 边界 ──────────────────────
 

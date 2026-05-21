@@ -6,7 +6,6 @@ rust-version = "1.77"
 
 [features]
 default = []
-sled-migration = ["sled"]
 
 [dependencies]
 axum = { version = "0.7", features = ["macros"] }
@@ -20,7 +19,6 @@ rusqlite = { version = "0.39", features = ["bundled"] }
 r2d2 = "0.8"
 r2d2_sqlite = "0.33"
 
-sled = { version = "=0.34.7", optional = true }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -46,6 +44,7 @@ tokio-cron-scheduler = "0.11"
 reqwest = { version = "0.12", default-features = false, features = ["json", "cookies", "stream", "rustls-tls"] }
 
 dashmap = "6"
+parking_lot = "0.12"
 dotenvy = "0.15"
 toml = "0.8"
 notify = "6"
@@ -72,10 +71,6 @@ utoipa = { version = "5.5.0", features = ["uuid", "chrono", "yaml"] }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
-[[bin]]
-name = "migrate-sled-to-sqlite"
-path = "src/bin/migrate_sled_to_sqlite.rs"
-required-features = ["sled-migration"]
 
 [dev-dependencies]
 axum-test = "16"

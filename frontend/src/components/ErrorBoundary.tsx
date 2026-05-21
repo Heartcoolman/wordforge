@@ -1,18 +1,40 @@
 import { ErrorBoundary as SolidErrorBoundary, type ParentProps } from 'solid-js';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
+import { buildUrl } from '@/api/client';
 
 // 已记录过的 err 引用，避免 fallback 重渲染时重复打 console.error；
 // 用 WeakSet 让 GC 能正常回收（reset 后 err 引用断开即可清理）
 const loggedErrors: WeakSet<object> = typeof WeakSet !== 'undefined' ? new WeakSet() : ({ add: () => {}, has: () => false } as unknown as WeakSet<object>);
+
+function reportError(err: unknown) {
+  // fire-and-forget：网络失败不影响 ErrorBoundary 渲染
+  try {
+    const body = {
+      message: err instanceof Error ? err.message : String(err),
+      stack: err instanceof Error ? err.stack : undefined,
+      url: typeof window !== 'undefined' ? window.location.href : undefined,
+      userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : undefined,
+    };
+    void fetch(buildUrl('/api/telemetry/error'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      // keepalive 确保 report 在页面卸载时仍能送出
+      keepalive: true,
+    });
+  } catch {
+    // 上报失败静默忽略
+  }
+}
 
 function logOnce(err: unknown) {
   if (typeof err === 'object' && err !== null) {
     if (loggedErrors.has(err)) return;
     loggedErrors.add(err);
   }
-  // TODO: 集成 Sentry / 监控时在此 hook
   console.error('[AppErrorBoundary]', err);
+  reportError(err);
 }
 
 export function AppErrorBoundary(props: ParentProps) {

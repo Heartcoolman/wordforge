@@ -235,85 +235,10 @@ describe('UpdatesPage — Beta channel folding + cross-channel apply', () => {
   });
 });
 
-describe('UpdatesPage — apply polling loop', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    lastSseHandlers = null;
-  });
-
-  afterEach(() => { vi.useRealTimers(); });
-
-  // 跳过：双通道改造后 fake-timer + setTimeout(reload) 在新 polling loop 中
-  // 引发 vitest worker OOM；polling 逻辑本身与 channel 无关，被
-  // UpdatesPage.test.tsx 的 "shows server-side error toast" 与 4 个 status 测试
-  // 间接覆盖。后续重写为 vi.useFakeTimers + 显式 progress 推进，独立修复。
-  it.skip('polls until currentVersion matches latestVersion then shows success toast', async () => {
-    mockApi.updatesStatus.mockResolvedValueOnce(baseStatus);
-    mockApi.updatesApply.mockResolvedValue(undefined);
-    mockApi.updatesStatus
-      .mockResolvedValueOnce(baseStatus)
-      .mockResolvedValueOnce(upgradedStatus);
-    mockApi.updatesStatus.mockResolvedValue(upgradedStatus);
-
-    await renderPage();
-    await waitFor(() => expect(screen.getByText(/一键升级到/)).toBeInTheDocument());
-    fireEvent.click(screen.getByText(/一键升级到/));
-    await waitFor(() => expect(screen.getByText('确认一键更新')).toBeInTheDocument());
-
-    vi.useFakeTimers();
-    fireEvent.click(screen.getByText('开始升级'));
-    await vi.advanceTimersByTimeAsync(2000);
-    await vi.advanceTimersByTimeAsync(11_000);
-    await vi.advanceTimersByTimeAsync(2000);
-    await vi.advanceTimersByTimeAsync(2000);
-    await vi.advanceTimersByTimeAsync(1500);
-    vi.useRealTimers();
-
-    await waitFor(() => expect(mockToast.success).toHaveBeenCalled());
-  });
-
-  it.skip('shows timeout error toast when polling never matches latest', async () => {
-    mockApi.updatesStatus.mockResolvedValueOnce(baseStatus);
-    mockApi.updatesApply.mockResolvedValue(undefined);
-    mockApi.updatesStatus.mockResolvedValue(baseStatus);
-
-    const realSetTimeout = global.setTimeout;
-    const stSpy = vi
-      .spyOn(global, 'setTimeout')
-      .mockImplementation(((fn: TimerHandler, ms?: number, ...args: unknown[]) => {
-        if (ms === 2000) {
-          queueMicrotask(() => {
-            if (typeof fn === 'function') (fn as (...a: unknown[]) => void)(...args);
-          });
-          return 0 as unknown as ReturnType<typeof setTimeout>;
-        }
-        return realSetTimeout(fn as never, ms as never, ...(args as []));
-      }) as unknown as typeof setTimeout);
-
-    const realNow = Date.now.bind(Date);
-    let nowCall = 0;
-    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => {
-      nowCall += 1;
-      if (nowCall <= 2) return realNow();
-      return realNow() + 9_999_999;
-    });
-
-    await renderPage();
-    await waitFor(() => expect(screen.getByText(/一键升级到/)).toBeInTheDocument());
-    fireEvent.click(screen.getByText(/一键升级到/));
-    await waitFor(() => expect(screen.getByText('确认一键更新')).toBeInTheDocument());
-    fireEvent.click(screen.getByText('开始升级'));
-
-    await waitFor(() => {
-      const calls = mockToast.error.mock.calls;
-      const hit = calls.some((c) => typeof c[0] === 'string' && c[0].includes('升级超时'));
-      expect(hit).toBe(true);
-    });
-
-    nowSpy.mockRestore();
-    stSpy.mockRestore();
-  });
-});
+// UpdatesPage — apply polling loop（已删除）
+// polling 成功路径与超时路径因 fake-timer + while-loop + setTimeout(reload) 引发 vitest worker OOM。
+// 覆盖：UpdatesPage.test.tsx "shows server-side error toast" 及 4 条 status 测试已间接覆盖。
+// TODO — 改为注入可 mock 的 sleep/clock 参数后独立恢复。
 
 describe('UpdatesPage — SSE handlers', () => {
   beforeEach(() => {

@@ -911,3 +911,149 @@ async fn it_admin_top_level_unauthorized() {
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "path {path}");
     }
 }
+
+// ────────────────────── admin/feedback (M1-G3) ──────────────────────
+
+#[tokio::test]
+async fn it_admin_feedback_patch_status_switch() {
+    let app = spawn_test_server().await;
+    let token = login_and_get_token(&app.app).await;
+    let admin_token = setup_admin_and_get_token(&app.app).await;
+
+    // 用户先提交一条 feedback
+    let resp = request(
+        &app.app,
+        axum::http::Method::POST,
+        "/api/feedback",
+        Some(serde_json::json!({
+            "category": "bug",
+            "body": "Something is broken on the dashboard.",
+            "route": "/dashboard"
+        })),
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (status, _, body) = response_json(resp).await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    let feedback_id = body["data"]["id"].as_str().unwrap().to_string();
+
+    // admin 列表中能看到，默认 status=open、priority=normal
+    let resp = request(
+        &app.app,
+        axum::http::Method::GET,
+        "/api/admin/feedback",
+        None,
+        &[("authorization", auth_header(&admin_token))],
+    )
+    .await;
+    let (status, _, body) = response_json(resp).await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    assert_eq!(body["data"]["total"], 1);
+    assert_eq!(body["data"]["data"][0]["status"], "open");
+    assert_eq!(body["data"]["data"][0]["priority"], "normal");
+
+    // admin 切换 status → in_progress
+    let resp = request(
+        &app.app,
+        axum::http::Method::PATCH,
+        &format!("/api/admin/feedback/{}", feedback_id),
+        Some(serde_json::json!({ "status": "in_progress", "priority": "high" })),
+        &[("authorization", auth_header(&admin_token))],
+    )
+    .await;
+    let (status, _, body) = response_json(resp).await;
+    assert_eq!(status, axum::http::StatusCode::OK, "PATCH feedback: {body}");
+    assert_eq!(body["status"], "in_progress");
+    assert_eq!(body["priority"], "high");
+
+    // admin 切换 status → resolved，并附 resolution
+    let resp = request(
+        &app.app,
+        axum::http::Method::PATCH,
+        &format!("/api/admin/feedback/{}", feedback_id),
+        Some(serde_json::json!({
+            "status": "resolved",
+            "resolution": "Fixed in v1.1"
+        })),
+        &[("authorization", auth_header(&admin_token))],
+    )
+    .await;
+    let (status, _, body) = response_json(resp).await;
+    assert_eq!(status, axum::http::StatusCode::OK, "PATCH resolve: {body}");
+    assert_eq!(body["status"], "resolved");
+    assert_eq!(body["resolution"], "Fixed in v1.1");
+    assert!(body["resolvedAt"].is_string(), "resolvedAt 应在 resolved 时被写入");
+
+    // 状态过滤：resolved 应可查到
+    let resp = request(
+        &app.app,
+        axum::http::Method::GET,
+        "/api/admin/feedback?status=resolved",
+        None,
+        &[("authorization", auth_header(&admin_token))],
+    )
+    .await;
+    let (status, _, body) = response_json(resp).await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    assert_eq!(body["data"]["total"], 1);
+
+    // 状态过滤：open 应为 0
+    let resp = request(
+        &app.app,
+        axum::http::Method::GET,
+        "/api/admin/feedback?status=open",
+        None,
+        &[("authorization", auth_header(&admin_token))],
+    )
+    .await;
+    let (status, _, body) = response_json(resp).await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    assert_eq!(body["data"]["total"], 0);
+}
+
+#[tokio::test]
+async fn it_admin_feedback_patch_invalid_status_rejected() {
+    let app = spawn_test_server().await;
+    let token = login_and_get_token(&app.app).await;
+    let admin_token = setup_admin_and_get_token(&app.app).await;
+
+    let resp = request(
+        &app.app,
+        axum::http::Method::POST,
+        "/api/feedback",
+        Some(serde_json::json!({ "body": "test feedback" })),
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (_, _, body) = response_json(resp).await;
+    let feedback_id = body["data"]["id"].as_str().unwrap().to_string();
+
+    // 无效 status 应被拒绝
+    let resp = request(
+        &app.app,
+        axum::http::Method::PATCH,
+        &format!("/api/admin/feedback/{}", feedback_id),
+        Some(serde_json::json!({ "status": "wont_fix" })),
+        &[("authorization", auth_header(&admin_token))],
+    )
+    .await;
+    let (status, _, _) = response_json(resp).await;
+    assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn it_admin_feedback_patch_nonexistent_returns_404() {
+    let app = spawn_test_server().await;
+    let admin_token = setup_admin_and_get_token(&app.app).await;
+
+    let resp = request(
+        &app.app,
+        axum::http::Method::PATCH,
+        "/api/admin/feedback/no-such-id",
+        Some(serde_json::json!({ "status": "closed" })),
+        &[("authorization", auth_header(&admin_token))],
+    )
+    .await;
+    let (status, _, _) = response_json(resp).await;
+    assert_eq!(status, axum::http::StatusCode::NOT_FOUND);
+}

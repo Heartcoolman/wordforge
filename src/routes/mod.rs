@@ -64,19 +64,26 @@ pub fn build_router(state: AppState) -> Router {
     // admin 认证公开路由（如 /status）不受 auth rate limit 约束
     let admin_auth_public_routes = admin::auth_public_router();
 
-    let api_routes = Router::new()
+    // M1-A6：豁免路由组 — 不受 strict-mode / maintenance 中间件约束。
+    // 豁免依据：admin 后台用浏览器原生 UA；status/realtime/telemetry 为基础设施通道；
+    //           v1 全部 410 无客户端契约意义，维护模式下也应直接 410 而非 503。
+    // 注意：admin auth 路由已在外层 merge，此处 /admin 指业务 admin 路由。
+    let exempt_routes = Router::new()
+        .nest("/admin/auth", admin_auth_routes.merge(admin_auth_public_routes))
+        .nest("/admin", admin::router())
+        .nest("/realtime", realtime::router())
+        .nest("/v1", v1::router())
+        .nest("/status", status::router())
+        .nest("/telemetry", telemetry::router());
+
+    // 受 strict-mode 与 maintenance 校验的路由组
+    let checked_routes = Router::new()
         .nest("/auth", auth_routes)
         .nest("/users", users::router())
         .nest("/words", words::router())
         .nest("/records", records::router())
         .nest("/analytics", analytics::router())
         .nest("/amas", admin::amas::router())
-        .nest(
-            "/admin/auth",
-            admin_auth_routes.merge(admin_auth_public_routes),
-        )
-        .nest("/admin", admin::router())
-        .nest("/realtime", realtime::router())
         .nest("/wordbooks", wordbooks::router())
         .nest("/study-config", study_config::router())
         .nest("/learning", learning::router())
@@ -88,14 +95,7 @@ pub fn build_router(state: AppState) -> Router {
         .nest("/word-favorites", word_favorites::router())
         .nest("/word-notes", word_notes::router())
         .nest("/wordbook-center", wordbook_center::user_router())
-        .nest("/v1", v1::router())
-        .nest("/status", status::router())
-        .nest("/telemetry", telemetry::router())
         .nest("/probe", probe_results::router())
-        .layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            device::device_middleware,
-        ))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             strict_mode::strict_mode_middleware,
@@ -103,6 +103,14 @@ pub fn build_router(state: AppState) -> Router {
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             maintenance::maintenance_middleware,
+        ));
+
+    let api_routes = Router::new()
+        .merge(exempt_routes)
+        .merge(checked_routes)
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            device::device_middleware,
         ))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),

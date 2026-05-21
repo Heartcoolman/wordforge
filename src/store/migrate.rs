@@ -21,6 +21,11 @@ fn migrations() -> Vec<(&'static str, MigrationFn)> {
             m013_learning_record_self_rating,
         ),
         ("014_probe_executions", m014_probe_executions),
+        ("015_gdpr_export_rate_limit", m015_gdpr_export_rate_limit),
+        ("016_llm_cost_ledger", m016_llm_cost_ledger),
+        ("017_update_audit_log", m017_update_audit_log),
+        ("018_feedback_priority_status", m018_feedback_priority_status),
+        ("019_worker_last_run", m019_worker_last_run),
     ]
 }
 
@@ -398,6 +403,104 @@ fn m014_probe_executions(store: &Store) -> Result<(), StoreError> {
         CREATE INDEX IF NOT EXISTS idx_probe_exec_pending
             ON probe_executions(status, dispatched_at)
             WHERE status IN ('pending', 'confirm_pending');",
+    )?;
+    Ok(())
+}
+
+fn m015_gdpr_export_rate_limit(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS gdpr_export_log (
+            user_id TEXT NOT NULL,
+            exported_at TEXT NOT NULL,
+            PRIMARY KEY (user_id)
+        );",
+    )?;
+    Ok(())
+}
+
+fn m017_update_audit_log(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS update_audit_log (
+            id           TEXT NOT NULL PRIMARY KEY,
+            admin_id     TEXT NOT NULL,
+            from_version TEXT NOT NULL,
+            to_version   TEXT NOT NULL,
+            channel      TEXT NOT NULL,
+            started_at   TEXT NOT NULL,
+            completed_at TEXT,
+            outcome      TEXT NOT NULL DEFAULT 'in_progress',
+            error        TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_update_audit_started
+            ON update_audit_log(started_at DESC);",
+    )?;
+    Ok(())
+}
+
+/// M1-G2：新建 llm_advisor_cost_ledger 月度成本台账；system_settings 追加月度成本上限列。
+fn m016_llm_cost_ledger(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS llm_advisor_cost_ledger (
+            month TEXT NOT NULL,
+            total_yuan REAL NOT NULL DEFAULT 0.0,
+            last_updated_at TEXT NOT NULL,
+            PRIMARY KEY (month)
+        );",
+    )?;
+    let has_col: bool = conn
+        .prepare("PRAGMA table_info(system_settings)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .any(|n| n == "llm_advisor_max_cost_per_month_yuan");
+    if !has_col {
+        conn.execute(
+            "ALTER TABLE system_settings ADD COLUMN
+             llm_advisor_max_cost_per_month_yuan REAL NOT NULL DEFAULT 100.0",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+
+fn m018_feedback_priority_status(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    for (col, ddl) in [
+        ("priority", "TEXT NOT NULL DEFAULT 'normal'"),
+        ("status", "TEXT NOT NULL DEFAULT 'open'"),
+        ("assignee_admin_id", "INTEGER"),
+        ("resolved_at", "TEXT"),
+        ("resolution", "TEXT"),
+    ] {
+        let has: bool = conn
+            .prepare("PRAGMA table_info(feedback_items)")?
+            .query_map([], |r| r.get::<_, String>(1))?
+            .filter_map(Result::ok)
+            .any(|name| name == col);
+        if !has {
+            conn.execute(
+                &format!("ALTER TABLE feedback_items ADD COLUMN {} {}", col, ddl),
+                [],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// M1-A5：worker 执行时间上报表。
+fn m019_worker_last_run(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS worker_last_run (
+            worker_name      TEXT NOT NULL PRIMARY KEY,
+            last_run_at      INTEGER NOT NULL,
+            last_duration_ms INTEGER NOT NULL DEFAULT 0,
+            last_error       TEXT,
+            last_outcome     TEXT NOT NULL CHECK (last_outcome IN ('success','failure','skipped'))
+        );",
     )?;
     Ok(())
 }

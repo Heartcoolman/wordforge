@@ -13,6 +13,7 @@ use crate::state::AppState;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(get_settings).put(update_settings))
+        .route("/maintenance", post(set_maintenance))
         .route("/reload-amas", post(reload_amas_config))
 }
 
@@ -27,6 +28,7 @@ struct UpdateSystemSettings {
     amas_auto_apply_enabled: Option<bool>,
     amas_auto_apply_max_per_day: Option<u32>,
     amas_auto_apply_min_confidence: Option<f64>,
+    llm_advisor_max_cost_per_month_yuan: Option<f64>,
 }
 
 impl UpdateSystemSettings {
@@ -60,6 +62,14 @@ impl UpdateSystemSettings {
                 return Err(AppError::bad_request(
                     "INVALID_CONFIDENCE",
                     "最低置信度必须在 0-1 之间",
+                ));
+            }
+        }
+        if let Some(v) = self.llm_advisor_max_cost_per_month_yuan {
+            if !(1.0..=10_000.0).contains(&v) {
+                return Err(AppError::bad_request(
+                    "INVALID_LLM_BUDGET",
+                    "LLM 月度成本上限必须在 1-10000 元之间",
                 ));
             }
         }
@@ -117,6 +127,9 @@ async fn update_settings(
                 if let Some(v) = req.amas_auto_apply_min_confidence {
                     settings.amas_auto_apply_min_confidence = v;
                 }
+                if let Some(v) = req.llm_advisor_max_cost_per_month_yuan {
+                    settings.llm_advisor_max_cost_per_month_yuan = v;
+                }
 
                 store.save_system_settings(&settings)?;
                 Ok(settings)
@@ -136,6 +149,39 @@ async fn update_settings(
     );
 
     Ok(ok(settings))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetMaintenanceRequest {
+    active: bool,
+}
+
+async fn set_maintenance(
+    admin: AdminAuthUser,
+    State(state): State<AppState>,
+    JsonBody(req): JsonBody<SetMaintenanceRequest>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let active = req.active;
+    state
+        .run_store_task("admin.settings.set_maintenance", move |store| -> Result<_, AppError> {
+            let mut settings = store.get_system_settings()?;
+            settings.maintenance_mode = active;
+            store.save_system_settings(&settings)?;
+            Ok(settings)
+        })
+        .await??;
+
+    state.set_maintenance(active);
+
+    tracing::info!(
+        admin_id = %admin.admin_id,
+        action = "set_maintenance",
+        active,
+        "管理员切换维护模式"
+    );
+
+    Ok(ok(serde_json::json!({ "active": active })))
 }
 
 async fn reload_amas_config(

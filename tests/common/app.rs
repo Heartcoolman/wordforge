@@ -127,6 +127,8 @@ async fn spawn_with_full_config(
             daily_cost_cap_usd: 1.0,
             input_price_per_mtok_usd: 0.55,
             output_price_per_mtok_usd: 2.19,
+            max_cost_per_month_yuan: 100.0,
+            usd_to_cny_rate: 7.3,
         },
         update_check: learning_backend::config::UpdateCheckConfig {
             api_url: String::new(),

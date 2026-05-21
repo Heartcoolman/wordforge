@@ -743,7 +743,24 @@ async fn get_user_wb_center_url(
     state: &AppState,
     user_id: &str,
 ) -> Result<Option<String>, AppError> {
-    state.wordbook_service().user_center_url(user_id).await
+    let store = state.store().clone();
+    let user_id = user_id.to_string();
+
+    crate::blocking::run_blocking(
+        "wordbook_center.user_center_url",
+        move || -> Result<_, AppError> {
+            match store.get_user_preferences(&user_id)? {
+                Some(prefs) => Ok(prefs
+                    .get("wordbook_center_url")
+                    .or_else(|| prefs.get("wordbookCenterUrl"))
+                    .and_then(|value| value.as_str())
+                    .filter(|url| !url.is_empty())
+                    .map(str::to_string)),
+                None => Ok(None),
+            }
+        },
+    )
+    .await?
 }
 
 async fn set_user_wb_center_url(
@@ -751,10 +768,36 @@ async fn set_user_wb_center_url(
     user_id: &str,
     url: Option<&str>,
 ) -> Result<(), AppError> {
-    state
-        .wordbook_service()
-        .set_user_center_url(user_id, url)
-        .await
+    let store = state.store().clone();
+    let user_id = user_id.to_string();
+    let url = url.map(str::to_string);
+
+    crate::blocking::run_blocking(
+        "wordbook_center.set_user_center_url",
+        move || -> Result<_, AppError> {
+            let mut prefs = store
+                .get_user_preferences(&user_id)?
+                .unwrap_or(serde_json::json!({}));
+
+            if let Some(obj) = prefs.as_object_mut() {
+                match url.as_deref() {
+                    Some(url) if !url.is_empty() => {
+                        obj.insert(
+                            "wordbook_center_url".to_string(),
+                            serde_json::Value::String(url.to_string()),
+                        );
+                    }
+                    _ => {
+                        obj.remove("wordbook_center_url");
+                    }
+                }
+            }
+
+            store.set_user_preferences(&user_id, &prefs)?;
+            Ok(())
+        },
+    )
+    .await?
 }
 
 async fn user_get_settings(

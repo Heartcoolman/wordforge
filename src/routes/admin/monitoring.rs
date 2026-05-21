@@ -16,6 +16,8 @@ pub fn router() -> Router<AppState> {
         .route("/health", get(system_health))
         .route("/database", get(database_stats))
         .route("/check-update", get(check_update))
+        // M1-A5：worker 执行状态区
+        .route("/workers", get(worker_status))
 }
 
 // B62: System health monitoring
@@ -48,12 +50,21 @@ async fn system_health(
         "healthy"
     };
 
+    // M0-P1 全局计数器快照：计算生命周期内 5xx 错误率（0.0–1.0）
+    let (total_req, total_5xx) = crate::metrics_counters::snapshot();
+    let error_rate = if total_req > 0 {
+        total_5xx as f64 / total_req as f64
+    } else {
+        0.0
+    };
+
     Ok(ok(serde_json::json!({
         "status": status,
         "storeProbeOk": store_probe_ok,
         "dbSizeBytes": size_on_disk,
         "uptimeSecs": uptime_secs,
         "version": env!("GIT_VERSION"),
+        "errorRate": error_rate,
         "services": {
             "amas": { "healthy": amas_healthy },
             "sse": {
@@ -192,6 +203,35 @@ fn is_newer(latest: &str, current: &str) -> bool {
         }
     }
     false
+}
+
+/// M1-A5：返回所有 worker 的最后执行记录，供 admin 控制台 "Worker 状态" 区展示。
+async fn worker_status(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let rows = state
+        .run_store_task("admin.monitoring.workers", |store| {
+            store.list_worker_last_run()
+        })
+        .await
+        .map_err(|e| AppError::internal(&e.to_string()))?
+        .map_err(AppError::from)?;
+
+    let workers: Vec<serde_json::Value> = rows
+        .into_iter()
+        .map(|r| {
+            serde_json::json!({
+                "workerName": r.worker_name,
+                "lastRunAt": r.last_run_at,
+                "lastDurationMs": r.last_duration_ms,
+                "lastOutcome": r.last_outcome,
+                "lastError": r.last_error,
+            })
+        })
+        .collect();
+
+    Ok(ok(serde_json::json!({ "workers": workers })))
 }
 
 #[cfg(test)]

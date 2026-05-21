@@ -70,7 +70,7 @@ impl Store {
                 word.difficulty,
                 Self::serialize_json(&word.examples)?,
                 Self::serialize_json(&word.tags)?,
-                word.embedding.as_ref().map(|e| Self::serialize_json(e)).transpose()?,
+                word.embedding.as_ref().map(Self::serialize_json).transpose()?,
                 word.created_at.to_rfc3339(),
             ],
         )?;

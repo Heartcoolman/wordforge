@@ -480,6 +480,7 @@ CREATE TABLE IF NOT EXISTS system_settings (
     amas_auto_apply_enabled INTEGER NOT NULL DEFAULT 0 CHECK (amas_auto_apply_enabled IN (0, 1)),
     amas_auto_apply_max_per_day INTEGER NOT NULL DEFAULT 1,
     amas_auto_apply_min_confidence REAL NOT NULL DEFAULT 0.8,
+    llm_advisor_max_cost_per_month_yuan REAL NOT NULL DEFAULT 100.0,
     PRIMARY KEY (singleton_id)
 );
 
@@ -634,4 +635,11 @@ CREATE INDEX IF NOT EXISTS idx_probe_exec_admin
 CREATE INDEX IF NOT EXISTS idx_probe_exec_pending
     ON probe_executions(status, dispatched_at)
     WHERE status IN ('pending', 'confirm_pending');
+
+CREATE TABLE IF NOT EXISTS llm_advisor_cost_ledger (
+    month TEXT NOT NULL,
+    total_yuan REAL NOT NULL DEFAULT 0.0,
+    last_updated_at TEXT NOT NULL,
+    PRIMARY KEY (month)
+);
 "#;

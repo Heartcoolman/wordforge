@@ -20,6 +20,8 @@ pub struct SystemSettings {
     pub amas_auto_apply_max_per_day: u32,
     #[serde(default = "default_auto_apply_min_confidence")]
     pub amas_auto_apply_min_confidence: f64,
+    #[serde(default = "default_llm_max_cost_per_month_yuan")]
+    pub llm_advisor_max_cost_per_month_yuan: f64,
 }
 
 fn default_auto_apply_max_per_day() -> u32 {
@@ -28,6 +30,10 @@ fn default_auto_apply_max_per_day() -> u32 {
 
 fn default_auto_apply_min_confidence() -> f64 {
     0.8
+}
+
+fn default_llm_max_cost_per_month_yuan() -> f64 {
+    100.0
 }
 
 impl Default for SystemSettings {
@@ -43,6 +49,7 @@ impl Default for SystemSettings {
             amas_auto_apply_enabled: false,
             amas_auto_apply_max_per_day: 1,
             amas_auto_apply_min_confidence: 0.8,
+            llm_advisor_max_cost_per_month_yuan: 100.0,
         }
     }
 }
@@ -53,7 +60,8 @@ impl Store {
         let result = conn
             .query_row(
                 "SELECT max_users, registration_enabled, maintenance_mode, default_daily_words, wordbook_center_url,
-                        amas_auto_apply_enabled, amas_auto_apply_max_per_day, amas_auto_apply_min_confidence
+                        amas_auto_apply_enabled, amas_auto_apply_max_per_day, amas_auto_apply_min_confidence,
+                        llm_advisor_max_cost_per_month_yuan
                  FROM system_settings WHERE singleton_id=1",
                 [],
                 |r| {
@@ -66,6 +74,7 @@ impl Store {
                         amas_auto_apply_enabled: r.get::<_, i64>(5)? != 0,
                         amas_auto_apply_max_per_day: r.get::<_, i64>(6)? as u32,
                         amas_auto_apply_min_confidence: r.get::<_, f64>(7)?,
+                        llm_advisor_max_cost_per_month_yuan: r.get::<_, f64>(8).unwrap_or(100.0),
                     })
                 },
             )
@@ -83,11 +92,13 @@ impl Store {
         conn.execute(
             "INSERT INTO system_settings
                 (singleton_id, max_users, registration_enabled, maintenance_mode, default_daily_words, wordbook_center_url,
-                 amas_auto_apply_enabled, amas_auto_apply_max_per_day, amas_auto_apply_min_confidence)
-             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 amas_auto_apply_enabled, amas_auto_apply_max_per_day, amas_auto_apply_min_confidence,
+                 llm_advisor_max_cost_per_month_yuan)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT(singleton_id) DO UPDATE SET
                 max_users=?1, registration_enabled=?2, maintenance_mode=?3, default_daily_words=?4, wordbook_center_url=?5,
-                amas_auto_apply_enabled=?6, amas_auto_apply_max_per_day=?7, amas_auto_apply_min_confidence=?8",
+                amas_auto_apply_enabled=?6, amas_auto_apply_max_per_day=?7, amas_auto_apply_min_confidence=?8,
+                llm_advisor_max_cost_per_month_yuan=?9",
             params![
                 settings.max_users as i64,
                 settings.registration_enabled as i64,
@@ -97,6 +108,7 @@ impl Store {
                 settings.amas_auto_apply_enabled as i64,
                 settings.amas_auto_apply_max_per_day as i64,
                 settings.amas_auto_apply_min_confidence,
+                settings.llm_advisor_max_cost_per_month_yuan,
             ],
         )?;
         Ok(())
@@ -137,6 +149,7 @@ mod tests {
             amas_auto_apply_enabled: true,
             amas_auto_apply_max_per_day: 9,
             amas_auto_apply_min_confidence: 0.55,
+            llm_advisor_max_cost_per_month_yuan: 200.0,
         };
         store.save_system_settings(&new).unwrap();
         let got = store.get_system_settings().unwrap();
@@ -151,6 +164,7 @@ mod tests {
         assert!(got.amas_auto_apply_enabled);
         assert_eq!(got.amas_auto_apply_max_per_day, 9);
         assert!((got.amas_auto_apply_min_confidence - 0.55).abs() < 1e-9);
+        assert!((got.llm_advisor_max_cost_per_month_yuan - 200.0).abs() < 1e-9);
     }
 
     #[test]
@@ -171,8 +185,8 @@ mod tests {
         {
             let conn = store.connection().unwrap();
             conn.execute(
-                "INSERT INTO system_settings (singleton_id, max_users, registration_enabled, maintenance_mode, default_daily_words, wordbook_center_url, amas_auto_apply_enabled, amas_auto_apply_max_per_day, amas_auto_apply_min_confidence)
-                 VALUES (1, 1, 1, 0, 1, NULL, 0, 1, 0.5)",
+                "INSERT INTO system_settings (singleton_id, max_users, registration_enabled, maintenance_mode, default_daily_words, wordbook_center_url, amas_auto_apply_enabled, amas_auto_apply_max_per_day, amas_auto_apply_min_confidence, llm_advisor_max_cost_per_month_yuan)
+                 VALUES (1, 1, 1, 0, 1, NULL, 0, 1, 0.5, 100.0)",
                 [],
             ).unwrap();
         }
@@ -184,6 +198,7 @@ mod tests {
     fn default_helpers_return_expected_values() {
         assert_eq!(default_auto_apply_max_per_day(), 1);
         assert!((default_auto_apply_min_confidence() - 0.8).abs() < 1e-9);
+        assert!((default_llm_max_cost_per_month_yuan() - 100.0).abs() < 1e-9);
     }
 
     #[test]
@@ -194,5 +209,6 @@ mod tests {
         assert!((parsed.amas_auto_apply_min_confidence - 0.8).abs() < 1e-9);
         assert!(!parsed.amas_auto_apply_enabled);
         assert!(parsed.wordbook_center_url.is_none());
+        assert!((parsed.llm_advisor_max_cost_per_month_yuan - 100.0).abs() < 1e-9);
     }
 }

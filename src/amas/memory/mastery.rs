@@ -53,6 +53,7 @@ pub fn update_mastery(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn update_mastery_at(
     state: &mut WordMasteryState,
     is_correct: bool,

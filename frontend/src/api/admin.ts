@@ -4,7 +4,7 @@ import type {
   AdminUsersPage, AdminUsersQuery,
   EngagementAnalytics, LearningAnalytics,
   SystemHealth, DatabaseInfo, SystemSettings,
-  UpdateCheck, AdminUpdateStatus, ApplyAccepted, DailyActiveUsersEntry, DailyRecordsEntry,
+  UpdateCheck, AdminUpdateStatus, ApplyAccepted, UpdateAuditEntry, DailyActiveUsersEntry, DailyRecordsEntry,
   StudyOverview, RecordTypeBreakdown, WordStateDistribution, RetentionCurve,
   FeedbackItem,
 } from '@/types/admin';
@@ -126,11 +126,15 @@ export const adminApi = {
       { channel, targetVersion, confirmCurrentVersion },
       { useAdminToken: true },
     ),
+  // S5：升级历史审计列表
+  updatesHistory: () =>
+    api.get<{ entries: UpdateAuditEntry[] }>('/api/admin/updates/history', undefined, { useAdminToken: true }),
 
   // Broadcast & Settings
   broadcast: (data: { title: string; message: string }) => api.post<{ sent: number }>('/api/admin/broadcast', data, { useAdminToken: true }),
   getSettings: () => api.get<SystemSettings>('/api/admin/settings', undefined, { useAdminToken: true }),
   updateSettings: (data: Partial<SystemSettings>) => api.put<SystemSettings>('/api/admin/settings', data, { useAdminToken: true }),
+  setMaintenance: (active: boolean) => api.post<{ active: boolean }>('/api/admin/settings/maintenance', { active }, { useAdminToken: true }),
   reloadAmas: (data: AmasConfig) => api.post<AmasConfig>('/api/admin/settings/reload-amas', data, { useAdminToken: true }),
   broadcastUpdate: (data?: { message?: string; version?: string }) =>
     api.post<{ broadcasted: boolean }>('/api/admin/broadcast-update', data || {}, { useAdminToken: true }),

@@ -148,6 +148,7 @@ export default function MonitoringPage() {
                     <MetricCell label="版本">{h().version}</MetricCell>
                     <MetricCell label="运行时间">{formatUptime(h().uptimeSecs)}</MetricCell>
                     <MetricCell label="数据库大小">{formatBytes(h().dbSizeBytes)}</MetricCell>
+                    <MetricCell label="5xx 错误率">{(h().errorRate * 100).toFixed(2)}%</MetricCell>
                   </div>
                 </Card>
               );

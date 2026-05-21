@@ -142,10 +142,7 @@ async fn it_worker_manager_registers_jobs_and_shutdowns() {
     assert!(jobs
         .iter()
         .any(|j| j.name == workers::WorkerName::MetricsFlush && j.enabled));
-    // MonitoringAggregate is stub-disabled by default
-    assert!(jobs
-        .iter()
-        .any(|j| j.name == workers::WorkerName::MonitoringAggregate && !j.enabled));
+    // M1-A3: MonitoringAggregate stub 已删
     // LlmAdvisor is configurable and enabled in this test
     assert!(jobs
         .iter()
@@ -165,9 +162,7 @@ async fn it_worker_manager_registers_jobs_and_shutdowns() {
     assert!(jobs_without_optional
         .iter()
         .any(|j| j.name == workers::WorkerName::MetricsFlush && !j.enabled));
-    assert!(jobs_without_optional
-        .iter()
-        .any(|j| j.name == workers::WorkerName::MonitoringAggregate && !j.enabled));
+    // M1-A3: MonitoringAggregate stub 已删
     assert!(jobs_without_optional
         .iter()
         .any(|j| j.name == workers::WorkerName::LlmAdvisor && !j.enabled));
@@ -183,8 +178,6 @@ async fn it_worker_manager_registers_jobs_and_shutdowns() {
 async fn it_runs_worker_tasks_and_persists_side_effects() {
     let (_tmp, store) = setup_store("workers-side-effects.sled");
     let engine = Arc::new(AMASEngine::new(AMASConfig::default(), store.clone()));
-
-    workers::embedding_generation::run(store.as_ref()).await;
 
     let user_1 = sample_user("u1", "u1@test.com");
     let user_2 = sample_user("u2", "u2@test.com");
@@ -305,16 +298,12 @@ async fn it_runs_worker_tasks_and_persists_side_effects() {
     workers::metrics_flush::run(&registry, store.as_ref()).await;
 
     workers::session_cleanup::run(store.as_ref()).await;
-    workers::monitoring_aggregate::run(store.as_ref()).await;
-    workers::llm_advisor::run(store.as_ref(), None, &engine).await;
+    workers::llm_advisor::run(store.as_ref(), None, &engine, None).await;
     workers::delayed_reward::run(store.as_ref()).await;
     workers::forgetting_alert::run(store.as_ref()).await;
     workers::algorithm_optimization::run(store.as_ref(), &engine).await;
     workers::daily_aggregation::run(store.as_ref()).await;
     workers::health_analysis::run(store.as_ref()).await;
-    workers::etymology_generation::run(store.as_ref()).await;
-    workers::embedding_generation::run(store.as_ref()).await;
-    workers::word_clustering::run(store.as_ref()).await;
     workers::confusion_pair_cache::run(store.as_ref()).await;
     workers::weekly_report::run(store.as_ref()).await;
     workers::log_export::run(store.as_ref()).await;
@@ -332,10 +321,7 @@ async fn it_runs_worker_tasks_and_persists_side_effects() {
         "forgetting alert should create notifications"
     );
 
-    assert!(store
-        .get_etymology("w1")
-        .expect("get etymology w1")
-        .is_some());
+    // M1-A3: etymology_generation stub worker 已删除，此断言不再适用
 
     let confusion_pairs = store
         .get_confusion_pairs_for_word(&word_easy.id, 10)
@@ -360,7 +346,6 @@ async fn it_runs_worker_tasks_and_persists_side_effects() {
         "daily_aggregation",
         "health_analysis",
         "weekly_report",
-        "word_clustering",
     ] {
         assert!(
             store

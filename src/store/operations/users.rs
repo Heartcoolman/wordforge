@@ -387,6 +387,43 @@ impl Store {
         )?;
         Ok(count as usize)
     }
+
+    /// 检查用户是否在 24h 内已导出过数据；返回上次导出时间（如有）。
+    pub fn get_gdpr_export_last_at(
+        &self,
+        user_id: &str,
+    ) -> Result<Option<DateTime<Utc>>, StoreError> {
+        keys::validate_id(user_id)?;
+        let conn = self.conn()?;
+        let row: Option<String> = conn
+            .query_row(
+                "SELECT exported_at FROM gdpr_export_log WHERE user_id=?1",
+                params![user_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        match row {
+            Some(s) => Ok(Some(
+                s.parse::<DateTime<Utc>>().map_err(|e| {
+                    StoreError::Validation(format!("gdpr_export_log invalid date: {e}"))
+                })?,
+            )),
+            None => Ok(None),
+        }
+    }
+
+    /// 记录本次导出时间（upsert）。
+    pub fn upsert_gdpr_export_log(&self, user_id: &str) -> Result<(), StoreError> {
+        keys::validate_id(user_id)?;
+        let conn = self.conn()?;
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO gdpr_export_log (user_id, exported_at) VALUES (?1, ?2)
+             ON CONFLICT(user_id) DO UPDATE SET exported_at=?2",
+            params![user_id, now],
+        )?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
