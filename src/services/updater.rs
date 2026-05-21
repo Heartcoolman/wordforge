@@ -1486,4 +1486,40 @@ mod tests {
             );
         }
     }
+
+    /// M0-R2：验签层拒绝篡改 tarball。
+    ///
+    /// 使用 minisign-verify crate 文档中的标准测试密钥对（对 b"test" 签名），
+    /// 直接调用底层 pk.verify()，验证签名与文件内容不匹配时返回错误。
+    /// 这是 verify_minisign_tarball() 内部 pk.verify() 调用的单元测试。
+    #[test]
+    fn verify_minisign_rejects_tampered_tarball() {
+        use minisign_verify::{PublicKey, Signature};
+
+        // 来自 minisign-verify crate 文档的标准测试密钥对，对 b"test" 签名
+        let pubkey_b64 = "RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3";
+        let sig_text = "untrusted comment: signature from minisign secret key\n\
+RUQf6LRCGA9i559r3g7V1qNyJDApGip8MfqcadIgT9CuhV3EMhHoN1mGTkUidF/\
+z7SrlQgXdy8ofjb7bNJJylDOocrCo8KLzZwo=\n\
+trusted comment: timestamp:1633700835\tfile:test\tprehashed\n\
+wLMDjy9FLAuxZ3q4NlEvkgtyhrr0gtTu6KC4KBJdITbbOeAi1zBIYo0v4iTgt8jJpIidRJnp94ABQkJAgAooBQ==";
+
+        let pk = PublicKey::from_base64(pubkey_b64).expect("测试公钥应有效");
+        let sig = Signature::decode(sig_text).expect("测试签名应可解析");
+
+        // 原始内容通过验签
+        let original: &[u8] = b"test";
+        assert!(
+            pk.verify(original, &sig, false).is_ok(),
+            "原始内容应通过验签"
+        );
+
+        // 篡改后的 tarball 内容必须被拒绝
+        let tampered: &[u8] = b"tampered content - simulates in-flight modification of tarball";
+        let result = pk.verify(tampered, &sig, false);
+        assert!(
+            result.is_err(),
+            "篡改后的 tarball 内容应被 minisign 验签拒绝，实际：{result:?}"
+        );
+    }
 }
