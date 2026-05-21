@@ -440,17 +440,44 @@ print('true' if all(results) and len(results)==7 else 'false')
         skip "GA 7 天日报（${OBS_DIR} 不存在，rc.3 发布后运行 daily_report.sh 生成）"
     fi
 
-    # 自更新成功率 > 95%（需 S5 upgrade_audit_log 存在）
+    # S5 自更新审计表（RFC §6.4：升级历史审计表有完整记录）
     check_file "GA (S5) update_audit_log migration 存在（自更新审计）" \
         "src/store/migrate.rs"
     check_contains "GA (S5) update_audit_log 表定义" \
         "src/store/migrate.rs" "update_audit_log"
+    # 表字段完整性（from_version/to_version/channel/outcome 是 RFC §6.4 规定字段）
+    check_contains "GA (S5) update_audit_log 含 from_version 字段" \
+        "src/store/migrate.rs" "from_version"
+    check_contains "GA (S5) update_audit_log 含 to_version 字段" \
+        "src/store/migrate.rs" "to_version"
+    check_contains "GA (S5) update_audit_log 含 outcome 字段" \
+        "src/store/migrate.rs" "outcome"
+    # apply 入口写入审计（RFC §6.4：升级时写入）
+    check_contains "GA (S5) apply 入口调用 insert_update_audit" \
+        "src/routes/admin/updates.rs" "insert_update_audit"
+    check_contains "GA (S5) apply 完成后调用 complete_update_audit" \
+        "src/routes/admin/updates.rs" "complete_update_audit"
+    # admin UI 历史列表路由（S5 定义：admin UI 加历史列表）
+    check_contains "GA (S5) /admin/updates/history 路由暴露审计历史" \
+        "src/routes/admin/updates.rs" "history.*get_history|get_history"
+
+    # 5xx 观测工具完整性（RFC §6.4：5xx 错误率 < 0.1%）
+    check_file "GA 5xx 观测脚本存在" \
+        "scripts/rc-observation/collect_5xx_rate.sh"
+    check_contains "GA 5xx 阈值 0.001（0.1%）正确" \
+        "scripts/rc-observation/collect_5xx_rate.sh" "0\.001|THRESHOLD"
+    check_file "GA 每日汇总脚本存在" \
+        "scripts/rc-observation/daily_report.sh"
+    check_file "GA GitHub 回归标签收集脚本存在" \
+        "scripts/rc-observation/collect_gh_regressions.sh"
 
     # 稳态阈值文档
     check_contains "GA 阈值文档包含 0.1% 定义" \
         "docs/runbook/rc-observation-thresholds.md" "0.1%|0.001"
     check_contains "GA 报告模板包含签署栏" \
         "docs/runbook/rc-observation-report.md" "签署"
+    check_contains "GA 报告模板包含 7 天表格" \
+        "docs/runbook/rc-observation-report.md" "all_green|7.*天"
 }
 
 # ================================================================
