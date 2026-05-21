@@ -740,7 +740,9 @@ impl Updater {
     ///
     /// 决策 O5-a：公钥编译期嵌入（`env!("MINISIGN_PUBKEY")`）。
     /// - 公钥为空（本地开发）→ warn 跳过，不阻断。
-    /// - sig_url 为空（旧 release 无签名 asset）→ warn 跳过，不阻断。
+    /// - 公钥非空（生产构建）+ sig_url 为空 → `SignatureInvalid` 阻断 apply。
+    ///   攻击者可能通过控制 GitHub API 响应去掉 .minisig 资产 URL 来绕过验签；
+    ///   生产构建必须拒绝无签名的 release（降级攻击防御）。
     /// - 公钥/签名格式错误或验签失败 → `SignatureInvalid` 错误，阻断 apply。
     async fn verify_minisign_tarball(
         &self,
@@ -752,9 +754,13 @@ impl Updater {
             tracing::warn!("MINISIGN_PUBKEY 未设置，跳过签名校验（非生产构建）");
             return Ok(());
         }
+        // 公钥非空 = 生产构建，必须验签。
+        // sig_url 空意味着 release assets 列表里没有 .minisig 文件——
+        // 可能是攻击者控制 API 响应去掉了该字段，按降级攻击处理，直接阻断。
         if sig_url.is_empty() {
-            tracing::warn!("release 无 .minisig asset，跳过签名校验（旧版 release）");
-            return Ok(());
+            return Err(UpdaterError::SignatureInvalid(
+                "release 无 .minisig asset，疑似降级攻击".into(),
+            ));
         }
 
         let pk = PublicKey::from_base64(PUBKEY_STR)
@@ -1443,5 +1449,41 @@ mod tests {
             matches!(result, Err(UpdaterError::PhaseTimeout { phase: "test_phase", .. })),
             "超时应映射为 PhaseTimeout"
         );
+    }
+
+    /// M0-R2 降级攻击防御：生产构建（PUBKEY 非空）+ sig_url 空 → 必须返回 SignatureInvalid。
+    /// 注意：此测试在 CI 生产构建（MINISIGN_PUBKEY 非空）下才触发阻断路径；
+    /// 本地 dev 构建 PUBKEY 为空时两种分支都走"跳过"路径，验证略有不同。
+    #[tokio::test]
+    async fn verify_minisign_rejects_missing_signature_in_production() {
+        let cfg = UpdateCheckConfig {
+            api_url: String::new(),
+            cache_ttl_secs: 3600,
+            worker_enabled: false,
+            worker_interval_secs: 3600,
+            github_token: None,
+            allow_downgrade: false,
+            install_dir: Some(std::env::temp_dir()),
+            max_tarball_bytes: 1024 * 1024 * 100,
+            download_mirror_prefix: None,
+        };
+        let updater = Updater::new(&cfg, "v0.0.0").expect("build updater");
+
+        // 用一个不存在的临时文件路径——只需走到 sig_url 判断，不会真正读文件
+        let dummy_path = std::env::temp_dir().join("dummy_tarball_nonexistent.tar.gz");
+
+        const PUBKEY_STR: &str = env!("MINISIGN_PUBKEY");
+        let result = updater.verify_minisign_tarball("", &dummy_path).await;
+
+        if PUBKEY_STR.is_empty() {
+            // 本地开发：公钥为空，跳过验签，返回 Ok
+            assert!(result.is_ok(), "本地开发构建应跳过验签");
+        } else {
+            // 生产构建：公钥非空 + sig_url 空 → 必须阻断
+            assert!(
+                matches!(result, Err(UpdaterError::SignatureInvalid(_))),
+                "生产构建应拒绝无签名 release，实际结果：{result:?}"
+            );
+        }
     }
 }
