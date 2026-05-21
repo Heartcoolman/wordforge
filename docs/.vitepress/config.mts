@@ -50,6 +50,7 @@ export default defineConfig({
             { text: '架构概览', link: '/guide/architecture' },
             { text: 'AMAS 入门', link: '/guide/amas-intro' },
             { text: '更新日志', link: '/changelog' },
+            { text: '发版日历', link: '/release-calendar' },
           ],
         },
         {
