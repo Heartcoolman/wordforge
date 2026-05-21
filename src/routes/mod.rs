@@ -31,7 +31,7 @@ use axum::routing::get_service;
 use axum::Router;
 use tower_http::services::{ServeDir, ServeFile};
 
-use crate::middleware::{device, maintenance, rate_limit, request_id, strict_mode};
+use crate::middleware::{device, http_metrics, maintenance, rate_limit, request_id, strict_mode};
 use crate::state::AppState;
 
 /// Maximum request body size: 2 MiB.
@@ -128,7 +128,9 @@ pub fn build_router(state: AppState) -> Router {
             .layer(axum::middleware::from_fn(static_cache_headers));
     }
 
+    // M0-P1 补充：histogram middleware 挂在 request_id 外侧，确保所有请求都被采集
     app.layer(axum::middleware::from_fn(request_id::request_id_middleware))
+        .layer(axum::middleware::from_fn(http_metrics::record_http_metrics))
         .with_state(state)
 }
 

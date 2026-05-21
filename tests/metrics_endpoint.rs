@@ -126,6 +126,24 @@ async fn metrics_endpoint_returns_prometheus_text_with_at_least_10_metrics() {
             );
         }
     }
+
+    // M0-P1 补充验收：histogram + worker_last_run_seconds 必须存在
+    assert!(
+        body.contains("http_request_duration_seconds_bucket"),
+        "缺少 http_request_duration_seconds_bucket\n实际响应：\n{body}"
+    );
+    assert!(
+        body.contains("http_request_duration_seconds_count"),
+        "缺少 http_request_duration_seconds_count\n实际响应：\n{body}"
+    );
+    assert!(
+        body.contains("http_request_duration_seconds_sum"),
+        "缺少 http_request_duration_seconds_sum\n实际响应：\n{body}"
+    );
+    assert!(
+        body.contains("worker_last_run_seconds"),
+        "缺少 worker_last_run_seconds\n实际响应：\n{body}"
+    );
 }
 
 #[tokio::test]

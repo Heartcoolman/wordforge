@@ -147,6 +147,30 @@ pub async fn metrics_handler(
         if state.is_maintenance() { 1.0 } else { 0.0 },
     );
 
+    // --- M0-P1 补充：http_request_duration_seconds histogram ---
+    crate::middleware::http_metrics::write_histogram_exposition(&mut out).await;
+
+    // --- M0-P1 补充：worker_last_run_seconds stub（M1-A5 时接入真实上报）---
+    // 所有已注册 worker 名称，value=0 表示尚无运行记录。
+    // M1-A5 (#28) 的 dev-arch-2 将在 worker 每次执行后写入真实时间戳。
+    {
+        use std::fmt::Write as _;
+        let _ = writeln!(&mut out, "# HELP worker_last_run_seconds 每个 worker 上次完成时的 Unix 时间戳（秒），0 表示尚未运行");
+        let _ = writeln!(&mut out, "# TYPE worker_last_run_seconds gauge");
+        const WORKER_NAMES: &[&str] = &[
+            "metrics_flush", "session_cleanup", "password_reset_cleanup",
+            "monitoring_aggregate", "llm_advisor", "delayed_reward",
+            "forgetting_alert", "algorithm_optimization", "cache_cleanup",
+            "daily_aggregation", "health_analysis", "etymology_generation",
+            "embedding_generation", "word_clustering", "confusion_pair_cache",
+            "weekly_report", "log_export", "update_checker",
+            "monitoring_retention", "error_rate_watchdog",
+        ];
+        for name in WORKER_NAMES {
+            let _ = writeln!(&mut out, "worker_last_run_seconds{{name=\"{name}\"}} 0");
+        }
+    }
+
     (
         StatusCode::OK,
         [(
