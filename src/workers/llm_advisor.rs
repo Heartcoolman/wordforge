@@ -40,7 +40,12 @@ fn build_system_prompt() -> String {
 }
 
 /// Worker 入口。失败时仅记录日志，不向调度器抛出（保持 timer 不被 disable）。
-pub async fn run(store: &Store, llm_cfg: Option<&LLMConfig>, engine: &AMASEngine) {
+pub async fn run(
+    store: &Store,
+    llm_cfg: Option<&LLMConfig>,
+    engine: &AMASEngine,
+    app_state: Option<&crate::state::AppState>,
+) {
     tracing::debug!("llm_advisor: start");
 
     let Some(llm_cfg) = llm_cfg else {
@@ -67,6 +72,21 @@ pub async fn run(store: &Store, llm_cfg: Option<&LLMConfig>, engine: &AMASEngine
         Err(e) => {
             tracing::warn!(error = %e, "llm_advisor: 读取每日成本失败，仍尝试运行");
         }
+    }
+
+    let current_month = chrono::Utc::now().format("%Y-%m").to_string();
+    let month_cap = store.get_system_settings().ok().map(|s| s.llm_advisor_max_cost_per_month_yuan).unwrap_or(llm_cfg.max_cost_per_month_yuan);
+    match store.get_llm_cost_this_month(&current_month) {
+        Ok(spent) if spent >= month_cap => {
+            tracing::warn!(spent_yuan = spent, cap_yuan = month_cap, month = %current_month, "llm_advisor: 已达月成本上限，跳过本次");
+            let resume = next_month_str(&current_month);
+            if let Some(state) = app_state {
+                state.broadcast_to_all_sse(crate::state::SseEvent::LlmBudgetExceeded { spent_yuan: spent, cap_yuan: month_cap, resume_month: resume });
+            }
+            return;
+        }
+        Ok(_) => {}
+        Err(e) => { tracing::warn!(error = %e, "llm_advisor: 读取月成本失败，仍尝试运行"); }
     }
 
     let evidence = match collect_evidence(store, engine) {
@@ -102,6 +122,8 @@ pub async fn run(store: &Store, llm_cfg: Option<&LLMConfig>, engine: &AMASEngine
     };
 
     let cost = provider.estimate_cost_usd(&resp.usage);
+    let cost_yuan = cost * llm_cfg.usd_to_cny_rate;
+    if let Err(e) = store.add_llm_cost(&current_month, cost_yuan) { tracing::warn!(error = %e, "llm_advisor: 月成本累计写入失败"); }
 
     let parsed: serde_json::Value = match serde_json::from_str(&resp.content) {
         Ok(v) => v,
@@ -366,4 +388,10 @@ fn read_path(cfg: &serde_json::Value, path: &str) -> Option<serde_json::Value> {
         }
     }
     Some(cur.clone())
+}
+fn next_month_str(month: &str) -> String {
+    let (year_str, mon_str) = month.split_once('-').unwrap_or(("2000","01"));
+    let year: i32 = year_str.parse().unwrap_or(2000);
+    let mon: u32 = mon_str.parse().unwrap_or(1);
+    if mon == 12 { format!("{:04}-01", year + 1) } else { format!("{year:04}-{:02}", mon + 1) }
 }

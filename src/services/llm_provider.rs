@@ -199,6 +199,8 @@ mod tests {
             daily_cost_cap_usd: 1.0,
             input_price_per_mtok_usd: 0.55,
             output_price_per_mtok_usd: 2.19,
+            max_cost_per_month_yuan: 100.0,
+            usd_to_cny_rate: 7.3,
         }
     }
 

@@ -113,6 +113,7 @@ pub struct WorkerManager {
     update_checker_ctx: Option<UpdateCheckerCtx>,
     /// M0-P4：error_rate_watchdog 需要 AppState 广播 SSE incident 事件
     watchdog_state: Option<crate::state::AppState>,
+    llm_advisor_state: Option<crate::state::AppState>,
 }
 
 #[derive(Clone)]
@@ -137,6 +138,7 @@ impl WorkerManager {
             llm_config: None,
             update_checker_ctx: None,
             watchdog_state: None,
+            llm_advisor_state: None,
         }
     }
 
@@ -148,6 +150,11 @@ impl WorkerManager {
 
     pub fn with_llm_config(mut self, llm: crate::config::LLMConfig) -> Self {
         self.llm_config = Some(llm);
+        self
+    }
+
+    pub fn with_llm_advisor_state(mut self, state: crate::state::AppState) -> Self {
+        self.llm_advisor_state = Some(state);
         self
     }
 
@@ -378,7 +385,7 @@ impl WorkerManager {
                         let llm = llm.clone();
                         let engine = engine_cloned.clone();
                         async move {
-                            llm_advisor::run(&store, llm.as_ref(), &engine).await;
+                            llm_advisor::run(&store, llm.as_ref(), &engine, None).await;
                         }
                     })
                     .await;

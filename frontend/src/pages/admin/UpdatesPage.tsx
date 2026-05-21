@@ -1,6 +1,7 @@
-import { createResource, createSignal, Show, onCleanup, onMount } from 'solid-js';
+import { createResource, createSignal, Show, For, onCleanup, onMount } from 'solid-js';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
+import { Badge } from '@/components/ui/Badge';
 import { Modal } from '@/components/ui/Modal';
 import { Spinner } from '@/components/ui/Spinner';
 import { Collapsible } from '@/components/ui/Collapsible';
@@ -34,9 +35,19 @@ const CHANNEL_LABEL: Record<'stable' | 'beta', string> = {
   beta: 'Beta 通道',
 };
 
+const OUTCOME_LABEL: Record<string, string> = {
+  success: '成功',
+  failed: '失败',
+  in_progress: '进行中',
+};
+
 export default function UpdatesPage() {
   const [status, { refetch }] = createResource<AdminUpdateStatus>(() =>
     adminApi.updatesStatus(),
+  );
+  // S5：升级历史列表
+  const [history, { refetch: refetchHistory }] = createResource(() =>
+    adminApi.updatesHistory(),
   );
   const [checking, setChecking] = createSignal(false);
   const [applying, setApplying] = createSignal(false);
@@ -335,8 +346,63 @@ export default function UpdatesPage() {
         </Show>
       </Modal>
 
+      {/* S5：升级历史 */}
+      <Collapsible title="升级历史">
+        <Show when={!history.loading} fallback={<Spinner />}>
+          <Show
+            when={history()?.entries?.length}
+            fallback={<p class="text-sm text-content-secondary py-2">暂无升级记录</p>}
+          >
+            <div class="overflow-x-auto">
+              <table class="w-full text-sm">
+                <thead>
+                  <tr class="text-left text-content-secondary border-b border-border">
+                    <th class="pb-2 pr-4 font-medium">时间</th>
+                    <th class="pb-2 pr-4 font-medium">版本</th>
+                    <th class="pb-2 pr-4 font-medium">通道</th>
+                    <th class="pb-2 font-medium">结果</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <For each={history()!.entries}>
+                    {(entry) => (
+                      <tr class="border-b border-border/50 last:border-0">
+                        <td class="py-2 pr-4 text-content-secondary font-mono text-xs">
+                          {new Date(entry.startedAt).toLocaleString('zh-CN')}
+                        </td>
+                        <td class="py-2 pr-4 font-mono">
+                          <span class="text-content-secondary">{entry.fromVersion}</span>
+                          <span class="mx-1 text-content-tertiary">→</span>
+                          <span class="text-content">{entry.toVersion}</span>
+                        </td>
+                        <td class="py-2 pr-4 text-content-secondary">{entry.channel}</td>
+                        <td class="py-2">
+                          <Badge
+                            variant={
+                              entry.outcome === 'success' ? 'success'
+                              : entry.outcome === 'failed' ? 'error'
+                              : 'default'
+                            }
+                            size="sm"
+                          >
+                            {OUTCOME_LABEL[entry.outcome] ?? entry.outcome}
+                          </Badge>
+                          <Show when={entry.error}>
+                            <span class="ml-2 text-xs text-content-tertiary">{entry.error}</span>
+                          </Show>
+                        </td>
+                      </tr>
+                    )}
+                  </For>
+                </tbody>
+              </table>
+            </div>
+          </Show>
+        </Show>
+      </Collapsible>
+
       {/* anyHasUpdate 当前不展示在 UI，但保留 helper 给将来 dashboard badge 用 */}
-      <Show when={false}>{anyHasUpdate(status())}</Show>
+      <Show when={false}>{anyHasUpdate(status())}{refetchHistory}</Show>
     </div>
   );
 }

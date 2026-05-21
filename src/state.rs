@@ -92,6 +92,16 @@ pub enum SseEvent {
         #[serde(rename = "windowSecs")]
         window_secs: u64,
     },
+    /// M1-G2：LLM advisor 月度人民币成本超上限，当月 worker 已自动停跑。
+    #[serde(rename = "llm_budget_exceeded")]
+    LlmBudgetExceeded {
+        #[serde(rename = "spentYuan")]
+        spent_yuan: f64,
+        #[serde(rename = "capYuan")]
+        cap_yuan: f64,
+        #[serde(rename = "resumeMonth")]
+        resume_month: String,
+    },
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

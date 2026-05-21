@@ -22,6 +22,8 @@ fn migrations() -> Vec<(&'static str, MigrationFn)> {
         ),
         ("014_probe_executions", m014_probe_executions),
         ("015_gdpr_export_rate_limit", m015_gdpr_export_rate_limit),
+        ("016_llm_cost_ledger", m016_llm_cost_ledger),
+        ("017_update_audit_log", m017_update_audit_log),
     ]
 }
 
@@ -412,6 +414,52 @@ fn m015_gdpr_export_rate_limit(store: &Store) -> Result<(), StoreError> {
             PRIMARY KEY (user_id)
         );",
     )?;
+    Ok(())
+}
+
+fn m017_update_audit_log(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS update_audit_log (
+            id           TEXT NOT NULL PRIMARY KEY,
+            admin_id     TEXT NOT NULL,
+            from_version TEXT NOT NULL,
+            to_version   TEXT NOT NULL,
+            channel      TEXT NOT NULL,
+            started_at   TEXT NOT NULL,
+            completed_at TEXT,
+            outcome      TEXT NOT NULL DEFAULT 'in_progress',
+            error        TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_update_audit_started
+            ON update_audit_log(started_at DESC);",
+    )?;
+    Ok(())
+}
+
+/// M1-G2：新建 llm_advisor_cost_ledger 月度成本台账；system_settings 追加月度成本上限列。
+fn m016_llm_cost_ledger(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS llm_advisor_cost_ledger (
+            month TEXT NOT NULL,
+            total_yuan REAL NOT NULL DEFAULT 0.0,
+            last_updated_at TEXT NOT NULL,
+            PRIMARY KEY (month)
+        );",
+    )?;
+    let has_col: bool = conn
+        .prepare("PRAGMA table_info(system_settings)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .any(|n| n == "llm_advisor_max_cost_per_month_yuan");
+    if !has_col {
+        conn.execute(
+            "ALTER TABLE system_settings ADD COLUMN
+             llm_advisor_max_cost_per_month_yuan REAL NOT NULL DEFAULT 100.0",
+            [],
+        )?;
+    }
     Ok(())
 }
 

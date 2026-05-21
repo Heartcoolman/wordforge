@@ -165,7 +165,8 @@ async fn main() {
             shutdown_tx.subscribe(),
             &config.worker,
         )
-        .with_llm_config(config.llm.clone());
+        .with_llm_config(config.llm.clone())
+        .with_llm_advisor_state(state.clone());
         if let Some(u) = updater.clone() {
             worker_manager = worker_manager.with_update_checker(
                 u,

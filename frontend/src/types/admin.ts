@@ -125,6 +125,19 @@ export interface ApplyTaskStatus {
   error?: string;
 }
 
+/// S5：升级历史审计记录。outcome: `success` | `failed` | `in_progress`
+export interface UpdateAuditEntry {
+  id: string;
+  adminId: string;
+  fromVersion: string;
+  toVersion: string;
+  channel: string;
+  startedAt: string;
+  completedAt?: string;
+  outcome: 'success' | 'failed' | 'in_progress';
+  error?: string;
+}
+
 /// `POST /api/admin/updates/apply` 立即返回（202 Accepted）的载荷
 export interface ApplyAccepted {
   taskId: string;

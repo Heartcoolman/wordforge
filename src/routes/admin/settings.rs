@@ -28,6 +28,7 @@ struct UpdateSystemSettings {
     amas_auto_apply_enabled: Option<bool>,
     amas_auto_apply_max_per_day: Option<u32>,
     amas_auto_apply_min_confidence: Option<f64>,
+    llm_advisor_max_cost_per_month_yuan: Option<f64>,
 }
 
 impl UpdateSystemSettings {
@@ -61,6 +62,14 @@ impl UpdateSystemSettings {
                 return Err(AppError::bad_request(
                     "INVALID_CONFIDENCE",
                     "最低置信度必须在 0-1 之间",
+                ));
+            }
+        }
+        if let Some(v) = self.llm_advisor_max_cost_per_month_yuan {
+            if !(1.0..=10_000.0).contains(&v) {
+                return Err(AppError::bad_request(
+                    "INVALID_LLM_BUDGET",
+                    "LLM 月度成本上限必须在 1-10000 元之间",
                 ));
             }
         }
@@ -117,6 +126,9 @@ async fn update_settings(
                 }
                 if let Some(v) = req.amas_auto_apply_min_confidence {
                     settings.amas_auto_apply_min_confidence = v;
+                }
+                if let Some(v) = req.llm_advisor_max_cost_per_month_yuan {
+                    settings.llm_advisor_max_cost_per_month_yuan = v;
                 }
 
                 store.save_system_settings(&settings)?;

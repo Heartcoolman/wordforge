@@ -178,6 +178,7 @@ pub async fn sse_handler(
                                     crate::state::SseEvent::ProbeRequest { .. } => "probe_request",
                                     crate::state::SseEvent::ProbeConfirm { .. } => "probe_confirm",
                                     crate::state::SseEvent::Incident { .. } => "incident",
+                                    crate::state::SseEvent::LlmBudgetExceeded { .. } => "llm_budget_exceeded",
                                 };
                                 yield Ok(Event::default().event(event_name).data(json));
                             }
@@ -264,6 +265,8 @@ mod tests {
                 daily_cost_cap_usd: 1.0,
                 input_price_per_mtok_usd: 0.55,
                 output_price_per_mtok_usd: 2.19,
+                max_cost_per_month_yuan: 100.0,
+                usd_to_cny_rate: 7.3,
             },
             update_check: UpdateCheckConfig {
                 api_url: String::new(),
