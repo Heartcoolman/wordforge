@@ -166,6 +166,18 @@ async fn spawn_with_full_config(
 
     let state = AppState::new(store, amas_engine, &config, shutdown_tx, false);
 
+    // v1.1-P0.10：与 main.rs 一致，给 AppState 注入资源包签名器。
+    // keypair 写在 temp_dir/keys/ 内，测试结束随 TempDir 自动清理。
+    {
+        let key_dir = temp_dir.path().join("keys");
+        match learning_backend::services::resource_pack_signing::ResourcePackSigner::load_or_generate(
+            &key_dir,
+        ) {
+            Ok(signer) => state.set_resource_pack_signer(Arc::new(signer)),
+            Err(e) => eprintln!("test setup: resource_pack signer init failed: {e}"),
+        }
+    }
+
     let app = build_router(state.clone());
 
     TestApp {

@@ -97,12 +97,14 @@ pub struct ResourcePackInstallLog {
     pub outcome: String,
 }
 
-/// 客户端 manifest 端点响应 DTO。字段名严格对齐对接文档 §2.1。
+/// 客户端 manifest 端点响应 DTO。字段名严格对齐对接文档 §2.1
+/// （注意 `downloadURL` 是全大写 URL，serde camelCase 不会正确转换，需手动 rename）。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResourcePackManifest {
     pub pack_id: String,
     pub version: String,
+    #[serde(rename = "downloadURL")]
     pub download_url: String,
     pub sha256: String,
     pub size_bytes: i64,
