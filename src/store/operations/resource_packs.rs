@@ -263,6 +263,39 @@ impl Store {
         rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
     }
 
+    /// 聚合某 pack × version 的 telemetry：返回 (outcome, count) 列表。
+    /// 不指定 version 时返回 pack 维度的全量聚合（version=*）。
+    pub fn pack_install_stats(
+        &self,
+        pack_id: &str,
+    ) -> Result<Vec<(String, String, i64)>, StoreError> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT version, outcome, COUNT(*) FROM resource_pack_install_log
+             WHERE pack_id = ?1
+             GROUP BY version, outcome
+             ORDER BY version DESC, outcome ASC",
+        )?;
+        let rows = stmt.query_map(params![pack_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
+    }
+
+    /// 拿某 pack 的所有版本（admin 列表用）。倒序按 published_at。
+    pub fn list_pack_versions(
+        &self,
+        pack_id: &str,
+    ) -> Result<Vec<ResourcePackVersion>, StoreError> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {VERSION_COLS} FROM resource_pack_versions \
+             WHERE pack_id = ?1 ORDER BY published_at DESC"
+        ))?;
+        let rows = stmt.query_map(params![pack_id], version_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
+    }
+
     /// 写入一条客户端 telemetry 记录。
     pub fn record_pack_install(
         &self,

@@ -6,6 +6,7 @@ pub mod clients;
 pub mod feedback;
 pub mod monitoring;
 pub mod probe;
+pub mod resource_packs;
 pub mod settings;
 pub mod updates;
 
@@ -65,6 +66,7 @@ pub fn router() -> Router<AppState> {
         .nest("/clients", clients::router())
         .nest("/feedback", feedback::router())
         .nest("/probe", probe::router())
+        .nest("/resource-packs", resource_packs::router())
         .nest("/telemetry", clients::telemetry_router())
         .route("/users", get(list_users))
         .route("/users/:id/ban", post(ban_user))
