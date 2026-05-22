@@ -43,6 +43,18 @@
 | v0.6.0-beta.2 | 2026-05-20 | pre | feedback ErrorBoundary 修复 |
 | v0.6.0-beta.3 | 2026-05-20 | pre | admin/updates 双通道 + prerelease 规则 |
 | v0.6.0-beta.4 | 2026-05-20 | pre | Release Notes markdown 渲染 |
+| v1.0.0 | 2026-05-22 | stable | GA 🎉 51 项 MUST 全完，详见 CHANGELOG |
+
+### v1.1 计划发版
+
+v1.1 采用 rc 滚动发布策略，三段 rc 合并后切 GA。
+
+| 版本 | 计划发布日 | 类型 | 摘要 |
+|---|---|---|---|
+| v1.1.0-rc.1 | 2026-05-22（当天发） | pre | 资源包热更后端（manifest + SSE 事件 + immutable cache） |
+| v1.1.0-rc.2 | 待定 | pre | events 总线化（S2：records → AMAS 解耦） |
+| v1.1.0-rc.3 | 待定 | pre | 工程债清理（clippy 零警告 / migration-down / rate_limit 双轨 / SSE-5000 / extras 拆分 / admin 敏感操作审计） |
+| v1.1.0 | 待定 | stable | 三段 rc 合并后切 GA |
 
 ### API 兼容窗口（v1 稳定版承诺）
 
@@ -84,6 +96,7 @@
 | 版本 | TestFlight 发布日 | 最低后端版本要求 | App Store 状态 | 说明 |
 |---|---|---|---|---|
 | — | — | — | — | _待填写_ |
+| v1.1 | 待定 | v1.1.0-rc.1+ | TestFlight | 资源包热更联调 |
 
 **后端 API 兼容要求**：iOS 客户端仅调用 `/api/*` v1 stable 端点（不走 `/api/v1/*`），理论上兼容 v0.6.0+ 后端。strict-mode 启用时，客户端 User-Agent 必须符合 `WordForge-iOS/<semver>` 格式。
 
@@ -97,7 +110,8 @@
    - 无 Breaking → 沿用现有最低版本
 3. 有新的 API 弃用公告 → 各客户端在下一个 minor 版本内迁移到新端点
 4. v1.0 GA 发布前，三方联合冒烟测试：后端 + Web + iOS 端到端流程全通
+5. v1.1：iOS 联调需先发后端 v1.1.0-rc.1（资源包端点 + manifest + SSE 事件就绪）
 
 ---
 
-_本页最后更新：2026-05-21_
+_本页最后更新：2026-05-22_
