@@ -397,3 +397,76 @@ async fn admin_list_returns_uploaded_packs() {
     assert!(pack_ids.contains(&"wordbook-core"));
     assert!(pack_ids.contains(&"homepage-banners"));
 }
+
+/// v1.1-P2.10：upload / set_active / deactivate 三个 admin 资源包 handler 都应写
+/// admin audit。通过 /api/admin/updates/history 反查，验证 action / targetType /
+/// targetId / metadata 都已落库。
+#[tokio::test]
+async fn admin_resource_pack_handlers_write_audit_log() {
+    let app = spawn_test_server().await;
+    let admin = setup_admin_and_get_token(&app.app).await;
+
+    // upload → set_active → deactivate
+    upload_pack_payload(
+        &app.app, &admin, "wordbook-core", "1.2.3", "stable", SAMPLE_PAYLOAD, None,
+    )
+    .await;
+    let _ = request(
+        &app.app,
+        Method::PUT,
+        "/api/admin/resource-packs/wordbook-core/channel/stable/active",
+        Some(serde_json::json!({ "version": "1.2.3" })),
+        &[("authorization", auth_header(&admin))],
+    )
+    .await;
+    let _ = request(
+        &app.app,
+        Method::DELETE,
+        "/api/admin/resource-packs/wordbook-core/versions/1.2.3",
+        None,
+        &[("authorization", auth_header(&admin))],
+    )
+    .await;
+
+    // 反查 history
+    let resp = request(
+        &app.app,
+        Method::GET,
+        "/api/admin/updates/history",
+        None,
+        &[("authorization", auth_header(&admin))],
+    )
+    .await;
+    let (status, _, body) = response_json(resp).await;
+    assert_eq!(status, StatusCode::OK);
+    let entries = body["data"]["entries"].as_array().expect("entries");
+    let pack_entries: Vec<&serde_json::Value> = entries
+        .iter()
+        .filter(|e| e["targetType"] == "resource_pack")
+        .collect();
+    let actions: Vec<&str> = pack_entries
+        .iter()
+        .filter_map(|e| e["action"].as_str())
+        .collect();
+    assert!(
+        actions.contains(&"resource_pack.upload"),
+        "缺 upload audit：{actions:?}"
+    );
+    assert!(
+        actions.contains(&"resource_pack.set_active"),
+        "缺 set_active audit：{actions:?}"
+    );
+    assert!(
+        actions.contains(&"resource_pack.deactivate"),
+        "缺 deactivate audit：{actions:?}"
+    );
+
+    // 任意 resource_pack 条目都应 targetId=wordbook-core / outcome=success
+    for e in &pack_entries {
+        assert_eq!(e["targetId"], "wordbook-core");
+        assert_eq!(e["outcome"], "success");
+        // metadata 序列化为字符串列，应能反解出原 JSON
+        let m = e["metadataJson"].as_str().expect("metadataJson 字符串");
+        let _: serde_json::Value = serde_json::from_str(m).expect("metadata 必须合法 JSON");
+    }
+}

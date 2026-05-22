@@ -104,7 +104,7 @@ async fn list_packs(
 /// `POST /api/admin/resource-packs/:pack_id/versions?version=&channel=&minAppVersion=`
 /// raw body 是 payload bytes（Content-Type 不限，但建议 application/json）。
 async fn upload_version(
-    _admin: AdminAuthUser,
+    admin: AdminAuthUser,
     Path(pack_id): Path<String>,
     Query(q): Query<UploadQuery>,
     State(state): State<AppState>,
@@ -182,6 +182,21 @@ async fn upload_version(
         })
         .await??;
 
+    // v1.1-P2.10：写 admin 审计（资源包上传），失败不影响主流程
+    write_admin_audit(
+        &state,
+        &admin.admin_id,
+        "resource_pack.upload",
+        &pack_id,
+        serde_json::json!({
+            "version": q.version,
+            "channel": channel.as_str(),
+            "sha256": sha256_hex,
+            "sizeBytes": size_bytes,
+            "minAppVersion": q.min_app_version,
+        }),
+    );
+
     tracing::info!(
         pack_id = %pack_id,
         version = %q.version,
@@ -203,7 +218,7 @@ async fn upload_version(
 
 /// `PUT /api/admin/resource-packs/:pack_id/channel/:channel/active` — 切激活并广播 SSE。
 async fn set_active(
-    _admin: AdminAuthUser,
+    admin: AdminAuthUser,
     Path((pack_id, channel_str)): Path<(String, String)>,
     State(state): State<AppState>,
     JsonBody(body): JsonBody<SetActiveBody>,
@@ -219,6 +234,18 @@ async fn set_active(
             store.set_active_pack_version(&pack_id_for_db, channel, &version_for_db, None)
         })
         .await??;
+
+    // v1.1-P2.10：切激活审计
+    write_admin_audit(
+        &state,
+        &admin.admin_id,
+        "resource_pack.set_active",
+        &pack_id,
+        serde_json::json!({
+            "channel": channel.as_str(),
+            "version": body.version,
+        }),
+    );
 
     // SSE 广播，5 分钟内 dedup（同 pack × channel 不重复推送）
     if state.try_mark_pack_broadcast(&pack_id, channel.as_str()) {
@@ -252,7 +279,7 @@ async fn set_active(
 /// `DELETE /api/admin/resource-packs/:pack_id/versions/:version` — 软删除（manifest 摘除）。
 /// 物理文件保留 30 天供回滚，由 GC worker 删盘（暂未实现，P2 范围）。
 async fn deactivate_version(
-    _admin: AdminAuthUser,
+    admin: AdminAuthUser,
     Path((pack_id, version)): Path<(String, String)>,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
@@ -265,6 +292,16 @@ async fn deactivate_version(
             store.deactivate_pack_version(&pack_id_for_db, &version_for_db)
         })
         .await??;
+
+    // v1.1-P2.10：软删除（下架）审计
+    write_admin_audit(
+        &state,
+        &admin.admin_id,
+        "resource_pack.deactivate",
+        &pack_id,
+        serde_json::json!({ "version": version }),
+    );
+
     Ok(ok(serde_json::json!({
         "packId": pack_id,
         "version": version,
@@ -300,6 +337,26 @@ async fn pack_stats(
 }
 
 // ── helpers ────────────────────────────────────────────────────────────────
+
+/// v1.1-P2.10：写一条 admin 资源包审计。与 `updates.rs::insert_update_audit` 同范式，
+/// 同步入 DB（SQLite 写入廉价），失败仅打 warn，不阻塞主响应。
+fn write_admin_audit(
+    state: &AppState,
+    admin_id: &str,
+    action: &str,
+    pack_id: &str,
+    metadata: serde_json::Value,
+) {
+    if let Err(e) = state.store().insert_admin_audit(
+        admin_id,
+        action,
+        Some("resource_pack"),
+        Some(pack_id),
+        Some(&metadata),
+    ) {
+        tracing::warn!(error=%e, action=%action, "写 admin audit 失败（不影响主流程）");
+    }
+}
 
 fn parse_channel(s: &str) -> Result<ResourcePackChannel, AppError> {
     ResourcePackChannel::from_str(s)

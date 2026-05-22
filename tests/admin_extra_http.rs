@@ -900,6 +900,105 @@ async fn it_admin_stats_and_users_endpoints() {
     assert_eq!(body["data"]["passwordReset"], true);
 }
 
+/// v1.1-P2.10：ban / unban / reset-password / set-password 四类 admin 敏感操作
+/// 都应在 update_audit_log 留下 admin audit 记录（action 显式区分）。
+/// 通过 GET /api/admin/updates/history 反查（无需启用 updater）。
+#[tokio::test]
+async fn it_admin_sensitive_actions_write_audit_log() {
+    let app = spawn_test_server().await;
+    let admin_token = setup_admin_and_get_token(&app.app).await;
+    let _user_token = login_and_get_token(&app.app).await;
+
+    // 取一个真实存在的用户 ID
+    let resp = request(
+        &app.app,
+        Method::GET,
+        "/api/admin/users?page=1&perPage=10",
+        None,
+        &[("authorization", auth_header(&admin_token))],
+    )
+    .await;
+    let (_, _, body) = response_json(resp).await;
+    let target_user_id = body["data"]["data"][0]["id"].as_str().unwrap().to_string();
+
+    // ban → unban → reset-password → set-password
+    for (method, path, payload) in [
+        (
+            Method::POST,
+            format!("/api/admin/users/{target_user_id}/ban"),
+            None,
+        ),
+        (
+            Method::POST,
+            format!("/api/admin/users/{target_user_id}/unban"),
+            None,
+        ),
+        (
+            Method::POST,
+            format!("/api/admin/users/{target_user_id}/reset-password"),
+            None,
+        ),
+        (
+            Method::POST,
+            format!("/api/admin/users/{target_user_id}/set-password"),
+            Some(serde_json::json!({ "newPassword": "Strongp4ssword!" })),
+        ),
+    ] {
+        let resp = request(
+            &app.app,
+            method,
+            &path,
+            payload,
+            &[("authorization", auth_header(&admin_token))],
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK, "{path} 应 200");
+    }
+
+    // 查 history（updater 未启用也可访问，handler 直接读 store）
+    let resp = request(
+        &app.app,
+        Method::GET,
+        "/api/admin/updates/history",
+        None,
+        &[("authorization", auth_header(&admin_token))],
+    )
+    .await;
+    let (status, _, body) = response_json(resp).await;
+    assert_eq!(status, StatusCode::OK);
+    let entries = body["data"]["entries"].as_array().expect("entries 数组");
+
+    // 期望恰好 4 条新 audit（admin 还未触发任何 self_update）
+    let admin_actions: Vec<&str> = entries
+        .iter()
+        .filter_map(|e| e["action"].as_str())
+        .filter(|a| *a != "self_update")
+        .collect();
+    assert!(
+        admin_actions.contains(&"user.ban"),
+        "缺 user.ban：{admin_actions:?}"
+    );
+    assert!(
+        admin_actions.contains(&"user.unban"),
+        "缺 user.unban：{admin_actions:?}"
+    );
+    assert!(
+        admin_actions.contains(&"user.reset_password"),
+        "缺 user.reset_password：{admin_actions:?}"
+    );
+    assert!(
+        admin_actions.contains(&"user.set_password"),
+        "缺 user.set_password：{admin_actions:?}"
+    );
+
+    // 每条 audit 都应有 targetType=user / targetId=目标 / outcome=success
+    for e in entries.iter().filter(|e| e["action"] != "self_update") {
+        assert_eq!(e["targetType"], "user");
+        assert_eq!(e["targetId"], target_user_id);
+        assert_eq!(e["outcome"], "success");
+    }
+}
+
 #[tokio::test]
 async fn it_admin_top_level_unauthorized() {
     let app = spawn_test_server().await;
