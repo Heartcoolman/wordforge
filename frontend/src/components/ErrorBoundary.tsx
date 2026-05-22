@@ -2,6 +2,7 @@ import { ErrorBoundary as SolidErrorBoundary, type ParentProps } from 'solid-js'
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { buildUrl } from '@/api/client';
+import { captureException, isSentryEnabled } from '@/lib/sentry';
 
 // 已记录过的 err 引用，避免 fallback 重渲染时重复打 console.error；
 // 用 WeakSet 让 GC 能正常回收（reset 后 err 引用断开即可清理）
@@ -9,6 +10,7 @@ const loggedErrors: WeakSet<object> = typeof WeakSet !== 'undefined' ? new WeakS
 
 function reportError(err: unknown) {
   // fire-and-forget：网络失败不影响 ErrorBoundary 渲染
+  // /api/telemetry/error 在 Sentry 启用时仍保留作为 fallback（双轨上报，便于后端日志关联）
   try {
     const body = {
       message: err instanceof Error ? err.message : String(err),
@@ -34,6 +36,14 @@ function logOnce(err: unknown) {
     loggedErrors.add(err);
   }
   console.error('[AppErrorBoundary]', err);
+  // 优先走 Sentry（结构化、聚合），DSN 缺省时退化 no-op
+  if (isSentryEnabled()) {
+    captureException(err, {
+      componentStack: err instanceof Error ? err.stack : undefined,
+      url: typeof window !== 'undefined' ? window.location.href : undefined,
+    });
+  }
+  // /api/telemetry/error 始终作 best-effort fallback 上报
   reportError(err);
 }
 
