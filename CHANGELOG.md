@@ -6,6 +6,104 @@
 
 ---
 
+## [Unreleased] — v1.1.0-rc.3（最终验证 + clippy 清零）
+
+rc.2 的功能/重构/文档全部落地后，本 RC 收口：
+
+### 质量
+
+- ✅ **cargo clippy --all-targets -- -D warnings 零警告零错误**：56 条历史警告
+  按「真问题修复 / 习语局部豁免 + 注释」两条线清零（P2.1）
+    - **真修复**：`tests/llm_cost_ledger.rs` 3.14 → 1.23（误中 approx_constant PI 阈值）；
+      `tests/admin_analytics_seeded_http.rs:327` 多余 `&` borrow 去除；
+    - **局部豁免（带理由注释）**：
+      `src/amas/engine.rs` / `src/amas/memory/ssp.rs` / `src/amas/monitoring.rs` /
+      `src/store/operations/elo.rs` / `src/store/operations/system_settings.rs` /
+      `tests/amas_param_sweep.rs` / `tests/property_memory_models.rs`
+      各自 `mod tests` 或 crate-level `#[allow(clippy::field_reassign_with_default)]`
+      —— 测试用 `let mut cfg = X::default(); cfg.field = v` 比 struct-update 语法
+      更易看清「这条 case 改了什么」，是公认习语；
+      `src/workers/error_rate_watchdog.rs:tests` 串行化全局静态用 std::sync::Mutex
+      跨 await，#[tokio::test] 单线程不死锁，`#[allow(clippy::await_holding_lock)]`；
+      `src/store/operations/resource_packs.rs::ResourcePackChannel::from_str`
+      故意返回 `Option<Self>` 而非 `Result<Self,Err>`，标 `#[allow(clippy::should_implement_trait)]`；
+      `src/store/operations/amas_telemetry.rs::tests::insert_event` 8 参数 helper
+      `#[allow(clippy::too_many_arguments)]`。
+- ✅ **cargo test 全过**：lib 641 + 集成 921 = **1562 passed / 0 failed**（6 ignored）
+
+### v1.1.0 全 RC 汇总（P0 + P1 + P2 = 22 commit）
+
+| 阶段 | 范围 | commit 数 | 状态 |
+|---|---|---|---|
+| **P0** | 资源包热更后端（rc.1 落地） | 12 | ✅ |
+| **P1** | 领域事件总线基础设施（rc.2） | 1 | ✅ |
+| **P2** | 重构/性能/文档/收尾（rc.2 + rc.3） | 9 | ✅ |
+
+### Release Notes（面向用户）
+
+v1.1.0 GA 给 iOS / Web 客户端的核心交付：
+- **资源包热更**：词书内容更新无需发版（详见 rc.1 段）
+- **事件总线**：records → AMAS 通过领域事件解耦，未来扩展更解耦（开发者体验）
+- **运维就绪**：维护模式 UI 开关 + nginx 反向代理样例 + TLS runbook + Sentry 错误监控
+- **稳定性**：rate_limit 双轨防恶意匿名爬取、SSE 上限提升 5× 适配大客户、21 条迁移可逆便于 dev 重置
+- **质量门**：clippy --deny 零警告 + 1562 测试 100% 通过
+
+---
+
+## [Unreleased] — v1.1.0-rc.2（事件总线 + 重构 + 文档）
+
+rc.1（资源包热更）落地后，本 RC 交付 P1 + P2 主体工作：
+
+### 新功能（事件总线）
+
+- 🚀 **领域事件总线**（P1-S2，commit 568f294）：records 写入旁路 emit `DomainEvent::LearningRecorded` →
+  AMAS engine 异步消费，事件总线（`src/services/event_bus.rs`）单向广播 + per-receiver
+  缓冲，避免 records→AMAS 紧耦合直接调用。新增 `tests/event_bus.rs` 单测覆盖 emit/recv
+  与背压 drop 行为。
+
+### 改进（rate_limit）
+
+- 🛡️ **rate_limit 双轨**（P2.3，commit fb9f5c1）：匿名按 IP 限流，已登录按 `user_id` 限流。
+  防止单个恶意未登录扫描器拖累全站，同时已登录用户在多设备/移动网络下不再被 IP 误伤。
+  `RateLimitConfig` 加 `anonymous_max_requests` / `authenticated_max_requests` 两挡。
+- ⚡ **SSE 上限放宽**（P2.4，commit 53c4294）：每用户最多 1000 → **5000** 路活跃连接，
+  心跳 15s → **10s**。给同时挂 10 端的「大用户」预留余量。
+
+### 改进（迁移 / 拆分 / 审计）
+
+- 🔧 **21 条 migration down 设计**（P2.2，commit 4d342c3）：m001–m021 全部配套 down 函数 +
+  `revert_to(target_version)` 接口，**生产严禁调用**（注释明示），仅供 dev / test 重置脏
+  schema。`tests/migrate_down.rs` 集成测试验证 up → down → up 循环幂等。
+- 🔧 **store/operations/extras.rs 按职责拆 3 块**（P2.5，commit 3cce60b）：937 行单文件
+  拆为 `user_profile_extras.rs` / `word_metadata_extras.rs` + 保留少量 extras 杂项。
+  `mod.rs` 同步导出，外部 API 兼容。
+- 🛡️ **`update_audit_log` 通用化**（P2.10，commit e37cb69）：迁移 021 给表加
+  `action / target_type / target_id / metadata_json` 4 列。覆盖 7 处 admin 敏感
+  handler：资源包 upload/set_active/deactivate + 用户 ban/unban/reset_password/set_password。
+  老 self_update 写入路径完全兼容，新写入通过 `Store::insert_admin_audit()` 通用入口。
+  `GET /api/admin/updates/history` 返回 entry 新增 4 个 camelCase 字段。
+
+### 数据库迁移
+
+- `021_admin_audit_log_v2`：ALTER TABLE 加 4 列（含 `action TEXT NOT NULL DEFAULT 'self_update'`），
+  老行回填默认值，向后兼容
+
+### 文档（运维 / 监控）
+
+- 📚 **release-calendar.md 补 v1.0 GA + v1.1 计划**（P2.7，commit 5b82688）
+- 📚 **nginx sample.conf + TLS runbook**（P2.8，commit 3fb7460）：反向代理样例 + Let's Encrypt
+- 📚 **维护模式运维 SOP runbook**（P2.9，commit 666ac5e）
+- 🛡️ **前端 ErrorBoundary 接 Sentry SDK**（P2.6，commit 3817047）
+
+### 测试
+
+- 新增 `tests/event_bus.rs` 单元测试覆盖事件总线 emit/recv/背压
+- 新增 `tests/migrate_down.rs` 集成测试覆盖 up→down→up 循环
+- `tests/admin_extra_http.rs` 加 `it_admin_sensitive_actions_write_audit_log`
+- `tests/resource_pack_http.rs` 加 `admin_resource_pack_handlers_write_audit_log`
+
+---
+
 ## [Unreleased] — v1.1.0-rc.1（资源包热更后端）
 
 iOS v1.1 客户端 POC 已落地（`/Users/liji/WordForge-App` @ `b1e1a41`），本 RC 交付后端配套，
