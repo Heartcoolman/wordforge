@@ -26,6 +26,7 @@ fn migrations() -> Vec<(&'static str, MigrationFn)> {
         ("017_update_audit_log", m017_update_audit_log),
         ("018_feedback_priority_status", m018_feedback_priority_status),
         ("019_worker_last_run", m019_worker_last_run),
+        ("020_resource_packs", m020_resource_packs),
     ]
 }
 
@@ -501,6 +502,58 @@ fn m019_worker_last_run(store: &Store) -> Result<(), StoreError> {
             last_error       TEXT,
             last_outcome     TEXT NOT NULL CHECK (last_outcome IN ('success','failure','skipped'))
         );",
+    )?;
+    Ok(())
+}
+
+/// v1.1-P0.1：资源包热更四表 —— 元数据、版本、各 channel 激活指针、安装日志。
+/// 字段约束对齐 `docs/backend-handoff-resource-pack-v1.1.md` §2 契约。
+/// 时间戳沿用 `update_audit_log` 的 TEXT (ISO 8601) 风格。down 由 v1.1-P2.2 统一补。
+fn m020_resource_packs(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS resource_packs (
+            pack_id      TEXT NOT NULL PRIMARY KEY,
+            description  TEXT,
+            created_at   TEXT NOT NULL,
+            updated_at   TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS resource_pack_versions (
+            pack_id         TEXT NOT NULL REFERENCES resource_packs(pack_id) ON DELETE CASCADE,
+            version         TEXT NOT NULL,
+            sha256          TEXT NOT NULL,
+            signature       TEXT,
+            signature_alg   TEXT NOT NULL DEFAULT 'ed25519',
+            size_bytes      INTEGER NOT NULL,
+            min_app_version TEXT,
+            channel         TEXT NOT NULL CHECK (channel IN ('stable','beta','internal')),
+            payload_path    TEXT NOT NULL,
+            published_at    TEXT NOT NULL,
+            deactivated_at  TEXT,
+            PRIMARY KEY (pack_id, version)
+        );
+        CREATE INDEX IF NOT EXISTS idx_rpv_channel_pubat
+            ON resource_pack_versions(pack_id, channel, published_at DESC);
+        CREATE TABLE IF NOT EXISTS resource_pack_active (
+            pack_id        TEXT NOT NULL,
+            channel        TEXT NOT NULL CHECK (channel IN ('stable','beta','internal')),
+            version        TEXT NOT NULL,
+            activated_at   TEXT NOT NULL,
+            activated_by   TEXT,
+            PRIMARY KEY (pack_id, channel),
+            FOREIGN KEY (pack_id, version) REFERENCES resource_pack_versions(pack_id, version)
+        );
+        CREATE TABLE IF NOT EXISTS resource_pack_install_log (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            pack_id       TEXT NOT NULL,
+            version       TEXT NOT NULL,
+            client_id     TEXT,
+            app_version   TEXT,
+            installed_at  TEXT NOT NULL,
+            outcome       TEXT NOT NULL CHECK (outcome IN ('installed','verify_failed','rollback'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_rpil_pack_ver
+            ON resource_pack_install_log(pack_id, version, installed_at DESC);",
     )?;
     Ok(())
 }
