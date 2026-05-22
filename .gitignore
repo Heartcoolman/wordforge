@@ -22,6 +22,10 @@ frontend/dist
 static/assets/
 static/index.html
 
+# v1.1 资源包 admin 上传产物 / 集成测试残留（保留目录骨架，忽略子内容）
+static/packs/*
+!static/packs/.gitkeep
+
 # OS
 .DS_Store
 *Zone.Identifier
