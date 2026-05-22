@@ -3,6 +3,9 @@
 //! 对关键参数进行网格搜索，找出最优组合
 //! 运行: cargo test --test amas_param_sweep --release -- --nocapture
 
+// 大量 `let mut cfg = X::default(); cfg.field = v` 风格易读，整 crate 豁免。
+#![allow(clippy::field_reassign_with_default)]
+
 use learning_backend::amas::config::MemoryModelConfig;
 use learning_backend::amas::memory::mdm::{
     composite_strength, compute_interval, recall_probability, update_strength, MdmState,

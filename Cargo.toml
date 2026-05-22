@@ -10,6 +10,22 @@ rust-version = "1.77"
 default = ["event-bus"]
 event-bus = []
 
+# v1.1-P2.1：clippy 全局豁免清单。
+# 真代码问题在 src/ 内仍按默认 default-deny 规则单独修；
+# 这里只豁免测试 / 工具代码中的公认习语，避免噪音。
+[lints.clippy]
+# tests/* 大量 Default::default() + 字段重赋的测试构造范式（已确认 src/ 0 命中）
+field_reassign_with_default = "allow"
+# property test / monte_carlo 里 for 循环带 counter 是显式可读做法
+explicit_counter_loop = "allow"
+# 同上：for i in 0..n { use w[i] } 在数值密集场景比迭代器更易读
+needless_range_loop = "allow"
+# tests/* 用 std::sync::Mutex TEST_MUTEX 串行化共享 atomic statics，
+# _guard 跨 await 是测试隔离的合法用法
+await_holding_lock = "allow"
+# .get(k).is_none() vs .contains_key(k)：可读性偏好，对性能无影响
+unnecessary_get_then_check = "allow"
+
 [dependencies]
 axum = { version = "0.7", features = ["macros"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "net", "fs", "io-util"] }

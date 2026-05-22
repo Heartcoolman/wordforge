@@ -36,6 +36,9 @@ impl ResourcePackChannel {
         }
     }
 
+    // 故意不实现 std::str::FromStr：返回 Option 而非 Result<Self, Err>，调用方
+    // 用 .ok_or_else 拼自己的 AppError 更直接。
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "stable" => Some(Self::Stable),

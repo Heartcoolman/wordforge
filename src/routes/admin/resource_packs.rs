@@ -15,6 +15,7 @@
 //!   3. 计算 SHA256（sha2 crate）
 //!   4. 用 ResourcePackSigner 签 payload，得到 base64 64B
 //!   5. 落 resource_pack_versions 表
+//!
 //! 切激活时调 state.broadcast_to_all_sse + 5min dedup（state.try_mark_pack_broadcast）。
 
 use axum::extract::{DefaultBodyLimit, Path, Query, State};

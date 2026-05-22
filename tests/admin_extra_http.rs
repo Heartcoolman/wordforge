@@ -765,7 +765,7 @@ async fn it_admin_stats_and_users_endpoints() {
     .await;
     let (status, _, body) = response_json(resp).await;
     assert_eq!(status, StatusCode::OK);
-    assert!(body["data"]["data"].as_array().unwrap().len() >= 1);
+    assert!(!body["data"]["data"].as_array().unwrap().is_empty());
     let target_user_id = body["data"]["data"][0]["id"].as_str().unwrap().to_string();
 
     // list users with search

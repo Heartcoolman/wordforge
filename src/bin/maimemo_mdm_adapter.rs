@@ -11,11 +11,9 @@ fn main() {
             eprintln!("{err}");
             std::process::exit(1);
         }
-    } else {
-        if let Err(err) = run_server() {
-            eprintln!("{err}");
-            std::process::exit(1);
-        }
+    } else if let Err(err) = run_server() {
+        eprintln!("{err}");
+        std::process::exit(1);
     }
 }
 

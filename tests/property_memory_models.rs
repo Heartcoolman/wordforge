@@ -1,3 +1,6 @@
+// property test 大量 `let mut cfg = X::default(); cfg.field = v` 风格易读，整 crate 豁免。
+#![allow(clippy::field_reassign_with_default)]
+
 use proptest::prelude::*;
 
 use learning_backend::amas::config::MemoryModelConfig;

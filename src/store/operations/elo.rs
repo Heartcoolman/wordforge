@@ -137,6 +137,8 @@ impl Store {
 }
 
 #[cfg(test)]
+// 测试用 `let mut cfg = X::default(); cfg.field = v` 易读，本 mod 豁免 field_reassign。
+#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use crate::amas::config::MemoryModelConfig;
     use crate::amas::elo::EloRating;

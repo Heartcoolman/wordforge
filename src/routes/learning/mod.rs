@@ -3,12 +3,12 @@ pub mod progress;
 pub mod session;
 pub mod study;
 
-pub(self) const SYNC_PROGRESS_EVENTS_LIMIT: usize = 100;
-pub(self) const COMPLETE_SESSION_EVENTS_LIMIT: usize = 200;
-pub(self) const EVENT_RESPONSE_TIME_MAX_MS: i64 = 300_000;
-pub(self) const EVENT_CLIENT_TS_BACKFILL_LIMIT_MIN: i64 = 30;
-pub(self) const EVENT_CLIENT_TS_FUTURE_TOLERANCE_MIN: i64 = 1;
-pub(self) const EVENT_CLIENT_EVENT_ID_MAX_LEN: usize = 128;
+ const SYNC_PROGRESS_EVENTS_LIMIT: usize = 100;
+ const COMPLETE_SESSION_EVENTS_LIMIT: usize = 200;
+ const EVENT_RESPONSE_TIME_MAX_MS: i64 = 300_000;
+ const EVENT_CLIENT_TS_BACKFILL_LIMIT_MIN: i64 = 30;
+ const EVENT_CLIENT_TS_FUTURE_TOLERANCE_MIN: i64 = 1;
+ const EVENT_CLIENT_EVENT_ID_MAX_LEN: usize = 128;
 
 use axum::routing::{get, post};
 use axum::Router;

@@ -54,9 +54,10 @@ mod tests {
     #[test]
     fn add_and_get_roundtrip() {
         let s = store();
-        s.add_llm_cost("2026-05", 3.14).unwrap();
+        // 注：金额值故意避开 3.14 / 3.141 等近似 PI，避免 clippy approx_constant
+        s.add_llm_cost("2026-05", 1.23).unwrap();
         let got = s.get_llm_cost_this_month("2026-05").unwrap();
-        assert!((got - 3.14).abs() < 1e-6);
+        assert!((got - 1.23).abs() < 1e-6);
     }
 
     #[test]

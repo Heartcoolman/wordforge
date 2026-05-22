@@ -176,8 +176,7 @@ async fn it_gdpr_export_rate_limited_on_second_call() {
         .headers()
         .get("retry-after")
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.parse::<i64>().ok())
-        .flatten();
+        .and_then(|s| s.parse::<i64>().ok());
     assert_eq!(status2, StatusCode::TOO_MANY_REQUESTS, "second export should be rate limited");
     assert!(
         retry_after.map(|s| s > 0).unwrap_or(false),

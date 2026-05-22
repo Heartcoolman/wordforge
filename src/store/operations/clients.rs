@@ -334,7 +334,7 @@ mod tests {
         }
 
         let s = store
-            .get_data_upload_status(&[user_id.clone()], &["dev-1".to_string()])
+            .get_data_upload_status(std::slice::from_ref(&user_id), &["dev-1".to_string()])
             .unwrap();
         assert_eq!(s.amas_by_user.get(&user_id).copied(), Some("uploaded"));
         assert_eq!(s.learning_by_user.get(&user_id).copied(), Some("uploaded"));
@@ -358,7 +358,7 @@ mod tests {
             .unwrap();
         }
         let s = store
-            .get_data_upload_status(&[user_id.clone()], &[])
+            .get_data_upload_status(std::slice::from_ref(&user_id), &[])
             .unwrap();
         assert_eq!(s.amas_by_user.get(&user_id).copied(), Some("nil"));
         // 没有 learning_records 时 key 不出现

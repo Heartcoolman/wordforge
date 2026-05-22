@@ -379,6 +379,8 @@ fn stability_to_raw_index(stability: f64, base: f64, min_index: i32) -> usize {
 }
 
 #[cfg(test)]
+// 测试用 `let mut cfg = X::default(); cfg.field = v` 易读，本 mod 豁免 field_reassign。
+#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
     use crate::amas::config::{MemoryModelConfig, SspConfig};
