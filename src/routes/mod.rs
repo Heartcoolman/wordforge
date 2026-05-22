@@ -10,6 +10,7 @@ pub mod notifications;
 pub mod probe_results;
 pub mod realtime;
 pub mod records;
+pub mod resource_packs;
 pub mod status;
 pub mod study_config;
 pub mod telemetry;
@@ -94,6 +95,7 @@ pub fn build_router(state: AppState) -> Router {
         .nest("/feedback", feedback::router())
         .nest("/word-favorites", word_favorites::router())
         .nest("/word-notes", word_notes::router())
+        .nest("/resource-packs", resource_packs::router())
         .nest("/wordbook-center", wordbook_center::user_router())
         .nest("/probe", probe_results::router())
         .layer(axum::middleware::from_fn_with_state(

@@ -178,6 +178,12 @@ pub struct AppState {
     /// v0.5.2 apply 后台 task 状态；sink 同步写、HTTP 同步读，故用 std::sync::Mutex
     apply_task: Arc<std::sync::Mutex<Option<ApplyTaskStatus>>>,
     probe_service: Arc<crate::services::probe::ProbeService>,
+    /// v1.1-P0.6：资源包 Ed25519 签名器。启动后由 main.rs 注入；
+    /// 失败时为 None，相关端点返回 503 SERVICE_UNAVAILABLE。
+    resource_pack_signer:
+        Arc<RwLock<Option<Arc<crate::services::resource_pack_signing::ResourcePackSigner>>>>,
+    /// v1.1-P0.7：同 pack 5 分钟 SSE dedup，键 = (packId, channel.as_str()).
+    recently_broadcasted_packs: Arc<DashMap<(String, String), Instant>>,
 }
 
 pub struct RuntimeConfig {
@@ -224,7 +230,41 @@ impl AppState {
             updater: Arc::new(RwLock::new(None)),
             apply_task: Arc::new(std::sync::Mutex::new(None)),
             probe_service: Arc::new(crate::services::probe::ProbeService::new()),
+            resource_pack_signer: Arc::new(RwLock::new(None)),
+            recently_broadcasted_packs: Arc::new(DashMap::new()),
         }
+    }
+
+    /// v1.1-P0.6：启动期注入资源包签名器。失败由 main.rs 处理（功能降级，端点返 503）。
+    pub fn set_resource_pack_signer(
+        &self,
+        signer: Arc<crate::services::resource_pack_signing::ResourcePackSigner>,
+    ) {
+        if let Ok(mut slot) = self.resource_pack_signer.try_write() {
+            *slot = Some(signer);
+        }
+    }
+
+    /// 读取资源包签名器；未初始化返回 None。沿用 updater() 的 async 范式。
+    pub async fn resource_pack_signer(
+        &self,
+    ) -> Option<Arc<crate::services::resource_pack_signing::ResourcePackSigner>> {
+        self.resource_pack_signer.read().await.clone()
+    }
+
+    /// v1.1-P0.7：检查同 pack×channel 是否在 5 分钟内已广播过；
+    /// 若否，记录时间戳并返回 true（允许广播），否则返回 false。
+    pub fn try_mark_pack_broadcast(&self, pack_id: &str, channel: &str) -> bool {
+        const DEDUP_WINDOW_SECS: u64 = 300;
+        let key = (pack_id.to_string(), channel.to_string());
+        let now = Instant::now();
+        if let Some(prev) = self.recently_broadcasted_packs.get(&key) {
+            if now.duration_since(*prev).as_secs() < DEDUP_WINDOW_SECS {
+                return false;
+            }
+        }
+        self.recently_broadcasted_packs.insert(key, now);
+        true
     }
 
     pub fn probe_service(&self) -> &crate::services::probe::ProbeService {

@@ -98,6 +98,25 @@ async fn main() {
         initial_maintenance,
     );
 
+    // v1.1-P0.6：资源包 Ed25519 签名器（与 db 同目录的 keys/）
+    {
+        let key_dir = std::path::Path::new(&config.database_url)
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join("keys");
+        match learning_backend::services::resource_pack_signing::ResourcePackSigner::load_or_generate(
+            &key_dir,
+        ) {
+            Ok(signer) => {
+                tracing::info!(dir = ?key_dir, pubkey = signer.public_key_base64(), "资源包签名器就绪");
+                state.set_resource_pack_signer(std::sync::Arc::new(signer));
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, dir = ?key_dir, "资源包签名器初始化失败，相关端点将返 503");
+            }
+        }
+    }
+
     // 自更新服务（含缓存 + ETag），不打 GitHub，纯本地构造
     let updater = match learning_backend::services::updater::Updater::new(
         &config.update_check,
