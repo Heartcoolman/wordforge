@@ -161,7 +161,9 @@ async fn static_cache_headers(req: Request<axum::body::Body>, next: Next) -> Res
 
     let cache_value = if is_html {
         "no-cache, must-revalidate"
-    } else if path.starts_with("/assets/") {
+    } else if path.starts_with("/assets/") || path.starts_with("/packs/") {
+        // v1.1-P0.5：资源包 payload 走版本号路径 /packs/<pack>/<ver>/payload.json，
+        // 与 /assets/* 同策略：版本号即不可变标识，可永久缓存。
         "public, max-age=31536000, immutable"
     } else {
         "public, max-age=3600"
