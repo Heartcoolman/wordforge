@@ -141,7 +141,32 @@ impl Default for SelfWatchdogConfig {
 #[derive(Debug, Clone)]
 pub struct RateLimitConfig {
     pub window_secs: u64,
+    /// v1.0 保留：作为 anonymous / authenticated 未单独配置时的 fallback 兜底。
     pub max_requests: u64,
+    /// v1.1-P2.3：匿名（按 IP）窗口配额；为 0 表示落回 `max_requests`。
+    pub anonymous_max_requests: u64,
+    /// v1.1-P2.3：已登录（按 user_id）窗口配额；为 0 表示落回 `max_requests`。
+    pub authenticated_max_requests: u64,
+}
+
+impl RateLimitConfig {
+    /// 真实匿名配额：anonymous_max_requests > 0 优先，否则用旧 max_requests 兜底。
+    pub fn anonymous_max_requests(&self) -> u64 {
+        if self.anonymous_max_requests > 0 {
+            self.anonymous_max_requests
+        } else {
+            self.max_requests
+        }
+    }
+
+    /// 真实已登录配额：authenticated_max_requests > 0 优先，否则用旧 max_requests 兜底。
+    pub fn authenticated_max_requests(&self) -> u64 {
+        if self.authenticated_max_requests > 0 {
+            self.authenticated_max_requests
+        } else {
+            self.max_requests
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -320,6 +345,12 @@ impl Config {
             rate_limit: RateLimitConfig {
                 window_secs: env_or_parse("RATE_LIMIT_WINDOW_SECS", 900_u64),
                 max_requests: env_or_parse("RATE_LIMIT_MAX", 500_u64),
+                // v1.1-P2.3：匿名 60 / window，已登录 600 / window（差异化默认值）。
+                anonymous_max_requests: env_or_parse("RATE_LIMIT_ANONYMOUS_MAX", 60_u64),
+                authenticated_max_requests: env_or_parse(
+                    "RATE_LIMIT_AUTHENTICATED_MAX",
+                    600_u64,
+                ),
             },
             auth_rate_limit: AuthRateLimitConfig {
                 window_secs: env_or_parse("AUTH_RATE_LIMIT_WINDOW_SECS", 60_u64),
@@ -819,6 +850,8 @@ mod tests {
             rate_limit: RateLimitConfig {
                 window_secs: 60,
                 max_requests: 100,
+                anonymous_max_requests: 0,
+                authenticated_max_requests: 0,
             },
             auth_rate_limit: AuthRateLimitConfig::default(),
             worker: WorkerConfig {
