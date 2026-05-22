@@ -14,6 +14,7 @@ pub mod llm_cost_ledger;
 pub mod notifications;
 pub mod probe;
 pub mod records;
+pub mod resource_packs;
 pub mod sessions;
 pub mod study_configs;
 pub mod system_settings;
