@@ -29,15 +29,16 @@ rc.2 的功能/重构/文档全部落地后，本 RC 收口：
       故意返回 `Option<Self>` 而非 `Result<Self,Err>`，标 `#[allow(clippy::should_implement_trait)]`；
       `src/store/operations/amas_telemetry.rs::tests::insert_event` 8 参数 helper
       `#[allow(clippy::too_many_arguments)]`。
-- ✅ **cargo test 全过**：lib 641 + 集成 921 = **1562 passed / 0 failed**（6 ignored）
+- ✅ **cargo test 全过**：lib 641 + 各集成测试 binary 累计 **921 passed / 0 failed**
+  （lib 单测 641 + tests/* 各 binary 合计 280；cargo test 按 binary 分组报，去重后总数 921）
 
-### v1.1.0 全 RC 汇总（P0 + P1 + P2 = 22 commit）
+### v1.1.0 全 RC 汇总（P0 + P1 + P2 = 25 commit）
 
 | 阶段 | 范围 | commit 数 | 状态 |
 |---|---|---|---|
 | **P0** | 资源包热更后端（rc.1 落地） | 12 | ✅ |
 | **P1** | 领域事件总线基础设施（rc.2） | 1 | ✅ |
-| **P2** | 重构/性能/文档/收尾（rc.2 + rc.3） | 9 | ✅ |
+| **P2** | 重构/性能/文档/收尾（rc.2 + rc.3，含 P2.1 clippy 清零） | 12 | ✅ |
 
 ### Release Notes（面向用户）
 
