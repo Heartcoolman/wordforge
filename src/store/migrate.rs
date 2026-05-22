@@ -1,3 +1,29 @@
+//! 数据库迁移注册表与执行器。
+//!
+//! ## up：单调向前
+//! 生产路径只用 [`run`]：根据 `schema_version` 表的当前版本，从 m001 依次向前执行
+//! 未跑过的迁移。每个 up 必须幂等（脚本使用 `IF NOT EXISTS` / `PRAGMA table_info`
+//! 探测）。
+//!
+//! ## down：仅用于本地 dev 重置与测试
+//! 每个 up 配套一个对应的 down 函数（注册在 [`migrations_down`]），通过 [`revert_to`]
+//! 可把 schema 从当前版本回退到目标版本。**严禁**在 production 自动调用；仅限：
+//!   - 本地开发时清理脏 schema 以重新跑迁移；
+//!   - 集成测试验证迁移的可逆性（up → down → up 循环）。
+//!
+//! 设计约束：
+//! - `m001_initial` 的实体 DDL 由 [`crate::store::Store::open`] 中的 `init_schema()`
+//!   在全新 DB 上一次性跑掉，m001 本身仅作 marker；其 down 也必须是 no-op：核心表
+//!   （users / learning_records 等）由 schema.rs 拥有，不在迁移回退范围内。
+//!   `revert_to(0)` 仅把 m002~mXXX 的副作用全部回退，保留 schema.rs 建的基线 schema
+//!   与 `schema_version` 表本身（让下一次 [`run`] 走增量路径而非全量 DDL 路径）。
+//! - SQLite `ALTER TABLE DROP COLUMN` 要求列未被 CHECK 表达式 / partial index /
+//!   generated 列引用；被引用时须先 `DROP INDEX`。下方 m005/m008 的 down 顺序已
+//!   显式处理 `learning_records.record_type` 相关索引；`revert_to` 倒序执行，
+//!   保证依赖列的索引先于列本身被丢弃。
+//! - 若某 up 引入了 `NOT NULL` 列且承载了用户数据，DROP COLUMN 会丢失数据，down 仅
+//!   适合 dev/test。生产不可用 down，因此可接受这种数据损失。
+
 use crate::store::{Store, StoreError};
 
 type MigrationFn = fn(&Store) -> Result<(), StoreError>;
@@ -27,6 +53,44 @@ fn migrations() -> Vec<(&'static str, MigrationFn)> {
         ("018_feedback_priority_status", m018_feedback_priority_status),
         ("019_worker_last_run", m019_worker_last_run),
         ("020_resource_packs", m020_resource_packs),
+        ("021_admin_audit_log_v2", m021_admin_audit_log_v2),
+    ]
+}
+
+/// down 注册表：索引 i 对应 [`migrations`]()[i] 的 inverse。
+/// [`revert_to`] 倒序消费此表。
+fn migrations_down() -> Vec<(&'static str, MigrationFn)> {
+    vec![
+        ("001_initial_sqlite", m001_initial_down),
+        ("002_client_management", m002_client_management_down),
+        ("003_telemetry_enhanced", m003_telemetry_enhanced_down),
+        ("004_user_data_interfaces", m004_user_data_interfaces_down),
+        ("005_learning_record_type", m005_learning_record_type_down),
+        ("006_session_shown_words", m006_session_shown_words_down),
+        ("007_session_perf_indexes", m007_session_perf_indexes_down),
+        ("008_admin_analytics_indexes", m008_admin_analytics_indexes_down),
+        ("009_amas_versioning", m009_amas_versioning_down),
+        ("010_amas_suggestions", m010_amas_suggestions_down),
+        (
+            "011_amas_auto_apply_settings",
+            m011_amas_auto_apply_settings_down,
+        ),
+        ("012_feedback_items", m012_feedback_items_down),
+        (
+            "013_learning_record_self_rating",
+            m013_learning_record_self_rating_down,
+        ),
+        ("014_probe_executions", m014_probe_executions_down),
+        ("015_gdpr_export_rate_limit", m015_gdpr_export_rate_limit_down),
+        ("016_llm_cost_ledger", m016_llm_cost_ledger_down),
+        ("017_update_audit_log", m017_update_audit_log_down),
+        (
+            "018_feedback_priority_status",
+            m018_feedback_priority_status_down,
+        ),
+        ("019_worker_last_run", m019_worker_last_run_down),
+        ("020_resource_packs", m020_resource_packs_down),
+        ("021_admin_audit_log_v2", m021_admin_audit_log_v2_down),
     ]
 }
 
@@ -67,6 +131,11 @@ pub fn set_version(store: &Store, version: u32) -> Result<(), StoreError> {
             message: format!("Refuse to downgrade from {} to {}", current, version),
         });
     }
+    write_version(store, version)
+}
+
+/// 不做"禁止降级"校验的版本写入，供 [`revert_to`] 内部使用。
+fn write_version(store: &Store, version: u32) -> Result<(), StoreError> {
     let conn = store.conn()?;
     conn.execute(
         "INSERT INTO schema_version (singleton_id, version, updated_at)
@@ -74,6 +143,35 @@ pub fn set_version(store: &Store, version: u32) -> Result<(), StoreError> {
          ON CONFLICT(singleton_id) DO UPDATE SET version = ?1, updated_at = datetime('now')",
         rusqlite::params![version],
     )?;
+    Ok(())
+}
+
+/// 把 schema 从当前版本回退到 `target_version`（含）。
+///
+/// 仅供 dev / test 使用。语义：
+///   - 若 `target_version >= current` 则直接返回 `Ok`（无需回退）；
+///   - 否则倒序对 `(target_version, current]` 区间每个版本调用其 down 函数；
+///   - 每个 down 成功后立即把 `schema_version` 改为 `version - 1`，保证中途失败可见
+///     已部分回退的状态。
+///
+/// `target_version = 0` 表示"全部回退"：m001..mN 的所有 down 都跑一遍，最终
+/// `schema_version` 表保留但 version 字段写 0。`schema_version` 表本身不删，让下次
+/// [`run`] 走增量路径而非全量 DDL 路径。
+pub fn revert_to(store: &Store, target_version: u32) -> Result<(), StoreError> {
+    let current = get_current_version(store)?;
+    if target_version >= current {
+        return Ok(());
+    }
+    let downs = migrations_down();
+    let max_idx = (current as usize).min(downs.len());
+    // 倒序：current, current-1, ..., target_version + 1
+    for version in ((target_version + 1)..=max_idx as u32).rev() {
+        let (name, func) = downs[(version - 1) as usize];
+        tracing::info!(version, name, "Reverting migration");
+        func(store)?;
+        write_version(store, version - 1)?;
+        tracing::info!(version, name, "Revert complete");
+    }
     Ok(())
 }
 
@@ -555,6 +653,314 @@ fn m020_resource_packs(store: &Store) -> Result<(), StoreError> {
         CREATE INDEX IF NOT EXISTS idx_rpil_pack_ver
             ON resource_pack_install_log(pack_id, version, installed_at DESC);",
     )?;
+    Ok(())
+}
+
+/// v1.1-P2.10：把 `update_audit_log` 通用化为「admin 敏感操作审计表」。
+///
+/// 老语义：仅二进制自更新（from_version → to_version）。
+/// 新语义：覆盖资源包上传 / 切激活 / 下架，以及 ban / unban / 重置密码 / 设密码等
+/// 一切 admin 高权限操作。
+///
+/// 兼容策略：
+///   - 老 `insert_update_audit` 写入仍只填 from/to/channel，action 默认 'self_update'；
+///   - 新 `insert_admin_audit` 写入留空 from/to/channel（空串占位），action 显式给值。
+///
+/// down 已在 v1.1-P2.2 统一规划，本迁移仅做幂等 ALTER。
+fn m021_admin_audit_log_v2(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    let cols: Vec<String> = conn
+        .prepare("PRAGMA table_info(update_audit_log)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .collect();
+    for (col, ddl) in [
+        ("action", "TEXT NOT NULL DEFAULT 'self_update'"),
+        ("target_type", "TEXT"),
+        ("target_id", "TEXT"),
+        ("metadata_json", "TEXT"),
+    ] {
+        if !cols.iter().any(|c| c == col) {
+            conn.execute(
+                &format!("ALTER TABLE update_audit_log ADD COLUMN {col} {ddl}"),
+                [],
+            )?;
+        }
+    }
+    // 新增 action 索引，便于 admin UI 按操作类型筛选
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_update_audit_action
+            ON update_audit_log(action, started_at DESC);",
+    )?;
+    Ok(())
+}
+
+// ============================================================================
+// down 函数：与上方 up 函数一一对应。仅在 dev / test 由 `revert_to` 调用。
+// 每个 down 都用 `DROP TABLE IF EXISTS` / `DROP INDEX IF EXISTS` 保证幂等。
+// ALTER TABLE DROP COLUMN 前若列被索引引用，必须先 DROP 那些索引；本文件已显式处理。
+// ============================================================================
+
+/// m001 的 up 是 no-op（实际 DDL 由 init_schema 跑 schema.rs），down 也保持 no-op，
+/// 避免误删 schema.rs 拥有的核心表。`revert_to(0)` 在此停下。
+fn m001_initial_down(_store: &Store) -> Result<(), StoreError> {
+    Ok(())
+}
+
+fn m002_client_management_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS idx_telemetry_server_ts;
+         DROP INDEX IF EXISTS idx_telemetry_device;
+         DROP TABLE IF EXISTS telemetry_events;
+         DROP INDEX IF EXISTS idx_client_devices_active;
+         DROP INDEX IF EXISTS idx_client_devices_user;
+         DROP TABLE IF EXISTS client_devices;",
+    )?;
+    Ok(())
+}
+
+fn m003_telemetry_enhanced_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS idx_telemetry_summaries_device;
+         DROP TABLE IF EXISTS telemetry_summaries;",
+    )?;
+    Ok(())
+}
+
+fn m004_user_data_interfaces_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS idx_wordbook_import_history_wordbook;
+         DROP INDEX IF EXISTS idx_wordbook_import_history_user_created_at;
+         DROP TABLE IF EXISTS wordbook_import_history;
+         DROP INDEX IF EXISTS idx_word_notes_word_id;
+         DROP INDEX IF EXISTS idx_word_notes_user_word;
+         DROP TABLE IF EXISTS word_notes;
+         DROP INDEX IF EXISTS idx_word_favorites_word_id;
+         DROP INDEX IF EXISTS idx_word_favorites_user_created_at;
+         DROP TABLE IF EXISTS word_favorites;",
+    )?;
+    Ok(())
+}
+
+/// m005 down：先把所有引用 `learning_records.record_type` 的索引干掉，再 DROP COLUMN。
+/// `idx_learning_records_type_time` 由 m008 创建，按理在 m008 down 时已经 DROP；这里
+/// 再补一次 DROP IF EXISTS 是为了支持"只回退到版本 4"这种跳过 m008 的边界场景。
+fn m005_learning_record_type_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS idx_learning_records_user_type_time;
+         DROP INDEX IF EXISTS idx_learning_records_type_time;",
+    )?;
+    let has_column: bool = conn
+        .prepare("PRAGMA table_info(learning_records)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .any(|name| name == "record_type");
+    if has_column {
+        conn.execute("ALTER TABLE learning_records DROP COLUMN record_type", [])?;
+    }
+    Ok(())
+}
+
+fn m006_session_shown_words_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS idx_ssw_session_batch;
+         DROP INDEX IF EXISTS idx_ssw_shown_at;
+         DROP TABLE IF EXISTS session_shown_words;",
+    )?;
+    Ok(())
+}
+
+/// m007 仅新增两个索引，down 反向 DROP。`idx_ssw_shown_at` 与 m006 自带的索引同表，
+/// m006 down 会再 DROP 一次（IF EXISTS 幂等）。
+fn m007_session_perf_indexes_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS idx_learning_records_user_session;
+         DROP INDEX IF EXISTS idx_ssw_shown_at;",
+    )?;
+    Ok(())
+}
+
+fn m008_admin_analytics_indexes_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS idx_learning_sessions_created_at;
+         DROP INDEX IF EXISTS idx_word_favorites_created_at;
+         DROP INDEX IF EXISTS idx_learning_records_type_time;",
+    )?;
+    Ok(())
+}
+
+fn m009_amas_versioning_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS idx_amas_config_versions_created;
+         DROP TABLE IF EXISTS amas_config_versions;",
+    )?;
+    Ok(())
+}
+
+fn m010_amas_suggestions_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS idx_amas_suggestions_status_time;
+         DROP TABLE IF EXISTS amas_tuning_suggestions;",
+    )?;
+    Ok(())
+}
+
+/// m011 down：三个 ALTER ADD COLUMN 的反向。SQLite 支持 DROP COLUMN（3.35+）。
+/// 这些列各自带 NOT NULL + DEFAULT，DROP 后任何用户写入的非默认值都会丢失——
+/// 仅 dev/test 使用，可接受。
+fn m011_amas_auto_apply_settings_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    let cols: Vec<String> = conn
+        .prepare("PRAGMA table_info(system_settings)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .collect();
+    for col in [
+        "amas_auto_apply_min_confidence",
+        "amas_auto_apply_max_per_day",
+        "amas_auto_apply_enabled",
+    ] {
+        if cols.iter().any(|c| c == col) {
+            conn.execute(&format!("ALTER TABLE system_settings DROP COLUMN {col}"), [])?;
+        }
+    }
+    Ok(())
+}
+
+fn m012_feedback_items_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS idx_feedback_items_user;
+         DROP INDEX IF EXISTS idx_feedback_items_created_at;
+         DROP TABLE IF EXISTS feedback_items;",
+    )?;
+    Ok(())
+}
+
+fn m013_learning_record_self_rating_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    let has_column: bool = conn
+        .prepare("PRAGMA table_info(learning_records)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .any(|name| name == "self_rating");
+    if has_column {
+        conn.execute("ALTER TABLE learning_records DROP COLUMN self_rating", [])?;
+    }
+    Ok(())
+}
+
+fn m014_probe_executions_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS idx_probe_exec_pending;
+         DROP INDEX IF EXISTS idx_probe_exec_admin;
+         DROP INDEX IF EXISTS idx_probe_exec_device;
+         DROP INDEX IF EXISTS idx_probe_exec_batch;
+         DROP TABLE IF EXISTS probe_executions;",
+    )?;
+    Ok(())
+}
+
+fn m015_gdpr_export_rate_limit_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch("DROP TABLE IF EXISTS gdpr_export_log;")?;
+    Ok(())
+}
+
+fn m016_llm_cost_ledger_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    let has_col: bool = conn
+        .prepare("PRAGMA table_info(system_settings)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .any(|n| n == "llm_advisor_max_cost_per_month_yuan");
+    if has_col {
+        conn.execute(
+            "ALTER TABLE system_settings DROP COLUMN llm_advisor_max_cost_per_month_yuan",
+            [],
+        )?;
+    }
+    conn.execute_batch("DROP TABLE IF EXISTS llm_advisor_cost_ledger;")?;
+    Ok(())
+}
+
+fn m017_update_audit_log_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS idx_update_audit_started;
+         DROP TABLE IF EXISTS update_audit_log;",
+    )?;
+    Ok(())
+}
+
+fn m018_feedback_priority_status_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    let cols: Vec<String> = conn
+        .prepare("PRAGMA table_info(feedback_items)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .collect();
+    for col in [
+        "resolution",
+        "resolved_at",
+        "assignee_admin_id",
+        "status",
+        "priority",
+    ] {
+        if cols.iter().any(|c| c == col) {
+            conn.execute(&format!("ALTER TABLE feedback_items DROP COLUMN {col}"), [])?;
+        }
+    }
+    Ok(())
+}
+
+fn m019_worker_last_run_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch("DROP TABLE IF EXISTS worker_last_run;")?;
+    Ok(())
+}
+
+fn m020_resource_packs_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS idx_rpil_pack_ver;
+         DROP TABLE IF EXISTS resource_pack_install_log;
+         DROP TABLE IF EXISTS resource_pack_active;
+         DROP INDEX IF EXISTS idx_rpv_channel_pubat;
+         DROP TABLE IF EXISTS resource_pack_versions;
+         DROP TABLE IF EXISTS resource_packs;",
+    )?;
+    Ok(())
+}
+
+/// m021 down：DROP 索引 + 4 个新增列。`action` 是 NOT NULL DEFAULT 列，下次 up 会
+/// 重新加回。生产严禁 down，仅 dev/test。
+fn m021_admin_audit_log_v2_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch("DROP INDEX IF EXISTS idx_update_audit_action;")?;
+    let cols: Vec<String> = conn
+        .prepare("PRAGMA table_info(update_audit_log)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .collect();
+    for col in ["metadata_json", "target_id", "target_type", "action"] {
+        if cols.iter().any(|c| c == col) {
+            conn.execute(
+                &format!("ALTER TABLE update_audit_log DROP COLUMN {col}"),
+                [],
+            )?;
+        }
+    }
     Ok(())
 }
 
