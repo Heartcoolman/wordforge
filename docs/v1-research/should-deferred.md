@@ -77,3 +77,16 @@ records.create_record()
 ## 总结
 
 S1 + S2 在 v1.0 阶段以**文档化承诺**形式收口，承诺 v1.1 实装。v1.0 已为这两项做了必要的前置基础设施工作（M1-A1/A2/A3/A6 + M0-P1）。这与 RFC §4.2 "SHOULD（v1.0 内尽量，但不阻塞 GA）" 定位一致。
+
+## 后记（2026-05-22 v1.0 GA 之后）
+
+**S1 已在 v1.0 GA 后由 dev-arch-1 提前实际兑现** —— commit `1c8d27f` "refactor(routes): learning.rs + records.rs 按 lifecycle 拆 (S1)"：
+
+- `learning.rs`（1398 行）→ `learning/mod.rs` + `session.rs`(560) + `study.rs`(363) + `progress.rs`(287) + `pick.rs`(213)
+- `records.rs`（849 行）→ `records/mod.rs` + `single.rs`(424) + `batch.rs`(294) + `stats.rs`(170)
+- 设计：`learning/mod.rs` 直接注册路由，子模块 handlers `pub(super)`；`records/mod.rs` 通过 `pub(crate) use` 重导出 `CreateRecordRequest` 等共享项，对外路径不变
+- 验证：cargo test --all 50 suites / 873 passed / 0 failed
+
+S1 的实际实施路径与本文档预测的"v1.1 实施路径"基本一致（pub(crate) 升 pub 改为 pub(super) + pub(crate) use 重导出，无需全升 pub）。
+
+S2（records → AMAS 事件总线化）仍维持 v1.1 文档化承诺，不在 v1.0 阶段实装。
