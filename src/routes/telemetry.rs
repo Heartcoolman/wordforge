@@ -15,7 +15,60 @@ pub fn router() -> Router<AppState> {
         .route("/", post(submit_telemetry))
         // 无鉴权错误上报：只记 tracing log，不落库；火焰即忘，失败不影响 UX
         .route("/error", post(report_client_error))
+        // v1.1-P0.8：资源包热更安装/校验/回滚 telemetry，对齐对接文档 §7.3
+        .route("/resource-pack-install", post(report_resource_pack_install))
         .layer(DefaultBodyLimit::max(64 * 1024))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ResourcePackInstallReport {
+    pack_id: String,
+    version: String,
+    /// `installed` | `verify_failed` | `rollback`
+    outcome: String,
+    app_version: Option<String>,
+}
+
+/// v1.1-P0.8：客户端资源包安装结果上报。鉴权与既有 telemetry 一致，
+/// 走 AuthUser（资源包是登录态特性）。
+async fn report_resource_pack_install(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    headers: HeaderMap,
+    JsonBody(body): JsonBody<ResourcePackInstallReport>,
+) -> Result<impl IntoResponse, AppError> {
+    let device_id = headers
+        .get("x-device-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    let pack_id = body.pack_id.clone();
+    let version = body.version.clone();
+    let outcome = body.outcome.clone();
+    let app_version = body.app_version.clone();
+
+    state
+        .run_store_task("telemetry.resource_pack_install", move |store| {
+            store.record_pack_install(
+                &pack_id,
+                &version,
+                device_id.as_deref(),
+                app_version.as_deref(),
+                &outcome,
+            )
+        })
+        .await??;
+
+    tracing::info!(
+        user_id = %auth.user_id,
+        pack_id = %body.pack_id,
+        version = %body.version,
+        outcome = %body.outcome,
+        "记录资源包安装事件"
+    );
+
+    Ok(ok(serde_json::json!({ "received": true })))
 }
 
 #[derive(serde::Deserialize)]
