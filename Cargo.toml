@@ -65,6 +65,8 @@ semver = "1"
 fs2 = "0.4"
 # M0-R2：minisign 验签（纯 Rust，无 C 依赖）
 minisign-verify = "0.2"
+# v1.1-P0.6：Ed25519 资源包签名（与 minisign 自更新链路解耦，对接文档 §7.1 要求 raw Ed25519）
+ed25519-dalek = { version = "2", features = ["std", "rand_core"] }
 # utoipa：OpenAPI 3.1 自动生成（M0-C2）；yaml feature 用于测试导出 docs/openapi.yaml
 utoipa = { version = "5.5.0", features = ["uuid", "chrono", "yaml"] }
 
