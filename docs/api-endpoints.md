@@ -2382,7 +2382,7 @@ Server-Sent Events（SSE）持久连接，用于接收服务端实时推送。
 | `llm_budget_exceeded` | LLM advisor 月度成本超限，当月 worker 已停跑（管理员专属） | `{"type": "llm_budget_exceeded", "spentYuan": 102.5, "capYuan": 100.0, "resumeMonth": "2026-06"}` |
 | `resource_pack_available` | v1.1：admin 切换 channel 激活资源包后广播，客户端拉 manifest 并下载安装（5 分钟内同 pack 不重复推送） | `{"type": "resource_pack_available", "packId": "wordbook-core", "version": "1.2.3", "channel": "stable"}` |
 
-> 服务端 SSE Keep-alive 文本行 `: keepalive` 每 15 秒发送一次。连接数达到服务器上限（默认 1000）时返回 `429 RATE_LIMITED`。
+> 服务端 SSE Keep-alive 文本行 `: keepalive` 每 10 秒发送一次（v1.1-P2.4 调整，更快感知死连接）。连接数达到服务器上限（默认 5000，v1.1-P2.4 调整自 1000）时返回 `429 RATE_LIMITED`。
 
 ---
 

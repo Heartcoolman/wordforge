@@ -107,7 +107,8 @@ impl Default for LimitsConfig {
     fn default() -> Self {
         Self {
             max_batch_size: 500,
-            max_sse_connections: 1000,
+            // v1.1-P2.4：1000 → 5000，配合心跳 15→10s 提供更敏锐的死连接回收
+            max_sse_connections: 5000,
             max_exclude_word_ids: 1000,
             max_word_fetch: 500,
             max_import_words: 5000,
@@ -389,7 +390,7 @@ impl Config {
             },
             limits: LimitsConfig {
                 max_batch_size: env_or_parse("LIMITS_MAX_BATCH_SIZE", 500_usize),
-                max_sse_connections: env_or_parse("LIMITS_MAX_SSE_CONNECTIONS", 1000_usize),
+                max_sse_connections: env_or_parse("LIMITS_MAX_SSE_CONNECTIONS", 5000_usize),
                 max_exclude_word_ids: env_or_parse("LIMITS_MAX_EXCLUDE_WORD_IDS", 1000_usize),
                 max_word_fetch: env_or_parse("LIMITS_MAX_WORD_FETCH", 500_usize),
                 max_import_words: env_or_parse("LIMITS_MAX_IMPORT_WORDS", 5000_usize),

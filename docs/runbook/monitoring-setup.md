@@ -77,15 +77,15 @@ groups:
           summary: "WordForge 5xx 错误率超过 1%"
           description: "过去 5 分钟 5xx 比率 {{ $value | humanizePercentage }}，请检查日志。"
 
-      # SSE 连接数接近上限（硬限 1000，预警 800）
+      # SSE 连接数接近上限（v1.1-P2.4：硬限 5000，预警 4000）
       - alert: SSEConnectionsHigh
-        expr: sse_active_connections{job="wordforge"} > 800
+        expr: sse_active_connections{job="wordforge"} > 4000
         for: 5m
         labels:
           severity: warning
         annotations:
           summary: "SSE 连接数接近上限"
-          description: "当前 SSE 连接 {{ $value }}，接近硬限 1000，考虑分流或提高上限。"
+          description: "当前 SSE 连接 {{ $value }}，接近硬限 5000，考虑分流或提高上限。"
 
       # DB 大小超过 5 GiB
       - alert: DatabaseSizeHigh

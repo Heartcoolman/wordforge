@@ -196,8 +196,9 @@ pub async fn sse_handler(
     };
 
     Ok(Sse::new(stream).keep_alive(
+        // v1.1-P2.4：15s → 10s，配合 max_sse_connections=5000 更快感知死连接
         KeepAlive::new()
-            .interval(Duration::from_secs(15))
+            .interval(Duration::from_secs(10))
             .text("keepalive"),
     ))
 }

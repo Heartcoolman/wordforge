@@ -10,7 +10,7 @@
 | WAL 模式并发 | 1 writer + 15 readers | WAL 协议限制 |
 | 写入理论上限 | ≈ 300 写/s（fsync NORMAL 限制） | `docs/v1-research/03-perf-warden.md §4.1` |
 | 读取理论上限 | ≈ 10k+ 读/s | cache 64 MiB + mmap 256 MiB |
-| SSE 连接上限 | 1000（`max_sse_connections`） | `src/config.rs LimitsConfig` |
+| SSE 连接上限 | 5000（`max_sse_connections`，v1.1-P2.4 自 1000 上调） | `src/config.rs LimitsConfig` |
 | 单实例稳态 QPS 目标 | ≥ 100 req/s | perf-warden SLA §7.2 |
 | 单实例峰值 QPS 目标 | ≥ 300 req/s | perf-warden SLA §7.2 |
 | DB 大小 SLA | < 5 GiB | perf-warden SLA §7.2 |
@@ -26,7 +26,7 @@
 |------|------|----------|
 | DB 文件大小 | > 5 GiB | `GET /api/admin/monitoring/database` → `sizeOnDisk` |
 | 5xx 错误率（滚动 1 分钟） | > 1% | `GET /metrics` → `http_5xx / http_requests` |
-| SSE 连接数 | > 900（接近 1000 上限） | `GET /metrics` → `sse_active_connections` |
+| SSE 连接数 | > 4500（接近 5000 上限） | `GET /metrics` → `sse_active_connections` |
 | 连接池耗尽（`SQLITE_BUSY_TIMEOUT_MS` 频繁触发） | 日志出现 `pool error` > 10 次/分钟 | `journalctl -u wordforge --since "1 hour ago" \| grep "pool error"` |
 
 ### P1：当班评估
