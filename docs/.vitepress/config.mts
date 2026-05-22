@@ -86,6 +86,7 @@ export default defineConfig({
           text: 'API 文档',
           collapsed: false,
           items: [
+            { text: 'v1.0 客户端迁移', link: '/v1-client-migration' },
             { text: 'API 接口对接', link: '/api-endpoints' },
             { text: 'API 对接规范', link: '/api-spec' },
             { text: '客户端上传数据规范', link: '/client-upload-data' },
