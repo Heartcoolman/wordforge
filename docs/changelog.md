@@ -6,6 +6,116 @@
 
 ---
 
+## [v1.0.0] — 2026-05-22 · GA 🎉
+
+**51 项 v1 工作全部完成**（MUST 37 + SHOULD 9 + 新增 5），76 commit 跨两个 RC 通道。完整 release notes 见 GitHub Release v1.0.0。
+
+### 重大变化（Breaking）
+
+- 🚨 **`/api/v1/*` 全部端点返回 410 Gone**（M0-C5）：v1 路由刻意绕过 AMAS 的设计警告，老客户端必须迁移至 `/api/learning/*` / `/api/records/*`
+- 🚨 **WordState wire 序列化改为 lowercase**（M0-C1）：第四轮 cross-validator P1-W1 对齐
+- 🚨 **删除 `sled-migration` feature**（M1-A4）：已无 sled→sqlite 迁移需求
+
+### 新功能
+
+- 🛡️ **minisign 签名链**（M0-R2）：release tarball 全签名，binary 内嵌公钥防 downgrade attack。公钥见 [`docs/security/wordforge-release.pub`](docs/security/wordforge-release.pub)
+- 🛡️ **GDPR 数据导出**（M1-G1）：`/api/users/me/export` JSON Lines 全量导出
+- 🛡️ **`update_audit_log`**（S5）：升级链全程审计可追溯
+- ⚡ **`/metrics` Prometheus 端点**（M0-P1）：HTTP 计数器 / `worker_last_run` / histogram
+- ⚡ **`error_rate_watchdog`**（M0-P4）：5xx 滚动告警 SSE incident
+- ⚡ **k6 + Lighthouse CI**（M2-Q1/Q2）：周一 03:00 自动跑
+- 💰 **LLM 月度成本上限**（M1-G2）：admin 后台可调，默认 ¥100，`SseEvent::LlmBudgetExceeded` 提醒
+- 📝 **8 篇文档全新入仓**：README + SECURITY + CONTRIBUTING + auto-update + 5 篇 runbook + 4 篇 user docs + word-states
+
+### 改进
+
+- 🧹 **删 services 层**（M1-A1）：handler 直接依赖 `Store` + `AMASEngine`
+- 🧹 **删 4 个 stub worker**（M1-A3）：`monitoring_aggregate` / `etymology_generation` / `embedding_generation` / `word_clustering` 自引入起从未启用
+- 🧹 **删 `@tanstack/solid-query` 死依赖**（M1-A7）：前端改用 `createResource` cache map
+- 🔧 **strict-mode / maintenance 改路由元数据驱动**（M1-A6）
+- 🔧 **AMASEngine `parking_lot` 锁中毒防护**（M1-A2）+ `amas_poison_recovery` 集成测试
+- 🔧 **cron scheduler 健康监测**（M1-A5）：migration + SSE `WorkerMissed`
+- 🔧 **`routes/learning.rs` + `records.rs` 按 lifecycle 拆分**（GA bonus，commit 1c8d27f）
+
+### 已知遗留（推 v1.1）
+
+- clippy 56 历史警告（M0 / M1 都接受了，v1.1 集中清）
+- S2 events 总线化（v1.0 文档化承诺，见 `docs/v1-research/should-deferred.md`）
+- 真实 7 天稳态观测（脚手架就位，rc.3 公开后用户自跑 `scripts/rc-observation/`）
+
+### 测试门
+
+- ✅ §6.1（M0 → rc.1）：824 cargo / 926 vitest / 0 P0 alignment
+- ✅ §6.2（M1 → rc.2）：873 cargo / 925 vitest
+- ✅ §6.3（M2 + SHOULD → GA）：873 cargo / 925 vitest / k6 + Lighthouse 入仓
+- 🟡 §6.4：7 天观测脚手架就绪
+
+---
+
+## [v1.0.0-rc.2] — 2026-05-22 · Pre-release · M1 + M2 + 6 SHOULD（24 项）
+
+### 新功能
+
+- **M1-G1** GDPR JSON Lines 数据导出
+- **M1-G2** LLM 顾问月度人民币成本上限（默认 ¥100）
+- **M1-G3** feedback_items 升级 priority / status / assignee / resolution
+- **M1-A5** cron scheduler 健康监测 + SSE `WorkerMissed`
+- **M2-Q1** k6 5 路径压测脚本 + load-test.yml CI
+- **M2-Q2** Lighthouse CI + Web Vitals
+- **M2-Q4** rc-observation 4 脚本 + 2 runbook + 集成测试
+- **S3** nginx + TLS 部署 runbook（certbot 流程）
+- **S4** admin 维护模式即时切换
+- **S5** `update_audit_log` 表 + 审计追踪
+- **S6** ErrorBoundary 接入 `/api/telemetry/error`
+- **S7** `health.error_rate` 字段实装
+- **S9** `release-calendar.md` 三仓发版日历
+
+### 改进
+
+- **M1-A0/A0a/A0b** clippy 清债（M0 新增警告全清，56 历史警告留 v1.1）
+- **M1-A1** 删 `LearningService` / `WordbookService` / `AdminService`
+- **M1-A2** AMASEngine 锁中毒防护
+- **M1-A6** strict-mode / maintenance 改路由分组驱动
+- **M1-A7** 删 `@tanstack/solid-query` 死依赖
+- **M2-Q3** alignment.md 第四轮终版
+- **S8** 复活 AdminLoginPage 3 个失败测试
+
+### 移除
+
+- **M1-A3** 删除 4 个 stub worker（`monitoring_aggregate` / `etymology_generation` / `embedding_generation` / `word_clustering`，自引入起 `enabled: false`）
+- **M1-A4** 删除 `sled-migration` feature + binary + 依赖
+
+---
+
+## [v1.0.0-rc.1] — 2026-05-22 · Pre-release · M0 基础修复 + 安全网（23 项）
+
+### 新功能
+
+- **M0-C2** OpenAPI 3.1 集中声明 + utoipa 25 端点 + CI drift 防漂
+- **M0-R1** `release.yml` pre-release-tag-lint step：tag 含 `-` → Pre-release，否则 → Latest
+- **M0-R2** minisign 签名链 + 防 downgrade attack（编译期嵌入公钥）
+- **M0-R3** 自更新回滚增强 + systemd unit 入仓
+- **M0-R4** apply swapping 自动维护模式
+- **M0-P1** `/metrics` Prometheus 端点 + HTTP 计数器 + worker_last_run + histogram
+- **M0-P3** monitoring_events retention + 月度 VACUUM
+- **M0-P4** `error_rate_watchdog` 5xx 滚动错误率告警
+- **M0-P5** apply 各 phase 独立 watchdog 超时 5 分钟
+- **M0-D1..D9** 8+1 篇全新文档：README + SECURITY + CONTRIBUTING + auto-update + 5 篇 runbook + 4 篇 user docs + word-states
+
+### 重大变化
+
+- **M0-C1** WordState wire 序列化改为 lowercase（cross-validator P1-W1）
+- **M0-C5** `/api/v1/*` 全部端点返回 410 Gone
+
+### 改进
+
+- **M0-C3** SSE 事件表补齐 5 条缺失变体
+- **M0-C6** `verify-*-auto-update*.sh` 双通道契约修复
+- **M0-D6a** VitePress srcExclude 排除内部目录
+- **M0-P2** `.env.example` 对齐 + `verify-env-example.sh`
+
+---
+
 ## [v0.6.0-beta.4] — 2026-05-20 · Pre-release
 
 ### 改进
