@@ -6,6 +6,50 @@
 
 ---
 
+## [Unreleased] — v1.1.0-rc.1（资源包热更后端）
+
+iOS v1.1 客户端 POC 已落地（`/Users/liji/WordForge-App` @ `b1e1a41`），本 RC 交付后端配套，
+路径协议详见 [`docs/backend-handoff-resource-pack-v1.1.md`](docs/backend-handoff-resource-pack-v1.1.md)
+和 [`docs/v1-research/v1-1-resource-pack.md`](docs/v1-research/v1-1-resource-pack.md)。
+
+### 新功能（资源包子系统）
+
+- 📦 **资源包匿名端点**：`GET /api/resource-packs`、`GET /api/resource-packs/:packId/manifest`、`GET /api/resource-packs/public-key`（详见 `docs/api-endpoints.md` §21）
+- 📦 **CDN 自托管**：`static/packs/<pack>/<ver>/payload.json` 走 ServeDir + `public, max-age=31536000, immutable`
+- 📦 **Admin CRUD**：`POST/PUT/GET/DELETE /api/admin/resource-packs/*`（详见 §22），含 multipart 上传后自动 SHA256 + Ed25519 签名 + 落盘 + 写表
+- 📦 **客户端 telemetry**：`POST /api/telemetry/resource-pack-install` 落 `resource_pack_install_log` 表
+- 🛡️ **Ed25519 签名链路**：`ed25519-dalek v2`，私钥 0600 / 公钥 0644 自动 bootstrap，与既有 minisign 自更新链路解耦
+- 🛡️ **SSE 事件 `resource_pack_available`**：admin 切 active 后 5 分钟 dedup 广播
+- 📊 **install_log 聚合**：admin `/stats` 端点按 `(version, outcome)` 计数
+
+### 数据库
+
+- 迁移 `020_resource_packs`：4 张表 `resource_packs` / `resource_pack_versions` / `resource_pack_active` / `resource_pack_install_log`，channel CHECK 限定 `stable/beta/internal`。down 迁移随 P2.2 统一补
+
+### 错误码
+
+- `RESOURCE_PACK_NOT_FOUND` (404)、`RESOURCE_PACK_APP_VERSION_TOO_LOW` (409)、`RESOURCE_PACK_CHANNEL_FORBIDDEN` (403)、`RESOURCE_PACK_SIGNER_UNAVAILABLE` (503)
+
+### 修复
+
+- 🐛 **`sse_event_table` 测试假性平衡**：v1.0 M1-A5 `worker_missed` 和 M1-G2 `llm_budget_exceeded` 未同步进 `DOCUMENTED_EVENTS` 和 `all_sse_event_samples()`，测试 11==11 巧合通过；本 RC 补齐至 14 个变体（含新 `resource_pack_available`）
+
+### 实施时的 plan 纠正
+
+- ❎ Plan 原写「扩展 `services::updater::Channel` 加 Internal 变体」，发现那是面向二进制自更新的 release 通道（牵连 checker / cache / apply 整套），改为**独立** `ResourcePackChannel { Stable, Beta, Internal }`（`store::operations::resource_packs`），业务语义分离更干净
+- ❎ 集成测试发现 `downloadURL` 全大写 URL 在 serde camelCase 下变成 `downloadUrl`（U 小写），必须手动 `#[serde(rename = "downloadURL")]`
+
+### 与 iOS 客户端的协调点
+
+iOS v1.1 客户端文档原写 `GET /api/v1/resource-packs/{packId}/manifest`，但后端 `/api/v1/*` 自 2026-05-21 起整组冻结返回 410 Gone（sunset 2027-01-01）。后端实现走 `/api/resource-packs/*` 主端点（与 `/api/wordbooks/*` 风格对齐），**iOS 需改 `EndpointServices.swift:519` 的 path + 同步对接文档**。
+
+### 测试
+
+- 9 个新增集成测试 `tests/resource_pack_http.rs`：upload→activate→manifest 端到端、ETag/Cache-Control/304/409/404、telemetry 聚合、SSE dedup
+- 全测试 635 lib + 130+ 集成测试 0 失败
+
+---
+
 ## [v1.0.0] — 2026-05-22 · GA 🎉
 
 **51 项 v1 工作全部完成**（MUST 37 + SHOULD 9 + 新增 5），76 commit 跨两个 RC 通道。完整 release notes 见 GitHub Release v1.0.0。
