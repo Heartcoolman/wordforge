@@ -156,6 +156,21 @@ async fn main() {
         shutdown_tx.subscribe(),
     ));
 
+    // v1.1-P1 S2：领域事件总线 consumer。`event-bus` feature 关闭时 subscribe()
+    // 返回 None，consumer 自动早退。AMAS 同步通路保留为主路径不变；这里只是
+    // 旁路计数 / 日志，为后续 outbox + AMAS 真异步化打底。
+    {
+        let bus = state.event_bus().clone();
+        let shutdown_rx = shutdown_tx.subscribe();
+        tokio::spawn(async move {
+            learning_backend::services::event_bus::run_record_consumer(
+                bus.as_ref(),
+                shutdown_rx,
+            )
+            .await;
+        });
+    }
+
     tokio::spawn(learning_backend::workers::probe_confirm_sweeper::run(
         state.clone(),
         shutdown_tx.subscribe(),

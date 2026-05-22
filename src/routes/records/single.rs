@@ -11,6 +11,7 @@ use crate::amas::types::{MasteryLevel, ProcessResult, RawEvent};
 use crate::auth::AuthUser;
 use crate::constants::{DEFAULT_HALF_LIFE_HOURS, DEFAULT_PAGE_SIZE_RECORDS, MAX_PAGE_SIZE};
 use crate::response::{created, ok, paginated, AppError};
+use crate::services::event_bus::DomainEvent;
 use crate::state::AppState;
 use crate::store::operations::learning_sessions::LearningSession;
 use crate::store::operations::records::{LearningRecord, RecordType};
@@ -402,6 +403,20 @@ async fn process_single_record(
             },
         )
         .await??;
+
+    // v1.1-P1 S2：写库成功后旁路 emit RecordCreated；
+    // AMAS 已在前面同步通路执行过，这里只是事件总线基础设施落地，
+    // 为未来 outbox 持久化 + 真异步消费铺路。fire-and-forget 不阻塞 HTTP 响应。
+    state.event_bus().emit(DomainEvent::RecordCreated {
+        user_id: record.user_id.clone(),
+        word_id: record.word_id.clone(),
+        record_id: record.id.clone(),
+        is_correct: record.is_correct,
+        response_time_ms: record.response_time_ms,
+        session_id: record.session_id.clone(),
+        record_type: record.record_type,
+        created_at: record.created_at,
+    });
 
     Ok(CreateRecordResponse {
         record,

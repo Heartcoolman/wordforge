@@ -8,6 +8,7 @@ use tokio::sync::{broadcast, mpsc, RwLock};
 use crate::amas::engine::AMASEngine;
 use crate::config::Config;
 use crate::middleware::rate_limit::{AuthRateLimitState, RateLimitState};
+use crate::services::event_bus::{self, EventBus};
 use crate::store::Store;
 
 #[derive(Debug, Clone)]
@@ -184,6 +185,9 @@ pub struct AppState {
         Arc<RwLock<Option<Arc<crate::services::resource_pack_signing::ResourcePackSigner>>>>,
     /// v1.1-P0.7：同 pack 5 分钟 SSE dedup，键 = (packId, channel.as_str()).
     recently_broadcasted_packs: Arc<DashMap<(String, String), Instant>>,
+    /// v1.1-P1 S2：领域事件总线。`event-bus` feature 开启时为 InMemoryEventBus，
+    /// 关闭时为 NoopEventBus。handler 写库成功后旁路 emit，consumer 异步消费。
+    event_bus: Arc<dyn EventBus>,
 }
 
 pub struct RuntimeConfig {
@@ -232,7 +236,21 @@ impl AppState {
             probe_service: Arc::new(crate::services::probe::ProbeService::new()),
             resource_pack_signer: Arc::new(RwLock::new(None)),
             recently_broadcasted_packs: Arc::new(DashMap::new()),
+            event_bus: event_bus::build_default_bus(),
         }
+    }
+
+    /// 测试 / 自定义场景下注入一个特定的 EventBus（如 NoopEventBus）。
+    /// 生产路径默认由 `AppState::new` 按 feature flag 选取。
+    #[cfg(any(test, feature = "event-bus"))]
+    pub fn with_event_bus(mut self, bus: Arc<dyn EventBus>) -> Self {
+        self.event_bus = bus;
+        self
+    }
+
+    /// 领域事件总线。handler 写库成功后调 `state.event_bus().emit(...)` 旁路投递。
+    pub fn event_bus(&self) -> &Arc<dyn EventBus> {
+        &self.event_bus
     }
 
     /// v1.1-P0.6：启动期注入资源包签名器。失败由 main.rs 处理（功能降级，端点返 503）。

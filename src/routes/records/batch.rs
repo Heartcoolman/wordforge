@@ -11,6 +11,7 @@ use crate::amas::types::{MasteryLevel, RawEvent};
 use crate::auth::AuthUser;
 use crate::constants::DEFAULT_HALF_LIFE_HOURS;
 use crate::response::{created, ok, AppError};
+use crate::services::event_bus::DomainEvent;
 use crate::state::AppState;
 use crate::store::operations::learning_sessions::LearningSession;
 use crate::store::operations::records::LearningRecord;
@@ -285,6 +286,18 @@ pub(crate) async fn process_batch_record(
             },
         )
         .await??;
+
+    // v1.1-P1 S2：与 single 路径对齐，写库成功后旁路 emit RecordCreated。
+    state.event_bus().emit(DomainEvent::RecordCreated {
+        user_id: record.user_id.clone(),
+        word_id: record.word_id.clone(),
+        record_id: record.id.clone(),
+        is_correct: record.is_correct,
+        response_time_ms: record.response_time_ms,
+        session_id: record.session_id.clone(),
+        record_type: record.record_type,
+        created_at: record.created_at,
+    });
 
     Ok(CreateRecordResponse {
         record,

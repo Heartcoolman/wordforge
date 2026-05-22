@@ -5,7 +5,10 @@ edition = "2021"
 rust-version = "1.77"
 
 [features]
-default = []
+# v1.1-P1 S2：领域事件总线。默认 enabled；关闭时 emit/consumer 退化为 noop，
+# records → AMAS 走原同步通路，作为灰度回滚开关。
+default = ["event-bus"]
+event-bus = []
 
 [dependencies]
 axum = { version = "0.7", features = ["macros"] }
