@@ -2377,6 +2377,10 @@ Server-Sent Events（SSE）持久连接，用于接收服务端实时推送。
 | `update_progress` | 一键更新执行阶段进度（管理员专属，0–100） | `{"type": "update_progress", "phase": "downloading", "percent": 35}` |
 | `probe_request` | 远程探针脚本下发：admin 通过 `POST /api/admin/probe` 派发，客户端在 Worker 沙箱 eval 后回传结果 | `{"type": "probe_request", "requestId": "<uuid>", "batchId": "<uuid>", "scriptB64": "...", "timeoutMs": 3000, "ctxVersion": 1}` |
 | `probe_confirm` | 远程探针二次确认：客户端首次返回 `confirm_required` 后，admin 输入设备后 5 位确认，后端推此事件 | `{"type": "probe_confirm", "requestId": "<uuid>", "confirmToken": "<uuid>"}` |
+| `incident` | 5xx 错误率超阈值告警（管理员专属，5 分钟窗口、同窗口 dedup） | `{"type": "incident", "errorRate": 0.025, "windowSecs": 300}` |
+| `worker_missed` | 调度器健康告警：worker 连续 3 个周期未上报（管理员专属） | `{"type": "worker_missed", "workerName": "amas_aggregator", "missCount": 3}` |
+| `llm_budget_exceeded` | LLM advisor 月度成本超限，当月 worker 已停跑（管理员专属） | `{"type": "llm_budget_exceeded", "spentYuan": 102.5, "capYuan": 100.0, "resumeMonth": "2026-06"}` |
+| `resource_pack_available` | v1.1：admin 切换 channel 激活资源包后广播，客户端拉 manifest 并下载安装（5 分钟内同 pack 不重复推送） | `{"type": "resource_pack_available", "packId": "wordbook-core", "version": "1.2.3", "channel": "stable"}` |
 
 > 服务端 SSE Keep-alive 文本行 `: keepalive` 每 15 秒发送一次。连接数达到服务器上限（默认 1000）时返回 `429 RATE_LIMITED`。
 

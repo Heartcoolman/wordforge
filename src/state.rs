@@ -112,6 +112,16 @@ pub enum SseEvent {
         #[serde(rename = "resumeMonth")]
         resume_month: String,
     },
+    /// v1.1-P0.4：admin 切换某 channel 的当前激活资源包后广播，客户端收到后
+    /// 主动拉取 manifest 并下载安装。频率限制由 admin handler 自行 5 分钟内 dedup。
+    /// 字段名对齐 `docs/backend-handoff-resource-pack-v1.1.md` §2.3。
+    #[serde(rename = "resource_pack_available")]
+    ResourcePackAvailable {
+        #[serde(rename = "packId")]
+        pack_id: String,
+        version: String,
+        channel: crate::store::operations::resource_packs::ResourcePackChannel,
+    },
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
