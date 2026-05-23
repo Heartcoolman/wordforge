@@ -9,8 +9,14 @@
 ## [v1.1.0-beta.1] — 2026-05-23 · Pre-release
 
 v1.1 首发 Pre-release。涵盖 P0（资源包热更 + GDPR 真流式 NDJSON）、P1（领域事件总线）、
-P2（重构 / 性能 / 文档 / clippy 清零）三阶段全部工作，主版本号从 `0.6.0-beta.4`
-跨升至 `1.1.0-beta.1`（v1.0.0 GA 之后版本号曾停滞，本 release 一并补齐）。
+P2（重构 / 性能 / 文档 / clippy 清零）三阶段全部工作。
+
+**版本号补齐说明**：v1.0.0 / v1.0.0-rc.1 / v1.0.0-rc.2 三次发版**漏改了 `Cargo.toml` 的
+`version` 字段**，导致这三个 tag 的二进制内嵌版本号实际是 `0.6.0-beta.4`（git tag 名对、
+binary `CARGO_PKG_VERSION` 错）。证据：`git show v1.0.0:Cargo.toml | grep ^version` 返回
+`0.6.0-beta.4`。生产影响极小：代码内仅 `src/state.rs:401` 一处用 `env!("CARGO_PKG_VERSION")`
+作 fallback；admin 一键升级 caller 几乎总会显式传 version，fallback 路径基本不触发。
+本 release 把 `Cargo.toml` + `Cargo.lock` 一并补齐到 `1.1.0-beta.1`，跨越两个失同步 release。
 
 ### P0 收尾（本 release 新增）
 
