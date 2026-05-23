@@ -218,6 +218,7 @@ async fn apply(
             health_url,
             on_rollback: Box::new(on_rollback),
             on_maintenance: Box::new(on_maintenance),
+            task_id: task_id.clone(),
         };
         match bg_updater.apply(ctx, backup_cb, sink).await {
             Ok(()) => {

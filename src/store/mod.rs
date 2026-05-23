@@ -25,6 +25,8 @@ pub enum StoreError {
     Sqlite(#[from] rusqlite::Error),
     #[error("pool error: {0}")]
     Pool(#[from] r2d2::Error),
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
     #[error("serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
     #[error("not found: entity={entity}, key={key}")]
@@ -111,7 +113,15 @@ impl Store {
 
     /// 把当前库快照拷贝到 `dst`。先 checkpoint 落 WAL，再 `VACUUM INTO` 生成单文件副本。
     /// 用于自更新前的兜底备份。
+    ///
+    /// v1.1.0-beta.3：VACUUM INTO 之前先 `remove_file(dst)`，避免 SQLite 自带的
+    /// "output file already exists" 拒绝（vacuum.c 主动检测 + SQLITE_ERROR）。
+    /// 上次升级失败回滚后 backup 文件遗留是 stale，本次升级生成的 backup 才是有效兜底。
     pub fn backup_to(&self, dst: &std::path::Path) -> Result<(), StoreError> {
+        // 预清理：忽略不存在（NotFound）以外的错误，避免无谓 fail；存在时清掉让 VACUUM INTO 可写。
+        if dst.exists() {
+            std::fs::remove_file(dst).map_err(StoreError::Io)?;
+        }
         let conn = self.conn()?;
         conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
         let raw = dst.to_string_lossy().replace('\'', "''");

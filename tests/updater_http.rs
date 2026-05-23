@@ -119,6 +119,7 @@ fn noop_ctx(channel: Channel, tag: &str) -> ApplyContext {
         health_url: String::new(),
         on_rollback: Box::new(|_| {}),
         on_maintenance: Box::new(|_| {}),
+        task_id: "test-task-id".to_string(),
     }
 }
 

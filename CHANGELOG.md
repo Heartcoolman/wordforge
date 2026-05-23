@@ -6,6 +6,83 @@
 
 ---
 
+## [v1.1.0-beta.3] — 2026-05-23 · Pre-release · 自更新死锁根治 + backup stale 清理
+
+### 真根因复盘
+
+v1.0 引入 M0-R3 父进程 60s 健康监督机制时，**没同步改 `spawn_replacement` 的 sh wrapper "等 parent 退出后 exec" 逻辑**，形成死锁：
+
+| 角色 | 逻辑 | 等的事 |
+|---|---|---|
+| sh wrapper | `while kill -0 $parent; do sleep 0.2; done; exec new_binary` | 等 parent 退出 |
+| parent | `for i in 60s { probe /health on localhost; if 200 then exit(0) }` | 等子进程 /health 200 |
+
+新 binary 永远没被 exec → parent 探针打到自己（旧进程仍 listen）→ swap 阶段已开 maintenance flag → /health 返回 503 → 60s 全失败 → parent 走 rollback `return Err`，但**不 exit** → sh wrapper 孤儿永久等。systemctl status 里那个 24h+ 的 sh wrapper PID 就是该死锁的物理证据。
+
+**v1.0 引入 M0-R3 后 admin 一键升级从未在生产真正成功过**。所有"成功"的升级（v1.0-rc.1/rc.2/v1.0 GA → v1.0）都是这之前 v0.x 时代的 sh wrapper + parent exit(0) 风格（无监督），M0-R3 之后所有升级理论上都会 60s 卡死回滚。
+
+事故链（2026-05-23）：v1.0 → v1.1.0-beta.1 升级 60s timeout → v1.1.0-beta.1 加了 stderr dup2 救场 → v1.0 → beta.2 又踩 backup db / static dir stale 残留陷阱反复失败 → SSH 手动 swap beta.2 + 写本 release 真正解死锁。
+
+### 修复 1：fork watcher + parent 立即 exit（Hybrid 设计）
+
+`src/services/updater.rs`：
+
+- **彻底删** `apply_locked` 内的 M0-R3 60s health check loop + spawn_replacement sh wrapper 调用
+- **新增** `WatcherArgs` / `spawn_watcher_then_exit_parent` / `run_watcher` / `watcher_probe_health` / `watcher_rollback` / `watcher_update_audit_outcome`
+- 新流程：parent swap 完成 → `libc::fork` watcher 子进程（detached / setsid / stdio→/dev/null）→ parent `std::process::exit(0)` → systemd `Restart=always` 在 `RestartSec=5` 后启动新 binary
+- watcher 独立 sleep 10s 给 systemd + binary startup → 60s loop `curl /health`：
+    - 通过 → rusqlite 直接 `UPDATE update_audit_log SET outcome='success'` → watcher exit
+    - 60s 超时 → `rename bin/static` 回滚 + 标 `.failed` 保留 forensics + `kill SIGTERM` 当前 wordforge 主进程 → systemd Restart 起 rolled-back v1.0 + UPDATE outcome=`rolled_back` → watcher exit
+- watcher 用 `curl` 而非 `reqwest`：fork 后 tokio runtime 状态不安全，sync HTTP 用 shell `curl` 最稳
+
+权衡：
+- ✅ 解死锁：parent 不再等子进程 health 200，立即 exit 让 systemd 接管
+- ✅ 保留 60s 自动回滚能力（watcher 独立监督）
+- ✅ admin UI 看 audit log 能拿到终态（success / rolled_back / applied_pending_watcher）
+- ❌ watcher 用 `pgrep` + `SIGTERM` kill 主进程要求 wordforge 用户能 kill 同 user 进程（systemd User=wordforge 跑的进程，OK）
+- ❌ 失败时仍依赖 systemd Restart=always 重启 rolled-back binary，不是 100% 即时
+
+### 修复 2：rename-to-backup stale 清理
+
+事故里反复踩的 `learning-v1.0.0.backup.db` + `static.v1.0.0` 残留陷阱：
+
+- **`src/store/mod.rs::backup_to`**：`VACUUM INTO` 之前先 `remove_file(dst)`，避免 SQLite vacuum.c 主动检测 + `SQLITE_ERROR: output file already exists`
+- **`src/services/updater.rs::apply_locked` swap 段**：`rename(bin_path, bin_backup)` 和 `rename(static_path, static_backup)` 之前都先 `remove_file` / `remove_dir_all` 目标
+- watcher rollback 路径同样：失败 binary/static 标 `.failed` 之前先 remove 同名残留
+- `StoreError` 加 `Io(#[from] std::io::Error)` 变体（之前 `Sqlite`/`Pool`/...缺 IO）
+
+### 修复 3：audit log 中间态 outcome
+
+handler 插入 `outcome='in_progress'` → updater 在 fork watcher 前更新为 `outcome='applied_pending_watcher'`（明确 swap 已成功、watcher 接管中）→ watcher 最终更新 `success` / `rolled_back`。admin UI 能区分"升级中"与"watcher 接管期间"两种状态。
+
+### ApplyContext 变更
+
+```rust
+pub struct ApplyContext {
+    pub channel: Channel,
+    pub target_tag: String,
+    pub health_url: String,
+    pub on_rollback: Box<dyn Fn(String) + Send + 'static>,
+    pub on_maintenance: Box<dyn Fn(bool) + Send + 'static>,
+    pub task_id: String,  // v1.1.0-beta.3 新增：传给 watcher 用于 UPDATE audit_log
+}
+```
+
+`on_rollback` callback 在新设计里**不再被 apply_locked 调用**（watcher 独立进程无法回调到 main process closure）；但 `ApplyContext` 字段保留兼容 handler 不需要改造。
+
+### upgrade ladder
+
+| 当前生产 binary | 走 admin 一键升级到 |
+|---|---|
+| v1.0.0 / v1.1.0-beta.{1,2} | **必须 SSH 手动 swap 到 beta.3**（旧 binary 的 spawn_replacement 死锁修不了） |
+| v1.1.0-beta.3 | **可以走 admin 一键升级**到后续版本（watcher 设计取代死锁的 sh wrapper） |
+
+### 版本号
+
+`Cargo.toml` + `Cargo.lock`: `1.1.0-beta.2` → `1.1.0-beta.3`
+
+---
+
 ## [v1.1.0-beta.2] — 2026-05-23 · Pre-release · 自更新诊断盲区修复
 
 v1.0.0 生产服务器（8.135.57.148）执行 admin 一键升级到 v1.1.0-beta.1 失败，60s /health 检查未通过 → 自动回滚到 v1.0.0。诊断时发现：`src/services/updater.rs::spawn_replacement` 把新进程 stdout/stderr **全部 Stdio::null() 丢弃**，导致新进程的 panic / migrate 失败 / bind 失败等任何 stderr 输出在 systemd journal 里**一行都看不到** —— 父进程探针 60s 超时是唯一可见信号，根因完全盲猜。

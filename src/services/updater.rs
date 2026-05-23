@@ -27,8 +27,7 @@ const ASSET_PREFIX: &str = "wordforge-linux-";
 const ASSET_SUFFIX_TAR: &str = ".tar.gz";
 const ASSET_SUFFIX_SHA: &str = ".tar.gz.sha256";
 const ASSET_SUFFIX_SIG: &str = ".tar.gz.minisig";
-/// M0-R3：fork-exec 后子进程健康自检超时（秒）
-const HEALTH_CHECK_TIMEOUT_SECS: u64 = 60;
+// v1.1.0-beta.3：HEALTH_CHECK_TIMEOUT_SECS 已废弃（M0-R3 死锁修复，watcher 内 hardcoded 60s loop）。
 /// M0-P5：每个 apply phase 的独立 watchdog 超时（秒）。
 /// 超过此值未推进到下一 phase 则强制 abort + 回滚。
 const PHASE_TIMEOUT_SECS: u64 = 300; // 5 分钟
@@ -183,13 +182,15 @@ pub enum UpdatePhase {
 pub type ProgressSink = Arc<dyn Fn(UpdatePhase) + Send + Sync>;
 
 /// apply() 的上下文参数包：将 channel / target_tag / health_url / on_rollback /
-/// on_maintenance 5 个参数合并为一个结构体，消除 clippy::too_many_arguments。
+/// on_maintenance / task_id 6 个参数合并为一个结构体，消除 clippy::too_many_arguments。
+/// `task_id` 是 v1.1.0-beta.3 新增：传给 watcher 子进程用于 finalize audit log outcome。
 pub struct ApplyContext {
     pub channel: Channel,
     pub target_tag: String,
     pub health_url: String,
     pub on_rollback: Box<dyn Fn(String) + Send + 'static>,
     pub on_maintenance: Box<dyn Fn(bool) + Send + 'static>,
+    pub task_id: String,
 }
 
 #[derive(Default)]
@@ -425,6 +426,7 @@ impl Updater {
             health_url,
             on_rollback,
             on_maintenance,
+            task_id,
         } = ctx;
         let latest = {
             let cache = self.cache.read().await;
@@ -490,6 +492,7 @@ impl Updater {
                 &health_url,
                 on_rollback,
                 on_maintenance,
+                &task_id,
             )
             .await;
         // 失败时锁随 file drop 自动释放；成功时进程 exit 也会自动释放
@@ -505,8 +508,9 @@ impl Updater {
         backup_callback: F,
         progress: ProgressSink,
         health_url: &str,
-        on_rollback: impl Fn(String) + Send + 'static,
+        _on_rollback: impl Fn(String) + Send + 'static,
         on_maintenance: impl Fn(bool) + Send + 'static,
+        task_id: &str,
     ) -> Result<(), UpdaterError>
     where
         F: FnOnce(&Path) -> Result<(), UpdaterError> + Send,
@@ -605,11 +609,22 @@ impl Updater {
 
         let swap_result = blocking_io(|| {
             let mut steps_done: Vec<UndoStep> = Vec::new();
+            // v1.1.0-beta.3：rename binary/static 前先清 stale 目标。
+            // 上次升级失败回滚后 backup 文件/目录会遗留，下次升级 rename(source, dest)
+            // 在 dest 是非空目录时 ENOTEMPTY、在 dest 是 file 时虽然 Linux rename(2)
+            // 允许覆盖但为统一两条路径都显式预清理。修 v1.0 → beta.{1,2} 升级反复踩
+            // `learning-v1.0.0.backup.db` / `static.v1.0.0` stale 残留陷阱。
             if bin_path.exists() {
+                if bin_backup.exists() {
+                    let _ = std::fs::remove_file(&bin_backup);
+                }
                 std::fs::rename(&bin_path, &bin_backup)?;
                 steps_done.push(UndoStep::Rename(bin_backup.clone(), bin_path.clone()));
             }
             if static_path.exists() {
+                if static_backup.exists() {
+                    let _ = std::fs::remove_dir_all(&static_backup);
+                }
                 if let Err(e) = std::fs::rename(&static_path, &static_backup) {
                     rollback(steps_done);
                     return Err(UpdaterError::RolledBack(format!(
@@ -655,57 +670,47 @@ impl Updater {
             tracing::warn!("prune db backups: {e}");
         }
 
-        // 6) fork-exec 自重启
+        // 6) v1.1.0-beta.3：fork watcher + parent exit 取代旧 spawn_replacement sh wrapper +
+        //    M0-R3 60s 父进程监督的死锁设计。
+        //
+        // 旧死锁（v1.0 引入 M0-R3 起一直存在，admin 一键升级从未在 v1.0 之后真正成功过）：
+        //   - spawn_replacement 的 sh wrapper：`while kill -0 parent; do sleep 0.2; done; exec new_binary`
+        //   - parent 在 60s health loop 内一直活着 → sh wrapper 永远 sleep → 新 binary 永远没被 exec
+        //   - parent 探针打到自己（旧 v1.0 进程仍 listen）→ maintenance flag 让 /health 返回 503
+        //   - 60s 全失败 → parent 走 rollback 路径 return Err 但仍不 exit → sh wrapper 孤儿永生
+        //
+        // 新设计（hybrid）：
+        //   1. parent swap 完成后 fork 一个 watcher 子进程（detached / setsid / stdio→/dev/null）
+        //   2. parent std::process::exit(0) → systemd Restart=always 在 RestartSec=5 后启动新 binary
+        //   3. watcher 独立 sleep 10s 给 systemd + binary 启动留时间
+        //   4. watcher 60s loop 探 /health：
+        //      - 通过 → watcher 用 rusqlite 直接 UPDATE audit outcome=success → watcher exit
+        //      - 60s 超时 → watcher rename bin/static 回滚 v1.0 + kill 当前 main pid
+        //                  → systemd Restart 起 rolled-back v1.0 → watcher UPDATE outcome=rolled_back → exit
         progress(UpdatePhase::Restarting);
-        blocking_io(|| spawn_replacement(&bin_path))?;
-
-        // M0-R3：健康自检。父进程保持存活最多 60s，轮询子进程 /health。
-        // 子进程成功响应 200 → 父进程退出；超时未响应 → 回滚二进制并报警。
         progress(UpdatePhase::HealthChecking);
-        let health_deadline = tokio::time::Instant::now()
-            + std::time::Duration::from_secs(HEALTH_CHECK_TIMEOUT_SECS);
-        // 初始等待：给子进程 1s 抢端口 + 初始化完成
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        let child_healthy = loop {
-            if tokio::time::Instant::now() >= health_deadline {
-                break false;
-            }
-            let ok = self.client
-                .get(health_url)
-                .timeout(std::time::Duration::from_secs(3))
-                .send()
-                .await
-                .map(|r| r.status().is_success())
-                .unwrap_or(false);
-            if ok {
-                break true;
-            }
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let watcher_args = WatcherArgs {
+            task_id: task_id.to_string(),
+            target_tag: latest.tag.clone(),
+            install_dir: self.install_dir.clone(),
+            bin_path,
+            bin_backup,
+            static_path,
+            static_backup,
+            flag_path,
+            health_url: health_url.to_string(),
+            audit_db_path: self.install_dir.join("data").join("learning.db"),
         };
-
-        if child_healthy {
-            tracing::info!("新进程健康自检通过，父进程退出");
-            std::process::exit(0);
-        }
-
-        // 子进程启动失败 → 回滚二进制（static 不回滚，因为变更通常向后兼容）
-        let alert_msg = format!(
-            "自更新回滚：新进程 {} 启动 {}s 内未通过 /health 检查，已还原 {}",
-            latest.tag, HEALTH_CHECK_TIMEOUT_SECS, self.current_tag
+        // 标 audit outcome='applied_pending_watcher' 让 admin UI 在 watcher 接管期间显示中间态。
+        // watcher 60s 后会把 outcome update 为 success / rolled_back 终态。
+        watcher_update_audit_outcome(
+            &watcher_args.audit_db_path,
+            &watcher_args.task_id,
+            "applied_pending_watcher",
+            None,
+            false, // 不写 completed_at（仍未完成）
         );
-        tracing::error!("{}", alert_msg);
-        blocking_io(|| {
-            if bin_backup.exists() {
-                std::fs::rename(&bin_backup, &bin_path)?;
-                tracing::info!("回滚：已还原 {:?} → {:?}", bin_backup, bin_path);
-            }
-            // M0-R4：回滚后关闭 maintenance 并删除 flag
-            let _ = std::fs::remove_file(&flag_path);
-            Ok(())
-        })?;
-        on_maintenance(false);
-        on_rollback(alert_msg.clone());
-        Err(UpdaterError::RolledBack(alert_msg))
+        spawn_watcher_then_exit_parent(watcher_args)
     }
 
     /// v0.5.4：对 release.githubusercontent.com / github.com/.../releases/download/
@@ -1158,94 +1163,212 @@ fn rollback(mut steps: Vec<UndoStep>) {
     }
 }
 
+// v1.1.0-beta.3：升级监督 watcher 设计 — 替换旧 spawn_replacement / M0-R3 死锁实现。
+//
+// 旧实现废弃说明：spawn_replacement 用 sh wrapper "等 parent 退出后 exec 新 binary"，
+// 但 M0-R3 设计是父进程 60s 监督子进程 /health 后再决定是否 exit。两者死锁导致
+// 新 binary 永远没被 exec、admin 一键升级从 v1.0 起从未真正成功过（参见 apply_locked
+// 内 v1.1.0-beta.3 注释段的事故复盘）。
+//
+// 新设计：parent fork watcher 子进程做 60s 监督 + 失败回滚，parent 自己立即 exit，
+// 让 systemd Restart=always 在 RestartSec=5 后起新 binary。watcher 与 parent 完全
+// 解耦，不存在等待循环。
+
+#[derive(Debug, Clone)]
+struct WatcherArgs {
+    task_id: String,
+    target_tag: String,
+    install_dir: PathBuf,
+    bin_path: PathBuf,
+    bin_backup: PathBuf,
+    static_path: PathBuf,
+    static_backup: PathBuf,
+    flag_path: PathBuf,
+    health_url: String,
+    audit_db_path: PathBuf,
+}
+
+/// fork watcher 子进程后 parent 立即 exit 让 systemd 接管的工具方法。
+/// 不返回。child 走 run_watcher 后 exit；parent 直接 exit。
+/// fork 失败时 fallback 到 parent 直接 exit（失去自动回滚但 systemd 仍会重启起新 binary）。
 #[cfg(unix)]
-fn spawn_replacement(bin_path: &Path) -> Result<(), UpdaterError> {
-    use std::os::unix::process::CommandExt;
-    let parent_pid = std::process::id().to_string();
+fn spawn_watcher_then_exit_parent(args: WatcherArgs) -> ! {
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
 
-    // v1.1.0-beta.2：把子进程 stdout/stderr 写到日志文件（不再 Stdio::null() 吞）。
-    // 历史教训：v1.0 → v1.1.0-beta.1 升级失败时新进程 panic 完全无 trace，纯靠
-    // 父进程探针的 60s 超时 + 「健康检查未通过」错误盲猜根因。本次改完后，
-    // 「下次升级」（如果升级方还是这版后续）也能直接拿到子进程真 stderr。
-    // 本次 v1.0 → beta.2 升级要拿 stderr 走 main.rs 里的 redirect_self_update_logs（双保险）。
-    let log_path = bin_path
-        .parent()
-        .map(|p| p.join("logs/updater-child.log"))
-        .unwrap_or_else(|| std::path::PathBuf::from("/tmp/wordforge-updater-child.log"));
-    if let Some(parent) = log_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let log_out = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-        .ok();
-    let log_err = log_out.as_ref().and_then(|f| f.try_clone().ok());
-
-    let mut cmd = std::process::Command::new("/bin/sh");
-    cmd.arg("-c")
-        .arg(
-            r#"parent="$1"; shift
-while kill -0 "$parent" 2>/dev/null; do
-  sleep 0.2
-done
-exec "$@"
-"#,
-        )
-        .arg("wordforge-restart")
-        .arg(parent_pid)
-        .arg(bin_path)
-        .args(std::env::args().skip(1))
-        .stdin(std::process::Stdio::null());
-
-    match (log_out, log_err) {
-        (Some(o), Some(e)) => {
-            cmd.stdout(o).stderr(e);
+    let pid = unsafe { libc::fork() };
+    if pid < 0 {
+        let errno = std::io::Error::last_os_error();
+        tracing::error!(
+            "fork watcher 失败 ({errno})；parent 直接 exit 让 systemd 接管，本次升级无 60s 自动回滚监督"
+        );
+        std::process::exit(0);
+    } else if pid == 0 {
+        // child = watcher
+        unsafe {
+            libc::setsid();
+            // 关 stdio：避免 watcher 的输出污染 systemd journal 接管的新主进程
+            let null = libc::open(b"/dev/null\0".as_ptr() as *const _, libc::O_RDWR);
+            if null >= 0 {
+                libc::dup2(null, 0);
+                libc::dup2(null, 1);
+                libc::dup2(null, 2);
+                libc::close(null);
+            }
         }
-        _ => {
-            // 开不了日志文件（权限/盘满）— 兜底回退到 null，不阻断升级流程。
-            tracing::warn!(
-                "无法打开 updater-child 日志文件 {:?}，新进程 stderr 将丢失",
-                log_path
-            );
-            cmd.stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null());
-        }
+        run_watcher(&args);
+        std::process::exit(0);
+    } else {
+        tracing::info!(
+            watcher_pid = pid,
+            "watcher 子进程已 fork，parent exit 让 systemd Restart=always 启动新 binary"
+        );
+        std::process::exit(0);
     }
-
-    unsafe {
-        cmd.pre_exec(|| {
-            // 新建 session，让子进程脱离父 tty 与进程组，父退出不影响子
-            nix_setsid();
-            Ok(())
-        });
-    }
-    cmd.spawn()?;
-    Ok(())
 }
 
 #[cfg(not(unix))]
-fn spawn_replacement(bin_path: &Path) -> Result<(), UpdaterError> {
-    let parent_pid = std::process::id().to_string();
-    std::process::Command::new("cmd")
-        .arg("/C")
-        .arg(format!(
-            "ping 127.0.0.1 -n 2 >NUL && start \"\" \"{}\"",
-            bin_path.display()
-        ))
-        .arg(parent_pid)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()?;
-    Ok(())
+fn spawn_watcher_then_exit_parent(_args: WatcherArgs) -> ! {
+    tracing::error!("非 unix 平台不支持 fork-based watcher，parent exit，无自动监督");
+    std::process::exit(0);
 }
 
-#[cfg(unix)]
-fn nix_setsid() {
-    // 直接走 libc：避免引入 nix crate
-    unsafe {
-        libc::setsid();
+/// watcher 子进程主循环：
+/// 1. sleep 10s 给 systemd RestartSec=5 + 新 binary startup（migration/bind）共留 10s
+/// 2. 60s loop 探 /health（每 2s 一次）
+///    - 通过 → 更新 audit outcome=success
+///    - 超时 → rollback binary/static + kill 当前主进程让 systemd 起 rolled-back binary
+///            + 更新 audit outcome=rolled_back
+fn run_watcher(args: &WatcherArgs) {
+    std::thread::sleep(std::time::Duration::from_secs(10));
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while std::time::Instant::now() < deadline {
+        if watcher_probe_health(&args.health_url) {
+            watcher_update_audit_outcome(
+                &args.audit_db_path,
+                &args.task_id,
+                "success",
+                None,
+                true,
+            );
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    }
+
+    let err_msg = format!(
+        "apply rolled back by watcher: 新进程 {} 启动 60s 内 {} 未通过 /health 检查",
+        args.target_tag, args.health_url
+    );
+    watcher_rollback(args);
+    watcher_update_audit_outcome(
+        &args.audit_db_path,
+        &args.task_id,
+        "rolled_back",
+        Some(&err_msg),
+        true,
+    );
+}
+
+/// 用 curl 探 /health：避免 fork 后 tokio runtime 状态损坏的 reqwest 风险，也避免
+/// 新增 ureq 依赖。Linux 标准发行版均有 curl。
+fn watcher_probe_health(url: &str) -> bool {
+    std::process::Command::new("curl")
+        .args(["-fsS", "--max-time", "3", "-o", "/dev/null", url])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// 回滚 binary + static + 清 maintenance flag + kill 当前 wordforge 主进程
+/// 让 systemd Restart=always 接管起 rolled-back binary。
+fn watcher_rollback(args: &WatcherArgs) {
+    // 1. binary：失败版本标 .failed 保留（forensics），备份 → 现役
+    let failed_bin = args
+        .install_dir
+        .join(format!("wordforge.{}.failed", args.target_tag));
+    let _ = std::fs::remove_file(&failed_bin);
+    let _ = std::fs::rename(&args.bin_path, &failed_bin);
+    if args.bin_backup.exists() {
+        let _ = std::fs::rename(&args.bin_backup, &args.bin_path);
+    }
+
+    // 2. static：失败版本标 .failed 保留，备份 → 现役
+    let failed_static = args
+        .install_dir
+        .join(format!("static.{}.failed", args.target_tag));
+    let _ = std::fs::remove_dir_all(&failed_static);
+    let _ = std::fs::rename(&args.static_path, &failed_static);
+    if args.static_backup.exists() {
+        let _ = std::fs::rename(&args.static_backup, &args.static_path);
+    }
+
+    // 3. 清 maintenance flag（M0-R4：新进程启动时也会清，双保险）
+    let _ = std::fs::remove_file(&args.flag_path);
+
+    // 4. kill 当前 wordforge 主进程（不 kill 自己），让 systemd Restart=always 起 rolled-back
+    #[cfg(unix)]
+    {
+        let my_pid = unsafe { libc::getpid() };
+        if let Ok(output) = std::process::Command::new("pgrep")
+            .args(["-f", "/opt/wordforge/wordforge"])
+            .output()
+        {
+            for line in String::from_utf8_lossy(&output.stdout).lines() {
+                if let Ok(pid) = line.trim().parse::<i32>() {
+                    if pid != my_pid {
+                        unsafe {
+                            libc::kill(pid, libc::SIGTERM);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// rusqlite 直接 UPDATE audit_log。失败静默：watcher 不应因写 audit_log 失败导致回滚流程失败。
+fn watcher_update_audit_outcome(
+    db_path: &Path,
+    task_id: &str,
+    outcome: &str,
+    error: Option<&str>,
+    write_completed_at: bool,
+) {
+    let conn = match rusqlite::Connection::open(db_path) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(
+                "watcher 打开 audit_log db 失败 path={:?} task_id={} outcome={}: {}",
+                db_path,
+                task_id,
+                outcome,
+                e
+            );
+            return;
+        }
+    };
+    let now = chrono::Utc::now().to_rfc3339();
+    let result = if write_completed_at {
+        conn.execute(
+            "UPDATE update_audit_log SET outcome = ?1, error = ?2, completed_at = ?3 WHERE id = ?4",
+            rusqlite::params![outcome, error.unwrap_or(""), now, task_id],
+        )
+    } else {
+        conn.execute(
+            "UPDATE update_audit_log SET outcome = ?1, error = ?2 WHERE id = ?3",
+            rusqlite::params![outcome, error.unwrap_or(""), task_id],
+        )
+    };
+    if let Err(e) = result {
+        tracing::warn!(
+            "watcher 写 audit_log 失败 task_id={} outcome={}: {}",
+            task_id,
+            outcome,
+            e
+        );
     }
 }
 
