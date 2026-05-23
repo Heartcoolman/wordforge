@@ -18,6 +18,16 @@ binary `CARGO_PKG_VERSION` 错）。证据：`git show v1.0.0:Cargo.toml | grep 
 作 fallback；admin 一键升级 caller 几乎总会显式传 version，fallback 路径基本不触发。
 本 release 把 `Cargo.toml` + `Cargo.lock` 一并补齐到 `1.1.0-beta.1`，跨越两个失同步 release。
 
+### Release 流程调整 · rc 通道废弃（follow-up）
+
+v1.1.0-beta.1 发布后决定**只走 beta + GA 两条线**，rc 通道废弃。改动：
+
+- 🔧 **`.github/workflows/release.yml` tag-lint 收紧**：原 `^v\d+\.\d+\.\d+-(alpha|beta|rc)\.\d+$` → `^v\d+\.\d+\.\d+-beta\.\d+$`。`v1.2.0-rc.1` / `v1.2.0-alpha.1` 这类 tag 投递会被 CI 拦下
+- 🗑️ **删除 `scripts/rc-observation/` 整套 7 天稳态观察脚手架**（5xx 收集 / SSE incident / GH regression / daily report 共 4 脚本 + README）+ 配套测试 `tests/rc_observation_scripts.rs`（299 行）+ runbook `docs/runbook/rc-observation-{thresholds,report}.md`。GA 门改为由 beta 内测充分性 + 既有质量门（clippy/test/audit）保证，不再需要 rc 阶段独立的 7 天三源观察期
+- 🔧 **`scripts/ga-regression-check.sh` 移除 M2-Q4 段 + § 6.4 GA 门里的 7 天日报判定段 + 5xx/阈值文档 check**（共 3 段），保留 S5 自更新审计 check
+- 📚 **`docs/release-calendar.md`** 流程表去掉 Release Candidate 行；v1.1 计划从"三段 rc 合并切 GA"改为"beta 单通道，beta.1 已发 → 内测无 P0 后切 GA"
+- **历史保留**：v1.0.0-rc.1 / v1.0.0-rc.2 git tag + GitHub Pre-release 不动（v1.0 发版过程的真实历史）；`docs/alignment.md` / `docs/changelog.md` 内 v1.0 历史段的 rc 引用不动
+
 ### P0 收尾（本 release 新增）
 
 - 🚀 **GDPR 导出真流式 NDJSON**（`src/routes/users.rs`）：`/api/users/me/export` 改用

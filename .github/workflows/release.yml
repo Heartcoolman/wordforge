@@ -28,8 +28,8 @@ jobs:
         run: |
           TAG="${GITHUB_REF_NAME}"
           if [[ "$TAG" == *-* ]]; then
-            if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-(alpha|beta|rc)\.[0-9]+$ ]]; then
-              echo "::error::Pre-release tag '$TAG' 格式非法。期望：^v\\d+\\.\\d+\\.\\d+-(alpha|beta|rc)\\.\\d+$（如 v1.0.0-beta.1）"
+            if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-beta\.[0-9]+$ ]]; then
+              echo "::error::Pre-release tag '$TAG' 格式非法。期望：^v\\d+\\.\\d+\\.\\d+-beta\\.\\d+$（如 v1.1.0-beta.1）。rc/alpha 通道已废弃（v1.1.0-beta.1 follow-up 决策）"
               exit 1
             fi
           else

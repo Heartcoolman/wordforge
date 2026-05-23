@@ -371,74 +371,15 @@ check_m2() {
     check_contains "M2-Q3 alignment.md 含第四轮 P0/P1 全绿判定" \
         "docs/alignment.md" "0 P0|P0.*0 P1|交叉验证 0 P0"
 
-    # M2-Q4：rc-observation 脚手架全存在
-    check_files_exist "M2-Q4 rc-observation 脚本全存在" \
-        "scripts/rc-observation/collect_5xx_rate.sh" \
-        "scripts/rc-observation/collect_sse_incidents.sh" \
-        "scripts/rc-observation/collect_gh_regressions.sh" \
-        "scripts/rc-observation/daily_report.sh"
-    check_files_exist "M2-Q4 rc-observation runbook 全存在" \
-        "docs/runbook/rc-observation-thresholds.md" \
-        "docs/runbook/rc-observation-report.md"
-    check_file "M2-Q4 rc_observation_scripts 测试存在" \
-        "tests/rc_observation_scripts.rs"
-
-    # M2 rc_observation 脚本可执行
-    for s in collect_5xx_rate.sh collect_sse_incidents.sh \
-              collect_gh_regressions.sh daily_report.sh; do
-        if [[ -x "${PROJECT_ROOT}/scripts/rc-observation/${s}" ]]; then
-            pass "M2-Q4 ${s} 有可执行权限"
-        else
-            fail "M2-Q4 ${s} 缺少可执行权限"
-        fi
-    done
-
-    # M2 cargo test：rc_observation_scripts
-    if [[ "$SKIP_CARGO" == "false" ]]; then
-        run_check "M2 cargo test --test rc_observation_scripts" \
-            cargo test --manifest-path "${PROJECT_ROOT}/Cargo.toml" \
-            --test rc_observation_scripts -- --test-threads=1
-    else
-        skip "M2 cargo test（--skip-cargo）"
-    fi
+    # M2-Q4 段（rc-observation 7 天稳态观察）已废弃：v1.1.0-beta.1 follow-up 决策
+    # 删除 rc 通道 → 不再走 7 天稳态观察期，由 beta 内测 + 质量门保证 GA 质量。
 }
 
 # ================================================================
 # § 6.4 GA 门（→ v1.0）：稳态验证
 # ================================================================
 check_ga() {
-    header "RFC §6.4 GA 门 — 稳态验证"
-
-    # 7 天日报文件存在（由 daily_report.sh 生成，obs-dir 可配置）
-    OBS_DIR="${RC_OBS_DIR:-/tmp/rc-obs}"
-    if [[ -d "$OBS_DIR" ]]; then
-        DAY_FILES=$(ls "${OBS_DIR}"/day-*.json 2>/dev/null | wc -l | tr -d ' ')
-        if [[ "$DAY_FILES" -ge 7 ]]; then
-            pass "GA 7 天日报文件存在（${DAY_FILES} 个，路径 ${OBS_DIR}）"
-            # 判定是否全绿
-            ALL_GREEN=$(python3 -c "
-import json, glob
-files = sorted(glob.glob('${OBS_DIR}/day-*.json'))[-7:]
-results = []
-for f in files:
-    try:
-        d = json.load(open(f))
-        results.append(d.get('all_green', False))
-    except Exception:
-        results.append(False)
-print('true' if all(results) and len(results)==7 else 'false')
-")
-            if [[ "$ALL_GREEN" == "true" ]]; then
-                pass "GA 最近 7 天日报全绿（all_green=true）"
-            else
-                fail "GA 最近 7 天日报未全绿（检查 ${OBS_DIR}/day-*.json）"
-            fi
-        else
-            fail "GA 日报文件不足 7 个（当前 ${DAY_FILES} 个，路径 ${OBS_DIR}）"
-        fi
-    else
-        skip "GA 7 天日报（${OBS_DIR} 不存在，rc.3 发布后运行 daily_report.sh 生成）"
-    fi
+    header "GA 门 — 自更新审计完整性（rc-observation 7 天稳态观察段已废弃，v1.1.0-beta.1 follow-up）"
 
     # S5 自更新审计表（RFC §6.4：升级历史审计表有完整记录）
     check_file "GA (S5) update_audit_log migration 存在（自更新审计）" \
@@ -461,23 +402,6 @@ print('true' if all(results) and len(results)==7 else 'false')
     check_contains "GA (S5) /admin/updates/history 路由暴露审计历史" \
         "src/routes/admin/updates.rs" "history.*get_history|get_history"
 
-    # 5xx 观测工具完整性（RFC §6.4：5xx 错误率 < 0.1%）
-    check_file "GA 5xx 观测脚本存在" \
-        "scripts/rc-observation/collect_5xx_rate.sh"
-    check_contains "GA 5xx 阈值 0.001（0.1%）正确" \
-        "scripts/rc-observation/collect_5xx_rate.sh" "0\.001|THRESHOLD"
-    check_file "GA 每日汇总脚本存在" \
-        "scripts/rc-observation/daily_report.sh"
-    check_file "GA GitHub 回归标签收集脚本存在" \
-        "scripts/rc-observation/collect_gh_regressions.sh"
-
-    # 稳态阈值文档
-    check_contains "GA 阈值文档包含 0.1% 定义" \
-        "docs/runbook/rc-observation-thresholds.md" "0.1%|0.001"
-    check_contains "GA 报告模板包含签署栏" \
-        "docs/runbook/rc-observation-report.md" "签署"
-    check_contains "GA 报告模板包含 7 天表格" \
-        "docs/runbook/rc-observation-report.md" "all_green|7.*天"
 }
 
 # ================================================================
