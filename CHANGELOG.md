@@ -6,6 +6,41 @@
 
 ---
 
+## [v1.1.0-beta.2] — 2026-05-23 · Pre-release · 自更新诊断盲区修复
+
+v1.0.0 生产服务器（8.135.57.148）执行 admin 一键升级到 v1.1.0-beta.1 失败，60s /health 检查未通过 → 自动回滚到 v1.0.0。诊断时发现：`src/services/updater.rs::spawn_replacement` 把新进程 stdout/stderr **全部 Stdio::null() 丢弃**，导致新进程的 panic / migrate 失败 / bind 失败等任何 stderr 输出在 systemd journal 里**一行都看不到** —— 父进程探针 60s 超时是唯一可见信号，根因完全盲猜。
+
+本 release **不修升级失败本身**（真根因还没拿到证据，等本次升级跑完拿到日志再说），只修**让下次升级能拿到 stderr** 的诊断盲区，双管齐下：
+
+### 修复
+
+- 🔧 **`src/main.rs` 加 `redirect_self_update_logs_if_applicable`**（A 修，本次升级救场）：main 函数第一行（dotenvy / Config::from_env 之前）就检测 `/proc/<ppid>/cmdline` 是否含 `wordforge-restart` 字符串（updater sh wrapper 的固定 argv[1]）。如果是 → `dup2` stdout/stderr 到 `<install_dir>/logs/updater-child-<unix_ts>.log`。否则不动 stderr（systemd journal 继续接管）
+    - 关键：必须在**任何可能 panic 的代码**之前跑，因此放在 main 第一行
+    - 时间戳放文件名内，多次升级日志不互相覆盖
+- 🔧 **`src/services/updater.rs::spawn_replacement` 改 Stdio::null() → logged file**（B 修，未来升级安全）：把子进程 stdout/stderr 改为 redirect 到 `<install_dir>/logs/updater-child.log`（append 模式）；开不了日志文件时回退 null + tracing warn
+
+### 为什么 A + B 双修
+
+| 修复 | 解决的场景 |
+|---|---|
+| A（main.rs） | **本次** v1.0 → beta.2 升级：v1.0 二进制跑的是 v1.0 编译时的旧 spawn_replacement（Stdio::null 写死在二进制里，没法回头改），但新 beta.2 二进制启动后立刻自己 dup2 救场 |
+| B（updater.rs） | **未来**升级（beta.2 → 后续版本）：父进程是 beta.2，直接给子进程开日志 fd |
+
+### 这次升级失败的真根因（pending）
+
+beta.2 发布 + 生产再次触发 admin 一键升级后，看 `/opt/wordforge/logs/updater-child-*.log` 的真 stderr 才能定位。当前**几个高概率假设**（按可能性排序，等数据来验证）：
+
+1. **migration m020 / m021 在 v1.0 prod db 上跑失败**（m021 已确认幂等，m020 是 4 张新表 CREATE IF NOT EXISTS 看似 OK，但仍可能某条 CHECK constraint 与现有数据冲突）
+2. **新进程 bind 端口失败**（旧进程 sock 没 release / SO_REUSEADDR 没设）
+3. **新引入的 startup 依赖**（如资源包签名器初始化时 key dir 权限）
+4. **dotenvy 读 .env 在新进程的 cwd 下找不到**（systemd EnvironmentFile 注入到父，子继承应该 OK，但需验证）
+
+### 版本号
+
+- `Cargo.toml` + `Cargo.lock`: `1.1.0-beta.1` → `1.1.0-beta.2`
+
+---
+
 ## [v1.1.0-beta.1] — 2026-05-23 · Pre-release
 
 v1.1 首发 Pre-release。涵盖 P0（资源包热更 + GDPR 真流式 NDJSON）、P1（领域事件总线）、

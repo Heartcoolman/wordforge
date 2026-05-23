@@ -25,8 +25,77 @@ use tower_http::trace::TraceLayer;
 const CSP_HEADER: &str = "default-src 'self'; script-src 'self' 'sha256-wEjozNdwHz/9ujnOuYJi4PZ89BSuTa/abtYO9C7bcNw='; style-src 'self'; font-src 'self'; connect-src 'self' https: capacitor: ionic:; img-src 'self' data: blob:; worker-src 'self' blob:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
 const HSTS_HEADER: &str = "max-age=31536000; includeSubDomains";
 
+/// v1.1.0-beta.2：自更新子进程 stderr 救场。
+///
+/// `updater::spawn_replacement` 起新进程时把 stdin/stdout/stderr 全 redirect 到
+/// `Stdio::null()`（v1.0 编译时写死，无法回头修），导致升级失败时新进程的 panic /
+/// migrate 错误**完全无 trace**（v1.0 → v1.1.0-beta.1 升级失败的诊断盲区根因）。
+///
+/// 本函数在 main 第一行就跑：通过 `/proc/<ppid>/cmdline` 检测是否被自更新 sh wrapper 起
+/// （wrapper 的 argv[1] 是固定字符串 `wordforge-restart`），如果是 → 立即 dup2 stdout/stderr
+/// 到 `<install_dir>/logs/updater-child-<unix_ts>.log`。非自更新启动（systemd fresh start）
+/// 不改 stderr，让 journal 继续接管。
+#[cfg(unix)]
+fn redirect_self_update_logs_if_applicable() {
+    let ppid = unsafe { libc::getppid() };
+    let cmdline_path = format!("/proc/{ppid}/cmdline");
+    let cmdline = match std::fs::read_to_string(&cmdline_path) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    // /proc/<pid>/cmdline 是 \0 分隔的 argv 拼串；wrapper 第二段是 "wordforge-restart"
+    if !cmdline.contains("wordforge-restart") {
+        return;
+    }
+
+    let log_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.join("logs")))
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
+    let _ = std::fs::create_dir_all(&log_dir);
+
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let log_path = log_dir.join(format!("updater-child-{ts}.log"));
+
+    let file = match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
+        Ok(f) => f,
+        Err(_) => return,
+    };
+
+    use std::os::unix::io::AsRawFd;
+    let fd = file.as_raw_fd();
+    unsafe {
+        // 1=STDOUT_FILENO, 2=STDERR_FILENO
+        let _ = libc::dup2(fd, 1);
+        let _ = libc::dup2(fd, 2);
+    }
+    // file 离开 scope 关闭原 fd，但 stdout/stderr 已经各持一个 dup 出来的独立 fd
+    drop(file);
+
+    eprintln!(
+        "[updater-child] self-update child detected (ppid={ppid} cmdline contains 'wordforge-restart'), logs at {log_path:?}"
+    );
+}
+
+#[cfg(not(unix))]
+fn redirect_self_update_logs_if_applicable() {
+    // 非 unix（Windows/其他）平台无 /proc 也无 dup2 语义，跳过。
+}
+
 #[tokio::main]
 async fn main() {
+    // v1.1.0-beta.2：先做自更新子进程 stderr 救场（必须在 dotenvy / Config::from_env 之前，
+    // 这样如果 Config::from_env 内 validate_secrets 等校验 panic，消息会落到日志文件而不是
+    // 被 spawn_replacement 的 Stdio::null() 吞掉）。
+    redirect_self_update_logs_if_applicable();
+
     dotenvy::dotenv().ok();
 
     let config = Config::from_env();

@@ -1162,6 +1162,26 @@ fn rollback(mut steps: Vec<UndoStep>) {
 fn spawn_replacement(bin_path: &Path) -> Result<(), UpdaterError> {
     use std::os::unix::process::CommandExt;
     let parent_pid = std::process::id().to_string();
+
+    // v1.1.0-beta.2：把子进程 stdout/stderr 写到日志文件（不再 Stdio::null() 吞）。
+    // 历史教训：v1.0 → v1.1.0-beta.1 升级失败时新进程 panic 完全无 trace，纯靠
+    // 父进程探针的 60s 超时 + 「健康检查未通过」错误盲猜根因。本次改完后，
+    // 「下次升级」（如果升级方还是这版后续）也能直接拿到子进程真 stderr。
+    // 本次 v1.0 → beta.2 升级要拿 stderr 走 main.rs 里的 redirect_self_update_logs（双保险）。
+    let log_path = bin_path
+        .parent()
+        .map(|p| p.join("logs/updater-child.log"))
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp/wordforge-updater-child.log"));
+    if let Some(parent) = log_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let log_out = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .ok();
+    let log_err = log_out.as_ref().and_then(|f| f.try_clone().ok());
+
     let mut cmd = std::process::Command::new("/bin/sh");
     cmd.arg("-c")
         .arg(
@@ -1176,9 +1196,23 @@ exec "$@"
         .arg(parent_pid)
         .arg(bin_path)
         .args(std::env::args().skip(1))
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+        .stdin(std::process::Stdio::null());
+
+    match (log_out, log_err) {
+        (Some(o), Some(e)) => {
+            cmd.stdout(o).stderr(e);
+        }
+        _ => {
+            // 开不了日志文件（权限/盘满）— 兜底回退到 null，不阻断升级流程。
+            tracing::warn!(
+                "无法打开 updater-child 日志文件 {:?}，新进程 stderr 将丢失",
+                log_path
+            );
+            cmd.stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+        }
+    }
+
     unsafe {
         cmd.pre_exec(|| {
             // 新建 session，让子进程脱离父 tty 与进程组，父退出不影响子
