@@ -1,11 +1,30 @@
 [package]
 name = "learning-backend"
-version = "0.6.0-beta.4"
+version = "1.1.0-beta.1"
 edition = "2021"
 rust-version = "1.77"
 
 [features]
-default = []
+# v1.1-P1 S2：领域事件总线。默认 enabled；关闭时 emit/consumer 退化为 noop，
+# records → AMAS 走原同步通路，作为灰度回滚开关。
+default = ["event-bus"]
+event-bus = []
+
+# v1.1-P2.1：clippy 全局豁免清单。
+# 真代码问题在 src/ 内仍按默认 default-deny 规则单独修；
+# 这里只豁免测试 / 工具代码中的公认习语，避免噪音。
+[lints.clippy]
+# tests/* 大量 Default::default() + 字段重赋的测试构造范式（已确认 src/ 0 命中）
+field_reassign_with_default = "allow"
+# property test / monte_carlo 里 for 循环带 counter 是显式可读做法
+explicit_counter_loop = "allow"
+# 同上：for i in 0..n { use w[i] } 在数值密集场景比迭代器更易读
+needless_range_loop = "allow"
+# tests/* 用 std::sync::Mutex TEST_MUTEX 串行化共享 atomic statics，
+# _guard 跨 await 是测试隔离的合法用法
+await_holding_lock = "allow"
+# .get(k).is_none() vs .contains_key(k)：可读性偏好，对性能无影响
+unnecessary_get_then_check = "allow"
 
 [dependencies]
 axum = { version = "0.7", features = ["macros"] }
@@ -65,6 +84,8 @@ semver = "1"
 fs2 = "0.4"
 # M0-R2：minisign 验签（纯 Rust，无 C 依赖）
 minisign-verify = "0.2"
+# v1.1-P0.6：Ed25519 资源包签名（与 minisign 自更新链路解耦，对接文档 §7.1 要求 raw Ed25519）
+ed25519-dalek = { version = "2", features = ["std", "rand_core"] }
 # utoipa：OpenAPI 3.1 自动生成（M0-C2）；yaml feature 用于测试导出 docs/openapi.yaml
 utoipa = { version = "5.5.0", features = ["uuid", "chrono", "yaml"] }
 

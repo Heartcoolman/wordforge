@@ -73,7 +73,7 @@ fn test_amas_beats_fixed_interval() {
                 break;
             }
             simulate_review(&mut amas_states[idx], 0.85, now_ms, &config);
-            let interval_ms = compute_interval(&amas_states[idx], 0.85, 1.0, &config) as i64 * 1000;
+            let interval_ms = compute_interval(&amas_states[idx], 0.85, 1.0, &config) * 1000;
             next_review[idx] = now_ms + interval_ms;
             reviewed += 1;
         }

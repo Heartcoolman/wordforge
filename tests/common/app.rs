@@ -54,11 +54,29 @@ async fn spawn_with_limits_inner(
     spawn_with_full_config(api_limit, auth_limit, strict_mode, Default::default()).await
 }
 
+/// v1.1-P2.3：spawn TestApp 并显式注入匿名/已登录双轨配额。
+/// `anon`/`authed` 为 0 时落回 `api_limit` fallback。
+pub async fn spawn_test_server_with_dual_limits(api_limit: u64, anon: u64, authed: u64) -> TestApp {
+    spawn_with_full_config_dual(api_limit, 10, Default::default(), Default::default(), anon, authed)
+        .await
+}
+
 async fn spawn_with_full_config(
     api_limit: u64,
     auth_limit: u64,
     strict_mode: learning_backend::config::StrictModeConfig,
     probe: learning_backend::config::ProbeConfig,
+) -> TestApp {
+    spawn_with_full_config_dual(api_limit, auth_limit, strict_mode, probe, 0, 0).await
+}
+
+async fn spawn_with_full_config_dual(
+    api_limit: u64,
+    auth_limit: u64,
+    strict_mode: learning_backend::config::StrictModeConfig,
+    probe: learning_backend::config::ProbeConfig,
+    anon_max: u64,
+    authed_max: u64,
 ) -> TestApp {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     // 直接构造 Config，避免使用 set_var 造成多线程测试环境变量竞态
@@ -95,6 +113,9 @@ async fn spawn_with_full_config(
         rate_limit: learning_backend::config::RateLimitConfig {
             window_secs: 60,
             max_requests: api_limit,
+            // 0 = fallback 到 max_requests；双轨用例显式注入差异化数值。
+            anonymous_max_requests: anon_max,
+            authenticated_max_requests: authed_max,
         },
         auth_rate_limit: learning_backend::config::AuthRateLimitConfig {
             window_secs: 60,
@@ -165,6 +186,18 @@ async fn spawn_with_full_config(
     let (shutdown_tx, _) = broadcast::channel::<()>(8);
 
     let state = AppState::new(store, amas_engine, &config, shutdown_tx, false);
+
+    // v1.1-P0.10：与 main.rs 一致，给 AppState 注入资源包签名器。
+    // keypair 写在 temp_dir/keys/ 内，测试结束随 TempDir 自动清理。
+    {
+        let key_dir = temp_dir.path().join("keys");
+        match learning_backend::services::resource_pack_signing::ResourcePackSigner::load_or_generate(
+            &key_dir,
+        ) {
+            Ok(signer) => state.set_resource_pack_signer(Arc::new(signer)),
+            Err(e) => eprintln!("test setup: resource_pack signer init failed: {e}"),
+        }
+    }
 
     let app = build_router(state.clone());
 

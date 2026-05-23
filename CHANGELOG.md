@@ -6,6 +6,161 @@
 
 ---
 
+## [v1.1.0-beta.1] — 2026-05-23 · Pre-release
+
+v1.1 首发 Pre-release。涵盖 P0（资源包热更 + GDPR 真流式 NDJSON）、P1（领域事件总线）、
+P2（重构 / 性能 / 文档 / clippy 清零）三阶段全部工作，主版本号从 `0.6.0-beta.4`
+跨升至 `1.1.0-beta.1`（v1.0.0 GA 之后版本号曾停滞，本 release 一并补齐）。
+
+### P0 收尾（本 release 新增）
+
+- 🚀 **GDPR 导出真流式 NDJSON**（`src/routes/users.rs`）：`/api/users/me/export` 改用
+  `tokio::sync::mpsc` + `axum::body::Body::from_stream`，每个 store 任务读完一块即推入
+  channel；HTTP/1.1 自动 `Transfer-Encoding: chunked`。修复原 `Vec.join` 一次性 body
+  在大用户（几十 MB records）下的内存膨胀，客户端可边读边写盘。
+    - 错误处理取舍：流中段 store 任务失败时，向 channel 推一行 `{"table":"_error",...}`
+      后关闭，**不**回退为 HTTP 5xx（status code 在首块 flush 时已定，无法回退） ——
+      流式 API 的固有约束，已在源码注释明示
+- 📝 **admin auth 注释补完**（`src/auth.rs`）：明示当前 admin session 校验**不做**用户表
+  跨查（之前实现把 `admin_id` 当 `user_id` 去 `users` 表查 `is_banned` 会把所有正常 admin
+  拒之门外）；管理员"禁用"目前靠 `locked_until` + `delete_admin_session` 两条机制；
+  真正的 admin `is_disabled` 列需 schema 迁移，超出 v1.1 P0 范围
+
+### 质量（原 rc.3 阶段）
+
+- ✅ **cargo clippy --all-targets -- -D warnings 零警告零错误**：56 条历史警告
+  按「真问题修复 / 习语局部豁免 + 注释」两条线清零（P2.1）
+    - **真修复**：`tests/llm_cost_ledger.rs` 3.14 → 1.23（误中 approx_constant PI 阈值）；
+      `tests/admin_analytics_seeded_http.rs:327` 多余 `&` borrow 去除；
+    - **局部豁免（带理由注释）**：
+      `src/amas/engine.rs` / `src/amas/memory/ssp.rs` / `src/amas/monitoring.rs` /
+      `src/store/operations/elo.rs` / `src/store/operations/system_settings.rs` /
+      `tests/amas_param_sweep.rs` / `tests/property_memory_models.rs`
+      各自 `mod tests` 或 crate-level `#[allow(clippy::field_reassign_with_default)]`
+      —— 测试用 `let mut cfg = X::default(); cfg.field = v` 比 struct-update 语法
+      更易看清「这条 case 改了什么」，是公认习语；
+      `src/workers/error_rate_watchdog.rs:tests` 串行化全局静态用 std::sync::Mutex
+      跨 await，#[tokio::test] 单线程不死锁，`#[allow(clippy::await_holding_lock)]`；
+      `src/store/operations/resource_packs.rs::ResourcePackChannel::from_str`
+      故意返回 `Option<Self>` 而非 `Result<Self,Err>`，标 `#[allow(clippy::should_implement_trait)]`；
+      `src/store/operations/amas_telemetry.rs::tests::insert_event` 8 参数 helper
+      `#[allow(clippy::too_many_arguments)]`。
+- ✅ **cargo test 全过**：lib 641 + 各集成测试 binary 累计 **921 passed / 0 failed**
+  （lib 单测 641 + tests/* 各 binary 合计 280；cargo test 按 binary 分组报，去重后总数 921）
+
+### v1.1.0 全 RC 汇总（P0 + P1 + P2 = 25 commit）
+
+| 阶段 | 范围 | commit 数 | 状态 |
+|---|---|---|---|
+| **P0** | 资源包热更后端（rc.1 落地） | 12 | ✅ |
+| **P1** | 领域事件总线基础设施（rc.2） | 1 | ✅ |
+| **P2** | 重构/性能/文档/收尾（rc.2 + rc.3，含 P2.1 clippy 清零） | 12 | ✅ |
+
+### Release Notes（面向用户）
+
+v1.1.0 GA 给 iOS / Web 客户端的核心交付：
+- **资源包热更**：词书内容更新无需发版（详见 rc.1 段）
+- **事件总线**：records → AMAS 通过领域事件解耦，未来扩展更解耦（开发者体验）
+- **运维就绪**：维护模式 UI 开关 + nginx 反向代理样例 + TLS runbook + Sentry 错误监控
+- **稳定性**：rate_limit 双轨防恶意匿名爬取、SSE 上限提升 5× 适配大客户、21 条迁移可逆便于 dev 重置
+- **质量门**：clippy --deny 零警告 + 921 测试 100% 通过
+
+### 过程节点 · rc.2（事件总线 + 重构 + 文档）
+
+rc.1（资源包热更）落地后，本 RC 交付 P1 + P2 主体工作。
+
+### 新功能（事件总线）
+
+- 🚀 **领域事件总线**（P1-S2，commit 568f294）：records 写入旁路 emit `DomainEvent::LearningRecorded` →
+  AMAS engine 异步消费，事件总线（`src/services/event_bus.rs`）单向广播 + per-receiver
+  缓冲，避免 records→AMAS 紧耦合直接调用。新增 `tests/event_bus.rs` 单测覆盖 emit/recv
+  与背压 drop 行为。
+
+### 改进（rate_limit）
+
+- 🛡️ **rate_limit 双轨**（P2.3，commit fb9f5c1）：匿名按 IP 限流，已登录按 `user_id` 限流。
+  防止单个恶意未登录扫描器拖累全站，同时已登录用户在多设备/移动网络下不再被 IP 误伤。
+  `RateLimitConfig` 加 `anonymous_max_requests` / `authenticated_max_requests` 两挡。
+- ⚡ **SSE 上限放宽**（P2.4，commit 53c4294）：每用户最多 1000 → **5000** 路活跃连接，
+  心跳 15s → **10s**。给同时挂 10 端的「大用户」预留余量。
+
+### 改进（迁移 / 拆分 / 审计）
+
+- 🔧 **21 条 migration down 设计**（P2.2，commit 4d342c3）：m001–m021 全部配套 down 函数 +
+  `revert_to(target_version)` 接口，**生产严禁调用**（注释明示），仅供 dev / test 重置脏
+  schema。`tests/migrate_down.rs` 集成测试验证 up → down → up 循环幂等。
+- 🔧 **store/operations/extras.rs 按职责拆 3 块**（P2.5，commit 3cce60b）：937 行单文件
+  拆为 `user_profile_extras.rs` / `word_metadata_extras.rs` + 保留少量 extras 杂项。
+  `mod.rs` 同步导出，外部 API 兼容。
+- 🛡️ **`update_audit_log` 通用化**（P2.10，commit e37cb69）：迁移 021 给表加
+  `action / target_type / target_id / metadata_json` 4 列。覆盖 7 处 admin 敏感
+  handler：资源包 upload/set_active/deactivate + 用户 ban/unban/reset_password/set_password。
+  老 self_update 写入路径完全兼容，新写入通过 `Store::insert_admin_audit()` 通用入口。
+  `GET /api/admin/updates/history` 返回 entry 新增 4 个 camelCase 字段。
+
+### 数据库迁移
+
+- `021_admin_audit_log_v2`：ALTER TABLE 加 4 列（含 `action TEXT NOT NULL DEFAULT 'self_update'`），
+  老行回填默认值，向后兼容
+
+### 文档（运维 / 监控）
+
+- 📚 **release-calendar.md 补 v1.0 GA + v1.1 计划**（P2.7，commit 5b82688）
+- 📚 **nginx sample.conf + TLS runbook**（P2.8，commit 3fb7460）：反向代理样例 + Let's Encrypt
+- 📚 **维护模式运维 SOP runbook**（P2.9，commit 666ac5e）
+- 🛡️ **前端 ErrorBoundary 接 Sentry SDK**（P2.6，commit 3817047）
+
+### 测试
+
+- 新增 `tests/event_bus.rs` 单元测试覆盖事件总线 emit/recv/背压
+- 新增 `tests/migrate_down.rs` 集成测试覆盖 up→down→up 循环
+- `tests/admin_extra_http.rs` 加 `it_admin_sensitive_actions_write_audit_log`
+- `tests/resource_pack_http.rs` 加 `admin_resource_pack_handlers_write_audit_log`
+
+### 过程节点 · rc.1（资源包热更后端）
+
+iOS v1.1 客户端 POC 已落地（`/Users/liji/WordForge-App` @ `b1e1a41`），本 RC 交付后端配套，
+路径协议详见 [`docs/backend-handoff-resource-pack-v1.1.md`](docs/backend-handoff-resource-pack-v1.1.md)
+和 [`docs/v1-research/v1-1-resource-pack.md`](docs/v1-research/v1-1-resource-pack.md)。
+
+### 新功能（资源包子系统）
+
+- 📦 **资源包匿名端点**：`GET /api/resource-packs`、`GET /api/resource-packs/:packId/manifest`、`GET /api/resource-packs/public-key`（详见 `docs/api-endpoints.md` §21）
+- 📦 **CDN 自托管**：`static/packs/<pack>/<ver>/payload.json` 走 ServeDir + `public, max-age=31536000, immutable`
+- 📦 **Admin CRUD**：`POST/PUT/GET/DELETE /api/admin/resource-packs/*`（详见 §22），含 multipart 上传后自动 SHA256 + Ed25519 签名 + 落盘 + 写表
+- 📦 **客户端 telemetry**：`POST /api/telemetry/resource-pack-install` 落 `resource_pack_install_log` 表
+- 🛡️ **Ed25519 签名链路**：`ed25519-dalek v2`，私钥 0600 / 公钥 0644 自动 bootstrap，与既有 minisign 自更新链路解耦
+- 🛡️ **SSE 事件 `resource_pack_available`**：admin 切 active 后 5 分钟 dedup 广播
+- 📊 **install_log 聚合**：admin `/stats` 端点按 `(version, outcome)` 计数
+
+### 数据库
+
+- 迁移 `020_resource_packs`：4 张表 `resource_packs` / `resource_pack_versions` / `resource_pack_active` / `resource_pack_install_log`，channel CHECK 限定 `stable/beta/internal`。down 迁移随 P2.2 统一补
+
+### 错误码
+
+- `RESOURCE_PACK_NOT_FOUND` (404)、`RESOURCE_PACK_APP_VERSION_TOO_LOW` (409)、`RESOURCE_PACK_CHANNEL_FORBIDDEN` (403)、`RESOURCE_PACK_SIGNER_UNAVAILABLE` (503)
+
+### 修复
+
+- 🐛 **`sse_event_table` 测试假性平衡**：v1.0 M1-A5 `worker_missed` 和 M1-G2 `llm_budget_exceeded` 未同步进 `DOCUMENTED_EVENTS` 和 `all_sse_event_samples()`，测试 11==11 巧合通过；本 RC 补齐至 14 个变体（含新 `resource_pack_available`）
+
+### 实施时的 plan 纠正
+
+- ❎ Plan 原写「扩展 `services::updater::Channel` 加 Internal 变体」，发现那是面向二进制自更新的 release 通道（牵连 checker / cache / apply 整套），改为**独立** `ResourcePackChannel { Stable, Beta, Internal }`（`store::operations::resource_packs`），业务语义分离更干净
+- ❎ 集成测试发现 `downloadURL` 全大写 URL 在 serde camelCase 下变成 `downloadUrl`（U 小写），必须手动 `#[serde(rename = "downloadURL")]`
+
+### 与 iOS 客户端的协调点
+
+iOS v1.1 客户端文档原写 `GET /api/v1/resource-packs/{packId}/manifest`，但后端 `/api/v1/*` 自 2026-05-21 起整组冻结返回 410 Gone（sunset 2027-01-01）。后端实现走 `/api/resource-packs/*` 主端点（与 `/api/wordbooks/*` 风格对齐），**iOS 需改 `EndpointServices.swift:519` 的 path + 同步对接文档**。
+
+### 测试
+
+- 9 个新增集成测试 `tests/resource_pack_http.rs`：upload→activate→manifest 端到端、ETag/Cache-Control/304/409/404、telemetry 聚合、SSE dedup
+- 全测试 635 lib + 130+ 集成测试 0 失败
+
+---
+
 ## [v1.0.0] — 2026-05-22 · GA 🎉
 
 **51 项 v1 工作全部完成**（MUST 37 + SHOULD 9 + 新增 5），76 commit 跨两个 RC 通道。完整 release notes 见 GitHub Release v1.0.0。

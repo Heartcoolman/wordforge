@@ -210,8 +210,8 @@ mod tests {
     use super::*;
 
     fn test_store() -> Store {
-        let store = Store::open(":memory:", 5000, 1).unwrap();
-        store
+        
+        Store::open(":memory:", 5000, 1).unwrap()
     }
 
     fn sample_word(id: &str, text: &str) -> Word {

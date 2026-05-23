@@ -846,21 +846,13 @@ fn run_fsrs_sim(words: &[f64], seed: u64, scenario: SimScenario) -> SimResult {
 // ============================================================================
 
 #[derive(Debug, Clone)]
+#[derive(Default)]
 struct EbbinghausState {
     box_level: usize,
     last_review_at: Option<i64>,
     review_count: u32,
 }
 
-impl Default for EbbinghausState {
-    fn default() -> Self {
-        Self {
-            box_level: 0,
-            last_review_at: None,
-            review_count: 0,
-        }
-    }
-}
 
 const EBBINGHAUS_INTERVALS: [f64; 8] = [0.01, 0.02, 0.5, 1.0, 2.0, 4.0, 7.0, 15.0];
 
@@ -1085,21 +1077,13 @@ fn run_hlr_sim(words: &[f64], seed: u64, scenario: SimScenario) -> SimResult {
 // ============================================================================
 
 #[derive(Debug, Clone)]
+#[derive(Default)]
 struct MemriseState {
     level: usize, // 0-5
     last_review_at: Option<i64>,
     review_count: u32,
 }
 
-impl Default for MemriseState {
-    fn default() -> Self {
-        Self {
-            level: 0,
-            last_review_at: None,
-            review_count: 0,
-        }
-    }
-}
 
 const MEMRISE_INTERVALS_HOURS: [f64; 6] = [4.0, 12.0, 24.0, 72.0, 168.0, 720.0];
 
@@ -1872,12 +1856,12 @@ fn monte_carlo_mtp_transfer() {
         // 累计学习多个含 "un-" 的词 → familiarity 增加 → bonus 应增加或保持
         update_known_morphemes(
             &mut mtp_state,
-            &vec!["un".to_string(), "lock".to_string()],
+            &["un".to_string(), "lock".to_string()],
             0.95,
             &config,
         );
         let bonus_after = morpheme_transfer_bonus(
-            &vec!["un".to_string(), "wrap".to_string()],
+            &["un".to_string(), "wrap".to_string()],
             &mtp_state.known_morphemes,
             &config,
         );

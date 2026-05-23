@@ -21,6 +21,9 @@ const DOCUMENTED_EVENTS: &[&str] = &[
     "probe_request",
     "probe_confirm",
     "incident",
+    "worker_missed",
+    "llm_budget_exceeded",
+    "resource_pack_available",
 ];
 
 /// SseEvent 变体的穷举列表，用于序列化验证。
@@ -58,6 +61,21 @@ fn all_sse_event_samples() -> Vec<SseEvent> {
         SseEvent::Incident {
             error_rate: 0.025,
             window_secs: 300,
+        },
+        SseEvent::WorkerMissed {
+            worker_name: "amas_aggregator".to_string(),
+            miss_count: 3,
+        },
+        SseEvent::LlmBudgetExceeded {
+            spent_yuan: 102.5,
+            cap_yuan: 100.0,
+            resume_month: "2026-06".to_string(),
+        },
+        SseEvent::ResourcePackAvailable {
+            pack_id: "wordbook-core".to_string(),
+            version: "1.2.3".to_string(),
+            channel:
+                learning_backend::store::operations::resource_packs::ResourcePackChannel::Stable,
         },
     ]
 }

@@ -2377,8 +2377,12 @@ Server-Sent Events（SSE）持久连接，用于接收服务端实时推送。
 | `update_progress` | 一键更新执行阶段进度（管理员专属，0–100） | `{"type": "update_progress", "phase": "downloading", "percent": 35}` |
 | `probe_request` | 远程探针脚本下发：admin 通过 `POST /api/admin/probe` 派发，客户端在 Worker 沙箱 eval 后回传结果 | `{"type": "probe_request", "requestId": "<uuid>", "batchId": "<uuid>", "scriptB64": "...", "timeoutMs": 3000, "ctxVersion": 1}` |
 | `probe_confirm` | 远程探针二次确认：客户端首次返回 `confirm_required` 后，admin 输入设备后 5 位确认，后端推此事件 | `{"type": "probe_confirm", "requestId": "<uuid>", "confirmToken": "<uuid>"}` |
+| `incident` | 5xx 错误率超阈值告警（管理员专属，5 分钟窗口、同窗口 dedup） | `{"type": "incident", "errorRate": 0.025, "windowSecs": 300}` |
+| `worker_missed` | 调度器健康告警：worker 连续 3 个周期未上报（管理员专属） | `{"type": "worker_missed", "workerName": "amas_aggregator", "missCount": 3}` |
+| `llm_budget_exceeded` | LLM advisor 月度成本超限，当月 worker 已停跑（管理员专属） | `{"type": "llm_budget_exceeded", "spentYuan": 102.5, "capYuan": 100.0, "resumeMonth": "2026-06"}` |
+| `resource_pack_available` | v1.1：admin 切换 channel 激活资源包后广播，客户端拉 manifest 并下载安装（5 分钟内同 pack 不重复推送） | `{"type": "resource_pack_available", "packId": "wordbook-core", "version": "1.2.3", "channel": "stable"}` |
 
-> 服务端 SSE Keep-alive 文本行 `: keepalive` 每 15 秒发送一次。连接数达到服务器上限（默认 1000）时返回 `429 RATE_LIMITED`。
+> 服务端 SSE Keep-alive 文本行 `: keepalive` 每 10 秒发送一次（v1.1-P2.4 调整，更快感知死连接）。连接数达到服务器上限（默认 5000，v1.1-P2.4 调整自 1000）时返回 `429 RATE_LIMITED`。
 
 ---
 
@@ -2870,3 +2874,244 @@ AMAS 算法指标快照（需 Admin Token）。
 | 错误码 | 说明 |
 |---|---|
 | `NOT_FOUND` | 笔记不存在或不属于当前用户 |
+
+---
+
+## 21. 资源包热更（v1.1）
+
+**路径前缀：** `/api/resource-packs`
+**认证：** ❌ 匿名（资源包视作公开内容）
+**契约文档：** [`docs/backend-handoff-resource-pack-v1.1.md`](backend-handoff-resource-pack-v1.1.md)
+
+### GET /api/resource-packs
+
+列出所有可见资源包元数据。
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "packId": "wordbook-core",
+      "description": "核心词库",
+      "createdAt": "2026-05-22T10:00:00Z",
+      "updatedAt": "2026-05-22T10:00:00Z"
+    }
+  ]
+}
+```
+
+---
+
+### GET /api/resource-packs/public-key
+
+返回当前后端 Ed25519 签名公钥（base64，44 字符含 padding）。供客户端 verify SDK 自检；正式分发仍由 v1.1 客户端发版时硬编码。
+
+**响应 200：**
+```json
+{
+  "publicKey": "BASE64_ENCODED_32_BYTES",
+  "algorithm": "ed25519"
+}
+```
+
+**响应头：** `Cache-Control: public, max-age=300`
+
+---
+
+### GET /api/resource-packs/:packId/manifest
+
+返回某 channel 当前激活版本的 manifest。客户端 `ResourcePackManager.check()` 调用入口。
+
+**Query 参数：**
+
+| 名 | 类型 | 必填 | 示例 | 说明 |
+|---|---|---|---|---|
+| `appVersion` | string (semver) | ✅ | `1.0.0` | 客户端 App marketing version |
+| `locale` | string (BCP-47) | ✅ | `zh-Hans-CN` | 客户端 Locale |
+| `channel` | string | ⬜ | `stable` | 灰度通道，缺省 `stable`；可选 `stable` / `beta` / `internal` |
+
+**响应 200：**
+```json
+{
+  "packId": "wordbook-core",
+  "version": "1.2.3",
+  "downloadURL": "https://api.wordforge.app/packs/wordbook-core/1.2.3/payload.json",
+  "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "sizeBytes": 12345,
+  "minAppVersion": "1.0.0",
+  "channel": "stable",
+  "signature": "BASE64_ENCODED_64_BYTES",
+  "signatureAlgorithm": "ed25519"
+}
+```
+
+**响应头：**
+- `ETag: "<version>"`
+- `Cache-Control: public, max-age=60`
+
+**304 Not Modified：** 客户端带 `If-None-Match: "<version>"` 命中当前 version 时返回空响应（保留 ETag + Cache-Control 头）。
+
+**错误码：**
+
+| code | HTTP | 触发场景 |
+|---|---|---|
+| `RESOURCE_PACK_NOT_FOUND` | 404 | packId 不存在 / 无激活版本 / 该 channel 未激活 |
+| `RESOURCE_PACK_APP_VERSION_TOO_LOW` | 409 | 客户端 appVersion 低于 manifest 的 minAppVersion |
+| `VALIDATION_ERROR` | 400 | packId 为空 / channel 非法 |
+
+**downloadURL 推断顺序：**
+1. 环境变量 `RESOURCE_PACK_BASE_URL`（部署时硬编码 CDN 前缀）
+2. 请求头 `X-Forwarded-Proto` + `X-Forwarded-Host`（反向代理透传）
+3. 请求头 `Host`，scheme 默认 `http`
+
+物理路径：`static/packs/<packId>/<version>/payload.json`，通过 `tower-http::ServeDir` 自动托管，命中 `/packs/*` cache 头规则 `public, max-age=31536000, immutable`。
+
+---
+
+### POST /api/telemetry/resource-pack-install
+
+客户端上报资源包安装事件（用于 admin /stats 聚合）。
+
+**认证：** Bearer Token + `X-Device-Id` 请求头
+
+**请求体：**
+```json
+{
+  "packId": "wordbook-core",
+  "version": "1.2.3",
+  "outcome": "installed",
+  "appVersion": "1.0.0"
+}
+```
+
+| 字段 | 类型 | 必填 | 取值 |
+|---|---|---|---|
+| `packId` | string | ✅ | 业务 ID |
+| `version` | string | ✅ | 已安装的版本 |
+| `outcome` | string | ✅ | `installed` / `verify_failed` / `rollback` |
+| `appVersion` | string | ⬜ | 客户端 App 版本 |
+
+**响应 200：** `{ "success": true, "data": { "received": true } }`
+
+---
+
+## 22. 资源包管理（admin · v1.1）
+
+**路径前缀：** `/api/admin/resource-packs`
+**认证：** AdminAuthUser（独立 admin JWT）
+
+### POST /api/admin/resource-packs/:packId/versions
+
+上传新版资源包。raw body 是 payload bytes，后端自动算 SHA256、Ed25519 签名、落 `static/packs/<pack>/<version>/payload.json`、写表。
+
+**Query 参数：**
+
+| 名 | 类型 | 必填 | 示例 | 说明 |
+|---|---|---|---|---|
+| `version` | string | ✅ | `1.2.3` | 语义版本，单调递增 |
+| `channel` | string | ✅ | `stable` | `stable` / `beta` / `internal` |
+| `minAppVersion` | string | ⬜ | `1.0.0` | App 版本下限，客户端低于此值静默忽略 |
+| `description` | string | ⬜ | `核心词库` | admin 备注（pack 元数据） |
+
+**请求体：** raw bytes（Content-Type 不限，建议 `application/octet-stream` 或 `application/json`）。**上限 4 MiB。**
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": {
+    "packId": "wordbook-core",
+    "version": "1.2.3",
+    "sha256": "...",
+    "signature": "...",
+    "sizeBytes": 12345,
+    "channel": "stable"
+  }
+}
+```
+
+**错误码：**
+
+| code | HTTP | 触发场景 |
+|---|---|---|
+| `PACK_EMPTY` | 400 | body 为空 |
+| `PAYLOAD_TOO_LARGE` | 413 | body > 4 MiB |
+| `VALIDATION_ERROR` | 400 | packId / version / channel 非法 |
+| `RESOURCE_PACK_SIGNER_UNAVAILABLE` | 503 | Ed25519 签名器未初始化（启动失败兜底） |
+
+---
+
+### PUT /api/admin/resource-packs/:packId/channel/:channel/active
+
+切换某 channel 当前激活版本，触发 SSE 广播。
+
+**路径参数：**
+- `packId`：业务 ID
+- `channel`：`stable` / `beta` / `internal`
+
+**请求体：**
+```json
+{ "version": "1.2.3" }
+```
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": {
+    "packId": "wordbook-core",
+    "channel": "stable",
+    "version": "1.2.3",
+    "activated": true
+  }
+}
+```
+
+**副作用：** 同 packId × channel 5 分钟内只广播 1 次 `resource_pack_available` SSE 事件（dedup）。
+
+---
+
+### GET /api/admin/resource-packs
+
+返回所有 pack 元数据 + 各自全部版本列表。admin UI 用。
+
+---
+
+### GET /api/admin/resource-packs/:packId/stats
+
+返回 install_log 按 `(version, outcome)` 聚合的统计。
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": {
+    "packId": "wordbook-core",
+    "stats": [
+      { "version": "1.2.3", "outcome": "installed", "count": 1284 },
+      { "version": "1.2.3", "outcome": "verify_failed", "count": 3 },
+      { "version": "1.2.3", "outcome": "rollback", "count": 1 }
+    ]
+  }
+}
+```
+
+---
+
+### DELETE /api/admin/resource-packs/:packId/versions/:version
+
+软删除某版本：从 manifest 路由摘除，物理文件保留供回滚兜底（GC worker 30 天后清盘 —— v1.1 P2 范围）。
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": {
+    "packId": "wordbook-core",
+    "version": "1.2.3",
+    "deactivated": true
+  }
+}
+```

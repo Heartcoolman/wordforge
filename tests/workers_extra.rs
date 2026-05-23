@@ -58,6 +58,8 @@ fn build_test_config(database_url: String) -> Config {
         rate_limit: RateLimitConfig {
             window_secs: 60,
             max_requests: 1000,
+            anonymous_max_requests: 0,
+            authenticated_max_requests: 0,
         },
         auth_rate_limit: AuthRateLimitConfig::default(),
         worker: WorkerConfig {

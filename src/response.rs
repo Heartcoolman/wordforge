@@ -118,6 +118,34 @@ impl AppError {
             is_operational: false,
         }
     }
+
+    // v1.1-P0.9：资源包热更专用错误，对齐 docs/backend-handoff-resource-pack-v1.1.md §3。
+    pub fn resource_pack_not_found(message: &str) -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            code: "RESOURCE_PACK_NOT_FOUND".to_string(),
+            message: message.to_string(),
+            is_operational: true,
+        }
+    }
+
+    pub fn resource_pack_app_version_too_low(message: &str) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "RESOURCE_PACK_APP_VERSION_TOO_LOW".to_string(),
+            message: message.to_string(),
+            is_operational: true,
+        }
+    }
+
+    pub fn resource_pack_channel_forbidden(message: &str) -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            code: "RESOURCE_PACK_CHANNEL_FORBIDDEN".to_string(),
+            message: message.to_string(),
+            is_operational: true,
+        }
+    }
 }
 
 impl IntoResponse for AppError {

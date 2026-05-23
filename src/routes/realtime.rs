@@ -180,6 +180,7 @@ pub async fn sse_handler(
                                     crate::state::SseEvent::Incident { .. } => "incident",
                                     crate::state::SseEvent::WorkerMissed { .. } => "worker_missed",
                                     crate::state::SseEvent::LlmBudgetExceeded { .. } => "llm_budget_exceeded",
+                                    crate::state::SseEvent::ResourcePackAvailable { .. } => "resource_pack_available",
                                 };
                                 yield Ok(Event::default().event(event_name).data(json));
                             }
@@ -195,8 +196,9 @@ pub async fn sse_handler(
     };
 
     Ok(Sse::new(stream).keep_alive(
+        // v1.1-P2.4：15s → 10s，配合 max_sse_connections=5000 更快感知死连接
         KeepAlive::new()
-            .interval(Duration::from_secs(15))
+            .interval(Duration::from_secs(10))
             .text("keepalive"),
     ))
 }
@@ -244,6 +246,8 @@ mod tests {
             rate_limit: RateLimitConfig {
                 window_secs: 60,
                 max_requests: 100,
+                anonymous_max_requests: 0,
+                authenticated_max_requests: 0,
             },
             auth_rate_limit: AuthRateLimitConfig::default(),
             worker: WorkerConfig {

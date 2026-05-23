@@ -6,6 +6,7 @@ pub mod clients;
 pub mod feedback;
 pub mod monitoring;
 pub mod probe;
+pub mod resource_packs;
 pub mod settings;
 pub mod updates;
 
@@ -65,6 +66,7 @@ pub fn router() -> Router<AppState> {
         .nest("/clients", clients::router())
         .nest("/feedback", feedback::router())
         .nest("/probe", probe::router())
+        .nest("/resource-packs", resource_packs::router())
         .nest("/telemetry", clients::telemetry_router())
         .route("/users", get(list_users))
         .route("/users/:id/ban", post(ban_user))
@@ -131,6 +133,14 @@ async fn ban_user(
         sessions_revoked = revoked,
         "管理员封禁用户"
     );
+    // v1.1-P2.10：admin 敏感操作审计
+    write_user_admin_audit(
+        &state,
+        &admin.admin_id,
+        "user.ban",
+        &id,
+        serde_json::json!({ "sessionsRevoked": revoked }),
+    );
     Ok(ok(
         serde_json::json!({"banned": true, "userId": id, "sessionsRevoked": revoked}),
     ))
@@ -147,6 +157,14 @@ async fn unban_user(
         action = "unban_user",
         target_user_id = %id,
         "管理员解封用户"
+    );
+    // v1.1-P2.10：admin 敏感操作审计
+    write_user_admin_audit(
+        &state,
+        &admin.admin_id,
+        "user.unban",
+        &id,
+        serde_json::Value::Null,
     );
     Ok(ok(serde_json::json!({"banned": false, "userId": id})))
 }
@@ -170,6 +188,15 @@ async fn admin_reset_user_password(
         action = "reset_user_password",
         target_user_id = %id,
         "管理员生成密码重置密钥"
+    );
+
+    // v1.1-P2.10：admin 敏感操作审计（不写 resetKey 明文）
+    write_user_admin_audit(
+        &state,
+        &admin.admin_id,
+        "user.reset_password",
+        &id,
+        serde_json::json!({ "expiresInHours": reset.expires_in_hours }),
     );
 
     Ok(ok(serde_json::json!({
@@ -206,11 +233,41 @@ async fn admin_set_user_password(
         "管理员直接重置用户密码"
     );
 
+    // v1.1-P2.10：admin 敏感操作审计（不写明文密码）
+    write_user_admin_audit(
+        &state,
+        &admin.admin_id,
+        "user.set_password",
+        &id,
+        serde_json::json!({ "sessionsRevoked": revoked }),
+    );
+
     Ok(ok(serde_json::json!({
         "passwordReset": true,
         "userId": id,
         "sessionsRevoked": revoked,
     })))
+}
+
+/// v1.1-P2.10：写 admin 用户管理审计。同步入 DB，失败仅 warn，不阻塞主响应。
+fn write_user_admin_audit(
+    state: &AppState,
+    admin_id: &str,
+    action: &str,
+    user_id: &str,
+    metadata: serde_json::Value,
+) {
+    let meta = if metadata.is_null() {
+        None
+    } else {
+        Some(&metadata)
+    };
+    if let Err(e) = state
+        .store()
+        .insert_admin_audit(admin_id, action, Some("user"), Some(user_id), meta)
+    {
+        tracing::warn!(error=%e, action=%action, "写 admin audit 失败（不影响主流程）");
+    }
 }
 
 // ── Admin 用户管理 helpers（原 AdminService 方法） ──

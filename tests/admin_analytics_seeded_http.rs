@@ -324,7 +324,7 @@ async fn it_admin_analytics_retention_curve_with_history() {
         seed_records(
             app.state.store(),
             &user.id,
-            &[wid.clone()],
+            std::slice::from_ref(wid),  // wid 是 String，from_ref 拿到 &[String] 切片
             0.6,
             RecordType::Review,
             first_learned + Duration::days(1),

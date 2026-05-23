@@ -77,7 +77,7 @@ systemctl restart wordforge
 ### 症状
 - 客户端报"连接超出限制"或 SSE 断开后无法重连
 - 日志出现 `SSE_CONNECTION_COUNT` 相关错误
-- 全局 SSE 上限（默认 1000，由 `LIMITS_MAX_SSE_CONNECTIONS` 配置）被触发
+- 全局 SSE 上限（默认 5000，v1.1-P2.4 自 1000 上调；由 `LIMITS_MAX_SSE_CONNECTIONS` 配置）被触发
 
 ### 诊断
 
@@ -105,7 +105,7 @@ systemctl restart wordforge
 ```bash
 # 临时调高（重启生效）
 grep LIMITS_MAX_SSE_CONNECTIONS /opt/wordforge/.env
-# 默认 1000，根据服务器内存判断是否调整
+# 默认 5000（v1.1-P2.4 自 1000 上调），根据服务器内存判断是否再调整
 ```
 
 3. 若是 heartbeat_watchdog 误触发 `data_corrupted`（见下方场景五），SSE 客户端会重连，可能堆积。

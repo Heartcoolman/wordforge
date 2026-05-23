@@ -11,10 +11,17 @@ use axum::Json;
 use std::net::SocketAddr;
 use tokio::sync::{broadcast, Mutex};
 
+use crate::auth::{extract_token_from_headers, verify_jwt};
 use crate::response::{AppError, ErrorBody};
 use crate::state::AppState;
 
 const NUM_SHARDS: usize = 16;
+
+/// v1.1-P2.3：限流 key 前缀。
+/// - `ip:<addr>` 用于匿名/未鉴权请求
+/// - `u:<user_id>` 用于已登录请求（按 sub 限流，绕开同 IP 多用户互踩）
+const KEY_PREFIX_IP: &str = "ip:";
+const KEY_PREFIX_USER: &str = "u:";
 
 #[derive(Debug, Clone)]
 struct WindowEntry {
@@ -24,32 +31,31 @@ struct WindowEntry {
 
 #[derive(Debug)]
 struct Shard {
-    map: Mutex<HashMap<IpAddr, WindowEntry>>,
+    map: Mutex<HashMap<String, WindowEntry>>,
 }
 
 #[derive(Debug)]
 pub struct RateLimiter {
     window_secs: u64,
+    /// 默认（fallback）配额，当 `check` 不显式传 max_requests 时使用。
     max_requests: u64,
     shards: Vec<Shard>,
 }
 
+fn shard_index_for_key(key: &str) -> usize {
+    // 简单 FNV-1a，避免引入 hasher 依赖。
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for b in key.as_bytes() {
+        hash ^= *b as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    (hash as usize) % NUM_SHARDS
+}
+
+/// v1.0 兼容入口：旧测试按 IpAddr 推导 shard 时复用。
+#[cfg(test)]
 fn shard_index(ip: &IpAddr) -> usize {
-    let hash = match ip {
-        IpAddr::V4(v4) => {
-            let octets = v4.octets();
-            u32::from_be_bytes(octets) as usize
-        }
-        IpAddr::V6(v6) => {
-            let segments = v6.segments();
-            (segments[0] as usize)
-                .wrapping_mul(31)
-                .wrapping_add(segments[1] as usize)
-                .wrapping_mul(31)
-                .wrapping_add(segments[2] as usize)
-        }
-    };
-    hash % NUM_SHARDS
+    shard_index_for_key(&ip_key(*ip))
 }
 
 #[derive(Debug, Clone)]
@@ -74,19 +80,30 @@ impl RateLimiter {
         }
     }
 
+    /// 兼容旧调用：按 IP 限流，使用构造时的默认 max_requests。
     pub async fn check(&self, ip: IpAddr, max_entries: usize) -> RateLimitResult {
-        let key = normalize_ip_for_rate_limit(ip);
+        let key = ip_key(ip);
+        self.check_with_max(&key, max_entries, self.max_requests).await
+    }
+
+    /// v1.1-P2.3：泛化 key + 显式 max_requests，支持匿名 IP / 已登录 user_id 双轨。
+    pub async fn check_with_max(
+        &self,
+        key: &str,
+        max_entries: usize,
+        max_requests: u64,
+    ) -> RateLimitResult {
         let now = Instant::now();
-        let shard = &self.shards[shard_index(&key)];
+        let shard = &self.shards[shard_index_for_key(key)];
         let mut map = shard.map.lock().await;
         let per_shard_max = max_entries / NUM_SHARDS + 1;
 
-        if map.len() >= per_shard_max && !map.contains_key(&key) {
+        if map.len() >= per_shard_max && !map.contains_key(key) {
             map.retain(|_, v| now.duration_since(v.window_start).as_secs() < self.window_secs);
             if map.len() >= per_shard_max {
                 return RateLimitResult {
                     allowed: false,
-                    limit: self.max_requests,
+                    limit: max_requests,
                     remaining: 0,
                     reset_at: SystemTime::now()
                         .duration_since(UNIX_EPOCH)
@@ -97,7 +114,7 @@ impl RateLimiter {
             }
         }
 
-        let entry = map.entry(key).or_insert(WindowEntry {
+        let entry = map.entry(key.to_string()).or_insert(WindowEntry {
             count: 0,
             window_start: now,
         });
@@ -107,12 +124,12 @@ impl RateLimiter {
             entry.window_start = now;
         }
 
-        let allowed = entry.count < self.max_requests;
+        let allowed = entry.count < max_requests;
         if allowed {
             entry.count += 1;
         }
 
-        let remaining = self.max_requests.saturating_sub(entry.count);
+        let remaining = max_requests.saturating_sub(entry.count);
         let elapsed = now.duration_since(entry.window_start).as_secs();
         let reset_after = self.window_secs.saturating_sub(elapsed);
         let reset_at = SystemTime::now()
@@ -123,7 +140,7 @@ impl RateLimiter {
 
         RateLimitResult {
             allowed,
-            limit: self.max_requests,
+            limit: max_requests,
             remaining,
             reset_at,
         }
@@ -138,6 +155,16 @@ impl RateLimiter {
             });
         }
     }
+}
+
+/// 由 IpAddr 构造限流 key：IPv6 先按 /64 前缀聚合，避免 /64 内随机段绕过。
+fn ip_key(ip: IpAddr) -> String {
+    let normalized = normalize_ip_for_rate_limit(ip);
+    format!("{KEY_PREFIX_IP}{normalized}")
+}
+
+fn user_key(user_id: &str) -> String {
+    format!("{KEY_PREFIX_USER}{user_id}")
 }
 
 fn normalize_ip_for_rate_limit(ip: IpAddr) -> IpAddr {
@@ -196,7 +223,23 @@ pub async fn rate_limit_middleware(
         .map(|ci| ci.0.ip());
     let ip = extract_client_ip(req.headers(), state.config().trust_proxy, connect_ip);
     let max_entries = state.config().limits.rate_limit_max_entries;
-    let result = state.rate_limit().limiter.check(ip, max_entries).await;
+
+    // v1.1-P2.3：双轨限流——根据 Authorization 是否解析出有效用户 JWT
+    // 选择"已登录 user_id 限流"或"匿名 IP 限流"；JWT 验签失败 / 缺失皆按匿名处理。
+    let cfg = state.config();
+    let (key, max_requests) = match resolve_user_from_request(req.headers(), &cfg.jwt_secret) {
+        Some(user_id) => (
+            user_key(&user_id),
+            cfg.rate_limit.authenticated_max_requests(),
+        ),
+        None => (ip_key(ip), cfg.rate_limit.anonymous_max_requests()),
+    };
+
+    let result = state
+        .rate_limit()
+        .limiter
+        .check_with_max(&key, max_entries, max_requests)
+        .await;
 
     if !result.allowed {
         let mut response = (
@@ -220,6 +263,18 @@ pub async fn rate_limit_middleware(
     let mut response = next.run(req).await;
     apply_rate_limit_headers(&mut response, &result);
     Ok(response)
+}
+
+/// 仅靠 JWT 验签提取 user_id：不查 DB / 不查 session，性能 µs 级。
+/// - token 缺失、解析失败、token_type 非 "user" → None（按匿名处理）
+/// - 已登录会话由后续 AuthUser extractor 在 handler 层再做完整校验
+fn resolve_user_from_request(headers: &HeaderMap, jwt_secret: &str) -> Option<String> {
+    let token = extract_token_from_headers(headers).ok()?;
+    let claims = verify_jwt(&token, jwt_secret).ok()?;
+    if claims.token_type != "user" {
+        return None;
+    }
+    Some(claims.sub)
 }
 
 fn normalize_api_path(raw_path: &str) -> String {
@@ -321,6 +376,7 @@ pub async fn auth_rate_limit_middleware(
         .map(|ci| ci.0.ip());
     let ip = extract_client_ip(req.headers(), state.config().trust_proxy, connect_ip);
     let max_entries = state.config().limits.rate_limit_max_entries;
+    // 认证端点（登录/注册）天然是匿名前置场景，永远按 IP 限流。
     let result = state.auth_rate_limit().limiter.check(ip, max_entries).await;
 
     if !result.allowed {
@@ -442,6 +498,9 @@ mod tests {
         let mut cfg = Config::from_env();
         cfg.rate_limit.window_secs = api_window;
         cfg.rate_limit.max_requests = api_max;
+        // 让 anonymous/authenticated fallback 到 api_max，保留旧用例语义。
+        cfg.rate_limit.anonymous_max_requests = 0;
+        cfg.rate_limit.authenticated_max_requests = 0;
         cfg.auth_rate_limit.window_secs = api_window;
         cfg.auth_rate_limit.max_requests = api_max;
         let tmp = tempfile::tempdir().expect("tempdir");

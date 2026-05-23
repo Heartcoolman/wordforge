@@ -90,6 +90,11 @@ pub async fn run(state: &AppState) {
 }
 
 #[cfg(test)]
+// 测试用 std::sync::Mutex 串行化访问 LAST_INCIDENT_AT 等全局静态计数器。
+// 持锁穿越 await 在 #[tokio::test] 默认单线程 runtime 下不会死锁；改用
+// tokio::sync::Mutex 会引入 #[tokio::test(flavor="multi_thread")] 需求与
+// 不必要的 async overhead，得不偿失。
+#[allow(clippy::await_holding_lock)]
 mod tests {
     use std::sync::Arc;
 

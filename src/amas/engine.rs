@@ -1397,6 +1397,10 @@ impl AMASEngine {
 }
 
 #[cfg(test)]
+// 测试构造 AMASConfig / 各 sub-config 大量用 `let mut x = T::default(); x.field = v` 风格，
+// 比 struct-update 语法（`T { field: v, ..Default::default() }`）更易看清「我故意改了什么」。
+// clippy 视为习语警告，本 mod 整体豁免。
+#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
 

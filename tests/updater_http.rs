@@ -123,10 +123,7 @@ fn noop_ctx(channel: Channel, tag: &str) -> ApplyContext {
 }
 
 fn skip_unless_supported_arch() -> bool {
-    match std::env::consts::ARCH {
-        "x86_64" | "aarch64" => false,
-        _ => true,
-    }
+    !matches!(std::env::consts::ARCH, "x86_64" | "aarch64")
 }
 
 #[tokio::test]

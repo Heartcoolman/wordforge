@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
+use std::convert::Infallible;
 
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::extract::State;
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::Response;
@@ -261,88 +262,113 @@ async fn gdpr_export(
             .await??;
     }
 
-    // 逐块收集数据，每块在独立 blocking 任务中完成。
-    let mut lines: Vec<String> = Vec::new();
-
-    // profile
-    {
-        let uid = user_id.clone();
-        let profile = state
-            .run_store_task("users.gdpr_export.profile", move |store| {
-                store.export_profile(&uid)
-            })
-            .await??;
-        if let Some(p) = profile {
-            lines.push(json_line("profile", &p));
+    // v1.1 P0：真流式 NDJSON。逐块读取后立即推入 mpsc channel，axum 用 ReceiverStream 包装为
+    // Body，HTTP/1.1 自动 Transfer-Encoding: chunked。修复 C4/B4 报告：原 `Vec.join` 一次性
+    // body 在大用户（几十 MB records）下内存膨胀，且无法被客户端边读边写盘。
+    //
+    // 错误处理：导出过程中若某个 store 任务失败，会向 channel 推一条 `{"error":"..."}` 行后
+    // 立即关闭流；客户端会读到部分数据 + 一行 error 标记，**而不是**收到 HTTP 5xx —— 因为
+    // status code 已经在第一个 chunk flush 时定下，无法回退。该取舍是流式 API 的固有约束。
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, Infallible>>(8);
+    let state_for_stream = state.clone();
+    let uid_for_stream = user_id.clone();
+    tokio::spawn(async move {
+        if let Err(err) = run_export_stream(state_for_stream, uid_for_stream, tx.clone()).await {
+            // AppError 无 Display 实现，用其暴露的 message 字段拼 NDJSON 错误行。
+            let line = serde_json::json!({"table": "_error", "data": err.message}).to_string();
+            let _ = tx.send(Ok(Bytes::from(line + "\n"))).await;
         }
+    });
+    let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/x-ndjson")
+        .header(
+            header::CONTENT_DISPOSITION,
+            HeaderValue::from_static("attachment; filename=\"wordforge-export.ndjson\""),
+        )
+        .body(Body::from_stream(stream))
+        .map_err(|e| AppError::internal(&e.to_string()))
+}
+
+/// v1.1 P0：GDPR 导出真流式 body 生产者。
+/// 每块单独在 blocking 线程读完后立即 push 到 channel；channel 容量 8 提供少量背压，
+/// 客户端断连时 tx.send 返回 Err → 后续块直接早退（不再浪费 store 任务）。
+///
+/// 错误返回给调用方包装为 NDJSON `_error` 行（见 `gdpr_export` 内的 spawn）。
+async fn run_export_stream(
+    state: AppState,
+    user_id: String,
+    tx: tokio::sync::mpsc::Sender<Result<Bytes, Infallible>>,
+) -> Result<(), AppError> {
+    // profile
+    let profile = state
+        .run_store_task("users.gdpr_export.profile", {
+            let uid = user_id.clone();
+            move |store| store.export_profile(&uid)
+        })
+        .await??;
+    if let Some(p) = profile {
+        send_line(&tx, "profile", &p).await?;
     }
 
     // study_config
-    {
-        let uid = user_id.clone();
-        let cfg = state
-            .run_store_task("users.gdpr_export.study_config", move |store| {
-                store.export_study_config(&uid)
-            })
-            .await??;
-        if let Some(c) = cfg {
-            lines.push(json_line("study_config", &c));
-        }
+    let cfg = state
+        .run_store_task("users.gdpr_export.study_config", {
+            let uid = user_id.clone();
+            move |store| store.export_study_config(&uid)
+        })
+        .await??;
+    if let Some(c) = cfg {
+        send_line(&tx, "study_config", &c).await?;
     }
 
     // word_states
-    {
-        let uid = user_id.clone();
-        let states = state
-            .run_store_task("users.gdpr_export.word_states", move |store| {
-                store.export_word_states(&uid)
-            })
-            .await??;
-        if !states.is_empty() {
-            lines.push(json_line("word_states", &states));
-        }
+    let states = state
+        .run_store_task("users.gdpr_export.word_states", {
+            let uid = user_id.clone();
+            move |store| store.export_word_states(&uid)
+        })
+        .await??;
+    if !states.is_empty() {
+        send_line(&tx, "word_states", &states).await?;
     }
 
     // favorites
-    {
-        let uid = user_id.clone();
-        let favs = state
-            .run_store_task("users.gdpr_export.favorites", move |store| {
-                store.export_favorites(&uid)
-            })
-            .await??;
-        if !favs.is_empty() {
-            lines.push(json_line("favorites", &favs));
-        }
+    let favs = state
+        .run_store_task("users.gdpr_export.favorites", {
+            let uid = user_id.clone();
+            move |store| store.export_favorites(&uid)
+        })
+        .await??;
+    if !favs.is_empty() {
+        send_line(&tx, "favorites", &favs).await?;
     }
 
     // notes
-    {
-        let uid = user_id.clone();
-        let notes = state
-            .run_store_task("users.gdpr_export.notes", move |store| {
-                store.export_notes(&uid)
-            })
-            .await??;
-        if !notes.is_empty() {
-            lines.push(json_line("notes", &notes));
-        }
+    let notes = state
+        .run_store_task("users.gdpr_export.notes", {
+            let uid = user_id.clone();
+            move |store| store.export_notes(&uid)
+        })
+        .await??;
+    if !notes.is_empty() {
+        send_line(&tx, "notes", &notes).await?;
     }
 
     // sessions
-    {
-        let uid = user_id.clone();
-        let sessions = state
-            .run_store_task("users.gdpr_export.sessions", move |store| {
-                store.export_sessions(&uid)
-            })
-            .await??;
-        if !sessions.is_empty() {
-            lines.push(json_line("sessions", &sessions));
-        }
+    let sessions = state
+        .run_store_task("users.gdpr_export.sessions", {
+            let uid = user_id.clone();
+            move |store| store.export_sessions(&uid)
+        })
+        .await??;
+    if !sessions.is_empty() {
+        send_line(&tx, "sessions", &sessions).await?;
     }
 
-    // records（分页，每批 EXPORT_RECORDS_PAGE 条，避免长事务）
+    // records 分页 push（与旧实现相同分页粒度，每批读完立即 flush 给客户端）。
     let mut offset = 0usize;
     loop {
         let uid = user_id.clone();
@@ -353,7 +379,7 @@ async fn gdpr_export(
             .await??;
         let done = page.len() < EXPORT_RECORDS_PAGE;
         if !page.is_empty() {
-            lines.push(json_line("records", &page));
+            send_line(&tx, "records", &page).await?;
         }
         if done {
             break;
@@ -361,16 +387,20 @@ async fn gdpr_export(
         offset += EXPORT_RECORDS_PAGE;
     }
 
-    let body_str = lines.join("\n") + "\n";
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/x-ndjson")
-        .header(
-            header::CONTENT_DISPOSITION,
-            HeaderValue::from_static("attachment; filename=\"wordforge-export.ndjson\""),
-        )
-        .body(Body::from(body_str))
-        .map_err(|e| AppError::internal(&e.to_string()))
+    Ok(())
+}
+
+/// 流式 helper：序列化一行并 push 到 channel；客户端断连时返回 Err 让上游早退。
+async fn send_line<T: Serialize>(
+    tx: &tokio::sync::mpsc::Sender<Result<Bytes, Infallible>>,
+    table: &str,
+    data: &T,
+) -> Result<(), AppError> {
+    let line = json_line(table, data) + "\n";
+    let chunk: Result<Bytes, Infallible> = Ok(Bytes::from(line));
+    tx.send(chunk)
+        .await
+        .map_err(|_| AppError::internal("GDPR 导出客户端已断连"))
 }
 
 /// 序列化一个数据块为 JSON Lines 行。

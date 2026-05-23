@@ -423,6 +423,8 @@ mod tests {
         store
     }
 
+    // 测试 helper：8 个参数对应表中 8 个差异维度，再拆 struct 反而加测试样板代码。
+    #[allow(clippy::too_many_arguments)]
     fn insert_event(
         store: &Store,
         id: &str,

@@ -98,6 +98,25 @@ async fn main() {
         initial_maintenance,
     );
 
+    // v1.1-P0.6：资源包 Ed25519 签名器（与 db 同目录的 keys/）
+    {
+        let key_dir = std::path::Path::new(&config.database_url)
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join("keys");
+        match learning_backend::services::resource_pack_signing::ResourcePackSigner::load_or_generate(
+            &key_dir,
+        ) {
+            Ok(signer) => {
+                tracing::info!(dir = ?key_dir, pubkey = signer.public_key_base64(), "资源包签名器就绪");
+                state.set_resource_pack_signer(std::sync::Arc::new(signer));
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, dir = ?key_dir, "资源包签名器初始化失败，相关端点将返 503");
+            }
+        }
+    }
+
     // 自更新服务（含缓存 + ETag），不打 GitHub，纯本地构造
     let updater = match learning_backend::services::updater::Updater::new(
         &config.update_check,
@@ -136,6 +155,21 @@ async fn main() {
         state.clone(),
         shutdown_tx.subscribe(),
     ));
+
+    // v1.1-P1 S2：领域事件总线 consumer。`event-bus` feature 关闭时 subscribe()
+    // 返回 None，consumer 自动早退。AMAS 同步通路保留为主路径不变；这里只是
+    // 旁路计数 / 日志，为后续 outbox + AMAS 真异步化打底。
+    {
+        let bus = state.event_bus().clone();
+        let shutdown_rx = shutdown_tx.subscribe();
+        tokio::spawn(async move {
+            learning_backend::services::event_bus::run_record_consumer(
+                bus.as_ref(),
+                shutdown_rx,
+            )
+            .await;
+        });
+    }
 
     tokio::spawn(learning_backend::workers::probe_confirm_sweeper::run(
         state.clone(),

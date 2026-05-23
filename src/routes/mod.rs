@@ -10,6 +10,7 @@ pub mod notifications;
 pub mod probe_results;
 pub mod realtime;
 pub mod records;
+pub mod resource_packs;
 pub mod status;
 pub mod study_config;
 pub mod telemetry;
@@ -94,6 +95,7 @@ pub fn build_router(state: AppState) -> Router {
         .nest("/feedback", feedback::router())
         .nest("/word-favorites", word_favorites::router())
         .nest("/word-notes", word_notes::router())
+        .nest("/resource-packs", resource_packs::router())
         .nest("/wordbook-center", wordbook_center::user_router())
         .nest("/probe", probe_results::router())
         .layer(axum::middleware::from_fn_with_state(
@@ -159,7 +161,9 @@ async fn static_cache_headers(req: Request<axum::body::Body>, next: Next) -> Res
 
     let cache_value = if is_html {
         "no-cache, must-revalidate"
-    } else if path.starts_with("/assets/") {
+    } else if path.starts_with("/assets/") || path.starts_with("/packs/") {
+        // v1.1-P0.5：资源包 payload 走版本号路径 /packs/<pack>/<ver>/payload.json，
+        // 与 /assets/* 同策略：版本号即不可变标识，可永久缓存。
         "public, max-age=31536000, immutable"
     } else {
         "public, max-age=3600"
