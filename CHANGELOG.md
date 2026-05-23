@@ -6,11 +6,27 @@
 
 ---
 
-## [Unreleased] — v1.1.0-rc.3（最终验证 + clippy 清零）
+## [v1.1.0-beta.1] — 2026-05-23 · Pre-release
 
-rc.2 的功能/重构/文档全部落地后，本 RC 收口：
+v1.1 首发 Pre-release。涵盖 P0（资源包热更 + GDPR 真流式 NDJSON）、P1（领域事件总线）、
+P2（重构 / 性能 / 文档 / clippy 清零）三阶段全部工作，主版本号从 `0.6.0-beta.4`
+跨升至 `1.1.0-beta.1`（v1.0.0 GA 之后版本号曾停滞，本 release 一并补齐）。
 
-### 质量
+### P0 收尾（本 release 新增）
+
+- 🚀 **GDPR 导出真流式 NDJSON**（`src/routes/users.rs`）：`/api/users/me/export` 改用
+  `tokio::sync::mpsc` + `axum::body::Body::from_stream`，每个 store 任务读完一块即推入
+  channel；HTTP/1.1 自动 `Transfer-Encoding: chunked`。修复原 `Vec.join` 一次性 body
+  在大用户（几十 MB records）下的内存膨胀，客户端可边读边写盘。
+    - 错误处理取舍：流中段 store 任务失败时，向 channel 推一行 `{"table":"_error",...}`
+      后关闭，**不**回退为 HTTP 5xx（status code 在首块 flush 时已定，无法回退） ——
+      流式 API 的固有约束，已在源码注释明示
+- 📝 **admin auth 注释补完**（`src/auth.rs`）：明示当前 admin session 校验**不做**用户表
+  跨查（之前实现把 `admin_id` 当 `user_id` 去 `users` 表查 `is_banned` 会把所有正常 admin
+  拒之门外）；管理员"禁用"目前靠 `locked_until` + `delete_admin_session` 两条机制；
+  真正的 admin `is_disabled` 列需 schema 迁移，超出 v1.1 P0 范围
+
+### 质量（原 rc.3 阶段）
 
 - ✅ **cargo clippy --all-targets -- -D warnings 零警告零错误**：56 条历史警告
   按「真问题修复 / 习语局部豁免 + 注释」两条线清零（P2.1）
@@ -49,11 +65,9 @@ v1.1.0 GA 给 iOS / Web 客户端的核心交付：
 - **稳定性**：rate_limit 双轨防恶意匿名爬取、SSE 上限提升 5× 适配大客户、21 条迁移可逆便于 dev 重置
 - **质量门**：clippy --deny 零警告 + 921 测试 100% 通过
 
----
+### 过程节点 · rc.2（事件总线 + 重构 + 文档）
 
-## [Unreleased] — v1.1.0-rc.2（事件总线 + 重构 + 文档）
-
-rc.1（资源包热更）落地后，本 RC 交付 P1 + P2 主体工作：
+rc.1（资源包热更）落地后，本 RC 交付 P1 + P2 主体工作。
 
 ### 新功能（事件总线）
 
@@ -103,9 +117,7 @@ rc.1（资源包热更）落地后，本 RC 交付 P1 + P2 主体工作：
 - `tests/admin_extra_http.rs` 加 `it_admin_sensitive_actions_write_audit_log`
 - `tests/resource_pack_http.rs` 加 `admin_resource_pack_handlers_write_audit_log`
 
----
-
-## [Unreleased] — v1.1.0-rc.1（资源包热更后端）
+### 过程节点 · rc.1（资源包热更后端）
 
 iOS v1.1 客户端 POC 已落地（`/Users/liji/WordForge-App` @ `b1e1a41`），本 RC 交付后端配套，
 路径协议详见 [`docs/backend-handoff-resource-pack-v1.1.md`](docs/backend-handoff-resource-pack-v1.1.md)

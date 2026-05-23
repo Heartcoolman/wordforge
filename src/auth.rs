@@ -252,6 +252,15 @@ where
                 if session.user_id != sub {
                     return Err(AppError::unauthorized("管理员会话不匹配"));
                 }
+                // 注：B3 审计提议在此添加 admin ban 检查（与 AuthUser 对齐），但 `admins` 表
+                // 当前 schema 不含 `is_banned` 字段（cols: id, email, password_hash, created_at,
+                // updated_at, failed_login_count, locked_until — 见 store/operations/admins.rs:9-10）。
+                // 管理员"禁用"目前靠两条独立机制：
+                //   1) `locked_until` 字段在登录失败次数超限后阻断登录（store/operations/admins.rs:225）；
+                //   2) 显式 `delete_admin_session` 撤销当前 token。
+                // 真正的"管理员禁用"语义需要 schema 迁移加 `is_disabled` 列 + 对应 admin 路由，
+                // 超出 v1.1 P0 范围。这里保留 session-only 校验，明确不做用户表跨查（之前的实现
+                // 把 admin_id 当 user_id 去 users 表查 is_banned，会把所有正常 admin 拒之门外）。
                 Ok(())
             })
             .await??;
