@@ -54,6 +54,9 @@ fi
 
 # --- install files ---
 mkdir -p "$INSTALL_DIR"
+# v1.1.0-beta.4: 显式创建 data/ —— DATABASE_URL 默认 ./data/learning.db，
+# 不预建会让首次启动 systemd 死循环报 "unable to open database file"。
+mkdir -p "$INSTALL_DIR/data"
 cp "$TMP/wordforge" "$INSTALL_DIR/wordforge"
 chmod +x "$INSTALL_DIR/wordforge"
 cp -r "$TMP/static" "$INSTALL_DIR/"
@@ -72,6 +75,7 @@ if [ ! -f "$INSTALL_DIR/.env" ]; then
     -e "s|MUST_CHANGE_USE_openssl_rand_hex_32_refresh|${REFRESH_JWT}|g" \
     -e "s|MUST_CHANGE_USE_openssl_rand_hex_32|${JWT}|g" \
     -e "s|HOST=127.0.0.1|HOST=0.0.0.0|" \
+    -e "s|CORS_ORIGIN=http://localhost:5173|# CORS_ORIGIN 部署时改为你的实际域名（如 https://your-domain.com）；\\n# 同源部署（前端由 backend serve）可以保留默认或注释掉本行。\\nCORS_ORIGIN=http://localhost:5173|" \
     "$INSTALL_DIR/.env"
 
   chmod 600 "$INSTALL_DIR/.env"

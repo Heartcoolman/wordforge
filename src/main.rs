@@ -194,7 +194,9 @@ async fn main() {
         Ok(u) => {
             // M0-R4：启动时检查 maintenance flag。上次自更新在 Swapping 阶段后崩溃
             // 或新进程健康检查超时回滚，父进程 exit 前无法清除 flag，由新进程代劳。
-            let flag_path = u.install_dir().join(learning_backend::services::updater::MAINTENANCE_FLAG);
+            let flag_path = u
+                .install_dir()
+                .join(learning_backend::services::updater::MAINTENANCE_FLAG);
             if flag_path.exists() {
                 tracing::warn!(path = ?flag_path, "发现 maintenance flag，上次自更新异常；清理 maintenance 模式");
                 state.set_maintenance(false);
@@ -232,11 +234,8 @@ async fn main() {
         let bus = state.event_bus().clone();
         let shutdown_rx = shutdown_tx.subscribe();
         tokio::spawn(async move {
-            learning_backend::services::event_bus::run_record_consumer(
-                bus.as_ref(),
-                shutdown_rx,
-            )
-            .await;
+            learning_backend::services::event_bus::run_record_consumer(bus.as_ref(), shutdown_rx)
+                .await;
         });
     }
 
@@ -249,6 +248,16 @@ async fn main() {
         state.clone(),
         shutdown_tx.subscribe(),
     ));
+
+    // 时钟健康探测：启动时打一次（detached，不阻塞 listen），之后每小时再打。
+    // 漂移超阈会 ERROR 日志告警 + `/health` 状态降级，详见 clock_health 模块文档。
+    {
+        let ch = state.clock_health().clone();
+        tokio::spawn(async move {
+            ch.probe_once().await;
+        });
+        let _periodic_handle = state.clock_health().spawn_periodic();
+    }
 
     tokio::spawn(rate_limit_cleanup_loop(
         state.rate_limit().clone(),
@@ -458,6 +467,9 @@ fn http_liveness_probe(addr: SocketAddr, timeout: Duration) -> bool {
 
 fn build_cors_layer(config: &Config) -> CorsLayer {
     let origin_str = config.cors_origin.trim();
+    // 跨域时浏览器默认不允许 JS 读非简单响应头，要让前端读到 X-Server-Time 做时钟对齐，
+    // 必须显式 expose（见 middleware/server_time.rs）。
+    let expose_headers = [HeaderName::from_static("x-server-time")];
 
     if origin_str == "*" {
         return CorsLayer::new()
@@ -470,6 +482,7 @@ fn build_cors_layer(config: &Config) -> CorsLayer {
                 HeaderName::from_static("x-device-id"),
                 HeaderName::from_static("x-device-platform"),
             ])
+            .expose_headers(expose_headers)
             .allow_methods(Any);
     }
 
@@ -499,6 +512,7 @@ fn build_cors_layer(config: &Config) -> CorsLayer {
                 HeaderName::from_static("x-device-id"),
                 HeaderName::from_static("x-device-platform"),
             ])
+            .expose_headers(expose_headers)
             .allow_methods([
                 Method::GET,
                 Method::POST,
@@ -520,6 +534,7 @@ fn build_cors_layer(config: &Config) -> CorsLayer {
                 HeaderName::from_static("x-device-id"),
                 HeaderName::from_static("x-device-platform"),
             ])
+            .expose_headers(expose_headers)
             .allow_methods([
                 Method::GET,
                 Method::POST,

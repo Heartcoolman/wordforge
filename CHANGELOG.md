@@ -6,6 +6,82 @@
 
 ---
 
+## [v1.1.0-beta.4] — 2026-05-26 · Pre-release · 客户端/服务器时钟漂移三层防御 + install.sh 修坑
+
+### 真根因复盘
+
+在 boxd.sh 等 microVM 平台首次部署 wordforge 时碰到诡异现象：管理员登录成功后立刻被踢回登录页，浏览器 Network 显示后端 verify 返回 401。后端单元测试 verify 一切正常，本机自测也没问题 —— 跨端就崩。
+
+最终定位到 **VM 时钟漂移 −10h48m**：
+
+| 角色 | 用的时间 | 看到 token 的状态 |
+|---|---|---|
+| 后端签 `iat`/`exp` | 漂移后的本机时间（≈10h 前） | 未来 2h 内有效 |
+| 浏览器 `isTokenExpired` | 用户系统的真实时间 | 已过期 8h+ |
+
+浏览器视角 `Date.now() / 1000 >= exp` → `getAdminToken()` 主动 `storage.remove()` → 跳登录页。后端 verify 用同样漂移的时间，所以 in-VM curl 测试 200，但浏览器就是不接受。
+
+microVM 上 `systemd-timesyncd` 因被 systemd 识别为 container 而拒启 (`ConditionVirtualization=!container was not met`)，`chrony` 与 `time-daemon` 虚拟包冲突装不上。靠手动 `ntpdate` 一次只能撑到下次 suspend/resume。**必须在代码层做防御**。
+
+### 修复 1：客户端时间对齐（核心）
+
+- **新增** `src/middleware/server_time.rs`：每个响应注入 `X-Server-Time: <unix_secs>` header
+- **新增** `frontend/src/lib/clockSkew.ts`：fetch 拦截 `X-Server-Time`，计算 `skew = server - client` 持久化 localStorage（24h 过期），导出 `nowSecs()`
+- **修改** `frontend/src/lib/token.ts` 的 `isTokenExpired` 改用 `nowSecs()` 替代 `Date.now() / 1000`
+- **修改** `src/main.rs::build_cors_layer` CORS `expose_headers` 增加 `x-server-time`（跨域部署必需）
+
+效果：无论服务器时钟漂多大（10h 也好），前端用 skew 修正后与服务器视角对齐，token 永不被误判过期。
+
+### 修复 2：服务器启动 + 周期时钟自检
+
+- **新增** `src/clock_health.rs`：并发探测 `cloudflare/google/apple` 三家的 HTTPS `Date` header（RFC 7231），取中位数对比本机时间
+- **为什么不用 SNTP**：UDP/123 在 microVM / 出云防火墙 / 企业内网常被拦截；HTTPS/443 几乎必通；精度 ±2s 足够识别业务级漂移
+- 漂移 > 60s（`DRIFT_DEGRADED_THRESHOLD_SECS`）→ `ERROR` 日志（含具体 `ntpdate` 修复命令）+ `/health` 状态 `degraded`
+- 启动时 detached spawn 一次（不阻塞 `listen`）+ 每小时复查
+- Warn-only：不 panic 启动流程，但让运维在被误诊为业务问题之前就看到根因
+
+### 修复 3：`/health` 暴露时钟状态 + Admin Banner
+
+- `/health` 响应增加 `services.clock`：`{ status, driftSecs, lastCheckAt, thresholdSecs }`
+- 新增 `frontend/src/components/admin/ClockDriftWarning.tsx`，挂在 `AdminLayout` header 下方
+- `clock.status === "drifted"` 时显示红色 banner，引导执行 `sudo ntpdate -u pool.ntp.org`
+
+### 修复 4：`install.sh` 缺 `mkdir -p data` 导致首次启动死循环
+
+`DATABASE_URL=./data/learning.db` 默认值，但 `install.sh` 没预建 `data/`。`wordforge` 启动时 `unable to open database file` → systemd `Restart=always` 立即重启 → 死循环。
+
+修复：`install.sh` 在 `mkdir -p "$INSTALL_DIR"` 之后显式 `mkdir -p "$INSTALL_DIR/data"`。
+
+### 修复 5：`install.sh` 生成的 `.env` `CORS_ORIGIN` 默认值会坑跨域部署
+
+`.env.example` 的 `CORS_ORIGIN=http://localhost:5173` 是 dev 友好默认，但 `install.sh` 直接拷贝过去会让生产环境跨域部署直接坏。
+
+修复：`install.sh` sed 写 `.env` 时在 `CORS_ORIGIN=...` 前注入两行提示注释，让用户首次部署就看到「部署时改为你的实际域名」的指引。
+
+### upgrade ladder
+
+| 当前生产 binary | 走 admin 一键升级到 |
+|---|---|
+| v1.1.0-beta.3 | **可以走 admin 一键升级** 到 beta.4（watcher 已 fork-exec 化）|
+| v1.0.0 / v1.1.0-beta.{1,2} | **必须先 SSH 手动 swap 到 beta.3 再升 beta.4**（旧 binary 的 spawn_replacement 死锁修不了，参考 beta.3 release notes 修复 1）|
+
+### 验证
+
+- `cargo test --lib`：646 passed（含新增 `clock_health` 4 cases + `server_time` middleware 1 case）
+- `vitest run tests/lib/clockSkew.test.ts`：10 passed
+- `vitest run tests/lib/token.test.ts`：24 passed（向后兼容）
+- `pnpm build`：全量构建通过
+
+### 兼容性 / 破坏性
+
+- **零新依赖**（`reqwest` / `chrono` / `futures` 已有；前端无新 npm 包）
+- **零新 env 变量**
+- `/health` schema 向后兼容（新增字段）
+- `isTokenExpired` 语义在「未拿到 server time 时 skew=0」回退到原行为
+- CORS `expose_headers` 增量增加 `x-server-time`
+
+---
+
 ## [v1.1.0-beta.3] — 2026-05-23 · Pre-release · 自更新死锁根治 + backup stale 清理
 
 ### 真根因复盘

@@ -188,6 +188,9 @@ pub struct AppState {
     /// v1.1-P1 S2：领域事件总线。`event-bus` feature 开启时为 InMemoryEventBus，
     /// 关闭时为 NoopEventBus。handler 写库成功后旁路 emit，consumer 异步消费。
     event_bus: Arc<dyn EventBus>,
+    /// 时钟健康探测器。启动时与每小时对比公网 HTTP Date header，识别本机时钟漂移。
+    /// 漂移超阈时 `/health` 状态降级为 `degraded`，详见 `clock_health` 模块文档。
+    clock_health: Arc<crate::clock_health::ClockHealth>,
 }
 
 pub struct RuntimeConfig {
@@ -237,7 +240,13 @@ impl AppState {
             resource_pack_signer: Arc::new(RwLock::new(None)),
             recently_broadcasted_packs: Arc::new(DashMap::new()),
             event_bus: event_bus::build_default_bus(),
+            clock_health: Arc::new(crate::clock_health::ClockHealth::new()),
         }
+    }
+
+    /// 时钟健康探测器（供 main.rs 启动时启动周期任务、health endpoint 读取状态）。
+    pub fn clock_health(&self) -> &Arc<crate::clock_health::ClockHealth> {
+        &self.clock_health
     }
 
     /// 测试 / 自定义场景下注入一个特定的 EventBus（如 NoopEventBus）。
@@ -291,10 +300,7 @@ impl AppState {
 
     /// 读取当前 apply 后台 task 状态（若无返回 None）。
     pub fn apply_task_snapshot(&self) -> Option<ApplyTaskStatus> {
-        self.apply_task
-            .lock()
-            .ok()
-            .and_then(|guard| guard.clone())
+        self.apply_task.lock().ok().and_then(|guard| guard.clone())
     }
 
     /// 替换 apply task 状态；保留以便 handler/sink 显式覆盖。

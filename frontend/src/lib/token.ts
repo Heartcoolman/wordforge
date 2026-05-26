@@ -1,5 +1,6 @@
 import { storage, STORAGE_KEYS } from './storage';
 import { TOKEN_REFRESH_BUFFER_SECS } from './constants';
+import { nowSecs } from './clockSkew';
 
 /** Decode JWT payload without verification */
 function decodeJwtPayload(token: string): Record<string, unknown> | null {
@@ -16,11 +17,18 @@ function decodeJwtPayload(token: string): Record<string, unknown> | null {
   }
 }
 
-/** Check if a JWT is expired (with optional buffer in seconds) */
+/**
+ * 检查 JWT 是否过期。
+ *
+ * 关键：用 `nowSecs()` 而非 `Date.now()/1000`。后者是客户端裸时间，与服务器时钟存在
+ * 漂移时（如 microVM 上未同步 NTP）会判错 —— 服务器签发的 token 在客户端视角下"立刻
+ * 过期"，触发清 storage + 跳登录页。`nowSecs()` 基于响应中的 X-Server-Time header
+ * 校正后再比较，详见 `clockSkew.ts`。
+ */
 function isTokenExpired(token: string, bufferSec = 0): boolean {
   const payload = decodeJwtPayload(token);
   if (!payload || typeof payload.exp !== 'number') return true;
-  return Date.now() / 1000 >= payload.exp - bufferSec;
+  return nowSecs() >= payload.exp - bufferSec;
 }
 
 let refreshPromise: Promise<boolean> | null = null;

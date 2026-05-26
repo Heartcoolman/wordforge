@@ -6,6 +6,7 @@ import { tokenManager } from '@/lib/token';
 import { uiStore } from '@/stores/ui';
 import { Skeleton } from '@/components/ui/Skeleton';
 import { useIndicatorTrack } from '@/lib/motion';
+import { ClockDriftWarning } from '@/components/admin/ClockDriftWarning';
 
 // Sidebar 宽度 / 主区 margin 集中常量；Tailwind 类不能动态拼接，仍保留字符串字面量
 const SIDEBAR_W_OPEN = 'md:w-56';
@@ -196,6 +197,7 @@ export function AdminLayout(props: ParentProps) {
             </button>
           </div>
         </header>
+        <ClockDriftWarning />
         <main class="p-4 sm:p-6">
           {/* 路由 children fade-in — Show keyed 在 pathname 变化时重新 mount 触发 CSS 入场 */}
           <Show when={location.pathname} keyed>

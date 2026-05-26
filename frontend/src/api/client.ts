@@ -1,5 +1,6 @@
 import { tokenManager } from '@/lib/token';
 import { getDeviceId, getDevicePlatform } from '@/lib/device';
+import { ingestServerTimeFromResponse } from '@/lib/clockSkew';
 import { createSignal } from 'solid-js';
 import type { AmasStateStreamEvent } from '@/types/amas';
 
@@ -170,6 +171,8 @@ async function req<T>(path: string, opts: ReqOpts = {}): Promise<T> {
       headers,
       signal: ctrl.signal,
     });
+    // 每个响应都带 X-Server-Time，第一时间更新时钟偏移，保证后续 isTokenExpired 用对的基准
+    ingestServerTimeFromResponse(response);
 
     if (response.status === 401 && canRetryUnauthorized(path, useAdminToken, skipTokenRefresh)) {
       const refreshed = await tokenManager.refreshAccessToken();
@@ -186,6 +189,7 @@ async function req<T>(path: string, opts: ReqOpts = {}): Promise<T> {
             headers: retryHeaders,
             signal: retryCtrl.signal,
           });
+          ingestServerTimeFromResponse(response);
         } finally {
           clearTimeout(retryTimer);
         }

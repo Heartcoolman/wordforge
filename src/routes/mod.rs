@@ -32,7 +32,9 @@ use axum::routing::get_service;
 use axum::Router;
 use tower_http::services::{ServeDir, ServeFile};
 
-use crate::middleware::{device, http_metrics, maintenance, rate_limit, request_id, strict_mode};
+use crate::middleware::{
+    device, http_metrics, maintenance, rate_limit, request_id, server_time, strict_mode,
+};
 use crate::state::AppState;
 
 /// Maximum request body size: 2 MiB.
@@ -70,7 +72,10 @@ pub fn build_router(state: AppState) -> Router {
     //           v1 全部 410 无客户端契约意义，维护模式下也应直接 410 而非 503。
     // 注意：admin auth 路由已在外层 merge，此处 /admin 指业务 admin 路由。
     let exempt_routes = Router::new()
-        .nest("/admin/auth", admin_auth_routes.merge(admin_auth_public_routes))
+        .nest(
+            "/admin/auth",
+            admin_auth_routes.merge(admin_auth_public_routes),
+        )
         .nest("/admin", admin::router())
         .nest("/realtime", realtime::router())
         .nest("/v1", v1::router())
@@ -139,9 +144,13 @@ pub fn build_router(state: AppState) -> Router {
     }
 
     // M0-P1 补充：histogram middleware 挂在 request_id 外侧，确保所有请求都被采集
-    app.layer(axum::middleware::from_fn(request_id::request_id_middleware))
-        .layer(axum::middleware::from_fn(http_metrics::record_http_metrics))
-        .with_state(state)
+    // server_time 注入 X-Server-Time 响应头（最外层，所有响应通用），用于前端时钟对齐
+    app.layer(axum::middleware::from_fn(
+        server_time::server_time_middleware,
+    ))
+    .layer(axum::middleware::from_fn(request_id::request_id_middleware))
+    .layer(axum::middleware::from_fn(http_metrics::record_http_metrics))
+    .with_state(state)
 }
 
 async fn static_cache_headers(req: Request<axum::body::Body>, next: Next) -> Response {

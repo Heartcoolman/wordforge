@@ -82,9 +82,7 @@ pub fn router() -> Router<AppState> {
         .route("/metrics", get(metrics))
 }
 
-pub async fn health_check(
-    State(state): State<AppState>,
-) -> impl axum::response::IntoResponse {
+pub async fn health_check(State(state): State<AppState>) -> impl axum::response::IntoResponse {
     // M0-R4：apply swapping 期间维护模式激活，/health 返回 503 告知负载均衡器下线。
     // fork-exec 后新进程启动完成（.maintenance.flag 清理）再恢复 200。
     if state.is_maintenance() {
@@ -102,10 +100,14 @@ pub async fn health_check(
     let amas_healthy = state.amas().is_healthy();
     let sse_healthy = sse_probe_ok(&state);
     let (wbc_healthy, wbc_probe_skipped) = wordbook_center_probe(&state).await;
+    let clock_status = state.clock_health().status().await;
+    let clock_drift_secs = state.clock_health().drift_secs();
+    let clock_last_check_at = state.clock_health().last_check_at();
+    let clock_degraded = matches!(clock_status, crate::clock_health::ClockCheckStatus::Drifted);
 
     let status = if !store_healthy {
         "down"
-    } else if !amas_healthy || !sse_healthy || !wbc_healthy {
+    } else if !amas_healthy || !sse_healthy || !wbc_healthy || clock_degraded {
         "degraded"
     } else {
         "ok"
@@ -116,6 +118,7 @@ pub async fn health_check(
         Json(serde_json::json!({
             "status": status,
             "uptimeSecs": startup_instant().elapsed().as_secs(),
+            "serverTime": chrono::Utc::now().timestamp(),
             "services": {
                 "store": { "healthy": store_healthy },
                 "amas": { "healthy": amas_healthy },
@@ -127,6 +130,14 @@ pub async fn health_check(
                 "wordbookCenter": {
                     "healthy": wbc_healthy,
                     "probeSkipped": wbc_probe_skipped
+                },
+                // 时钟健康状态：driftSecs = 服务器时钟 - 公网时钟（HTTP Date 取样）
+                // status=drifted 时说明本机 NTP 未同步，会造成 JWT 在客户端视角下失效
+                "clock": {
+                    "status": clock_status,
+                    "driftSecs": clock_drift_secs,
+                    "lastCheckAt": if clock_last_check_at == 0 { None } else { Some(clock_last_check_at) },
+                    "thresholdSecs": crate::clock_health::DRIFT_DEGRADED_THRESHOLD_SECS,
                 },
             }
         })),

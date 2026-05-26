@@ -6,6 +6,8 @@ pub mod http_metrics;
 pub mod maintenance;
 pub mod rate_limit;
 pub mod request_id;
+/// `X-Server-Time` 响应头注入：让前端能对齐时钟、防止 JWT exp 自杀
+pub mod server_time;
 pub mod strict_mode;
 
 /// M1-A6：路由元数据类型，预留给未来与 M0-C4 deprecation 体系统一（Extension 侧）。
