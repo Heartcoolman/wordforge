@@ -154,19 +154,15 @@ export default function DashboardPage() {
 
   return (
     <div class="space-y-6">
-      {/* Hero — 全局健康状态 + 4 KPI count-up */}
+      {/* Hero — 纯标题区:健康 chip + 大标题 + desc + WindowPicker。
+          KPI 数字单独由下方 4 张 StatCard 承载(带 icon/trend/sparkline),
+          原 meta-grid 与 StatCard 重复,已删除。 */}
       <HeroCard
         eyebrow={healthEyebrow().text}
         eyebrowVariant={healthEyebrow().variant}
         title="全局概览"
         desc="今日学习产出、用户活跃、AMAS 健康状态一屏看完。窗口可切 7 / 14 / 30 天。"
         cta={<WindowPicker value={days()} onChange={setDays} />}
-        meta={[
-          { value: stats()?.users ?? 0, label: '注册用户', format: formatNumber },
-          { value: eng()?.activeToday ?? 0, label: '今日活跃', format: formatNumber },
-          { value: overview()?.summary.recordCount ?? 0, label: `${days()}天答题`, format: formatNumber },
-          { value: overview()?.summary.accuracy != null ? formatAccuracy(overview()!.summary.accuracy) : '—', label: `${days()}天正确率` },
-        ]}
       />
 
       <Show when={allFailed()}>
