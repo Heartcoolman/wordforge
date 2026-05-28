@@ -15,13 +15,13 @@ RED='\033[0;31m'
 NC='\033[0m' # No Color
 
 # 检查是否在项目根目录
-if [ ! -d "frontend" ]; then
+if [ ! -d "admin-ui" ]; then
     echo -e "${RED}错误: 请在项目根目录下运行此脚本${NC}"
     exit 1
 fi
 
 # 前端目录
-cd frontend
+cd admin-ui
 
 # 安装依赖
 echo -e "${YELLOW}📦 检查并安装依赖...${NC}"
@@ -84,6 +84,6 @@ echo "  - 前端E2E测试: ${E2E_STATUS}"
 echo "  - 后端测试: ✅ 通过"
 echo ""
 echo "📁 测试报告:"
-echo "  - E2E报告: frontend/playwright-report/index.html"
-echo "  - 查看E2E报告: cd frontend && npx playwright show-report"
+echo "  - E2E报告: admin-ui/playwright-report/index.html"
+echo "  - 查看E2E报告: cd admin-ui && npx playwright show-report"
 echo ""

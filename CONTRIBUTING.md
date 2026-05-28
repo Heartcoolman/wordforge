@@ -33,10 +33,10 @@ feat(admin): AMAS 调参后台产品化 — 结构化编辑 + 可视化 (#31)
 cargo test
 
 # 前端单测（Vitest）
-cd frontend && npm test
+cd admin-ui && npm test
 
 # E2E 测试（Playwright）
-cd frontend && npm run test:e2e
+cd admin-ui && npm run test:e2e
 ```
 
 完整套件（含覆盖率报告）：
@@ -56,7 +56,7 @@ make coverage   # cargo-llvm-cov 生成 HTML 报告
 
 以下为发版前曾发现的典型遗漏，请逐项核查：
 
-- [ ] **lockfile 同步**：`frontend/package-lock.json` 与 `package.json` 一致，未出现 "lockfile out of sync" 警告
+- [ ] **lockfile 同步**：`admin-ui/package-lock.json` 与 `package.json` 一致，未出现 "lockfile out of sync" 警告
 - [ ] **a11y 与 role**：新增或改动 UI 组件后，若有 `role` / `aria-*` 属性变化，必须跑一次 E2E
 - [ ] **二次确认交互**：涉及破坏性操作的按钮（删除 / 升级 / 重置）必须有二次确认弹窗或提示，并在 E2E 中覆盖
 - [ ] **表单按钮 disabled 表达式**：`disabled` 逻辑逐个检查——特别注意 `&&` 与 `||` 优先级，以及 signal 为 undefined 时的行为

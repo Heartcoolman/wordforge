@@ -12,10 +12,10 @@ src/amas/config.rs (AMASConfig + 24 个子结构体)
   ↓  #[derive(JsonSchema)]
 schemars::schema_for!(AMASConfig)
   ↓  cargo test --test amas_schema_export
-frontend/src/types/amas.schema.json   ← checked-in，CI 单一事实源
+admin-ui/src/types/amas.schema.json   ← checked-in，CI 单一事实源
   ↓  npm run gen:amas-types
-frontend/src/types/amas.generated.ts  ← checked-in，TS 类型
-  ↓  re-export 自 frontend/src/types/amas.ts
+admin-ui/src/types/amas.generated.ts  ← checked-in，TS 类型
+  ↓  re-export 自 admin-ui/src/types/amas.ts
 应用代码
 ```
 
@@ -29,11 +29,11 @@ frontend/src/types/amas.generated.ts  ← checked-in，TS 类型
 cargo test --test amas_schema_export
 
 # 2. 由 schema 生成 TS
-cd frontend
+cd admin-ui
 npm run gen:amas-types
 
 # 3. 提交两个文件
-git add frontend/src/types/amas.schema.json frontend/src/types/amas.generated.ts
+git add admin-ui/src/types/amas.schema.json admin-ui/src/types/amas.generated.ts
 ```
 
 ## CI 漂移防护
@@ -44,13 +44,13 @@ CI 应在构建前后跑下列序列，确保 PR 没遗漏 regenerate：
 - name: 重新生成 AMAS schema 与类型
   run: |
     cargo test --test amas_schema_export
-    cd frontend && npm run gen:amas-types
+    cd admin-ui && npm run gen:amas-types
 
 - name: 校验 schema/类型未漂移
   run: |
     git diff --exit-code \
-      frontend/src/types/amas.schema.json \
-      frontend/src/types/amas.generated.ts
+      admin-ui/src/types/amas.schema.json \
+      admin-ui/src/types/amas.generated.ts
 ```
 
 如果该 step 失败，说明开发者修改了后端 struct 但忘了 regenerate。
@@ -74,9 +74,9 @@ Authorization: Bearer <admin_token>
 |------|------|---------|
 | `src/amas/config.rs` 等 | 手写 + `#[derive(JsonSchema)]` | 手写 |
 | `src/amas/types.rs` | 手写 + `#[derive(JsonSchema)]` | 手写 |
-| `frontend/src/types/amas.schema.json` | `cargo test --test amas_schema_export` | 自动生成（checked-in） |
-| `frontend/src/types/amas.generated.ts` | `npm run gen:amas-types` | 自动生成（checked-in） |
-| `frontend/src/types/amas.ts` | 手写 re-export + 兼容 alias + 运行时类型 | 手写 |
+| `admin-ui/src/types/amas.schema.json` | `cargo test --test amas_schema_export` | 自动生成（checked-in） |
+| `admin-ui/src/types/amas.generated.ts` | `npm run gen:amas-types` | 自动生成（checked-in） |
+| `admin-ui/src/types/amas.ts` | 手写 re-export + 兼容 alias + 运行时类型 | 手写 |
 
 ## 兼容性
 

@@ -1,7 +1,9 @@
 # API 对接规范文档
 
-> 适用对象：所有接入 WordForge 后端的客户端（Web、iOS、Android 等）。
+> 适用对象：通过 `/api/*` 接入 WordForge 后端的 **end-user 客户端**（Web、iOS、Android、[wordforge-web](https://github.com/Heartcoolman/wordforge-web) 等）。
 > 本文档描述全局约定，包括认证机制、请求格式、响应结构、错误处理、限流规则等。
+>
+> **不在本文范围**：内嵌的 admin GUI（`/admin/*` 路由）走独立的 `/api/admin/*` + Admin Token，属于后端的运维管理面，不属于"客户端"范畴。
 
 ---
 

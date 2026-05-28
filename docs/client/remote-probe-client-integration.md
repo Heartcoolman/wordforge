@@ -3,7 +3,7 @@
 > 配套设计稿：[`docs/superpowers/specs/2026-05-19-remote-probe-design.md`](../superpowers/specs/2026-05-19-remote-probe-design.md)
 > 管理员手册：[`docs/admin/remote-probe.md`](../admin/remote-probe.md)
 >
-> 本文面向「客户端实现者」—— 既包括官方 SolidJS Web 端（见 `frontend/src/workers/probe/`），也包括日后任何第二实现（Tauri、Electron、移动端 WebView 等）。
+> 本文面向「客户端实现者」—— 既包括官方 SolidJS Web 端（见 `admin-ui/src/workers/probe/`），也包括日后任何第二实现（Tauri、Electron、移动端 WebView 等）。
 
 ---
 
@@ -165,7 +165,7 @@ Body limit: 320 KB
 - `_actions` 是 Worker 内 cmd stub 的 push 队列。Worker 通过 `postMessage({ok, result, actions, durationMs})` 把它带回主线程
 - `ctx.storage.get()` 的 value **必须脱敏**（强制空串）—— 这是隐私契约，任何端的实现都不可破
 
-参考实现：`frontend/src/workers/probe/{ctx-factory,build-ctx,types}.ts`。
+参考实现：`admin-ui/src/workers/probe/{ctx-factory,build-ctx,types}.ts`。
 
 ---
 
@@ -179,7 +179,7 @@ Body limit: 320 KB
 | `errors` | 50 | `window.addEventListener('error', ...)` + `'unhandledrejection'` |
 | `net` | 100 | `window.fetch` 包装 + XHR 包装（如果用 axios，等价于 axios interceptor） |
 
-幂等性：必须保证多次调用 `installRingBuffers()` 不重复 wrap。参考 `frontend/src/workers/probe/ring-buffers.ts`。
+幂等性：必须保证多次调用 `installRingBuffers()` 不重复 wrap。参考 `admin-ui/src/workers/probe/ring-buffers.ts`。
 
 **敏感字段过滤**：
 
@@ -278,7 +278,7 @@ clearCache → signOut → reload
 - `signOut`：清 token + `window.location.assign('/admin/login')` 或等价
 - `reload`：`window.location.reload()`
 
-参考 `frontend/src/workers/probe/api-bridge.ts::executeActions`。
+参考 `admin-ui/src/workers/probe/api-bridge.ts::executeActions`。
 
 ---
 
@@ -341,7 +341,7 @@ startProbeBridge(); // 内部 connectSseStream({ onProbeRequest, onProbeConfirm 
 stopProbeBridge();  // 关 SSE，清 pendingConfirms
 ```
 
-参考：`frontend/src/App.tsx` 的 `onMount` 钩子。
+参考：`admin-ui/src/App.tsx` 的 `onMount` 钩子。
 
 ---
 
@@ -378,15 +378,15 @@ ctx schema 一旦发布，**字段只增不减、不改名**。需要破坏性�
 
 | 模块 | 文件 |
 |---|---|
-| 类型契约 | `frontend/src/workers/probe/types.ts` |
-| Ring buffer | `frontend/src/workers/probe/ring-buffers.ts` |
-| ctx 采集（主线程） | `frontend/src/workers/probe/ctx-factory.ts` |
-| ctx 包装（Worker 内） | `frontend/src/workers/probe/build-ctx.ts` |
-| 沙箱 eval | `frontend/src/workers/probe/runner.worker.ts` |
-| 主线程编排 / 确认链 / 序列化 | `frontend/src/workers/probe/api-bridge.ts` |
-| SSE 解析分支 | `frontend/src/api/client.ts`（`onProbeRequest` / `onProbeConfirm`） |
-| 启动钩子 | `frontend/src/App.tsx`（`installRingBuffers` + `startProbeBridge`） |
+| 类型契约 | `admin-ui/src/workers/probe/types.ts` |
+| Ring buffer | `admin-ui/src/workers/probe/ring-buffers.ts` |
+| ctx 采集（主线程） | `admin-ui/src/workers/probe/ctx-factory.ts` |
+| ctx 包装（Worker 内） | `admin-ui/src/workers/probe/build-ctx.ts` |
+| 沙箱 eval | `admin-ui/src/workers/probe/runner.worker.ts` |
+| 主线程编排 / 确认链 / 序列化 | `admin-ui/src/workers/probe/api-bridge.ts` |
+| SSE 解析分支 | `admin-ui/src/api/client.ts`（`onProbeRequest` / `onProbeConfirm`） |
+| 启动钩子 | `admin-ui/src/App.tsx`（`installRingBuffers` + `startProbeBridge`） |
 | 后端 SSE 事件 | `src/state.rs::SseEvent::{ProbeRequest, ProbeConfirm}` |
 | 上报端点 | `src/routes/probe_results.rs` |
 
-测试覆盖：`frontend/tests/workers/probe/{ring-buffers,build-ctx,ctx-snapshot,serialize-truncate,executeActions}.test.ts`。
+测试覆盖：`admin-ui/tests/workers/probe/{ring-buffers,build-ctx,ctx-snapshot,serialize-truncate,executeActions}.test.ts`。

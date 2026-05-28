@@ -73,7 +73,9 @@ amas/
 
 事件流：`POST /api/amas/process-event` → `AMASEngine::process_event()` → 内部按 user 加锁 → 特征向量 → 候选策略生成（heuristic + IGE + SWD）→ 信任分加权融合 → 约束兜底 → 持久化 + 监控采样。
 
-## 前端（`frontend/`）
+## Admin GUI（`admin-ui/`，后端内嵌）
+
+本节描述的是**后端的内嵌运维 GUI**，不是独立前端项目。源码在 `admin-ui/`，构建产物落仓库根 `static/`，由后端 `tower-http::fs::ServeDir` 作为 fallback 服务出去 —— 生产环境用户永远不会单独访问 `admin-ui` 这个 npm 项目，它没有独立部署形态。
 
 | 选型 | 版本 |
 |---|---|
@@ -86,7 +88,7 @@ amas/
 | 疲劳检测 | `@mediapipe/tasks-vision` + 本仓 `crates/visual-fatigue-wasm`（wasm-pack 产物） |
 | 测试 | Vitest（单测）+ Playwright（E2E，71 用例） |
 
-构建产物落 `static/`，被后端的 `tower-http::fs::ServeDir` fallback 服务出去——生产环境**单二进制即包含完整前端**。
+构建产物落 `static/`，被后端的 `tower-http::fs::ServeDir` fallback 服务出去——生产环境**单二进制即包含完整 admin GUI**。
 
 ## Workers（`src/workers/`）
 
@@ -109,6 +111,8 @@ amas/
 - 备份：自更新前 `PRAGMA wal_checkpoint(TRUNCATE)` → `VACUUM INTO` 生成单文件快照
 
 历史上有 sled 实现，已通过一次性二进制 `migrate-sled-to-sqlite` 迁出，sled 依赖被 `sled-migration` feature 隔离，默认不编译。
+
+> **术语 reconciliation**：数据库内部沿用 `client_*` 命名（`client_devices` 表、`client_id` 字段、`adminApi.{getClients,banClient,unbanClient}` 等），UI 层统一改为 `device/设备` 表达（DevicesPage / "设备管理" 菜单 / `<h1>设备</h1>`）。DB 层因迁移成本（schema_version 兼容、回滚保护）暂保留旧命名；**新增字段一律用 `device_*`**。这套不对称是有意为之，不属于命名 bug。
 
 ## 自更新链路
 

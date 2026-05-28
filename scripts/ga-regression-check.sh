@@ -290,13 +290,13 @@ check_m1() {
         "tests/middleware_exemption.rs"
 
     # M1-A7：queryClient 死依赖已删
-    if [[ ! -f "${PROJECT_ROOT}/frontend/src/lib/queryClient.ts" ]]; then
-        pass "M1-A7 frontend/src/lib/queryClient.ts 已删"
+    if [[ ! -f "${PROJECT_ROOT}/admin-ui/src/lib/queryClient.ts" ]]; then
+        pass "M1-A7 admin-ui/src/lib/queryClient.ts 已删"
     else
-        fail "M1-A7 frontend/src/lib/queryClient.ts 未删除"
+        fail "M1-A7 admin-ui/src/lib/queryClient.ts 未删除"
     fi
     check_not_contains "M1-A7 package.json solid-query 已删" \
-        "frontend/package.json" "solid-query"
+        "admin-ui/package.json" "solid-query"
 
     # M1-G1：GDPR 导出端点
     check_contains   "M1-G1 GDPR export store 实现存在" \
@@ -341,7 +341,7 @@ check_m1() {
     # M1 e2e：GDPR 导出流程
     if [[ "$SKIP_E2E" == "false" ]]; then
         run_check "M1 Playwright gdpr e2e（如有）" \
-            bash -c "cd '${PROJECT_ROOT}/frontend' && npx playwright test --grep gdpr --reporter=line 2>/dev/null || true"
+            bash -c "cd '${PROJECT_ROOT}/admin-ui' && npx playwright test --grep gdpr --reporter=line 2>/dev/null || true"
     else
         skip "M1 Playwright e2e（--skip-e2e）"
     fi
@@ -424,7 +424,7 @@ check_vitest() {
     header "前端 Vitest 单测"
     if [[ "$SKIP_E2E" == "false" ]]; then
         run_check "vitest run（前端单测）" \
-            bash -c "cd '${PROJECT_ROOT}/frontend' && npm test -- --reporter=verbose 2>&1 | tail -20"
+            bash -c "cd '${PROJECT_ROOT}/admin-ui' && npm test -- --reporter=verbose 2>&1 | tail -20"
     else
         skip "Vitest（--skip-e2e）"
     fi

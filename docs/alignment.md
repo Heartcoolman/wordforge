@@ -3,7 +3,7 @@
 **审计时间**：2026-05-22
 **后端仓库**：`/Users/liji/english/wordforge`（branch `feat/v1-m1`）
 **iOS 客户端**：`/Users/liji/WordForge-App`（branch `main`）
-**Web 前端**：`/Users/liji/english/wordforge/frontend`
+**Web 前端**：`/Users/liji/english/wordforge/admin-ui`
 **审计范围**：M1 阶段变更（M0-C5 410 端点、M1-G1 GDPR 导出、M1-G3 feedback 扩展字段、M1-A7 queryClient 清理）
 **判定方式**：交叉验证 0 P0 + 0 P1、字段级一致、类型检查通过
 
@@ -33,7 +33,7 @@
 
 | # | 一句话 | 范围 | 修复方 | 状态 |
 |---|---|---|---|---|
-| P1-G1 | `frontend/src/types/admin.ts::FeedbackItem` 缺少 M1-G3 新增的 `priority`/`status`/`assigneeAdminId`/`resolvedAt`/`resolution` 5 个字段；后端 wire 含这 5 字段，前端类型不完整导致运行时字段丢失 | admin.ts | 前端 | **已修**（本轮） |
+| P1-G1 | `admin-ui/src/types/admin.ts::FeedbackItem` 缺少 M1-G3 新增的 `priority`/`status`/`assigneeAdminId`/`resolvedAt`/`resolution` 5 个字段；后端 wire 含这 5 字段，前端类型不完整导致运行时字段丢失 | admin.ts | 前端 | **已修**（本轮） |
 
 ### 3.2 发现 P2（1 项，已记录）
 
@@ -58,7 +58,7 @@
 
 | 文件 | 改动 |
 |---|---|
-| `frontend/src/types/admin.ts` | `FeedbackItem` 补全 `priority` / `status` / `assigneeAdminId` / `resolvedAt` / `resolution` 5 字段 |
+| `admin-ui/src/types/admin.ts` | `FeedbackItem` 补全 `priority` / `status` / `assigneeAdminId` / `resolvedAt` / `resolution` 5 字段 |
 
 ---
 
@@ -71,7 +71,7 @@ cargo test --no-fail-fast
 
 ### 5.2 前端
 ```bash
-cd frontend && pnpm tsc --noEmit
+cd admin-ui && pnpm tsc --noEmit
 # 预期：仅 App.tsx(93) + UpdatesPage.tsx(405) 两处已知预存错误，无 FeedbackItem 新增错误
 ```
 

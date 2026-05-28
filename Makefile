@@ -1,4 +1,4 @@
-.PHONY: help test coverage coverage-backend coverage-frontend clean
+.PHONY: help test coverage coverage-backend coverage-admin-ui clean
 
 help: ## 显示帮助信息
 	@echo "可用命令："
@@ -10,9 +10,9 @@ test: ## 运行所有测试
 	ADMIN_JWT_SECRET="test_admin_secret_key_for_jwt_signing_minimum_64_chars_long" \
 	cargo test --no-fail-fast
 	@echo "\n运行前端测试..."
-	cd frontend && npm run test
+	cd admin-ui && npm run test
 
-coverage: coverage-backend coverage-frontend ## 生成完整的覆盖率报告
+coverage: coverage-backend coverage-admin-ui ## 生成完整的覆盖率报告
 
 coverage-backend: ## 生成后端覆盖率报告（HTML + JSON）
 	@echo "生成 Rust 后端覆盖率报告..."
@@ -41,11 +41,11 @@ coverage-backend: ## 生成后端覆盖率报告（HTML + JSON）
 	ADMIN_JWT_SECRET="test_admin_secret_key_for_jwt_signing_minimum_64_chars_long" \
 	cargo llvm-cov --summary-only --no-run --ignore-filename-regex="tests/" 2>/dev/null | grep "TOTAL" || echo "覆盖率摘要："
 
-coverage-frontend: ## 生成前端覆盖率报告
+coverage-admin-ui: ## 生成前端覆盖率报告
 	@echo "生成前端覆盖率报告..."
-	cd frontend && npm run test:coverage
+	cd admin-ui && npm run test:coverage
 	@echo "✓ 前端覆盖率报告已生成："
-	@echo "  HTML: frontend/coverage/index.html"
+	@echo "  HTML: admin-ui/coverage/index.html"
 
 coverage-open: ## 在浏览器中打开覆盖率报告
 	@echo "打开后端覆盖率报告..."
@@ -53,12 +53,12 @@ coverage-open: ## 在浏览器中打开覆盖率报告
 	command -v open >/dev/null 2>&1 && open target/llvm-cov/html/index.html || \
 	echo "请手动打开: target/llvm-cov/html/index.html"
 	@echo "打开前端覆盖率报告..."
-	@command -v xdg-open >/dev/null 2>&1 && xdg-open frontend/coverage/index.html || \
-	command -v open >/dev/null 2>&1 && open frontend/coverage/index.html || \
-	echo "请手动打开: frontend/coverage/index.html"
+	@command -v xdg-open >/dev/null 2>&1 && xdg-open admin-ui/coverage/index.html || \
+	command -v open >/dev/null 2>&1 && open admin-ui/coverage/index.html || \
+	echo "请手动打开: admin-ui/coverage/index.html"
 
 clean: ## 清理覆盖率报告
 	@echo "清理覆盖率报告..."
 	rm -rf target/llvm-cov
-	rm -rf frontend/coverage
+	rm -rf admin-ui/coverage
 	@echo "✓ 清理完成"

@@ -21,7 +21,7 @@ openssl rand -hex 32   # → REFRESH_JWT_SECRET
 # 把生成结果写入 .env
 
 # 构建管理后台（产物落到 ../static/，被后端内嵌做 fallback）
-cd frontend && npm install && npm run build && cd ..
+cd admin-ui && npm install && npm run build && cd ..
 
 # 启动后端
 cargo run    # 监听 http://127.0.0.1:3000
@@ -33,10 +33,10 @@ cargo run    # 监听 http://127.0.0.1:3000
 
 ```bash
 cargo run                          # 终端 1：后端 :3000
-cd frontend && npx vite --host     # 终端 2：前端 :5173，自动代理 /api → :3000
+cd admin-ui && npx vite --host     # 终端 2：前端 :5173，自动代理 /api → :3000
 ```
 
-`frontend/vite.config.ts` 已配好 `/api`、`/health` 反代到 `:3000`。
+`admin-ui/vite.config.ts` 已配好 `/api`、`/health` 反代到 `:3000`。
 
 ## 关键环境变量
 
@@ -59,8 +59,8 @@ cd frontend && npx vite --host     # 终端 2：前端 :5173，自动代理 /api
 ```bash
 ./run-all-tests.sh                  # 后端 + 前端全套
 cargo test                          # 仅后端单测 + 集成测试
-cd frontend && npm test             # 前端 Vitest
-cd frontend && npm run test:e2e     # Playwright E2E
+cd admin-ui && npm test             # 前端 Vitest
+cd admin-ui && npm run test:e2e     # Playwright E2E
 make coverage                       # 覆盖率报告（cargo-llvm-cov）
 cargo build --release               # 生产构建：strip + LTO，单文件 ~30MB
 ```

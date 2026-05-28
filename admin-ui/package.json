@@ -1,0 +1,54 @@
+{
+  "name": "wordforge-admin-ui",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "generate:openapi-types": "node scripts/generate-openapi-types.mjs",
+    "gen:amas-types": "node scripts/generate-amas-types.mjs",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "test:e2e": "playwright test",
+    "test:all": "vitest run --coverage && playwright test"
+  },
+  "dependencies": {
+    "@codemirror/commands": "^6.10.3",
+    "@codemirror/lang-javascript": "^6.2.5",
+    "@codemirror/state": "^6.6.0",
+    "@codemirror/view": "^6.43.0",
+    "@mediapipe/tasks-vision": "^0.10.32",
+    "@sentry/browser": "^10.53.1",
+    "@solidjs/router": "^0.15.4",
+    "clsx": "^2.1.1",
+    "codemirror": "^6.0.2",
+    "echarts": "^6.0.0",
+    "solid-js": "^1.9.11",
+    "solid-motionone": "^1.0.4",
+    "tailwind-merge": "^3.4.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.58.2",
+    "@solidjs/testing-library": "^0.8.10",
+    "@tailwindcss/vite": "^4.1.18",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/user-event": "^14.6.1",
+    "@vitest/coverage-v8": "^3.2.4",
+    "happy-dom": "^20.6.1",
+    "jsdom": "^25.0.1",
+    "json-schema-to-typescript": "^15.0.4",
+    "msw": "^2.12.9",
+    "tailwindcss": "^4.1.18",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.1",
+    "vite-plugin-solid": "^2.11.10",
+    "vite-plugin-top-level-await": "^1.6.0",
+    "vite-plugin-wasm": "^3.5.0",
+    "vitest": "^3.2.4"
+  }
+}

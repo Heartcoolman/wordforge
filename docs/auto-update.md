@@ -335,7 +335,7 @@ cp data/learning-v<OLD>.backup.db data/learning.db
 |------|------|------|
 | 后端单测 | `cargo test --test updater_http` | 通过 |
 | 后端 lib | `cargo test --lib` | 通过 |
-| 前端单测 | `pnpm -C frontend test -- tests/pages/admin/UpdatesPage.test.tsx` | 通过 |
+| 前端单测 | `pnpm -C admin-ui test -- tests/pages/admin/UpdatesPage.test.tsx` | 通过 |
 
 ---
 

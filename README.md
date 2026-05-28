@@ -8,7 +8,9 @@ Self-hosted, single-binary, SQLite-backed — no Redis, no queues. Real-time wor
 
 ## WordForge 是什么
 
-WordForge 是一个**自适应算法驱动的英语词汇学习平台**，由 Rust 后端 + SolidJS 管理后台 + 独立的用户学习端（[wordforge-web](https://github.com/Heartcoolman/wordforge-web)）组成。
+WordForge 是一个**自适应算法驱动的英语词汇学习平台**，由 Rust 后端 + **内嵌的 SolidJS 管理 GUI**（`admin-ui/`，构建产物作为单二进制的静态资源 fallback）+ 独立的用户学习端（[wordforge-web](https://github.com/Heartcoolman/wordforge-web)）组成。
+
+> **架构关键事实**：admin GUI 不是独立的客户端 deliverable，构建产物直接打进 `learning-backend` 二进制（落 `static/` 由 `tower-http::ServeDir` 服务）；end-user 学习端 `wordforge-web` 是另一个独立仓库，与本仓无构建依赖。
 
 核心引擎 **AMAS** 在每次答题事件后实时调整后续选词、间隔与节奏，融合记忆曲线（MDM）、ELO 评分与疲劳感知三个维度。
 
@@ -85,7 +87,7 @@ openssl rand -hex 32   # → REFRESH_JWT_SECRET
 # 把生成结果写入 .env
 
 # 构建管理后台前端
-cd frontend && npm install && npm run build && cd ..
+cd admin-ui && npm install && npm run build && cd ..
 
 # 启动后端（监听 http://127.0.0.1:3000）
 cargo run
@@ -97,7 +99,7 @@ cargo run
 
 ```bash
 cargo run                          # 终端 1：后端 :3000
-cd frontend && npx vite --host     # 终端 2：前端 :5173，代理 /api → :3000
+cd admin-ui && npx vite --host     # 终端 2：前端 :5173，代理 /api → :3000
 ```
 
 ### 运行测试
@@ -105,7 +107,7 @@ cd frontend && npx vite --host     # 终端 2：前端 :5173，代理 /api → :
 ```bash
 ./run-all-tests.sh          # 后端 + 前端全套
 cargo test                  # 仅后端
-cd frontend && npm test     # 前端 Vitest
+cd admin-ui && npm test     # 前端 Vitest
 ```
 
 ---

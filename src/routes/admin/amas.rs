@@ -147,7 +147,7 @@ async fn get_config(
 
 /// GET /api/admin/amas/config/schema —— 返回 AMASConfig 的 JSON Schema（由 schemars 派生）
 ///
-/// 用途：作为前端 `frontend/src/types/amas.generated.ts` codegen 的事实源，
+/// 用途：作为前端 `admin-ui/src/types/amas.generated.ts` codegen 的事实源，
 /// 任何后端结构体增删字段都会自动反映到 schema，避免手写 TS 漂移。
 async fn get_config_schema(
     _admin: AdminAuthUser,
