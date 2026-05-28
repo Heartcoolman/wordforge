@@ -7,9 +7,9 @@ echo "======================================"
 echo "E2E测试执行脚本"
 echo "======================================"
 
-# 检查是否在frontend目录
+# 检查是否在 admin-ui 目录
 if [ ! -f "package.json" ]; then
-    echo "错误: 请在frontend目录下运行此脚本"
+    echo "错误: 请在 admin-ui 目录下运行此脚本"
     exit 1
 fi
 

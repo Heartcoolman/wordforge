@@ -165,7 +165,7 @@ ENABLE_LLM_ADVISOR_WORKER=true                # cron 调度开关
 |---|---|---|
 | 后端 lib | `cargo test --lib` | 221 passed |
 | 后端集成 | `cargo test` | 全套 passed |
-| 前端 | `pnpm -C frontend test` | 347 passed |
+| 前端 | `pnpm -C admin-ui test` | 347 passed |
 | LLM mock 端到端 | `LLM_ENABLED=true LLM_MOCK=true ENABLE_LLM_ADVISOR_WORKER=true cargo run` → 等 cron tick → `GET /api/admin/amas/suggestions?status=pending` | 看到一条 mock pending |
 
 ---

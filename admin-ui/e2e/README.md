@@ -7,7 +7,7 @@
 ## 测试结构
 
 ```
-frontend/e2e/
+admin-ui/e2e/
 ├── admin.spec.ts           # 管理后台测试
 ├── auth.spec.ts             # 认证流程测试  
 ├── home-navigation.spec.ts  # 主页和导航测试
@@ -104,7 +104,7 @@ frontend/e2e/
 ### 安装依赖
 
 ```bash
-cd frontend
+cd admin-ui
 npm ci
 ```
 
@@ -140,7 +140,7 @@ npx playwright show-report
 
 ## 测试配置
 
-配置文件位于 `frontend/playwright.config.ts`：
+配置文件位于 `admin-ui/playwright.config.ts`：
 
 ```typescript
 {
@@ -212,7 +212,7 @@ E2E测试可以集成到GitHub Actions工作流中：
 ```yaml
 - name: Install dependencies
   run: |
-    cd frontend
+    cd admin-ui
     npm ci
 
 - name: Install Playwright browsers
@@ -226,7 +226,7 @@ E2E测试可以集成到GitHub Actions工作流中：
   uses: actions/upload-artifact@v3
   with:
     name: playwright-report
-    path: frontend/playwright-report/
+    path: admin-ui/playwright-report/
 ```
 
 ## 注意事项

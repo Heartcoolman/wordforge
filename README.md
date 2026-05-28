@@ -87,7 +87,7 @@ openssl rand -hex 32   # → REFRESH_JWT_SECRET
 # 把生成结果写入 .env
 
 # 构建管理后台前端
-cd frontend && npm install && npm run build && cd ..
+cd admin-ui && npm install && npm run build && cd ..
 
 # 启动后端（监听 http://127.0.0.1:3000）
 cargo run
@@ -99,7 +99,7 @@ cargo run
 
 ```bash
 cargo run                          # 终端 1：后端 :3000
-cd frontend && npx vite --host     # 终端 2：前端 :5173，代理 /api → :3000
+cd admin-ui && npx vite --host     # 终端 2：前端 :5173，代理 /api → :3000
 ```
 
 ### 运行测试
@@ -107,7 +107,7 @@ cd frontend && npx vite --host     # 终端 2：前端 :5173，代理 /api → :
 ```bash
 ./run-all-tests.sh          # 后端 + 前端全套
 cargo test                  # 仅后端
-cd frontend && npm test     # 前端 Vitest
+cd admin-ui && npm test     # 前端 Vitest
 ```
 
 ---

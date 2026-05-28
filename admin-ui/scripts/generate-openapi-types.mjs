@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, '../..');
 const specPath = resolve(repoRoot, 'docs/openapi.yaml');
-const outputPath = resolve(repoRoot, 'frontend/src/types/openapi.ts');
+const outputPath = resolve(repoRoot, 'admin-ui/src/types/openapi.ts');
 
 const methods = new Set(['get', 'post', 'put', 'patch', 'delete']);
 const spec = readFileSync(specPath, 'utf8').split(/\r?\n/);
