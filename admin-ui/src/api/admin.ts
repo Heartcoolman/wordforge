@@ -1,12 +1,15 @@
 import { api } from './http';
 import type {
   AdminAuthResponse, AdminStats,
-  AdminUsersPage, AdminUsersQuery,
+  AdminUser, AdminUsersPage, AdminUsersQuery, AdminCreateUserPayload,
+  ClientDeviceRow, AdminAuditEntry, UserActivityEntry, UserExtras,
   EngagementAnalytics, LearningAnalytics,
   SystemHealth, DatabaseInfo, SystemSettings, WorkerStatusRow,
   UpdateCheck, AdminUpdateStatus, ApplyAccepted, UpdateAuditEntry, DailyActiveUsersEntry, DailyRecordsEntry,
   StudyOverview, RecordTypeBreakdown, WordStateDistribution, RetentionCurve,
   FeedbackItem,
+  // m027:设备页对齐 clients.html 设计新增
+  ListedDevice, ClientPlatformAgg, ClientVersionAgg, ClientUpgradePolicy,
 } from '@/types/admin';
 import type { AmasConfig } from '@/types/amas';
 import type { BrowseItem, WordbookPreview, ImportResult, UpdateInfo, SyncResult } from '@/types/wordbookCenter';
@@ -92,10 +95,18 @@ export const adminApi = {
   // Users
   getUsers: (params?: AdminUsersQuery) =>
     api.get<AdminUsersPage>('/api/admin/users', params as Record<string, string | number | boolean | undefined>, { useAdminToken: true }),
+  // m024:创建用户(admin 通道,跳过公共注册限制但仍走 email/username/password 校验)
+  createUser: (payload: AdminCreateUserPayload) =>
+    api.post<AdminUser>('/api/admin/users', payload, { useAdminToken: true }),
   banUser: (id: string) => api.post<{ banned: boolean; userId: string }>(`/api/admin/users/${id}/ban`, undefined, { useAdminToken: true }),
   unbanUser: (id: string) => api.post<{ banned: boolean; userId: string }>(`/api/admin/users/${id}/unban`, undefined, { useAdminToken: true }),
   resetUserPassword: (id: string) => api.post<{ resetKey: string; expiresInHours: number }>(`/api/admin/users/${id}/reset-password`, undefined, { useAdminToken: true }),
   setUserPassword: (id: string, newPassword: string) => api.post<{ passwordReset: boolean; userId: string; sessionsRevoked: number }>(`/api/admin/users/${id}/set-password`, { newPassword }, { useAdminToken: true }),
+  // m024:角色变更(单条 + 批量)
+  patchUserRole: (id: string, role: 'user' | 'staff' | 'admin') =>
+    api.patch<AdminUser>(`/api/admin/users/${id}/role`, { role }, { useAdminToken: true }),
+  usersBulkRole: (userIds: string[], role: 'user' | 'staff' | 'admin') =>
+    api.post<BulkUserResult & { role: string }>('/api/admin/users/bulk-role', { userIds, role }, { useAdminToken: true }),
   getStats: () => api.get<AdminStats>('/api/admin/stats', undefined, { useAdminToken: true }),
 
   // Analytics
@@ -145,7 +156,17 @@ export const adminApi = {
     ),
 
   // Broadcast & Settings
-  broadcast: (data: { title: string; message: string }) => api.post<{ sent: number }>('/api/admin/broadcast', data, { useAdminToken: true }),
+  broadcast: (data: {
+    title: string;
+    message: string;
+    /** m027:可选受众条件,任一字段为空数组 / null 都视为该维度不过滤;整个 audience 为 undefined 时走全员广播。 */
+    audience?: {
+      platforms?: string[];
+      versionMin?: string | null;
+      lastActiveDays?: number | null;
+      userIds?: string[];
+    };
+  }) => api.post<{ sent: number }>('/api/admin/broadcast', data, { useAdminToken: true }),
   getSettings: () => api.get<SystemSettings>('/api/admin/settings', undefined, { useAdminToken: true }),
   updateSettings: (data: Partial<SystemSettings>) => api.put<SystemSettings>('/api/admin/settings', data, { useAdminToken: true }),
   setMaintenance: (active: boolean) => api.post<{ active: boolean }>('/api/admin/settings/maintenance', { active }, { useAdminToken: true }),
@@ -164,6 +185,33 @@ export const adminApi = {
     api.post<{ requestId: string }>(`/api/admin/clients/${id}/request-telemetry`, undefined, { useAdminToken: true }),
   getTelemetry: (deviceId: string, params?: { limit?: number; offset?: number }) =>
     api.get<{ records: TelemetrySummary[]; total: number }>(`/api/admin/telemetry/${deviceId}`, params as Record<string, string | number | boolean | undefined>, { useAdminToken: true }),
+
+  // m027:设备表后端分页 + 平台聚合 + 升级策略 CRUD + 强制升级广播
+  getClientsPaginated: (params?: {
+    page?: number; perPage?: number; q?: string; platform?: string; recentMinutes?: number;
+  }) =>
+    api.get<{ data: ListedDevice[]; total: number; page: number; perPage: number; totalPages: number }>(
+      '/api/admin/clients/paginated',
+      params as Record<string, string | number | boolean | undefined>,
+      { useAdminToken: true },
+    ),
+  getClientsDistribution: () =>
+    api.get<{
+      platforms: ClientPlatformAgg[];
+      versions: ClientVersionAgg[];
+      policies: ClientUpgradePolicy[];
+    }>('/api/admin/clients/distribution', undefined, { useAdminToken: true }),
+  listUpgradePolicy: () =>
+    api.get<{ policies: ClientUpgradePolicy[] }>('/api/admin/clients/upgrade-policy', undefined, { useAdminToken: true }),
+  putUpgradePolicy: (platform: string, payload: {
+    minVersion?: string | null; suggestedVersion?: string | null;
+    grayscalePct?: number; pwaSilentUpdate?: boolean;
+  }) =>
+    api.put<{ ok: boolean; platform: string }>(`/api/admin/clients/upgrade-policy/${platform}`, payload, { useAdminToken: true }),
+  broadcastUpgrade: (platform: string, payload: {
+    belowVersion: string; latestVersion: string; message?: string;
+  }) =>
+    api.post<{ matched: number; pushedConnections: number }>(`/api/admin/clients/broadcast-upgrade/${platform}`, payload, { useAdminToken: true }),
 
   // Wordbook Center
   wbCenterBrowse: () =>
@@ -316,6 +364,30 @@ export const adminApi = {
     api.post<BulkUserResult>('/api/admin/users/bulk-ban', { userIds, reason }, { useAdminToken: true }),
   usersBulkUnban: (userIds: string[]) =>
     api.post<BulkUserResult>('/api/admin/users/bulk-unban', { userIds }, { useAdminToken: true }),
+  // m024:Drawer 数据源 —— 设备会话(复用 client_devices) + admin 操作审计
+  userDevices: (id: string, limit = 20) =>
+    api.get<{ devices: ClientDeviceRow[] }>(`/api/admin/users/${id}/devices`, { limit }, { useAdminToken: true }),
+  userAuditLog: (id: string, limit = 50) =>
+    api.get<{ entries: AdminAuditEntry[] }>(`/api/admin/users/${id}/audit-log`, { limit }, { useAdminToken: true }),
+  // m025:用户档案深化(preferences/elo/habit/streak/latest strategy/latest device/7d metrics)
+  userExtras: (id: string) =>
+    api.get<UserExtras>(`/api/admin/users/${id}/extras`, undefined, { useAdminToken: true }),
+  // m025:用户自有活动日志(login / session.complete / goal.update / fatigue.alert)
+  userActivityLog: (id: string, limit = 50) =>
+    api.get<{ entries: UserActivityEntry[] }>(`/api/admin/users/${id}/activity-log`, { limit }, { useAdminToken: true }),
+  // m026:批量重置密码(密钥不回写,前端单查显示)
+  usersBulkResetPassword: (userIds: string[]) =>
+    api.post<BulkUserResult>('/api/admin/users/bulk-reset-password', { userIds }, { useAdminToken: true }),
+  // m026:批量删除(危险,带 reason 强 audit)
+  usersBulkDelete: (userIds: string[], reason: string) =>
+    api.post<BulkUserResult>('/api/admin/users/bulk-delete', { userIds, reason }, { useAdminToken: true }),
+  // m026:设备封禁(踢 user 所有会话兜底)
+  banUserDevice: (userId: string, deviceId: string) =>
+    api.post<{ banned: boolean; deviceId: string }>(
+      `/api/admin/users/${userId}/devices/${deviceId}/ban`,
+      undefined,
+      { useAdminToken: true },
+    ),
 };
 
 // ─────────── m022:新端点附属类型 ───────────
@@ -362,6 +434,8 @@ export interface UserProfile {
   totalRecords: number;
   correctRecords: number;
   accuracy: number | null;
+  /** m026:平均反应时(ms);null = 无答题或全为 0 */
+  avgResponseTimeMs: number | null;
   sessionCount: number;
   wordbookDistribution: Array<{ wordbookId: string; name: string; recordCount: number }>;
 }

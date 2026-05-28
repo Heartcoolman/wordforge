@@ -1,4 +1,4 @@
-import { batch, createMemo, createSignal, onMount, Show, For } from 'solid-js';
+import { batch, createEffect, createMemo, createSignal, onMount, Show, For } from 'solid-js';
 import { Card } from '@/components/ui/Card';
 import { HeroCard } from '@/components/ui/HeroCard';
 import { Button } from '@/components/ui/Button';
@@ -10,6 +10,7 @@ import { Empty } from '@/components/ui/Empty';
 import { Tabs } from '@/components/ui/Tabs';
 import { Table } from '@/components/ui/Table';
 import { adminApi, type SseLiveEntry, type RecentlyActiveEntry, type TelemetrySummary, type DataChannelValue } from '@/api/admin';
+import type { ClientPlatformAgg, ClientVersionAgg, ClientUpgradePolicy, ListedDevice } from '@/types/admin';
 import { uiStore } from '@/stores/ui';
 
 const CHANNEL_LABELS: Record<string, string> = {
@@ -55,11 +56,35 @@ export default function DevicesPage() {
   const [sseLive, setSseLive] = createSignal<SseLiveEntry[]>([]);
   const [recentlyActive, setRecentlyActive] = createSignal<RecentlyActiveEntry[]>([]);
   const [loading, setLoading] = createSignal(true);
-  const [tab, setTab] = createSignal<'sse' | 'recent'>('sse');
+  const [tab, setTab] = createSignal<'sse' | 'recent' | 'all'>('sse');
 
   // Ban confirm
   const [banTarget, setBanTarget] = createSignal<{ id: string; action: 'ban' | 'unban' } | null>(null);
   const [banReason, setBanReason] = createSignal('');
+
+  // m027:平台聚合 + 版本分布 + 升级策略(对齐 clients.html 设计图)
+  const [platforms, setPlatforms] = createSignal<ClientPlatformAgg[]>([]);
+  const [versionRows, setVersionRows] = createSignal<ClientVersionAgg[]>([]);
+  const [policies, setPolicies] = createSignal<ClientUpgradePolicy[]>([]);
+  const [versionFilter, setVersionFilter] = createSignal<'all' | 'web' | 'ios' | 'android'>('all');
+
+  // m027:升级策略编辑态(per-platform draft;保存后 invalidate)
+  const [policyDraft, setPolicyDraft] = createSignal<Record<string, Partial<ClientUpgradePolicy>>>({});
+  const [savingPolicy, setSavingPolicy] = createSignal<string | null>(null);
+
+  // m027:强制升级广播 modal
+  const [broadcastUpgradeOpen, setBroadcastUpgradeOpen] = createSignal<{ platform: string; below: string; latest: string } | null>(null);
+  const [broadcastUpgradeMessage, setBroadcastUpgradeMessage] = createSignal('');
+  const [broadcastUpgradeSending, setBroadcastUpgradeSending] = createSignal(false);
+
+  // m027 / m027-G:全部设备 tab — 后端分页 + 搜索 + CSV
+  const [allPage, setAllPage] = createSignal(1);
+  const [allPerPage] = createSignal(20);
+  const [allQ, setAllQ] = createSignal('');
+  const [allPlatform, setAllPlatform] = createSignal<'' | 'web' | 'ios' | 'android'>('');
+  const [allRows, setAllRows] = createSignal<ListedDevice[]>([]);
+  const [allTotal, setAllTotal] = createSignal(0);
+  const [allLoading, setAllLoading] = createSignal(false);
 
   // Telemetry
   const [telemetryDevice, setTelemetryDevice] = createSignal<string | null>(null);
@@ -73,13 +98,114 @@ export default function DevicesPage() {
   const loadDevices = async () => {
     try {
       setLoading(true);
+      // m027:先拉 SSE 列表(关键路径)→ 再拉平台/版本/策略聚合(非关键,失败仅 warn)。
+      // 顺序非并行,避免 happy-dom 在 vi.fn mocks 下 Promise.all 的 microtask 时序
+      // 引发"Tab 计数未刷新"测试 flake。
       const data = await adminApi.getClients();
       setSseLive(data.sseLive);
       setRecentlyActive(data.recentlyActive);
+      try {
+        const dist = await adminApi.getClientsDistribution();
+        setPlatforms(dist.platforms);
+        setVersionRows(dist.versions);
+        setPolicies(dist.policies);
+      } catch (e: any) {
+        uiStore.toast.warning('设备聚合数据加载失败', e?.message);
+      }
     } catch (e: any) {
       uiStore.toast.error('加载设备列表失败', e.message);
     } finally {
       setLoading(false);
+    }
+  };
+
+  // m027:全部设备 tab — 后端分页查询(独立 loading,避免占用主 tab)
+  const loadAllDevices = async () => {
+    try {
+      setAllLoading(true);
+      const data = await adminApi.getClientsPaginated({
+        page: allPage(),
+        perPage: allPerPage(),
+        q: allQ() || undefined,
+        platform: allPlatform() || undefined,
+      });
+      setAllRows(data.data);
+      setAllTotal(data.total);
+    } catch (e: any) {
+      uiStore.toast.error('加载设备分页失败', e.message);
+    } finally {
+      setAllLoading(false);
+    }
+  };
+
+  // m027:CSV 导出 — 当前页(对齐设计图"导出 CSV"按钮)。
+  // 实现策略:不拉全集(可能 1000+ 行),仅导当前分页结果。需要全集时增大 perPage 再点。
+  const exportCsv = () => {
+    const rows = allRows();
+    if (rows.length === 0) {
+      uiStore.toast.info('当前页无数据可导出');
+      return;
+    }
+    const header = ['deviceId', 'platform', 'userId', 'appVersion', 'country', 'firstSeenAt', 'lastSeenAt', 'isBanned'];
+    const escape = (v: unknown) => {
+      const s = v == null ? '' : String(v);
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const lines = [
+      header.join(','),
+      ...rows.map((r) => header.map((k) => escape((r as any)[k])).join(',')),
+    ];
+    const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8;' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `devices-page-${allPage()}-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  };
+
+  // m027:升级策略保存
+  const savePolicy = async (platform: string) => {
+    const draft = policyDraft()[platform];
+    const original = policies().find((p) => p.platform === platform);
+    if (!draft || !original) return;
+    setSavingPolicy(platform);
+    try {
+      await adminApi.putUpgradePolicy(platform, {
+        minVersion: draft.minVersion ?? original.minVersion,
+        suggestedVersion: draft.suggestedVersion ?? original.suggestedVersion,
+        grayscalePct: draft.grayscalePct ?? original.grayscalePct,
+        pwaSilentUpdate: draft.pwaSilentUpdate ?? original.pwaSilentUpdate,
+      });
+      uiStore.toast.success(`${platform} 策略已保存`);
+      const dist = await adminApi.getClientsDistribution();
+      setPolicies(dist.policies);
+      // 清掉本平台 draft
+      setPolicyDraft((d) => ({ ...d, [platform]: {} }));
+    } catch (e: any) {
+      uiStore.toast.error(`${platform} 策略保存失败`, e.message);
+    } finally {
+      setSavingPolicy(null);
+    }
+  };
+
+  // m027:强制升级广播
+  const sendBroadcastUpgrade = async () => {
+    const target = broadcastUpgradeOpen();
+    if (!target) return;
+    setBroadcastUpgradeSending(true);
+    try {
+      const result = await adminApi.broadcastUpgrade(target.platform, {
+        belowVersion: target.below,
+        latestVersion: target.latest,
+        message: broadcastUpgradeMessage() || undefined,
+      });
+      uiStore.toast.success(`已派发 ${target.platform} 强制升级`, `匹配 ${result.matched} 设备 · 触达 ${result.pushedConnections} 个活跃连接`);
+      setBroadcastUpgradeOpen(null);
+      setBroadcastUpgradeMessage('');
+    } catch (e: any) {
+      uiStore.toast.error('强制升级广播失败', e.message);
+    } finally {
+      setBroadcastUpgradeSending(false);
     }
   };
 
@@ -143,6 +269,16 @@ export default function DevicesPage() {
   };
 
   onMount(loadDevices);
+
+  // m027:进入"全部设备"tab 或筛选变化时,拉分页。
+  createEffect(() => {
+    if (tab() !== 'all') return;
+    // 触发 reactive 依赖 allPage / allQ / allPlatform
+    allPage();
+    allQ();
+    allPlatform();
+    void loadAllDevices();
+  });
 
   function truncateId(id: string | null | undefined) {
     if (!id) return '';
@@ -327,48 +463,202 @@ export default function DevicesPage() {
         cta={<Button size="sm" variant="outline" onClick={loadDevices} disabled={loading()}>刷新</Button>}
       />
 
+      {/* m027:平台 hero 3 卡(Web/iOS/Android × total/active7d/月环比) */}
+      <Show when={platforms().length > 0}>
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <For each={platforms()}>
+            {(p) => {
+              const total = createMemo(() => platforms().reduce((a, b) => a + b.total, 0) || 1);
+              const share = () => (p.total / total()) * 100;
+              const pctClass = p.monthOverMonthPct >= 0 ? 'text-success-strong' : 'text-error-strong';
+              const pctArrow = p.monthOverMonthPct >= 0 ? '▲' : '▼';
+              return (
+                <Card padding="md">
+                  <div class="flex items-center gap-2">
+                    <Badge size="sm" variant={p.platform === 'web' ? 'accent' : p.platform === 'ios' ? 'default' : 'success'}>
+                      {p.platform.toUpperCase()}
+                    </Badge>
+                  </div>
+                  <div class="mt-3 text-2xl font-bold tabular-nums">
+                    {p.total.toLocaleString()}
+                    <span class="text-xs text-content-tertiary font-medium ml-1.5">设备 · {share().toFixed(1)}%</span>
+                  </div>
+                  <div class="mt-2 flex gap-3 text-xs text-content-secondary tabular-nums">
+                    <span>
+                      <span class={pctClass}>{pctArrow} {Math.abs(p.monthOverMonthPct).toFixed(1)}%</span> 比上月
+                    </span>
+                    <span>{p.active7d.toLocaleString()} 在线 (7d)</span>
+                  </div>
+                </Card>
+              );
+            }}
+          </For>
+        </div>
+      </Show>
+
+      {/* m027:版本分布柱(三平台 × N 档版本)+ 升级策略面板(右侧) */}
+      <Show when={versionRows().length > 0 || policies().length > 0}>
+        <div class="grid grid-cols-1 lg:grid-cols-12 gap-4">
+          <Card class="lg:col-span-7" padding="md">
+            <div class="flex items-center justify-between mb-3">
+              <h3 class="text-sm font-semibold text-content">版本分布 · 各平台</h3>
+              <div class="flex gap-1" role="tablist" aria-label="版本分布平台过滤">
+                <For each={['all', 'web', 'ios', 'android'] as const}>
+                  {(k) => (
+                    <Button
+                      size="xs"
+                      variant={versionFilter() === k ? 'primary' : 'ghost'}
+                      onClick={() => setVersionFilter(k)}
+                    >
+                      {k === 'all' ? '全部' : k.toUpperCase()}
+                    </Button>
+                  )}
+                </For>
+              </div>
+            </div>
+            <For each={(['web', 'ios', 'android'] as const).filter((p) => versionFilter() === 'all' || versionFilter() === p)}>
+              {(plt) => {
+                const rows = createMemo(() => versionRows().filter((v) => v.platform === plt));
+                const max = createMemo(() => rows().reduce((m, r) => Math.max(m, r.count), 0) || 1);
+                const total = createMemo(() => rows().reduce((a, b) => a + b.count, 0));
+                return (
+                  <Show when={rows().length > 0}>
+                    <div class="mt-3 first:mt-0">
+                      <h4 class="text-[11px] font-semibold uppercase tracking-wider text-content-secondary mb-2">
+                        {plt.toUpperCase()} ({total().toLocaleString()} 设备)
+                      </h4>
+                      <For each={rows().slice(0, 6)}>
+                        {(r, idx) => (
+                          <div class="grid grid-cols-[110px_1fr_60px] items-center gap-2 py-1 text-[12.5px]">
+                            <span class="font-mono tabular-nums">
+                              <span class={idx() === 0 ? 'text-success-strong font-semibold' : ''}>{r.version === 'unknown' ? '未知' : r.version}</span>
+                            </span>
+                            <div class="h-2 rounded-full bg-surface-secondary overflow-hidden">
+                              <div
+                                class="h-full rounded-full transition-[width] duration-base ease-out-expo"
+                                style={{
+                                  width: `${((r.count / max()) * 100).toFixed(1)}%`,
+                                  background: idx() === 0 ? 'var(--accent)' : idx() < 3 ? 'var(--warning)' : 'var(--error)',
+                                }}
+                              />
+                            </div>
+                            <span class="font-mono tabular-nums text-right text-content-secondary">{r.count.toLocaleString()}</span>
+                          </div>
+                        )}
+                      </For>
+                    </div>
+                  </Show>
+                );
+              }}
+            </For>
+          </Card>
+
+          {/* m027:强制升级策略面板(右 5/12) */}
+          <Card class="lg:col-span-5" padding="md">
+            <div class="flex items-center justify-between mb-3">
+              <h3 class="text-sm font-semibold text-content">强制升级策略</h3>
+              <span class="text-xs text-content-tertiary tabular-nums">每平台独立</span>
+            </div>
+            <For each={policies()}>
+              {(p) => {
+                const draftOf = (k: keyof ClientUpgradePolicy) => policyDraft()[p.platform]?.[k];
+                const setDraft = (k: keyof ClientUpgradePolicy, v: any) =>
+                  setPolicyDraft((d) => ({ ...d, [p.platform]: { ...d[p.platform], [k]: v } }));
+                const dirty = () => {
+                  const d = policyDraft()[p.platform];
+                  return d && Object.keys(d).length > 0;
+                };
+                return (
+                  <div class="border-b border-border-hairline last:border-b-0 py-2.5">
+                    <div class="flex items-center justify-between">
+                      <Badge size="sm" variant="default">{p.platform.toUpperCase()}</Badge>
+                      <Show when={dirty()}>
+                        <Button
+                          size="xs"
+                          variant="primary"
+                          disabled={savingPolicy() === p.platform}
+                          onClick={() => savePolicy(p.platform)}
+                        >
+                          {savingPolicy() === p.platform ? '保存中…' : '保存'}
+                        </Button>
+                      </Show>
+                    </div>
+                    <div class="grid grid-cols-2 gap-2 mt-2 text-xs">
+                      <label class="flex flex-col gap-0.5">
+                        <span class="text-content-tertiary">最低支持版本</span>
+                        <Input
+                          size="sm"
+                          placeholder="例如 v0.6.5"
+                          value={(draftOf('minVersion') ?? p.minVersion ?? '') as string}
+                          onInput={(e) => setDraft('minVersion', e.currentTarget.value || null)}
+                        />
+                      </label>
+                      <label class="flex flex-col gap-0.5">
+                        <span class="text-content-tertiary">建议升级版本</span>
+                        <Input
+                          size="sm"
+                          placeholder="例如 v0.7.0"
+                          value={(draftOf('suggestedVersion') ?? p.suggestedVersion ?? '') as string}
+                          onInput={(e) => setDraft('suggestedVersion', e.currentTarget.value || null)}
+                        />
+                      </label>
+                      <label class="flex flex-col gap-0.5">
+                        <span class="text-content-tertiary">灰度 %(0-100)</span>
+                        <Input
+                          size="sm"
+                          type="number"
+                          min="0"
+                          max="100"
+                          value={String(draftOf('grayscalePct') ?? p.grayscalePct)}
+                          onInput={(e) => setDraft('grayscalePct', Number(e.currentTarget.value))}
+                        />
+                      </label>
+                      <Show when={p.platform === 'web'} fallback={<div />}>
+                        <label class="flex items-center gap-1.5 mt-3.5">
+                          <input
+                            type="checkbox"
+                            class="checkbox"
+                            checked={(draftOf('pwaSilentUpdate') ?? p.pwaSilentUpdate) as boolean}
+                            onChange={(e) => setDraft('pwaSilentUpdate', e.currentTarget.checked)}
+                          />
+                          <span class="text-content-secondary">PWA 静默更新</span>
+                        </label>
+                      </Show>
+                    </div>
+                    <Show when={p.minVersion}>
+                      <Button
+                        size="xs"
+                        variant="outline"
+                        class="mt-2 w-full"
+                        onClick={() => {
+                          setBroadcastUpgradeOpen({
+                            platform: p.platform,
+                            below: p.minVersion!,
+                            latest: p.suggestedVersion || p.minVersion!,
+                          });
+                        }}
+                      >
+                        立即推送 {p.suggestedVersion || p.minVersion} 给老版本设备
+                      </Button>
+                    </Show>
+                  </div>
+                );
+              }}
+            </For>
+          </Card>
+        </div>
+      </Show>
+
       {/* Tabs / Telemetry Panel 不受 loading 影响：刷新时 Telemetry 已展开面板不被卸载 */}
       <Tabs
         tabs={[
           { id: 'sse', label: `SSE 实时连接 (${sseLive().length})` },
           { id: 'recent', label: `近期活跃 (${recentlyActive().length})` },
+          { id: 'all', label: '全部设备' },
         ]}
         active={tab()}
-        onChange={(id) => setTab(id as 'sse' | 'recent')}
+        onChange={(id) => setTab(id as 'sse' | 'recent' | 'all')}
       />
-
-      {/* 平台分布 mini bar:版本字段后端未透出,以接入平台分布替代 */}
-      <Show when={platformDistribution().length > 0}>
-        <Card>
-          <div class="flex items-center justify-between mb-3">
-            <h3 class="text-sm font-semibold text-content">平台分布</h3>
-            <span class="text-xs text-content-tertiary tabular-nums">
-              共 {platformDistribution().reduce((a, b) => a + b.count, 0)} 台已知设备
-            </span>
-          </div>
-          <ul class="space-y-2">
-            <For each={platformDistribution()}>
-              {(row) => (
-                <li class="grid grid-cols-[80px_1fr_auto] items-center gap-3 text-[12.5px]">
-                  <span class="font-mono text-content-secondary truncate uppercase tracking-wide" title={row.platform}>{row.platform.toUpperCase()}</span>
-                  <div class="h-2 rounded-full bg-surface-secondary overflow-hidden">
-                    <div
-                      class="h-full rounded-full transition-[width] duration-base ease-out-expo"
-                      style={{
-                        width: `${(row.share * 100).toFixed(1)}%`,
-                        background: platformBarColor[row.platform.toLowerCase()] ?? 'var(--accent)',
-                      }}
-                    />
-                  </div>
-                  <span class="font-mono tabular-nums text-content">
-                    {row.count} <span class="text-content-tertiary">({(row.share * 100).toFixed(0)}%)</span>
-                  </span>
-                </li>
-              )}
-            </For>
-          </ul>
-        </Card>
-      </Show>
 
       {/* 列表/表格区单独 loading 边界 */}
       <Show when={!loading()} fallback={<div class="flex justify-center py-12"><Spinner size="lg" /></div>}>
@@ -400,6 +690,119 @@ export default function DevicesPage() {
               caption="按设备 ID / 平台 / 用户 / 最后活跃 / 封禁状态 / 数据上报状态 列展示最近接入设备"
             />
           </Show>
+        </Show>
+
+        {/* m027 / m027-G:全部设备 — 后端分页 + 搜索 + 平台 filter + CSV 导出 + country 列 */}
+        <Show when={tab() === 'all'}>
+          <Card padding="md">
+            <div class="flex gap-2 mb-3 items-center">
+              <Input
+                size="sm"
+                placeholder="搜索设备 ID / 用户 ID"
+                value={allQ()}
+                onInput={(e) => {
+                  batch(() => {
+                    setAllQ(e.currentTarget.value);
+                    setAllPage(1);
+                  });
+                }}
+                class="max-w-[260px]"
+              />
+              <select
+                class="select select-sm"
+                value={allPlatform()}
+                onChange={(e) => {
+                  batch(() => {
+                    setAllPlatform(e.currentTarget.value as any);
+                    setAllPage(1);
+                  });
+                }}
+              >
+                <option value="">全部平台</option>
+                <option value="web">Web</option>
+                <option value="ios">iOS</option>
+                <option value="android">Android</option>
+              </select>
+              <div class="ml-auto flex gap-2">
+                <Button size="sm" variant="outline" onClick={exportCsv} disabled={allRows().length === 0}>导出 CSV</Button>
+              </div>
+            </div>
+            <Show when={!allLoading()} fallback={<div class="flex justify-center py-8"><Spinner /></div>}>
+              <Show
+                when={allRows().length > 0}
+                fallback={<Empty title="暂无设备记录" description="筛选条件下没有命中数据" />}
+              >
+                <Table
+                  columns={[
+                    {
+                      key: 'deviceId',
+                      title: '设备 ID',
+                      render: (r: ListedDevice) => (
+                        <span class="font-mono text-xs tabular-nums" title={r.deviceId}>{truncateId(r.deviceId)}</span>
+                      ),
+                    },
+                    {
+                      key: 'platform',
+                      title: '平台',
+                      render: (r: ListedDevice) => <Badge size="sm" variant="default">{r.platform}</Badge>,
+                    },
+                    {
+                      key: 'appVersion',
+                      title: '版本',
+                      render: (r: ListedDevice) => (
+                        <span class="font-mono text-xs tabular-nums">{r.appVersion ?? '—'}</span>
+                      ),
+                    },
+                    {
+                      key: 'country',
+                      title: '国家',
+                      render: (r: ListedDevice) => (
+                        <span class="text-xs tabular-nums">{r.country ?? '—'}</span>
+                      ),
+                    },
+                    {
+                      key: 'userId',
+                      title: '用户',
+                      render: (r: ListedDevice) => (
+                        <span class="font-mono text-xs tabular-nums">{r.userId ? truncateId(r.userId) : '—'}</span>
+                      ),
+                    },
+                    {
+                      key: 'lastSeenAt',
+                      title: '最后活跃',
+                      render: (r: ListedDevice) => (
+                        <span class="text-xs tabular-nums whitespace-nowrap">{formatTimestamp(r.lastSeenAt)}</span>
+                      ),
+                    },
+                    {
+                      key: 'status',
+                      title: '状态',
+                      render: (r: ListedDevice) => (
+                        <Badge size="sm" variant={r.isBanned ? 'error' : 'success'} dot>
+                          {r.isBanned ? '已封禁' : '正常'}
+                        </Badge>
+                      ),
+                    },
+                  ]}
+                  data={allRows()}
+                  aria-label="全部设备分页"
+                />
+                <div class="flex items-center justify-between mt-3 text-xs">
+                  <span class="text-content-tertiary tabular-nums">
+                    显示 {(allPage() - 1) * allPerPage() + 1}–{Math.min(allPage() * allPerPage(), allTotal())} 共 {allTotal()} 台
+                  </span>
+                  <div class="flex gap-2 items-center">
+                    <Button size="xs" variant="ghost" disabled={allPage() <= 1} onClick={() => setAllPage(allPage() - 1)}>‹</Button>
+                    <span class="tabular-nums">{allPage()} / {Math.max(1, Math.ceil(allTotal() / allPerPage()))}</span>
+                    <Button size="xs" variant="ghost"
+                      disabled={allPage() >= Math.ceil(allTotal() / allPerPage())}
+                      onClick={() => setAllPage(allPage() + 1)}
+                    >›</Button>
+                  </div>
+                </div>
+              </Show>
+            </Show>
+          </Card>
         </Show>
       </Show>
 
@@ -535,6 +938,34 @@ export default function DevicesPage() {
                 maxlength={500}
               />
             </Show>
+          </ConfirmDialog>
+        )}
+      </Show>
+
+      {/* m027:强制升级广播 Confirm Dialog */}
+      <Show when={broadcastUpgradeOpen()}>
+        {(target) => (
+          <ConfirmDialog
+            open={true}
+            title="确认推送强制升级"
+            message={
+              <span>
+                平台 <strong>{target().platform.toUpperCase()}</strong>:
+                所有低于 <span class="font-mono">{target().below}</span> 的设备将收到 SSE 升级提示,目标版本 <span class="font-mono">{target().latest}</span>。
+              </span>
+            }
+            confirmText={broadcastUpgradeSending() ? '推送中…' : '确认推送'}
+            variant="warning"
+            onConfirm={sendBroadcastUpgrade}
+            onCancel={() => { setBroadcastUpgradeOpen(null); setBroadcastUpgradeMessage(''); }}
+          >
+            <Input
+              type="text"
+              placeholder="附加消息(可选, 显示在客户端横幅)"
+              value={broadcastUpgradeMessage()}
+              onInput={(e) => setBroadcastUpgradeMessage(e.currentTarget.value)}
+              maxlength={300}
+            />
           </ConfirmDialog>
         )}
       </Show>

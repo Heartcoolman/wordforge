@@ -198,6 +198,7 @@ async fn algorithm_optimization_lowers_difficulty_on_low_accuracy() {
             role: "user".to_string(),
             status: "active".to_string(),
             last_login_at: None,
+    referrer_source: None,
     };
     store.create_user(&user).unwrap();
 
@@ -241,6 +242,7 @@ async fn algorithm_optimization_raises_difficulty_on_high_accuracy() {
             role: "user".to_string(),
             status: "active".to_string(),
             last_login_at: None,
+    referrer_source: None,
     };
     store.create_user(&user).unwrap();
 

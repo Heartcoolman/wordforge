@@ -80,6 +80,7 @@ mod tests {
             role: "user".to_string(),
             status: "active".to_string(),
             last_login_at: None,
+            referrer_source: None,
         }
     }
 

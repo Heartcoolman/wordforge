@@ -9,6 +9,12 @@ vi.mock('@/api/admin', () => ({
     unbanClient: vi.fn(),
     requestTelemetry: vi.fn(),
     getTelemetry: vi.fn(),
+    // m027:DevicesPage 现在并行拉 distribution(失败不挡 SSE 渲染),默认 mock 返空聚合
+    getClientsDistribution: vi.fn(() => Promise.resolve({ platforms: [], versions: [], policies: [] })),
+    getClientsPaginated: vi.fn(() => Promise.resolve({ data: [], total: 0, page: 1, perPage: 20, totalPages: 0 })),
+    listUpgradePolicy: vi.fn(() => Promise.resolve({ policies: [] })),
+    putUpgradePolicy: vi.fn(() => Promise.resolve({ ok: true, platform: 'web' })),
+    broadcastUpgrade: vi.fn(() => Promise.resolve({ matched: 0, pushedConnections: 0 })),
   },
 }));
 vi.mock('@/stores/ui', () => ({
@@ -53,7 +59,16 @@ const telemetryRecord = {
 };
 
 describe('DevicesPage', () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // m027:vi.clearAllMocks 会清掉 mockResolvedValue 设的实现,需要在每次 it 前还原默认值,
+    // 否则 loadDevices 内 Promise.all 第二项(getClientsDistribution)返 undefined 导致解构失败。
+    mockApi.getClientsDistribution.mockResolvedValue({ platforms: [], versions: [], policies: [] });
+    mockApi.getClientsPaginated.mockResolvedValue({ data: [], total: 0, page: 1, perPage: 20, totalPages: 0 });
+    mockApi.listUpgradePolicy.mockResolvedValue({ policies: [] });
+    mockApi.putUpgradePolicy.mockResolvedValue({ ok: true, platform: 'web' });
+    mockApi.broadcastUpgrade.mockResolvedValue({ matched: 0, pushedConnections: 0 });
+  });
 
   async function renderPage() {
     const { default: Page } = await import('@/pages/DevicesPage');

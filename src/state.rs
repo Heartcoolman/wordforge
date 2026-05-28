@@ -123,6 +123,14 @@ pub enum SseEvent {
         version: String,
         channel: crate::store::operations::resource_packs::ResourcePackChannel,
     },
+    /// m027:admin 对某平台老版本发起强制升级时,精确推送到符合受众的活跃 SSE 连接。
+    /// 老客户端不识别该 type 时静默忽略,不破坏现有协议。
+    #[serde(rename = "upgrade_required")]
+    UpgradeRequired {
+        #[serde(rename = "latestVersion")]
+        latest_version: String,
+        message: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -191,6 +199,23 @@ pub struct AppState {
     /// 时钟健康探测器。启动时与每小时对比公网 HTTP Date header，识别本机时钟漂移。
     /// 漂移超阈时 `/health` 状态降级为 `degraded`，详见 `clock_health` 模块文档。
     clock_health: Arc<crate::clock_health::ClockHealth>,
+    /// m027：GeoIP 反查器（可选）。data/GeoLite2-Country.mmdb 加载成功才有，
+    /// 失败/缺失为 None，客户端 IP→country 写库降级为 NULL，不影响主链路。
+    geoip: Option<Arc<crate::services::geoip::Reader>>,
+    /// m027：强制升级策略 60s 内存缓存。device_middleware 每请求都要读策略比较
+    /// x-app-version，纯 SQLite 查询 ~100µs 但量大时也会成为瓶颈；缓存键 = platform。
+    /// 写入端点(`PUT /admin/clients/upgrade-policy/:platform`)调 invalidate_upgrade_cache。
+    upgrade_policy_cache: Arc<
+        std::sync::RwLock<
+            Option<(
+                Instant,
+                std::collections::HashMap<
+                    String,
+                    crate::store::operations::clients::ClientUpgradePolicy,
+                >,
+            )>,
+        >,
+    >,
 }
 
 pub struct RuntimeConfig {
@@ -241,12 +266,65 @@ impl AppState {
             recently_broadcasted_packs: Arc::new(DashMap::new()),
             event_bus: event_bus::build_default_bus(),
             clock_health: Arc::new(crate::clock_health::ClockHealth::new()),
+            geoip: None,
+            upgrade_policy_cache: Arc::new(std::sync::RwLock::new(None)),
+        }
+    }
+
+    /// m027:60s TTL 升级策略缓存读取(读尝试 → 过期 / 缺失 → DB 重载)。
+    /// 失败时返回空 HashMap,middleware 把 X-Upgrade-Hint 退化为不塞。
+    pub fn get_upgrade_policies_cached(
+        &self,
+    ) -> std::collections::HashMap<
+        String,
+        crate::store::operations::clients::ClientUpgradePolicy,
+    > {
+        const TTL_SECS: u64 = 60;
+        if let Ok(guard) = self.upgrade_policy_cache.read() {
+            if let Some((at, ref map)) = *guard {
+                if at.elapsed().as_secs() < TTL_SECS {
+                    return map.clone();
+                }
+            }
+        }
+        let rows = match self.store.list_upgrade_policies() {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error = %e, "upgrade_policy cache reload failed; serving empty map");
+                return std::collections::HashMap::new();
+            }
+        };
+        let mut map = std::collections::HashMap::with_capacity(rows.len());
+        for p in rows {
+            map.insert(p.platform.clone(), p);
+        }
+        if let Ok(mut guard) = self.upgrade_policy_cache.write() {
+            *guard = Some((Instant::now(), map.clone()));
+        }
+        map
+    }
+
+    /// m027:`PUT /admin/clients/upgrade-policy/:platform` 写入后调,强制下次请求 reload。
+    pub fn invalidate_upgrade_cache(&self) {
+        if let Ok(mut guard) = self.upgrade_policy_cache.write() {
+            *guard = None;
         }
     }
 
     /// 时钟健康探测器（供 main.rs 启动时启动周期任务、health endpoint 读取状态）。
     pub fn clock_health(&self) -> &Arc<crate::clock_health::ClockHealth> {
         &self.clock_health
+    }
+
+    /// m027：启动期注入 GeoIP reader。data/GeoLite2-Country.mmdb 缺失时不调用即可，
+    /// 链路保持 None；可重复调用以热切换。
+    pub fn set_geoip(&mut self, reader: Option<Arc<crate::services::geoip::Reader>>) {
+        self.geoip = reader;
+    }
+
+    /// m027：GeoIP reader（可选）。client_track middleware 用它把 IP 译成 country。
+    pub fn geoip(&self) -> Option<&Arc<crate::services::geoip::Reader>> {
+        self.geoip.as_ref()
     }
 
     /// 测试 / 自定义场景下注入一个特定的 EventBus（如 NoopEventBus）。

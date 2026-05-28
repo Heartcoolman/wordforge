@@ -711,6 +711,7 @@ mod tests {
                 role: "user".into(),
                 status: "active".into(),
                 last_login_at: None,
+                referrer_source: None,
             })
             .unwrap();
         // 创建一条 active session

@@ -55,6 +55,8 @@ fn migrations() -> Vec<(&'static str, MigrationFn)> {
         ("020_resource_packs", m020_resource_packs),
         ("021_admin_audit_log_v2", m021_admin_audit_log_v2),
         ("022_admin_ui_completeness", m022_admin_ui_completeness),
+        ("023_user_profile_extras", m023_user_profile_extras),
+        ("024_client_extras", m024_client_extras),
     ]
 }
 
@@ -93,6 +95,8 @@ fn migrations_down() -> Vec<(&'static str, MigrationFn)> {
         ("020_resource_packs", m020_resource_packs_down),
         ("021_admin_audit_log_v2", m021_admin_audit_log_v2_down),
         ("022_admin_ui_completeness", m022_admin_ui_completeness_down),
+        ("023_user_profile_extras", m023_user_profile_extras_down),
+        ("024_client_extras", m024_client_extras_down),
     ]
 }
 
@@ -1149,6 +1153,203 @@ fn m022_admin_ui_completeness_down(store: &Store) -> Result<(), StoreError> {
         .any(|n| n == "app_version");
     if has_app_version {
         conn.execute("ALTER TABLE client_devices DROP COLUMN app_version", [])?;
+    }
+
+    Ok(())
+}
+
+/// m025-a:用户档案补全 —— 设计图 Drawer "资料 / 答题 / 设备 / 操作日志" 完整化。
+///
+/// 新增:
+///   1) `user_activity_log`(用户**自有**活动日志,区别于 admin_audit_log)
+///   2) `users.referrer_source`(注册来源)
+///   3) `user_elo.sigma`(ELO 1432 ± 86 的 sigma)
+///   4) `habit_profiles.daily_goal_words / daily_goal_minutes`(每日目标)
+fn m023_user_profile_extras(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+
+    // 1) user_activity_log
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS user_activity_log (
+            id           TEXT NOT NULL,
+            user_id      TEXT NOT NULL,
+            action       TEXT NOT NULL,
+            detail_json  TEXT,
+            ip           TEXT,
+            created_at   TEXT NOT NULL,
+            PRIMARY KEY (id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_user_activity_user_time
+            ON user_activity_log(user_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_user_activity_action
+            ON user_activity_log(action, created_at DESC);",
+    )?;
+
+    // 2) users.referrer_source
+    let user_cols: Vec<String> = conn
+        .prepare("PRAGMA table_info(users)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .collect();
+    if !user_cols.iter().any(|c| c == "referrer_source") {
+        conn.execute(
+            "ALTER TABLE users ADD COLUMN referrer_source TEXT DEFAULT NULL",
+            [],
+        )?;
+    }
+
+    // 3) user_elo.sigma
+    let elo_cols: Vec<String> = conn
+        .prepare("PRAGMA table_info(user_elo)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .collect();
+    if !elo_cols.iter().any(|c| c == "sigma") {
+        conn.execute(
+            "ALTER TABLE user_elo ADD COLUMN sigma REAL NOT NULL DEFAULT 86.0",
+            [],
+        )?;
+    }
+
+    // 4) habit_profiles.daily_goal_words / daily_goal_minutes
+    let habit_cols: Vec<String> = conn
+        .prepare("PRAGMA table_info(habit_profiles)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .collect();
+    for (col, ddl) in [
+        ("daily_goal_words", "INTEGER NOT NULL DEFAULT 30"),
+        ("daily_goal_minutes", "INTEGER NOT NULL DEFAULT 25"),
+    ] {
+        if !habit_cols.iter().any(|c| c == col) {
+            conn.execute(
+                &format!("ALTER TABLE habit_profiles ADD COLUMN {col} {ddl}"),
+                [],
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+/// m023 down:撤销 user_profile_extras 全部 4 项变更。
+fn m023_user_profile_extras_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+
+    // 4) habit_profiles
+    let habit_cols: Vec<String> = conn
+        .prepare("PRAGMA table_info(habit_profiles)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .collect();
+    for col in ["daily_goal_minutes", "daily_goal_words"] {
+        if habit_cols.iter().any(|c| c == col) {
+            conn.execute(
+                &format!("ALTER TABLE habit_profiles DROP COLUMN {col}"),
+                [],
+            )?;
+        }
+    }
+
+    // 3) user_elo.sigma
+    let elo_cols: Vec<String> = conn
+        .prepare("PRAGMA table_info(user_elo)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .collect();
+    if elo_cols.iter().any(|c| c == "sigma") {
+        conn.execute("ALTER TABLE user_elo DROP COLUMN sigma", [])?;
+    }
+
+    // 2) users.referrer_source
+    let user_cols: Vec<String> = conn
+        .prepare("PRAGMA table_info(users)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .collect();
+    if user_cols.iter().any(|c| c == "referrer_source") {
+        conn.execute("ALTER TABLE users DROP COLUMN referrer_source", [])?;
+    }
+
+    // 1) user_activity_log
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS idx_user_activity_action;
+         DROP INDEX IF EXISTS idx_user_activity_user_time;
+         DROP TABLE IF EXISTS user_activity_log;",
+    )?;
+
+    Ok(())
+}
+
+/// m027-A:设备页对齐设计图 clients.html 所需补强 ——
+///   1) `client_devices.country`(GeoIP ISO-3166-1 alpha-2)
+///   2) `client_devices.last_ip`(便于审计、变更检测)
+///   3) `client_devices(platform, last_seen_at)` 复合索引(平台聚合 + 月环比加速)
+///   4) `client_upgrade_policy` 新表 + 三平台 seed 行(web/ios/android)
+fn m024_client_extras(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+
+    let cd_cols: Vec<String> = conn
+        .prepare("PRAGMA table_info(client_devices)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .collect();
+    for col in ["country", "last_ip"] {
+        if !cd_cols.iter().any(|c| c == col) {
+            conn.execute(
+                &format!("ALTER TABLE client_devices ADD COLUMN {col} TEXT DEFAULT NULL"),
+                [],
+            )?;
+        }
+    }
+
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_client_devices_platform
+            ON client_devices(platform, last_seen_at DESC);
+
+         CREATE TABLE IF NOT EXISTS client_upgrade_policy (
+             platform           TEXT NOT NULL,
+             min_version        TEXT,
+             suggested_version  TEXT,
+             grayscale_pct      INTEGER NOT NULL DEFAULT 0
+                                CHECK (grayscale_pct BETWEEN 0 AND 100),
+             pwa_silent_update  INTEGER NOT NULL DEFAULT 1
+                                CHECK (pwa_silent_update IN (0, 1)),
+             updated_at         TEXT NOT NULL,
+             updated_by         TEXT,
+             PRIMARY KEY (platform)
+         );
+
+         INSERT OR IGNORE INTO client_upgrade_policy (platform, updated_at)
+             VALUES ('web', datetime('now')),
+                    ('ios', datetime('now')),
+                    ('android', datetime('now'));",
+    )?;
+
+    Ok(())
+}
+
+/// m024 down:DROP 顺序 — 表 → 复合索引 → 两列;两列借 SQLite ALTER DROP 单删。
+fn m024_client_extras_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+
+    conn.execute_batch(
+        "DROP TABLE IF EXISTS client_upgrade_policy;
+         DROP INDEX IF EXISTS idx_client_devices_platform;",
+    )?;
+
+    let cd_cols: Vec<String> = conn
+        .prepare("PRAGMA table_info(client_devices)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .collect();
+    for col in ["last_ip", "country"] {
+        if cd_cols.iter().any(|c| c == col) {
+            conn.execute(
+                &format!("ALTER TABLE client_devices DROP COLUMN {col}"),
+                [],
+            )?;
+        }
     }
 
     Ok(())

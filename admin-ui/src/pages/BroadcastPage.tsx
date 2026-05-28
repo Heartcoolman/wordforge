@@ -78,6 +78,52 @@ export default function BroadcastPage() {
   const [showConfirm, setShowConfirm] = createSignal(false);
   const [history, setHistory] = createSignal<SendHistoryEntry[]>([]);
 
+  // m027:受众过滤(可选)。任一为空都视为该维度不过滤,全部为空 = 全员广播。
+  const [audPlatforms, setAudPlatforms] = createSignal<Set<string>>(new Set());
+  const [audVersionMin, setAudVersionMin] = createSignal('');
+  const [audLastActiveDays, setAudLastActiveDays] = createSignal('');
+  const [audUserIdsText, setAudUserIdsText] = createSignal('');
+
+  // 构造 audience payload,所有维度都空时返 undefined(对应后端"全员广播"路径)
+  const buildAudience = () => {
+    const platforms = Array.from(audPlatforms());
+    const versionMin = audVersionMin().trim();
+    const daysStr = audLastActiveDays().trim();
+    const userIds = audUserIdsText()
+      .split(/[\s,]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (platforms.length === 0 && !versionMin && !daysStr && userIds.length === 0) {
+      return undefined;
+    }
+    return {
+      platforms: platforms.length > 0 ? platforms : undefined,
+      versionMin: versionMin || undefined,
+      lastActiveDays: daysStr ? Number(daysStr) || undefined : undefined,
+      userIds: userIds.length > 0 ? userIds : undefined,
+    };
+  };
+
+  const togglePlatform = (p: string) => {
+    setAudPlatforms((prev) => {
+      const next = new Set(prev);
+      if (next.has(p)) next.delete(p);
+      else next.add(p);
+      return next;
+    });
+  };
+
+  const audienceLabel = () => {
+    const a = buildAudience();
+    if (!a) return '全员';
+    const parts: string[] = [];
+    if (a.platforms) parts.push(`platform = ${a.platforms.join(' / ')}`);
+    if (a.versionMin) parts.push(`version ≥ ${a.versionMin}`);
+    if (a.lastActiveDays) parts.push(`last_active ≤ ${a.lastActiveDays}d`);
+    if (a.userIds) parts.push(`${a.userIds.length} 个 user_id`);
+    return parts.join(' · ');
+  };
+
   function pickTemplate(t: { title: string; message: string }) {
     setTitle(t.title);
     setMessage(t.message);
@@ -103,7 +149,12 @@ export default function BroadcastPage() {
         const payload = message().trim() ? { message: message() } : undefined;
         await adminApi.broadcastUpdate(payload);
       } else {
-        const res = await adminApi.broadcast({ title: title(), message: message() });
+        // m027:audience 为 undefined 时后端走全员广播路径(对齐现有行为)
+        const res = await adminApi.broadcast({
+          title: title(),
+          message: message(),
+          audience: buildAudience(),
+        });
         sentCount = res.sent;
       }
       const ok = current === 'update' ? true : (sentCount ?? 0) >= 0;
@@ -148,7 +199,8 @@ export default function BroadcastPage() {
             <Show when={message().trim()}>
               <p class="mb-2 text-content-secondary text-sm">内容预览: {message().slice(0, 80)}{message().length > 80 ? '…' : ''}</p>
             </Show>
-            <p>此消息将广播到所有在线客户端，确认发送？</p>
+            <p class="mb-2">受众: <span class="font-mono text-accent">{audienceLabel()}</span></p>
+            <p>此消息将广播到{audienceLabel() === '全员' ? '所有在线客户端' : '受众过滤命中的用户'}，确认发送？</p>
           </>
         }
         confirmText="确认发送"
@@ -206,6 +258,62 @@ export default function BroadcastPage() {
             placeholder={tab() === 'update' ? '有新版本可用，请刷新页面获取最新内容' : '通知内容'}
             rows={4}
           />
+
+          {/* m027:受众过滤(仅 system/maintenance 类需要;update 通知是 SSE 广播无受众概念) */}
+          <Show when={tab() !== 'update'}>
+            <div class="rounded-lg border border-border-hairline bg-surface-secondary p-3 space-y-2.5">
+              <div class="flex items-center justify-between">
+                <SectionTitle as="h3" title="受众过滤" sub="可叠加 · 任一为空表示该维度不限" class="!mb-0" />
+                <Badge variant={buildAudience() ? 'accent' : 'default'} size="sm">{audienceLabel()}</Badge>
+              </div>
+              <div class="grid grid-cols-1 md:grid-cols-2 gap-2.5 text-xs">
+                <div>
+                  <div class="text-content-tertiary mb-1">平台</div>
+                  <div class="flex gap-1.5">
+                    <For each={['web', 'ios', 'android']}>
+                      {(p) => (
+                        <Button
+                          size="xs"
+                          variant={audPlatforms().has(p) ? 'primary' : 'outline'}
+                          disabled={sending()}
+                          onClick={() => togglePlatform(p)}
+                        >
+                          {p}
+                        </Button>
+                      )}
+                    </For>
+                  </div>
+                </div>
+                <Input
+                  label="版本下限(≥)"
+                  size="sm"
+                  placeholder="例如 v0.7.0"
+                  value={audVersionMin()}
+                  disabled={sending()}
+                  onInput={(e) => setAudVersionMin(e.currentTarget.value)}
+                />
+                <Input
+                  label="最近活跃 ≤ N 天"
+                  size="sm"
+                  type="number"
+                  min="1"
+                  placeholder="例如 7"
+                  value={audLastActiveDays()}
+                  disabled={sending()}
+                  onInput={(e) => setAudLastActiveDays(e.currentTarget.value)}
+                />
+                <Input
+                  label="指定 user_id(逗号/空格分隔, 高级)"
+                  size="sm"
+                  placeholder="u-1, u-2 …"
+                  value={audUserIdsText()}
+                  disabled={sending()}
+                  onInput={(e) => setAudUserIdsText(e.currentTarget.value)}
+                />
+              </div>
+            </div>
+          </Show>
+
           <div class="flex items-center justify-between gap-3">
             <p class="text-xs text-content-tertiary">
               送达统计在发送完成后写入下方"发送历史"。

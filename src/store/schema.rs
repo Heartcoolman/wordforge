@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS users (
     role TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('user','staff','admin')),
     status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','inactive','suspended')),
     last_login_at TEXT DEFAULT NULL,
+    referrer_source TEXT DEFAULT NULL,
     PRIMARY KEY (id),
     UNIQUE (email)
 );
@@ -85,6 +86,8 @@ CREATE TABLE IF NOT EXISTS habit_profiles (
     sessions_per_day REAL NOT NULL DEFAULT 1.0,
     temporal_hourly_stats_json TEXT NOT NULL DEFAULT '[]',
     temporal_total_sessions INTEGER NOT NULL DEFAULT 0,
+    daily_goal_words INTEGER NOT NULL DEFAULT 30,
+    daily_goal_minutes INTEGER NOT NULL DEFAULT 25,
     PRIMARY KEY (user_id)
 );
 
@@ -394,6 +397,7 @@ CREATE TABLE IF NOT EXISTS user_elo (
     user_id TEXT NOT NULL,
     rating REAL NOT NULL DEFAULT 1200.0,
     games INTEGER NOT NULL DEFAULT 0,
+    sigma REAL NOT NULL DEFAULT 86.0,
     PRIMARY KEY (user_id)
 );
 
@@ -487,6 +491,22 @@ CREATE TABLE IF NOT EXISTS system_settings (
     PRIMARY KEY (singleton_id)
 );
 
+-- m025:用户**自有**活动日志(区别于 admin_audit_log = admin 对用户的操作)
+-- action 例:'user.login' / 'session.complete' / 'goal.update' / 'fatigue.alert'
+CREATE TABLE IF NOT EXISTS user_activity_log (
+    id           TEXT NOT NULL,
+    user_id      TEXT NOT NULL,
+    action       TEXT NOT NULL,
+    detail_json  TEXT,
+    ip           TEXT,
+    created_at   TEXT NOT NULL,
+    PRIMARY KEY (id)
+);
+CREATE INDEX IF NOT EXISTS idx_user_activity_user_time
+    ON user_activity_log(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_user_activity_action
+    ON user_activity_log(action, created_at DESC);
+
 -- Client management
 CREATE TABLE IF NOT EXISTS client_devices (
     device_id TEXT NOT NULL,
@@ -499,11 +519,30 @@ CREATE TABLE IF NOT EXISTS client_devices (
     banned_by TEXT DEFAULT NULL,
     ban_reason TEXT DEFAULT NULL,
     app_version TEXT DEFAULT NULL,
+    -- m024:GeoIP 反查的 ISO-3166-1 alpha-2 国家码(CN/US/...);last_ip 兼记本次 lookup 源
+    country TEXT DEFAULT NULL,
+    last_ip TEXT DEFAULT NULL,
     PRIMARY KEY (device_id)
 );
 CREATE INDEX IF NOT EXISTS idx_client_devices_user ON client_devices(user_id, last_seen_at DESC);
 CREATE INDEX IF NOT EXISTS idx_client_devices_active ON client_devices(last_seen_at DESC) WHERE is_banned = 0;
 CREATE INDEX IF NOT EXISTS idx_client_devices_app_version ON client_devices(app_version) WHERE app_version IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_client_devices_platform ON client_devices(platform, last_seen_at DESC);
+
+-- m024:强制升级策略(每平台一行)。min_version 以下启动拦截,suggested_version
+-- 以下顶部黄条提示,grayscale_pct 控制灰度推送百分比,pwa_silent_update 仅 Web 有意义。
+CREATE TABLE IF NOT EXISTS client_upgrade_policy (
+    platform TEXT NOT NULL,
+    min_version TEXT,
+    suggested_version TEXT,
+    grayscale_pct INTEGER NOT NULL DEFAULT 0 CHECK (grayscale_pct BETWEEN 0 AND 100),
+    pwa_silent_update INTEGER NOT NULL DEFAULT 1 CHECK (pwa_silent_update IN (0, 1)),
+    updated_at TEXT NOT NULL,
+    updated_by TEXT,
+    PRIMARY KEY (platform)
+);
+INSERT OR IGNORE INTO client_upgrade_policy (platform, updated_at)
+    VALUES ('web', datetime('now')), ('ios', datetime('now')), ('android', datetime('now'));
 
 CREATE TABLE IF NOT EXISTS telemetry_events (
     id TEXT NOT NULL,

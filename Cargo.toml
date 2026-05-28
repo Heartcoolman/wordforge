@@ -82,6 +82,8 @@ tar = "0.4"
 flate2 = "1"
 semver = "1"
 fs2 = "0.4"
+# m027:GeoIP 反查(MaxMind GeoLite2-Country.mmdb,需 data/GeoLite2-Country.mmdb 文件)
+maxminddb = "0.24"
 # M0-R2：minisign 验签（纯 Rust，无 C 依赖）
 minisign-verify = "0.2"
 # v1.1-P0.6：Ed25519 资源包签名（与 minisign 自更新链路解耦，对接文档 §7.1 要求 raw Ed25519）

@@ -7,7 +7,7 @@ use crate::store::keys;
 use crate::store::{Store, StoreError};
 
 const USER_COLS: &str =
-    "id, email, username, password_hash, is_banned, created_at, updated_at, failed_login_count, locked_until, role, status, last_login_at";
+    "id, email, username, password_hash, is_banned, created_at, updated_at, failed_login_count, locked_until, role, status, last_login_at, referrer_source";
 
 const USER_SCOPED_TABLES: &[&str] = &[
     "sessions",
@@ -34,6 +34,8 @@ const USER_SCOPED_TABLES: &[&str] = &[
     "word_notes",
     "wordbook_import_history",
     "wb_center_imports",
+    // m025:用户自有活动日志,delete_user 时级联清理避免孤儿
+    "user_activity_log",
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,6 +63,9 @@ pub struct User {
     /// m022:最近一次登录成功时间;NULL 表示从未登录。
     #[serde(default)]
     pub last_login_at: Option<DateTime<Utc>>,
+    /// m025:注册来源(referral/techweekly 等);NULL 表示未知。
+    #[serde(default)]
+    pub referrer_source: Option<String>,
 }
 
 fn default_role() -> String {
@@ -68,6 +73,30 @@ fn default_role() -> String {
 }
 fn default_status() -> String {
     "active".to_string()
+}
+
+/// m024:list_users 高级过滤参数(None = 该条件不应用)。
+#[derive(Debug, Default, Clone)]
+pub struct UserListFilter {
+    /// LIKE %needle%,小写匹配 username / email
+    pub search: Option<String>,
+    pub banned: Option<bool>,
+    /// 'user' / 'staff' / 'admin'
+    pub role: Option<String>,
+    /// 'active' / 'inactive' / 'suspended'
+    pub status: Option<String>,
+    /// 最近 N 天未登录(含从未登录);0 / None 表示不过滤
+    pub inactive_days: Option<u32>,
+}
+
+/// m024:用户答题聚合,供 list?includeStats=true 批量返回。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserStats {
+    pub record_count: i64,
+    pub correct_count: i64,
+    /// 最近 20 题 is_correct 序列(从新到旧,0/1)。不足 20 时 len < 20。
+    pub last20_outcomes: Vec<i64>,
 }
 
 fn user_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<User> {
@@ -84,6 +113,7 @@ fn user_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<User> {
         role: row.get::<_, Option<String>>(9)?.unwrap_or_else(default_role),
         status: row.get::<_, Option<String>>(10)?.unwrap_or_else(default_status),
         last_login_at: row.get::<_, Option<String>>(11)?.map(parse_dt).transpose()?,
+        referrer_source: row.get::<_, Option<String>>(12)?,
     })
 }
 
@@ -124,13 +154,16 @@ impl Store {
         keys::validate_id(&user.id)?;
         let conn = self.conn()?;
         let locked = user.locked_until.map(|t| t.to_rfc3339());
+        // m024+m025:写 role/status/referrer_source(last_login_at 创建时为 NULL)
         match conn.execute(
-            "INSERT INTO users (id, email, username, password_hash, is_banned, created_at, updated_at, failed_login_count, locked_until)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO users (id, email, username, password_hash, is_banned, \
+             created_at, updated_at, failed_login_count, locked_until, role, status, referrer_source) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 &user.id, &user.email, &user.username, &user.password_hash,
                 user.is_banned as i64, user.created_at.to_rfc3339(), user.updated_at.to_rfc3339(),
                 user.failed_login_count as i64, locked.as_deref(),
+                &user.role, &user.status, user.referrer_source.as_deref(),
             ],
         ) {
             Ok(_) => Ok(()),
@@ -246,6 +279,40 @@ impl Store {
         self.set_banned(user_id, false)
     }
 
+    /// m024:CAS 更新 user.role。CHECK 约束在 DB 层兜底非法值。幂等。
+    pub fn update_user_role(&self, user_id: &str, new_role: &str) -> Result<(), StoreError> {
+        keys::validate_id(user_id)?;
+        let conn = self.conn()?;
+        for _ in 0..MAX_CAS_RETRIES {
+            let user = get_user_conn(&conn, user_id)?.ok_or_else(|| StoreError::NotFound {
+                entity: "user".into(),
+                key: user_id.into(),
+            })?;
+            if user.role == new_role {
+                return Ok(());
+            }
+            match conn.execute(
+                "UPDATE users SET role=?1, updated_at=?2 WHERE id=?3 AND updated_at=?4",
+                params![
+                    new_role,
+                    Utc::now().to_rfc3339(),
+                    user_id,
+                    user.updated_at.to_rfc3339()
+                ],
+            ) {
+                Ok(1) => return Ok(()),
+                Ok(0) => continue,
+                Err(e) => return Err(e.into()),
+                _ => continue,
+            }
+        }
+        Err(StoreError::CasRetryExhausted {
+            entity: "user".into(),
+            key: user_id.into(),
+            attempts: MAX_CAS_RETRIES,
+        })
+    }
+
     pub fn list_user_ids(&self) -> Result<Vec<String>, StoreError> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare("SELECT id FROM users")?;
@@ -264,6 +331,151 @@ impl Store {
             .query_map(params![limit as i64, offset as i64], user_from_row)?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(users)
+    }
+
+    /// m024:扩展版 list_users —— 支持 search/banned/role/status/inactive_days 过滤,
+    /// 返回 (页内 users, total)。WHERE 子句按需拼装,所有动态值用 ? 占位绑定。
+    pub fn list_users_filtered(
+        &self,
+        filter: &UserListFilter,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<User>, u64), StoreError> {
+        use rusqlite::types::Value;
+        let conn = self.conn()?;
+
+        let mut where_parts: Vec<&'static str> = Vec::new();
+        let mut binds: Vec<Value> = Vec::new();
+
+        if let Some(needle) = filter.search.as_deref() {
+            // LIKE escape:% / _ 字符显式转义,statement 用 ESCAPE '\\'
+            let pat = format!(
+                "%{}%",
+                needle
+                    .to_lowercase()
+                    .replace('\\', r"\\")
+                    .replace('%', r"\%")
+                    .replace('_', r"\_")
+            );
+            where_parts.push("(LOWER(username) LIKE ? ESCAPE '\\' OR LOWER(email) LIKE ? ESCAPE '\\')");
+            binds.push(Value::Text(pat.clone()));
+            binds.push(Value::Text(pat));
+        }
+        if let Some(b) = filter.banned {
+            where_parts.push("is_banned = ?");
+            binds.push(Value::Integer(b as i64));
+        }
+        if let Some(r) = filter.role.as_deref() {
+            where_parts.push("role = ?");
+            binds.push(Value::Text(r.to_string()));
+        }
+        if let Some(s) = filter.status.as_deref() {
+            where_parts.push("status = ?");
+            binds.push(Value::Text(s.to_string()));
+        }
+        if let Some(d) = filter.inactive_days.filter(|d| *d > 0) {
+            // 含从未登录(NULL)
+            where_parts.push(
+                "(last_login_at IS NULL OR datetime(last_login_at) < datetime('now', ?))",
+            );
+            binds.push(Value::Text(format!("-{d} days")));
+        }
+        let where_sql = if where_parts.is_empty() {
+            String::new()
+        } else {
+            format!(" WHERE {}", where_parts.join(" AND "))
+        };
+
+        // total
+        let count_sql = format!("SELECT COUNT(*) FROM users{where_sql}");
+        let total: i64 = conn.query_row(
+            &count_sql,
+            rusqlite::params_from_iter(binds.iter()),
+            |r| r.get(0),
+        )?;
+
+        // page
+        let mut list_binds = binds.clone();
+        list_binds.push(Value::Integer(limit as i64));
+        list_binds.push(Value::Integer(offset as i64));
+        let list_sql = format!(
+            "SELECT {USER_COLS} FROM users{where_sql} ORDER BY created_at DESC LIMIT ? OFFSET ?"
+        );
+        let mut stmt = conn.prepare(&list_sql)?;
+        let users = stmt
+            .query_map(rusqlite::params_from_iter(list_binds.iter()), user_from_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((users, total as u64))
+    }
+
+    /// m024:batch 拉一组 user 的答题聚合(record_count / correct_count /
+    /// 最近 20 题 outcome)。空入参直接返回空 map。
+    /// 走 `idx_learning_records_user_time` 索引,3 段查询合一连接。
+    pub fn list_user_stats(
+        &self,
+        user_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, UserStats>, StoreError> {
+        use std::collections::HashMap;
+        if user_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let conn = self.conn()?;
+        let placeholders = vec!["?"; user_ids.len()].join(",");
+
+        // 初始化 map 保证未答题用户也返回 zero stats
+        let mut map: HashMap<String, UserStats> = user_ids
+            .iter()
+            .map(|id| {
+                (
+                    id.clone(),
+                    UserStats {
+                        record_count: 0,
+                        correct_count: 0,
+                        last20_outcomes: Vec::new(),
+                    },
+                )
+            })
+            .collect();
+
+        // 1) record_count + correct_count
+        let agg_sql = format!(
+            "SELECT user_id, COUNT(*) AS n, \
+             COALESCE(SUM(CASE WHEN is_correct=1 THEN 1 ELSE 0 END), 0) AS c \
+             FROM learning_records WHERE user_id IN ({placeholders}) GROUP BY user_id"
+        );
+        let mut stmt = conn.prepare(&agg_sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(user_ids.iter()), |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))
+        })?;
+        for row in rows {
+            let (uid, n, c) = row?;
+            if let Some(e) = map.get_mut(&uid) {
+                e.record_count = n;
+                e.correct_count = c;
+            }
+        }
+        drop(stmt);
+
+        // 2) 最近 20 题 outcome(window function,SQLite 3.25+;rusqlite ≥3.36 默认支持)
+        let win_sql = format!(
+            "SELECT user_id, is_correct FROM ( \
+                 SELECT user_id, is_correct, \
+                        ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY created_at DESC, id DESC) AS rn \
+                 FROM learning_records WHERE user_id IN ({placeholders}) \
+             ) WHERE rn <= 20 ORDER BY user_id, rn"
+        );
+        let mut stmt = conn.prepare(&win_sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(user_ids.iter()), |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        })?;
+        for row in rows {
+            let (uid, oc) = row?;
+            if let Some(e) = map.get_mut(&uid) {
+                e.last20_outcomes.push(oc);
+            }
+        }
+
+        Ok(map)
     }
 
     pub fn record_failed_login(&self, user_id: &str) -> Result<bool, StoreError> {
@@ -469,6 +681,7 @@ mod tests {
             role: "user".to_string(),
             status: "active".to_string(),
             last_login_at: None,
+            referrer_source: None,
         }
     }
 

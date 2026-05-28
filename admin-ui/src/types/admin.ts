@@ -1,5 +1,13 @@
 import type { PaginatedResponse } from './api';
 
+/** m024:批量答题聚合;list?includeStats=true 时填充。 */
+export interface AdminUserStats {
+  recordCount: number;
+  correctCount: number;
+  /** 最近 20 题 is_correct(0/1)序列,从新到旧;不足 20 时 len<20 */
+  last20Outcomes: number[];
+}
+
 export interface AdminUser {
   id: string;
   email: string;
@@ -9,6 +17,16 @@ export interface AdminUser {
   lockedUntil: string | null;
   createdAt: string;
   updatedAt: string;
+  /** m024:'user' / 'staff' / 'admin' */
+  role: 'user' | 'staff' | 'admin';
+  /** m024:'active' / 'inactive' / 'suspended' */
+  status: 'active' | 'inactive' | 'suspended';
+  /** m024:最近一次登录时间;null 表示从未登录 */
+  lastLoginAt: string | null;
+  /** m025:注册来源(referral/marketing channel);null 表示未知 */
+  referrerSource: string | null;
+  /** m024:仅 list?includeStats=true 时填充 */
+  stats?: AdminUserStats;
 }
 
 export interface AdminUsersQuery {
@@ -16,9 +34,145 @@ export interface AdminUsersQuery {
   perPage?: number;
   search?: string;
   banned?: boolean;
+  /** m024:角色筛选 */
+  role?: 'user' | 'staff' | 'admin';
+  /** m024:状态筛选 */
+  status?: 'active' | 'inactive' | 'suspended';
+  /** m024:最近 N 天未登录(含从未登录),0 表示不过滤 */
+  inactiveDays?: number;
+  /** m024:为 true 时 list 返回每个 user 的答题聚合 */
+  includeStats?: boolean;
 }
 
 export type AdminUsersPage = PaginatedResponse<AdminUser>;
+
+/** m024:创建用户 payload */
+export interface AdminCreateUserPayload {
+  email: string;
+  username: string;
+  password: string;
+  role?: 'user' | 'staff' | 'admin';
+}
+
+/** m024:某用户绑定的 client_device 行,供 Drawer "设备 / 会话" tab */
+export interface ClientDeviceRow {
+  deviceId: string;
+  platform: string;
+  userId: string | null;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  isBanned: boolean;
+  bannedAt: string | null;
+  bannedBy: string | null;
+  banReason: string | null;
+  appVersion: string | null;
+  /** m027:GeoIP 反查 ISO-3166-1 alpha-2;无 mmdb / 私网 IP 时为 null */
+  country?: string | null;
+  /** m027:仅 Drawer 详情用,列表不展示 */
+  lastIp?: string | null;
+}
+
+/** m027:设备表后端分页行(精简字段集,不含 banned_by/ban_reason 等审计敏感列) */
+export interface ListedDevice {
+  deviceId: string;
+  platform: string;
+  userId: string | null;
+  appVersion: string | null;
+  country: string | null;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  isBanned: boolean;
+}
+
+/** m027:平台聚合 hero 卡片数据源 */
+export interface ClientPlatformAgg {
+  platform: string;
+  total: number;
+  active7d: number;
+  /** 月环比百分比(可负;原表为空时为 0.0 或 100.0) */
+  monthOverMonthPct: number;
+}
+
+/** m027:平台×版本分布柱(按 platform 分组,版本按 count 倒序) */
+export interface ClientVersionAgg {
+  platform: string;
+  /** 'unknown' 表示 app_version IS NULL */
+  version: string;
+  count: number;
+}
+
+/** m027:强制升级策略一行(每平台独立) */
+export interface ClientUpgradePolicy {
+  platform: string;
+  minVersion: string | null;
+  suggestedVersion: string | null;
+  grayscalePct: number;
+  pwaSilentUpdate: boolean;
+  updatedAt: string;
+  updatedBy: string | null;
+}
+
+/** m024:admin 操作审计行(target_type='user'),供 Drawer "操作日志" tab */
+export interface AdminAuditEntry {
+  id: string;
+  adminId: string;
+  fromVersion: string;
+  toVersion: string;
+  channel: string;
+  startedAt: string;
+  completedAt: string | null;
+  outcome: string;
+  error: string | null;
+  action: string;
+  targetType: string | null;
+  targetId: string | null;
+  metadataJson: string | null;
+}
+
+/** m025:用户**自有**活动日志(login / session.complete / goal.update / fatigue.alert) */
+export interface UserActivityEntry {
+  id: string;
+  userId: string;
+  action: string;
+  detailJson: string | null;
+  ip: string | null;
+  createdAt: string;
+}
+
+/** m025:用户档案深化数据;字段全为可选(数据未初始化时缺) */
+export interface UserExtras {
+  preferences: {
+    theme: string;
+    language: string;
+    notificationEnabled: boolean;
+    soundEnabled: boolean;
+  } | null;
+  elo: { rating: number; sigma: number; games: number; level: number } | null;
+  habit: {
+    dailyGoalWords: number;
+    dailyGoalMinutes: number;
+    sessionsPerDay: number;
+    medianSessionMins: number;
+    totalSessions: number;
+  } | null;
+  streakDays: number;
+  /** m026:用户选中的词书(JOIN study_configs.selected_wordbook_ids × wordbooks)*/
+  selectedWordbooks: Array<{ id: string; name: string }>;
+  latestStrategy: { strategy: Record<string, unknown>; at: string } | null;
+  latestDevice: {
+    osName: string | null;
+    browserName: string | null;
+    browserVersion: string | null;
+    timezone: string | null;
+    language: string | null;
+  } | null;
+  metrics7d: {
+    records: number;
+    correct: number;
+    accuracy: number | null;
+    fatigueAlertCount: number;
+  };
+}
 
 export interface AdminAuthResponse {
   token: string;

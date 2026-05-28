@@ -1,10 +1,65 @@
 use axum::extract::State;
-use axum::http::{Request, StatusCode};
+use axum::http::{HeaderValue, Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 
 use crate::auth::{extract_token_from_headers, verify_jwt};
 use crate::state::AppState;
+
+/// m027:X-Upgrade-Hint 响应头取值。老客户端不读不受影响,新 SDK 据此显示横幅 / 强制升级窗。
+const HINT_REQUIRED: &str = "required";
+const HINT_SUGGESTED: &str = "suggested";
+const HINT_NONE: &str = "none";
+
+/// m027:从 headers 提取 client IP。同 routes/auth.rs 实现,本仓库目前仅两处用,
+/// 不抽公共模块避免跨 mod 引用扩散。
+fn extract_client_ip(headers: &axum::http::HeaderMap) -> Option<String> {
+    if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+        if let Some(first) = xff.split(',').next() {
+            let s = first.trim();
+            if !s.is_empty() {
+                return Some(s.to_string());
+            }
+        }
+    }
+    headers
+        .get("x-real-ip")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// m027:semver "<" 比较;任一边 parse 失败返 false(降级为"无 hint")。
+/// 接受带 v 前缀("v0.7.3")与不带的两种,内部统一去 v。
+fn version_lt(actual: &str, threshold: &str) -> bool {
+    let a = actual.trim_start_matches('v');
+    let t = threshold.trim_start_matches('v');
+    match (semver::Version::parse(a), semver::Version::parse(t)) {
+        (Ok(av), Ok(tv)) => av < tv,
+        _ => false,
+    }
+}
+
+/// m027:据 policy 比较 app_version,算 X-Upgrade-Hint 取值。
+/// 任一缺失返 None(不塞 header)。
+fn compute_upgrade_hint(
+    policy: Option<&crate::store::operations::clients::ClientUpgradePolicy>,
+    app_version: Option<&str>,
+) -> Option<&'static str> {
+    let p = policy?;
+    let v = app_version?;
+    if let Some(min) = p.min_version.as_deref() {
+        if version_lt(v, min) {
+            return Some(HINT_REQUIRED);
+        }
+    }
+    if let Some(sug) = p.suggested_version.as_deref() {
+        if version_lt(v, sug) {
+            return Some(HINT_SUGGESTED);
+        }
+    }
+    Some(HINT_NONE)
+}
 
 pub async fn device_middleware(
     State(state): State<AppState>,
@@ -20,6 +75,8 @@ pub async fn device_middleware(
         .get("x-device-id")
         .and_then(|v| v.to_str().ok())
         .map(String::from);
+
+    let mut upgrade_hint: Option<&'static str> = None;
 
     if let Some(ref did) = device_id {
         let banned_check = {
@@ -66,6 +123,23 @@ pub async fn device_middleware(
             .filter(|s| !s.is_empty() && s.len() <= 64)
             .map(String::from);
 
+        // m027:据缓存 policy 算 X-Upgrade-Hint(任一字段缺都返 None)。
+        if let Some(av) = app_version.as_deref() {
+            let policies = state.get_upgrade_policies_cached();
+            upgrade_hint = compute_upgrade_hint(policies.get(platform), Some(av));
+        }
+
+        // m027:IP → country。GeoIP 缺失或 IP 私网/未知都返 None,country 字段保持 NULL。
+        let client_ip = extract_client_ip(req.headers());
+        let country = client_ip
+            .as_deref()
+            .and_then(|s| s.parse::<std::net::IpAddr>().ok())
+            .and_then(|ip| {
+                state
+                    .geoip()
+                    .and_then(|r| crate::services::geoip::lookup_country(r, ip))
+            });
+
         let user_id = extract_token_from_headers(req.headers())
             .ok()
             .and_then(|token| verify_jwt(&token, &state.config().jwt_secret).ok())
@@ -78,13 +152,17 @@ pub async fn device_middleware(
                 let platform = platform.to_string();
                 let uid = uid.clone();
                 let app_version = app_version.clone();
+                let country = country.clone();
+                let client_ip = client_ip.clone();
                 state
                     .run_store_task("middleware.device.upsert_client_device", move |store| {
-                        store.upsert_client_device_with_version(
+                        store.upsert_client_device_with_extras(
                             &did,
                             &platform,
                             &uid,
                             app_version.as_deref(),
+                            country.as_deref(),
+                            client_ip.as_deref(),
                         )
                     })
                     .await
@@ -102,7 +180,15 @@ pub async fn device_middleware(
         }
     }
 
-    next.run(req).await
+    let mut resp = next.run(req).await;
+
+    // m027:hint 在 next 前算好,run 之后塞。失败时(HeaderValue::from_static)直接丢弃。
+    if let Some(hint) = upgrade_hint {
+        resp.headers_mut()
+            .insert("x-upgrade-hint", HeaderValue::from_static(hint));
+    }
+
+    resp
 }
 
 #[cfg(test)]

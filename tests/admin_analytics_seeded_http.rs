@@ -61,6 +61,7 @@ fn seed_user(store: &Store, suffix: &str) -> User {
             role: "user".to_string(),
             status: "active".to_string(),
             last_login_at: None,
+    referrer_source: None,
     };
     store.create_user(&user).expect("create user");
     user

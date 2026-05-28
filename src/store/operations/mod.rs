@@ -21,6 +21,7 @@ pub mod study_configs;
 pub mod system_settings;
 pub mod telemetry;
 pub mod update_audit;
+pub mod user_activity_log;
 pub mod user_profile_extras;
 pub mod users;
 pub mod wb_center;

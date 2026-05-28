@@ -159,13 +159,30 @@ async fn main() {
         .map(|s| s.maintenance_mode)
         .unwrap_or(false);
 
-    let state = AppState::new(
+    let mut state = AppState::new(
         store.clone(),
         amas_engine.clone(),
         &config,
         shutdown_tx.clone(),
         initial_maintenance,
     );
+
+    // m027：GeoIP（可选）。data/GeoLite2-Country.mmdb 在 binary 同目录或 cwd 都试一次。
+    {
+        let candidates = [
+            std::path::PathBuf::from("data/GeoLite2-Country.mmdb"),
+            std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|d| d.join("data/GeoLite2-Country.mmdb")))
+                .unwrap_or_default(),
+        ];
+        let reader = candidates
+            .iter()
+            .find(|p| p.exists())
+            .and_then(learning_backend::services::geoip::try_load);
+        state.set_geoip(reader);
+    }
+    let state = state;
 
     // v1.1-P0.6：资源包 Ed25519 签名器（与 db 同目录的 keys/）
     {
