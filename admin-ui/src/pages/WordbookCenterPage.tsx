@@ -4,6 +4,7 @@ import { HeroCard } from '@/components/ui/HeroCard';
 import { Button } from '@/components/ui/Button';
 import { Badge } from '@/components/ui/Badge';
 import { Drawer } from '@/components/ui/Drawer';
+import { Modal } from '@/components/ui/Modal';
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
 import { Input } from '@/components/ui/Input';
 import { Empty } from '@/components/ui/Empty';
@@ -25,6 +26,15 @@ export default function WordbookCenterPage() {
   const [syncing, setSyncing] = createSignal<string | null>(null);
   const [checkingUpdates, setCheckingUpdates] = createSignal(false);
   const [importTarget, setImportTarget] = createSignal<BrowseItem | null>(null);
+  // m022:本地词书上传 modal
+  const [uploadOpen, setUploadOpen] = createSignal(false);
+  const [uploadDraft, setUploadDraft] = createSignal({ id: '', name: '', description: '', wordsJson: '[]' });
+  const [uploadBusy, setUploadBusy] = createSignal(false);
+  // m022:本地词书标签编辑 modal(只对 imported 词书有效)
+  const [tagsTarget, setTagsTarget] = createSignal<BrowseItem | null>(null);
+  const [tagsDraft, setTagsDraft] = createSignal<string[]>([]);
+  const [tagsBusy, setTagsBusy] = createSignal(false);
+  const [tagInput, setTagInput] = createSignal('');
 
   async function loadItems() {
     setLoading(true);
@@ -138,6 +148,93 @@ export default function WordbookCenterPage() {
     setPreview(null);
   }
 
+  // m022:上传本地词书 → POST /admin/wordbook-center/upload
+  async function submitUpload() {
+    const d = uploadDraft();
+    if (!d.id.trim() || !d.name.trim()) {
+      uiStore.toast.error('ID 与名称必填');
+      return;
+    }
+    let words: Array<{ spelling: string; phonetic?: string; meanings?: string[]; examples?: string[] }>;
+    try {
+      const parsed = JSON.parse(d.wordsJson);
+      if (!Array.isArray(parsed)) throw new Error('words 应为数组');
+      words = parsed;
+    } catch (e) {
+      uiStore.toast.error('JSON 解析失败', e instanceof Error ? e.message : '');
+      return;
+    }
+    setUploadBusy(true);
+    try {
+      const res = await adminApi.wbCenterUpload({
+        id: d.id.trim(),
+        name: d.name.trim(),
+        description: d.description.trim() || undefined,
+        words,
+      });
+      uiStore.toast.success(`已上传「${res.wordbook.name}」(${res.wordsImported} 词)`);
+      setUploadOpen(false);
+      setUploadDraft({ id: '', name: '', description: '', wordsJson: '[]' });
+      await loadItems();
+    } catch (err: unknown) {
+      uiStore.toast.error('上传失败', err instanceof Error ? err.message : '');
+    } finally {
+      setUploadBusy(false);
+    }
+  }
+
+  // m022:文件选择 → 读 JSON / CSV(PapaParse 走客户端 → 转成 words 数组)
+  function handleFile(file: File) {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const txt = e.target?.result;
+      if (typeof txt !== 'string') return;
+      if (file.name.endsWith('.csv')) {
+        // 简易 CSV: spelling,phonetic,meaning 三列
+        const lines = txt.split(/\r?\n/).filter((l) => l.trim());
+        const words = lines.slice(1).map((line) => {
+          const [spelling, phonetic, meaning] = line.split(',');
+          return {
+            spelling: spelling?.trim() ?? '',
+            phonetic: phonetic?.trim() || undefined,
+            meanings: meaning ? [meaning.trim()] : [],
+          };
+        }).filter((w) => w.spelling);
+        setUploadDraft({ ...uploadDraft(), wordsJson: JSON.stringify(words, null, 2) });
+      } else {
+        setUploadDraft({ ...uploadDraft(), wordsJson: txt });
+      }
+    };
+    reader.readAsText(file);
+  }
+
+  // m022:打开标签编辑 modal
+  function openTagsEditor(item: BrowseItem) {
+    if (!item.localWordbookId) {
+      uiStore.toast.error('该词书尚未导入,无法编辑本地标签');
+      return;
+    }
+    setTagsTarget(item);
+    setTagsDraft([...item.tags]);
+    setTagInput('');
+  }
+
+  async function saveTags() {
+    const t = tagsTarget();
+    if (!t || !t.localWordbookId) return;
+    setTagsBusy(true);
+    try {
+      const res = await adminApi.wbCenterPatchTags(t.localWordbookId, { replace: tagsDraft() });
+      uiStore.toast.success(`已更新标签(${res.tags.length} 个)`);
+      setTagsTarget(null);
+      await loadItems();
+    } catch (err: unknown) {
+      uiStore.toast.error('标签保存失败', err instanceof Error ? err.message : '');
+    } finally {
+      setTagsBusy(false);
+    }
+  }
+
   return (
     <div class="space-y-6">
       <HeroCard
@@ -146,11 +243,16 @@ export default function WordbookCenterPage() {
         title="词书中心"
         desc="管理官方与用户词库。支持词条预览、标签编辑、CSV/JSON 导入。"
         cta={
-          <Show when={configured()}>
-            <Button size="sm" variant="ghost" onClick={checkUpdates} loading={checkingUpdates()}>
-              检查更新
+          <div class="flex flex-wrap gap-2">
+            <Button size="sm" onClick={() => setUploadOpen(true)}>
+              上传本地词书
             </Button>
-          </Show>
+            <Show when={configured()}>
+              <Button size="sm" variant="ghost" onClick={checkUpdates} loading={checkingUpdates()}>
+                检查更新
+              </Button>
+            </Show>
+          </div>
         }
       />
 
@@ -360,6 +462,21 @@ export default function WordbookCenterPage() {
               return (
                 <div class="flex flex-wrap justify-end gap-2">
                   <Button variant="ghost" size="sm" onClick={closePreview}>关闭</Button>
+                  <Show when={matched()?.imported && matched()?.localWordbookId}>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => {
+                        const it = matched();
+                        if (it) {
+                          openTagsEditor(it);
+                          closePreview();
+                        }
+                      }}
+                    >
+                      编辑标签
+                    </Button>
+                  </Show>
                   <Show when={matched() && !matched()!.imported}>
                     <Button
                       size="sm"
@@ -445,6 +562,137 @@ export default function WordbookCenterPage() {
           )}
         </Show>
       </Drawer>
+
+      {/* m022:本地词书上传 Modal */}
+      <Modal open={uploadOpen()} onClose={() => setUploadOpen(false)} title="上传本地词书" size="lg">
+        <div class="space-y-3">
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <p class="text-[11.5px] uppercase tracking-wide text-content-tertiary mb-1">词书 ID</p>
+              <Input
+                placeholder="如 cet4-core (英数 - 下划线)"
+                value={uploadDraft().id}
+                onInput={(e) => setUploadDraft({ ...uploadDraft(), id: e.currentTarget.value })}
+              />
+            </div>
+            <div>
+              <p class="text-[11.5px] uppercase tracking-wide text-content-tertiary mb-1">词书名称</p>
+              <Input
+                placeholder="如 CET-4 核心词汇"
+                value={uploadDraft().name}
+                onInput={(e) => setUploadDraft({ ...uploadDraft(), name: e.currentTarget.value })}
+              />
+            </div>
+          </div>
+          <div>
+            <p class="text-[11.5px] uppercase tracking-wide text-content-tertiary mb-1">简介(可选)</p>
+            <Input
+              placeholder="一句话说明用途"
+              value={uploadDraft().description}
+              onInput={(e) => setUploadDraft({ ...uploadDraft(), description: e.currentTarget.value })}
+            />
+          </div>
+          <div>
+            <div class="flex items-baseline justify-between mb-1">
+              <p class="text-[11.5px] uppercase tracking-wide text-content-tertiary">
+                Words JSON 数组
+              </p>
+              <label class="text-[11.5px] text-accent cursor-pointer hover:underline">
+                选择 .json/.csv 文件
+                <input
+                  type="file"
+                  accept=".json,.csv,application/json,text/csv"
+                  class="hidden"
+                  onChange={(e) => {
+                    const f = e.currentTarget.files?.[0];
+                    if (f) handleFile(f);
+                  }}
+                />
+              </label>
+            </div>
+            <textarea
+              rows={10}
+              value={uploadDraft().wordsJson}
+              onInput={(e) => setUploadDraft({ ...uploadDraft(), wordsJson: e.currentTarget.value })}
+              placeholder={`[{"spelling": "apple", "phonetic": "/ˈæpəl/", "meanings": ["苹果"]}]`}
+              class="w-full px-3 py-2 rounded-md border border-border bg-surface text-[12px] font-mono focus:outline-none focus:border-accent focus:ring-2 focus:ring-accent/30 transition"
+            />
+            <p class="text-[10.5px] text-content-tertiary mt-1">
+              CSV 格式: <code class="font-mono">spelling,phonetic,meaning</code>(首行表头),客户端会自动转 JSON
+            </p>
+          </div>
+          <div class="flex justify-end gap-2 pt-1">
+            <Button size="sm" variant="ghost" onClick={() => setUploadOpen(false)}>取消</Button>
+            <Button size="sm" loading={uploadBusy()} onClick={submitUpload}>上传</Button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* m022:本地词书标签编辑 Modal */}
+      <Modal open={!!tagsTarget()} onClose={() => setTagsTarget(null)} title="编辑词书标签" size="md">
+        <Show when={tagsTarget()}>
+          {(t) => (
+            <div class="space-y-3">
+              <p class="text-sm text-content-secondary">
+                正在编辑「<span class="font-medium text-content">{t().name}</span>」的本地标签。
+                <br />
+                <span class="text-[11.5px] text-content-tertiary">
+                  这只影响本地 wordbook_local_tags 表,远程词书原 tags 不受影响。
+                </span>
+              </p>
+              {/* 当前标签 chips */}
+              <div class="flex flex-wrap gap-1.5 min-h-[32px] p-2 rounded-md border border-border-hairline bg-surface-secondary">
+                <Show when={tagsDraft().length > 0} fallback={<span class="text-[11.5px] text-content-tertiary">暂无标签</span>}>
+                  <For each={tagsDraft()}>
+                    {(tag) => (
+                      <span class="inline-flex items-center gap-1 px-2 py-0.5 bg-accent text-accent-content rounded-full text-xs">
+                        {tag}
+                        <button
+                          type="button"
+                          class="hover:text-accent-content/70"
+                          onClick={() => setTagsDraft(tagsDraft().filter((x) => x !== tag))}
+                          aria-label={`移除标签 ${tag}`}
+                        >×</button>
+                      </span>
+                    )}
+                  </For>
+                </Show>
+              </div>
+              {/* 新增标签 */}
+              <div class="flex gap-2">
+                <Input
+                  placeholder="输入新标签按 Enter 添加"
+                  value={tagInput()}
+                  onInput={(e) => setTagInput(e.currentTarget.value)}
+                  onKeyDown={(e: KeyboardEvent) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      const v = tagInput().trim();
+                      if (v && !tagsDraft().includes(v)) setTagsDraft([...tagsDraft(), v]);
+                      setTagInput('');
+                    }
+                  }}
+                />
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => {
+                    const v = tagInput().trim();
+                    if (v && !tagsDraft().includes(v)) setTagsDraft([...tagsDraft(), v]);
+                    setTagInput('');
+                  }}
+                >
+                  添加
+                </Button>
+              </div>
+              <div class="flex justify-end gap-2 pt-1">
+                <Button size="sm" variant="ghost" onClick={() => setTagsTarget(null)}>取消</Button>
+                <Button size="sm" loading={tagsBusy()} onClick={saveTags}>保存</Button>
+              </div>
+            </div>
+          )}
+        </Show>
+      </Modal>
     </div>
   );
 }

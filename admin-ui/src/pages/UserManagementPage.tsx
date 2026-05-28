@@ -1,4 +1,4 @@
-import { createSignal, createMemo, createEffect, Show, For, onMount, onCleanup } from 'solid-js';
+import { createSignal, createMemo, createEffect, createResource, Show, For, onMount, onCleanup } from 'solid-js';
 import { Card } from '@/components/ui/Card';
 import { HeroCard } from '@/components/ui/HeroCard';
 import { Button } from '@/components/ui/Button';
@@ -13,6 +13,20 @@ import { Empty } from '@/components/ui/Empty';
 import { uiStore } from '@/stores/ui';
 import { adminApi } from '@/api/admin';
 import type { AdminUser } from '@/types/admin';
+
+// 会话状态短中文
+const SESSION_STATUS_LABEL: Record<string, string> = {
+  active: '进行中',
+  completed: '已完成',
+  abandoned: '已放弃',
+  paused: '已暂停',
+};
+const SESSION_STATUS_VARIANT: Record<string, 'info' | 'success' | 'default' | 'warning'> = {
+  active: 'info',
+  completed: 'success',
+  abandoned: 'default',
+  paused: 'warning',
+};
 
 // 重置模式选择卡片：复用 Card interactive variant 的标准 hover/elevation
 function ResetModeCard(props: { title: string; description: string; onClick: () => void }) {
@@ -83,6 +97,11 @@ export default function UserManagementPage() {
   const [selectedIds, setSelectedIds] = createSignal<Set<string>>(new Set());
   const [detailUser, setDetailUser] = createSignal<AdminUser | null>(null);
   const [bulkBusy, setBulkBusy] = createSignal<'ban' | 'unban' | null>(null);
+
+  // m022:Drawer 打开时拉 profile + sessions
+  const [profile] = createResource(detailUser, async (u) => (u ? adminApi.userProfile(u.id) : null));
+  const [sessionsResp] = createResource(detailUser, async (u) => (u ? adminApi.userSessions(u.id, 20) : null));
+  const sessions = () => sessionsResp()?.sessions ?? null;
   const allSelected = createMemo(() => {
     const list = filteredUsers();
     return list.length > 0 && list.every((u) => selectedIds().has(u.id));
@@ -108,19 +127,23 @@ export default function UserManagementPage() {
     const ids = Array.from(selectedIds());
     if (ids.length === 0) return;
     setBulkBusy(action);
-    const results = await Promise.allSettled(
-      ids.map((id) => (action === 'ban' ? adminApi.banUser(id) : adminApi.unbanUser(id))),
-    );
-    const okCount = results.filter((r) => r.status === 'fulfilled').length;
-    const failCount = results.length - okCount;
-    if (failCount === 0) {
-      uiStore.toast.success(`${action === 'ban' ? '批量封禁' : '批量解封'}成功 (${okCount})`);
-    } else {
-      uiStore.toast.error(`部分失败:${okCount} 成功 / ${failCount} 失败`);
+    try {
+      // m022:走 atomic 批量端点,后端单次返回 succeeded/failed 计数 + 失败明细
+      const res = action === 'ban'
+        ? await adminApi.usersBulkBan(ids)
+        : await adminApi.usersBulkUnban(ids);
+      if (res.failed === 0) {
+        uiStore.toast.success(`${action === 'ban' ? '批量封禁' : '批量解封'}成功 (${res.succeeded})`);
+      } else {
+        uiStore.toast.error(`部分失败:${res.succeeded} 成功 / ${res.failed} 失败`);
+      }
+    } catch (e) {
+      uiStore.toast.error('批量操作失败', e instanceof Error ? e.message : '');
+    } finally {
+      setSelectedIds(new Set<string>());
+      setBulkBusy(null);
+      void load();
     }
-    setSelectedIds(new Set<string>());
-    setBulkBusy(null);
-    void load();
   }
   function exportUsersCsv() {
     const rows: string[][] = [['id', 'username', 'email', 'status']];
@@ -558,7 +581,8 @@ export default function UserManagementPage() {
       >
         <Show when={detailUser()}>
           {(u) => (
-            <div class="space-y-4 text-[13px]">
+            <div class="space-y-5 text-[13px]">
+              {/* 元信息 */}
               <dl class="grid grid-cols-[80px_1fr] gap-y-2 gap-x-3 text-content-secondary">
                 <dt>用户 ID</dt>
                 <dd class="font-mono text-[11.5px] text-content break-all">{u().id}</dd>
@@ -573,10 +597,118 @@ export default function UserManagementPage() {
                   </Badge>
                 </dd>
               </dl>
-              <p class="text-[11.5px] text-content-tertiary">
-                注:答题档案 / 设备会话 / 完整时间线等扩展数据需后端 admin/users/:id/profile 端点支持,
-                当前 GET /api/admin/users 仅返回 id / username / email / isBanned 4 字段。
-              </p>
+
+              {/* m022:答题档案 (profile API) */}
+              <section>
+                <div class="flex items-baseline justify-between mb-2">
+                  <h3 class="text-sm font-semibold text-content">答题档案</h3>
+                  <Show when={profile()}>
+                    <span class="text-[11.5px] text-content-tertiary tabular-nums">
+                      {profile()!.sessionCount} 会话
+                    </span>
+                  </Show>
+                </div>
+                <Show
+                  when={!profile.loading && profile()}
+                  fallback={
+                    <Show when={profile.error} fallback={<Spinner size="sm" />}>
+                      <p class="text-[11.5px] text-error">{profile.error instanceof Error ? profile.error.message : '加载失败'}</p>
+                    </Show>
+                  }
+                >
+                  {(p) => (
+                    <div class="space-y-2">
+                      <div class="grid grid-cols-3 gap-2">
+                        <div class="rounded-md bg-surface-secondary p-2 text-center">
+                          <p class="text-[10.5px] text-content-tertiary uppercase tracking-wide">总答题</p>
+                          <p class="text-base font-mono tabular-nums text-content">{p().totalRecords}</p>
+                        </div>
+                        <div class="rounded-md bg-surface-secondary p-2 text-center">
+                          <p class="text-[10.5px] text-content-tertiary uppercase tracking-wide">正确</p>
+                          <p class="text-base font-mono tabular-nums text-success">{p().correctRecords}</p>
+                        </div>
+                        <div class="rounded-md bg-surface-secondary p-2 text-center">
+                          <p class="text-[10.5px] text-content-tertiary uppercase tracking-wide">正确率</p>
+                          <p class="text-base font-mono tabular-nums text-content">
+                            {p().accuracy != null ? `${((p().accuracy ?? 0) * 100).toFixed(1)}%` : '—'}
+                          </p>
+                        </div>
+                      </div>
+                      {/* 词书分布 top 10 mini bar */}
+                      <Show when={p().wordbookDistribution.length > 0} fallback={
+                        <p class="text-[11.5px] text-content-tertiary italic">尚无词书答题记录</p>
+                      }>
+                        <p class="text-[11.5px] uppercase tracking-wide text-content-tertiary">词书分布 Top {Math.min(p().wordbookDistribution.length, 10)}</p>
+                        <ul class="space-y-1">
+                          <For each={p().wordbookDistribution.slice(0, 10)}>
+                            {(wb) => {
+                              const maxCount = Math.max(...p().wordbookDistribution.map((x) => x.recordCount));
+                              const pct = maxCount > 0 ? (wb.recordCount / maxCount) * 100 : 0;
+                              return (
+                                <li>
+                                  <div class="flex items-baseline justify-between text-[11.5px] gap-2">
+                                    <span class="text-content truncate" title={wb.name}>{wb.name}</span>
+                                    <span class="text-content-tertiary tabular-nums font-mono">{wb.recordCount}</span>
+                                  </div>
+                                  <div class="h-1 bg-surface-secondary rounded-full overflow-hidden">
+                                    <div class="h-full bg-accent" style={{ width: `${pct}%` }} />
+                                  </div>
+                                </li>
+                              );
+                            }}
+                          </For>
+                        </ul>
+                      </Show>
+                    </div>
+                  )}
+                </Show>
+              </section>
+
+              {/* m022:设备会话(sessions API) */}
+              <section>
+                <div class="flex items-baseline justify-between mb-2">
+                  <h3 class="text-sm font-semibold text-content">最近学习会话</h3>
+                  <Show when={sessions()}>
+                    <span class="text-[11.5px] text-content-tertiary tabular-nums">{sessions()!.length} 条</span>
+                  </Show>
+                </div>
+                <Show
+                  when={!sessionsResp.loading && sessions()}
+                  fallback={
+                    <Show when={sessionsResp.error} fallback={<Spinner size="sm" />}>
+                      <p class="text-[11.5px] text-error">{sessionsResp.error instanceof Error ? sessionsResp.error.message : '加载失败'}</p>
+                    </Show>
+                  }
+                >
+                  {(rows) => (
+                    <Show when={rows().length > 0} fallback={<p class="text-[11.5px] text-content-tertiary italic">尚无会话记录</p>}>
+                      <ul class="space-y-1.5 max-h-64 overflow-y-auto pr-1">
+                        <For each={rows()}>
+                          {(s) => (
+                            <li class="px-2.5 py-1.5 rounded-md bg-surface-secondary text-[11.5px]">
+                              <div class="flex items-center justify-between gap-2">
+                                <Badge variant={SESSION_STATUS_VARIANT[s.status] ?? 'default'} size="sm" dot>
+                                  {SESSION_STATUS_LABEL[s.status] ?? s.status}
+                                </Badge>
+                                <time class="font-mono tabular-nums text-content-tertiary">
+                                  {new Date(s.createdAt).toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}
+                                </time>
+                              </div>
+                              <div class="mt-1 flex items-center gap-3 text-content-tertiary tabular-nums">
+                                <span>{s.wordsCount ?? 0} 词</span>
+                                <span>正确 {s.correctCount ?? 0}</span>
+                                <Show when={s.accuracy != null}>
+                                  <span>{((s.accuracy ?? 0) * 100).toFixed(0)}%</span>
+                                </Show>
+                              </div>
+                            </li>
+                          )}
+                        </For>
+                      </ul>
+                    </Show>
+                  )}
+                </Show>
+              </section>
             </div>
           )}
         </Show>

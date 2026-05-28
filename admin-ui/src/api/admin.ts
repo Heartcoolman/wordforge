@@ -465,6 +465,8 @@ export interface AmasSuggestion {
   tokensInput: number | null;
   tokensOutput: number | null;
   confidence: number | null;
+  /** m022:llm_advisor 写入时按 patch 的 key 从 basedOn 配置抓出的旧值快照,供 UI diff */
+  baseValuesJson?: Record<string, number> | null;
 }
 
 export interface AmasExplainResponse {

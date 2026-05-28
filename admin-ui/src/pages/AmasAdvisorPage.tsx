@@ -314,25 +314,51 @@ function SuggestionCard(props: {
       <div class="text-sm text-content leading-relaxed mb-2">{props.s.rationale}</div>
 
       <div class="space-y-1.5">
-        <h4 class="text-xs font-medium text-content-secondary">Patch（{Object.keys(props.s.patchJson).length} 项）</h4>
+        <h4 class="text-xs font-medium text-content-secondary">
+          Patch diff（{Object.keys(props.s.patchJson).length} 项 · 基于 {props.s.basedOnVersionHash.slice(0, 8)}）
+        </h4>
         <table class="w-full text-xs font-mono">
           <thead>
             <tr class="text-content-tertiary border-b border-border-hairline">
               <th class="text-left py-1 pr-2">字段</th>
-              <th class="text-right py-1">建议值</th>
+              <th class="text-right py-1 pr-2 w-24">旧值</th>
+              <th class="text-center py-1 w-6"></th>
+              <th class="text-right py-1 pl-2 w-24">建议值</th>
+              <th class="text-right py-1 pl-3 w-16">Δ%</th>
             </tr>
           </thead>
           <tbody>
             <For each={Object.entries(props.s.patchJson)}>
-              {([path, value]) => (
-                <tr class="border-b border-border-hairline">
-                  <td class="py-1 pr-2 text-content">{path}</td>
-                  <td class="py-1 text-right text-success tabular-nums">{formatPatchValue(value)}</td>
-                </tr>
-              )}
+              {([path, value]) => {
+                const old = props.s.baseValuesJson?.[path];
+                const oldNum = typeof old === 'number' && Number.isFinite(old) ? old : null;
+                const newNum = typeof value === 'number' && Number.isFinite(value) ? value : null;
+                const pct = oldNum != null && newNum != null && oldNum !== 0
+                  ? ((newNum - oldNum) / Math.abs(oldNum)) * 100
+                  : null;
+                const upward = pct != null && pct >= 0;
+                return (
+                  <tr class="border-b border-border-hairline">
+                    <td class="py-1 pr-2 text-content">{path}</td>
+                    <td class="py-1 pr-2 text-right text-content-tertiary tabular-nums">
+                      {oldNum != null ? formatPatchValue(oldNum) : '—'}
+                    </td>
+                    <td class="py-1 text-center text-content-tertiary">→</td>
+                    <td class="py-1 pl-2 text-right text-success tabular-nums">{formatPatchValue(value)}</td>
+                    <td class={`py-1 pl-3 text-right tabular-nums ${pct == null ? 'text-content-tertiary' : upward ? 'text-success' : 'text-error'}`}>
+                      {pct == null ? '—' : `${upward ? '+' : ''}${pct.toFixed(1)}%`}
+                    </td>
+                  </tr>
+                );
+              }}
             </For>
           </tbody>
         </table>
+        <Show when={!props.s.baseValuesJson}>
+          <p class="text-[10px] text-content-tertiary italic">
+            旧版 advisor 未生成 baseValuesJson · 此 patch diff 仅显示新值
+          </p>
+        </Show>
       </div>
 
       <div class="mt-2">

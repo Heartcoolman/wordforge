@@ -46,6 +46,13 @@ export default function AnalyticsPage() {
   const [recordTypes] = createResource(days, (d) => adminApi.getRecordTypes(d));
   const [retention] = createResource(() => adminApi.getRetentionCurve());
   const [states] = createResource(() => adminApi.getWordStateDistribution());
+  // m022:新增 3 端点
+  const [hourly] = createResource(days, (d) => adminApi.analyticsHourly(d));
+  const [wbRank] = createResource(days, (d) => adminApi.analyticsWordbookRank({ days: d, limit: 10 }));
+  const [cohort] = createResource(() => adminApi.analyticsRetentionCohort({ cohort: 'weekly', maxDays: 28 }));
+
+  // 中文星期 label,用于 hourly heatmap y 轴
+  const DOW_LABEL = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
 
   // 导出 CSV:把当前已加载的 retention + state + record types 拼成一个表
   function exportCsv() {
@@ -383,30 +390,208 @@ export default function AnalyticsPage() {
         </Card>
       </div>
 
-      {/* 时段热图占位 + 词库 top10 占位 — 后端 admin/analytics 当前未提供
-          hourly buckets 与 wordbook usage rank,后续扩展端点后接入 */}
+      {/* m022:时段热图 + 词库 top10 (来自 /admin/analytics/hourly + wordbook-rank) */}
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <Card variant="elevated">
           <div class="flex items-center justify-between mb-3">
             <h2 class="text-headline text-content">时段活跃热图</h2>
-            <span class="text-[11px] text-content-tertiary uppercase tracking-wide">待后端接入</span>
+            <Show when={hourly()}>
+              <span class="text-xs text-content-secondary">总样本 {formatNumber(hourly()!.total)}</span>
+            </Show>
           </div>
-          <Empty
-            title="等待后端 hourly buckets"
-            description="需要 /api/admin/analytics/hourly?days=N 返回 24h × 7d 答题数矩阵后接入 ECharts heatmap。"
-          />
+          <Show
+            when={!hourly.error}
+            fallback={<Empty title="加载失败" description="无法获取 hourly buckets" />}
+          >
+            <Show when={hourly()} fallback={<Skeleton height="320px" />}>
+              {(data) => {
+                // matrix 7×24 → echarts heatmap 需要 [hour, dow, value] 三元组
+                const points: Array<[number, number, number]> = [];
+                let maxV = 0;
+                data().matrix.forEach((row, dow) => {
+                  row.forEach((v, hour) => {
+                    points.push([hour, dow, v]);
+                    if (v > maxV) maxV = v;
+                  });
+                });
+                return (
+                  <Show when={maxV > 0} fallback={<Empty title="过去 N 天无答题样本" />}>
+                    <EChart
+                      height="320px"
+                      option={() => {
+                        const accent = cssVar('--accent', '#6366f1');
+                        const surface = cssVar('--surface-tertiary', '#f3f4f6');
+                        return {
+                          tooltip: {
+                            position: 'top',
+                            formatter: (p: unknown) => {
+                              const param = Array.isArray(p) ? p[0] : p;
+                              const [hr, dw, val] = (param as { data: [number, number, number] }).data;
+                              return `${DOW_LABEL[dw]} ${String(hr).padStart(2, '0')}:00<br/>答题 ${val}`;
+                            },
+                          },
+                          grid: { left: 50, right: 20, top: 20, bottom: 50 },
+                          xAxis: {
+                            type: 'category',
+                            data: Array.from({ length: 24 }, (_, i) => String(i).padStart(2, '0')),
+                            splitArea: { show: true },
+                          },
+                          yAxis: {
+                            type: 'category',
+                            data: DOW_LABEL,
+                            splitArea: { show: true },
+                          },
+                          visualMap: {
+                            min: 0,
+                            max: maxV,
+                            calculable: true,
+                            orient: 'horizontal',
+                            left: 'center',
+                            bottom: 5,
+                            inRange: { color: [surface, accent] },
+                            textStyle: { fontSize: 10 },
+                          },
+                          series: [
+                            {
+                              type: 'heatmap',
+                              data: points,
+                              label: { show: false },
+                              emphasis: { itemStyle: { shadowBlur: 10 } },
+                            },
+                          ],
+                        };
+                      }}
+                    />
+                  </Show>
+                );
+              }}
+            </Show>
+          </Show>
         </Card>
+
         <Card variant="elevated">
           <div class="flex items-center justify-between mb-3">
             <h2 class="text-headline text-content">词库使用 Top 10</h2>
-            <span class="text-[11px] text-content-tertiary uppercase tracking-wide">待后端接入</span>
+            <Show when={wbRank()}>
+              <span class="text-xs text-content-secondary">过去 {wbRank()!.days} 天</span>
+            </Show>
           </div>
-          <Empty
-            title="等待后端 wordbook usage rank"
-            description="需要 /api/admin/analytics/wordbook-rank?days=N 返回各词库答题数排序后接入横向柱图。"
-          />
+          <Show
+            when={!wbRank.error}
+            fallback={<Empty title="加载失败" description="无法获取词库排名数据" />}
+          >
+            <Show when={wbRank()} fallback={<Skeleton height="320px" />}>
+              {(data) => (
+                <Show when={data().rows.length > 0} fallback={<Empty title="过去 N 天无词库使用记录" />}>
+                  <EChart
+                    height="320px"
+                    option={() => {
+                      const accent = cssVar('--accent', '#6366f1');
+                      const info = cssVar('--info', '#0ea5e9');
+                      // 横向柱图:y category = 词书名,x value = 答题数,叠加正确率提示
+                      const reversed = [...data().rows].reverse(); // echarts 横向柱底部=第一项,反转使最大在顶
+                      return {
+                        grid: { left: 130, right: 30, top: 20, bottom: 30 },
+                        tooltip: {
+                          trigger: 'axis',
+                          axisPointer: { type: 'shadow' },
+                          formatter: (p: unknown) => {
+                            const arr = Array.isArray(p) ? p : [p];
+                            const first = arr[0] as { dataIndex: number; value: number };
+                            const row = reversed[first.dataIndex];
+                            const acc = row.accuracy != null ? `${(row.accuracy * 100).toFixed(1)}%` : '—';
+                            return `<b>${row.name}</b><br/>答题 ${row.recordCount} · 正确 ${row.correctCount}<br/>学习者 ${row.learnerCount} · 正确率 ${acc}`;
+                          },
+                        },
+                        xAxis: { type: 'value', name: '答题数', axisLabel: { fontSize: 11 } },
+                        yAxis: {
+                          type: 'category',
+                          data: reversed.map((r) => r.name.length > 14 ? `${r.name.slice(0, 12)}…` : r.name),
+                          axisLabel: { fontSize: 11 },
+                        },
+                        series: [
+                          {
+                            type: 'bar',
+                            barWidth: '60%',
+                            itemStyle: {
+                              color: (params: { dataIndex: number }) => {
+                                const row = reversed[params.dataIndex];
+                                // 学习者多用 accent,少用 info
+                                return row.learnerCount > 10 ? accent : info;
+                              },
+                              borderRadius: [0, 4, 4, 0],
+                            },
+                            data: reversed.map((r) => r.recordCount),
+                          },
+                        ],
+                      };
+                    }}
+                  />
+                </Show>
+              )}
+            </Show>
+          </Show>
         </Card>
       </div>
+
+      {/* m022:cohort 留存曲线(按周聚合) */}
+      <Card variant="elevated">
+        <div class="flex items-center justify-between mb-3">
+          <h2 class="text-headline text-content">用户留存(按注册周分组)</h2>
+          <Show when={cohort()}>
+            <span class="text-xs text-content-secondary">最近 {cohort()!.maxDays} 天 · 按 {cohort()!.cohortUnit} 聚合</span>
+          </Show>
+        </div>
+        <Show
+          when={!cohort.error}
+          fallback={<Empty title="加载失败" description="无法获取 cohort 数据" />}
+        >
+          <Show when={cohort()} fallback={<Skeleton height="320px" />}>
+            {(data) => {
+              // 按 cohortStart 分组,每个 cohort 一条线;x = daysSince, y = retainedUsers
+              const cohorts = new Map<string, Array<{ d: number; n: number }>>();
+              data().rows.forEach((r) => {
+                const arr = cohorts.get(r.cohortStart) ?? [];
+                arr.push({ d: r.daysSince, n: r.retainedUsers });
+                cohorts.set(r.cohortStart, arr);
+              });
+              return (
+                <Show when={cohorts.size > 0} fallback={<Empty title="过去 N 天无注册用户分组" />}>
+                  <EChart
+                    height="320px"
+                    option={() => {
+                      const palette = [
+                        cssVar('--accent', '#6366f1'),
+                        cssVar('--info', '#0ea5e9'),
+                        cssVar('--success', '#22c55e'),
+                        cssVar('--warning', '#eab308'),
+                        cssVar('--error', '#ef4444'),
+                      ];
+                      const series = Array.from(cohorts.entries()).slice(0, 5).map(([start, pts], i) => ({
+                        name: start.slice(5), // MM-DD
+                        type: 'line' as const,
+                        smooth: true,
+                        symbolSize: 6,
+                        lineStyle: { color: palette[i % palette.length] },
+                        itemStyle: { color: palette[i % palette.length] },
+                        data: pts.sort((a, b) => a.d - b.d).map((p) => [p.d, p.n]),
+                      }));
+                      return {
+                        grid: { left: 50, right: 30, top: 40, bottom: 30 },
+                        legend: { top: 0, type: 'scroll', itemWidth: 14, itemHeight: 8 },
+                        tooltip: { trigger: 'axis' },
+                        xAxis: { type: 'value', name: '注册后天数', min: 0 },
+                        yAxis: { type: 'value', name: '留存人数', minInterval: 1 },
+                        series,
+                      };
+                    }}
+                  />
+                </Show>
+              );
+            }}
+          </Show>
+        </Show>
+      </Card>
     </div>
   );
 }

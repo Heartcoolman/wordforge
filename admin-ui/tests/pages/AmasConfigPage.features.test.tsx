@@ -16,6 +16,12 @@ vi.mock('@/api/admin', () => ({
     amasRollback: vi.fn(),
     amasGetVersion: vi.fn(),
     amasRestoreVersion: vi.fn(),
+    // m022:CanaryCard + JsonAdvancedPanel TOML 模式
+    amasGetCanary: vi.fn(() => Promise.resolve({ canary: null })),
+    amasSetCanary: vi.fn(),
+    amasDisableCanary: vi.fn(),
+    amasParseToml: vi.fn(),
+    amasSerializeToml: vi.fn(),
   },
 }));
 vi.mock('@/stores/ui', () => ({

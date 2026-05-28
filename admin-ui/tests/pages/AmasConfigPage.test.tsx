@@ -13,6 +13,14 @@ vi.mock('@/api/amas', () => ({
 vi.mock('@/api/admin', () => ({
   adminApi: {
     reloadAmas: vi.fn(),
+    // m022:CanaryCard 用的端点(无 active canary + 空版本列表)
+    amasGetCanary: vi.fn().mockResolvedValue({ canary: null }),
+    amasListVersions: vi.fn().mockResolvedValue([]),
+    amasSetCanary: vi.fn(),
+    amasDisableCanary: vi.fn(),
+    // m022:JsonAdvancedPanel TOML 模式
+    amasParseToml: vi.fn(),
+    amasSerializeToml: vi.fn(),
   },
 }));
 

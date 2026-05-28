@@ -11,6 +11,10 @@ vi.mock('@/api/admin', () => ({
     getRecordTypes: vi.fn(),
     getRetentionCurve: vi.fn(),
     getWordStateDistribution: vi.fn(),
+    // m022:3 个新端点
+    analyticsHourly: vi.fn(),
+    analyticsWordbookRank: vi.fn(),
+    analyticsRetentionCohort: vi.fn(),
   },
 }));
 vi.mock('@/components/ui/EChart', () => ({
@@ -90,6 +94,10 @@ const mockEmptyStates = {
 describe('AnalyticsPage', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // m022:3 端点全局默认空集,避免 each test 都得 prime
+    mockAdminApi.analyticsHourly?.mockResolvedValue({ generatedAt: '', days: 7, matrix: Array.from({ length: 7 }, () => Array(24).fill(0)), total: 0 });
+    mockAdminApi.analyticsWordbookRank?.mockResolvedValue({ generatedAt: '', days: 7, limit: 10, rows: [] });
+    mockAdminApi.analyticsRetentionCohort?.mockResolvedValue({ generatedAt: '', cohortUnit: 'weekly', maxDays: 28, rows: [] });
   });
 
   function primeMocks() {

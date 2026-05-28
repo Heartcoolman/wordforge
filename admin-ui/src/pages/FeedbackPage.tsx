@@ -9,6 +9,7 @@ import { Pagination } from '@/components/ui/Pagination';
 import { Drawer } from '@/components/ui/Drawer';
 import { Select } from '@/components/ui/Select';
 import { Table } from '@/components/ui/Table';
+import { Collapsible } from '@/components/ui/Collapsible';
 import { adminApi } from '@/api/admin';
 import { uiStore } from '@/stores/ui';
 import type { FeedbackItem } from '@/types/admin';
@@ -336,6 +337,22 @@ export default function FeedbackPage() {
                   {it().body}
                 </div>
               </div>
+
+              {/* m022:设备指纹快照 + 答题上下文快照(老客户端无,折叠默认收起) */}
+              <Show when={it().deviceProfile}>
+                <Collapsible title="设备指纹快照" badge="m022">
+                  <pre class="text-[11px] font-mono text-content-secondary bg-surface-secondary rounded-md p-2 overflow-x-auto max-h-64">
+                    {JSON.stringify(it().deviceProfile, null, 2)}
+                  </pre>
+                </Collapsible>
+              </Show>
+              <Show when={it().answerSnapshot}>
+                <Collapsible title="答题上下文快照" badge="m022">
+                  <pre class="text-[11px] font-mono text-content-secondary bg-surface-secondary rounded-md p-2 overflow-x-auto max-h-64">
+                    {JSON.stringify(it().answerSnapshot, null, 2)}
+                  </pre>
+                </Collapsible>
+              </Show>
 
               {/* 状态 / 优先级 编辑 */}
               <div class="grid grid-cols-2 gap-3">

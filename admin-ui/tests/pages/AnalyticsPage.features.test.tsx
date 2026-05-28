@@ -15,6 +15,10 @@ vi.mock('@/api/admin', () => ({
     getRecordTypes: vi.fn(),
     getRetentionCurve: vi.fn(),
     getWordStateDistribution: vi.fn(),
+    // m022:3 个新端点
+    analyticsHourly: vi.fn(),
+    analyticsWordbookRank: vi.fn(),
+    analyticsRetentionCohort: vi.fn(),
   },
 }));
 vi.mock('@/stores/ui', () => ({
@@ -61,6 +65,10 @@ function primeAll() {
   mockApi.getRecordTypes.mockResolvedValue(mockRecordTypes);
   mockApi.getRetentionCurve.mockResolvedValue(mockRetention);
   mockApi.getWordStateDistribution.mockResolvedValue(mockStates);
+  // m022:3 个新端点默认空集
+  mockApi.analyticsHourly.mockResolvedValue({ generatedAt: '', days: 7, matrix: Array.from({ length: 7 }, () => Array(24).fill(0)), total: 0 });
+  mockApi.analyticsWordbookRank.mockResolvedValue({ generatedAt: '', days: 7, limit: 10, rows: [] });
+  mockApi.analyticsRetentionCohort.mockResolvedValue({ generatedAt: '', cohortUnit: 'weekly', maxDays: 28, rows: [] });
 }
 
 describe('AnalyticsPage — empty data, loading state, days picker', () => {

@@ -106,18 +106,14 @@ export default function UpdatesPage() {
     setRollbackOpen(false);
     setRollbackBusy(true);
     try {
-      // 通过 apply 端点切到 prev 版本(后端可能拒绝向下迁移,此时返回错误)
-      // channel 默认走 stable;后端通过 apply payload 中的 targetVersion 直接覆盖
-      await adminApi.updatesApply('stable', prev, s.currentVersion);
+      // m022:走 /rollback 专用端点,后端 allow_downgrade=true 跳过 semver 上升校验
+      // 同时按 target tag 拉 GitHub release metadata 注入 updater cache 再 apply
+      await adminApi.updatesRollback('stable', prev, s.currentVersion);
       uiStore.toast.success(`已下发回滚到 ${prev},等待重启...`);
       setTimeout(() => window.location.reload(), 2000);
     } catch (e) {
       const msg = e instanceof Error ? e.message : '未知错误';
-      uiStore.toast.error('回滚被后端拒绝',
-        msg.includes('semver') || msg.includes('forbidden')
-          ? '后端策略要求版本只能向上迁移,请 SSH 手动 swap 二进制'
-          : msg,
-      );
+      uiStore.toast.error('回滚失败', msg);
     } finally {
       setRollbackBusy(false);
     }
@@ -455,9 +451,9 @@ export default function UpdatesPage() {
               <span class="font-mono text-content font-semibold">{previousVersion()}</span>。
             </p>
             <p class="text-xs text-warning">
-              ⚠ 后端策略要求版本只能向上迁移,因此回滚很可能会被后端拒绝。
-              如确实需要降级,建议 SSH 登录服务器手动 swap 二进制 + 恢复对应 backup DB。
-              本按钮仅用于"尝试自动回滚",失败时会显示后端原因。
+              ⚠ 此操作走 <code class="font-mono">/admin/updates/rollback</code> 端点,
+              后端会跳过 semver 上升校验、从 GitHub 拉 target tag 的 release metadata 再走标准 apply 流程
+              (sha256 校验 / DB 备份 / fork-exec 自重启)。如目标 tag 在 GitHub 已删除会失败。
             </p>
             <div class="flex justify-end gap-2 pt-2">
               <Button variant="ghost" onClick={() => setRollbackOpen(false)}>取消</Button>

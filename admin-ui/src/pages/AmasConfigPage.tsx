@@ -14,6 +14,7 @@ import { TierAPanel } from './amas/TierAPanel';
 import { SectionPanel } from './amas/SectionPanel';
 import { JsonAdvancedPanel } from './amas/JsonAdvancedPanel';
 import { PresetSelector } from './amas/PresetSelector';
+import { CanaryCard } from './amas/CanaryCard';
 import { AmasVersionDrawer } from '@/components/admin/AmasVersionDrawer';
 import { validateConfig, diffKnown } from './amas/schema';
 
@@ -273,6 +274,9 @@ export default function AmasConfigPage() {
           }}
           onCancel={() => setShowDirtyDrawerConfirm(false)}
         />
+
+        {/* m022:灰度发布卡 */}
+        <CanaryCard />
 
         <Show when={metrics()}>
           {(m) => {
