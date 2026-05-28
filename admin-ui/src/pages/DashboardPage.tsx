@@ -8,6 +8,8 @@ import { Skeleton } from '@/components/ui/Skeleton';
 import { WindowPicker } from '@/components/ui/WindowPicker';
 import { Panel } from '@/components/ui/Panel';
 import { MiniStat } from '@/components/ui/MiniStat';
+import { HeroCard } from '@/components/ui/HeroCard';
+import { Sparkline } from '@/components/ui/Sparkline';
 import { adminApi } from '@/api/admin';
 import { formatNumber, formatDuration, formatAccuracy, formatBytes } from '@/utils/formatters';
 
@@ -64,12 +66,30 @@ export default function DashboardPage() {
     };
   });
 
+  const healthEyebrow = createMemo(() => {
+    const h = health();
+    if (!h) return { text: '检查中…', variant: 'info' as const };
+    if (h.status === 'healthy') return { text: '运行正常', variant: 'success' as const };
+    if (h.status === 'degraded') return { text: '性能降级', variant: 'warning' as const };
+    return { text: '服务异常', variant: 'error' as const };
+  });
+
   return (
     <div class="space-y-6">
-      <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-2 border-b border-border-hairline">
-        <h1 class="text-title text-content">全局概览</h1>
-        <WindowPicker value={days()} onChange={setDays} />
-      </div>
+      {/* Hero — 全局健康状态 + 4 KPI count-up（来自 stats / eng / overview，sparkline 在 KPI 行另外展示） */}
+      <HeroCard
+        eyebrow={healthEyebrow().text}
+        eyebrowVariant={healthEyebrow().variant}
+        title="全局概览"
+        desc="今日学习产出、用户活跃、AMAS 健康状态一屏看完。窗口可切 7 / 14 / 30 天。"
+        cta={<WindowPicker value={days()} onChange={setDays} />}
+        meta={[
+          { value: stats()?.users ?? 0, label: '注册用户', format: formatNumber },
+          { value: eng()?.activeToday ?? 0, label: '今日活跃', format: formatNumber },
+          { value: overview()?.summary.recordCount ?? 0, label: `${days()}天答题`, format: formatNumber },
+          { value: overview()?.summary.accuracy != null ? formatAccuracy(overview()!.summary.accuracy) : '—', label: `${days()}天正确率` },
+        ]}
+      />
 
       {/* KPI 行 — 4 张卡 stagger 80ms 错开；动画放在内层渲染节点，避免 Skeleton/StatCard 切换时闪动 */}
       <div class="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-4 gap-4">

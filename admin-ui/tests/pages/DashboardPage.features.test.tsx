@@ -48,14 +48,15 @@ describe('DashboardPage — status & update banner', () => {
     primeBase();
     mockApi.getHealth.mockResolvedValue(mockHealth('degraded'));
     await renderPage();
-    await waitFor(() => expect(screen.getByText('性能降级')).toBeInTheDocument());
+    // PR redesign: 同时出现在 HeroCard eyebrow + 系统状态卡
+    await waitFor(() => expect(screen.getAllByText('性能降级').length).toBeGreaterThan(0));
   });
 
   it('shows down status visual', async () => {
     primeBase();
     mockApi.getHealth.mockResolvedValue(mockHealth('down'));
     await renderPage();
-    await waitFor(() => expect(screen.getByText('服务异常')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getAllByText('服务异常').length).toBeGreaterThan(0));
   });
 
   it('shows update banner when hasUpdate', async () => {
