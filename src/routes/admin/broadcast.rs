@@ -11,7 +11,49 @@ use crate::response::{ok, AppError};
 use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
-    Router::new().route("/", post(broadcast_message))
+    Router::new()
+        .route("/", post(broadcast_message))
+        // m027:受众预估命中端点 — 不持久化,纯查询,供 DevicesPage 广播 section 实时显示
+        .route("/preview", post(broadcast_preview))
+}
+
+/// m027:广播受众预估命中。POST 接 `BroadcastAudience`,返 `{matched, total}`。
+/// audience 为 None 时 matched = total(全员)。
+async fn broadcast_preview(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    JsonBody(req): JsonBody<PreviewRequest>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let (matched, total) = state
+        .run_store_task(
+            "admin.broadcast.preview",
+            move |store| -> Result<_, AppError> {
+                let total = store.count_users()? as i64;
+                let matched = if let Some(aud) = req.audience {
+                    match store.list_user_ids_for_audience(
+                        &aud.platforms,
+                        aud.version_min.as_deref(),
+                        aud.last_active_days,
+                        &aud.user_ids,
+                    )? {
+                        Some(ids) => ids.len() as i64,
+                        None => total,
+                    }
+                } else {
+                    total
+                };
+                Ok((matched, total))
+            },
+        )
+        .await??;
+    Ok(ok(serde_json::json!({ "matched": matched, "total": total })))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PreviewRequest {
+    #[serde(default)]
+    audience: Option<BroadcastAudience>,
 }
 
 // B63: System-wide broadcast

@@ -167,6 +167,15 @@ export const adminApi = {
       userIds?: string[];
     };
   }) => api.post<{ sent: number }>('/api/admin/broadcast', data, { useAdminToken: true }),
+  /** m027:广播受众预估命中(不持久化),供 DevicesPage 嵌入 broadcast section "X / N 用户" 显示 */
+  broadcastPreview: (data: {
+    audience?: {
+      platforms?: string[];
+      versionMin?: string | null;
+      lastActiveDays?: number | null;
+      userIds?: string[];
+    };
+  }) => api.post<{ matched: number; total: number }>('/api/admin/broadcast/preview', data, { useAdminToken: true }),
   getSettings: () => api.get<SystemSettings>('/api/admin/settings', undefined, { useAdminToken: true }),
   updateSettings: (data: Partial<SystemSettings>) => api.put<SystemSettings>('/api/admin/settings', data, { useAdminToken: true }),
   setMaintenance: (active: boolean) => api.post<{ active: boolean }>('/api/admin/settings/maintenance', { active }, { useAdminToken: true }),

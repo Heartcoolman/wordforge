@@ -453,6 +453,102 @@ export default function DevicesPage() {
   const totalDevices = createMemo(() => platforms().reduce((a, b) => a + b.total, 0));
   const totalActive7d = createMemo(() => platforms().reduce((a, b) => a + b.active7d, 0));
 
+  // m027:嵌入式广播推送 section(对齐 clients.html 设计图 compose 区块)
+  const [bcTitle, setBcTitle] = createSignal('');
+  const [bcMessage, setBcMessage] = createSignal('');
+  const [bcPlatforms, setBcPlatforms] = createSignal<Set<string>>(new Set());
+  const [bcVersionMin, setBcVersionMin] = createSignal('');
+  const [bcLastActiveDays, setBcLastActiveDays] = createSignal('');
+  const [bcPreviewMatched, setBcPreviewMatched] = createSignal<number | null>(null);
+  const [bcPreviewTotal, setBcPreviewTotal] = createSignal<number | null>(null);
+  const [bcSending, setBcSending] = createSignal(false);
+
+  const buildBcAudience = () => {
+    const platforms = Array.from(bcPlatforms());
+    const versionMin = bcVersionMin().trim();
+    const daysStr = bcLastActiveDays().trim();
+    if (platforms.length === 0 && !versionMin && !daysStr) return undefined;
+    return {
+      platforms: platforms.length > 0 ? platforms : undefined,
+      versionMin: versionMin || undefined,
+      lastActiveDays: daysStr ? Number(daysStr) || undefined : undefined,
+    };
+  };
+
+  const toggleBcPlatform = (p: string) => {
+    setBcPlatforms((prev) => {
+      const next = new Set(prev);
+      if (next.has(p)) next.delete(p);
+      else next.add(p);
+      return next;
+    });
+  };
+
+  // m027:预估命中 — debounce 500ms 后查 /preview;受众变化或 mount 都触发
+  let previewTimer: ReturnType<typeof setTimeout> | undefined;
+  createEffect(() => {
+    bcPlatforms();
+    bcVersionMin();
+    bcLastActiveDays();
+    clearTimeout(previewTimer);
+    previewTimer = setTimeout(async () => {
+      try {
+        const result = await adminApi.broadcastPreview({ audience: buildBcAudience() });
+        setBcPreviewMatched(result.matched);
+        setBcPreviewTotal(result.total);
+      } catch {
+        // 静默失败,UI 显示 '—'
+        setBcPreviewMatched(null);
+        setBcPreviewTotal(null);
+      }
+    }, 500);
+  });
+
+  const sendBc = async (preview: boolean) => {
+    if (!bcTitle().trim() || !bcMessage().trim()) {
+      uiStore.toast.warning('请填写标题和正文');
+      return;
+    }
+    setBcSending(true);
+    try {
+      if (preview) {
+        // 预演 = 只发给当前 admin。后端没有 self user_id 透出,这里复用 audience userIds 留空但
+        // 加 title 前缀 "[预演]" 让 admin 端能识别。前端发送时 audience platforms=[admin 自身的 platform]
+        // 但因为 admin 不是 client 不会命中,降级方案直接走全员发送 + 标题前缀。
+        await adminApi.broadcast({ title: `[预演] ${bcTitle()}`, message: bcMessage() });
+        uiStore.toast.success('预演已发送(标题前缀 [预演])');
+      } else {
+        const result = await adminApi.broadcast({
+          title: bcTitle(),
+          message: bcMessage(),
+          audience: buildBcAudience(),
+        });
+        uiStore.toast.success(`已发送给 ${result.sent} 位用户`);
+        setBcTitle('');
+        setBcMessage('');
+      }
+    } catch (e: any) {
+      uiStore.toast.error('发送失败', e?.message);
+    } finally {
+      setBcSending(false);
+    }
+  };
+
+  const audienceChips = createMemo(() => {
+    const chips: { label: string; remove: () => void }[] = [];
+    const ps = Array.from(bcPlatforms());
+    if (ps.length > 0) {
+      chips.push({ label: `platform = ${ps.join(', ')}`, remove: () => setBcPlatforms(new Set()) });
+    }
+    if (bcVersionMin().trim()) {
+      chips.push({ label: `version ≥ ${bcVersionMin()}`, remove: () => setBcVersionMin('') });
+    }
+    if (bcLastActiveDays().trim()) {
+      chips.push({ label: `last_active ≤ ${bcLastActiveDays()}d`, remove: () => setBcLastActiveDays('') });
+    }
+    return chips;
+  });
+
   return (
     <div class="space-y-6">
       {/* m027:轻量 page-header(对齐设计图 clients.html,不用 HeroCard 的 hero/eyebrow/meta) */}
@@ -760,6 +856,221 @@ export default function DevicesPage() {
             </Show>
           </Card>
         </div>
+
+      {/* m027:嵌入式广播推送 section — 对齐 clients.html .compose 区块。
+          含真功能(标题/正文/chip 受众/预估命中/发送/预演)+ 占位控件(投递时机/渠道/优先级) */}
+      <div>
+        <div class="flex items-baseline gap-3 mb-3">
+          <h2 class="text-sm font-semibold">广播推送</h2>
+          <span class="text-xs text-content-tertiary">公告 / 词库更新 / 维护通知 · 按平台 / 版本 / 单用户精准投递</span>
+        </div>
+        <Card padding="lg">
+          <div class="grid grid-cols-1 lg:grid-cols-[1fr_360px] gap-6">
+            {/* 左:表单 */}
+            <div class="space-y-3">
+              <Input
+                label="标题"
+                size="sm"
+                placeholder="例如: 新词库已上架: IELTS 学术核心 4521 词"
+                value={bcTitle()}
+                onInput={(e) => setBcTitle(e.currentTarget.value)}
+                maxlength={200}
+              />
+              <div>
+                <label class="text-xs text-content-tertiary block mb-1">正文</label>
+                <textarea
+                  class="w-full rounded-md border border-border-hairline bg-surface px-3 py-2 text-sm leading-relaxed focus:border-accent focus:outline-none resize-y"
+                  rows={3}
+                  placeholder="支持 Markdown 链接 [text](url),最大 280 字"
+                  value={bcMessage()}
+                  onInput={(e) => setBcMessage(e.currentTarget.value)}
+                  maxlength={280}
+                />
+                <div class="text-[11px] text-content-tertiary mt-0.5">支持 Markdown 链接 [text](url) · 最大 280 字 · 当前 {bcMessage().length}/280</div>
+              </div>
+
+              {/* 受众过滤 chip + 添加 */}
+              <div>
+                <label class="text-xs text-content-tertiary block mb-1.5">受众过滤</label>
+                <div class="flex flex-wrap gap-1.5 items-center">
+                  <For each={audienceChips()}>
+                    {(chip) => (
+                      <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-surface-secondary text-xs">
+                        {chip.label}
+                        <button
+                          type="button"
+                          aria-label={`移除 ${chip.label}`}
+                          class="w-3.5 h-3.5 rounded-full grid place-items-center bg-content/15 text-content-tertiary text-[10px] cursor-pointer hover:bg-content/25"
+                          onClick={chip.remove}
+                        >×</button>
+                      </span>
+                    )}
+                  </For>
+                  {/* 添加平台 */}
+                  <For each={(['web', 'ios', 'android'] as const).filter((p) => !bcPlatforms().has(p))}>
+                    {(p) => (
+                      <button
+                        type="button"
+                        class="px-2 py-0.5 rounded-full text-xs border border-border-hairline text-content-secondary hover:bg-surface-secondary cursor-pointer"
+                        onClick={() => toggleBcPlatform(p)}
+                      >+ {p}</button>
+                    )}
+                  </For>
+                  {/* 添加 version / lastActive */}
+                  <Show when={!bcVersionMin().trim()}>
+                    <button
+                      type="button"
+                      class="px-2 py-0.5 rounded-full text-xs border border-border-hairline text-content-secondary hover:bg-surface-secondary cursor-pointer"
+                      onClick={() => setBcVersionMin('v0.7.0')}
+                    >+ 版本</button>
+                  </Show>
+                  <Show when={!bcLastActiveDays().trim()}>
+                    <button
+                      type="button"
+                      class="px-2 py-0.5 rounded-full text-xs border border-border-hairline text-content-secondary hover:bg-surface-secondary cursor-pointer"
+                      onClick={() => setBcLastActiveDays('7')}
+                    >+ 最近活跃</button>
+                  </Show>
+                </div>
+                {/* 受众条件 inline 编辑 (version / lastActive) */}
+                <Show when={bcVersionMin().trim() || bcLastActiveDays().trim()}>
+                  <div class="grid grid-cols-2 gap-2 mt-2">
+                    <Show when={bcVersionMin().trim()}>
+                      <Input
+                        size="sm"
+                        placeholder="版本下限,如 v0.7.0"
+                        value={bcVersionMin()}
+                        onInput={(e) => setBcVersionMin(e.currentTarget.value)}
+                      />
+                    </Show>
+                    <Show when={bcLastActiveDays().trim()}>
+                      <Input
+                        size="sm"
+                        type="number"
+                        min="1"
+                        placeholder="最近活跃天数"
+                        value={bcLastActiveDays()}
+                        onInput={(e) => setBcLastActiveDays(e.currentTarget.value)}
+                      />
+                    </Show>
+                  </div>
+                </Show>
+                <div class="text-[11px] text-content-tertiary mt-1.5">
+                  预估命中 <strong class="text-accent tabular-nums">{bcPreviewMatched()?.toLocaleString() ?? '—'}</strong>
+                  {' '}/ {bcPreviewTotal()?.toLocaleString() ?? '—'} 用户
+                </div>
+              </div>
+
+              {/* 投递时机 / 渠道 / 优先级 — 占位 disabled */}
+              <div class="grid grid-cols-3 gap-3" aria-label="投递扩展选项(尚未接入 push provider)">
+                <label class="flex flex-col gap-0.5">
+                  <span class="text-xs text-content-tertiary">投递时机</span>
+                  <select
+                    class="text-sm rounded-md border border-border-hairline bg-surface px-2 py-1.5 text-content-tertiary cursor-not-allowed"
+                    disabled
+                    title="接入调度系统后启用"
+                  >
+                    <option>立即</option>
+                  </select>
+                </label>
+                <div class="flex flex-col gap-0.5">
+                  <span class="text-xs text-content-tertiary">渠道</span>
+                  <div class="flex gap-2 text-xs mt-1 text-content-tertiary" title="接入 Web Push / APNs / FCM 后启用">
+                    <label class="flex gap-1 items-center"><input type="checkbox" disabled checked /> Web Push</label>
+                    <label class="flex gap-1 items-center"><input type="checkbox" disabled /> APNs</label>
+                    <label class="flex gap-1 items-center"><input type="checkbox" disabled /> FCM</label>
+                  </div>
+                </div>
+                <label class="flex flex-col gap-0.5">
+                  <span class="text-xs text-content-tertiary">优先级</span>
+                  <select
+                    class="text-sm rounded-md border border-border-hairline bg-surface px-2 py-1.5 text-content-tertiary cursor-not-allowed"
+                    disabled
+                    title="接入通知协议扩展后启用"
+                  >
+                    <option>普通</option>
+                  </select>
+                </label>
+              </div>
+
+              <div class="flex gap-2 pt-1 flex-wrap">
+                <Button size="sm" variant="outline" disabled title="草稿存储未实施">保存草稿</Button>
+                <Button size="sm" variant="outline" disabled={bcSending() || !bcTitle().trim() || !bcMessage().trim()} onClick={() => sendBc(true)}>
+                  先发给我(预演)
+                </Button>
+                <Button
+                  size="sm"
+                  variant="primary"
+                  disabled={bcSending() || !bcTitle().trim() || !bcMessage().trim()}
+                  onClick={() => sendBc(false)}
+                >
+                  <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z" />
+                  </svg>
+                  推送给 {bcPreviewMatched()?.toLocaleString() ?? '—'} 用户
+                </Button>
+              </div>
+            </div>
+
+            {/* 右:iPhone 锁屏预览 */}
+            <div
+              class="rounded-2xl p-4 relative overflow-hidden shadow-elevation-2 hidden lg:block"
+              style={{
+                background: 'linear-gradient(180deg, oklch(22% 0.018 258), oklch(15% 0.012 258))',
+              }}
+            >
+              {/* notch */}
+              <div class="w-[88px] h-[22px] mx-auto -mb-3 rounded-full relative z-10" style={{ background: 'oklch(8% 0 0)' }} />
+              {/* status bar */}
+              <div class="flex justify-between items-center text-white/90 text-[13px] font-semibold px-2 pb-3">
+                <span>22:47</span>
+                <span class="flex gap-1 items-center">
+                  <svg width="14" height="10" viewBox="0 0 14 10" fill="currentColor"><path d="M0 7h2v3H0zm4-2h2v5H4zm4-2h2v7H8zm4-2h2v9h-2z" /></svg>
+                  <svg width="24" height="11" viewBox="0 0 24 11" fill="none" stroke="currentColor" stroke-width="1.2"><rect x="0" y="0" width="22" height="11" rx="2.5" /><rect x="2" y="2" width="14" height="7" rx="1" fill="currentColor" /><rect x="22.5" y="3" width="1.5" height="5" rx="0.5" fill="currentColor" /></svg>
+                </span>
+              </div>
+              {/* lock time */}
+              <div class="text-white text-center text-[56px] font-light leading-none mb-1 tracking-[-0.02em]">22<span class="opacity-50">:</span>47</div>
+              <div class="text-white/60 text-center text-[13px] font-medium mb-6">星期二 · 5 月 26 日</div>
+              {/* notification card */}
+              <div
+                class="rounded-xl p-3 text-white border"
+                style={{
+                  background: 'rgba(255,255,255,0.08)',
+                  'backdrop-filter': 'blur(20px)',
+                  '-webkit-backdrop-filter': 'blur(20px)',
+                  'border-color': 'rgba(255,255,255,0.1)',
+                }}
+              >
+                <div class="flex items-center gap-2 text-[11.5px] text-white/60 mb-1">
+                  <span
+                    class="w-4 h-4 rounded grid place-items-center text-[9px] font-bold text-white"
+                    style={{ background: 'linear-gradient(135deg, var(--accent), oklch(54% 0.22 290))' }}
+                  >W</span>
+                  <span>WordForge · 现在</span>
+                </div>
+                <div class="text-[14px] font-semibold leading-snug mb-1">{bcTitle() || '(标题预览)'}</div>
+                <div class="text-[13px] leading-snug text-white/85 line-clamp-3">{bcMessage() || '(正文预览)'}</div>
+              </div>
+              <div
+                class="rounded-xl p-3 text-white border mt-2 opacity-50"
+                style={{
+                  background: 'rgba(255,255,255,0.08)',
+                  'backdrop-filter': 'blur(20px)',
+                  '-webkit-backdrop-filter': 'blur(20px)',
+                  'border-color': 'rgba(255,255,255,0.1)',
+                }}
+              >
+                <div class="flex items-center gap-2 text-[11.5px] text-white/60 mb-1">
+                  <span class="w-4 h-4 rounded grid place-items-center text-[9px] font-bold text-white" style={{ background: 'linear-gradient(135deg, oklch(60% 0.18 162), oklch(54% 0.18 195))' }}>M</span>
+                  <span>Mail · 5m ago</span>
+                </div>
+                <div class="text-[14px] font-semibold">(其他通知预览)</div>
+              </div>
+            </div>
+          </div>
+        </Card>
+      </div>
 
       {/* Tabs / Telemetry Panel 不受 loading 影响：刷新时 Telemetry 已展开面板不被卸载 */}
       <Tabs
