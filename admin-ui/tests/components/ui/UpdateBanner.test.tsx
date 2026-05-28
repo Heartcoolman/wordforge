@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent } from '@solidjs/testing-library';
 import { UpdateBanner } from '@/components/ui/UpdateBanner';
-import { setUpdateInfo } from '@/api/client';
+import { setUpdateInfo } from '@/api/http';
 
 describe('UpdateBanner', () => {
   beforeEach(() => setUpdateInfo(null));

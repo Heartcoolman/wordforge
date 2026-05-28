@@ -41,7 +41,7 @@ import {
   setUpdateInfo,
   connectSseStream,
   connectAmasStateStream,
-} from '@/api/client';
+} from '@/api/http';
 import { tokenManager } from '@/lib/token';
 
 const tm = tokenManager as unknown as typeof tokenManager & {

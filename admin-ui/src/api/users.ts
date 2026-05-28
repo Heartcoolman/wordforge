@@ -1,4 +1,4 @@
-import { api } from './client';
+import { api } from './http';
 import type { User, UserStats, ChangePasswordRequest } from '@/types/user';
 
 export const usersApi = {

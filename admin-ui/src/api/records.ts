@@ -1,4 +1,4 @@
-import { api } from './client';
+import { api } from './http';
 import type { LearningRecord, CreateRecordRequest, RecordResponse, RecordStatistics, EnhancedStatistics } from '@/types/record';
 import type { PaginatedResponse } from '@/types/api';
 

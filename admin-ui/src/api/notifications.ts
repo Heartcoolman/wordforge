@@ -1,4 +1,4 @@
-import { api } from './client';
+import { api } from './http';
 import type { Notification, Badge } from '@/types/notification';
 import type { UserPreferences } from '@/types/user';
 

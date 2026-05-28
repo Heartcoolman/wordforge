@@ -1,5 +1,5 @@
 import { Show, createSignal, onCleanup, onMount } from 'solid-js';
-import { api } from '@/api/client';
+import { api } from '@/api/http';
 
 /**
  * Admin 后台顶部时钟漂移告警条。

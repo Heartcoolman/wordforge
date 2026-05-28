@@ -33,7 +33,7 @@ vi.mock('@/api/admin', () => ({
 
 // 关键：mock api/client 使 maintenanceActive 返回 true，同时 isAdminPath 在
 // 非 admin 路径下 false → MaintenanceProvider 的 Show fallback={<MaintenancePage />} 求值。
-vi.mock('@/api/client', () => ({
+vi.mock('@/api/http', () => ({
   api: { get: vi.fn().mockResolvedValue({ maintenanceMode: true, version: 'v1' }) },
   // 让 maintenanceActive 始终为 true：admin path 测试时触发 isAdminPath() 求值
   maintenanceActive: () => true,
@@ -48,19 +48,19 @@ vi.mock('@/pages/MaintenancePage', () => ({ default: () => <div data-testid="mai
 // 其余 lazy 目标按需 mock —— 在 maintenance fallback 路径下，admin login lazy 不会渲染
 vi.mock('@/pages/NotFoundPage', () => ({ default: () => <div>NF</div> }));
 vi.mock('@/pages/LegacyUserFrontendPage', () => ({ default: () => <div>L</div> }));
-vi.mock('@/pages/admin/AdminLoginPage', () => ({ default: () => <div>AL</div> }));
-vi.mock('@/pages/admin/AdminSetupPage', () => ({ default: () => <div>AS</div> }));
-vi.mock('@/pages/admin/AdminDashboard', () => ({ default: () => <div>AD</div> }));
-vi.mock('@/pages/admin/UserManagementPage', () => ({ default: () => <div>UM</div> }));
-vi.mock('@/pages/admin/AmasConfigPage', () => ({ default: () => <div>AC</div> }));
-vi.mock('@/pages/admin/AmasMetricsPage', () => ({ default: () => <div>AM</div> }));
-vi.mock('@/pages/admin/AmasAdvisorPage', () => ({ default: () => <div>AA</div> }));
-vi.mock('@/pages/admin/MonitoringPage', () => ({ default: () => <div>M</div> }));
-vi.mock('@/pages/admin/AnalyticsPage', () => ({ default: () => <div>An</div> }));
-vi.mock('@/pages/admin/SettingsPage', () => ({ default: () => <div>S</div> }));
-vi.mock('@/pages/admin/UpdatesPage', () => ({ default: () => <div>U</div> }));
-vi.mock('@/pages/admin/ClientsPage', () => ({ default: () => <div>C</div> }));
-vi.mock('@/pages/admin/AdminWordbookCenterPage', () => ({ default: () => <div>WB</div> }));
+vi.mock('@/pages/LoginPage', () => ({ default: () => <div>AL</div> }));
+vi.mock('@/pages/SetupPage', () => ({ default: () => <div>AS</div> }));
+vi.mock('@/pages/DashboardPage', () => ({ default: () => <div>AD</div> }));
+vi.mock('@/pages/UserManagementPage', () => ({ default: () => <div>UM</div> }));
+vi.mock('@/pages/AmasConfigPage', () => ({ default: () => <div>AC</div> }));
+vi.mock('@/pages/AmasMetricsPage', () => ({ default: () => <div>AM</div> }));
+vi.mock('@/pages/AmasAdvisorPage', () => ({ default: () => <div>AA</div> }));
+vi.mock('@/pages/MonitoringPage', () => ({ default: () => <div>M</div> }));
+vi.mock('@/pages/AnalyticsPage', () => ({ default: () => <div>An</div> }));
+vi.mock('@/pages/SettingsPage', () => ({ default: () => <div>S</div> }));
+vi.mock('@/pages/UpdatesPage', () => ({ default: () => <div>U</div> }));
+vi.mock('@/pages/DevicesPage', () => ({ default: () => <div>C</div> }));
+vi.mock('@/pages/WordbookCenterPage', () => ({ default: () => <div>WB</div> }));
 
 import App from '@/App';
 

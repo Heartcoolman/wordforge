@@ -1,4 +1,4 @@
-import { api } from './client';
+import { api } from './http';
 import type { AmasMetrics } from '@/types/amas';
 
 export interface PublicHealthStatus {

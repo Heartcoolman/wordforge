@@ -276,8 +276,8 @@ describe('amasApi', () => {
     // 通过 mock client 的 connectAmasStateStream 来隔离 SSE 真实连接
     const dispose = vi.fn();
     const connect = vi.fn(() => dispose);
-    vi.doMock('@/api/client', async (importOriginal) => {
-      const actual = await importOriginal<typeof import('@/api/client')>();
+    vi.doMock('@/api/http', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('@/api/http')>();
       return { ...actual, connectAmasStateStream: connect };
     });
     vi.resetModules();
@@ -286,7 +286,7 @@ describe('amasApi', () => {
     const ret = freshApi.subscribeStateEvents(cb);
     expect(connect).toHaveBeenCalledWith(cb);
     expect(ret).toBe(dispose);
-    vi.doUnmock('@/api/client');
+    vi.doUnmock('@/api/http');
     vi.resetModules();
   });
 });

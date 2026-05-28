@@ -5,7 +5,7 @@ import { AppErrorBoundary } from '@/components/ErrorBoundary';
 import { AdminLayout } from '@/components/layout/AdminLayout';
 import { AdminProtectedRoute } from '@/components/auth/ProtectedRoute';
 import { Spinner } from '@/components/ui/Spinner';
-import { api, maintenanceActive, setMaintenanceActive, setUpdateInfo } from '@/api/client';
+import { api, maintenanceActive, setMaintenanceActive, setUpdateInfo } from '@/api/http';
 import MaintenancePage from '@/pages/MaintenancePage';
 import { UpdateBanner } from '@/components/ui/UpdateBanner';
 import { startProbeBridge, stopProbeBridge } from '@/workers/probe/api-bridge';
@@ -17,21 +17,21 @@ installRingBuffers();
 const NotFoundPage = lazy(() => import('@/pages/NotFoundPage'));
 const LegacyUserFrontendPage = lazy(() => import('@/pages/LegacyUserFrontendPage'));
 
-const AdminLoginPage = lazy(() => import('@/pages/admin/AdminLoginPage'));
-const AdminSetupPage = lazy(() => import('@/pages/admin/AdminSetupPage'));
-const AdminDashboard = lazy(() => import('@/pages/admin/AdminDashboard'));
-const UserManagementPage = lazy(() => import('@/pages/admin/UserManagementPage'));
-const AmasConfigPage = lazy(() => import('@/pages/admin/AmasConfigPage'));
-const AmasMetricsPage = lazy(() => import('@/pages/admin/AmasMetricsPage'));
-const AmasAdvisorPage = lazy(() => import('@/pages/admin/AmasAdvisorPage'));
-const MonitoringPage = lazy(() => import('@/pages/admin/MonitoringPage'));
-const AnalyticsPage = lazy(() => import('@/pages/admin/AnalyticsPage'));
-const SettingsPage = lazy(() => import('@/pages/admin/SettingsPage'));
-const UpdatesPage = lazy(() => import('@/pages/admin/UpdatesPage'));
-const AdminWordbookCenterPage = lazy(() => import('@/pages/admin/AdminWordbookCenterPage'));
-const ClientsPage = lazy(() => import('@/pages/admin/ClientsPage'));
-const FeedbackPage = lazy(() => import('@/pages/admin/FeedbackPage'));
-const ProbePage = lazy(() => import('@/pages/admin/ProbePage'));
+const LoginPage = lazy(() => import('@/pages/LoginPage'));
+const SetupPage = lazy(() => import('@/pages/SetupPage'));
+const DashboardPage = lazy(() => import('@/pages/DashboardPage'));
+const UserManagementPage = lazy(() => import('@/pages/UserManagementPage'));
+const AmasConfigPage = lazy(() => import('@/pages/AmasConfigPage'));
+const AmasMetricsPage = lazy(() => import('@/pages/AmasMetricsPage'));
+const AmasAdvisorPage = lazy(() => import('@/pages/AmasAdvisorPage'));
+const MonitoringPage = lazy(() => import('@/pages/MonitoringPage'));
+const AnalyticsPage = lazy(() => import('@/pages/AnalyticsPage'));
+const SettingsPage = lazy(() => import('@/pages/SettingsPage'));
+const UpdatesPage = lazy(() => import('@/pages/UpdatesPage'));
+const WordbookCenterPage = lazy(() => import('@/pages/WordbookCenterPage'));
+const DevicesPage = lazy(() => import('@/pages/DevicesPage'));
+const FeedbackPage = lazy(() => import('@/pages/FeedbackPage'));
+const ProbePage = lazy(() => import('@/pages/ProbePage'));
 
 function PageSpinner() {
   return (
@@ -104,12 +104,12 @@ export default function App() {
         <Route path="/profile" component={() => (<Suspense fallback={<PageSpinner />}><LegacyUserFrontendPage /></Suspense>)} />
         <Route path="/notifications" component={() => (<Suspense fallback={<PageSpinner />}><LegacyUserFrontendPage /></Suspense>)} />
         <Route path="/admin">
-          <Route path="/login" component={() => (<Suspense fallback={<PageSpinner />}><AdminLoginPage /></Suspense>)} />
-          <Route path="/setup" component={() => (<Suspense fallback={<PageSpinner />}><AdminSetupPage /></Suspense>)} />
+          <Route path="/login" component={() => (<Suspense fallback={<PageSpinner />}><LoginPage /></Suspense>)} />
+          <Route path="/setup" component={() => (<Suspense fallback={<PageSpinner />}><SetupPage /></Suspense>)} />
           <Route path="/" component={AdminLayout}>
-            <Route path="/" component={() => (<AdminProtectedRoute><Suspense fallback={<PageSpinner />}><AdminDashboard /></Suspense></AdminProtectedRoute>)} />
+            <Route path="/" component={() => (<AdminProtectedRoute><Suspense fallback={<PageSpinner />}><DashboardPage /></Suspense></AdminProtectedRoute>)} />
             <Route path="/users" component={() => (<AdminProtectedRoute><Suspense fallback={<PageSpinner />}><UserManagementPage /></Suspense></AdminProtectedRoute>)} />
-            <Route path="/clients" component={() => (<AdminProtectedRoute><Suspense fallback={<PageSpinner />}><ClientsPage /></Suspense></AdminProtectedRoute>)} />
+            <Route path="/clients" component={() => (<AdminProtectedRoute><Suspense fallback={<PageSpinner />}><DevicesPage /></Suspense></AdminProtectedRoute>)} />
             <Route path="/amas-config" component={() => (<AdminProtectedRoute><Suspense fallback={<PageSpinner />}><AmasConfigPage /></Suspense></AdminProtectedRoute>)} />
             <Route path="/amas-metrics" component={() => (<AdminProtectedRoute><Suspense fallback={<PageSpinner />}><AmasMetricsPage /></Suspense></AdminProtectedRoute>)} />
             <Route path="/amas-advisor" component={() => (<AdminProtectedRoute><Suspense fallback={<PageSpinner />}><AmasAdvisorPage /></Suspense></AdminProtectedRoute>)} />
@@ -117,7 +117,7 @@ export default function App() {
             <Route path="/analytics" component={() => (<AdminProtectedRoute><Suspense fallback={<PageSpinner />}><AnalyticsPage /></Suspense></AdminProtectedRoute>)} />
             <Route path="/settings" component={() => (<AdminProtectedRoute><Suspense fallback={<PageSpinner />}><SettingsPage /></Suspense></AdminProtectedRoute>)} />
             <Route path="/updates" component={() => (<AdminProtectedRoute><Suspense fallback={<PageSpinner />}><UpdatesPage /></Suspense></AdminProtectedRoute>)} />
-            <Route path="/wordbook-center" component={() => (<AdminProtectedRoute><Suspense fallback={<PageSpinner />}><AdminWordbookCenterPage /></Suspense></AdminProtectedRoute>)} />
+            <Route path="/wordbook-center" component={() => (<AdminProtectedRoute><Suspense fallback={<PageSpinner />}><WordbookCenterPage /></Suspense></AdminProtectedRoute>)} />
             <Route path="/feedback" component={() => (<AdminProtectedRoute><Suspense fallback={<PageSpinner />}><FeedbackPage /></Suspense></AdminProtectedRoute>)} />
             <Route path="/probe" component={() => (<AdminProtectedRoute><Suspense fallback={<PageSpinner />}><ProbePage /></Suspense></AdminProtectedRoute>)} />
           </Route>

@@ -5,8 +5,8 @@ import { Spinner } from '@/components/ui/Spinner';
 import { Empty } from '@/components/ui/Empty';
 import { adminApi, type AmasConfigVersionRow, type AmasConfigVersionSource } from '@/api/admin';
 import { uiStore } from '@/stores/ui';
-import { diffKnown } from '@/pages/admin/amas/schema';
-import { formatVal } from '@/pages/admin/amas/PresetSelector';
+import { diffKnown } from '@/pages/amas/schema';
+import { formatVal } from '@/pages/amas/PresetSelector';
 
 interface AmasVersionDrawerProps {
   open: boolean;

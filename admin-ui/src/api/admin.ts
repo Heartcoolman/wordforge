@@ -1,4 +1,4 @@
-import { api } from './client';
+import { api } from './http';
 import type {
   AdminAuthResponse, AdminStats,
   AdminUsersPage, AdminUsersQuery,

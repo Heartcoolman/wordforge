@@ -9,7 +9,7 @@ const mocks = vi.hoisted(() => ({
   collectDeviceFingerprint: vi.fn(),
 }));
 
-vi.mock('@/api/client', () => ({
+vi.mock('@/api/http', () => ({
   api: {
     post: mocks.post,
   },

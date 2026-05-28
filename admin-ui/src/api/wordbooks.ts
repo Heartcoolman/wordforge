@@ -1,4 +1,4 @@
-import { api } from './client';
+import { api } from './http';
 import type { Wordbook, CreateWordbookRequest } from '@/types/wordbook';
 import type { Word } from '@/types/word';
 import type { PaginatedResponse } from '@/types/api';

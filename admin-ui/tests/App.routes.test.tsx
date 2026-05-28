@@ -5,19 +5,19 @@ import { render, waitFor, cleanup } from '@solidjs/testing-library';
 // 关键是覆盖 App.tsx 内所有 lazy(() => import('@/pages/...')) 工厂
 vi.mock('@/pages/NotFoundPage', () => ({ default: () => <div>NotFound</div> }));
 vi.mock('@/pages/LegacyUserFrontendPage', () => ({ default: () => <div>Legacy</div> }));
-vi.mock('@/pages/admin/AdminLoginPage', () => ({ default: () => <div>AdminLogin</div> }));
-vi.mock('@/pages/admin/AdminSetupPage', () => ({ default: () => <div>AdminSetup</div> }));
-vi.mock('@/pages/admin/AdminDashboard', () => ({ default: () => <div>AdminDashboard</div> }));
-vi.mock('@/pages/admin/UserManagementPage', () => ({ default: () => <div>UserMgmt</div> }));
-vi.mock('@/pages/admin/AmasConfigPage', () => ({ default: () => <div>AmasConfig</div> }));
-vi.mock('@/pages/admin/AmasMetricsPage', () => ({ default: () => <div>AmasMetrics</div> }));
-vi.mock('@/pages/admin/AmasAdvisorPage', () => ({ default: () => <div>AmasAdvisor</div> }));
-vi.mock('@/pages/admin/MonitoringPage', () => ({ default: () => <div>Monitoring</div> }));
-vi.mock('@/pages/admin/AnalyticsPage', () => ({ default: () => <div>Analytics</div> }));
-vi.mock('@/pages/admin/SettingsPage', () => ({ default: () => <div>Settings</div> }));
-vi.mock('@/pages/admin/UpdatesPage', () => ({ default: () => <div>Updates</div> }));
-vi.mock('@/pages/admin/ClientsPage', () => ({ default: () => <div>Clients</div> }));
-vi.mock('@/pages/admin/AdminWordbookCenterPage', () => ({ default: () => <div>AdminWB</div> }));
+vi.mock('@/pages/LoginPage', () => ({ default: () => <div>AdminLogin</div> }));
+vi.mock('@/pages/SetupPage', () => ({ default: () => <div>AdminSetup</div> }));
+vi.mock('@/pages/DashboardPage', () => ({ default: () => <div>DashboardPage</div> }));
+vi.mock('@/pages/UserManagementPage', () => ({ default: () => <div>UserMgmt</div> }));
+vi.mock('@/pages/AmasConfigPage', () => ({ default: () => <div>AmasConfig</div> }));
+vi.mock('@/pages/AmasMetricsPage', () => ({ default: () => <div>AmasMetrics</div> }));
+vi.mock('@/pages/AmasAdvisorPage', () => ({ default: () => <div>AmasAdvisor</div> }));
+vi.mock('@/pages/MonitoringPage', () => ({ default: () => <div>Monitoring</div> }));
+vi.mock('@/pages/AnalyticsPage', () => ({ default: () => <div>Analytics</div> }));
+vi.mock('@/pages/SettingsPage', () => ({ default: () => <div>Settings</div> }));
+vi.mock('@/pages/UpdatesPage', () => ({ default: () => <div>Updates</div> }));
+vi.mock('@/pages/DevicesPage', () => ({ default: () => <div>Clients</div> }));
+vi.mock('@/pages/WordbookCenterPage', () => ({ default: () => <div>AdminWB</div> }));
 
 // AdminProtectedRoute 放行：直接渲染 children，避免 token / 权限校验阻断 lazy 工厂
 vi.mock('@/components/auth/ProtectedRoute', () => ({
@@ -51,7 +51,7 @@ vi.mock('@/lib/token', () => ({
 vi.mock('@/api/admin', () => ({
   adminApi: { verifyToken: vi.fn().mockResolvedValue({ id: 'a', email: 'a@b.c' }) },
 }));
-vi.mock('@/api/client', () => ({
+vi.mock('@/api/http', () => ({
   api: { get: vi.fn().mockResolvedValue({ maintenanceMode: false, version: 'v1' }) },
   maintenanceActive: () => false,
   updateInfo: () => null,
@@ -83,7 +83,7 @@ const ROUTES: Array<[string, string]> = [
   ['/notifications', 'Legacy'],
   ['/admin/login', 'AdminLogin'],
   ['/admin/setup', 'AdminSetup'],
-  ['/admin', 'AdminDashboard'],
+  ['/admin', 'DashboardPage'],
   ['/admin/users', 'UserMgmt'],
   ['/admin/clients', 'Clients'],
   ['/admin/amas-config', 'AmasConfig'],

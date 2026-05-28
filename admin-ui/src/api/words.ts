@@ -1,4 +1,4 @@
-import { api } from './client';
+import { api } from './http';
 import type { Word, CreateWordRequest, BatchCreateResponse, ImportUrlResponse } from '@/types/word';
 import type { PaginatedResponse } from '@/types/api';
 

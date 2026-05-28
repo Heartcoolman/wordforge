@@ -1,5 +1,5 @@
 import { Show } from 'solid-js';
-import { updateInfo, setUpdateInfo } from '@/api/client';
+import { updateInfo, setUpdateInfo } from '@/api/http';
 
 export function UpdateBanner() {
   return (

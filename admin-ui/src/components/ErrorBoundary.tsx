@@ -1,7 +1,7 @@
 import { ErrorBoundary as SolidErrorBoundary, type ParentProps } from 'solid-js';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
-import { buildUrl } from '@/api/client';
+import { buildUrl } from '@/api/http';
 import { captureException, isSentryEnabled } from '@/lib/sentry';
 
 // 已记录过的 err 引用，避免 fallback 重渲染时重复打 console.error；

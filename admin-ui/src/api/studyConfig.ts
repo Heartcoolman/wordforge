@@ -1,4 +1,4 @@
-import { api } from './client';
+import { api } from './http';
 import type { StudyConfig, UpdateStudyConfigRequest, StudyProgress } from '@/types/studyConfig';
 import type { Word } from '@/types/word';
 

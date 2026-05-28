@@ -1,4 +1,4 @@
-import { api, connectAmasStateStream } from './client';
+import { api, connectAmasStateStream } from './http';
 import type {
   AmasStateStreamEvent,
   AmasUserState,

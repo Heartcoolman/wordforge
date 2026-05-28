@@ -4,7 +4,7 @@
  * 与 `src/routes/admin/probe.rs` + `src/routes/probe_results.rs` 对齐。
  */
 
-import { api, buildUrl } from '@/api/client';
+import { api, buildUrl } from '@/api/http';
 import { tokenManager } from '@/lib/token';
 
 export interface DispatchRequest {

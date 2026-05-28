@@ -1,4 +1,4 @@
-import { api } from './client';
+import { api } from './http';
 import type { WordLearningState, WordStateOverview, BatchUpdateRequest } from '@/types/wordState';
 import { WORD_STATES_DUE_DEFAULT_LIMIT } from '@/lib/constants';
 

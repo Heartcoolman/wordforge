@@ -11,7 +11,7 @@
  *   7. `POST /api/probe/results` 回传。
  */
 
-import { api, connectSseStream } from '@/api/client';
+import { api, connectSseStream } from '@/api/http';
 import { collectCtxSnapshot } from './ctx-factory';
 import {
   CLIENT_CTX_VERSION,

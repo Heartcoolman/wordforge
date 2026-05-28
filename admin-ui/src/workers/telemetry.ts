@@ -1,4 +1,4 @@
-import { api, connectSseStream } from '@/api/client';
+import { api, connectSseStream } from '@/api/http';
 import { collectDeviceFingerprint, getDeviceId } from '@/lib/device';
 import { tokenManager } from '@/lib/token';
 

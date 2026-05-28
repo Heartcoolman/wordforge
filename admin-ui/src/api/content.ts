@@ -1,4 +1,4 @@
-import { api } from './client';
+import { api } from './http';
 import type { Etymology, Morpheme, WordContexts, SemanticSearchResult, ConfusionPairsResult } from '@/types/content';
 import { SEMANTIC_SEARCH_DEFAULT_LIMIT } from '@/lib/constants';
 
