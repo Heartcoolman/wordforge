@@ -619,13 +619,18 @@ pub(crate) async fn approve_one(
         return Err(AppError::bad_request("BAD_STATUS", "仅 pending 建议可被批准"));
     }
 
-    // 校验 patch（防止数据库篡改）
+    // 校验 patch（防止数据库篡改）—— 白名单从 store 读
     let patch_obj = suggestion
         .patch_json
         .as_object()
         .ok_or_else(|| AppError::internal("patch_json 非对象"))?
         .clone();
-    let errs = validate_patch(&patch_obj);
+    let patch_for_validate = patch_obj.clone();
+    let errs = state
+        .run_store_task("admin.amas.approve_validate", move |store| {
+            Ok::<_, crate::store::StoreError>(validate_patch(&store, &patch_for_validate))
+        })
+        .await??;
     if !errs.is_empty() {
         return Err(AppError::bad_request("PATCH_INVALID", &errs.join("；")));
     }

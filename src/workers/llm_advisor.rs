@@ -27,13 +27,22 @@ const SYSTEM_PROMPT: &str = r#"你是 AMAS（自适应记忆与算法系统）�
 白名单字段（含安全区间，越界会被拒绝）：
 "#;
 
-fn build_system_prompt() -> String {
+fn build_system_prompt(store: &Store) -> String {
     let mut s = String::from(SYSTEM_PROMPT);
-    for entry in TIER_A_WHITELIST {
-        s.push_str(&format!(
-            "- {} ∈ [{}, {}]\n",
-            entry.path, entry.min_safe, entry.max_safe
-        ));
+    match store.list_tuning_whitelist() {
+        Ok(rows) if !rows.is_empty() => {
+            for r in &rows {
+                s.push_str(&format!("- {} ∈ [{}, {}]\n", r.path, r.min_safe, r.max_safe));
+            }
+        }
+        _ => {
+            for entry in TIER_A_WHITELIST {
+                s.push_str(&format!(
+                    "- {} ∈ [{}, {}]\n",
+                    entry.path, entry.min_safe, entry.max_safe
+                ));
+            }
+        }
     }
     s.push_str("\n要求：patch 至多包含 3 个参数；优先调整与 evidence 关联最强的字段；不确定时输出 {\"patch\":{}}。");
     s
@@ -100,7 +109,7 @@ pub async fn run(
     let provider = LlmProvider::new(llm_cfg);
     let req = ChatRequest {
         messages: vec![
-            ChatMessage { role: "system".into(), content: build_system_prompt() },
+            ChatMessage { role: "system".into(), content: build_system_prompt(store) },
             ChatMessage {
                 role: "user".into(),
                 content: format!(
@@ -152,7 +161,7 @@ pub async fn run(
         return;
     }
 
-    let validation_errors = validate_patch(&patch_obj);
+    let validation_errors = validate_patch(store, &patch_obj);
     if !validation_errors.is_empty() {
         tracing::warn!(
             errors = ?validation_errors,
