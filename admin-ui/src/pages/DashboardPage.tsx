@@ -1,18 +1,21 @@
-import { createMemo, createResource, For, Show } from 'solid-js';
+import { createMemo, createResource, For, Show, type JSX } from 'solid-js';
 import { useSearchParams } from '@solidjs/router';
 import { Card } from '@/components/ui/Card';
 import { Empty } from '@/components/ui/Empty';
-import { StatCard } from '@/components/ui/StatCard';
+import { Button } from '@/components/ui/Button';
+import { Sparkline } from '@/components/ui/Sparkline';
 import { EChart } from '@/components/ui/EChart';
 import { Skeleton } from '@/components/ui/Skeleton';
 import { WindowPicker } from '@/components/ui/WindowPicker';
 import { Panel } from '@/components/ui/Panel';
 import { MiniStat } from '@/components/ui/MiniStat';
-import { HeroCard } from '@/components/ui/HeroCard';
 import { WorkerGridCell, type WorkerOutcome } from '@/components/ui/WorkerGridCell';
 import { adminApi } from '@/api/admin';
 import { amasApi } from '@/api/amas';
-import { formatNumber, formatDuration, formatAccuracy, formatBytes } from '@/utils/formatters';
+import { uiStore } from '@/stores/ui';
+import { useCountUp } from '@/lib/motion';
+import { formatNumber, formatDuration, formatBytes } from '@/utils/formatters';
+import type { TrendField } from '@/types/admin';
 
 const DAYS_ALLOWED = [7, 14, 30] as const;
 const cssVar = (name: string, fallback: string) =>
@@ -51,26 +54,86 @@ export default function DashboardPage() {
   const [stats, { refetch: refetchStats }] = createResource(() => adminApi.getStats());
   const [eng, { refetch: refetchEng }] = createResource(() => adminApi.getEngagement());
   const [overview, { refetch: refetchOverview }] = createResource(days, (d) => adminApi.getStudyOverview(d));
-  const [dau] = createResource(days, (d) => adminApi.getDailyActiveUsers(d));
-  const [records] = createResource(days, (d) => adminApi.getDailyRecords(d));
-  const [health] = createResource(() => adminApi.getHealth());
+  const [dau, { refetch: refetchDau }] = createResource(days, (d) => adminApi.getDailyActiveUsers(d));
+  const [records, { refetch: refetchRecords }] = createResource(days, (d) => adminApi.getDailyRecords(d));
+  const [health, { refetch: refetchHealth }] = createResource(() => adminApi.getHealth());
   const [updateInfo] = createResource(() => adminApi.checkUpdate());
-  const [monitoring] = createResource(() => amasApi.getMonitoring(20).catch(() => []));
+  const [monitoring, { refetch: refetchMonitoring }] = createResource(() =>
+    amasApi.getMonitoring(20).catch(() => []),
+  );
 
   // m023:新增 4 块资源 —— 算法分布 / 时段热图 / Worker 网格 / LLM 待审
-  const [algoSeries] = createResource(days, (d) =>
+  const [algoSeries, { refetch: refetchAlgo }] = createResource(days, (d) =>
     adminApi.amasMetricsTimeseries(d).catch(() => [] as Awaited<ReturnType<typeof adminApi.amasMetricsTimeseries>>),
   );
-  const [hourly] = createResource(days, (d) => adminApi.analyticsHourly(d).catch(() => null));
-  const [workersResp] = createResource(() => adminApi.monitoringWorkers().catch(() => ({ workers: [] })));
+  const [hourly, { refetch: refetchHourly }] = createResource(days, (d) =>
+    adminApi.analyticsHourly(d).catch(() => null),
+  );
+  const [workersResp, { refetch: refetchWorkers }] = createResource(() =>
+    adminApi.monitoringWorkers().catch(() => ({ workers: [] })),
+  );
   const workers = () => workersResp()?.workers ?? [];
-  const [suggestions] = createResource(() =>
+  const [suggestions, { refetch: refetchSuggestions }] = createResource(() =>
     adminApi.amasListSuggestions('pending', 50).catch(() => []),
   );
   // 待处理事项里需要"未处理反馈"计数。perPage=1 拿 total 即可,省带宽。
-  const [openFeedback] = createResource(() =>
+  const [openFeedback, { refetch: refetchFeedback }] = createResource(() =>
     adminApi.listFeedback({ status: 'open', perPage: 1 }).catch(() => null),
   );
+
+  // m023:刷新按钮 —— 触发所有 resource 重新拉取。注意 days() 变化时 days-依赖资源自动重拉,
+  // 这里手动 refetch 是给那些非 days 依赖资源(stats/eng/health/etc.)用的。
+  function refreshAll() {
+    refetchStats();
+    refetchEng();
+    refetchOverview();
+    refetchDau();
+    refetchRecords();
+    refetchHealth();
+    refetchMonitoring();
+    refetchAlgo();
+    refetchHourly();
+    refetchWorkers();
+    refetchSuggestions();
+    refetchFeedback();
+    uiStore.toast.info('已刷新所有数据');
+  }
+
+  // m023:导出按钮 —— 把 dau + records 当前窗口的逐日序列拼 CSV 下载。
+  // 没数据时也下个空表头,告知用户操作触发但本期无数据。
+  function exportCsv() {
+    const header = ['date', 'registered', 'active', 'records', 'correct', 'accuracy_pct', 'duration_secs', 'new_words'];
+    const d = dau() ?? [];
+    const r = records() ?? [];
+    const max = Math.max(d.length, r.length);
+    const rows: string[] = [header.join(',')];
+    for (let i = 0; i < max; i += 1) {
+      const di = d[i];
+      const ri = r[i];
+      const date = di?.date ?? ri?.date ?? '';
+      const acc = ri && ri.total > 0 ? ((ri.correct / ri.total) * 100).toFixed(1) : '';
+      rows.push([
+        date,
+        di?.registered ?? '',
+        di?.count ?? '',
+        ri?.total ?? '',
+        ri?.correct ?? '',
+        acc,
+        ri?.durationSecs ?? '',
+        ri?.newWords ?? '',
+      ].join(','));
+    }
+    const blob = new Blob([rows.join('\n')], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `dashboard-${days()}d-${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    uiStore.toast.success(`已导出 ${max} 行 CSV`);
+  }
 
   // sparkline 序列
   const registeredSpark = createMemo(() => dau()?.map((d) => d.registered) ?? []);
@@ -131,14 +194,6 @@ export default function DashboardPage() {
     };
   });
 
-  const healthEyebrow = createMemo(() => {
-    const h = health();
-    if (!h) return { text: '检查中…', variant: 'info' as const };
-    if (h.status === 'healthy') return { text: '运行正常', variant: 'success' as const };
-    if (h.status === 'degraded') return { text: '性能降级', variant: 'warning' as const };
-    return { text: '服务异常', variant: 'error' as const };
-  });
-
   // m023:Worker 健康统计 —— "16 健康 · 1 警告"摘要
   const workerSummary = createMemo(() => {
     const ws = workers();
@@ -154,16 +209,49 @@ export default function DashboardPage() {
 
   return (
     <div class="space-y-6">
-      {/* Hero — 纯标题区:健康 chip + 大标题 + desc + WindowPicker。
-          KPI 数字单独由下方 4 张 StatCard 承载(带 icon/trend/sparkline),
-          原 meta-grid 与 StatCard 重复,已删除。 */}
-      <HeroCard
-        eyebrow={healthEyebrow().text}
-        eyebrowVariant={healthEyebrow().variant}
-        title="全局概览"
-        desc="今日学习产出、用户活跃、AMAS 健康状态一屏看完。窗口可切 7 / 14 / 30 天。"
-        cta={<WindowPicker value={days()} onChange={setDays} />}
-      />
+      {/* Page header — 简洁标题 + desc + 右侧 WindowPicker / 刷新 / 导出。
+          对齐设计图 dashboard.html .page-header,不再用 HeroCard 圆角卡 + halo 渐变。 */}
+      <header class="flex flex-wrap items-start justify-between gap-4">
+        <div class="min-w-0">
+          <h1 class="text-[clamp(26px,3vw,34px)] font-bold tracking-tight text-content">全局概览</h1>
+          <p class="mt-2 text-sm leading-relaxed text-content-secondary max-w-2xl">
+            注册 / 活跃 / 答题 / 健康一屏看完。所有数据来自 axum{' '}
+            <code class="font-mono text-content text-[12.5px] px-1 py-0.5 rounded bg-surface-sunken">/admin/stats</code>
+            {' '}与{' '}
+            <code class="font-mono text-content text-[12.5px] px-1 py-0.5 rounded bg-surface-sunken">/admin/engagement</code>
+            {' '}的实时聚合。
+          </p>
+        </div>
+        <div class="flex items-center gap-2 shrink-0">
+          <WindowPicker value={days()} onChange={setDays} />
+          <Button
+            variant="secondary"
+            size="md"
+            onClick={refreshAll}
+            icon={
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                <polyline points="23 4 23 10 17 10" /><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+              </svg>
+            }
+          >
+            刷新
+          </Button>
+          <Button
+            variant="secondary"
+            size="md"
+            onClick={exportCsv}
+            icon={
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                <polyline points="7 10 12 15 17 10" />
+                <line x1="12" y1="15" x2="12" y2="3" />
+              </svg>
+            }
+          >
+            导出
+          </Button>
+        </div>
+      </header>
 
       <Show when={allFailed()}>
         <div
@@ -177,85 +265,81 @@ export default function DashboardPage() {
         </div>
       </Show>
 
-      {/* KPI 行 — 4 张卡 stagger 80ms 错开 */}
-      <div class="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <div class="h-full">
-          <Show
-            when={stats()}
-            fallback={stats.error ? <KpiErrorCell onRetry={refetchStats} /> : <Skeleton height="100px" />}
-          >
-            {(s) => (
-              <div class="animate-fade-in-up h-full" style={STAGGER_DELAYS[0]}>
-                <StatCard
-                  title="注册用户"
-                  value={s().users}
-                  format={formatNumber}
-                  color="accent"
-                  icon="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z"
-                  trend={s().trend?.users}
-                  spark={registeredSpark()}
-                />
-              </div>
-            )}
-          </Show>
-        </div>
-        <div class="h-full">
-          <Show
-            when={eng()}
-            fallback={eng.error ? <KpiErrorCell onRetry={refetchEng} /> : <Skeleton height="100px" />}
-          >
-            {(e) => (
-              <div class="animate-fade-in-up h-full" style={STAGGER_DELAYS[1]}>
-                <StatCard
-                  title="今日活跃"
-                  value={e().activeToday}
-                  format={formatNumber}
-                  color="success"
-                  icon="M13 10V3L4 14h7v7l9-11h-7z"
-                  trend={e().trend?.activeToday}
-                  spark={activeSpark()}
-                />
-              </div>
-            )}
-          </Show>
-        </div>
-        <div class="h-full">
-          <Show
-            when={overview()}
-            fallback={overview.error ? <KpiErrorCell onRetry={refetchOverview} /> : <Skeleton height="100px" />}
-          >
-            {(o) => (
-              <div class="animate-fade-in-up h-full" style={STAGGER_DELAYS[2]}>
-                <StatCard
-                  title={`${days()}天答题数`}
-                  value={o().summary.recordCount}
-                  format={formatNumber}
-                  color="info"
-                  icon="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"
-                  spark={recordsSpark()}
-                />
-              </div>
-            )}
-          </Show>
-        </div>
-        <div class="h-full">
-          <Show
-            when={overview()}
-            fallback={overview.error ? <KpiErrorCell onRetry={refetchOverview} /> : <Skeleton height="100px" />}
-          >
-            {(o) => (
-              <div class="animate-fade-in-up h-full" style={STAGGER_DELAYS[3]}>
-                <StatCard
-                  title={`${days()}天正确率`}
-                  value={formatAccuracy(o().summary.accuracy)}
-                  color="warning"
-                  icon="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
-                  spark={accuracySpark()}
-                />
-              </div>
-            )}
-          </Show>
-        </div>
+      {/* KPI 4 卡 — tint 底 + icon/label 同行 + 大数字 + trend chip + 右下 sparkline。
+          对齐 dashboard.html .kpi.is-{accent|success|info|warning}。 */}
+      <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <Show
+          when={stats()}
+          fallback={stats.error ? <KpiErrorCell onRetry={refetchStats} /> : <Skeleton height="148px" />}
+        >
+          {(s) => (
+            <div class="animate-fade-in-up h-full" style={STAGGER_DELAYS[0]}>
+              <KpiCard
+                tone="accent"
+                title="注册用户"
+                icon={ICON_USERS}
+                value={s().users}
+                format={formatNumber}
+                trend={s().trend?.users ?? null}
+                spark={registeredSpark()}
+              />
+            </div>
+          )}
+        </Show>
+        <Show
+          when={eng()}
+          fallback={eng.error ? <KpiErrorCell onRetry={refetchEng} /> : <Skeleton height="148px" />}
+        >
+          {(e) => (
+            <div class="animate-fade-in-up h-full" style={STAGGER_DELAYS[1]}>
+              <KpiCard
+                tone="success"
+                title="今日活跃"
+                icon={ICON_LIGHTNING}
+                value={e().activeToday}
+                format={formatNumber}
+                trend={e().trend?.activeToday ?? null}
+                spark={activeSpark()}
+              />
+            </div>
+          )}
+        </Show>
+        <Show
+          when={overview()}
+          fallback={overview.error ? <KpiErrorCell onRetry={refetchOverview} /> : <Skeleton height="148px" />}
+        >
+          {(o) => (
+            <div class="animate-fade-in-up h-full" style={STAGGER_DELAYS[2]}>
+              <KpiCard
+                tone="info"
+                title={`${days()} 天答题数`}
+                icon={ICON_CALENDAR}
+                value={o().summary.recordCount}
+                format={formatNumber}
+                trend={null}
+                spark={recordsSpark()}
+              />
+            </div>
+          )}
+        </Show>
+        <Show
+          when={overview()}
+          fallback={overview.error ? <KpiErrorCell onRetry={refetchOverview} /> : <Skeleton height="148px" />}
+        >
+          {(o) => (
+            <div class="animate-fade-in-up h-full" style={STAGGER_DELAYS[3]}>
+              <KpiCard
+                tone="warning"
+                title={`${days()} 天正确率`}
+                icon={ICON_CHECK_CIRCLE}
+                value={o().summary.accuracy != null ? Number((o().summary.accuracy! * 100).toFixed(1)) : '—'}
+                unit={o().summary.accuracy != null ? '%' : undefined}
+                trend={null}
+                spark={accuracySpark()}
+              />
+            </div>
+          )}
+        </Show>
       </div>
 
       {/* Row A:用户活跃趋势(8) + AMAS 算法分布(4) */}
@@ -822,6 +906,125 @@ export default function DashboardPage() {
 }
 
 // ─────────── 局部辅助组件 ───────────
+
+// dashboard 4 张 KPI 卡的 icon path(viewBox 24×24,stroke 路径)
+const ICON_USERS =
+  'M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 7a4 4 0 1 0 0 8 4 4 0 0 0 0-8z';
+const ICON_LIGHTNING = 'M13 2L3 14h9l-1 8 10-12h-9l1-8z';
+const ICON_CALENDAR =
+  'M19 4H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2zM16 2v4M8 2v4M3 10h18';
+const ICON_CHECK_CIRCLE = 'M22 11.08V12a10 10 0 1 1-5.93-9.14M22 4L12 14.01l-3-3';
+
+// 4 色对应的 tint / accent class —— Tailwind 字面量,确保 JIT 扫到
+const KPI_TONE: Record<
+  'accent' | 'success' | 'info' | 'warning',
+  { bg: string; ring: string; label: string; sparkVar: string }
+> = {
+  accent: {
+    bg: 'bg-accent-light/50 dark:bg-accent-light/30',
+    ring: 'ring-1 ring-accent/15',
+    label: 'text-accent',
+    sparkVar: '--accent',
+  },
+  success: {
+    bg: 'bg-success-light/50 dark:bg-success-light/30',
+    ring: 'ring-1 ring-success/15',
+    label: 'text-success-strong',
+    sparkVar: '--success',
+  },
+  info: {
+    bg: 'bg-info-light/50 dark:bg-info-light/30',
+    ring: 'ring-1 ring-info/15',
+    label: 'text-info-strong',
+    sparkVar: '--info',
+  },
+  warning: {
+    bg: 'bg-warning-light/50 dark:bg-warning-light/30',
+    ring: 'ring-1 ring-warning/15',
+    label: 'text-warning-strong',
+    sparkVar: '--warning',
+  },
+};
+
+interface KpiCardProps {
+  tone: 'accent' | 'success' | 'info' | 'warning';
+  title: string;
+  icon: string;
+  value: string | number;
+  unit?: string;
+  format?: (n: number) => string;
+  /** 上/下行 chip + 文字。null 时不渲染 chip 行 */
+  trend?: TrendField | null;
+  /** sparkline 数据,长度 ≥2 时渲染右下 */
+  spark?: number[];
+}
+
+/**
+ * Dashboard 顶部 KPI 卡 —— 对齐设计图 dashboard.html .kpi.is-{tone}。
+ *
+ * 布局:tint 浅底 + icon/label 同行(label 小号 medium)→ 大数字 → trend chip + 文字 → 右下 sparkline。
+ * 数据为 number 时启用 count-up 动画;value 是 '—' 等 string 直显。
+ */
+function KpiCard(props: KpiCardProps): JSX.Element {
+  const tone = () => KPI_TONE[props.tone];
+  const numericTarget = createMemo(() => (typeof props.value === 'number' ? props.value : null));
+  const animated = useCountUp({
+    to: () => numericTarget() ?? 0,
+    format: props.format,
+  });
+  const displayValue = () => (numericTarget() != null ? animated() : String(props.value));
+
+  const trendUp = () => (props.trend?.value ?? 0) > 0;
+  const trendDown = () => (props.trend?.value ?? 0) < 0;
+  const hasTrend = () => !!props.trend && props.trend.value !== 0;
+
+  return (
+    <div
+      class={`relative overflow-hidden rounded-2xl ${tone().bg} ${tone().ring} px-5 py-4 flex flex-col min-h-[148px] h-full`}
+    >
+      {/* icon + label 同行,小号 */}
+      <div class={`flex items-center gap-2 text-[12.5px] font-medium ${tone().label}`}>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+          <path d={props.icon} stroke-linecap="round" stroke-linejoin="round" />
+        </svg>
+        <span>{props.title}</span>
+      </div>
+
+      {/* 大数字 */}
+      <div class="mt-3 text-[34px] leading-none font-bold tabular-nums tracking-tight text-content">
+        {displayValue()}
+        <Show when={props.unit}>
+          <span class="ml-1 align-baseline text-base font-medium text-content-secondary">{props.unit}</span>
+        </Show>
+      </div>
+
+      {/* trend chip + 文字。chip 配色按涨跌走 success-light / error-light */}
+      <Show when={hasTrend()}>
+        <div class="mt-2 flex items-center gap-2 text-[12px]">
+          <span
+            class={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full tabular-nums font-medium ${
+              trendUp()
+                ? 'bg-success-light text-success-strong'
+                : trendDown()
+                ? 'bg-error-light text-error-strong'
+                : 'bg-surface-sunken text-content-tertiary'
+            }`}
+          >
+            {trendUp() ? '▲' : trendDown() ? '▼' : '—'} {Math.abs(props.trend!.value).toFixed(1)}%
+          </span>
+          <span class="text-content-secondary truncate">{props.trend!.label}</span>
+        </div>
+      </Show>
+
+      {/* sparkline 右下,push 到底 */}
+      <Show when={props.spark && props.spark.length >= 2}>
+        <div class="mt-auto pt-3 self-end opacity-90">
+          <Sparkline data={props.spark!} w={120} h={32} stroke={`var(${tone().sparkVar})`} strokeWidth={1.5} />
+        </div>
+      </Show>
+    </div>
+  );
+}
 
 interface ResourceBarProps {
   label: string;
