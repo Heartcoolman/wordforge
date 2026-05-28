@@ -1,4 +1,4 @@
-import { createMemo, createResource, Show } from 'solid-js';
+import { createMemo, createResource, For, Show } from 'solid-js';
 import { useSearchParams } from '@solidjs/router';
 import { Card } from '@/components/ui/Card';
 import { Empty } from '@/components/ui/Empty';
@@ -9,8 +9,8 @@ import { WindowPicker } from '@/components/ui/WindowPicker';
 import { Panel } from '@/components/ui/Panel';
 import { MiniStat } from '@/components/ui/MiniStat';
 import { HeroCard } from '@/components/ui/HeroCard';
-import { Sparkline } from '@/components/ui/Sparkline';
 import { adminApi } from '@/api/admin';
+import { amasApi } from '@/api/amas';
 import { formatNumber, formatDuration, formatAccuracy, formatBytes } from '@/utils/formatters';
 
 const DAYS_ALLOWED = [7, 14, 30] as const;
@@ -42,6 +42,28 @@ export default function DashboardPage() {
   const [records] = createResource(days, (d) => adminApi.getDailyRecords(d));
   const [health] = createResource(() => adminApi.getHealth());
   const [updateInfo] = createResource(() => adminApi.checkUpdate());
+  // 近期告警：取最近 20 条 AMAS 监控事件,只筛 error/warning 级别(eventType 含 error|warn|fail|denied)
+  const [monitoring] = createResource(() => amasApi.getMonitoring(20).catch(() => []));
+
+  // sparkline series:dau.registered 是每日新增注册,dau.count 是每日活跃
+  const registeredSpark = createMemo(() => dau()?.map((d) => d.registered) ?? []);
+  const activeSpark = createMemo(() => dau()?.map((d) => d.count) ?? []);
+  const recordsSpark = createMemo(() => records()?.map((d) => d.total) ?? []);
+  const accuracySpark = createMemo(
+    () => records()?.map((d) => (d.total > 0 ? (d.correct / d.total) * 100 : 0)) ?? [],
+  );
+
+  // 近期告警筛选 + 视觉级别
+  const alerts = createMemo(() => {
+    const events = monitoring() ?? [];
+    return events
+      .filter((e) => /error|warn|fail|denied|critical/i.test(e.eventType))
+      .slice(0, 6);
+  });
+  function alertSeverity(eventType: string): { tone: 'error' | 'warning'; label: string } {
+    if (/error|fail|critical|denied/i.test(eventType)) return { tone: 'error', label: '错误' };
+    return { tone: 'warning', label: '警告' };
+  }
 
   // 单卡级错误降级：err → 简短错误 + 重试按钮，避免永远转圈的 Skeleton
   const KpiErrorCell = (props: { onRetry: () => void }) => (
@@ -107,6 +129,7 @@ export default function DashboardPage() {
                   color="accent"
                   icon="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z"
                   trend={s().trend?.users}
+                  spark={registeredSpark()}
                 />
               </div>
             )}
@@ -126,6 +149,7 @@ export default function DashboardPage() {
                   color="success"
                   icon="M13 10V3L4 14h7v7l9-11h-7z"
                   trend={e().trend?.activeToday}
+                  spark={activeSpark()}
                 />
               </div>
             )}
@@ -144,6 +168,7 @@ export default function DashboardPage() {
                   format={formatNumber}
                   color="info"
                   icon="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"
+                  spark={recordsSpark()}
                 />
               </div>
             )}
@@ -161,6 +186,7 @@ export default function DashboardPage() {
                   value={formatAccuracy(o().summary.accuracy)}
                   color="warning"
                   icon="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
+                  spark={accuracySpark()}
                 />
               </div>
             )}
@@ -374,6 +400,74 @@ export default function DashboardPage() {
           </Card>
         )}
       </Show>
+
+      {/* 近期告警：从 AMAS monitoring 取最近 error/warning 级别事件,最多 6 条 */}
+      <Card variant="elevated">
+        <div class="flex items-center justify-between mb-3">
+          <div class="flex items-center gap-2">
+            <h2 class="text-lg font-semibold text-content">近期告警</h2>
+            <Show when={alerts().length > 0}>
+              <span class="inline-flex items-center px-2 py-0.5 rounded-pill text-[11px] font-medium bg-warning-light text-warning-strong tabular-nums">
+                {alerts().length}
+              </span>
+            </Show>
+          </div>
+          <a
+            href="/admin/monitoring"
+            class="text-[12.5px] text-content-tertiary hover:text-accent inline-flex items-center gap-0.5"
+          >
+            查看全部 →
+          </a>
+        </div>
+        <Show
+          when={!monitoring.loading}
+          fallback={<Skeleton height="80px" />}
+        >
+          <Show
+            when={alerts().length > 0}
+            fallback={
+              <div class="flex items-center gap-2 py-3 text-[13px] text-content-tertiary">
+                <span class="inline-block size-1.5 rounded-full bg-success animate-ring-pulse" aria-hidden="true" />
+                近 20 条监控事件未发现告警,系统运行平稳。
+              </div>
+            }
+          >
+            <ul class="divide-y divide-border-hairline">
+              <For each={alerts()}>
+                {(ev) => {
+                  const sev = alertSeverity(ev.eventType);
+                  return (
+                    <li class="flex items-start gap-3 py-2.5 text-[13px]">
+                      <span
+                        class={`mt-1 inline-block size-2 rounded-full shrink-0 ${
+                          sev.tone === 'error' ? 'bg-error' : 'bg-warning'
+                        }`}
+                        aria-hidden="true"
+                      />
+                      <div class="min-w-0 flex-1">
+                        <div class="flex items-center gap-2">
+                          <span class={`font-mono text-[11.5px] uppercase tracking-wide ${
+                            sev.tone === 'error' ? 'text-error-strong' : 'text-warning-strong'
+                          }`}>{sev.label}</span>
+                          <span class="font-mono text-content text-[12.5px] truncate">{ev.eventType}</span>
+                        </div>
+                        <Show when={Object.keys(ev.data).length > 0}>
+                          <p class="text-content-tertiary text-[11.5px] truncate font-mono">
+                            {JSON.stringify(ev.data).slice(0, 120)}
+                          </p>
+                        </Show>
+                      </div>
+                      <time class="text-content-tertiary text-[11.5px] tabular-nums shrink-0">
+                        {new Date(ev.timestamp).toLocaleString('zh-CN', { hour12: false })}
+                      </time>
+                    </li>
+                  );
+                }}
+              </For>
+            </ul>
+          </Show>
+        </Show>
+      </Card>
 
       {/* 各 Resource 已在自身位置展示降级（KPI 卡 / Panel / 系统状态），不再叠加"全失败"Empty */}
     </div>

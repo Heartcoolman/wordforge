@@ -1,5 +1,6 @@
 import { Show, createMemo } from 'solid-js';
 import { Card } from './Card';
+import { Sparkline } from './Sparkline';
 import { useCountUp } from '@/lib/motion';
 
 interface StatCardProps {
@@ -16,14 +17,16 @@ interface StatCardProps {
   size?: 'sm' | 'md';
   /** 是否可交互（启用 Card hover 抬升）；StatCard 默认非交互卡 */
   interactive?: boolean;
+  /** 可选趋势 sparkline 数据，显示在卡底部右侧；颜色随 color 主题 */
+  spark?: number[];
 }
 
 const colorMap = {
-  accent: { bg: 'bg-accent-light', text: 'text-accent', dot: 'bg-accent' },
-  success: { bg: 'bg-success-light', text: 'text-success', dot: 'bg-success' },
-  warning: { bg: 'bg-warning-light', text: 'text-warning', dot: 'bg-warning' },
-  error: { bg: 'bg-error-light', text: 'text-error', dot: 'bg-error' },
-  info: { bg: 'bg-info-light', text: 'text-info', dot: 'bg-info' },
+  accent: { bg: 'bg-accent-light', text: 'text-accent', dot: 'bg-accent', sparkVar: '--accent' },
+  success: { bg: 'bg-success-light', text: 'text-success', dot: 'bg-success', sparkVar: '--success' },
+  warning: { bg: 'bg-warning-light', text: 'text-warning', dot: 'bg-warning', sparkVar: '--warning' },
+  error: { bg: 'bg-error-light', text: 'text-error', dot: 'bg-error', sparkVar: '--error' },
+  info: { bg: 'bg-info-light', text: 'text-info', dot: 'bg-info', sparkVar: '--info' },
 };
 
 export function StatCard(props: StatCardProps) {
@@ -97,6 +100,16 @@ export function StatCard(props: StatCardProps) {
           </Show>
         </div>
       </div>
+      <Show when={props.spark && props.spark.length >= 2}>
+        <div class="mt-3 flex justify-end opacity-90">
+          <Sparkline
+            data={props.spark!}
+            w={84}
+            h={24}
+            stroke={`var(${colors().sparkVar})`}
+          />
+        </div>
+      </Show>
     </Card>
   );
 }
