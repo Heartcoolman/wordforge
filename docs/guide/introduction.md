@@ -1,6 +1,6 @@
 # WordForge 是什么
 
-WordForge 是一个**自适应算法驱动的英语词汇学习平台**，由 Rust 后端 + SolidJS 管理后台 + 独立的用户学习端（[wordforge-web](https://github.com/Heartcoolman/wordforge-web)，单独仓库）组成。核心是内置的 **AMAS**（Adaptive Mastery Acquisition System，自适应掌握度习得系统），它在每一次答题事件后实时调整后续选词、间隔与节奏。
+WordForge 是一个**自适应算法驱动的英语词汇学习平台**，由 Rust 后端 + **内嵌的 SolidJS 管理 GUI**（`admin-ui/`，作为单二进制的静态资源 fallback）+ 独立的用户学习端（[wordforge-web](https://github.com/Heartcoolman/wordforge-web)，单独仓库）组成。核心是内置的 **AMAS**（Adaptive Mastery Acquisition System，自适应掌握度习得系统），它在每一次答题事件后实时调整后续选词、间隔与节奏。
 
 ## 设计目标
 
@@ -18,12 +18,12 @@ WordForge 是一个**自适应算法驱动的英语词汇学习平台**，由 Ru
 | **疲劳感知** | MediaPipe + WebAssembly 摄像头检测，疲劳信号注入 AMAS 强度调节 |
 | **LLM 调参顾问** | 每 20 分钟跑一次 DeepSeek，综合近期指标产出 patch 建议，白名单 + 成本上限 + 灰度自动应用 |
 | **配置热加载** | `amas_config.toml` 被 `notify` watcher 盯着，500ms 防抖 + validate → `reload_config()` 原子生效 |
-| **管理后台** | 用户、广播、AMAS 调参、版本对比、监控、自更新；SolidJS + Tailwind v4 + TanStack Query |
+| **Admin GUI（`admin-ui/`）** | 用户、广播、AMAS 调参、版本对比、监控、自更新；SolidJS + Tailwind v4 + TanStack Query；构建产物内嵌进后端二进制 |
 | **API 服务** | axum 0.7 统一对外，给管理后台与移动/Web 学习端复用 |
 
 ## 仓库定位
 
-本仓库是**服务端 + 管理后台一体的 monorepo**。最终发布产物是单个二进制 `learning-backend`，把前端构建产物 `static/` 内嵌作 fallback 静态资源。用户学习端 Web 已拆分到独立项目 `wordforge-web`，本仓库只对历史用户路径保留过渡页。
+本仓库是**后端 + 内嵌 admin GUI 的 monorepo**（**不是**典型的"前后端分离 monorepo"）。`admin-ui/` 是后端的运维 GUI 源码，构建产物 `static/` 由 `learning-backend` 二进制通过 `tower-http::ServeDir` 内嵌 fallback 服务；它**没有独立部署形态** —— 离开后端二进制就不存在。end-user 学习端 Web 已拆分到独立项目 `wordforge-web`，本仓库只对历史用户路径保留过渡页（`LegacyUserFrontendPage`）。
 
 ## 下一步
 

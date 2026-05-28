@@ -83,3 +83,7 @@ static/avatars/
 # Benchmarks
 benchmarks/
 **/.claude/scheduled_tasks.lock
+
+# 设计参考资料（admin 重设计 mockup，手动暂存不纳入版本库）
+admin后端/
+*管理后端*.zip
