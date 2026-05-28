@@ -745,3 +745,103 @@ async fn it_advisor_config_get_put() {
     assert_eq!(get2_body["data"]["advisorEnabled"], true);
     assert_eq!(get2_body["data"]["grayscaleSteps"][1], 50);
 }
+
+// ─────────── C4/C5: 白名单 + 历史 ───────────
+
+async fn setup_amas_admin_token(app: &common::app::TestApp) -> String {
+    let admin_email = format!("wl-admin-{}@test.com", uuid::Uuid::new_v4());
+    let setup = request(
+        &app.app,
+        Method::POST,
+        "/api/admin/auth/setup",
+        Some(serde_json::json!({ "email": admin_email, "password": "AdminPassw0rd!" })),
+        &[],
+    )
+    .await;
+    let (status, _, body) = response_json(setup).await;
+    assert_eq!(status, StatusCode::CREATED);
+    body["data"]["token"].as_str().expect("admin token").to_string()
+}
+
+#[tokio::test]
+async fn it_amas_advisor_whitelist_crud() {
+    let app = spawn_test_server().await;
+    let token = setup_amas_admin_token(&app).await;
+
+    // GET → seed 后应有 11 条
+    let list = request(
+        &app.app,
+        Method::GET,
+        "/api/admin/amas/advisor/whitelist",
+        None,
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (s, _, body) = response_json(list).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(body["data"].as_array().unwrap().len(), 11);
+
+    // POST 新增一条合法 path
+    let add = request(
+        &app.app,
+        Method::POST,
+        "/api/admin/amas/advisor/whitelist",
+        Some(serde_json::json!({ "path": "memoryModel.w[5]", "minSafe": 0.1, "maxSafe": 2.0 })),
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (s, _, body) = response_json(add).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(body["data"]["path"], "memoryModel.w[5]");
+    assert!((body["data"]["minSafe"].as_f64().unwrap() - 0.1).abs() < 1e-9);
+
+    // POST 越界区间 → 400
+    let bad_range = request(
+        &app.app,
+        Method::POST,
+        "/api/admin/amas/advisor/whitelist",
+        Some(serde_json::json!({ "path": "memoryModel.w[6]", "minSafe": 5.0, "maxSafe": 1.0 })),
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (s, _, _) = response_json(bad_range).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+
+    // POST 非 memoryModel.* path → 400
+    let bad_path = request(
+        &app.app,
+        Method::POST,
+        "/api/admin/amas/advisor/whitelist",
+        Some(serde_json::json!({ "path": "ensemble.foo", "minSafe": 0.0, "maxSafe": 1.0 })),
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (s, _, _) = response_json(bad_path).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+
+    // DELETE 存在 → deleted:true
+    let del = request(
+        &app.app,
+        Method::DELETE,
+        "/api/admin/amas/advisor/whitelist/memoryModel.w[5]",
+        None,
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (s, _, body) = response_json(del).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(body["data"]["deleted"], true);
+
+    // DELETE 不存在 → deleted:false
+    let del2 = request(
+        &app.app,
+        Method::DELETE,
+        "/api/admin/amas/advisor/whitelist/memoryModel.w[5]",
+        None,
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (s, _, body) = response_json(del2).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(body["data"]["deleted"], false);
+}

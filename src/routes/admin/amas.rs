@@ -69,6 +69,12 @@ pub fn admin_router() -> Router<AppState> {
             "/advisor/config",
             get(get_advisor_config).put(update_advisor_config),
         )
+        // C4: 调参白名单 CRUD
+        .route("/advisor/whitelist", get(list_whitelist).post(add_whitelist))
+        .route(
+            "/advisor/whitelist/:path",
+            axum::routing::delete(delete_whitelist),
+        )
 }
 
 // ─────────────────── m022:TOML 互转 + canary ───────────────────
@@ -766,6 +772,68 @@ async fn suggestion_spend(
         "dailyCapUsd": cap,
         "remainingUsd": (cap - cost).max(0.0),
     })))
+}
+
+// ─────────── C4: 调参白名单 CRUD ───────────
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AddWhitelistBody {
+    path: String,
+    min_safe: f64,
+    max_safe: f64,
+}
+
+async fn list_whitelist(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let rows = state
+        .run_store_task("admin.amas.list_whitelist", |store| {
+            store.list_tuning_whitelist()
+        })
+        .await??;
+    Ok(ok(rows))
+}
+
+async fn add_whitelist(
+    admin: AdminAuthUser,
+    State(state): State<AppState>,
+    JsonBody(body): JsonBody<AddWhitelistBody>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    // path 必须是 memoryModel.* 命名空间（与 Tier-A 白名单语义一致，拒绝越界命名空间）
+    if !body.path.starts_with("memoryModel.") {
+        return Err(AppError::bad_request(
+            "INVALID_PATH",
+            "白名单 path 必须以 memoryModel. 开头",
+        ));
+    }
+    if body.min_safe >= body.max_safe {
+        return Err(AppError::bad_request(
+            "INVALID_RANGE",
+            "minSafe 必须小于 maxSafe",
+        ));
+    }
+    let admin_id = admin.admin_id.clone();
+    let row = state
+        .run_store_task("admin.amas.add_whitelist", move |store| {
+            store.insert_tuning_whitelist(&body.path, body.min_safe, body.max_safe, &admin_id)
+        })
+        .await??;
+    Ok(ok(row))
+}
+
+async fn delete_whitelist(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Path(path): Path<String>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let deleted = state
+        .run_store_task("admin.amas.delete_whitelist", move |store| {
+            store.delete_tuning_whitelist(&path)
+        })
+        .await??;
+    Ok(ok(serde_json::json!({ "deleted": deleted })))
 }
 
 /// 简化版按点分式路径写值，支持 `mem.w[0]`
