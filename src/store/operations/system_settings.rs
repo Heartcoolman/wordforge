@@ -25,6 +25,13 @@ pub struct SystemSettings {
     /// C2/C3:LLM 顾问运行时巡查开关(env ENABLE_LLM_ADVISOR_WORKER 与本列取或)。
     #[serde(default)]
     pub llm_advisor_enabled: bool,
+    /// C3:灰度策略三档(20→60→100),存为逗号分隔字符串列,序列化为 [u32;3]。
+    #[serde(default = "default_grayscale_steps")]
+    pub amas_grayscale_steps: [u32; 3],
+}
+
+fn default_grayscale_steps() -> [u32; 3] {
+    [20, 60, 100]
 }
 
 fn default_auto_apply_max_per_day() -> u32 {
@@ -37,6 +44,15 @@ fn default_auto_apply_min_confidence() -> f64 {
 
 fn default_llm_max_cost_per_month_yuan() -> f64 {
     100.0
+}
+
+/// 解析逗号分隔的灰度档位字符串("20,60,100")为 [u32;3],缺项回落默认。
+fn parse_steps(s: &str) -> [u32; 3] {
+    let mut it = s.split(',').filter_map(|p| p.trim().parse::<u32>().ok());
+    let a = it.next().unwrap_or(20);
+    let b = it.next().unwrap_or(60);
+    let c = it.next().unwrap_or(100);
+    [a, b, c]
 }
 
 impl Default for SystemSettings {
@@ -54,6 +70,7 @@ impl Default for SystemSettings {
             amas_auto_apply_min_confidence: 0.8,
             llm_advisor_max_cost_per_month_yuan: 100.0,
             llm_advisor_enabled: false,
+            amas_grayscale_steps: [20, 60, 100],
         }
     }
 }
@@ -65,7 +82,7 @@ impl Store {
             .query_row(
                 "SELECT max_users, registration_enabled, maintenance_mode, default_daily_words, wordbook_center_url,
                         amas_auto_apply_enabled, amas_auto_apply_max_per_day, amas_auto_apply_min_confidence,
-                        llm_advisor_max_cost_per_month_yuan, llm_advisor_enabled
+                        llm_advisor_max_cost_per_month_yuan, llm_advisor_enabled, amas_grayscale_steps
                  FROM system_settings WHERE singleton_id=1",
                 [],
                 |r| {
@@ -80,6 +97,9 @@ impl Store {
                         amas_auto_apply_min_confidence: r.get::<_, f64>(7)?,
                         llm_advisor_max_cost_per_month_yuan: r.get::<_, f64>(8).unwrap_or(100.0),
                         llm_advisor_enabled: r.get::<_, i64>(9).unwrap_or(0) != 0,
+                        amas_grayscale_steps: parse_steps(
+                            &r.get::<_, Option<String>>(10).ok().flatten().unwrap_or_default(),
+                        ),
                     })
                 },
             )
@@ -98,12 +118,12 @@ impl Store {
             "INSERT INTO system_settings
                 (singleton_id, max_users, registration_enabled, maintenance_mode, default_daily_words, wordbook_center_url,
                  amas_auto_apply_enabled, amas_auto_apply_max_per_day, amas_auto_apply_min_confidence,
-                 llm_advisor_max_cost_per_month_yuan, llm_advisor_enabled)
-             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                 llm_advisor_max_cost_per_month_yuan, llm_advisor_enabled, amas_grayscale_steps)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
              ON CONFLICT(singleton_id) DO UPDATE SET
                 max_users=?1, registration_enabled=?2, maintenance_mode=?3, default_daily_words=?4, wordbook_center_url=?5,
                 amas_auto_apply_enabled=?6, amas_auto_apply_max_per_day=?7, amas_auto_apply_min_confidence=?8,
-                llm_advisor_max_cost_per_month_yuan=?9, llm_advisor_enabled=?10",
+                llm_advisor_max_cost_per_month_yuan=?9, llm_advisor_enabled=?10, amas_grayscale_steps=?11",
             params![
                 settings.max_users as i64,
                 settings.registration_enabled as i64,
@@ -115,6 +135,12 @@ impl Store {
                 settings.amas_auto_apply_min_confidence,
                 settings.llm_advisor_max_cost_per_month_yuan,
                 settings.llm_advisor_enabled as i64,
+                format!(
+                    "{},{},{}",
+                    settings.amas_grayscale_steps[0],
+                    settings.amas_grayscale_steps[1],
+                    settings.amas_grayscale_steps[2]
+                ),
             ],
         )?;
         Ok(())
@@ -166,6 +192,7 @@ mod tests {
             amas_auto_apply_min_confidence: 0.55,
             llm_advisor_max_cost_per_month_yuan: 200.0,
             llm_advisor_enabled: true,
+            amas_grayscale_steps: [10, 50, 100],
         };
         store.save_system_settings(&new).unwrap();
         let got = store.get_system_settings().unwrap();
@@ -182,6 +209,7 @@ mod tests {
         assert!((got.amas_auto_apply_min_confidence - 0.55).abs() < 1e-9);
         assert!((got.llm_advisor_max_cost_per_month_yuan - 200.0).abs() < 1e-9);
         assert!(got.llm_advisor_enabled);
+        assert_eq!(got.amas_grayscale_steps, [10, 50, 100]);
     }
 
     #[test]
@@ -202,8 +230,8 @@ mod tests {
         {
             let conn = store.connection().unwrap();
             conn.execute(
-                "INSERT INTO system_settings (singleton_id, max_users, registration_enabled, maintenance_mode, default_daily_words, wordbook_center_url, amas_auto_apply_enabled, amas_auto_apply_max_per_day, amas_auto_apply_min_confidence, llm_advisor_max_cost_per_month_yuan, llm_advisor_enabled)
-                 VALUES (1, 1, 1, 0, 1, NULL, 0, 1, 0.5, 100.0, 0)",
+                "INSERT INTO system_settings (singleton_id, max_users, registration_enabled, maintenance_mode, default_daily_words, wordbook_center_url, amas_auto_apply_enabled, amas_auto_apply_max_per_day, amas_auto_apply_min_confidence, llm_advisor_max_cost_per_month_yuan, llm_advisor_enabled, amas_grayscale_steps)
+                 VALUES (1, 1, 1, 0, 1, NULL, 0, 1, 0.5, 100.0, 0, '20,60,100')",
                 [],
             ).unwrap();
         }
@@ -237,5 +265,22 @@ mod tests {
         assert!(store.get_system_settings().unwrap().llm_advisor_enabled);
         store.set_llm_advisor_enabled(false).unwrap();
         assert!(!store.get_system_settings().unwrap().llm_advisor_enabled);
+    }
+
+    #[test]
+    fn grayscale_steps_default_and_roundtrip() {
+        let store = test_store();
+        // 默认 20/60/100
+        assert_eq!(
+            store.get_system_settings().unwrap().amas_grayscale_steps,
+            [20, 60, 100]
+        );
+        let mut s = store.get_system_settings().unwrap();
+        s.amas_grayscale_steps = [10, 50, 100];
+        store.save_system_settings(&s).unwrap();
+        assert_eq!(
+            store.get_system_settings().unwrap().amas_grayscale_steps,
+            [10, 50, 100]
+        );
     }
 }

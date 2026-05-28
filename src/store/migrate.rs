@@ -1407,6 +1407,20 @@ fn m025_amas_advisor(store: &Store) -> Result<(), StoreError> {
         )?;
     }
 
+    // C3:system_settings.amas_grayscale_steps —— 灰度策略三档,逗号分隔字符串列(幂等)
+    let has_steps: bool = conn
+        .prepare("PRAGMA table_info(system_settings)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .any(|c| c == "amas_grayscale_steps");
+    if !has_steps {
+        conn.execute(
+            "ALTER TABLE system_settings ADD COLUMN amas_grayscale_steps
+                TEXT NOT NULL DEFAULT '20,60,100'",
+            [],
+        )?;
+    }
+
     Ok(())
 }
 
@@ -1425,6 +1439,17 @@ fn m025_amas_advisor_down(store: &Store) -> Result<(), StoreError> {
     if has_col {
         conn.execute(
             "ALTER TABLE system_settings DROP COLUMN llm_advisor_enabled",
+            [],
+        )?;
+    }
+    let has_steps: bool = conn
+        .prepare("PRAGMA table_info(system_settings)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .any(|c| c == "amas_grayscale_steps");
+    if has_steps {
+        conn.execute(
+            "ALTER TABLE system_settings DROP COLUMN amas_grayscale_steps",
             [],
         )?;
     }
