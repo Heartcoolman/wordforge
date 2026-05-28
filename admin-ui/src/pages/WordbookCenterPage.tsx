@@ -1,5 +1,6 @@
 import { createSignal, Show, For, onMount } from 'solid-js';
 import { Card } from '@/components/ui/Card';
+import { HeroCard } from '@/components/ui/HeroCard';
 import { Button } from '@/components/ui/Button';
 import { Badge } from '@/components/ui/Badge';
 import { Modal } from '@/components/ui/Modal';
@@ -139,14 +140,19 @@ export default function WordbookCenterPage() {
 
   return (
     <div class="space-y-6">
-      <div class="flex items-center justify-between flex-wrap gap-2 pb-2 border-b border-border-hairline">
-        <h1 class="text-title text-content">词书中心</h1>
-        <Show when={configured()}>
-          <Button size="sm" variant="ghost" onClick={checkUpdates} loading={checkingUpdates()}>
-            检查更新
-          </Button>
-        </Show>
-      </div>
+      <HeroCard
+        eyebrow="词条管理"
+        eyebrowVariant="accent"
+        title="词书中心"
+        desc="管理官方与用户词库。支持词条预览、标签编辑、CSV/JSON 导入。"
+        cta={
+          <Show when={configured()}>
+            <Button size="sm" variant="ghost" onClick={checkUpdates} loading={checkingUpdates()}>
+              检查更新
+            </Button>
+          </Show>
+        }
+      />
 
       <Show when={!configured() && !loading()}>
         <Card variant="outlined" padding="lg">

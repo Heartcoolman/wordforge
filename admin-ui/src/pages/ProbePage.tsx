@@ -15,6 +15,7 @@ import ResultCard from '@/components/probe/ResultCard';
 import ScriptEditor from '@/components/probe/ScriptEditor';
 import { PROBE_TEMPLATES } from './probe-templates';
 import { Card } from '@/components/ui/Card';
+import { HeroCard } from '@/components/ui/HeroCard';
 import { Button } from '@/components/ui/Button';
 import { Input, TextArea } from '@/components/ui/Input';
 import { Empty } from '@/components/ui/Empty';
@@ -178,13 +179,12 @@ export default function ProbePage() {
 
   return (
     <div class="space-y-6 animate-fade-in">
-      <header class="space-y-1">
-        <h1 class="text-title text-content">远程探针</h1>
-        <p class="text-body text-content-secondary max-w-3xl">
-          在客户端 Worker 沙箱里执行 JS 表达式，通过白名单 ctx 读取诊断信息。
-          含 D 类受控写（reload/clearCache/signOut）需二次确认。
-        </p>
-      </header>
+      <HeroCard
+        eyebrow="脱敏 + ringbuffer"
+        eyebrowVariant="accent"
+        title="远程探针"
+        desc="在客户端 Worker 沙箱里执行 JS 表达式，通过白名单 ctx 读取诊断信息。含 D 类受控写（reload/clearCache/signOut）需二次确认。"
+      />
 
       <div class="grid gap-6 lg:grid-cols-[1fr_300px]">
         <div class="space-y-6">

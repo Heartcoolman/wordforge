@@ -1,5 +1,6 @@
 import { createSignal, Show, For, onMount, createMemo } from 'solid-js';
 import { Card } from '@/components/ui/Card';
+import { HeroCard } from '@/components/ui/HeroCard';
 import { Badge } from '@/components/ui/Badge';
 import { Button } from '@/components/ui/Button';
 import { Spinner } from '@/components/ui/Spinner';
@@ -46,16 +47,15 @@ export default function FeedbackPage() {
 
   return (
     <div class="space-y-4">
-      <header class="flex items-center justify-between pb-2 border-b border-border-hairline">
-        <div>
-          <h1 class="text-title text-content">反馈中心</h1>
-          <p class="text-caption mt-1">用户通过 /api/feedback 提交的内容，按时间倒序展示</p>
-        </div>
-        {/* loading 期间隐藏 Badge，避免显示"共 0 条" */}
-        <Show when={!loading()}>
-          <Badge variant="accent" size="md">共 {total()} 条</Badge>
-        </Show>
-      </header>
+      <HeroCard
+        eyebrow="工单流转"
+        eyebrowVariant="warning"
+        title="用户反馈"
+        desc="用户通过 /api/feedback 提交的内容，按时间倒序展示。后续支持状态标签、批量打标、设备 / 答题快照。"
+        meta={[
+          { value: total(), label: '总反馈数' },
+        ]}
+      />
 
       <Card padding="none">
         <Show when={!loading()} fallback={<div class="py-12 flex justify-center"><Spinner size="lg" /></div>}>

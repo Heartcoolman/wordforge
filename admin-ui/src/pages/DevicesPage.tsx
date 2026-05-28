@@ -1,5 +1,6 @@
 import { batch, createSignal, onMount, Show, For } from 'solid-js';
 import { Card } from '@/components/ui/Card';
+import { HeroCard } from '@/components/ui/HeroCard';
 import { Button } from '@/components/ui/Button';
 import { Badge } from '@/components/ui/Badge';
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
@@ -149,10 +150,17 @@ export default function DevicesPage() {
 
   return (
     <div class="space-y-6">
-      <div class="flex items-center justify-between flex-wrap gap-2 pb-2 border-b border-border-hairline">
-        <h1 class="text-title text-content">设备</h1>
-        <Button size="sm" variant="outline" onClick={loadDevices} disabled={loading()}>刷新</Button>
-      </div>
+      <HeroCard
+        eyebrow="SSE + Telemetry"
+        eyebrowVariant="info"
+        title="设备管理"
+        desc="所有通过 /api/* 接入后端的 end-user 设备（Web / iOS / Android），含实时 SSE 连接与接入历史统计。"
+        meta={[
+          { value: sseLive().length, label: '在线连接数' },
+          { value: recentlyActive().length, label: '近期接入设备' },
+        ]}
+        cta={<Button size="sm" variant="outline" onClick={loadDevices} disabled={loading()}>刷新</Button>}
+      />
 
       {/* Tabs / Telemetry Panel 不受 loading 影响：刷新时 Telemetry 已展开面板不被卸载 */}
       <Tabs

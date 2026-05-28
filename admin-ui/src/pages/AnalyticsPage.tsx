@@ -1,6 +1,7 @@
 import { createMemo, createResource, Show, For } from 'solid-js';
 import { useSearchParams } from '@solidjs/router';
 import { Card } from '@/components/ui/Card';
+import { HeroCard } from '@/components/ui/HeroCard';
 import { Skeleton } from '@/components/ui/Skeleton';
 import { StatCard } from '@/components/ui/StatCard';
 import { EChart } from '@/components/ui/EChart';
@@ -46,10 +47,13 @@ export default function AnalyticsPage() {
 
   return (
     <div class="space-y-6">
-      <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-2 border-b border-border-hairline">
-        <h1 class="text-title text-content">深度分析</h1>
-        <WindowPicker value={days()} onChange={setDays} />
-      </div>
+      <HeroCard
+        eyebrow="留存 + 漏斗 + 时段"
+        eyebrowVariant="info"
+        title="数据分析"
+        desc={`过去 ${days()} 天的学习深度数据。留存矩阵、答题分布、时段热图、词库使用 top。可导出 CSV。`}
+        cta={<WindowPicker value={days()} onChange={setDays} />}
+      />
 
       {/* KPI 行 (6 张) — 中等宽度先 2 行 3 列，lg/xl 展开 6 卡，避免 1024-1279 区间挤压 */}
       <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 xl:grid-cols-6 gap-3">

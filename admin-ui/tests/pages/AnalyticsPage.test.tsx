@@ -120,7 +120,7 @@ describe('AnalyticsPage', () => {
   it('renders page heading after loading', async () => {
     primeMocks();
     await renderPage();
-    await waitFor(() => expect(screen.getByText('深度分析')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('数据分析')).toBeInTheDocument());
   });
 
   it('shows KPI cards after loading', async () => {
@@ -181,7 +181,7 @@ describe('AnalyticsPage', () => {
   it('updates window via search params when picker changes', async () => {
     primeMocks();
     await renderPage();
-    await waitFor(() => expect(screen.getByText('深度分析')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('数据分析')).toBeInTheDocument());
     // WindowPicker 升级为 radiogroup；按 14天 radio 触发切换
     const btn14 = screen.getAllByRole('radio').find((b) => b.textContent === '14天');
     expect(btn14).toBeDefined();
