@@ -6,8 +6,10 @@ import { Skeleton } from '@/components/ui/Skeleton';
 import { StatCard } from '@/components/ui/StatCard';
 import { EChart } from '@/components/ui/EChart';
 import { Empty } from '@/components/ui/Empty';
+import { Button } from '@/components/ui/Button';
 import { WindowPicker } from '@/components/ui/WindowPicker';
 import { adminApi } from '@/api/admin';
+import { uiStore } from '@/stores/ui';
 import { formatNumber, formatPercent, formatDuration, formatAccuracy } from '@/utils/formatters';
 
 const DAYS_ALLOWED = [7, 14, 30] as const;
@@ -45,6 +47,53 @@ export default function AnalyticsPage() {
   const [retention] = createResource(() => adminApi.getRetentionCurve());
   const [states] = createResource(() => adminApi.getWordStateDistribution());
 
+  // 导出 CSV:把当前已加载的 retention + state + record types 拼成一个表
+  function exportCsv() {
+    const rows: string[][] = [['section', 'metric', 'value']];
+    const e = eng();
+    const o = overview();
+    if (e) {
+      rows.push(['engagement', 'totalUsers', String(e.totalUsers)]);
+      rows.push(['engagement', 'activeToday', String(e.activeToday)]);
+      rows.push(['engagement', 'retentionRate', formatPercent(e.retentionRate)]);
+    }
+    if (o) {
+      rows.push(['overview', `${days()}d_records`, String(o.summary.recordCount)]);
+      rows.push(['overview', `${days()}d_accuracy`, formatAccuracy(o.summary.accuracy)]);
+      rows.push(['overview', `${days()}d_duration_secs`, String(o.summary.totalDurationSecs)]);
+      rows.push(['overview', `${days()}d_new_words`, String(o.summary.newWords)]);
+    }
+    const r = retention();
+    if (r) {
+      r.points.forEach((p) => {
+        rows.push(['retention', `${p.daysSinceLearn}d_since_learn`, `${p.retention ?? 'null'}|n=${p.sampleSize}`]);
+      });
+    }
+    const s = states();
+    if (s) {
+      Object.entries(s.states).forEach(([k, v]) => {
+        rows.push(['state_distribution', k, String(v)]);
+      });
+    }
+    if (rows.length === 1) {
+      uiStore.toast.warning('没有可导出的数据,请等待图表全部加载');
+      return;
+    }
+    const csv = rows
+      .map((r) => r.map((cell) => (cell.includes(',') || cell.includes('"') ? `"${cell.replace(/"/g, '""')}"` : cell)).join(','))
+      .join('\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `wordforge-analytics-${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    uiStore.toast.success(`已导出 ${rows.length - 1} 行 CSV`);
+  }
+
   return (
     <div class="space-y-6">
       <HeroCard
@@ -52,7 +101,12 @@ export default function AnalyticsPage() {
         eyebrowVariant="info"
         title="数据分析"
         desc={`过去 ${days()} 天的学习深度数据。留存矩阵、答题分布、时段热图、词库使用 top。可导出 CSV。`}
-        cta={<WindowPicker value={days()} onChange={setDays} />}
+        cta={
+          <div class="flex flex-wrap items-center gap-2">
+            <WindowPicker value={days()} onChange={setDays} />
+            <Button size="sm" variant="ghost" onClick={exportCsv}>导出 CSV</Button>
+          </div>
+        }
       />
 
       {/* KPI 行 (6 张) — 中等宽度先 2 行 3 列，lg/xl 展开 6 卡，避免 1024-1279 区间挤压 */}
@@ -326,6 +380,31 @@ export default function AnalyticsPage() {
               }}
             </Show>
           </Show>
+        </Card>
+      </div>
+
+      {/* 时段热图占位 + 词库 top10 占位 — 后端 admin/analytics 当前未提供
+          hourly buckets 与 wordbook usage rank,后续扩展端点后接入 */}
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <Card variant="elevated">
+          <div class="flex items-center justify-between mb-3">
+            <h2 class="text-headline text-content">时段活跃热图</h2>
+            <span class="text-[11px] text-content-tertiary uppercase tracking-wide">待后端接入</span>
+          </div>
+          <Empty
+            title="等待后端 hourly buckets"
+            description="需要 /api/admin/analytics/hourly?days=N 返回 24h × 7d 答题数矩阵后接入 ECharts heatmap。"
+          />
+        </Card>
+        <Card variant="elevated">
+          <div class="flex items-center justify-between mb-3">
+            <h2 class="text-headline text-content">词库使用 Top 10</h2>
+            <span class="text-[11px] text-content-tertiary uppercase tracking-wide">待后端接入</span>
+          </div>
+          <Empty
+            title="等待后端 wordbook usage rank"
+            description="需要 /api/admin/analytics/wordbook-rank?days=N 返回各词库答题数排序后接入横向柱图。"
+          />
         </Card>
       </div>
     </div>
