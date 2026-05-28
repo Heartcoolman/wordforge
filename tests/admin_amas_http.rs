@@ -561,3 +561,52 @@ async fn it_amas_user_and_admin_endpoints() {
     let (config_as_user_status, _, _) = response_json(config_as_user).await;
     assert_eq!(config_as_user_status, StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn it_advisor_cost_endpoints() {
+    let app = spawn_test_server().await;
+    let admin_token = common::auth::setup_admin_and_get_token(&app.app).await;
+
+    let cost = request(
+        &app.app,
+        Method::GET,
+        "/api/admin/amas/advisor/cost",
+        None,
+        &[("authorization", auth_header(&admin_token))],
+    )
+    .await;
+    let (cost_status, _, cost_body) = response_json(cost).await;
+    assert_eq!(cost_status, StatusCode::OK);
+    // 空表兜底：所有数值字段为 0，acceptanceRate=0
+    assert!(cost_body["data"]["monthYuan"].is_number());
+    assert!(cost_body["data"]["monthCapYuan"].is_number());
+    assert!(cost_body["data"]["quotaPct"].is_number());
+    assert!(cost_body["data"]["acceptedCount"].is_number());
+    assert!(cost_body["data"]["rejectedCount"].is_number());
+    assert!(cost_body["data"]["acceptanceRate"].is_number());
+
+    let daily = request(
+        &app.app,
+        Method::GET,
+        "/api/admin/amas/advisor/cost/daily?days=30",
+        None,
+        &[("authorization", auth_header(&admin_token))],
+    )
+    .await;
+    let (daily_status, _, daily_body) = response_json(daily).await;
+    assert_eq!(daily_status, StatusCode::OK);
+    assert!(daily_body["data"].is_array());
+
+    // 鉴权：普通用户 401
+    let user_token = login_and_get_token(&app.app).await;
+    let denied = request(
+        &app.app,
+        Method::GET,
+        "/api/admin/amas/advisor/cost",
+        None,
+        &[("authorization", auth_header(&user_token))],
+    )
+    .await;
+    let (denied_status, _, _) = response_json(denied).await;
+    assert_eq!(denied_status, StatusCode::UNAUTHORIZED);
+}

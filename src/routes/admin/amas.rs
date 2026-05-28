@@ -10,6 +10,7 @@ use crate::auth::{AdminAuthUser, AuthUser};
 use crate::response::{ok, AppError};
 use crate::state::AppState;
 use crate::store::operations::amas_versions::ConfigVersionSource;
+use chrono::Datelike;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -57,6 +58,9 @@ pub fn admin_router() -> Router<AppState> {
         .route("/suggestions/:id", get(get_suggestion))
         .route("/suggestions/:id/approve", post(approve_suggestion))
         .route("/suggestions/:id/reject", post(reject_suggestion))
+        // C1: advisor 成本/统计
+        .route("/advisor/cost", get(advisor_cost))
+        .route("/advisor/cost/daily", get(advisor_cost_daily))
 }
 
 // ─────────────────── m022:TOML 互转 + canary ───────────────────
@@ -1108,4 +1112,127 @@ async fn evaluate_mastery(
     };
 
     Ok(ok(mastery_info))
+}
+
+// ─────────── C1: advisor 成本 / 统计 ───────────
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AdvisorCostStats {
+    month_yuan: f64,
+    month_cap_yuan: f64,
+    quota_pct: f64,
+    forecast_yuan: f64,
+    avg7d_cost_yuan: f64,
+    month_calls: i64,
+    accepted_count: i64,
+    rejected_count: i64,
+    acceptance_rate: f64,
+}
+
+async fn advisor_cost(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let usd_to_cny = state.config().llm.usd_to_cny_rate;
+    let month = chrono::Utc::now().format("%Y-%m").to_string();
+    let stats = state
+        .run_store_task("admin.amas.advisor_cost", move |store| {
+            let month_yuan = store.get_llm_cost_this_month(&month)?;
+            let settings = store.get_system_settings()?;
+            let (approved, rejected) = store.aggregate_suggestion_acceptance()?;
+            // 本月调用次数 + 近 7 天¥成本（用于均单次 + 预测）
+            let daily = store.aggregate_daily_suggestion_cost_yuan(7, usd_to_cny)?;
+            let counts = store.count_suggestions_by_status()?;
+            let month_calls: i64 = counts.iter().map(|(_, c)| *c).sum();
+            Ok::<_, crate::store::StoreError>((
+                month_yuan,
+                settings.llm_advisor_max_cost_per_month_yuan,
+                approved,
+                rejected,
+                daily,
+                month_calls,
+            ))
+        })
+        .await??;
+
+    let (month_yuan, month_cap_yuan, approved, rejected, daily7, month_calls) = stats;
+    let quota_pct = if month_cap_yuan > 0.0 {
+        (month_yuan / month_cap_yuan * 100.0).min(999.0)
+    } else {
+        0.0
+    };
+    // 月末预测：按当前 day-of-month 线性外推
+    let now = chrono::Utc::now();
+    let day = now.day().max(1) as f64;
+    let days_in_month = days_in_month(now.year(), now.month()) as f64;
+    let forecast_yuan = month_yuan / day * days_in_month;
+    let total7: f64 = daily7.iter().map(|(_, c)| *c).sum();
+    let avg7d_cost_yuan = if month_calls > 0 {
+        total7 / (month_calls as f64).max(1.0)
+    } else {
+        0.0
+    };
+    let decided = approved + rejected;
+    let acceptance_rate = if decided > 0 {
+        approved as f64 / decided as f64
+    } else {
+        0.0
+    };
+
+    Ok(ok(AdvisorCostStats {
+        month_yuan,
+        month_cap_yuan,
+        quota_pct,
+        forecast_yuan,
+        avg7d_cost_yuan,
+        month_calls,
+        accepted_count: approved,
+        rejected_count: rejected,
+        acceptance_rate,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CostDailyQuery {
+    days: Option<i64>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CostDailyPoint {
+    date: String,
+    cost_yuan: f64,
+}
+
+async fn advisor_cost_daily(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Query(q): Query<CostDailyQuery>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let days = q.days.unwrap_or(30).clamp(1, 90);
+    let usd_to_cny = state.config().llm.usd_to_cny_rate;
+    let rows = state
+        .run_store_task("admin.amas.advisor_cost_daily", move |store| {
+            store.aggregate_daily_suggestion_cost_yuan(days, usd_to_cny)
+        })
+        .await??;
+    let points: Vec<CostDailyPoint> = rows
+        .into_iter()
+        .map(|(date, cost_yuan)| CostDailyPoint { date, cost_yuan })
+        .collect();
+    Ok(ok(points))
+}
+
+/// 给定年月返回该月天数（用于月末成本线性外推）。
+fn days_in_month(year: i32, month: u32) -> u32 {
+    let (ny, nm) = if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
+    };
+    let first_next = chrono::NaiveDate::from_ymd_opt(ny, nm, 1).unwrap_or_default();
+    let first_this = chrono::NaiveDate::from_ymd_opt(year, month, 1).unwrap_or_default();
+    (first_next - first_this).num_days() as u32
 }
