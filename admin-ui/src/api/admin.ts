@@ -1,4 +1,5 @@
-import { api } from './http';
+import { api, buildUrl } from './http';
+import { tokenManager } from '@/lib/token';
 import type {
   AdminAuthResponse, AdminStats,
   AdminUser, AdminUsersPage, AdminUsersQuery, AdminCreateUserPayload,
@@ -286,8 +287,8 @@ export const adminApi = {
     api.get<{ a: AmasVersionSlice; b: AmasVersionSlice }>('/api/admin/amas/compare', { versionA, versionB }, { useAdminToken: true }),
 
   // ─────────── AMAS Advisor / Suggestions（PR-5/6） ───────────
-  amasListSuggestions: (status?: AmasSuggestionStatus, limit = 50) =>
-    api.get<AmasSuggestion[]>('/api/admin/amas/suggestions', { status, limit }, { useAdminToken: true }),
+  amasListSuggestions: (status?: AmasSuggestionStatus, limit = 50, offset = 0, q?: string) =>
+    api.get<AmasSuggestion[]>('/api/admin/amas/suggestions', { status, limit, offset, q }, { useAdminToken: true }),
   amasGetSuggestion: (id: number) =>
     api.get<AmasSuggestion>(`/api/admin/amas/suggestions/${id}`, undefined, { useAdminToken: true }),
   amasApproveSuggestion: (id: number, note?: string) =>
@@ -298,6 +299,59 @@ export const adminApi = {
     api.post<AmasExplainResponse>('/api/admin/amas/suggestions/explain', { path, currentValue }, { useAdminToken: true }),
   amasSuggestionSpend: () =>
     api.get<AmasSpendStats>('/api/admin/amas/suggestions/spend', undefined, { useAdminToken: true }),
+
+  // ─────────── advisor 成本/统计/巡查（C1-C2） ───────────
+  amasAdvisorCost: () =>
+    api.get<AdvisorCostStats>('/api/admin/amas/advisor/cost', undefined, { useAdminToken: true }),
+  amasAdvisorCostDaily: (days = 30) =>
+    api.get<AdvisorCostDaily[]>('/api/admin/amas/advisor/cost/daily', { days }, { useAdminToken: true }),
+  amasAdvisorRun: () =>
+    api.post<{ produced: boolean; suggestionId: number | null }>('/api/admin/amas/advisor/run', undefined, { useAdminToken: true }),
+  amasApproveAllSuggestions: () =>
+    api.post<{ results: Array<{ id: number; ok: boolean; error: string | null }> }>(
+      '/api/admin/amas/suggestions/approve-all', undefined, { useAdminToken: true }),
+
+  // ─────────── advisor 配置（C3） ───────────
+  amasAdvisorConfig: () =>
+    api.get<AdvisorConfig>('/api/admin/amas/advisor/config', undefined, { useAdminToken: true }),
+  amasUpdateAdvisorConfig: (payload: Partial<Pick<AdvisorConfig,
+    'monthCapYuan' | 'autoApplyEnabled' | 'autoApplyMaxPerDay' | 'autoApplyMinConfidence' | 'grayscaleSteps' | 'advisorEnabled'>>) =>
+    api.put<AdvisorConfig>('/api/admin/amas/advisor/config', payload, { useAdminToken: true }),
+
+  // ─────────── 白名单 CRUD（C4） ───────────
+  amasListWhitelist: () =>
+    api.get<WhitelistRow[]>('/api/admin/amas/advisor/whitelist', undefined, { useAdminToken: true }),
+  amasAddWhitelist: (payload: { path: string; minSafe: number; maxSafe: number }) =>
+    api.post<WhitelistRow>('/api/admin/amas/advisor/whitelist', payload, { useAdminToken: true }),
+  amasDeleteWhitelist: (path: string) =>
+    api.delete<{ deleted: boolean }>(`/api/admin/amas/advisor/whitelist/${encodeURIComponent(path)}`, { useAdminToken: true }),
+
+  // ─────────── 历史增强（C5） ───────────
+  amasRollbackSuggestion: (id: number) =>
+    api.post<{ rolledBack: boolean; versionHash: string }>(`/api/admin/amas/suggestions/${id}/rollback`, undefined, { useAdminToken: true }),
+  /** CSV 导出走原始 fetch（响应是 text/csv 非 JSON envelope，api.get 的 unwrap 会误解析）。 */
+  amasExportSuggestionsCsv: async (status?: AmasSuggestionStatus, q?: string): Promise<string> => {
+    const url = buildUrl('/api/admin/amas/suggestions/export.csv', { status, q });
+    const token = tokenManager.getAdminToken();
+    const res = await fetch(url, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      credentials: 'include',
+    });
+    if (!res.ok) throw new Error(`导出失败 HTTP ${res.status}`);
+    return res.text();
+  },
+
+  // ─────────── per-patch canary（C6） ───────────
+  amasListCanaries: () =>
+    api.get<PatchCanary[]>('/api/admin/amas/advisor/canary', undefined, { useAdminToken: true }),
+  amasCreateCanary: (payload: { suggestionId: number; percent: number }) =>
+    api.post<PatchCanary>('/api/admin/amas/advisor/canary', payload, { useAdminToken: true }),
+  amasScaleCanary: (id: number, percent: number) =>
+    api.post<PatchCanary>(`/api/admin/amas/advisor/canary/${id}/scale`, { percent }, { useAdminToken: true }),
+  amasRollbackCanary: (id: number) =>
+    api.post<{ rolledBack: boolean }>(`/api/admin/amas/advisor/canary/${id}/rollback`, undefined, { useAdminToken: true }),
+  amasPromoteCanary: (id: number) =>
+    api.post<{ promoted: boolean; versionHash: string }>(`/api/admin/amas/advisor/canary/${id}/promote`, undefined, { useAdminToken: true }),
 
   // ─────────── m022:新增端点全集 ───────────
   // AMAS TOML 互转
@@ -584,4 +638,59 @@ export interface AmasVersionSlice {
   meanConfidence: number;
   firstEventAt: string | null;
   lastEventAt: string | null;
+}
+
+// ─────────── advisor 全栈对齐类型（camelCase 镜像后端序列化） ───────────
+export interface AdvisorCostStats {
+  monthYuan: number;
+  monthCapYuan: number;
+  quotaPct: number;
+  forecastYuan: number;
+  avg7dCostYuan: number;
+  monthCalls: number;
+  acceptedCount: number;
+  rejectedCount: number;
+  acceptanceRate: number;
+}
+
+export interface AdvisorCostDaily {
+  date: string;
+  costYuan: number;
+}
+
+export interface AdvisorConfig {
+  model: string;
+  pollCron: string;
+  apiKeyTail: string;
+  monthCapYuan: number;
+  autoApplyEnabled: boolean;
+  autoApplyMaxPerDay: number;
+  autoApplyMinConfidence: number;
+  grayscaleSteps: [number, number, number];
+  advisorEnabled: boolean;
+}
+
+export interface WhitelistRow {
+  path: string;
+  minSafe: number;
+  maxSafe: number;
+}
+
+export type PatchCanaryStatus = 'active' | 'effective' | 'rolled_back';
+
+export interface PatchCanary {
+  id: number;
+  suggestionId: number;
+  versionHash: string;
+  percent: number;
+  cohortLo: number;
+  cohortHi: number;
+  status: PatchCanaryStatus;
+  baselineMetricsJson: string;
+  startedAt: string;
+  updatedAt: string;
+  /** GET /advisor/canary 端点联表附带的实测口径 */
+  liveReward: number;
+  liveAnomalyRate: number;
+  baselineReward: number;
 }
