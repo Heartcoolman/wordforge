@@ -16,6 +16,9 @@ pub struct ClientDevice {
     pub banned_at: Option<String>,
     pub banned_by: Option<String>,
     pub ban_reason: Option<String>,
+    /// m022 加入：客户端首次上报的 x-app-version 头。NULL 表示该设备从未上报过版本。
+    #[serde(default)]
+    pub app_version: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -51,15 +54,28 @@ impl Store {
         platform: &str,
         user_id: &str,
     ) -> Result<(), StoreError> {
+        self.upsert_client_device_with_version(device_id, platform, user_id, None)
+    }
+
+    /// 同 [`upsert_client_device`],额外把 `x-app-version` header 落库。
+    /// app_version 传 None 时保留 DB 现有值不变(用 COALESCE),避免后续请求漏带头清掉版本。
+    pub fn upsert_client_device_with_version(
+        &self,
+        device_id: &str,
+        platform: &str,
+        user_id: &str,
+        app_version: Option<&str>,
+    ) -> Result<(), StoreError> {
         let conn = self.conn()?;
         conn.execute(
-            "INSERT INTO client_devices (device_id, platform, user_id, first_seen_at, last_seen_at)
-             VALUES (?1, ?2, ?3, datetime('now'), datetime('now'))
+            "INSERT INTO client_devices (device_id, platform, user_id, app_version, first_seen_at, last_seen_at)
+             VALUES (?1, ?2, ?3, ?4, datetime('now'), datetime('now'))
              ON CONFLICT(device_id) DO UPDATE SET
                 last_seen_at = datetime('now'),
                 platform = ?2,
-                user_id = ?3",
-            params![device_id, platform, user_id],
+                user_id = ?3,
+                app_version = COALESCE(?4, app_version)",
+            params![device_id, platform, user_id, app_version],
         )?;
         Ok(())
     }
@@ -83,7 +99,7 @@ impl Store {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT device_id, platform, user_id, first_seen_at, last_seen_at,
-                    is_banned, banned_at, banned_by, ban_reason
+                    is_banned, banned_at, banned_by, ban_reason, app_version
              FROM client_devices
              WHERE last_seen_at >= datetime('now', ?1) OR is_banned = 1
              ORDER BY is_banned DESC, last_seen_at DESC",
@@ -100,6 +116,7 @@ impl Store {
                 banned_at: r.get(6)?,
                 banned_by: r.get(7)?,
                 ban_reason: r.get(8)?,
+                app_version: r.get(9)?,
             })
         })?;
         let mut result = Vec::new();
@@ -107,6 +124,41 @@ impl Store {
             result.push(row?);
         }
         Ok(result)
+    }
+
+    /// 查给定 device_id 列表的 app_version。用于 SSE live entry 透出版本号
+    /// (因为 SseClientInfo 不存 app_version)。返回 map,缺失或 NULL 都映射为 None。
+    pub fn get_app_versions_for_devices(
+        &self,
+        device_ids: &[String],
+    ) -> Result<HashMap<String, Option<String>>, StoreError> {
+        if device_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let conn = self.conn()?;
+        let placeholders: Vec<String> = device_ids
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("?{}", i + 1))
+            .collect();
+        let sql = format!(
+            "SELECT device_id, app_version FROM client_devices WHERE device_id IN ({})",
+            placeholders.join(",")
+        );
+        let params: Vec<&dyn rusqlite::types::ToSql> = device_ids
+            .iter()
+            .map(|s| s as &dyn rusqlite::types::ToSql)
+            .collect();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params.as_slice(), |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+        })?;
+        let mut map = HashMap::new();
+        for row in rows {
+            let (id, ver) = row?;
+            map.insert(id, ver);
+        }
+        Ok(map)
     }
 
     pub fn ban_client_device(

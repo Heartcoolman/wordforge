@@ -191,6 +191,10 @@ pub struct ApplyContext {
     pub on_rollback: Box<dyn Fn(String) + Send + 'static>,
     pub on_maintenance: Box<dyn Fn(bool) + Send + 'static>,
     pub task_id: String,
+    /// m022:rollback 专用旁路。设 true 时绕过 `is_strictly_newer` 校验,
+    /// 允许把当前版本 swap 成更低的 target_tag。默认 false 即沿用 Updater struct
+    /// 的 `allow_downgrade` 全局开关(env 配置)。
+    pub allow_downgrade: bool,
 }
 
 #[derive(Default)]
@@ -304,6 +308,72 @@ impl Updater {
     /// 强制刷新：跳过 TTL，但仍带 ETag 走 304 节省 GitHub 额度。admin "立即检查" 用这条。
     pub async fn force_check_latest(&self) -> Result<UpdateStatus, UpdaterError> {
         self.check_inner(true).await
+    }
+
+    /// m022:rollback 专用。从 GitHub `/releases/tags/{tag}` 拉单条 release,parse 后
+    /// 塞入指定 channel 的 cache slot,使后续 `apply()` 能用该 tag 作为 target。
+    /// 注意:覆盖现有 cache 中的 channel latest;rollback 完成后下次 check 会重新拉真正的 latest。
+    pub async fn fetch_release_by_tag(
+        &self,
+        channel: Channel,
+        target_tag: &str,
+    ) -> Result<(), UpdaterError> {
+        if self.api_url.trim().is_empty() {
+            return Err(UpdaterError::Config(
+                "api_url is empty; cannot fetch release by tag".into(),
+            ));
+        }
+        // 把 list URL("https://api.github.com/.../releases?per_page=10")
+        // 改写为 single tag URL("https://api.github.com/.../releases/tags/{tag}")
+        let base = self.api_url.split('?').next().unwrap_or(&self.api_url);
+        let tag_url = format!("{}/tags/{}", base.trim_end_matches('/'), target_tag);
+
+        let mut req = self
+            .client
+            .get(&tag_url)
+            .header("Accept", "application/vnd.github+json");
+        if let Some(ref token) = self.github_token {
+            req = req.header("Authorization", format!("Bearer {token}"));
+        }
+
+        let resp = req.send().await?;
+        let status = resp.status();
+        if status.as_u16() == 403 || status.as_u16() == 429 {
+            return Err(UpdaterError::RateLimited);
+        }
+        if status.as_u16() == 404 {
+            return Err(UpdaterError::InvalidTarget(format!(
+                "GitHub release tag '{}' not found",
+                target_tag
+            )));
+        }
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(UpdaterError::Api {
+                status: status.as_u16(),
+                body,
+            });
+        }
+        let body: serde_json::Value = resp.json().await?;
+        let parsed = parse_release_payload(&body).ok_or_else(|| {
+            UpdaterError::InvalidTarget(format!(
+                "release tag '{}' has no compatible asset for current arch",
+                target_tag
+            ))
+        })?;
+        if parsed.tag != target_tag {
+            return Err(UpdaterError::InvalidTarget(format!(
+                "GitHub returned tag '{}' for query '{}'",
+                parsed.tag, target_tag
+            )));
+        }
+
+        let mut cache = self.cache.write().await;
+        match channel {
+            Channel::Stable => cache.stable = Some(parsed),
+            Channel::Beta => cache.beta = Some(parsed),
+        }
+        Ok(())
     }
 
     async fn check_inner(&self, force: bool) -> Result<UpdateStatus, UpdaterError> {
@@ -427,6 +497,7 @@ impl Updater {
             on_rollback,
             on_maintenance,
             task_id,
+            allow_downgrade: ctx_allow_downgrade,
         } = ctx;
         let latest = {
             let cache = self.cache.read().await;
@@ -457,7 +528,9 @@ impl Updater {
                 arch: current_arch_token().unwrap_or("unknown").to_string(),
             });
         }
-        if !self.allow_downgrade && !is_strictly_newer(&latest.tag, &self.current_tag) {
+        // m022:ApplyContext.allow_downgrade 任一为 true 即放行;rollback handler 走此分支。
+        let allow_downgrade = self.allow_downgrade || ctx_allow_downgrade;
+        if !allow_downgrade && !is_strictly_newer(&latest.tag, &self.current_tag) {
             return Err(UpdaterError::DowngradeRefused {
                 current: self.current_tag.clone(),
                 latest: latest.tag.clone(),

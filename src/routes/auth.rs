@@ -198,6 +198,9 @@ async fn register(
                     updated_at: now,
                     failed_login_count: 0,
                     locked_until: None,
+                    role: "user".to_string(),
+                    status: "active".to_string(),
+                    last_login_at: None,
                 };
                 store.create_user(&user)?;
                 Ok(user)

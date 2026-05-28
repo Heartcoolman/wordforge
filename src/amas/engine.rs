@@ -118,6 +118,64 @@ impl AMASEngine {
         self.config.read().as_ref().clone()
     }
 
+    /// m022:按 user_id 解析"有效配置"。
+    ///   - 无 active canary → 返回当前 stable config(`self.config.read()`)
+    ///   - 有 canary 且 user_id 在 force_user_ids 或 hash(user_id) % 100 < percent →
+    ///     从 amas_config_versions 表加载 canary version 的 snapshot
+    ///   - 反序列化失败或 version 不存在时回退 stable(打 warn log 不抛错)
+    ///
+    /// process_event_blocking 在入口调一次此方法,后续整个 request 内的 ProcessingContext.config
+    /// 都用同一份 Arc,保证一次请求内 config 一致。
+    pub fn effective_config_for_user(&self, user_id: &str) -> Arc<AMASConfig> {
+        let stable: Arc<AMASConfig> = Arc::clone(&self.config.read());
+        let canary = match self.store.get_active_amas_canary() {
+            Ok(Some(c)) => c,
+            Ok(None) => return stable,
+            Err(e) => {
+                tracing::warn!(error=%e, "effective_config_for_user: 查 canary 失败,回退 stable");
+                return stable;
+            }
+        };
+        let is_forced = canary.force_user_ids.iter().any(|id| id == user_id);
+        // hash(user_id) % 100 < percent
+        let in_bucket = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            user_id.hash(&mut h);
+            (h.finish() % 100) < canary.percent as u64
+        };
+        if !is_forced && !in_bucket {
+            return stable;
+        }
+        // 从 versions 表拉 canary snapshot
+        match self.store.get_amas_config_version(&canary.version_hash) {
+            Ok(Some(version)) => {
+                match serde_json::from_value::<AMASConfig>(version.snapshot_json.clone()) {
+                    Ok(cfg) => Arc::new(cfg),
+                    Err(e) => {
+                        tracing::warn!(
+                            version_hash = %canary.version_hash,
+                            error = %e,
+                            "effective_config_for_user: 反序列化 canary snapshot 失败,回退 stable"
+                        );
+                        stable
+                    }
+                }
+            }
+            Ok(None) => {
+                tracing::warn!(
+                    version_hash = %canary.version_hash,
+                    "effective_config_for_user: canary version_hash 在 amas_config_versions 中不存在,回退 stable"
+                );
+                stable
+            }
+            Err(e) => {
+                tracing::warn!(error=%e, "effective_config_for_user: 加载 canary version 失败,回退 stable");
+                stable
+            }
+        }
+    }
+
     pub fn metrics_registry(&self) -> &Arc<metrics::MetricsRegistry> {
         &self.metrics_registry
     }
@@ -179,10 +237,8 @@ impl AMASEngine {
         let user_lock = self.acquire_user_lock_blocking(user_id);
         let _guard = user_lock.lock();
 
-        let config = {
-            let guard = self.config.read();
-            Arc::clone(&guard)
-        };
+        // m022:按 user_id 做 canary 抽样,可能返回 canary version 而非全局 stable。
+        let config = self.effective_config_for_user(user_id);
         let now = chrono::Utc::now();
         let mut context = self.prepare_processing_context(user_id, &raw_event, config, now)?;
         let strategy = self.select_strategy(&mut context);

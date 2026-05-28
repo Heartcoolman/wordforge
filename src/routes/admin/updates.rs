@@ -30,6 +30,7 @@ pub fn router() -> Router<AppState> {
         .route("/status", get(get_status))
         .route("/check", post(force_check))
         .route("/apply", post(apply))
+        .route("/rollback", post(rollback))
         .route("/history", get(get_history))
 }
 
@@ -219,6 +220,7 @@ async fn apply(
             on_rollback: Box::new(on_rollback),
             on_maintenance: Box::new(on_maintenance),
             task_id: task_id.clone(),
+            allow_downgrade: false,
         };
         match bg_updater.apply(ctx, backup_cb, sink).await {
             Ok(()) => {
@@ -318,6 +320,178 @@ fn map_err(e: UpdaterError) -> AppError {
         },
         other => AppError::internal(&other.to_string()),
     }
+}
+
+/// m022:POST /api/admin/updates/rollback —— 显式回退到某个旧版本。
+///
+/// 与 `apply` 的差异:
+///   1. 接收 `target_version` 不必是 channel 的 latest;backend 先调
+///      `fetch_release_by_tag(channel, target_version)` 把那个 tag 的元数据塞 cache,
+///      再走 apply pipeline。
+///   2. `ApplyContext.allow_downgrade = true`,绕过 semver 单调向上校验。
+///   3. 审计日志 `action = "rollback"`(默认 `self_update`),前端可按 action 区分。
+///   4. 仍然走 DB backup → swap → health-check → restart 的完整流程;失败自动回滚。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RollbackRequest {
+    channel: Channel,
+    target_version: String,
+    confirm_current_version: String,
+}
+
+async fn rollback(
+    admin: AdminAuthUser,
+    State(state): State<AppState>,
+    JsonBody(req): JsonBody<RollbackRequest>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let updater = require_updater(&state).await?;
+
+    if req.confirm_current_version != updater.current_tag() {
+        return Err(AppError::bad_request(
+            "CURRENT_VERSION_MISMATCH",
+            "前端版本号与后端不一致，请刷新后重试",
+        ));
+    }
+
+    if let Some(existing) = state.apply_task_snapshot() {
+        if existing.is_running() {
+            return Err(AppError {
+                status: StatusCode::CONFLICT,
+                code: "UPDATE_IN_PROGRESS".into(),
+                message: format!("已有升级任务在跑：{}", existing.target_version),
+                is_operational: true,
+            });
+        }
+    }
+
+    // 关键一步:把 target_version 的 release 元数据从 GitHub 拉到 cache,
+    // 否则 apply 会在 "channel latest != target_tag" 校验失败。
+    updater
+        .fetch_release_by_tag(req.channel, &req.target_version)
+        .await
+        .map_err(map_err)?;
+
+    let task_id = uuid::Uuid::new_v4().to_string();
+    let started_at = chrono::Utc::now();
+    let initial = ApplyTaskStatus {
+        task_id: task_id.clone(),
+        phase: "pending".into(),
+        percent: 0,
+        target_version: req.target_version.clone(),
+        started_at,
+        completed_at: None,
+        error: None,
+    };
+    state.set_apply_task(Some(initial.clone()));
+
+    tracing::warn!(
+        admin_id = %admin.admin_id,
+        task_id = %task_id,
+        target = %req.target_version,
+        current = updater.current_tag(),
+        "管理员触发 rollback(回滚到旧版本)",
+    );
+
+    {
+        let from = updater.current_tag().to_owned();
+        let store = state.store().clone();
+        let audit_id = task_id.clone();
+        let audit_admin_id = admin.admin_id.clone();
+        let to = req.target_version.clone();
+        let ch = format!("{:?}", req.channel).to_lowercase();
+        // 使用 m022 加入的 with_action 接口写 action="rollback",前端 history 按 action 区分
+        if let Err(e) = store.insert_update_audit_with_action(
+            &audit_id,
+            &audit_admin_id,
+            &from,
+            &to,
+            &ch,
+            "rollback",
+        ) {
+            tracing::warn!(error=%e, "写入 rollback audit 失败(不影响流程)");
+        }
+    }
+
+    let bg_state = state.clone();
+    let bg_updater = updater.clone();
+    let bg_store = state.store().clone();
+    let target = req.target_version.clone();
+    let channel = req.channel;
+    let health_url = format!("http://127.0.0.1:{}/health", state.config().port);
+    tokio::spawn(async move {
+        let progress_state = bg_state.clone();
+        let sink: crate::services::updater::ProgressSink = Arc::new(move |phase| {
+            let (label, percent) = phase_label_percent(&phase);
+            progress_state.broadcast_to_all_sse(SseEvent::UpdateProgress {
+                phase: label.clone(),
+                percent,
+            });
+            progress_state.update_apply_task(|t| {
+                t.phase = label;
+                t.percent = percent;
+            });
+        });
+
+        let audit_store = bg_store.clone();
+        let backup_cb = move |dst: &std::path::Path| -> Result<(), UpdaterError> {
+            bg_store.backup_to(dst).map_err(UpdaterError::Store)
+        };
+
+        let rollback_state = bg_state.clone();
+        let on_rollback = move |msg: String| {
+            rollback_state.broadcast_to_all_sse(SseEvent::UpdateProgress {
+                phase: format!("rollback: {msg}"),
+                percent: 0,
+            });
+        };
+
+        let maintenance_state = bg_state.clone();
+        let on_maintenance = move |active: bool| {
+            maintenance_state.set_maintenance(active);
+        };
+
+        let ctx = ApplyContext {
+            channel,
+            target_tag: target,
+            health_url,
+            on_rollback: Box::new(on_rollback),
+            on_maintenance: Box::new(on_maintenance),
+            task_id: task_id.clone(),
+            allow_downgrade: true,
+        };
+        match bg_updater.apply(ctx, backup_cb, sink).await {
+            Ok(()) => {
+                let _ = audit_store.complete_update_audit(&task_id, "success", None);
+                bg_state.update_apply_task(|t| {
+                    t.phase = "completed".into();
+                    t.percent = 100;
+                    t.completed_at = Some(chrono::Utc::now());
+                });
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                tracing::error!(task_id=%task_id, error=%msg, "rollback 后台 task 失败");
+                let _ = audit_store.complete_update_audit(&task_id, "failed", Some(msg.as_str()));
+                bg_state.update_apply_task(|t| {
+                    t.phase = "failed".into();
+                    t.completed_at = Some(chrono::Utc::now());
+                    t.error = Some(msg);
+                });
+            }
+        }
+    });
+
+    Ok((
+        StatusCode::ACCEPTED,
+        ok(json!({
+            "taskId": initial.task_id,
+            "phase": initial.phase,
+            "percent": initial.percent,
+            "targetVersion": initial.target_version,
+            "startedAt": initial.started_at,
+            "action": "rollback",
+        })),
+    ))
 }
 
 /// S5：GET /api/admin/updates/history — 最近 50 条升级审计记录（倒序）。

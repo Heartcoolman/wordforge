@@ -26,6 +26,12 @@ struct CreateFeedbackRequest {
     category: Option<String>,
     body: String,
     route: Option<String>,
+    /// m022:可选设备指纹快照 JSON。客户端可填 platform / appVersion / osName / browser / locale 等。
+    #[serde(default)]
+    device_profile: Option<serde_json::Value>,
+    /// m022:可选答题上下文快照 JSON。客户端可附最近 N 步答题事件、当前题目 ID 等任意 shape。
+    #[serde(default)]
+    answer_snapshot: Option<serde_json::Value>,
 }
 
 async fn create_feedback(
@@ -58,6 +64,8 @@ async fn create_feedback(
         assignee_admin_id: None,
         resolved_at: None,
         resolution: None,
+        device_profile: req.device_profile,
+        answer_snapshot: req.answer_snapshot,
     };
     let response = item.clone();
     state

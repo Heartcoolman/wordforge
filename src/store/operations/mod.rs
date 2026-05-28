@@ -1,5 +1,6 @@
 pub mod admin_analytics;
 pub mod admins;
+pub mod amas_canary;
 pub mod amas_suggestions;
 pub mod amas_telemetry;
 pub mod amas_versions;

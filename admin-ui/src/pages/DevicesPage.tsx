@@ -192,6 +192,13 @@ export default function DevicesPage() {
       ),
     },
     {
+      key: 'appVersion',
+      title: '版本',
+      render: (r: SseLiveEntry) => (
+        <span class="font-mono text-xs tabular-nums text-fg-muted">{r.appVersion ?? '—'}</span>
+      ),
+    },
+    {
       key: 'userId',
       title: '用户',
       render: (r: SseLiveEntry) => (
@@ -250,6 +257,13 @@ export default function DevicesPage() {
       key: 'platform',
       title: '平台',
       render: (r: RecentlyActiveEntry) => <Badge variant="default" size="sm">{r.platform}</Badge>,
+    },
+    {
+      key: 'appVersion',
+      title: '版本',
+      render: (r: RecentlyActiveEntry) => (
+        <span class="font-mono text-xs tabular-nums text-fg-muted">{r.appVersion ?? '—'}</span>
+      ),
     },
     {
       key: 'userId',

@@ -27,6 +27,8 @@ export interface SseLiveEntry {
   connectionCount: number;
   isBanned: boolean;
   dataChannels: DataChannelStatus;
+  /** m022:`x-app-version` 头落库后透出;旧客户端未上报时为 null */
+  appVersion?: string | null;
 }
 
 export interface RecentlyActiveEntry {
@@ -36,6 +38,8 @@ export interface RecentlyActiveEntry {
   lastSeenAt: string;
   isBanned: boolean;
   dataChannels: DataChannelStatus;
+  /** m022:同上 */
+  appVersion?: string | null;
 }
 
 export interface TelemetrySummary {
@@ -129,6 +133,13 @@ export const adminApi = {
   // S5：升级历史审计列表
   updatesHistory: () =>
     api.get<{ entries: UpdateAuditEntry[] }>('/api/admin/updates/history', undefined, { useAdminToken: true }),
+  // m022:回滚到旧版本(后端跳过 semver 上升校验,从 GitHub 拉 target tag metadata + apply)
+  updatesRollback: (channel: 'stable' | 'beta', targetVersion: string, confirmCurrentVersion: string) =>
+    api.post<ApplyAccepted>(
+      '/api/admin/updates/rollback',
+      { channel, targetVersion, confirmCurrentVersion },
+      { useAdminToken: true },
+    ),
 
   // Broadcast & Settings
   broadcast: (data: { title: string; message: string }) => api.post<{ sent: number }>('/api/admin/broadcast', data, { useAdminToken: true }),
@@ -227,7 +238,147 @@ export const adminApi = {
     api.post<AmasExplainResponse>('/api/admin/amas/suggestions/explain', { path, currentValue }, { useAdminToken: true }),
   amasSuggestionSpend: () =>
     api.get<AmasSpendStats>('/api/admin/amas/suggestions/spend', undefined, { useAdminToken: true }),
+
+  // ─────────── m022:新增端点全集 ───────────
+  // AMAS TOML 互转
+  amasParseToml: (toml: string) =>
+    api.post<AmasConfig>('/api/admin/amas/config/parse-toml', { toml }, { useAdminToken: true }),
+  amasSerializeToml: (config: AmasConfig) =>
+    api.post<{ toml: string }>('/api/admin/amas/config/serialize-toml', config, { useAdminToken: true }),
+
+  // AMAS canary 灰度
+  amasGetCanary: () =>
+    api.get<{ canary: AmasCanaryConfig | null }>('/api/admin/amas/config/canary', undefined, { useAdminToken: true }),
+  amasSetCanary: (payload: { versionHash: string; percent: number; forceUserIds?: string[] }) =>
+    api.put<{ canary: AmasCanaryConfig }>('/api/admin/amas/config/canary', payload, { useAdminToken: true }),
+  amasDisableCanary: () =>
+    api.post<{ disabled: boolean }>('/api/admin/amas/config/canary/disable', undefined, { useAdminToken: true }),
+
+  // Probe ring buffer + cluster
+  probeBufferStats: () =>
+    api.get<ProbeBufferStats>('/api/admin/probe/buffer-stats', undefined, { useAdminToken: true }),
+  probeCluster: (windowHours = 24) =>
+    api.get<{ windowHours: number; clusters: ProbeStatusCluster[] }>(
+      '/api/admin/probe/cluster',
+      { windowHours },
+      { useAdminToken: true },
+    ),
+
+  // Wordbook 本地上传 + 标签覆盖
+  wbCenterUpload: (payload: {
+    id: string;
+    name: string;
+    description?: string;
+    version?: string;
+    tags?: string[];
+    words: Array<{ spelling: string; phonetic?: string; meanings?: string[]; examples?: string[] }>;
+  }) => api.post<ImportResult>('/api/admin/wordbook-center/upload', payload, { useAdminToken: true }),
+  wbCenterPatchTags: (
+    wordbookId: string,
+    payload: { add?: string[]; remove?: string[]; replace?: string[] },
+  ) =>
+    api.patch<{ tags: string[] }>(`/api/admin/wordbook-center/${wordbookId}/tags`, payload, {
+      useAdminToken: true,
+    }),
+
+  // Analytics 三新端点
+  analyticsHourly: (days = 7) =>
+    api.get<{ generatedAt: string; days: number; matrix: number[][]; total: number }>(
+      '/api/admin/analytics/hourly',
+      { days },
+      { useAdminToken: true },
+    ),
+  analyticsWordbookRank: (params?: { days?: number; limit?: number }) =>
+    api.get<{ generatedAt: string; days: number; limit: number; rows: WordbookRankRow[] }>(
+      '/api/admin/analytics/wordbook-rank',
+      params as Record<string, string | number | boolean | undefined>,
+      { useAdminToken: true },
+    ),
+  analyticsRetentionCohort: (params?: { cohort?: 'weekly' | 'daily'; maxDays?: number }) =>
+    api.get<{
+      generatedAt: string;
+      cohortUnit: string;
+      maxDays: number;
+      rows: Array<{ cohortStart: string; daysSince: number; retainedUsers: number }>;
+    }>('/api/admin/analytics/retention-cohort', params as Record<string, string | number | boolean | undefined>, {
+      useAdminToken: true,
+    }),
+
+  // Users 扩展
+  userProfile: (id: string) =>
+    api.get<UserProfile>(`/api/admin/users/${id}/profile`, undefined, { useAdminToken: true }),
+  userSessions: (id: string, limit = 20) =>
+    api.get<{ sessions: UserSessionRow[] }>(`/api/admin/users/${id}/sessions`, { limit }, { useAdminToken: true }),
+  usersBulkBan: (userIds: string[], reason?: string) =>
+    api.post<BulkUserResult>('/api/admin/users/bulk-ban', { userIds, reason }, { useAdminToken: true }),
+  usersBulkUnban: (userIds: string[]) =>
+    api.post<BulkUserResult>('/api/admin/users/bulk-unban', { userIds }, { useAdminToken: true }),
 };
+
+// ─────────── m022:新端点附属类型 ───────────
+export interface AmasCanaryConfig {
+  id: number;
+  versionHash: string;
+  percent: number;
+  forceUserIds: string[];
+  createdAt: string;
+  createdBy: string;
+}
+
+export interface ProbeBatchStat {
+  batchId: string;
+  capacity: number;
+  receiverCount: number;
+}
+
+export interface ProbeBufferStats {
+  broadcastCapacityPerBatch: number;
+  activeBatches: number;
+  pendingConfirms: number;
+  trackedAdmins: number;
+  perBatch: ProbeBatchStat[];
+}
+
+export interface ProbeStatusCluster {
+  status: string;
+  count: number;
+  topErrors: string[];
+}
+
+export interface WordbookRankRow {
+  wordbookId: string;
+  name: string;
+  learnerCount: number;
+  recordCount: number;
+  correctCount: number;
+  accuracy: number | null;
+}
+
+export interface UserProfile {
+  userId: string;
+  totalRecords: number;
+  correctRecords: number;
+  accuracy: number | null;
+  sessionCount: number;
+  wordbookDistribution: Array<{ wordbookId: string; name: string; recordCount: number }>;
+}
+
+export interface UserSessionRow {
+  id: string;
+  status: string;
+  createdAt: string;
+  completedAt: string | null;
+  wordsCount: number | null;
+  correctCount: number | null;
+  accuracy: number | null;
+}
+
+export interface BulkUserResult {
+  total: number;
+  succeeded: number;
+  failed: number;
+  results: Array<{ userId: string; success: boolean; error: string | null }>;
+}
 
 // ─────────── 版本相关类型（PR-2） ───────────
 export type AmasConfigVersionSource = 'manual' | 'llm_suggested' | 'llm_auto';

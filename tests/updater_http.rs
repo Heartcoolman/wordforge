@@ -120,6 +120,7 @@ fn noop_ctx(channel: Channel, tag: &str) -> ApplyContext {
         on_rollback: Box::new(|_| {}),
         on_maintenance: Box::new(|_| {}),
         task_id: "test-task-id".to_string(),
+        allow_downgrade: false,
     }
 }
 

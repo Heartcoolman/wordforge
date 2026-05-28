@@ -10,6 +10,9 @@ CREATE TABLE IF NOT EXISTS users (
     updated_at TEXT NOT NULL,
     failed_login_count INTEGER NOT NULL DEFAULT 0,
     locked_until TEXT DEFAULT NULL,
+    role TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('user','staff','admin')),
+    status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','inactive','suspended')),
+    last_login_at TEXT DEFAULT NULL,
     PRIMARY KEY (id),
     UNIQUE (email)
 );
@@ -495,10 +498,12 @@ CREATE TABLE IF NOT EXISTS client_devices (
     banned_at TEXT DEFAULT NULL,
     banned_by TEXT DEFAULT NULL,
     ban_reason TEXT DEFAULT NULL,
+    app_version TEXT DEFAULT NULL,
     PRIMARY KEY (device_id)
 );
 CREATE INDEX IF NOT EXISTS idx_client_devices_user ON client_devices(user_id, last_seen_at DESC);
 CREATE INDEX IF NOT EXISTS idx_client_devices_active ON client_devices(last_seen_at DESC) WHERE is_banned = 0;
+CREATE INDEX IF NOT EXISTS idx_client_devices_app_version ON client_devices(app_version) WHERE app_version IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS telemetry_events (
     id TEXT NOT NULL,
@@ -521,6 +526,13 @@ CREATE TABLE IF NOT EXISTS feedback_items (
     body TEXT NOT NULL,
     route TEXT DEFAULT NULL,
     created_at TEXT NOT NULL,
+    priority TEXT NOT NULL DEFAULT 'normal',
+    status TEXT NOT NULL DEFAULT 'open',
+    assignee_admin_id INTEGER DEFAULT NULL,
+    resolved_at TEXT DEFAULT NULL,
+    resolution TEXT DEFAULT NULL,
+    device_profile_json TEXT DEFAULT NULL,
+    answer_snapshot_json TEXT DEFAULT NULL,
     PRIMARY KEY (id)
 );
 CREATE INDEX IF NOT EXISTS idx_feedback_items_created_at ON feedback_items(created_at DESC);
@@ -596,8 +608,30 @@ CREATE TABLE IF NOT EXISTS amas_tuning_suggestions (
     cost_usd REAL,
     tokens_input INTEGER,
     tokens_output INTEGER,
-    confidence REAL
+    confidence REAL,
+    base_values_json TEXT DEFAULT NULL
 );
+
+CREATE TABLE IF NOT EXISTS wordbook_local_tags (
+    wordbook_id TEXT NOT NULL,
+    tag         TEXT NOT NULL,
+    created_at  TEXT NOT NULL,
+    created_by  TEXT,
+    PRIMARY KEY (wordbook_id, tag)
+);
+CREATE INDEX IF NOT EXISTS idx_wordbook_local_tags_tag ON wordbook_local_tags(tag);
+
+CREATE TABLE IF NOT EXISTS amas_canary_config (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    version_hash    TEXT NOT NULL,
+    percent         INTEGER NOT NULL CHECK (percent BETWEEN 0 AND 100),
+    force_user_ids  TEXT NOT NULL DEFAULT '[]',
+    active          INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0,1)),
+    created_at      TEXT NOT NULL,
+    created_by      TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_amas_canary_active ON amas_canary_config(active) WHERE active = 1;
+CREATE INDEX IF NOT EXISTS idx_amas_canary_created ON amas_canary_config(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_amas_suggestions_status_time
     ON amas_tuning_suggestions(status, created_at DESC);
 

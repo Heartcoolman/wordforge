@@ -36,6 +36,9 @@ fn sample_user(id: &str, email: &str) -> User {
         updated_at: Utc::now(),
         failed_login_count: 0,
         locked_until: None,
+        role: "user".to_string(),
+        status: "active".to_string(),
+        last_login_at: None,
     }
 }
 

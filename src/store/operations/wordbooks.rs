@@ -226,6 +226,101 @@ impl Store {
         Ok(ids)
     }
 
+    // ────────────────── m022:wordbook_local_tags ──────────────────
+    // 本地标签覆盖层(远端 metadata 不可改),由 admin wordbook-center 页编辑。
+
+    /// 列出 wordbook 的本地标签(按字母序)。
+    pub fn list_wordbook_local_tags(&self, wordbook_id: &str) -> Result<Vec<String>, StoreError> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT tag FROM wordbook_local_tags WHERE wordbook_id = ?1 ORDER BY tag ASC",
+        )?;
+        let tags: Result<Vec<String>, _> = stmt
+            .query_map(params![wordbook_id], |r| r.get::<_, String>(0))?
+            .collect();
+        Ok(tags?)
+    }
+
+    /// 增量加入标签;已存在的跳过(ON CONFLICT DO NOTHING)。
+    pub fn add_wordbook_local_tags(
+        &self,
+        wordbook_id: &str,
+        tags: &[String],
+        created_by: Option<&str>,
+    ) -> Result<(), StoreError> {
+        if tags.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+        let now = chrono::Utc::now().to_rfc3339();
+        for tag in tags {
+            let trimmed = tag.trim();
+            if trimmed.is_empty() || trimmed.len() > 64 {
+                continue;
+            }
+            tx.execute(
+                "INSERT INTO wordbook_local_tags (wordbook_id, tag, created_at, created_by)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(wordbook_id, tag) DO NOTHING",
+                params![wordbook_id, trimmed, now, created_by],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// 删除指定标签。
+    pub fn remove_wordbook_local_tags(
+        &self,
+        wordbook_id: &str,
+        tags: &[String],
+    ) -> Result<(), StoreError> {
+        if tags.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+        for tag in tags {
+            tx.execute(
+                "DELETE FROM wordbook_local_tags WHERE wordbook_id = ?1 AND tag = ?2",
+                params![wordbook_id, tag.trim()],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// 整体替换标签:先清空再写入(单事务)。前端"标签编辑器"提交全集时使用。
+    pub fn set_wordbook_local_tags(
+        &self,
+        wordbook_id: &str,
+        tags: &[String],
+        created_by: Option<&str>,
+    ) -> Result<(), StoreError> {
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+        tx.execute(
+            "DELETE FROM wordbook_local_tags WHERE wordbook_id = ?1",
+            params![wordbook_id],
+        )?;
+        let now = chrono::Utc::now().to_rfc3339();
+        for tag in tags {
+            let trimmed = tag.trim();
+            if trimmed.is_empty() || trimmed.len() > 64 {
+                continue;
+            }
+            tx.execute(
+                "INSERT INTO wordbook_local_tags (wordbook_id, tag, created_at, created_by)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(wordbook_id, tag) DO NOTHING",
+                params![wordbook_id, trimmed, now, created_by],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn count_wordbook_words(&self, wordbook_id: &str) -> Result<u64, StoreError> {
         keys::validate_id(wordbook_id)?;
         let conn = self.conn()?;

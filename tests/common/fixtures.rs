@@ -18,6 +18,9 @@ pub fn seed_user(store: &Store, email: &str, username: &str, password: &str) -> 
         updated_at: now,
         failed_login_count: 0,
         locked_until: None,
+            role: "user".to_string(),
+            status: "active".to_string(),
+            last_login_at: None,
     };
     store.create_user(&user).expect("create seed user");
     user

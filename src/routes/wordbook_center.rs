@@ -129,6 +129,10 @@ pub fn admin_router() -> Router<AppState> {
         .route("/import/:id", post(admin_import))
         .route("/updates", get(admin_updates))
         .route("/updates/:id/sync", post(admin_sync))
+        // m022:本地 JSON 上传(CSV 在前端用 PapaParse 转 JSON 再 POST 避免后端引 csv crate)
+        .route("/upload", post(admin_upload))
+        // m022:本地标签覆盖层(远端 metadata 不可改,这是 admin 自定义的 wordbook 标签)
+        .route("/:wordbook_id/tags", axum::routing::patch(admin_patch_tags))
 }
 
 // ── User routes ──
@@ -708,6 +712,126 @@ async fn admin_updates(
         .collect();
 
     Ok(ok(updates))
+}
+
+/// m022:POST /api/admin/wordbook-center/upload —— 上传本地 JSON 词书,绕过远端 center。
+///
+/// body 与 RemoteWordbook 同 shape:`{id, name, description, version, tags, words: [{spelling, phonetic, meanings, examples}]}`。
+/// `id` 必须由调用方提供(用于去重 + 防止重复导入)。
+/// 默认 book_type=System(admin 上传作为系统词书),user_id=None。
+/// 复用 persist_remote_wordbook_import 走完整 store 写入流程。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UploadWordbookRequest {
+    id: String,
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    version: String,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    words: Vec<RemoteWord>,
+}
+
+async fn admin_upload(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    JsonBody(req): JsonBody<UploadWordbookRequest>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    if req.id.is_empty() || req.name.is_empty() {
+        return Err(AppError::bad_request(
+            "WB_UPLOAD_INVALID",
+            "id 和 name 必填",
+        ));
+    }
+    if req.words.is_empty() {
+        return Err(AppError::bad_request(
+            "WB_UPLOAD_EMPTY",
+            "words 列表为空,拒绝创建空词书",
+        ));
+    }
+    // 用 `local:upload:<timestamp>` 作 source_url,与 wb_center 的远端 source_url 隔离
+    let source_url = format!("local:upload:{}", Utc::now().to_rfc3339());
+    let initial_tags = req.tags.clone();
+    let wordbook_id_for_tags = req.id.clone();
+    let remote = RemoteWordbook {
+        id: req.id,
+        name: req.name,
+        description: req.description,
+        word_count: req.words.len() as u64,
+        cover_image: None,
+        tags: req.tags,
+        version: req.version,
+        author: Some("admin-upload".to_string()),
+        download_count: None,
+        words: req.words,
+    };
+    let store = state.store().clone();
+    let result = crate::blocking::run_blocking("wordbook_center.admin_upload", move || {
+        persist_remote_wordbook_import(&store, &source_url, remote, WordbookType::System, None)
+    })
+    .await??;
+
+    // 把 upload 时携带的 tags 直接落 wordbook_local_tags(免去前端再调 PATCH)
+    if !initial_tags.is_empty() {
+        // 从 result 里取 wordbook.id(persist_remote_wordbook_import 返回 wordbook 对象)
+        let local_id = result
+            .get("wordbook")
+            .and_then(|w| w.get("id"))
+            .and_then(|v| v.as_str())
+            .unwrap_or(&wordbook_id_for_tags)
+            .to_string();
+        let store2 = state.store().clone();
+        let _ = crate::blocking::run_blocking("wordbook_center.admin_upload.tags", move || {
+            store2.set_wordbook_local_tags(&local_id, &initial_tags, Some("admin-upload"))
+        })
+        .await;
+    }
+
+    Ok(created(result))
+}
+
+/// m022:PATCH /api/admin/wordbook-center/:wordbook_id/tags —— 本地标签覆盖。
+///
+/// body: `{add?: string[], remove?: string[]}` 或 `{replace: string[]}`(三选一,replace 优先)。
+/// 写 wordbook_local_tags 表(m022 新建),不影响远端 metadata 中的 tags。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PatchTagsRequest {
+    #[serde(default)]
+    add: Vec<String>,
+    #[serde(default)]
+    remove: Vec<String>,
+    /// 给定时整体替换为这个列表,忽略 add/remove。前端"标签编辑器"提交全集时使用。
+    #[serde(default)]
+    replace: Option<Vec<String>>,
+}
+
+async fn admin_patch_tags(
+    admin: AdminAuthUser,
+    Path(wordbook_id): Path<String>,
+    State(state): State<AppState>,
+    JsonBody(req): JsonBody<PatchTagsRequest>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let admin_id = admin.admin_id.clone();
+    let tags = state
+        .run_store_task("wordbook_center.admin_patch_tags", move |store| {
+            if let Some(replace) = req.replace {
+                store.set_wordbook_local_tags(&wordbook_id, &replace, Some(&admin_id))?;
+            } else {
+                if !req.add.is_empty() {
+                    store.add_wordbook_local_tags(&wordbook_id, &req.add, Some(&admin_id))?;
+                }
+                if !req.remove.is_empty() {
+                    store.remove_wordbook_local_tags(&wordbook_id, &req.remove)?;
+                }
+            }
+            store.list_wordbook_local_tags(&wordbook_id)
+        })
+        .await??;
+    Ok(ok(serde_json::json!({ "tags": tags })))
 }
 
 async fn admin_sync(

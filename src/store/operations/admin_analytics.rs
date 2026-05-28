@@ -8,6 +8,7 @@
 
 use chrono::{DateTime, Duration, Utc};
 use rusqlite::params;
+use serde::Serialize;
 
 use crate::store::operations::records::RecordType;
 use crate::store::{Store, StoreError};
@@ -64,6 +65,36 @@ pub struct AdminRetentionSampleRow {
     pub state_updated_at: Option<DateTime<Utc>>,
     pub mdm_last_review_at: Option<DateTime<Utc>>,
     pub total_attempts: i64,
+}
+
+/// m022:/analytics/hourly 单元格(原始稀疏行,前端组装 7×24 矩阵)。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminHourlyBucketRow {
+    pub dow: i32,
+    pub hour: i32,
+    pub count: i64,
+}
+
+/// m022:/analytics/wordbook-rank 单行。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminWordbookRankRow {
+    pub wordbook_id: String,
+    pub name: String,
+    pub learner_count: i64,
+    pub record_count: i64,
+    pub correct_count: i64,
+    pub accuracy: Option<f64>,
+}
+
+/// m022:/analytics/retention-cohort 矩阵单元(cohort_start, days_since, retained_users)。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminRetentionCohortRow {
+    pub cohort_start: String,
+    pub days_since: u32,
+    pub retained_users: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -545,6 +576,137 @@ impl Store {
         Ok(out)
     }
 
+    // ────────────────── m022:三个新 analytics 端点 ──────────────────
+
+    /// 按 (day_of_week, hour_of_day) 聚合最近 N 天的答题计数。
+    /// 返回原始稀疏行,前端组装 7×24 矩阵。
+    /// strftime('%w') 返回 0-6(0=Sunday),strftime('%H') 返回 00-23。
+    pub fn admin_hourly_buckets(
+        &self,
+        days: u32,
+    ) -> Result<Vec<AdminHourlyBucketRow>, StoreError> {
+        let conn = self.conn()?;
+        let since = window_since_date(days);
+        let mut stmt = conn.prepare(
+            "SELECT
+                CAST(strftime('%w', created_at) AS INTEGER) AS dow,
+                CAST(strftime('%H', created_at) AS INTEGER) AS hour,
+                COUNT(*) AS cnt
+             FROM learning_records
+             WHERE created_at >= ?1
+             GROUP BY dow, hour
+             ORDER BY dow, hour",
+        )?;
+        let rows = stmt.query_map(params![&since], |r| {
+            Ok(AdminHourlyBucketRow {
+                dow: r.get(0)?,
+                hour: r.get(1)?,
+                count: r.get(2)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
+    /// 词库使用排名:JOIN learning_records → wordbook_words → wordbooks,
+    /// 按 record_count DESC 排,返回 top N。
+    pub fn admin_wordbook_rank(
+        &self,
+        days: u32,
+        limit: u32,
+    ) -> Result<Vec<AdminWordbookRankRow>, StoreError> {
+        let conn = self.conn()?;
+        let since = window_since_date(days);
+        let mut stmt = conn.prepare(
+            "SELECT
+                wb.id AS wordbook_id,
+                wb.name AS wordbook_name,
+                COUNT(DISTINCT lr.user_id) AS learner_count,
+                COUNT(*) AS record_count,
+                SUM(CASE WHEN lr.is_correct = 1 THEN 1 ELSE 0 END) AS correct_count
+             FROM learning_records lr
+             JOIN wordbook_words ww ON ww.word_id = lr.word_id
+             JOIN wordbooks wb ON wb.id = ww.wordbook_id
+             WHERE lr.created_at >= ?1
+             GROUP BY wb.id, wb.name
+             ORDER BY record_count DESC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![&since, limit as i64], |r| {
+            let correct: i64 = r.get(4)?;
+            let total: i64 = r.get(3)?;
+            Ok(AdminWordbookRankRow {
+                wordbook_id: r.get(0)?,
+                name: r.get(1)?,
+                learner_count: r.get(2)?,
+                record_count: total,
+                correct_count: correct,
+                accuracy: if total > 0 {
+                    Some(correct as f64 / total as f64)
+                } else {
+                    None
+                },
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
+    /// cohort × daysSinceLearn 留存矩阵。cohort 维度:按 user 首次答题日期的
+    /// "weekly bucket"(date(first_record, 'weekday 0'))分组,然后对每 bucket
+    /// 内的用户算 1/3/7/14/30 天后是否仍在活跃。
+    ///
+    /// SQL 设计:
+    ///   1. 子查询 1:每用户首次活跃日 first_day。
+    ///   2. 子查询 2:每用户活跃日(去重 date)。
+    ///   3. JOIN 后按 cohort_start(week of first_day)、days_since(active_day - first_day)聚合。
+    pub fn admin_retention_cohort(
+        &self,
+        cohort_unit: &str,
+        max_days: u32,
+    ) -> Result<Vec<AdminRetentionCohortRow>, StoreError> {
+        // 只支持 weekly / daily 两种 cohort 粒度
+        let cohort_expr = match cohort_unit {
+            "daily" => "DATE(first_day)",
+            // 默认 weekly(date('YYYY-MM-DD', 'weekday 0') 拿到该日所在周的周日)
+            _ => "DATE(first_day, 'weekday 0', '-6 days')",
+        };
+        let since = window_since_date(max_days * 2); // 留出 2 倍窗口供 cohort 形成
+        let conn = self.conn()?;
+        let sql = format!(
+            "WITH user_first AS (
+                SELECT user_id, MIN(DATE(created_at)) AS first_day
+                FROM learning_records
+                WHERE created_at >= ?1
+                GROUP BY user_id
+            ),
+            user_active AS (
+                SELECT DISTINCT user_id, DATE(created_at) AS active_day
+                FROM learning_records
+                WHERE created_at >= ?1
+            )
+            SELECT
+                {cohort_expr} AS cohort_start,
+                (julianday(active_day) - julianday(first_day)) AS days_since,
+                COUNT(DISTINCT user_active.user_id) AS retained_users
+            FROM user_active
+            JOIN user_first USING (user_id)
+            WHERE days_since BETWEEN 0 AND ?2
+            GROUP BY cohort_start, days_since
+            ORDER BY cohort_start, days_since"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![&since, max_days as i64], |r| {
+            Ok(AdminRetentionCohortRow {
+                cohort_start: r.get(0)?,
+                days_since: r.get::<_, f64>(1)? as u32,
+                retained_users: r.get(2)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
     pub fn admin_daily_registered_users(
         &self,
         days: u32,
@@ -598,6 +760,9 @@ mod tests {
             updated_at: Utc::now(),
             failed_login_count: 0,
             locked_until: None,
+            role: "user".to_string(),
+            status: "active".to_string(),
+            last_login_at: None,
         };
         store.create_user(&u).unwrap();
     }

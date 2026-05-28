@@ -19,6 +19,7 @@ type SuggestionRow = (
     Option<i64>,
     Option<i64>,
     Option<f64>,
+    Option<String>, // m022:base_values_json
 );
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,6 +75,10 @@ pub struct TuningSuggestionRow {
     pub tokens_input: Option<u64>,
     pub tokens_output: Option<u64>,
     pub confidence: Option<f64>,
+    /// m022:生成 patch 时同步快照的"旧值"映射,SuggestionCard 渲染 diff 时不再额外打 amasGetConfig。
+    /// 形态等同 patch_json:`{"path.to.field": oldValue, ...}`,与 patch_json 同 key set。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_values_json: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -89,6 +94,8 @@ pub struct InsertSuggestion {
     pub initial_status: SuggestionStatus, // 通常 Pending；auto-apply 直接置 AutoApplied
     pub decided_by: Option<String>,
     pub decision_note: Option<String>,
+    /// m022:与 patch_json 同 key set 的旧值快照,空字串视同 NULL。
+    pub base_values_json: Option<String>,
 }
 
 fn parse_dt(s: String) -> Result<DateTime<Utc>, StoreError> {
@@ -115,6 +122,7 @@ fn row_to_suggestion(
         row.get::<_, Option<i64>>(11)?,
         row.get::<_, Option<i64>>(12)?,
         row.get::<_, Option<f64>>(13)?,
+        row.get::<_, Option<String>>(14)?, // m022:base_values_json
     ))
 }
 
@@ -134,6 +142,7 @@ fn build(
         tin,
         tout,
         conf,
+        base_values,
     ): SuggestionRow,
 ) -> Result<TuningSuggestionRow, StoreError> {
     Ok(TuningSuggestionRow {
@@ -151,10 +160,15 @@ fn build(
         tokens_input: tin.map(|v| v as u64),
         tokens_output: tout.map(|v| v as u64),
         confidence: conf,
+        base_values_json: base_values
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map(|s| serde_json::from_str(s).map_err(StoreError::Serialization))
+            .transpose()?,
     })
 }
 
-const COLS: &str = "id, created_at, based_on_version_hash, patch_json, rationale, evidence_json, status, decided_by, decided_at, decision_note, cost_usd, tokens_input, tokens_output, confidence";
+const COLS: &str = "id, created_at, based_on_version_hash, patch_json, rationale, evidence_json, status, decided_by, decided_at, decision_note, cost_usd, tokens_input, tokens_output, confidence, base_values_json";
 
 impl Store {
     pub fn insert_amas_suggestion(&self, s: &InsertSuggestion) -> Result<i64, StoreError> {
@@ -168,8 +182,9 @@ impl Store {
         conn.execute(
             "INSERT INTO amas_tuning_suggestions
              (created_at, based_on_version_hash, patch_json, rationale, evidence_json,
-              status, decided_by, decided_at, decision_note, cost_usd, tokens_input, tokens_output, confidence)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+              status, decided_by, decided_at, decision_note, cost_usd, tokens_input, tokens_output, confidence,
+              base_values_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 now,
                 &s.based_on_version_hash,
@@ -184,6 +199,7 @@ impl Store {
                 s.tokens_input.map(|v| v as i64),
                 s.tokens_output.map(|v| v as i64),
                 s.confidence,
+                s.base_values_json.as_deref(),
             ],
         )?;
         Ok(conn.last_insert_rowid())
@@ -302,6 +318,7 @@ mod tests {
             initial_status,
             decided_by: None,
             decision_note: None,
+            base_values_json: None,
         }
     }
 

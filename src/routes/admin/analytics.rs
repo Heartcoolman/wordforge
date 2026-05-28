@@ -8,8 +8,9 @@ use crate::auth::AdminAuthUser;
 use crate::response::{ok, AppError};
 use crate::state::AppState;
 use crate::store::operations::admin_analytics::{
-    AdminDailyRecordTypeRow, AdminDailyRegisteredUsersRow, AdminRetentionSampleRow,
-    AdminStudyDailyRow, AdminStudySummaryRow,
+    AdminDailyRecordTypeRow, AdminDailyRegisteredUsersRow, AdminHourlyBucketRow,
+    AdminRetentionCohortRow, AdminRetentionSampleRow, AdminStudyDailyRow, AdminStudySummaryRow,
+    AdminWordbookRankRow,
 };
 use crate::store::operations::records::RecordType;
 
@@ -23,6 +24,10 @@ pub fn router() -> Router<AppState> {
         .route("/record-types", get(record_types))
         .route("/word-states", get(word_states))
         .route("/retention-curve", get(retention_curve))
+        // m022:三个新端点(时段热图 / 词库排名 / cohort 留存矩阵)
+        .route("/hourly", get(hourly_buckets))
+        .route("/wordbook-rank", get(wordbook_rank))
+        .route("/retention-cohort", get(retention_cohort))
 }
 
 // ---------------------------------------------------------------------------
@@ -671,5 +676,164 @@ async fn retention_curve(
         } else {
             None
         },
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// m022:三个新端点
+// ---------------------------------------------------------------------------
+
+/// `?days=` 拓宽到 1..=60(老接口最大 30 天,时段热图希望更长窗口看周环比)。
+fn ensure_days_extended(days: u32) -> Result<(), AppError> {
+    if !(1..=60).contains(&days) {
+        return Err(AppError::bad_request(
+            "INVALID_DAYS",
+            "days must be between 1 and 60",
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HourlyResponse {
+    generated_at: DateTime<Utc>,
+    days: u32,
+    /// 7×24 矩阵(行 dow=Sun..Sat,列 hour 0..23),前端直接渲染热图。
+    /// 稀疏行在此被组装为稠密矩阵,缺失格填 0。
+    matrix: Vec<Vec<i64>>,
+    /// 全窗口总答题数,前端可显示在卡片副文。
+    total: i64,
+}
+
+async fn hourly_buckets(
+    _admin: AdminAuthUser,
+    Query(q): Query<DaysQuery>,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    ensure_days_extended(q.days)?;
+    let days = q.days;
+    let rows: Vec<AdminHourlyBucketRow> = state
+        .run_store_task("admin.analytics.hourly", move |store| {
+            store.admin_hourly_buckets(days)
+        })
+        .await??;
+    let mut matrix = vec![vec![0i64; 24]; 7];
+    let mut total = 0i64;
+    for row in rows {
+        if (0..7).contains(&row.dow) && (0..24).contains(&row.hour) {
+            matrix[row.dow as usize][row.hour as usize] = row.count;
+            total += row.count;
+        }
+    }
+    Ok(ok(HourlyResponse {
+        generated_at: Utc::now(),
+        days: q.days,
+        matrix,
+        total,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WordbookRankQuery {
+    #[serde(default = "default_days_30")]
+    days: u32,
+    #[serde(default = "default_limit")]
+    limit: u32,
+}
+
+fn default_days_30() -> u32 {
+    30
+}
+fn default_limit() -> u32 {
+    10
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WordbookRankResponse {
+    generated_at: DateTime<Utc>,
+    days: u32,
+    limit: u32,
+    rows: Vec<AdminWordbookRankRow>,
+}
+
+async fn wordbook_rank(
+    _admin: AdminAuthUser,
+    Query(q): Query<WordbookRankQuery>,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    ensure_days_extended(q.days)?;
+    let limit = q.limit.clamp(1, 100);
+    let days = q.days;
+    let rows: Vec<AdminWordbookRankRow> = state
+        .run_store_task("admin.analytics.wordbook_rank", move |store| {
+            store.admin_wordbook_rank(days, limit)
+        })
+        .await??;
+    Ok(ok(WordbookRankResponse {
+        generated_at: Utc::now(),
+        days: q.days,
+        limit,
+        rows,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RetentionCohortQuery {
+    /// "weekly"(默认)或 "daily"。daily 在用户量大时矩阵巨大,前端可降为按行 slicing。
+    #[serde(default)]
+    cohort: Option<String>,
+    #[serde(default = "default_cohort_max_days")]
+    max_days: u32,
+}
+
+fn default_cohort_max_days() -> u32 {
+    30
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RetentionCohortResponse {
+    generated_at: DateTime<Utc>,
+    cohort_unit: String,
+    max_days: u32,
+    /// 稀疏行:每条 (cohort_start, days_since, retained_users)。
+    /// 前端按 cohort_start 分组组装二维矩阵。
+    rows: Vec<AdminRetentionCohortRow>,
+}
+
+async fn retention_cohort(
+    _admin: AdminAuthUser,
+    Query(q): Query<RetentionCohortQuery>,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    if !(1..=90).contains(&q.max_days) {
+        return Err(AppError::bad_request(
+            "INVALID_MAX_DAYS",
+            "max_days must be between 1 and 90",
+        ));
+    }
+    let cohort_unit = q.cohort.as_deref().unwrap_or("weekly").to_string();
+    if !matches!(cohort_unit.as_str(), "weekly" | "daily") {
+        return Err(AppError::bad_request(
+            "INVALID_COHORT_UNIT",
+            "cohort must be 'weekly' or 'daily'",
+        ));
+    }
+    let max_days = q.max_days;
+    let cohort_for_store = cohort_unit.clone();
+    let rows: Vec<AdminRetentionCohortRow> = state
+        .run_store_task("admin.analytics.retention_cohort", move |store| {
+            store.admin_retention_cohort(&cohort_for_store, max_days)
+        })
+        .await??;
+    Ok(ok(RetentionCohortResponse {
+        generated_at: Utc::now(),
+        cohort_unit,
+        max_days: q.max_days,
+        rows,
     }))
 }

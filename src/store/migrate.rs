@@ -54,6 +54,7 @@ fn migrations() -> Vec<(&'static str, MigrationFn)> {
         ("019_worker_last_run", m019_worker_last_run),
         ("020_resource_packs", m020_resource_packs),
         ("021_admin_audit_log_v2", m021_admin_audit_log_v2),
+        ("022_admin_ui_completeness", m022_admin_ui_completeness),
     ]
 }
 
@@ -91,6 +92,7 @@ fn migrations_down() -> Vec<(&'static str, MigrationFn)> {
         ("019_worker_last_run", m019_worker_last_run_down),
         ("020_resource_packs", m020_resource_packs_down),
         ("021_admin_audit_log_v2", m021_admin_audit_log_v2_down),
+        ("022_admin_ui_completeness", m022_admin_ui_completeness_down),
     ]
 }
 
@@ -943,6 +945,123 @@ fn m020_resource_packs_down(store: &Store) -> Result<(), StoreError> {
     Ok(())
 }
 
+/// m022：admin-ui 缺位补齐合集。一次性覆盖 6 项 schema 变化:
+///   1. client_devices.app_version —— 设备版本透出（替代仅平台分布）
+///   2. users.role / users.status / users.last_login_at —— UserManagementPage Drawer 数据源
+///   3. feedback_items.device_profile_json / answer_snapshot_json —— FeedbackPage 上下文快照
+///   4. amas_tuning_suggestions.base_values_json —— SuggestionCard 左旧值/右新值 diff
+///   5. wordbook_local_tags 新表 —— 词书本地标签覆盖层（远端 metadata 不可写）
+///   6. amas_canary_config 新表 —— AMAS 灰度配置（百分比抽样 + 强制白名单）
+fn m022_admin_ui_completeness(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+
+    // 1) client_devices.app_version
+    let has_app_version: bool = conn
+        .prepare("PRAGMA table_info(client_devices)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .any(|n| n == "app_version");
+    if !has_app_version {
+        conn.execute(
+            "ALTER TABLE client_devices ADD COLUMN app_version TEXT DEFAULT NULL",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_client_devices_app_version
+                 ON client_devices(app_version)
+                 WHERE app_version IS NOT NULL",
+            [],
+        )?;
+    }
+
+    // 2) users.role / status / last_login_at
+    let user_cols: Vec<String> = conn
+        .prepare("PRAGMA table_info(users)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .collect();
+    for (col, ddl) in [
+        (
+            "role",
+            "TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('user','staff','admin'))",
+        ),
+        (
+            "status",
+            "TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','inactive','suspended'))",
+        ),
+        ("last_login_at", "TEXT DEFAULT NULL"),
+    ] {
+        if !user_cols.iter().any(|c| c == col) {
+            conn.execute(
+                &format!("ALTER TABLE users ADD COLUMN {col} {ddl}"),
+                [],
+            )?;
+        }
+    }
+
+    // 3) feedback_items.device_profile_json / answer_snapshot_json
+    let feedback_cols: Vec<String> = conn
+        .prepare("PRAGMA table_info(feedback_items)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .collect();
+    for col in ["device_profile_json", "answer_snapshot_json"] {
+        if !feedback_cols.iter().any(|c| c == col) {
+            conn.execute(
+                &format!("ALTER TABLE feedback_items ADD COLUMN {col} TEXT DEFAULT NULL"),
+                [],
+            )?;
+        }
+    }
+
+    // 4) amas_tuning_suggestions.base_values_json
+    let has_base_values: bool = conn
+        .prepare("PRAGMA table_info(amas_tuning_suggestions)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .any(|n| n == "base_values_json");
+    if !has_base_values {
+        conn.execute(
+            "ALTER TABLE amas_tuning_suggestions ADD COLUMN base_values_json TEXT DEFAULT NULL",
+            [],
+        )?;
+    }
+
+    // 5) wordbook_local_tags（远端词书的本地标签覆盖层）
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS wordbook_local_tags (
+            wordbook_id TEXT NOT NULL,
+            tag         TEXT NOT NULL,
+            created_at  TEXT NOT NULL,
+            created_by  TEXT,
+            PRIMARY KEY (wordbook_id, tag)
+        );
+        CREATE INDEX IF NOT EXISTS idx_wordbook_local_tags_tag
+            ON wordbook_local_tags(tag);",
+    )?;
+
+    // 6) amas_canary_config（百分比抽样 + 强制白名单）
+    //    一行配置即可：是否启用 + 候选 version_hash + 比例 + 白名单 JSON。
+    //    取代 toggle 模式：每次 PUT 覆盖之前的活跃配置（用 active=1 唯一约束）。
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS amas_canary_config (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            version_hash    TEXT NOT NULL,
+            percent         INTEGER NOT NULL CHECK (percent BETWEEN 0 AND 100),
+            force_user_ids  TEXT NOT NULL DEFAULT '[]',
+            active          INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0,1)),
+            created_at      TEXT NOT NULL,
+            created_by      TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_amas_canary_active
+            ON amas_canary_config(active) WHERE active = 1;
+        CREATE INDEX IF NOT EXISTS idx_amas_canary_created
+            ON amas_canary_config(created_at DESC);",
+    )?;
+
+    Ok(())
+}
+
 /// m021 down：DROP 索引 + 4 个新增列。`action` 是 NOT NULL DEFAULT 列，下次 up 会
 /// 重新加回。生产严禁 down，仅 dev/test。
 fn m021_admin_audit_log_v2_down(store: &Store) -> Result<(), StoreError> {
@@ -961,6 +1080,77 @@ fn m021_admin_audit_log_v2_down(store: &Store) -> Result<(), StoreError> {
             )?;
         }
     }
+    Ok(())
+}
+
+/// m022 down：依序撤销 6 项 schema 变化。新加列 / 新建表均带 DROP IF EXISTS 保证幂等。
+fn m022_admin_ui_completeness_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+
+    // 6) amas_canary_config
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS idx_amas_canary_created;
+         DROP INDEX IF EXISTS uq_amas_canary_active;
+         DROP TABLE IF EXISTS amas_canary_config;",
+    )?;
+
+    // 5) wordbook_local_tags
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS idx_wordbook_local_tags_tag;
+         DROP TABLE IF EXISTS wordbook_local_tags;",
+    )?;
+
+    // 4) amas_tuning_suggestions.base_values_json
+    let has_base_values: bool = conn
+        .prepare("PRAGMA table_info(amas_tuning_suggestions)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .any(|n| n == "base_values_json");
+    if has_base_values {
+        conn.execute(
+            "ALTER TABLE amas_tuning_suggestions DROP COLUMN base_values_json",
+            [],
+        )?;
+    }
+
+    // 3) feedback_items.device_profile_json / answer_snapshot_json
+    let feedback_cols: Vec<String> = conn
+        .prepare("PRAGMA table_info(feedback_items)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .collect();
+    for col in ["answer_snapshot_json", "device_profile_json"] {
+        if feedback_cols.iter().any(|c| c == col) {
+            conn.execute(
+                &format!("ALTER TABLE feedback_items DROP COLUMN {col}"),
+                [],
+            )?;
+        }
+    }
+
+    // 2) users.last_login_at / status / role
+    let user_cols: Vec<String> = conn
+        .prepare("PRAGMA table_info(users)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .collect();
+    for col in ["last_login_at", "status", "role"] {
+        if user_cols.iter().any(|c| c == col) {
+            conn.execute(&format!("ALTER TABLE users DROP COLUMN {col}"), [])?;
+        }
+    }
+
+    // 1) client_devices.app_version
+    conn.execute_batch("DROP INDEX IF EXISTS idx_client_devices_app_version;")?;
+    let has_app_version: bool = conn
+        .prepare("PRAGMA table_info(client_devices)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .any(|n| n == "app_version");
+    if has_app_version {
+        conn.execute("ALTER TABLE client_devices DROP COLUMN app_version", [])?;
+    }
+
     Ok(())
 }
 

@@ -57,6 +57,15 @@ pub async fn device_middleware(
             .and_then(|v| v.to_str().ok())
             .unwrap_or("unknown");
 
+        // m022:`x-app-version` 是可选头(老客户端不带),首次出现时落库;后续请求漏带
+        // 时 upsert 用 COALESCE 保留 DB 已有值,不会被清空。
+        let app_version = req
+            .headers()
+            .get("x-app-version")
+            .and_then(|v| v.to_str().ok())
+            .filter(|s| !s.is_empty() && s.len() <= 64)
+            .map(String::from);
+
         let user_id = extract_token_from_headers(req.headers())
             .ok()
             .and_then(|token| verify_jwt(&token, &state.config().jwt_secret).ok())
@@ -68,9 +77,15 @@ pub async fn device_middleware(
                 let did = did.clone();
                 let platform = platform.to_string();
                 let uid = uid.clone();
+                let app_version = app_version.clone();
                 state
                     .run_store_task("middleware.device.upsert_client_device", move |store| {
-                        store.upsert_client_device(&did, &platform, &uid)
+                        store.upsert_client_device_with_version(
+                            &did,
+                            &platform,
+                            &uid,
+                            app_version.as_deref(),
+                        )
                     })
                     .await
             };

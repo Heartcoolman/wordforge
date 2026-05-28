@@ -195,6 +195,9 @@ async fn algorithm_optimization_lowers_difficulty_on_low_accuracy() {
         updated_at: Utc::now(),
         failed_login_count: 0,
         locked_until: None,
+            role: "user".to_string(),
+            status: "active".to_string(),
+            last_login_at: None,
     };
     store.create_user(&user).unwrap();
 
@@ -235,6 +238,9 @@ async fn algorithm_optimization_raises_difficulty_on_high_accuracy() {
         updated_at: Utc::now(),
         failed_login_count: 0,
         locked_until: None,
+            role: "user".to_string(),
+            status: "active".to_string(),
+            last_login_at: None,
     };
     store.create_user(&user).unwrap();
 

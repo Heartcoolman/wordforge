@@ -36,6 +36,15 @@ pub fn admin_router() -> Router<AppState> {
         .route("/config/versions", get(list_versions))
         .route("/config/versions/:hash", get(get_version))
         .route("/config/versions/:hash/restore", post(restore_version))
+        // m022:TOML ↔ JSON 转换端点(admin UI CodeMirror TOML 编辑器使用)
+        .route("/config/parse-toml", post(parse_toml))
+        .route("/config/serialize-toml", post(serialize_toml))
+        // m022:百分比抽样灰度发布
+        .route("/config/canary", get(get_canary).put(set_canary))
+        .route(
+            "/config/canary/disable",
+            post(disable_canary),
+        )
         .route("/metrics", get(get_metrics))
         .route("/metrics/timeseries", get(metrics_timeseries))
         .route("/monitoring", get(get_monitoring_events))
@@ -48,6 +57,120 @@ pub fn admin_router() -> Router<AppState> {
         .route("/suggestions/:id", get(get_suggestion))
         .route("/suggestions/:id/approve", post(approve_suggestion))
         .route("/suggestions/:id/reject", post(reject_suggestion))
+}
+
+// ─────────────────── m022:TOML 互转 + canary ───────────────────
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ParseTomlRequest {
+    toml: String,
+}
+
+/// POST /config/parse-toml —— TOML 字符串 → JSON `AMASConfig`。
+/// 前端 CodeMirror TOML 编辑器保存前用此校验语法 + 转 JSON 给 PUT /config。
+async fn parse_toml(
+    _admin: AdminAuthUser,
+    JsonBody(req): JsonBody<ParseTomlRequest>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let cfg: crate::amas::config::AMASConfig = toml::from_str(&req.toml).map_err(|e| {
+        AppError::bad_request("TOML_PARSE_ERROR", &format!("TOML 解析失败:{e}"))
+    })?;
+    let value =
+        serde_json::to_value(&cfg).map_err(|e| AppError::internal(&e.to_string()))?;
+    Ok(ok(value))
+}
+
+/// POST /config/serialize-toml —— JSON `AMASConfig` → TOML 字符串。
+/// 前端从 JSON 切到 TOML 视图时调一次,把当前 config 渲染成 TOML。
+async fn serialize_toml(
+    _admin: AdminAuthUser,
+    JsonBody(cfg): JsonBody<crate::amas::config::AMASConfig>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let s = toml::to_string_pretty(&cfg)
+        .map_err(|e| AppError::internal(&format!("TOML 序列化失败:{e}")))?;
+    Ok(ok(serde_json::json!({ "toml": s })))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetCanaryRequest {
+    version_hash: String,
+    /// 0..=100,按 user_id hash % 100 判定是否落入 canary 桶。
+    percent: u32,
+    /// 强制走 canary 的用户白名单,与 percent 抽样并存(任一命中即用 canary)。
+    #[serde(default)]
+    force_user_ids: Vec<String>,
+}
+
+/// PUT /config/canary —— 设置 active canary 配置。
+/// 同一时刻只能有一个 active(由 wordbook_canary_config 的 unique index 强制)。
+async fn set_canary(
+    admin: AdminAuthUser,
+    State(state): State<AppState>,
+    JsonBody(req): JsonBody<SetCanaryRequest>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    if req.percent > 100 {
+        return Err(AppError::bad_request(
+            "INVALID_PERCENT",
+            "percent must be in 0..=100",
+        ));
+    }
+    // 校验 version_hash 存在
+    let vhash = req.version_hash.clone();
+    let admin_id = admin.admin_id.clone();
+    let exists = state
+        .run_store_task("admin.amas.canary.validate", move |store| {
+            store.get_amas_config_version(&vhash)
+        })
+        .await??;
+    if exists.is_none() {
+        return Err(AppError::bad_request(
+            "VERSION_HASH_NOT_FOUND",
+            "version_hash 在 amas_config_versions 中不存在",
+        ));
+    }
+
+    let req_for_store = req;
+    let admin_id_for_store = admin_id;
+    let inserted = state
+        .run_store_task("admin.amas.canary.set", move |store| {
+            store.set_amas_canary(
+                &req_for_store.version_hash,
+                req_for_store.percent,
+                &req_for_store.force_user_ids,
+                &admin_id_for_store,
+            )
+        })
+        .await??;
+    Ok(ok(serde_json::json!({
+        "canary": inserted,
+    })))
+}
+
+/// GET /config/canary —— 读当前 active canary 配置(可能为 None)。
+async fn get_canary(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let current = state
+        .run_store_task("admin.amas.canary.get", |store| store.get_active_amas_canary())
+        .await??;
+    Ok(ok(serde_json::json!({ "canary": current })))
+}
+
+/// POST /config/canary/disable —— 把当前 active canary 标记为 inactive。后续
+/// effective_config_for_user 永远返回 stable。
+async fn disable_canary(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let cleared = state
+        .run_store_task("admin.amas.canary.disable", |store| {
+            store.disable_active_amas_canary()
+        })
+        .await??;
+    Ok(ok(serde_json::json!({ "disabled": cleared })))
 }
 
 #[derive(Debug, Deserialize, Clone)]

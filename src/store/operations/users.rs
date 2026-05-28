@@ -7,7 +7,7 @@ use crate::store::keys;
 use crate::store::{Store, StoreError};
 
 const USER_COLS: &str =
-    "id, email, username, password_hash, is_banned, created_at, updated_at, failed_login_count, locked_until";
+    "id, email, username, password_hash, is_banned, created_at, updated_at, failed_login_count, locked_until, role, status, last_login_at";
 
 const USER_SCOPED_TABLES: &[&str] = &[
     "sessions",
@@ -50,6 +50,24 @@ pub struct User {
     pub failed_login_count: u32,
     #[serde(default)]
     pub locked_until: Option<DateTime<Utc>>,
+    /// m022:'user' / 'staff' / 'admin'。默认 'user'(DB CHECK 限定)。
+    #[serde(default = "default_role")]
+    pub role: String,
+    /// m022:'active' / 'inactive' / 'suspended'。与 is_banned 互不矛盾:
+    /// - is_banned=1 时通常 status='suspended',但允许独立修改。
+    /// - 'inactive' 表示长时间未登录(可由定时 worker 维护),不阻止登录。
+    #[serde(default = "default_status")]
+    pub status: String,
+    /// m022:最近一次登录成功时间;NULL 表示从未登录。
+    #[serde(default)]
+    pub last_login_at: Option<DateTime<Utc>>,
+}
+
+fn default_role() -> String {
+    "user".to_string()
+}
+fn default_status() -> String {
+    "active".to_string()
 }
 
 fn user_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<User> {
@@ -63,6 +81,9 @@ fn user_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<User> {
         updated_at: parse_dt(row.get(6)?)?,
         failed_login_count: row.get::<_, i64>(7)? as u32,
         locked_until: row.get::<_, Option<String>>(8)?.map(parse_dt).transpose()?,
+        role: row.get::<_, Option<String>>(9)?.unwrap_or_else(default_role),
+        status: row.get::<_, Option<String>>(10)?.unwrap_or_else(default_status),
+        last_login_at: row.get::<_, Option<String>>(11)?.map(parse_dt).transpose()?,
     })
 }
 
@@ -445,6 +466,9 @@ mod tests {
             updated_at: Utc::now(),
             failed_login_count: 0,
             locked_until: None,
+            role: "user".to_string(),
+            status: "active".to_string(),
+            last_login_at: None,
         }
     }
 

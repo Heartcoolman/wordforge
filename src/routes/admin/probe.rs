@@ -39,6 +39,43 @@ pub fn router() -> Router<AppState> {
         .route("/:batch_id/stream", get(batch_stream))
         .route("/:request_id/confirm", post(confirm_probe))
         .route("/by-id/:request_id", get(get_probe))
+        // m022:admin probe 页 ring buffer 状态卡 + 错误聚类视图
+        .route("/buffer-stats", get(buffer_stats))
+        .route("/cluster", get(cluster_probes))
+}
+
+/// m022:GET /api/admin/probe/buffer-stats —— 暴露 broadcast channel 容量、
+/// 当前活跃 batch 数、订阅者数。供 admin ProbePage 顶部"ring buffer 状态卡"。
+async fn buffer_stats(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    Ok(ok(state.probe_service().buffer_stats()))
+}
+
+#[derive(Debug, Deserialize)]
+struct ClusterQuery {
+    #[serde(default)]
+    window_hours: Option<u32>,
+}
+
+/// m022:GET /api/admin/probe/cluster?window_hours=24 —— 按 status 聚合最近 N
+/// 小时内的 probe 执行,附最近 3 条 stderr 摘要。供 ProbePage"错误聚类"区块。
+async fn cluster_probes(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Query(q): Query<ClusterQuery>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let window = q.window_hours.unwrap_or(24).clamp(1, 720);
+    let clusters = state
+        .run_store_task("admin.probe.cluster", move |store| {
+            store.cluster_probe_by_status(window)
+        })
+        .await??;
+    Ok(ok(serde_json::json!({
+        "windowHours": window,
+        "clusters": clusters,
+    })))
 }
 
 #[derive(Debug, Deserialize)]

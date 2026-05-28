@@ -19,6 +19,13 @@ pub struct FeedbackItem {
     pub assignee_admin_id: Option<String>,
     pub resolved_at: Option<DateTime<Utc>>,
     pub resolution: Option<String>,
+    /// m022:用户提交时附带的设备指纹快照(platform / appVersion / osName 等任意 JSON shape)。
+    /// 旧客户端不传时为 NULL,admin UI 显示 'no snapshot' 占位。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_profile: Option<serde_json::Value>,
+    /// m022:答题上下文快照(最近 N 步答题事件 / 当前正在答的题 ID 等)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer_snapshot: Option<serde_json::Value>,
 }
 
 /// PATCH /api/admin/feedback/:id 请求体。
@@ -66,6 +73,12 @@ fn feedback_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FeedbackItem> 
         assignee_admin_id: row.get(8)?,
         resolved_at: parse_dt_opt(row.get(9)?)?,
         resolution: row.get(10)?,
+        device_profile: row
+            .get::<_, Option<String>>(11)?
+            .and_then(|s| serde_json::from_str(&s).ok()),
+        answer_snapshot: row
+            .get::<_, Option<String>>(12)?
+            .and_then(|s| serde_json::from_str(&s).ok()),
     })
 }
 
@@ -77,10 +90,19 @@ impl Store {
         keys::validate_id(&item.id)?;
         keys::validate_id(&item.user_id)?;
         let conn = self.conn()?;
+        let device_profile_json = item
+            .device_profile
+            .as_ref()
+            .map(|v| v.to_string());
+        let answer_snapshot_json = item
+            .answer_snapshot
+            .as_ref()
+            .map(|v| v.to_string());
         conn.execute(
             "INSERT INTO feedback_items
-                (id, user_id, category, body, route, created_at, priority, status)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                (id, user_id, category, body, route, created_at, priority, status,
+                 device_profile_json, answer_snapshot_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 &item.id,
                 &item.user_id,
@@ -90,6 +112,8 @@ impl Store {
                 item.created_at.to_rfc3339(),
                 &item.priority,
                 &item.status,
+                device_profile_json.as_deref(),
+                answer_snapshot_json.as_deref(),
             ],
         )?;
         Ok(())
@@ -141,7 +165,8 @@ impl Store {
 
         let list_sql = format!(
             "SELECT id, user_id, category, body, route, created_at,
-                    priority, status, assignee_admin_id, resolved_at, resolution
+                    priority, status, assignee_admin_id, resolved_at, resolution,
+                    device_profile_json, answer_snapshot_json
              FROM feedback_items
              {}
              ORDER BY created_at DESC, id DESC
@@ -168,7 +193,8 @@ impl Store {
         Ok(conn
             .query_row(
                 "SELECT id, user_id, category, body, route, created_at,
-                        priority, status, assignee_admin_id, resolved_at, resolution
+                        priority, status, assignee_admin_id, resolved_at, resolution,
+                        device_profile_json, answer_snapshot_json
                  FROM feedback_items
                  WHERE id = ?1",
                 params![id],
@@ -233,7 +259,8 @@ impl Store {
             return Ok(conn
                 .query_row(
                     "SELECT id, user_id, category, body, route, created_at,
-                            priority, status, assignee_admin_id, resolved_at, resolution
+                            priority, status, assignee_admin_id, resolved_at, resolution,
+                            device_profile_json, answer_snapshot_json
                      FROM feedback_items WHERE id = ?1",
                     params![id],
                     feedback_from_row,
@@ -259,7 +286,8 @@ impl Store {
         Ok(conn
             .query_row(
                 "SELECT id, user_id, category, body, route, created_at,
-                        priority, status, assignee_admin_id, resolved_at, resolution
+                        priority, status, assignee_admin_id, resolved_at, resolution,
+                        device_profile_json, answer_snapshot_json
                  FROM feedback_items WHERE id = ?1",
                 params![id],
                 feedback_from_row,
@@ -292,6 +320,8 @@ mod tests {
             assignee_admin_id: None,
             resolved_at: None,
             resolution: None,
+            device_profile: None,
+            answer_snapshot: None,
         }
     }
 

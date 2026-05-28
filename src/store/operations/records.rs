@@ -708,6 +708,9 @@ mod tests {
                 updated_at: Utc::now(),
                 failed_login_count: 0,
                 locked_until: None,
+                role: "user".into(),
+                status: "active".into(),
+                last_login_at: None,
             })
             .unwrap();
         // 创建一条 active session

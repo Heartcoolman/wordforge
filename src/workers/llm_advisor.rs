@@ -170,6 +170,7 @@ pub async fn run(
             initial_status: SuggestionStatus::Rejected,
             decided_by: Some("worker:llm_advisor".into()),
             decision_note: Some(validation_errors.join("；")),
+            base_values_json: build_base_values(engine, &patch_obj),
         });
         return;
     }
@@ -200,6 +201,7 @@ pub async fn run(
         initial_status,
         decided_by: decided_by.clone(),
         decision_note: decision_note.clone(),
+        base_values_json: build_base_values(engine, &patch_obj),
     }) {
         Ok(id) => id,
         Err(e) => {
@@ -343,6 +345,29 @@ fn current_version_hash(engine: &AMASEngine) -> String {
     let cfg = engine.get_config();
     let json = serde_json::to_string(&cfg).unwrap_or_default();
     compute_config_hash(&json)
+}
+
+/// m022:把 patch 涉及的每个路径从当前 engine config 中 lookup 旧值,
+/// 序列化为 `{"path.to.field": oldValue}` JSON 字符串。
+/// 用于 InsertSuggestion.base_values_json,让 admin SuggestionCard 渲染左旧值/右新值 diff。
+/// 没匹配到任何 path 时返回 None(NULL 落库)。
+fn build_base_values(
+    engine: &AMASEngine,
+    patch_obj: &serde_json::Map<String, serde_json::Value>,
+) -> Option<String> {
+    let cfg = engine.get_config();
+    let cfg_json = serde_json::to_value(&cfg).ok()?;
+    let mut out = serde_json::Map::new();
+    for k in patch_obj.keys() {
+        if let Some(v) = read_path(&cfg_json, k) {
+            out.insert(k.clone(), v);
+        }
+    }
+    if out.is_empty() {
+        None
+    } else {
+        serde_json::to_string(&serde_json::Value::Object(out)).ok()
+    }
 }
 
 fn collect_evidence(

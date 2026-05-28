@@ -33,6 +33,8 @@ struct SseLiveEntry {
     connection_count: usize,
     is_banned: bool,
     data_channels: DataChannelStatus,
+    /// m022:`x-app-version` 头落库后透出。SseClientInfo 不存版本,这里从 client_devices 表反查。
+    app_version: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -44,6 +46,8 @@ struct RecentlyActiveEntry {
     last_seen_at: String,
     is_banned: bool,
     data_channels: DataChannelStatus,
+    /// m022:同上,直接来自 ClientDevice.app_version 字段。
+    app_version: Option<String>,
 }
 
 async fn list_clients(
@@ -66,6 +70,7 @@ async fn list_clients(
                 connection_count: conns.len(),
                 is_banned: false,
                 data_channels: DataChannelStatus::default(),
+                app_version: None, // 稍后在 store task 后填充
             })
         })
         .collect();
@@ -75,12 +80,15 @@ async fn list_clients(
         .iter()
         .map(|entry| entry.device_id.clone())
         .collect();
-    let (banned_by_device, recently_active_devices, status) = state
+    let (banned_by_device, recently_active_devices, status, sse_app_versions) = state
         .run_store_task("admin.clients.list", move |store| -> Result<_, AppError> {
             let banned_by_device = live_device_ids
                 .iter()
                 .map(|device_id| Ok((device_id.clone(), store.is_device_banned(device_id)?)))
                 .collect::<Result<std::collections::HashMap<String, bool>, crate::store::StoreError>>()?;
+
+            // m022:为 SSE live 设备查 app_version(recently_active 自带 app_version 字段)
+            let sse_app_versions = store.get_app_versions_for_devices(&live_device_ids)?;
 
             let recently_active_devices =
                 exclude_live_devices(store.get_recently_active_clients(15)?, &live_device_ids);
@@ -102,7 +110,7 @@ async fn list_clients(
                 )
                 .collect();
             let status = store.get_data_upload_status(&user_ids, &device_ids)?;
-            Ok((banned_by_device, recently_active_devices, status))
+            Ok((banned_by_device, recently_active_devices, status, sse_app_versions))
         })
         .await??;
 
@@ -112,6 +120,10 @@ async fn list_clients(
             .get(&entry.device_id)
             .copied()
             .unwrap_or(false);
+        entry.app_version = sse_app_versions
+            .get(&entry.device_id)
+            .cloned()
+            .unwrap_or(None);
     }
 
     let recently_active: Vec<RecentlyActiveEntry> = recently_active_devices
@@ -123,6 +135,7 @@ async fn list_clients(
             last_seen_at: d.last_seen_at.clone(),
             is_banned: d.is_banned,
             data_channels: DataChannelStatus::default(),
+            app_version: d.app_version.clone(),
         })
         .collect();
 
@@ -336,6 +349,7 @@ mod tests {
             banned_at: None,
             banned_by: None,
             ban_reason: None,
+            app_version: None,
         }
     }
 

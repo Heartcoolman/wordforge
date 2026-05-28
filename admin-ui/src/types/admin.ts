@@ -276,4 +276,8 @@ export interface FeedbackItem {
   resolvedAt: string | null;
   /** 解决备注，可为 null */
   resolution: string | null;
+  /** m022:用户提交时附带的设备指纹快照(平台/版本/OS 等任意 JSON),旧客户端不传时为 null */
+  deviceProfile?: Record<string, unknown> | null;
+  /** m022:答题上下文快照(最近 N 步事件 / 当前题目 ID 等任意 JSON),老客户端不传时为 null */
+  answerSnapshot?: Record<string, unknown> | null;
 }
