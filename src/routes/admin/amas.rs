@@ -1,4 +1,7 @@
+use axum::body::Body;
 use axum::extract::{Path, Query, State};
+use axum::http::{header, StatusCode};
+use axum::response::Response;
 use axum::routing::{get, post};
 use axum::Router;
 
@@ -55,6 +58,8 @@ pub fn admin_router() -> Router<AppState> {
         .route("/suggestions", get(list_suggestions))
         .route("/suggestions/explain", post(explain_param))
         .route("/suggestions/spend", get(suggestion_spend))
+        // C5: 历史导出 CSV
+        .route("/suggestions/export.csv", get(export_suggestions_csv))
         .route("/suggestions/:id", get(get_suggestion))
         .route("/suggestions/:id/approve", post(approve_suggestion))
         .route("/suggestions/:id/reject", post(reject_suggestion))
@@ -584,6 +589,68 @@ async fn list_suggestions(
         })
         .await??;
     Ok(ok(rows))
+}
+
+// ─────────── C5: 历史导出 CSV ───────────
+
+/// CSV 字段转义：含逗号/引号/换行的值用双引号包裹，内部引号翻倍。
+fn csv_cell(s: &str) -> String {
+    if s.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
+}
+
+async fn export_suggestions_csv(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Query(q): Query<ListSuggestionsQuery>,
+) -> Result<Response, AppError> {
+    use crate::store::operations::amas_suggestions::SuggestionStatus;
+    let status = if let Some(s) = q.status.as_deref() {
+        Some(
+            SuggestionStatus::parse(s)
+                .map_err(|e| AppError::bad_request("BAD_STATUS", &e.to_string()))?,
+        )
+    } else {
+        None
+    };
+    let keyword = q.q.clone();
+    let rows = state
+        .run_store_task("admin.amas.export_csv", move |store| {
+            store.list_amas_suggestions_paged(status, 500, 0, keyword.as_deref())
+        })
+        .await??;
+
+    let mut out =
+        String::from("id,created_at,based_on_version_hash,patch,rationale,cost_usd,status,decided_by\n");
+    for r in &rows {
+        let patch = serde_json::to_string(&r.patch_json).unwrap_or_default();
+        let cost = r.cost_usd.map(|c| c.to_string()).unwrap_or_default();
+        let decided_by = r.decided_by.clone().unwrap_or_default();
+        out.push_str(&format!(
+            "{},{},{},{},{},{},{},{}\n",
+            r.id,
+            csv_cell(&r.created_at.to_rfc3339()),
+            csv_cell(&r.based_on_version_hash),
+            csv_cell(&patch),
+            csv_cell(&r.rationale),
+            csv_cell(&cost),
+            r.status.as_str(),
+            csv_cell(&decided_by),
+        ));
+    }
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/csv; charset=utf-8")
+        .header(
+            header::CONTENT_DISPOSITION,
+            "attachment; filename=\"amas-suggestions.csv\"",
+        )
+        .body(Body::from(out))
+        .map_err(|e| AppError::internal(&e.to_string()))
 }
 
 async fn get_suggestion(

@@ -905,3 +905,58 @@ async fn it_amas_suggestions_offset_and_q() {
     assert_eq!(s, StatusCode::OK);
     assert_eq!(body["data"].as_array().unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn it_amas_suggestions_export_csv() {
+    let app = spawn_test_server().await;
+    let token = setup_amas_admin_token(&app).await;
+
+    app.state
+        .store()
+        .insert_amas_suggestion(
+            &learning_backend::store::operations::amas_suggestions::InsertSuggestion {
+                based_on_version_hash: "vhash-csv".into(),
+                patch_json: r#"{"memoryModel.w[0]":1.0}"#.into(),
+                rationale: "csv 测试理由".into(),
+                evidence_json: "{}".into(),
+                cost_usd: Some(0.02),
+                tokens_input: Some(10),
+                tokens_output: Some(5),
+                confidence: Some(0.7),
+                initial_status:
+                    learning_backend::store::operations::amas_suggestions::SuggestionStatus::Pending,
+                decided_by: None,
+                decision_note: None,
+                base_values_json: None,
+            },
+        )
+        .expect("insert suggestion");
+
+    let resp = request(
+        &app.app,
+        Method::GET,
+        "/api/admin/amas/suggestions/export.csv",
+        None,
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let status = resp.status();
+    let ct = resp
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let text = String::from_utf8(bytes.to_vec()).unwrap();
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(ct.starts_with("text/csv"), "content-type: {ct}");
+    let first_line = text.lines().next().unwrap();
+    assert_eq!(
+        first_line,
+        "id,created_at,based_on_version_hash,patch,rationale,cost_usd,status,decided_by"
+    );
+    assert!(text.contains("vhash-csv"));
+    assert!(text.contains("csv 测试理由"));
+}
