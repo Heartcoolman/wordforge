@@ -3,7 +3,7 @@ import { Card } from '@/components/ui/Card';
 import { HeroCard } from '@/components/ui/HeroCard';
 import { Button } from '@/components/ui/Button';
 import { Badge } from '@/components/ui/Badge';
-import { Modal } from '@/components/ui/Modal';
+import { Drawer } from '@/components/ui/Drawer';
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
 import { Input } from '@/components/ui/Input';
 import { Empty } from '@/components/ui/Empty';
@@ -339,50 +339,112 @@ export default function WordbookCenterPage() {
         )}
       </Show>
 
-      {/* Preview modal — 单一 open 控制；onClose 同步清 preview，避免下次打开闪旧数据 */}
-      <Modal
+      {/* Preview drawer — 替代原 Modal:右侧滑入,元信息更紧凑,底部 footer 直接操作 */}
+      <Drawer
         open={showPreview() && preview() !== null}
         onClose={closePreview}
-        title={preview()?.name ?? ''}
-        size="lg"
+        title={preview()?.name ?? '词书预览'}
+        width={460}
+        headerActions={
+          <Show when={preview()?.tags && preview()!.tags.length > 0}>
+            <span class="text-[11.5px] text-content-tertiary tabular-nums" title={preview()!.tags.join(', ')}>
+              {preview()!.tags.length} 标签
+            </span>
+          </Show>
+        }
+        footer={
+          <Show when={preview()}>
+            {(p) => {
+              // 找到 grid 中对应 item 拿 imported / hasUpdate 状态
+              const matched = () => items().find((it) => it.id === p().id);
+              return (
+                <div class="flex flex-wrap justify-end gap-2">
+                  <Button variant="ghost" size="sm" onClick={closePreview}>关闭</Button>
+                  <Show when={matched() && !matched()!.imported}>
+                    <Button
+                      size="sm"
+                      onClick={() => {
+                        const it = matched();
+                        if (it) setImportTarget(it);
+                      }}
+                      loading={importing() === p().id}
+                      disabled={mutating()}
+                    >
+                      导入为系统词书
+                    </Button>
+                  </Show>
+                  <Show when={matched()?.imported && matched()?.hasUpdate}>
+                    <Button
+                      size="sm"
+                      onClick={() => handleSync(p().id, p().name)}
+                      loading={syncing() === p().id}
+                      disabled={mutating()}
+                    >
+                      同步更新
+                    </Button>
+                  </Show>
+                </div>
+              );
+            }}
+          </Show>
+        }
       >
         <Show when={preview()}>
           {(p) => (
-            <div class="space-y-4 mt-2">
-              <Show when={p().description}>
-                <p class="text-sm text-content-secondary">{p().description}</p>
-              </Show>
-              <div class="flex gap-3 text-xs text-content-tertiary">
-                <span>{p().wordCount} 词</span>
-                <Show when={p().version}><span>v{p().version}</span></Show>
-                <Show when={p().author}><span>作者: {p().author}</span></Show>
-              </div>
-              <div class="space-y-2 max-h-[400px] overflow-y-auto">
-                <For each={p().words.data}>
-                  {(word) => (
-                    <div class="px-3 py-2 rounded-lg bg-surface-secondary text-sm">
-                      <div class="flex items-center gap-2">
-                        <span class="font-medium text-content">{word.spelling}</span>
-                        <Show when={word.phonetic}>
-                          <span class="text-content-tertiary">{word.phonetic}</span>
-                        </Show>
-                      </div>
-                      <Show when={word.meanings.length > 0}>
-                        <p class="text-content-secondary mt-1">{word.meanings.join('; ')}</p>
-                      </Show>
-                    </div>
-                  )}
-                </For>
-              </div>
-              <Show when={p().words.totalPages > 1}>
-                <p class="text-xs text-content-tertiary text-center">
-                  显示前 {p().words.data.length} / {p().words.total} 词
+            <div class="space-y-4 text-[13px]">
+              {/* metadata grid */}
+              <dl class="grid grid-cols-[80px_1fr] gap-y-2 gap-x-3 text-content-secondary">
+                <Show when={p().description}>
+                  <dt>简介</dt>
+                  <dd class="text-content leading-relaxed">{p().description}</dd>
+                </Show>
+                <dt>词条数</dt>
+                <dd class="font-mono tabular-nums text-content">{p().wordCount}</dd>
+                <Show when={p().version}>
+                  <dt>版本</dt>
+                  <dd class="font-mono text-content">v{p().version}</dd>
+                </Show>
+                <Show when={p().author}>
+                  <dt>作者</dt>
+                  <dd class="text-content">{p().author}</dd>
+                </Show>
+                <Show when={p().tags && p().tags.length > 0}>
+                  <dt>标签</dt>
+                  <dd class="flex flex-wrap gap-1">
+                    <For each={p().tags}>
+                      {(tag) => <Badge size="sm">{tag}</Badge>}
+                    </For>
+                  </dd>
+                </Show>
+              </dl>
+
+              {/* preview 词条列表 */}
+              <div>
+                <p class="text-[11.5px] uppercase tracking-wide text-content-tertiary mb-1.5">
+                  词条预览 · 显示前 {p().words.data.length} / {p().words.total} 词
                 </p>
-              </Show>
+                <ul class="space-y-2">
+                  <For each={p().words.data}>
+                    {(word) => (
+                      <li class="px-3 py-2 rounded-md bg-surface-secondary">
+                        <div class="flex items-center gap-2">
+                          <span class="font-medium text-content">{word.spelling}</span>
+                          <Show when={word.phonetic}>
+                            <span class="font-mono text-[11.5px] text-content-tertiary">{word.phonetic}</span>
+                          </Show>
+                        </div>
+                        <Show when={word.meanings.length > 0}>
+                          <p class="text-content-secondary mt-1 text-[12.5px] leading-snug">{word.meanings.join('; ')}</p>
+                        </Show>
+                      </li>
+                    )}
+                  </For>
+                </ul>
+              </div>
             </div>
           )}
         </Show>
-      </Modal>
+      </Drawer>
     </div>
   );
 }
