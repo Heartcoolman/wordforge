@@ -1,5 +1,6 @@
 import { createSignal, createMemo, createEffect, Show, For, onMount, onCleanup } from 'solid-js';
 import { Card } from '@/components/ui/Card';
+import { HeroCard } from '@/components/ui/HeroCard';
 import { Button } from '@/components/ui/Button';
 import { Badge } from '@/components/ui/Badge';
 import { Modal } from '@/components/ui/Modal';
@@ -189,6 +190,15 @@ export default function UserManagementPage() {
 
   return (
     <div class="space-y-6">
+      <HeroCard
+        eyebrow="批量 + 行抽屉"
+        eyebrowVariant="info"
+        title="用户管理"
+        desc="高级过滤、批量禁用 / 重置 / 导出，行内抽屉查看答题档案 + 设备会话。"
+        meta={[
+          { value: users().length, label: '当前列表' },
+        ]}
+      />
 
       {/* 确认弹窗 */}
       <Show when={confirmTarget()}>

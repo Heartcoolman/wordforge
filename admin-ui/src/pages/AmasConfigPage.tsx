@@ -1,5 +1,6 @@
 import { createSignal, createMemo, Show, For, onMount } from 'solid-js';
 import { Card } from '@/components/ui/Card';
+import { HeroCard } from '@/components/ui/HeroCard';
 import { Button } from '@/components/ui/Button';
 import { Spinner } from '@/components/ui/Spinner';
 import { Tabs } from '@/components/ui/Tabs';
@@ -118,6 +119,12 @@ export default function AmasConfigPage() {
 
   return (
     <div class="space-y-4">
+      <HeroCard
+        eyebrow="热加载 · 灰度 · 回滚"
+        eyebrowVariant="warning"
+        title="AMAS 调参"
+        desc="amas_config.toml 295 个子参数。「重点参数」调 11 维 Tier-A 核心；「分节配置」按 section 收纳；「JSON 高级」直接编辑。修改自动 diff，发布支持灰度。"
+      />
       <Show when={!loading()} fallback={<div class="flex justify-center py-12"><Spinner size="lg" /></div>}>
         <Show when={!loadError()} fallback={
           <Card variant="elevated">

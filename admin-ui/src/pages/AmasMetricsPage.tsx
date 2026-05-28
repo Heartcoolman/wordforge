@@ -1,5 +1,6 @@
 import { createSignal, Show } from 'solid-js';
 import { Tabs } from '@/components/ui/Tabs';
+import { HeroCard } from '@/components/ui/HeroCard';
 import { MetricsDashboard } from './amas/MetricsDashboard';
 import { AnomaliesPanel } from './amas/AnomaliesPanel';
 import { UserStatePanel } from './amas/UserStatePanel';
@@ -19,6 +20,12 @@ export default function AmasMetricsPage() {
 
   return (
     <div class="space-y-4">
+      <HeroCard
+        eyebrow="8 算法 × 决策"
+        eyebrowVariant="accent"
+        title="AMAS 指标"
+        desc="算法延迟 / 错误率、版本对比（预测 / 留存）、异常 / 不变量、用户状态分布。监控 ensemble / heuristic / IGE / SWD / MDM / IAD / MTP / SSP 8 个决策算法。"
+      />
       <Tabs
         tabs={[
           { id: 'metrics', label: '算法延迟 / 错误率' },

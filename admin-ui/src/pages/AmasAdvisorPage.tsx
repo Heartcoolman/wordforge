@@ -8,6 +8,7 @@ import { Tabs } from '@/components/ui/Tabs';
 import { StatCard } from '@/components/ui/StatCard';
 import { Modal } from '@/components/ui/Modal';
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
+import { HeroCard } from '@/components/ui/HeroCard';
 import { uiStore } from '@/stores/ui';
 import { adminApi, type AmasSuggestion, type AmasSuggestionStatus } from '@/api/admin';
 import { formatMoney } from '@/utils/formatters';
@@ -97,6 +98,12 @@ export default function AmasAdvisorPage() {
 
   return (
     <div class="space-y-4">
+      <HeroCard
+        eyebrow="每 20 分钟 · 白名单"
+        eyebrowVariant="info"
+        title="LLM 调参顾问"
+        desc="DeepSeek patch 时间线、当前建议 diff、成本看板、灰度发布。接受 / 拒绝建议会写回 AMAS 配置。"
+      />
       <Show
         when={!spend.error}
         fallback={<Card variant="elevated"><Empty title="额度信息加载失败" description={spend.error instanceof Error ? spend.error.message : '请稍后重试'} /></Card>}
