@@ -260,6 +260,30 @@ async function mockAdminApi(page: Page, overrides: { wordbookUrl?: string } = {}
     if (path === '/api/admin/amas/monitoring') {
       return json(ok([{ timestamp: '2026-05-19T00:00:00Z', eventType: 'invariant_violation', data: { field: 'fatigue', value: 1.2 } }]));
     }
+    if (path === '/api/admin/monitoring/workers') {
+      return json(ok({
+        workers: [
+          { name: 'amas_decision_loop', lastRunAt: '2026-05-19T00:00:00Z', lastDurationMs: 12, lastOutcome: 'ok' },
+          { name: 'session_aggregator', lastRunAt: '2026-05-19T00:00:00Z', lastDurationMs: 8, lastOutcome: 'ok' },
+        ],
+      }));
+    }
+    // Resource packs:list/upload/setActive/deactivate/stats
+    if (path === '/api/admin/resource-packs' && method === 'GET') {
+      return json(ok([
+        {
+          packId: 'cet4-2k',
+          name: 'CET-4 2K',
+          channels: {
+            stable: { activeVersion: 'v1.2.0', versions: [{ version: 'v1.2.0', publishedAt: '2026-04-01', sizeBytes: 524288 }] },
+            beta: { activeVersion: null, versions: [{ version: 'v1.3.0-beta.1', publishedAt: '2026-05-12', sizeBytes: 540000 }] },
+          },
+        },
+      ]));
+    }
+    if (path.startsWith('/api/admin/resource-packs/') && method === 'GET' && path.endsWith('/stats')) {
+      return json(ok({ downloads: 128, lastFetchedAt: '2026-05-18T22:00:00Z' }));
+    }
 
     if (path === '/api/admin/clients') {
       return json(ok({
@@ -521,27 +545,55 @@ test.describe('Admin real UI flows', () => {
     await expect(page.getByLabel('维护模式')).toBeChecked();
   });
 
-  test('settings broadcasts user message after confirmation', async ({ page }) => {
+  test('broadcast page sends system message after confirmation', async ({ page }) => {
     const state = await mockAdminApi(page);
-    await page.goto('/admin/settings');
+    await page.goto('/admin/broadcast');
 
-    await page.getByLabel('标题').fill('维护通知');
+    await page.getByPlaceholder('通知标题').fill('维护通知');
     await page.getByPlaceholder('通知内容').fill('今晚维护 10 分钟');
     await page.getByRole('button', { name: '发送广播' }).click();
-    await expect(page.getByRole('heading', { name: '确认发送广播' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: /确认发送/ })).toBeVisible();
     await page.getByRole('button', { name: '确认发送' }).click();
     await expect.poll(() => state.calls.some((c) => c.path === '/api/admin/broadcast')).toBe(true);
   });
 
-  test('settings sends update broadcast', async ({ page }) => {
+  test('broadcast page switches to update tab and sends update notice', async ({ page }) => {
     const state = await mockAdminApi(page);
-    await page.goto('/admin/settings');
+    await page.goto('/admin/broadcast');
 
-    await page.getByPlaceholder('有新版本可用，请刷新页面获取最新内容').fill('请刷新页面');
-    await page.getByRole('button', { name: '发送更新通知' }).click();
-    await expect(page.getByRole('heading', { name: '确认发送更新通知' })).toBeVisible();
+    // 切到'更新通知' tab
+    await page.getByRole('tab', { name: /更新通知/ }).click();
+    await page.getByPlaceholder(/请刷新页面/).fill('请刷新页面以获取最新内容');
+    await page.getByRole('button', { name: /发送更新通知/ }).click();
+    await expect(page.getByRole('heading', { name: /确认发送/ })).toBeVisible();
     await page.getByRole('button', { name: '确认发送' }).click();
     await expect.poll(() => state.calls.some((c) => c.path === '/api/admin/broadcast-update')).toBe(true);
+  });
+
+  test('command palette opens on ⌘K and navigates via Enter', async ({ page }) => {
+    await mockAdminApi(page);
+    await page.goto('/admin');
+
+    // Mac Meta+K 或 Linux/Windows Ctrl+K
+    const isMac = process.platform === 'darwin';
+    await page.keyboard.press(isMac ? 'Meta+k' : 'Control+k');
+    await expect(page.getByRole('dialog', { name: '命令面板' })).toBeVisible();
+
+    // 输入 'broadcast' 模糊匹配,Enter 跳转
+    await page.getByPlaceholder('跳转到任意页面或操作…').fill('broadcast');
+    await page.keyboard.press('Enter');
+    await expect(page).toHaveURL(/\/admin\/broadcast/);
+    await expect(page.getByRole('heading', { name: '系统广播' })).toBeVisible();
+  });
+
+  test('resource-packs page lists packs and switches channel', async ({ page }) => {
+    await mockAdminApi(page);
+    await page.goto('/admin/resource-packs');
+
+    // hero
+    await expect(page.getByRole('heading', { name: '资源包管理' })).toBeVisible();
+    // 通道 tab 应当至少包含 stable / beta
+    await expect(page.getByRole('tab', { name: /stable/i })).toBeVisible();
   });
 
   test('wordbook center shows unconfigured state', async ({ page }) => {

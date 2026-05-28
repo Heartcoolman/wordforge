@@ -98,7 +98,7 @@ export default function UserManagementPage() {
   function toggleSelectAll() {
     const list = filteredUsers();
     setSelectedIds((prev) => {
-      if (list.every((u) => prev.has(u.id))) return new Set();
+      if (list.every((u) => prev.has(u.id))) return new Set<string>();
       const next = new Set(prev);
       list.forEach((u) => next.add(u.id));
       return next;
@@ -118,7 +118,7 @@ export default function UserManagementPage() {
     } else {
       uiStore.toast.error(`部分失败:${okCount} 成功 / ${failCount} 失败`);
     }
-    setSelectedIds(new Set());
+    setSelectedIds(new Set<string>());
     setBulkBusy(null);
     void load();
   }
@@ -329,7 +329,7 @@ export default function UserManagementPage() {
                 <Button size="xs" variant="danger" loading={bulkBusy() === 'ban'} onClick={() => bulkToggleBan('ban')}>批量封禁</Button>
                 <Button size="xs" variant="success" loading={bulkBusy() === 'unban'} onClick={() => bulkToggleBan('unban')}>批量解封</Button>
                 <Button size="xs" variant="ghost" onClick={exportUsersCsv}>导出选中 CSV</Button>
-                <Button size="xs" variant="ghost" onClick={() => setSelectedIds(new Set())}>清空选择</Button>
+                <Button size="xs" variant="ghost" onClick={() => setSelectedIds(new Set<string>())}>清空选择</Button>
               </Show>
             </div>
 
