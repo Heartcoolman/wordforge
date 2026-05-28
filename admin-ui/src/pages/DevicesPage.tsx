@@ -1,4 +1,4 @@
-import { batch, createSignal, onMount, Show, For } from 'solid-js';
+import { batch, createMemo, createSignal, onMount, Show, For } from 'solid-js';
 import { Card } from '@/components/ui/Card';
 import { HeroCard } from '@/components/ui/HeroCard';
 import { Button } from '@/components/ui/Button';
@@ -8,6 +8,7 @@ import { Input } from '@/components/ui/Input';
 import { Spinner } from '@/components/ui/Spinner';
 import { Empty } from '@/components/ui/Empty';
 import { Tabs } from '@/components/ui/Tabs';
+import { Table } from '@/components/ui/Table';
 import { adminApi, type SseLiveEntry, type RecentlyActiveEntry, type TelemetrySummary, type DataChannelValue } from '@/api/admin';
 import { uiStore } from '@/stores/ui';
 
@@ -148,6 +149,156 @@ export default function DevicesPage() {
     return id.length > 12 ? `${id.slice(0, 8)}...${id.slice(-4)}` : id;
   }
 
+  // 平台分布：合并 SSE + Recent 去重后按 platform 聚合(版本字段后端未透出,以平台分布替代)
+  const platformDistribution = createMemo<Array<{ platform: string; count: number; share: number }>>(() => {
+    const seen = new Set<string>();
+    const byPlatform = new Map<string, number>();
+    const collect = (entries: Array<{ deviceId: string; platform: string }>) => {
+      for (const e of entries) {
+        if (seen.has(e.deviceId)) continue;
+        seen.add(e.deviceId);
+        byPlatform.set(e.platform, (byPlatform.get(e.platform) ?? 0) + 1);
+      }
+    };
+    collect(sseLive());
+    collect(recentlyActive());
+    const total = Array.from(byPlatform.values()).reduce((a, b) => a + b, 0) || 1;
+    return Array.from(byPlatform.entries())
+      .map(([platform, count]) => ({ platform, count, share: count / total }))
+      .sort((a, b) => b.count - a.count);
+  });
+
+  const platformBarColor: Record<string, string> = {
+    web: 'var(--accent)',
+    ios: 'var(--info)',
+    android: 'var(--success)',
+  };
+
+  // SSE 表列定义
+  const sseColumns = [
+    {
+      key: 'deviceId',
+      title: '设备 ID',
+      class: 'whitespace-nowrap',
+      render: (r: SseLiveEntry) => (
+        <span class="font-mono text-xs tabular-nums" title={r.deviceId}>{truncateId(r.deviceId)}</span>
+      ),
+    },
+    {
+      key: 'platform',
+      title: '平台',
+      render: (r: SseLiveEntry) => (
+        <Badge variant="default" size="sm">{r.platform}</Badge>
+      ),
+    },
+    {
+      key: 'userId',
+      title: '用户',
+      render: (r: SseLiveEntry) => (
+        <span class="font-mono text-xs tabular-nums">{truncateId(r.userId)}</span>
+      ),
+    },
+    {
+      key: 'connectedSecs',
+      title: '连接时长',
+      render: (r: SseLiveEntry) => <span class="tabular-nums">{Math.floor(r.connectedSecs / 60)}m</span>,
+    },
+    {
+      key: 'connectionCount',
+      title: '连接数',
+      render: (r: SseLiveEntry) => <span class="tabular-nums">{r.connectionCount}</span>,
+    },
+    {
+      key: 'channels',
+      title: '数据状态',
+      render: (r: SseLiveEntry) => (
+        <div class="flex flex-wrap gap-1">
+          <DataChannelBadge channel="amas" status={r.dataChannels.amas} />
+          <DataChannelBadge channel="learning" status={r.dataChannels.learning} />
+          <DataChannelBadge channel="telemetry" status={r.dataChannels.telemetry} />
+        </div>
+      ),
+    },
+    {
+      key: 'actions',
+      title: '操作',
+      render: (r: SseLiveEntry) => (
+        <div class="flex gap-1 flex-wrap">
+          <Show when={r.isBanned} fallback={
+            <Button size="xs" variant="danger" disabled={loading()} onClick={() => setBanTarget({ id: r.deviceId, action: 'ban' })}>封禁</Button>
+          }>
+            <Button size="xs" variant="success" disabled={loading()} onClick={() => setBanTarget({ id: r.deviceId, action: 'unban' })}>解封</Button>
+          </Show>
+          <Button size="xs" variant="outline" disabled={requestingTelemetry() === r.deviceId} onClick={() => requestTelemetry(r.deviceId)}>拉取遥测</Button>
+          <Button size="xs" variant="ghost" onClick={() => loadTelemetry(r.deviceId)}>历史</Button>
+        </div>
+      ),
+    },
+  ];
+
+  // Recent 表列定义(无 connection 字段,加状态列)
+  const recentColumns = [
+    {
+      key: 'deviceId',
+      title: '设备 ID',
+      class: 'whitespace-nowrap',
+      render: (r: RecentlyActiveEntry) => (
+        <span class="font-mono text-xs tabular-nums" title={r.deviceId}>{truncateId(r.deviceId)}</span>
+      ),
+    },
+    {
+      key: 'platform',
+      title: '平台',
+      render: (r: RecentlyActiveEntry) => <Badge variant="default" size="sm">{r.platform}</Badge>,
+    },
+    {
+      key: 'userId',
+      title: '用户',
+      render: (r: RecentlyActiveEntry) => (
+        <span class="font-mono text-xs tabular-nums">{r.userId ? truncateId(r.userId) : '-'}</span>
+      ),
+    },
+    {
+      key: 'lastSeenAt',
+      title: '最后活跃',
+      render: (r: RecentlyActiveEntry) => (
+        <span class="text-xs tabular-nums whitespace-nowrap">{formatTimestamp(r.lastSeenAt)}</span>
+      ),
+    },
+    {
+      key: 'status',
+      title: '状态',
+      render: (r: RecentlyActiveEntry) => (
+        <Badge variant={r.isBanned ? 'error' : 'success'} size="sm" dot>{r.isBanned ? '已封禁' : '正常'}</Badge>
+      ),
+    },
+    {
+      key: 'channels',
+      title: '数据状态',
+      render: (r: RecentlyActiveEntry) => (
+        <div class="flex flex-wrap gap-1">
+          <DataChannelBadge channel="amas" status={r.dataChannels.amas} />
+          <DataChannelBadge channel="learning" status={r.dataChannels.learning} />
+          <DataChannelBadge channel="telemetry" status={r.dataChannels.telemetry} />
+        </div>
+      ),
+    },
+    {
+      key: 'actions',
+      title: '操作',
+      render: (r: RecentlyActiveEntry) => (
+        <div class="flex gap-1 flex-wrap">
+          <Show when={r.isBanned} fallback={
+            <Button size="xs" variant="danger" disabled={loading()} onClick={() => setBanTarget({ id: r.deviceId, action: 'ban' })}>封禁</Button>
+          }>
+            <Button size="xs" variant="success" disabled={loading()} onClick={() => setBanTarget({ id: r.deviceId, action: 'unban' })}>解封</Button>
+          </Show>
+          <Button size="xs" variant="ghost" onClick={() => loadTelemetry(r.deviceId)}>历史</Button>
+        </div>
+      ),
+    },
+  ];
+
   return (
     <div class="space-y-6">
       <HeroCard
@@ -172,112 +323,68 @@ export default function DevicesPage() {
         onChange={(id) => setTab(id as 'sse' | 'recent')}
       />
 
+      {/* 平台分布 mini bar:版本字段后端未透出,以接入平台分布替代 */}
+      <Show when={platformDistribution().length > 0}>
+        <Card>
+          <div class="flex items-center justify-between mb-3">
+            <h3 class="text-sm font-semibold text-content">平台分布</h3>
+            <span class="text-xs text-content-tertiary tabular-nums">
+              共 {platformDistribution().reduce((a, b) => a + b.count, 0)} 台已知设备
+            </span>
+          </div>
+          <ul class="space-y-2">
+            <For each={platformDistribution()}>
+              {(row) => (
+                <li class="grid grid-cols-[80px_1fr_auto] items-center gap-3 text-[12.5px]">
+                  <span class="font-mono text-content-secondary truncate uppercase tracking-wide" title={row.platform}>{row.platform.toUpperCase()}</span>
+                  <div class="h-2 rounded-full bg-surface-secondary overflow-hidden">
+                    <div
+                      class="h-full rounded-full transition-[width] duration-base ease-out-expo"
+                      style={{
+                        width: `${(row.share * 100).toFixed(1)}%`,
+                        background: platformBarColor[row.platform.toLowerCase()] ?? 'var(--accent)',
+                      }}
+                    />
+                  </div>
+                  <span class="font-mono tabular-nums text-content">
+                    {row.count} <span class="text-content-tertiary">({(row.share * 100).toFixed(0)}%)</span>
+                  </span>
+                </li>
+              )}
+            </For>
+          </ul>
+        </Card>
+      </Show>
+
       {/* 列表/表格区单独 loading 边界 */}
       <Show when={!loading()} fallback={<div class="flex justify-center py-12"><Spinner size="lg" /></div>}>
         {/* SSE Live */}
         <Show when={tab() === 'sse'}>
-          <Show when={sseLive().length > 0} fallback={<Card variant="outlined" padding="lg"><Empty title="暂无活跃 SSE 连接" description="实时连接数为 0；用户登录后会出现在这里" /></Card>}>
-            <div class="overflow-x-auto">
-              <table class="w-full text-sm">
-                <thead>
-<tr class="border-b border-border-hairline text-left text-caption uppercase tracking-wide text-content-secondary">
-                     <th class="py-2 pr-4">设备 ID</th>
-                     <th class="py-2 pr-4">平台</th>
-                     <th class="py-2 pr-4">用户</th>
-                     <th class="py-2 pr-4">连接时长</th>
-                     <th class="py-2 pr-4">连接数</th>
-                     <th class="py-2 pr-4">数据状态</th>
-                     <th class="py-2">操作</th>
-                   </tr>
-                </thead>
-                <tbody>
-                  <For each={sseLive()}>
-                    {(entry) => (
-                      <tr class="border-b border-border-hairline hover:bg-accent-light/40 transition-colors duration-fast ease-out-expo">
-                        <td class="py-2 pr-4 font-mono text-xs tabular-nums" title={entry.deviceId}>{truncateId(entry.deviceId)}</td>
-                        <td class="py-2 pr-4">{entry.platform}</td>
-                        <td class="py-2 pr-4 font-mono text-xs tabular-nums">{truncateId(entry.userId)}</td>
-                        <td class="py-2 pr-4 tabular-nums">{Math.floor(entry.connectedSecs / 60)}m</td>
-                        <td class="py-2 pr-4 tabular-nums">{entry.connectionCount}</td>
-                         <td class="py-2 pr-4">
-                           <div class="flex flex-wrap gap-1">
-                             <DataChannelBadge channel="amas" status={entry.dataChannels.amas} />
-                             <DataChannelBadge channel="learning" status={entry.dataChannels.learning} />
-                             <DataChannelBadge channel="telemetry" status={entry.dataChannels.telemetry} />
-                           </div>
-                         </td>
-                         <td class="py-2">
-                           <div class="flex gap-1 flex-wrap">
-                             <Show when={entry.isBanned} fallback={
-                               <Button size="xs" variant="danger" disabled={loading()} onClick={() => setBanTarget({ id: entry.deviceId, action: 'ban' })}>封禁</Button>
-                             }>
-                               <Button size="xs" variant="success" disabled={loading()} onClick={() => setBanTarget({ id: entry.deviceId, action: 'unban' })}>解封</Button>
-                             </Show>
-                             <Button size="xs" variant="outline" disabled={requestingTelemetry() === entry.deviceId} onClick={() => requestTelemetry(entry.deviceId)}>拉取遥测</Button>
-                             <Button size="xs" variant="ghost" onClick={() => loadTelemetry(entry.deviceId)}>历史</Button>
-                           </div>
-                         </td>
-                      </tr>
-                    )}
-                  </For>
-                </tbody>
-              </table>
-            </div>
+          <Show
+            when={sseLive().length > 0}
+            fallback={<Card variant="outlined" padding="lg"><Empty title="暂无活跃 SSE 连接" description="实时连接数为 0；用户登录后会出现在这里" /></Card>}
+          >
+            <Table
+              columns={sseColumns}
+              data={sseLive() as unknown as Record<string, unknown>[]}
+              aria-label="SSE 实时连接"
+              caption="按设备 ID / 平台 / 用户 / 连接时长 / 连接数 / 数据上报状态 列展示活跃 SSE 连接"
+            />
           </Show>
         </Show>
 
         {/* Recently Active */}
         <Show when={tab() === 'recent'}>
-          <Show when={recentlyActive().length > 0} fallback={<Card variant="outlined" padding="lg"><Empty title="暂无近期活跃设备" description="最近 24h 内没有设备上报过活动" /></Card>}>
-            <div class="overflow-x-auto">
-              <table class="w-full text-sm">
-                <thead>
-<tr class="border-b border-border-hairline text-left text-caption uppercase tracking-wide text-content-secondary">
-                     <th class="py-2 pr-4">设备 ID</th>
-                     <th class="py-2 pr-4">平台</th>
-                     <th class="py-2 pr-4">用户</th>
-                     <th class="py-2 pr-4">最后活跃</th>
-                     <th class="py-2 pr-4">状态</th>
-                     <th class="py-2 pr-4">数据状态</th>
-                     <th class="py-2">操作</th>
-                   </tr>
-                </thead>
-                <tbody>
-                  <For each={recentlyActive()}>
-                    {(entry) => (
-                      <tr class="border-b border-border-hairline hover:bg-accent-light/40 transition-colors duration-fast ease-out-expo">
-                        <td class="py-2 pr-4 font-mono text-xs tabular-nums" title={entry.deviceId}>{truncateId(entry.deviceId)}</td>
-                        <td class="py-2 pr-4">{entry.platform}</td>
-                        <td class="py-2 pr-4 font-mono text-xs tabular-nums">{entry.userId ? truncateId(entry.userId) : '-'}</td>
-                        <td class="py-2 pr-4 text-xs tabular-nums whitespace-nowrap">{formatTimestamp(entry.lastSeenAt)}</td>
-                        <td class="py-2 pr-4">
-                           <Badge variant={entry.isBanned ? 'error' : 'success'} size="sm" dot>
-                             {entry.isBanned ? '已封禁' : '正常'}
-                           </Badge>
-                         </td>
-                         <td class="py-2 pr-4">
-                           <div class="flex flex-wrap gap-1">
-                             <DataChannelBadge channel="amas" status={entry.dataChannels.amas} />
-                             <DataChannelBadge channel="learning" status={entry.dataChannels.learning} />
-                             <DataChannelBadge channel="telemetry" status={entry.dataChannels.telemetry} />
-                           </div>
-                         </td>
-                         <td class="py-2">
-                           <div class="flex gap-1 flex-wrap">
-                             <Show when={entry.isBanned} fallback={
-                               <Button size="xs" variant="danger" disabled={loading()} onClick={() => setBanTarget({ id: entry.deviceId, action: 'ban' })}>封禁</Button>
-                             }>
-                               <Button size="xs" variant="success" disabled={loading()} onClick={() => setBanTarget({ id: entry.deviceId, action: 'unban' })}>解封</Button>
-                             </Show>
-                             <Button size="xs" variant="ghost" onClick={() => loadTelemetry(entry.deviceId)}>历史</Button>
-                           </div>
-                         </td>
-                      </tr>
-                    )}
-                  </For>
-                </tbody>
-              </table>
-            </div>
+          <Show
+            when={recentlyActive().length > 0}
+            fallback={<Card variant="outlined" padding="lg"><Empty title="暂无近期活跃设备" description="最近 24h 内没有设备上报过活动" /></Card>}
+          >
+            <Table
+              columns={recentColumns}
+              data={recentlyActive() as unknown as Record<string, unknown>[]}
+              aria-label="近期活跃设备"
+              caption="按设备 ID / 平台 / 用户 / 最后活跃 / 封禁状态 / 数据上报状态 列展示最近接入设备"
+            />
           </Show>
         </Show>
       </Show>
