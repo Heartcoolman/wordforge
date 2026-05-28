@@ -63,6 +63,8 @@ pub fn admin_router() -> Router<AppState> {
         .route("/suggestions/:id", get(get_suggestion))
         .route("/suggestions/:id/approve", post(approve_suggestion))
         .route("/suggestions/:id/reject", post(reject_suggestion))
+        // C5: 建议回滚（版本链 restore parent）
+        .route("/suggestions/:id/rollback", post(rollback_suggestion))
         // C1: advisor 成本/统计
         .route("/advisor/cost", get(advisor_cost))
         .route("/advisor/cost/daily", get(advisor_cost_daily))
@@ -778,6 +780,86 @@ async fn reject_suggestion(
         })
         .await??;
     Ok(ok(serde_json::json!({"rejected": true})))
+}
+
+// ─────────── C5: 建议回滚（版本链 restore parent）───────────
+
+/// 回滚某条已批准建议引入的配置改动：定位该建议 approve 产出的版本，restore 其 parent 版本快照，
+/// 并把建议标记为 superseded（复用现有 apply_and_persist_config restore 通路 + 审计）。
+async fn rollback_suggestion(
+    admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    use crate::store::operations::amas_suggestions::SuggestionStatus;
+
+    // 先确认建议存在（不存在 → 404）
+    state
+        .run_store_task("admin.amas.rollback_lookup", move |store| {
+            store.get_amas_suggestion(id)
+        })
+        .await??
+        .ok_or_else(|| AppError::not_found("建议不存在"))?;
+
+    // 定位该建议 approve 产出的版本（note == "approve suggestion#{id}"），回滚目标 = 其 parent 版本。
+    let approve_note = format!("approve suggestion#{id}");
+    let parent_hash = state
+        .run_store_task("admin.amas.rollback_find_version", move |store| {
+            let versions = store.list_amas_config_versions(500)?;
+            Ok::<_, crate::store::StoreError>(
+                versions
+                    .into_iter()
+                    .find(|v| v.note.as_deref() == Some(approve_note.as_str()))
+                    .and_then(|v| v.parent_version_hash),
+            )
+        })
+        .await??
+        .ok_or_else(|| {
+            AppError::bad_request(
+                "PARENT_NOT_FOUND",
+                "该建议无可回滚的父版本（版本链缺失或为创世版本）",
+            )
+        })?;
+
+    let lookup_hash = parent_hash.clone();
+    let detail = state
+        .run_store_task("admin.amas.rollback_target", move |store| {
+            store.get_amas_config_version(&lookup_hash)
+        })
+        .await??
+        .ok_or_else(|| AppError::bad_request("PARENT_NOT_FOUND", "回滚目标版本不存在于版本链"))?;
+
+    let cfg: crate::amas::config::AMASConfig = serde_json::from_value(detail.snapshot_json)
+        .map_err(|e| AppError::internal(&format!("快照反序列化失败: {e}")))?;
+
+    apply_and_persist_config(
+        &state,
+        &admin.admin_id,
+        cfg,
+        ConfigVersionSource::Manual,
+        Some(format!(
+            "rollback suggestion#{id} → {}",
+            &parent_hash[..parent_hash.len().min(8)]
+        )),
+    )
+    .await?;
+
+    let admin_id = admin.admin_id.clone();
+    state
+        .run_store_task("admin.amas.rollback_mark", move |store| {
+            store.update_amas_suggestion_status(
+                id,
+                SuggestionStatus::Superseded,
+                Some(&admin_id),
+                Some("rolled back to parent version"),
+            )
+        })
+        .await??;
+
+    Ok(ok(serde_json::json!({
+        "rolledBack": true,
+        "versionHash": parent_hash,
+    })))
 }
 
 #[derive(Debug, Deserialize)]

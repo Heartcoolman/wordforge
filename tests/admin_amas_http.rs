@@ -960,3 +960,106 @@ async fn it_amas_suggestions_export_csv() {
     assert!(text.contains("vhash-csv"));
     assert!(text.contains("csv 测试理由"));
 }
+
+#[tokio::test]
+async fn it_amas_suggestion_rollback() {
+    let app = spawn_test_server().await;
+    let token = setup_amas_admin_token(&app).await;
+
+    // 不存在 id → 404
+    let nf = request(
+        &app.app,
+        Method::POST,
+        "/api/admin/amas/suggestions/999999/rollback",
+        None,
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (s, _, _) = response_json(nf).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+
+    // 先把当前 config PUT 一次 → 落入基线版本 V0（approve 产出版本的 parent）
+    let cfg = request(
+        &app.app,
+        Method::GET,
+        "/api/admin/amas/config",
+        None,
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (_, _, cfg_body) = response_json(cfg).await;
+    let put_base = request(
+        &app.app,
+        Method::PUT,
+        "/api/admin/amas/config?note=rollback-base",
+        Some(cfg_body["data"].clone()),
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (s, _, base_body) = response_json(put_base).await;
+    assert_eq!(s, StatusCode::OK);
+    let base_hash = base_body["data"]["versionHash"]
+        .as_str()
+        .expect("base version hash")
+        .to_string();
+
+    // 插入一条 pending suggestion，approve 后产出子版本（parent = V0）
+    let sid = app
+        .state
+        .store()
+        .insert_amas_suggestion(
+            &learning_backend::store::operations::amas_suggestions::InsertSuggestion {
+                based_on_version_hash: base_hash.clone(),
+                patch_json: r#"{"memoryModel.baseDesiredRetention":0.85}"#.into(),
+                rationale: "rollback 测试".into(),
+                evidence_json: "{}".into(),
+                cost_usd: Some(0.01),
+                tokens_input: Some(10),
+                tokens_output: Some(5),
+                confidence: Some(0.7),
+                initial_status:
+                    learning_backend::store::operations::amas_suggestions::SuggestionStatus::Pending,
+                decided_by: None,
+                decision_note: None,
+                base_values_json: None,
+            },
+        )
+        .expect("insert suggestion");
+
+    let approve = request(
+        &app.app,
+        Method::POST,
+        &format!("/api/admin/amas/suggestions/{sid}/approve"),
+        Some(serde_json::json!({ "note": "approve for rollback test" })),
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (s, _, _) = response_json(approve).await;
+    assert_eq!(s, StatusCode::OK);
+
+    let rollback = request(
+        &app.app,
+        Method::POST,
+        &format!("/api/admin/amas/suggestions/{sid}/rollback"),
+        None,
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (s, _, body) = response_json(rollback).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(body["data"]["rolledBack"], true);
+    // 回滚目标即基线版本 V0
+    assert_eq!(body["data"]["versionHash"].as_str().unwrap(), base_hash);
+
+    // suggestion 被标记 superseded
+    let got = request(
+        &app.app,
+        Method::GET,
+        &format!("/api/admin/amas/suggestions/{sid}"),
+        None,
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (_, _, got_body) = response_json(got).await;
+    assert_eq!(got_body["data"]["status"], "superseded");
+}
