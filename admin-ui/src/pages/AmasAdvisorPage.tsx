@@ -1,4 +1,4 @@
-import { createResource, createSignal, For, Show } from 'solid-js';
+import { createMemo, createResource, createSignal, For, Show } from 'solid-js';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Badge } from '@/components/ui/Badge';
@@ -9,6 +9,7 @@ import { StatCard } from '@/components/ui/StatCard';
 import { Modal } from '@/components/ui/Modal';
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
 import { HeroCard } from '@/components/ui/HeroCard';
+import { Sparkline } from '@/components/ui/Sparkline';
 import { uiStore } from '@/stores/ui';
 import { adminApi, type AmasSuggestion, type AmasSuggestionStatus } from '@/api/admin';
 import { formatMoney } from '@/utils/formatters';
@@ -50,6 +51,16 @@ export default function AmasAdvisorPage() {
   );
 
   const [spend, { refetch: refetchSpend }] = createResource(async () => adminApi.amasSuggestionSpend());
+
+  // 从 history(已加载时) 取每条 costUsd 做 mini sparkline 趋势
+  const costSeries = createMemo<number[]>(() => {
+    const h = history() ?? [];
+    return h
+      .map((s) => s.costUsd ?? 0)
+      .filter((c) => c > 0)
+      .slice(0, 30)
+      .reverse(); // 时间从旧到新
+  });
 
   function approve(s: AmasSuggestion) {
     setApproveTarget(s);
@@ -116,6 +127,7 @@ export default function AmasAdvisorPage() {
                 value={formatMoney(s().todayCostUsd, 4)}
                 color="info"
                 icon="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+                spark={costSeries()}
               />
               <StatCard
                 title="日额度上限"
@@ -216,36 +228,54 @@ export default function AmasAdvisorPage() {
         >
           <Show when={!history.loading} fallback={<div class="flex justify-center py-12"><Spinner /></div>}>
             <Show when={(history() ?? []).length > 0} fallback={<Card variant="elevated"><Empty title="尚无历史" description="" /></Card>}>
-            <Card variant="elevated">
-              <div class="overflow-x-auto">
-                <table class="w-full text-sm">
-                  <thead>
-                    <tr class="bg-surface-secondary/60 backdrop-blur-sm border-b border-border-hairline">
-                      <th scope="col" class="px-3 py-2 text-left font-medium text-content-secondary">时间</th>
-                      <th scope="col" class="px-3 py-2 text-left font-medium text-content-secondary">状态</th>
-                      <th scope="col" class="px-3 py-2 text-left font-medium text-content-secondary">基础版本</th>
-                      <th scope="col" class="px-3 py-2 text-left font-medium text-content-secondary">理由（摘要）</th>
-                      <th scope="col" class="px-3 py-2 text-right font-medium text-content-secondary">cost</th>
-                      <th scope="col" class="px-3 py-2 text-left font-medium text-content-secondary">决策人</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <For each={history() ?? []}>
-                      {(s) => (
-                        <tr class="border-b border-border-hairline">
-                          <td class="px-3 py-2 text-xs text-content-tertiary tabular-nums whitespace-nowrap">{formatTime(s.createdAt)}</td>
-                          <td class="px-3 py-2"><Badge variant={STATUS_VARIANT[s.status]} size="sm">{STATUS_LABEL[s.status]}</Badge></td>
-                          <td class="px-3 py-2 font-mono text-xs tabular-nums">{s.basedOnVersionHash.slice(0, 10)}</td>
-                          <td class="px-3 py-2 text-xs text-content max-w-md truncate" title={s.rationale}>{s.rationale}</td>
-                          <td class="px-3 py-2 text-right font-mono text-xs tabular-nums">{s.costUsd != null ? formatMoney(s.costUsd, 4) : '—'}</td>
-                          <td class="px-3 py-2 text-xs text-content-tertiary">{s.decidedBy ?? '—'}</td>
-                        </tr>
-                      )}
-                    </For>
-                  </tbody>
-                </table>
-              </div>
-            </Card>
+              {/* Patch timeline: 左侧时间轴 + 右侧 patch 卡片 */}
+              <Card variant="elevated">
+                <ol class="relative space-y-0" style={{ 'list-style': 'none' }}>
+                  <span
+                    aria-hidden="true"
+                    class="absolute left-[7px] top-1 bottom-1 w-px bg-border-hairline"
+                  />
+                  <For each={history() ?? []}>
+                    {(s) => {
+                      const dotColor = STATUS_VARIANT[s.status];
+                      const dotBg = `var(--${dotColor === 'default' ? 'content-tertiary' : dotColor})`;
+                      return (
+                        <li class="relative pl-7 pb-5 last:pb-0">
+                          <span
+                            aria-hidden="true"
+                            class="absolute left-1 top-1.5 size-3 rounded-full ring-2 ring-surface-elevated"
+                            style={{ background: dotBg }}
+                          />
+                          <div class="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                            <Badge variant={STATUS_VARIANT[s.status]} size="sm">{STATUS_LABEL[s.status]}</Badge>
+                            <time class="text-[11.5px] tabular-nums text-content-tertiary">{formatTime(s.createdAt)}</time>
+                            <span class="font-mono text-[11.5px] text-content-tertiary tabular-nums">
+                              基于 {s.basedOnVersionHash.slice(0, 10)}
+                            </span>
+                            <span class="font-mono text-[11.5px] tabular-nums text-content-tertiary">
+                              <span aria-hidden="true">· </span>
+                              <span>{s.costUsd != null ? formatMoney(s.costUsd, 4) : '—'}</span>
+                            </span>
+                            <span class="text-[11.5px] text-content-tertiary">
+                              <span aria-hidden="true">· </span>
+                              <span>{s.decidedBy ?? '—'}</span>
+                            </span>
+                          </div>
+                          <p class="mt-1 text-[13px] text-content leading-relaxed" title={s.rationale}>
+                            {s.rationale}
+                          </p>
+                          <Show when={s.patchJson && Object.keys(s.patchJson).length > 0}>
+                            <p class="mt-1 text-[11px] font-mono text-content-tertiary truncate">
+                              patch: {Object.keys(s.patchJson).slice(0, 3).join(', ')}
+                              {Object.keys(s.patchJson).length > 3 && ` +${Object.keys(s.patchJson).length - 3}`}
+                            </p>
+                          </Show>
+                        </li>
+                      );
+                    }}
+                  </For>
+                </ol>
+              </Card>
             </Show>
           </Show>
         </Show>
