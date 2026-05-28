@@ -4,13 +4,35 @@ import { Badge } from '@/components/ui/Badge';
 import { Button } from '@/components/ui/Button';
 import { Spinner } from '@/components/ui/Spinner';
 import { Empty } from '@/components/ui/Empty';
+import { HeroCard } from '@/components/ui/HeroCard';
+import { SectionTitle } from '@/components/ui/SectionTitle';
+import { WorkerGridCell, type WorkerOutcome } from '@/components/ui/WorkerGridCell';
 import { adminApi } from '@/api/admin';
 import { amasApi } from '@/api/amas';
 import { healthApi, type PublicHealthStatus } from '@/api/health';
+import { api } from '@/api/http';
 import type { SystemHealth, DatabaseInfo } from '@/types/admin';
 import type { MonitoringEvent } from '@/types/amas';
 import { MONITORING_DEFAULT_LIMIT } from '@/lib/constants';
 import { formatBytes } from '@/utils/formatters';
+
+interface WorkerRow {
+  workerName: string;
+  lastRunAt: string | null;
+  lastDurationMs: number | null;
+  lastOutcome: string | null;
+  lastError: string | null;
+}
+
+/** 后端 last_outcome 字符串 → WorkerGridCell 的 4 态枚举 */
+function mapOutcome(s: string | null | undefined): WorkerOutcome {
+  if (!s) return 'unknown';
+  const v = s.toLowerCase();
+  if (v === 'ok' || v === 'success' || v === 'completed') return 'ok';
+  if (v === 'error' || v === 'failure' || v === 'failed' || v === 'panic') return 'error';
+  if (v === 'idle' || v === 'pending' || v === 'scheduled') return 'idle';
+  return 'unknown';
+}
 
 function formatUptime(secs: number): string {
   const d = Math.floor(secs / 86400);
@@ -77,13 +99,16 @@ export default function MonitoringPage() {
   const [dbErr, setDbErr] = createSignal('');
   const [monitoringErr, setMonitoringErr] = createSignal('');
   const [lastUpdated, setLastUpdated] = createSignal<Date | null>(null);
+  const [workers, setWorkers] = createSignal<WorkerRow[]>([]);
+  const [workersErr, setWorkersErr] = createSignal('');
 
   async function fetchAll() {
-    const [h, ph, d, m] = await Promise.allSettled([
+    const [h, ph, d, m, w] = await Promise.allSettled([
       adminApi.getHealth(),
       healthApi.getStatus(),
       adminApi.getDatabase(),
       amasApi.getMonitoring(MONITORING_DEFAULT_LIMIT),
+      api.get<{ workers: WorkerRow[] }>('/api/admin/monitoring/workers', { useAdminToken: true }),
     ]);
     if (h.status === 'fulfilled') { setHealth(h.value); setHealthErr(''); }
     else setHealthErr(h.reason instanceof Error ? h.reason.message : '加载失败');
@@ -93,7 +118,10 @@ export default function MonitoringPage() {
     else setDbErr(d.reason instanceof Error ? d.reason.message : '加载失败');
     if (m.status === 'fulfilled') { setMonitoring(m.value); setMonitoringErr(''); }
     else setMonitoringErr(m.reason instanceof Error ? m.reason.message : '加载失败');
-    const allRejected = h.status === 'rejected' && ph.status === 'rejected' && d.status === 'rejected' && m.status === 'rejected';
+    if (w.status === 'fulfilled') { setWorkers(w.value?.workers ?? []); setWorkersErr(''); }
+    else setWorkersErr(w.reason instanceof Error ? w.reason.message : '加载失败');
+    const allRejected =
+      h.status === 'rejected' && ph.status === 'rejected' && d.status === 'rejected' && m.status === 'rejected';
     setAllFailed(allRejected);
     if (!allRejected) setLastUpdated(new Date());
   }
@@ -118,12 +146,57 @@ export default function MonitoringPage() {
 
   return (
     <div class="space-y-6">
+      {/* Hero — SLO 概览 + 全局健康 */}
+      <HeroCard
+        eyebrow={health() ? (statusMap[health()!.status]?.label ?? '未知') : '检查中…'}
+        eyebrowVariant={
+          !health() ? 'info'
+            : health()!.status === 'healthy' ? 'success'
+            : health()!.status === 'degraded' ? 'warning'
+            : 'error'
+        }
+        title="系统监控"
+        desc="实时观察 SLO、worker 心跳、数据库状态与 AMAS 监控事件。每 30 秒自动刷新。"
+        meta={[
+          { value: workers().filter((w) => mapOutcome(w.lastOutcome) === 'ok').length, label: 'Worker OK' },
+          { value: workers().filter((w) => mapOutcome(w.lastOutcome) === 'error').length, label: 'Worker Error' },
+          { value: health()?.errorRate != null ? `${(health()!.errorRate * 100).toFixed(2)}%` : '—', label: '5xx 错误率' },
+          { value: health()?.uptimeSecs != null ? formatUptime(health()!.uptimeSecs) : '—', label: '运行时长' },
+        ]}
+        cta={<Button size="sm" variant="ghost" loading={refreshing()} onClick={handleRefresh}>刷新</Button>}
+      />
+
       <Show when={!loading()} fallback={<div class="flex justify-center py-12"><Spinner size="lg" /></div>}>
-        {/* 顶部 toolbar：手动刷新 + 上次更新时间戳 */}
-        <div class="flex items-center justify-between">
-          <p class="text-xs text-content-tertiary">更新于 {formatTime(lastUpdated())}（每 30 秒自动刷新）</p>
-          <Button size="sm" variant="ghost" loading={refreshing()} onClick={handleRefresh}>刷新</Button>
+        {/* 顶部 toolbar：上次更新时间戳 */}
+        <div class="flex items-center justify-between text-xs">
+          <p class="text-content-tertiary">更新于 {formatTime(lastUpdated())}（每 30 秒自动刷新）</p>
+          <span class="text-content-tertiary">共 {workers().length} 个 worker</span>
         </div>
+
+        {/* Worker 健康网格 — 21+ tokio::spawn 实时心跳 */}
+        <Show when={workers().length > 0} fallback={
+          <Show when={workersErr()}>
+            <Card variant="outlined"><p class="text-sm text-error">Worker: {workersErr()}</p></Card>
+          </Show>
+        }>
+          <Card variant="elevated">
+            <SectionTitle title="Worker 健康网格" sub={`${workers().length} 个 tokio::spawn 心跳`} />
+            <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-2.5">
+              <For each={workers()}>
+                {(w) => (
+                  <WorkerGridCell
+                    name={w.workerName}
+                    outcome={mapOutcome(w.lastOutcome)}
+                    lastRunAt={w.lastRunAt}
+                    lastDurationMs={w.lastDurationMs}
+                    lastError={w.lastError}
+                  />
+                )}
+              </For>
+            </div>
+          </Card>
+        </Show>
+
         <Show when={!allFailed()} fallback={
           <Empty title="加载失败" description="无法获取任何监控数据，请检查后端服务状态后重试" />
         }>
