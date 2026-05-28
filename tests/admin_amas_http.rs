@@ -610,3 +610,72 @@ async fn it_advisor_cost_endpoints() {
     let (denied_status, _, _) = response_json(denied).await;
     assert_eq!(denied_status, StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn it_advisor_run_and_approve_all() {
+    let app = spawn_test_server().await;
+    let admin_token = common::auth::setup_admin_and_get_token(&app.app).await;
+
+    // POST /advisor/run：LLM 默认 disabled（test config llm.enabled=false）→ produced=false
+    let run = request(
+        &app.app,
+        Method::POST,
+        "/api/admin/amas/advisor/run",
+        None,
+        &[("authorization", auth_header(&admin_token))],
+    )
+    .await;
+    let (run_status, _, run_body) = response_json(run).await;
+    assert_eq!(run_status, StatusCode::OK);
+    assert_eq!(run_body["data"]["produced"], false);
+    assert!(run_body["data"]["suggestionId"].is_null());
+
+    // 预置一条 pending 建议，approve-all 应处理它
+    app.state
+        .store()
+        .insert_amas_suggestion(
+            &learning_backend::store::operations::amas_suggestions::InsertSuggestion {
+                based_on_version_hash: "approveall-base".into(),
+                patch_json: r#"{"memoryModel.baseDesiredRetention":0.85}"#.into(),
+                rationale: "approve-all 测试".into(),
+                evidence_json: "{}".into(),
+                cost_usd: Some(0.01),
+                tokens_input: Some(10),
+                tokens_output: Some(5),
+                confidence: Some(0.9),
+                initial_status:
+                    learning_backend::store::operations::amas_suggestions::SuggestionStatus::Pending,
+                decided_by: None,
+                decision_note: None,
+                base_values_json: None,
+            },
+        )
+        .expect("insert pending");
+
+    let approve_all = request(
+        &app.app,
+        Method::POST,
+        "/api/admin/amas/suggestions/approve-all",
+        None,
+        &[("authorization", auth_header(&admin_token))],
+    )
+    .await;
+    let (aa_status, _, aa_body) = response_json(approve_all).await;
+    assert_eq!(aa_status, StatusCode::OK);
+    let results = aa_body["data"]["results"].as_array().expect("results array");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["ok"], true);
+
+    // 再 approve-all 一次：已无 pending → 空 results
+    let again = request(
+        &app.app,
+        Method::POST,
+        "/api/admin/amas/suggestions/approve-all",
+        None,
+        &[("authorization", auth_header(&admin_token))],
+    )
+    .await;
+    let (again_status, _, again_body) = response_json(again).await;
+    assert_eq!(again_status, StatusCode::OK);
+    assert_eq!(again_body["data"]["results"].as_array().unwrap().len(), 0);
+}

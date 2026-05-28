@@ -61,6 +61,9 @@ pub fn admin_router() -> Router<AppState> {
         // C1: advisor 成本/统计
         .route("/advisor/cost", get(advisor_cost))
         .route("/advisor/cost/daily", get(advisor_cost_daily))
+        // C2: 巡查控制
+        .route("/advisor/run", post(advisor_run))
+        .route("/suggestions/approve-all", post(approve_all_suggestions))
 }
 
 // ─────────────────── m022:TOML 互转 + canary ───────────────────
@@ -588,12 +591,15 @@ struct DecisionBody {
     note: Option<String>,
 }
 
-async fn approve_suggestion(
-    admin: AdminAuthUser,
-    State(state): State<AppState>,
-    Path(id): Path<i64>,
-    JsonBody(body): JsonBody<DecisionBody>,
-) -> Result<impl axum::response::IntoResponse, AppError> {
+/// C2 复用核心：校验 pending → validate_patch → 应用 patch → 落版本 → 标记 approved。
+/// approve_suggestion 单条端点与 approve-all 批量端点共用，确保白名单校验一致。
+/// 返回 apply_and_persist_config 的版本响应（单条端点据此保留 {updated,versionHash,versionId} 契约）。
+pub(crate) async fn approve_one(
+    state: &AppState,
+    admin_id: &str,
+    id: i64,
+    note: Option<&str>,
+) -> Result<axum::response::Response, AppError> {
     use crate::amas::tuning_whitelist::validate_patch;
     use crate::store::operations::amas_suggestions::SuggestionStatus;
 
@@ -605,10 +611,7 @@ async fn approve_suggestion(
         .ok_or_else(|| AppError::not_found("建议不存在"))?;
 
     if !matches!(suggestion.status, SuggestionStatus::Pending) {
-        return Err(AppError::bad_request(
-            "BAD_STATUS",
-            "仅 pending 建议可被批准",
-        ));
+        return Err(AppError::bad_request("BAD_STATUS", "仅 pending 建议可被批准"));
     }
 
     // 校验 patch（防止数据库篡改）
@@ -636,27 +639,37 @@ async fn approve_suggestion(
         })?;
 
     let resp = apply_and_persist_config(
-        &state,
-        &admin.admin_id,
+        state,
+        admin_id,
         new_cfg,
         ConfigVersionSource::LlmSuggested,
         Some(format!("approve suggestion#{}", id)),
     )
     .await?;
 
-    let admin_id = admin.admin_id.clone();
+    let admin_id_owned = admin_id.to_string();
+    let note_owned = note.map(|s| s.to_string());
     state
         .run_store_task("admin.amas.approve_update", move |store| {
             store.update_amas_suggestion_status(
                 id,
                 SuggestionStatus::Approved,
-                Some(&admin_id),
-                body.note.as_deref(),
+                Some(&admin_id_owned),
+                note_owned.as_deref(),
             )
         })
         .await??;
 
     Ok(resp)
+}
+
+async fn approve_suggestion(
+    admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    JsonBody(body): JsonBody<DecisionBody>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    approve_one(&state, &admin.admin_id, id, body.note.as_deref()).await
 }
 
 async fn reject_suggestion(
@@ -1235,4 +1248,80 @@ fn days_in_month(year: i32, month: u32) -> u32 {
     let first_next = chrono::NaiveDate::from_ymd_opt(ny, nm, 1).unwrap_or_default();
     let first_this = chrono::NaiveDate::from_ymd_opt(year, month, 1).unwrap_or_default();
     (first_next - first_this).num_days() as u32
+}
+
+// ─────────── C2: 巡查控制 ───────────
+
+async fn advisor_run(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    // 触发前记录最新 suggestion id，作为"是否新产出"的基准
+    let before = state
+        .run_store_task("admin.amas.advisor_run.before", |store| {
+            store.list_amas_suggestions(None, 1)
+        })
+        .await??
+        .first()
+        .map(|r| r.id)
+        .unwrap_or(0);
+
+    let llm_cfg = state.config().llm.clone();
+    crate::workers::llm_advisor::run(state.store(), Some(&llm_cfg), state.amas(), Some(&state))
+        .await;
+
+    let latest = state
+        .run_store_task("admin.amas.advisor_run.after", |store| {
+            store.list_amas_suggestions(None, 1)
+        })
+        .await??;
+    let produced = latest.first().map(|r| r.id).unwrap_or(0) > before;
+    let suggestion_id = if produced {
+        latest.first().map(|r| r.id)
+    } else {
+        None
+    };
+    Ok(ok(serde_json::json!({
+        "produced": produced,
+        "suggestionId": suggestion_id,
+    })))
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ApproveAllItem {
+    id: i64,
+    ok: bool,
+    error: Option<String>,
+}
+
+async fn approve_all_suggestions(
+    admin: AdminAuthUser,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    use crate::store::operations::amas_suggestions::SuggestionStatus;
+
+    let pending = state
+        .run_store_task("admin.amas.approve_all.list", |store| {
+            store.list_amas_suggestions(Some(SuggestionStatus::Pending), 500)
+        })
+        .await??;
+
+    let mut results = Vec::with_capacity(pending.len());
+    for s in pending {
+        let id = s.id;
+        match approve_one(&state, &admin.admin_id, id, None).await {
+            Ok(_) => results.push(ApproveAllItem {
+                id,
+                ok: true,
+                error: None,
+            }),
+            Err(e) => results.push(ApproveAllItem {
+                id,
+                ok: false,
+                error: Some(e.message.clone()),
+            }),
+        }
+    }
+    Ok(ok(serde_json::json!({ "results": results })))
 }
