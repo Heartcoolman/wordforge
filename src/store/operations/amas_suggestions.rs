@@ -293,6 +293,56 @@ impl Store {
         )?;
         Ok((cost, tin, tout))
     }
+
+    /// 近 days 天按 date(created_at) 聚合 cost_usd,折算人民币。返回 (date, costYuan) 升序。
+    /// date 为本地零时区 UTC 日期串(YYYY-MM-DD),与 created_at 的 rfc3339 前缀一致。
+    pub fn aggregate_daily_suggestion_cost_yuan(
+        &self,
+        days: i64,
+        usd_to_cny: f64,
+    ) -> Result<Vec<(String, f64)>, StoreError> {
+        let cutoff = (Utc::now() - Duration::days(days.max(0))).to_rfc3339();
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT substr(created_at, 1, 10) AS d, COALESCE(SUM(cost_usd), 0.0) * ?2
+             FROM amas_tuning_suggestions
+             WHERE created_at >= ?1
+             GROUP BY d
+             ORDER BY d ASC",
+        )?;
+        let rows: Result<Vec<_>, _> = stmt
+            .query_map(params![cutoff, usd_to_cny], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?))
+            })?
+            .collect();
+        Ok(rows?)
+    }
+
+    /// 累计接受率分子分母:approved/auto_applied 计 approved,rejected 计 rejected。
+    pub fn aggregate_suggestion_acceptance(&self) -> Result<(i64, i64), StoreError> {
+        let conn = self.conn()?;
+        let (approved, rejected) = conn.query_row(
+            "SELECT
+                COALESCE(SUM(CASE WHEN status IN ('approved','auto_applied') THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END), 0)
+             FROM amas_tuning_suggestions",
+            [],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+        )?;
+        Ok((approved, rejected))
+    }
+
+    /// 各 status 的条数(供 PatchTabs 角标)。返回 (status, count),仅含有记录的 status。
+    pub fn count_suggestions_by_status(&self) -> Result<Vec<(String, i64)>, StoreError> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT status, COUNT(*) FROM amas_tuning_suggestions GROUP BY status ORDER BY status",
+        )?;
+        let rows: Result<Vec<_>, _> = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
+            .collect();
+        Ok(rows?)
+    }
 }
 
 #[cfg(test)]
@@ -393,5 +443,44 @@ mod tests {
         assert!((cost - 0.02).abs() < 1e-9);
         assert_eq!(tin, 200);
         assert_eq!(tout, 100);
+    }
+
+    #[test]
+    fn daily_cost_groups_by_date_and_converts() {
+        let store = fresh_store();
+        // 两条 today,各 cost_usd=0.01 → 合计 0.02 USD;汇率 7.0 → 0.14 元
+        store.insert_amas_suggestion(&ins(SuggestionStatus::Pending)).unwrap();
+        store.insert_amas_suggestion(&ins(SuggestionStatus::AutoApplied)).unwrap();
+        let daily = store.aggregate_daily_suggestion_cost_yuan(30, 7.0).unwrap();
+        assert_eq!(daily.len(), 1, "all rows same day");
+        assert!((daily[0].1 - 0.14).abs() < 1e-6, "got {}", daily[0].1);
+        // date 形如 YYYY-MM-DD
+        assert_eq!(daily[0].0.len(), 10);
+    }
+
+    #[test]
+    fn acceptance_counts_approved_vs_rejected() {
+        let store = fresh_store();
+        store.insert_amas_suggestion(&ins(SuggestionStatus::Approved)).unwrap();
+        store.insert_amas_suggestion(&ins(SuggestionStatus::AutoApplied)).unwrap();
+        store.insert_amas_suggestion(&ins(SuggestionStatus::Rejected)).unwrap();
+        store.insert_amas_suggestion(&ins(SuggestionStatus::Pending)).unwrap();
+        let (approved, rejected) = store.aggregate_suggestion_acceptance().unwrap();
+        // approved + auto_applied 计入 approved
+        assert_eq!(approved, 2);
+        assert_eq!(rejected, 1);
+    }
+
+    #[test]
+    fn count_by_status_buckets() {
+        let store = fresh_store();
+        store.insert_amas_suggestion(&ins(SuggestionStatus::Pending)).unwrap();
+        store.insert_amas_suggestion(&ins(SuggestionStatus::Pending)).unwrap();
+        store.insert_amas_suggestion(&ins(SuggestionStatus::Rejected)).unwrap();
+        let counts = store.count_suggestions_by_status().unwrap();
+        let pending = counts.iter().find(|(s, _)| s == "pending").map(|(_, n)| *n);
+        let rejected = counts.iter().find(|(s, _)| s == "rejected").map(|(_, n)| *n);
+        assert_eq!(pending, Some(2));
+        assert_eq!(rejected, Some(1));
     }
 }
