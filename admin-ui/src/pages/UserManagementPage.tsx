@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/Button';
 import { Badge } from '@/components/ui/Badge';
 import { Modal } from '@/components/ui/Modal';
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
+import { Drawer } from '@/components/ui/Drawer';
 import { Input } from '@/components/ui/Input';
 import { Pagination } from '@/components/ui/Pagination';
 import { Spinner } from '@/components/ui/Spinner';
@@ -77,6 +78,76 @@ export default function UserManagementPage() {
   // 关闭 key-result 时若密钥未复制，弹二次确认
   const [showCloseKeyConfirm, setShowCloseKeyConfirm] = createSignal(false);
   const pageSize = 20;
+
+  // 多选 checkbox + 详情 Drawer + 批量操作
+  const [selectedIds, setSelectedIds] = createSignal<Set<string>>(new Set());
+  const [detailUser, setDetailUser] = createSignal<AdminUser | null>(null);
+  const [bulkBusy, setBulkBusy] = createSignal<'ban' | 'unban' | null>(null);
+  const allSelected = createMemo(() => {
+    const list = filteredUsers();
+    return list.length > 0 && list.every((u) => selectedIds().has(u.id));
+  });
+  function toggleSelect(id: string) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+  function toggleSelectAll() {
+    const list = filteredUsers();
+    setSelectedIds((prev) => {
+      if (list.every((u) => prev.has(u.id))) return new Set();
+      const next = new Set(prev);
+      list.forEach((u) => next.add(u.id));
+      return next;
+    });
+  }
+  async function bulkToggleBan(action: 'ban' | 'unban') {
+    const ids = Array.from(selectedIds());
+    if (ids.length === 0) return;
+    setBulkBusy(action);
+    const results = await Promise.allSettled(
+      ids.map((id) => (action === 'ban' ? adminApi.banUser(id) : adminApi.unbanUser(id))),
+    );
+    const okCount = results.filter((r) => r.status === 'fulfilled').length;
+    const failCount = results.length - okCount;
+    if (failCount === 0) {
+      uiStore.toast.success(`${action === 'ban' ? '批量封禁' : '批量解封'}成功 (${okCount})`);
+    } else {
+      uiStore.toast.error(`部分失败:${okCount} 成功 / ${failCount} 失败`);
+    }
+    setSelectedIds(new Set());
+    setBulkBusy(null);
+    void load();
+  }
+  function exportUsersCsv() {
+    const rows: string[][] = [['id', 'username', 'email', 'status']];
+    const targetUsers = selectedIds().size > 0
+      ? users().filter((u) => selectedIds().has(u.id))
+      : filteredUsers();
+    targetUsers.forEach((u) => {
+      rows.push([u.id, u.username, maskEmail(u.email), u.isBanned ? 'banned' : 'active']);
+    });
+    if (rows.length === 1) {
+      uiStore.toast.warning('当前列表为空');
+      return;
+    }
+    const csv = rows
+      .map((r) => r.map((c) => (c.includes(',') || c.includes('"') ? `"${c.replace(/"/g, '""')}"` : c)).join(','))
+      .join('\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `wordforge-users-${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    uiStore.toast.success(`已导出 ${targetUsers.length} 条用户`);
+  }
 
   function closeResetModal() {
     setResetTarget(null);
@@ -240,10 +311,41 @@ export default function UserManagementPage() {
                 </span>
               </Show>
             </div>
+            {/* 批量操作工具栏:选中 > 0 时显示批量按钮,否则显示'导出 CSV' */}
+            <div class="flex flex-wrap items-center gap-2 text-[12.5px]">
+              <Show
+                when={selectedIds().size > 0}
+                fallback={
+                  <>
+                    <span class="text-content-tertiary">未选中</span>
+                    <span class="flex-1" />
+                    <Button size="xs" variant="ghost" onClick={exportUsersCsv}>
+                      导出当前列表 CSV
+                    </Button>
+                  </>
+                }
+              >
+                <span class="text-content">已选 <span class="font-mono tabular-nums">{selectedIds().size}</span> 项</span>
+                <Button size="xs" variant="danger" loading={bulkBusy() === 'ban'} onClick={() => bulkToggleBan('ban')}>批量封禁</Button>
+                <Button size="xs" variant="success" loading={bulkBusy() === 'unban'} onClick={() => bulkToggleBan('unban')}>批量解封</Button>
+                <Button size="xs" variant="ghost" onClick={exportUsersCsv}>导出选中 CSV</Button>
+                <Button size="xs" variant="ghost" onClick={() => setSelectedIds(new Set())}>清空选择</Button>
+              </Show>
+            </div>
+
             <div class="relative overflow-x-auto rounded-xl border border-border-hairline shadow-elevation-1">
               <table class="w-full text-sm">
                 <thead>
                   <tr class="bg-surface-secondary/60 backdrop-blur-sm border-b border-border-hairline">
+                    <th class="px-3 py-3 w-9 text-center">
+                      <input
+                        type="checkbox"
+                        aria-label="全选 / 全不选"
+                        checked={allSelected()}
+                        onChange={toggleSelectAll}
+                        class="size-3.5 cursor-pointer accent-accent"
+                      />
+                    </th>
                     <th class="px-4 py-3 text-left text-caption uppercase tracking-wide font-medium text-content-secondary">用户名</th>
                     <th class="px-4 py-3 text-left text-caption uppercase tracking-wide font-medium text-content-secondary">邮箱</th>
                     <th class="px-4 py-3 text-left text-caption uppercase tracking-wide font-medium text-content-secondary">状态</th>
@@ -253,7 +355,24 @@ export default function UserManagementPage() {
                 <tbody>
                   <For each={filteredUsers()}>
                     {(user) => (
-                      <tr class="border-b border-border-hairline last:border-b-0 hover:bg-accent-light/40 transition-colors duration-fast ease-out-expo">
+                      <tr
+                        class="border-b border-border-hairline last:border-b-0 hover:bg-accent-light/40 transition-colors duration-fast ease-out-expo cursor-pointer"
+                        onClick={(e) => {
+                          // 排除点击 checkbox / button 时打开 drawer,避免误触
+                          const tgt = e.target as HTMLElement;
+                          if (tgt.closest('input,button')) return;
+                          setDetailUser(user);
+                        }}
+                      >
+                        <td class="px-3 py-3 text-center" onClick={(e) => e.stopPropagation()}>
+                          <input
+                            type="checkbox"
+                            aria-label={`选中 ${user.username}`}
+                            checked={selectedIds().has(user.id)}
+                            onChange={() => toggleSelect(user.id)}
+                            class="size-3.5 cursor-pointer accent-accent"
+                          />
+                        </td>
                         <td class="px-4 py-3 font-medium text-content">{user.username}</td>
                         <td class="px-4 py-3 text-content-secondary">{maskEmail(user.email)}</td>
                         <td class="px-4 py-3">
@@ -398,6 +517,70 @@ export default function UserManagementPage() {
         onConfirm={() => { setShowCloseKeyConfirm(false); closeResetModal(); }}
         onCancel={() => setShowCloseKeyConfirm(false)}
       />
+
+      {/* 行详情 Drawer */}
+      <Drawer
+        open={!!detailUser()}
+        onClose={() => setDetailUser(null)}
+        title="用户详情"
+        width={380}
+        headerActions={
+          <Show when={detailUser()}>
+            <Badge variant={detailUser()!.isBanned ? 'error' : 'success'} size="sm" dot>
+              {detailUser()!.isBanned ? '已封禁' : '正常'}
+            </Badge>
+          </Show>
+        }
+        footer={
+          <Show when={detailUser()}>
+            {(u) => (
+              <div class="flex flex-wrap justify-end gap-2">
+                <Button variant="ghost" size="sm" onClick={() => setDetailUser(null)}>关闭</Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => { setDetailUser(null); closeResetModal(); setResetTarget(u()); }}
+                >
+                  重置密码
+                </Button>
+                <Button
+                  size="sm"
+                  variant={u().isBanned ? 'success' : 'danger'}
+                  loading={busyUserId() === u().id}
+                  onClick={() => handleBanClick(u())}
+                >
+                  {u().isBanned ? '解封' : '封禁'}
+                </Button>
+              </div>
+            )}
+          </Show>
+        }
+      >
+        <Show when={detailUser()}>
+          {(u) => (
+            <div class="space-y-4 text-[13px]">
+              <dl class="grid grid-cols-[80px_1fr] gap-y-2 gap-x-3 text-content-secondary">
+                <dt>用户 ID</dt>
+                <dd class="font-mono text-[11.5px] text-content break-all">{u().id}</dd>
+                <dt>用户名</dt>
+                <dd class="text-content">{u().username}</dd>
+                <dt>邮箱</dt>
+                <dd class="font-mono text-[11.5px] text-content">{maskEmail(u().email)}</dd>
+                <dt>状态</dt>
+                <dd>
+                  <Badge variant={u().isBanned ? 'error' : 'success'} size="sm" dot>
+                    {u().isBanned ? '已封禁' : '正常'}
+                  </Badge>
+                </dd>
+              </dl>
+              <p class="text-[11.5px] text-content-tertiary">
+                注:答题档案 / 设备会话 / 完整时间线等扩展数据需后端 admin/users/:id/profile 端点支持,
+                当前 GET /api/admin/users 仅返回 id / username / email / isBanned 4 字段。
+              </p>
+            </div>
+          )}
+        </Show>
+      </Drawer>
     </div>
   );
 }
