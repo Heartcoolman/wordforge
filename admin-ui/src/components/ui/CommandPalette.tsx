@@ -36,7 +36,7 @@ const defaultItems: CommandItem[] = [
   { id: 'broadcast', title: '系统广播', desc: '在线推送 · 模板 · 送达统计', href: '/admin/broadcast', keywords: 'broadcast announce 广播 公告 推送', mark: 'accent' },
   { id: 'amas-config', title: 'AMAS 调参', desc: 'TOML 编辑 · 灰度发布 · 回滚', href: '/admin/amas-config', keywords: 'amas config toml 调参' },
   { id: 'amas-metrics', title: 'AMAS 指标', desc: 'ELO / MDM / 疲劳 / 决策算法', href: '/admin/amas-metrics', keywords: 'amas metrics elo mdm 指标' },
-  { id: 'amas-advisor', title: 'LLM 调参顾问', desc: 'DeepSeek patch · 成本 · 灰度', href: '/admin/amas-advisor', keywords: 'llm advisor deepseek 顾问' },
+  { id: 'amas-advisor', title: 'LLM 调参顾问', desc: 'DeepSeek patch · 成本 · 灰度', href: '/admin/amas-advisor', keywords: 'llm advisor deepseek amas 顾问' },
   { id: 'monitoring', title: '系统监控', desc: 'SLO · workers · 实时日志', href: '/admin/monitoring', keywords: 'monitor logs slo 监控 worker' },
   { id: 'analytics', title: '数据分析', desc: '留存 · 漏斗 · 时段 · 导出', href: '/admin/analytics', keywords: 'analytics retention 分析' },
   { id: 'wordbook', title: '词库中心', desc: '官方 / 用户词库 · 导入', href: '/admin/wordbook-center', keywords: 'wordbook vocab 词库' },

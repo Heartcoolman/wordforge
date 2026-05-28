@@ -62,21 +62,16 @@ export function WorkerGridCell(props: WorkerGridCellProps) {
     return `${d}d 前`;
   });
 
-  const Tag = isInteractive() ? 'button' : 'div';
+  const baseClass = cn(
+    'rounded-lg bg-surface-elevated shadow-elevation-1 px-3 py-2.5 text-left',
+    'transition-[transform,box-shadow] duration-fast ease-out-expo',
+    isInteractive() && 'hover:-translate-y-0.5 hover:shadow-elevation-2 cursor-pointer focus-ring-soft',
+    outcome() === 'error' && 'ring-1 ring-error/30',
+    props.class,
+  );
 
-  return (
-    <Tag
-      type={isInteractive() ? 'button' : undefined}
-      onClick={props.onClick}
-      class={cn(
-        'rounded-lg bg-surface-elevated shadow-elevation-1 px-3 py-2.5 text-left',
-        'transition-[transform,box-shadow] duration-fast ease-out-expo',
-        isInteractive() && 'hover:-translate-y-0.5 hover:shadow-elevation-2 cursor-pointer focus-ring-soft',
-        outcome() === 'error' && 'ring-1 ring-error/30',
-        props.class,
-      )}
-      title={props.lastError || undefined}
-    >
+  const innerContent = () => (
+    <>
       <div class="flex items-center gap-2">
         <span
           aria-hidden="true"
@@ -95,6 +90,21 @@ export function WorkerGridCell(props: WorkerGridCellProps) {
           {props.lastError}
         </div>
       </Show>
-    </Tag>
+    </>
+  );
+
+  return (
+    <Show
+      when={isInteractive()}
+      fallback={
+        <div class={baseClass} title={props.lastError || undefined}>
+          {innerContent()}
+        </div>
+      }
+    >
+      <button type="button" onClick={props.onClick} class={baseClass} title={props.lastError || undefined}>
+        {innerContent()}
+      </button>
+    </Show>
   );
 }

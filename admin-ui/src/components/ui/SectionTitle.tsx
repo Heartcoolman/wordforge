@@ -21,14 +21,14 @@ interface SectionTitleProps extends ParentProps {
  *   <SectionTitle title="Worker 健康" actions={<Button size="sm">刷新</Button>} />
  */
 export function SectionTitle(props: SectionTitleProps) {
-  const Heading = props.as === 'h3' ? 'h3' : 'h2';
-  const headingClass = props.as === 'h3'
-    ? 'text-headline'
-    : 'text-base font-semibold tracking-[-0.012em]';
+  const h3Class = 'text-headline';
+  const h2Class = 'text-base font-semibold tracking-[-0.012em]';
 
   return (
     <div class={cn('flex items-baseline gap-3 my-4 first:mt-0', props.class)}>
-      <Heading class={headingClass}>{props.title}</Heading>
+      <Show when={props.as === 'h3'} fallback={<h2 class={h2Class}>{props.title}</h2>}>
+        <h3 class={h3Class}>{props.title}</h3>
+      </Show>
       <Show when={props.actions} fallback={
         <Show when={props.sub}>
           <span class="text-content-tertiary text-[12.5px]">{props.sub}</span>
