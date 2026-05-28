@@ -112,6 +112,8 @@ amas/
 
 历史上有 sled 实现，已通过一次性二进制 `migrate-sled-to-sqlite` 迁出，sled 依赖被 `sled-migration` feature 隔离，默认不编译。
 
+> **术语 reconciliation**：数据库内部沿用 `client_*` 命名（`client_devices` 表、`client_id` 字段、`adminApi.{getClients,banClient,unbanClient}` 等），UI 层统一改为 `device/设备` 表达（DevicesPage / "设备管理" 菜单 / `<h1>设备</h1>`）。DB 层因迁移成本（schema_version 兼容、回滚保护）暂保留旧命名；**新增字段一律用 `device_*`**。这套不对称是有意为之，不属于命名 bug。
+
 ## 自更新链路
 
 1. `update_checker` worker 每小时拉 GitHub Releases，结果走 `Updater` 的 ETag 缓存
