@@ -270,7 +270,7 @@ export default function DashboardPage() {
       <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <Show
           when={stats()}
-          fallback={stats.error ? <KpiErrorCell onRetry={refetchStats} /> : <Skeleton height="148px" />}
+          fallback={stats.error ? <KpiErrorCell onRetry={refetchStats} /> : <Skeleton height="104px" />}
         >
           {(s) => (
             <div class="animate-fade-in-up h-full" style={STAGGER_DELAYS[0]}>
@@ -288,7 +288,7 @@ export default function DashboardPage() {
         </Show>
         <Show
           when={eng()}
-          fallback={eng.error ? <KpiErrorCell onRetry={refetchEng} /> : <Skeleton height="148px" />}
+          fallback={eng.error ? <KpiErrorCell onRetry={refetchEng} /> : <Skeleton height="104px" />}
         >
           {(e) => (
             <div class="animate-fade-in-up h-full" style={STAGGER_DELAYS[1]}>
@@ -306,7 +306,7 @@ export default function DashboardPage() {
         </Show>
         <Show
           when={overview()}
-          fallback={overview.error ? <KpiErrorCell onRetry={refetchOverview} /> : <Skeleton height="148px" />}
+          fallback={overview.error ? <KpiErrorCell onRetry={refetchOverview} /> : <Skeleton height="104px" />}
         >
           {(o) => (
             <div class="animate-fade-in-up h-full" style={STAGGER_DELAYS[2]}>
@@ -324,7 +324,7 @@ export default function DashboardPage() {
         </Show>
         <Show
           when={overview()}
-          fallback={overview.error ? <KpiErrorCell onRetry={refetchOverview} /> : <Skeleton height="148px" />}
+          fallback={overview.error ? <KpiErrorCell onRetry={refetchOverview} /> : <Skeleton height="104px" />}
         >
           {(o) => (
             <div class="animate-fade-in-up h-full" style={STAGGER_DELAYS[3]}>
@@ -915,35 +915,15 @@ const ICON_CALENDAR =
   'M19 4H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2zM16 2v4M8 2v4M3 10h18';
 const ICON_CHECK_CIRCLE = 'M22 11.08V12a10 10 0 1 1-5.93-9.14M22 4L12 14.01l-3-3';
 
-// 4 色对应的 tint / accent class —— Tailwind 字面量,确保 JIT 扫到
+// 4 色对应 CSS var,renderer 内联到 background gradient + sparkline stroke
 const KPI_TONE: Record<
   'accent' | 'success' | 'info' | 'warning',
-  { bg: string; ring: string; label: string; sparkVar: string }
+  { var: string; labelClass: string }
 > = {
-  accent: {
-    bg: 'bg-accent-light/50 dark:bg-accent-light/30',
-    ring: 'ring-1 ring-accent/15',
-    label: 'text-accent',
-    sparkVar: '--accent',
-  },
-  success: {
-    bg: 'bg-success-light/50 dark:bg-success-light/30',
-    ring: 'ring-1 ring-success/15',
-    label: 'text-success-strong',
-    sparkVar: '--success',
-  },
-  info: {
-    bg: 'bg-info-light/50 dark:bg-info-light/30',
-    ring: 'ring-1 ring-info/15',
-    label: 'text-info-strong',
-    sparkVar: '--info',
-  },
-  warning: {
-    bg: 'bg-warning-light/50 dark:bg-warning-light/30',
-    ring: 'ring-1 ring-warning/15',
-    label: 'text-warning-strong',
-    sparkVar: '--warning',
-  },
+  accent: { var: '--accent', labelClass: 'text-accent' },
+  success: { var: '--success', labelClass: 'text-success-strong' },
+  info: { var: '--info', labelClass: 'text-info-strong' },
+  warning: { var: '--warning', labelClass: 'text-warning-strong' },
 };
 
 interface KpiCardProps {
@@ -960,10 +940,15 @@ interface KpiCardProps {
 }
 
 /**
- * Dashboard 顶部 KPI 卡 —— 对齐设计图 dashboard.html .kpi.is-{tone}。
+ * Dashboard 顶部 KPI 卡 —— 像素对齐 admin.css .kpi.is-{tone}:
  *
- * 布局:tint 浅底 + icon/label 同行(label 小号 medium)→ 大数字 → trend chip + 文字 → 右下 sparkline。
- * 数据为 number 时启用 count-up 动画;value 是 '—' 等 string 直显。
+ * - background: linear-gradient(135deg, var(--{tone}-light) 0%, var(--surface-elevated) 60%)
+ * - padding: 16px 18px  (px-[18px] py-4)
+ * - kpi-value: 700 28px/1.05  (text-[28px] leading-[1.05])
+ * - kpi-spark: absolute right:14 bottom:14, 80×28, opacity 0.65
+ * - 不设 min-height,卡片按内容自然收缩;grid stretch 让 4 张同高
+ *
+ * 数据为 number 时启用 count-up 动画;'—' 等 string 直显。
  */
 function KpiCard(props: KpiCardProps): JSX.Element {
   const tone = () => KPI_TONE[props.tone];
@@ -980,46 +965,49 @@ function KpiCard(props: KpiCardProps): JSX.Element {
 
   return (
     <div
-      class={`relative overflow-hidden rounded-2xl ${tone().bg} ${tone().ring} px-5 py-4 flex flex-col min-h-[148px] h-full`}
+      class="relative overflow-hidden rounded-lg shadow-elevation-1 px-[18px] py-4 h-full"
+      style={{
+        background: `linear-gradient(135deg, var(${tone().var}-light) 0%, var(--surface-elevated) 60%)`,
+      }}
     >
-      {/* icon + label 同行,小号 */}
-      <div class={`flex items-center gap-2 text-[12.5px] font-medium ${tone().label}`}>
+      {/* icon + label 同行,12px medium —— admin.css .kpi-label */}
+      <div class={`flex items-center gap-1.5 text-[12px] font-medium ${tone().labelClass}`}>
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
           <path d={props.icon} stroke-linecap="round" stroke-linejoin="round" />
         </svg>
         <span>{props.title}</span>
       </div>
 
-      {/* 大数字 */}
-      <div class="mt-3 text-[34px] leading-none font-bold tabular-nums tracking-tight text-content">
+      {/* 大数字 700 28px/1.05 —— admin.css .kpi-value */}
+      <div class="mt-1.5 text-[28px] leading-[1.05] font-bold tabular-nums tracking-[-0.025em] text-content">
         {displayValue()}
         <Show when={props.unit}>
-          <span class="ml-1 align-baseline text-base font-medium text-content-secondary">{props.unit}</span>
+          <span class="ml-1 text-sm font-medium text-content-tertiary">{props.unit}</span>
         </Show>
       </div>
 
-      {/* trend chip + 文字。chip 配色按涨跌走 success-light / error-light */}
+      {/* trend chip + 文字 —— admin.css .kpi-trend, .delta.up/.down */}
       <Show when={hasTrend()}>
-        <div class="mt-2 flex items-center gap-2 text-[12px]">
+        <div class="mt-1.5 flex items-center gap-1 text-[11.5px] text-content-tertiary">
           <span
-            class={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full tabular-nums font-medium ${
+            class={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded font-semibold tabular-nums ${
               trendUp()
                 ? 'bg-success-light text-success-strong'
                 : trendDown()
                 ? 'bg-error-light text-error-strong'
-                : 'bg-surface-sunken text-content-tertiary'
+                : 'bg-surface-secondary text-content-tertiary'
             }`}
           >
             {trendUp() ? '▲' : trendDown() ? '▼' : '—'} {Math.abs(props.trend!.value).toFixed(1)}%
           </span>
-          <span class="text-content-secondary truncate">{props.trend!.label}</span>
+          <span class="truncate">{props.trend!.label}</span>
         </div>
       </Show>
 
-      {/* sparkline 右下,push 到底 */}
+      {/* sparkline absolute 右下 80×28 opacity 0.65 —— admin.css .kpi-spark */}
       <Show when={props.spark && props.spark.length >= 2}>
-        <div class="mt-auto pt-3 self-end opacity-90">
-          <Sparkline data={props.spark!} w={120} h={32} stroke={`var(${tone().sparkVar})`} strokeWidth={1.5} />
+        <div class="absolute right-[14px] bottom-[14px] pointer-events-none opacity-65">
+          <Sparkline data={props.spark!} w={80} h={28} stroke={`var(${tone().var})`} strokeWidth={1.5} />
         </div>
       </Show>
     </div>
