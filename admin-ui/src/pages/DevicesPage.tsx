@@ -1,6 +1,5 @@
 import { batch, createEffect, createMemo, createSignal, onMount, Show, For } from 'solid-js';
 import { Card } from '@/components/ui/Card';
-import { HeroCard } from '@/components/ui/HeroCard';
 import { Button } from '@/components/ui/Button';
 import { Badge } from '@/components/ui/Badge';
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
@@ -12,6 +11,7 @@ import { Table } from '@/components/ui/Table';
 import { adminApi, type SseLiveEntry, type RecentlyActiveEntry, type TelemetrySummary, type DataChannelValue } from '@/api/admin';
 import type { ClientPlatformAgg, ClientVersionAgg, ClientUpgradePolicy, ListedDevice } from '@/types/admin';
 import { uiStore } from '@/stores/ui';
+import { Switch } from '@/components/ui/Switch';
 
 const CHANNEL_LABELS: Record<string, string> = {
   amas: 'AMAS',
@@ -449,48 +449,60 @@ export default function DevicesPage() {
     },
   ];
 
+  // m027:动态 page-desc 数字 — 对齐设计图 'X 个绑定设备 · Y 个 7 天内在线 · 三端版本分布...'
+  const totalDevices = createMemo(() => platforms().reduce((a, b) => a + b.total, 0));
+  const totalActive7d = createMemo(() => platforms().reduce((a, b) => a + b.active7d, 0));
+
   return (
     <div class="space-y-6">
-      <HeroCard
-        eyebrow="SSE + Telemetry"
-        eyebrowVariant="info"
-        title="设备管理"
-        desc="所有通过 /api/* 接入后端的 end-user 设备（Web / iOS / Android），含实时 SSE 连接与接入历史统计。"
-        meta={[
-          { value: sseLive().length, label: '在线连接数' },
-          { value: recentlyActive().length, label: '近期接入设备' },
-        ]}
-        cta={
-          <div class="flex gap-2 flex-wrap">
-            <Button size="sm" variant="outline" onClick={loadDevices} disabled={loading()}>刷新</Button>
-            {/* m027:对齐设计图 page-header 2 action 按钮(全部强制升级 / 新建推送) */}
-            <Button
-              size="sm"
-              variant="warning"
-              disabled={policies().every((p) => !p.minVersion)}
-              onClick={() => {
-                // 找第一个有 minVersion 的 policy 作为入口(用户进 Modal 后可继续选别的平台)
-                const target = policies().find((p) => p.minVersion);
-                if (target) {
-                  setBroadcastUpgradeOpen({
-                    platform: target.platform,
-                    below: target.minVersion!,
-                    latest: target.suggestedVersion || target.minVersion!,
-                  });
-                }
-              }}
-            >
-              全部强制升级
-            </Button>
-            <Button size="sm" variant="primary" onClick={() => (window.location.href = '/admin/broadcast')}>
-              新建推送
-            </Button>
-          </div>
-        }
-      />
+      {/* m027:轻量 page-header(对齐设计图 clients.html,不用 HeroCard 的 hero/eyebrow/meta) */}
+      <div class="flex items-start justify-between gap-4 flex-wrap">
+        <div class="min-w-0 flex-1">
+          <h1 class="text-[28px] font-bold leading-tight tracking-[-0.02em]">设备管理</h1>
+          <p class="mt-1.5 text-sm text-content-secondary leading-relaxed">
+            <span class="tabular-nums">{totalDevices().toLocaleString()}</span> 个绑定设备 ·
+            <span class="tabular-nums"> {totalActive7d().toLocaleString()}</span> 个 7 天内在线 ·
+            三端版本分布 + 强制升级 + 广播推送。所有推送写入 audit log,可按平台 / 版本 / 单用户精准投递。
+          </p>
+        </div>
+        <div class="flex gap-2 shrink-0">
+          <Button size="sm" variant="outline" onClick={loadDevices} disabled={loading()} aria-label="刷新设备列表">
+            <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+            </svg>
+            刷新
+          </Button>
+          <Button
+            size="sm"
+            variant="warning"
+            disabled={policies().every((p) => !p.minVersion)}
+            onClick={() => {
+              const target = policies().find((p) => p.minVersion);
+              if (target) {
+                setBroadcastUpgradeOpen({
+                  platform: target.platform,
+                  below: target.minVersion!,
+                  latest: target.suggestedVersion || target.minVersion!,
+                });
+              }
+            }}
+          >
+            <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M21 12a9 9 0 11-9-9c2.52 0 4.93 1 6.74 2.74L21 8M21 3v5h-5" />
+            </svg>
+            全部强制升级
+          </Button>
+          <Button size="sm" variant="primary" onClick={() => (window.location.href = '/admin/broadcast')}>
+            <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z" />
+            </svg>
+            新建推送
+          </Button>
+        </div>
+      </div>
 
-      {/* m027:平台 hero 3 卡(Web/iOS/Android × total/active7d/月环比)。
-          固定渲染 3 平台,无数据时显示 0 设备占位,对齐设计图视觉骨架 */}
+      {/* m027:平台 hero 3 卡(Web/iOS/Android × icon + total/share/active7d/月环比)。
+          固定渲染 3 平台,无数据时显示 0 设备占位,对齐设计图 clients.html .platform-card */}
       <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
         <For each={['web', 'ios', 'android'] as const}>
           {(name) => {
@@ -500,31 +512,76 @@ export default function DevicesPage() {
             const pct = () => agg()?.monthOverMonthPct ?? 0;
             const pctClass = () => (pct() >= 0 ? 'text-success-strong' : 'text-error-strong');
             const pctArrow = () => (pct() >= 0 ? '▲' : '▼');
-            const label: Record<typeof name, { name: string; sub: string }> = {
-              web: { name: 'Web 浏览器', sub: 'PWA · Chrome / Safari / Firefox' },
-              ios: { name: 'iOS 原生', sub: 'iPhone / iPad · App Store' },
-              android: { name: 'Android 原生', sub: 'Google Play / 应用宝 / APK' },
+            const meta: Record<typeof name, {
+              name: string;
+              sub: string;
+              bg: string;
+              iconBg: string;
+              icon: () => any;
+            }> = {
+              web: {
+                name: 'Web 浏览器',
+                sub: 'PWA · Chrome / Safari / Firefox',
+                bg: 'linear-gradient(135deg, var(--accent-light) 0%, var(--surface-elevated) 65%)',
+                iconBg: 'var(--accent)',
+                icon: () => (
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-4 h-4">
+                    <circle cx="12" cy="12" r="10" />
+                    <line x1="2" y1="12" x2="22" y2="12" />
+                    <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
+                  </svg>
+                ),
+              },
+              ios: {
+                name: 'iOS 原生',
+                sub: 'iPhone / iPad · App Store',
+                bg: 'linear-gradient(135deg, var(--surface-tertiary) 0%, var(--surface-elevated) 65%)',
+                iconBg: 'oklch(20% 0.012 250)',
+                icon: () => (
+                  <svg viewBox="0 0 24 24" fill="currentColor" class="w-4 h-4">
+                    <path d="M17.05 20.28c-.98.95-2.05.8-3.08.35-1.09-.46-2.09-.48-3.24 0-1.44.62-2.2.44-3.06-.35C2.79 15.25 3.51 7.59 9.05 7.31c1.35.07 2.29.74 3.08.8 1.18-.24 2.31-.93 3.57-.84 1.51.12 2.65.72 3.4 1.8-3.12 1.87-2.38 5.98.48 7.13-.57 1.5-1.31 2.99-2.54 4.09zM12.03 7.25c-.15-2.23 1.66-4.07 3.74-4.25.29 2.58-2.34 4.5-3.74 4.25z" />
+                  </svg>
+                ),
+              },
+              android: {
+                name: 'Android 原生',
+                sub: 'Google Play / 应用宝 / APK',
+                bg: 'linear-gradient(135deg, var(--success-light) 0%, var(--surface-elevated) 65%)',
+                iconBg: 'oklch(58% 0.16 162)',
+                icon: () => (
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-4 h-4">
+                    <path d="M5 16V8a4 4 0 0 1 4-4h6a4 4 0 0 1 4 4v8M9 20v-3M15 20v-3" />
+                    <circle cx="9" cy="11" r="1" fill="currentColor" />
+                    <circle cx="15" cy="11" r="1" fill="currentColor" />
+                  </svg>
+                ),
+              },
             };
             return (
-              <Card padding="md">
-                <div class="flex items-center gap-2">
-                  <Badge size="sm" variant={name === 'web' ? 'accent' : name === 'ios' ? 'default' : 'success'}>
-                    {name.toUpperCase()}
-                  </Badge>
-                  <div class="text-xs text-content-tertiary truncate">{label[name].sub}</div>
+              <div class="rounded-2xl p-[18px] shadow-elevation-1 relative overflow-hidden" style={{ background: meta[name].bg }}>
+                <div class="flex items-center gap-2.5">
+                  <div
+                    class="w-8 h-8 rounded-[9px] grid place-items-center text-white shrink-0"
+                    style={{ background: meta[name].iconBg }}
+                  >
+                    {meta[name].icon()}
+                  </div>
+                  <div class="min-w-0">
+                    <div class="text-sm font-semibold leading-tight">{meta[name].name}</div>
+                    <div class="text-[11px] text-content-tertiary truncate">{meta[name].sub}</div>
+                  </div>
                 </div>
-                <div class="text-sm font-semibold mt-2">{label[name].name}</div>
-                <div class="mt-2 text-2xl font-bold tabular-nums">
+                <div class="mt-3 text-[28px] font-bold tabular-nums leading-none tracking-[-0.025em]">
                   {(agg()?.total ?? 0).toLocaleString()}
-                  <span class="text-xs text-content-tertiary font-medium ml-1.5">设备 · {share().toFixed(1)}%</span>
+                  <span class="text-xs text-content-tertiary font-medium ml-1.5 align-baseline">设备 · {share().toFixed(1)}%</span>
                 </div>
-                <div class="mt-2 flex gap-3 text-xs text-content-secondary tabular-nums">
+                <div class="mt-2.5 flex gap-3 text-[11.5px] text-content-secondary font-mono tabular-nums">
                   <span>
-                    <span class={pctClass()}>{pctArrow()} {Math.abs(pct()).toFixed(1)}%</span> 比上月
+                    <span class={pctClass()}>{pctArrow()} {Math.abs(pct()).toFixed(0)}%</span> 比上月
                   </span>
                   <span>{(agg()?.active7d ?? 0).toLocaleString()} 在线 (7d)</span>
                 </div>
-              </Card>
+              </div>
             );
           }}
         </For>
@@ -606,8 +663,8 @@ export default function DevicesPage() {
                   return d && Object.keys(d).length > 0;
                 };
                 return (
-                  <div class="border-b border-border-hairline last:border-b-0 py-2.5">
-                    <div class="flex items-center justify-between">
+                  <div class="border-b border-border-hairline last:border-b-0 py-3">
+                    <div class="flex items-center justify-between mb-2">
                       <Badge size="sm" variant="default">{p.platform.toUpperCase()}</Badge>
                       <Show when={dirty()}>
                         <Button
@@ -620,53 +677,64 @@ export default function DevicesPage() {
                         </Button>
                       </Show>
                     </div>
-                    <div class="grid grid-cols-2 gap-2 mt-2 text-xs">
-                      <label class="flex flex-col gap-0.5">
-                        <span class="text-content-tertiary">最低支持版本</span>
-                        <Input
-                          size="sm"
-                          placeholder="例如 v0.6.5"
-                          value={(draftOf('minVersion') ?? p.minVersion ?? '') as string}
-                          onInput={(e) => setDraft('minVersion', e.currentTarget.value || null)}
-                        />
-                      </label>
-                      <label class="flex flex-col gap-0.5">
-                        <span class="text-content-tertiary">建议升级版本</span>
-                        <Input
-                          size="sm"
-                          placeholder="例如 v0.7.0"
-                          value={(draftOf('suggestedVersion') ?? p.suggestedVersion ?? '') as string}
-                          onInput={(e) => setDraft('suggestedVersion', e.currentTarget.value || null)}
-                        />
-                      </label>
-                      <label class="flex flex-col gap-0.5">
-                        <span class="text-content-tertiary">灰度 %(0-100)</span>
-                        <Input
-                          size="sm"
-                          type="number"
-                          min="0"
-                          max="100"
-                          value={String(draftOf('grayscalePct') ?? p.grayscalePct)}
-                          onInput={(e) => setDraft('grayscalePct', Number(e.currentTarget.value))}
-                        />
-                      </label>
-                      <Show when={p.platform === 'web'} fallback={<div />}>
-                        <label class="flex items-center gap-1.5 mt-3.5">
-                          <input
-                            type="checkbox"
-                            class="checkbox"
-                            checked={(draftOf('pwaSilentUpdate') ?? p.pwaSilentUpdate) as boolean}
-                            onChange={(e) => setDraft('pwaSilentUpdate', e.currentTarget.checked)}
-                          />
-                          <span class="text-content-secondary">PWA 静默更新</span>
-                        </label>
-                      </Show>
+                    {/* 最低支持版本 行 — 对齐设计图 row spread */}
+                    <div class="flex items-center justify-between py-1.5">
+                      <div class="min-w-0">
+                        <div class="text-[13px] font-semibold">最低支持版本</div>
+                        <div class="text-[11px] text-content-tertiary mt-0.5">低于此版本启动时弹强制升级窗口</div>
+                      </div>
+                      <Input
+                        size="sm"
+                        placeholder="v0.6.5"
+                        value={(draftOf('minVersion') ?? p.minVersion ?? '') as string}
+                        onInput={(e) => setDraft('minVersion', e.currentTarget.value || null)}
+                        class="!w-[110px] font-mono"
+                      />
                     </div>
+                    <div class="flex items-center justify-between py-1.5 border-t border-border-hairline">
+                      <div class="min-w-0">
+                        <div class="text-[13px] font-semibold">建议升级</div>
+                        <div class="text-[11px] text-content-tertiary mt-0.5">非阻断式 · 顶部黄色横幅</div>
+                      </div>
+                      <Input
+                        size="sm"
+                        placeholder="v0.7.0"
+                        value={(draftOf('suggestedVersion') ?? p.suggestedVersion ?? '') as string}
+                        onInput={(e) => setDraft('suggestedVersion', e.currentTarget.value || null)}
+                        class="!w-[110px] font-mono"
+                      />
+                    </div>
+                    <div class="flex items-center justify-between py-1.5 border-t border-border-hairline">
+                      <div class="min-w-0">
+                        <div class="text-[13px] font-semibold">灰度发布 %</div>
+                        <div class="text-[11px] text-content-tertiary mt-0.5">向 N% 用户先放出新版浮窗</div>
+                      </div>
+                      <Input
+                        size="sm"
+                        type="number"
+                        min="0"
+                        max="100"
+                        value={String(draftOf('grayscalePct') ?? p.grayscalePct)}
+                        onInput={(e) => setDraft('grayscalePct', Number(e.currentTarget.value))}
+                        class="!w-[70px] font-mono"
+                      />
+                    </div>
+                    <Show when={p.platform === 'web'}>
+                      <div class="flex items-center justify-between py-1.5 border-t border-border-hairline">
+                        <div class="min-w-0">
+                          <div class="text-[13px] font-semibold">PWA 后台静默更新</div>
+                          <div class="text-[11px] text-content-tertiary mt-0.5">下次访问自动应用 service worker</div>
+                        </div>
+                        <Switch
+                          checked={(draftOf('pwaSilentUpdate') ?? p.pwaSilentUpdate) as boolean}
+                          onChange={(v) => setDraft('pwaSilentUpdate', v)}
+                        />
+                      </div>
+                    </Show>
                     <Show when={p.minVersion}>
-                      <Button
-                        size="xs"
-                        variant="outline"
-                        class="mt-2 w-full"
+                      <button
+                        type="button"
+                        class="mt-3 w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-md bg-warning-light text-warning-strong text-[13px] font-medium hover:brightness-95 transition cursor-pointer"
                         onClick={() => {
                           setBroadcastUpgradeOpen({
                             platform: p.platform,
@@ -675,8 +743,11 @@ export default function DevicesPage() {
                           });
                         }}
                       >
+                        <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                          <path stroke-linecap="round" stroke-linejoin="round" d="M21 12a9 9 0 11-9-9c2.52 0 4.93 1 6.74 2.74L21 8M21 3v5h-5" />
+                        </svg>
                         立即推送 {p.suggestedVersion || p.minVersion} 给老版本设备
-                      </Button>
+                      </button>
                     </Show>
                   </div>
                 );
