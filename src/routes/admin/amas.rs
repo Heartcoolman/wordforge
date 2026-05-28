@@ -64,6 +64,11 @@ pub fn admin_router() -> Router<AppState> {
         // C2: 巡查控制
         .route("/advisor/run", post(advisor_run))
         .route("/suggestions/approve-all", post(approve_all_suggestions))
+        // C3: 顾问配置
+        .route(
+            "/advisor/config",
+            get(get_advisor_config).put(update_advisor_config),
+        )
 }
 
 // ─────────────────── m022:TOML 互转 + canary ───────────────────
@@ -1324,4 +1329,122 @@ async fn approve_all_suggestions(
         }
     }
     Ok(ok(serde_json::json!({ "results": results })))
+}
+
+// ─────────── C3: 顾问配置 ───────────
+
+/// advisor 巡查 cron（与 workers/mod.rs LlmAdvisor 注册一致，每 20 分钟）。
+const ADVISOR_POLL_CRON: &str = "0 */20 * * * *";
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AdvisorConfig {
+    model: String,
+    poll_cron: String,
+    api_key_tail: String,
+    month_cap_yuan: f64,
+    auto_apply_enabled: bool,
+    auto_apply_max_per_day: i64,
+    auto_apply_min_confidence: f64,
+    grayscale_steps: [u32; 3],
+    advisor_enabled: bool,
+}
+
+fn build_advisor_config(
+    llm: &crate::config::LLMConfig,
+    settings: &crate::store::operations::system_settings::SystemSettings,
+) -> AdvisorConfig {
+    let tail = if llm.api_key.len() >= 4 {
+        llm.api_key[llm.api_key.len() - 4..].to_string()
+    } else {
+        String::new()
+    };
+    AdvisorConfig {
+        model: llm.model.clone(),
+        poll_cron: ADVISOR_POLL_CRON.to_string(),
+        api_key_tail: tail,
+        month_cap_yuan: settings.llm_advisor_max_cost_per_month_yuan,
+        auto_apply_enabled: settings.amas_auto_apply_enabled,
+        auto_apply_max_per_day: settings.amas_auto_apply_max_per_day as i64,
+        auto_apply_min_confidence: settings.amas_auto_apply_min_confidence,
+        grayscale_steps: settings.amas_grayscale_steps,
+        advisor_enabled: settings.llm_advisor_enabled,
+    }
+}
+
+async fn get_advisor_config(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let settings = state
+        .run_store_task("admin.amas.advisor_config.get", |store| {
+            store.get_system_settings()
+        })
+        .await??;
+    let llm = state.config().llm.clone();
+    Ok(ok(build_advisor_config(&llm, &settings)))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateAdvisorConfigBody {
+    month_cap_yuan: Option<f64>,
+    auto_apply_enabled: Option<bool>,
+    auto_apply_max_per_day: Option<i64>,
+    auto_apply_min_confidence: Option<f64>,
+    grayscale_steps: Option<[u32; 3]>,
+    advisor_enabled: Option<bool>,
+}
+
+async fn update_advisor_config(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    JsonBody(body): JsonBody<UpdateAdvisorConfigBody>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    // 校验灰度档位单调递增且末档 = 100
+    if let Some(steps) = body.grayscale_steps {
+        if !(steps[0] < steps[1] && steps[1] <= steps[2] && steps[2] == 100 && steps[0] >= 1) {
+            return Err(AppError::bad_request(
+                "INVALID_GRAYSCALE",
+                "灰度档位需满足 1 ≤ s0 < s1 ≤ s2 且 s2 = 100",
+            ));
+        }
+    }
+    if let Some(c) = body.auto_apply_min_confidence {
+        if !(0.0..=1.0).contains(&c) {
+            return Err(AppError::bad_request(
+                "INVALID_CONFIDENCE",
+                "min_confidence 需在 0..=1",
+            ));
+        }
+    }
+
+    let settings = state
+        .run_store_task("admin.amas.advisor_config.put", move |store| {
+            let mut s = store.get_system_settings()?;
+            if let Some(v) = body.month_cap_yuan {
+                s.llm_advisor_max_cost_per_month_yuan = v.max(0.0);
+            }
+            if let Some(v) = body.auto_apply_enabled {
+                s.amas_auto_apply_enabled = v;
+            }
+            if let Some(v) = body.auto_apply_max_per_day {
+                s.amas_auto_apply_max_per_day = v.clamp(0, 100) as u32;
+            }
+            if let Some(v) = body.auto_apply_min_confidence {
+                s.amas_auto_apply_min_confidence = v;
+            }
+            if let Some(v) = body.grayscale_steps {
+                s.amas_grayscale_steps = v;
+            }
+            if let Some(v) = body.advisor_enabled {
+                s.llm_advisor_enabled = v;
+            }
+            store.save_system_settings(&s)?;
+            Ok::<_, crate::store::StoreError>(s)
+        })
+        .await??;
+
+    let llm = state.config().llm.clone();
+    Ok(ok(build_advisor_config(&llm, &settings)))
 }

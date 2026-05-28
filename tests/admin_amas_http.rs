@@ -679,3 +679,69 @@ async fn it_advisor_run_and_approve_all() {
     assert_eq!(again_status, StatusCode::OK);
     assert_eq!(again_body["data"]["results"].as_array().unwrap().len(), 0);
 }
+
+#[tokio::test]
+async fn it_advisor_config_get_put() {
+    let app = spawn_test_server().await;
+    let admin_token = common::auth::setup_admin_and_get_token(&app.app).await;
+
+    let get = request(
+        &app.app,
+        Method::GET,
+        "/api/admin/amas/advisor/config",
+        None,
+        &[("authorization", auth_header(&admin_token))],
+    )
+    .await;
+    let (get_status, _, get_body) = response_json(get).await;
+    assert_eq!(get_status, StatusCode::OK);
+    let cfg = &get_body["data"];
+    assert!(cfg["model"].is_string());
+    assert!(cfg["pollCron"].is_string());
+    // API Key env-only 脱敏：test config api_key 为空 → 尾号空串
+    assert!(cfg["apiKeyTail"].is_string());
+    assert!(cfg["monthCapYuan"].is_number());
+    assert_eq!(cfg["autoApplyEnabled"], false);
+    assert!(cfg["grayscaleSteps"].is_array());
+    assert_eq!(cfg["grayscaleSteps"].as_array().unwrap().len(), 3);
+    assert_eq!(cfg["advisorEnabled"], false);
+
+    // PUT 仅更新可写字段
+    let put = request(
+        &app.app,
+        Method::PUT,
+        "/api/admin/amas/advisor/config",
+        Some(serde_json::json!({
+            "monthCapYuan": 250.0,
+            "autoApplyEnabled": true,
+            "autoApplyMaxPerDay": 5,
+            "autoApplyMinConfidence": 0.9,
+            "grayscaleSteps": [10, 50, 100],
+            "advisorEnabled": true
+        })),
+        &[("authorization", auth_header(&admin_token))],
+    )
+    .await;
+    let (put_status, _, put_body) = response_json(put).await;
+    assert_eq!(put_status, StatusCode::OK);
+    let updated = &put_body["data"];
+    assert!((updated["monthCapYuan"].as_f64().unwrap() - 250.0).abs() < 1e-9);
+    assert_eq!(updated["autoApplyEnabled"], true);
+    assert_eq!(updated["autoApplyMaxPerDay"], 5);
+    assert!((updated["autoApplyMinConfidence"].as_f64().unwrap() - 0.9).abs() < 1e-9);
+    assert_eq!(updated["grayscaleSteps"][0], 10);
+    assert_eq!(updated["advisorEnabled"], true);
+
+    // 持久化验证：再 GET 一次
+    let get2 = request(
+        &app.app,
+        Method::GET,
+        "/api/admin/amas/advisor/config",
+        None,
+        &[("authorization", auth_header(&admin_token))],
+    )
+    .await;
+    let (_, _, get2_body) = response_json(get2).await;
+    assert_eq!(get2_body["data"]["advisorEnabled"], true);
+    assert_eq!(get2_body["data"]["grayscaleSteps"][1], 50);
+}
