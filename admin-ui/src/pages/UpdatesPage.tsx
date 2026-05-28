@@ -1,10 +1,12 @@
-import { createResource, createSignal, Show, For, onCleanup, onMount } from 'solid-js';
+import { createMemo, createResource, createSignal, Show, For, onCleanup, onMount } from 'solid-js';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Badge } from '@/components/ui/Badge';
 import { Modal } from '@/components/ui/Modal';
 import { Spinner } from '@/components/ui/Spinner';
+import { Switch } from '@/components/ui/Switch';
 import { Collapsible } from '@/components/ui/Collapsible';
+import { HeroCard } from '@/components/ui/HeroCard';
 import { UpdateChannelCard } from '@/components/admin/UpdateChannelCard';
 import { adminApi } from '@/api/admin';
 import { ApiError, connectSseStream } from '@/api/http';
@@ -49,15 +51,77 @@ export default function UpdatesPage() {
   const [history, { refetch: refetchHistory }] = createResource(() =>
     adminApi.updatesHistory(),
   );
+  // 维护模式状态:来自 SystemSettings.maintenanceMode
+  const [settings, { refetch: refetchSettings }] = createResource(() => adminApi.getSettings());
+  const [maintenanceBusy, setMaintenanceBusy] = createSignal(false);
   const [checking, setChecking] = createSignal(false);
   const [applying, setApplying] = createSignal(false);
   const [pendingChannel, setPendingChannel] = createSignal<'stable' | 'beta' | null>(null);
   const [confirmOpen, setConfirmOpen] = createSignal(false);
+  // 回滚到上一版:从 history 找最新 success entry 的 fromVersion
+  const [rollbackOpen, setRollbackOpen] = createSignal(false);
+  const [rollbackBusy, setRollbackBusy] = createSignal(false);
   const [progress, setProgress] = createSignal<{ phase: string; percent: number } | null>(null);
-  // 终态标记：completed/failed 后 progress 保留显示（红/绿），不再被轮询清空
+  // 终态标记：completed/failed 后 progress 保留显示(红/绿),不再被轮询清空
   const [terminal, setTerminal] = createSignal<'success' | 'failed' | null>(null);
-  // SSE 最近一次推送时间，用于判断是否进入静默
+  // SSE 最近一次推送时间,用于判断是否进入静默
   let lastSseAt = 0;
+
+  // 从 history 推导上一版:最新 success 的 fromVersion(必须不等于当前版本)
+  const previousVersion = createMemo<string | null>(() => {
+    const entries = history()?.entries ?? [];
+    const current = status()?.currentVersion;
+    if (!current) return null;
+    const lastSuccess = entries.find(
+      (e) => e.outcome === 'success' && e.fromVersion && e.fromVersion !== current,
+    );
+    return lastSuccess?.fromVersion ?? null;
+  });
+
+  // history 成功率:历史总数 vs success 数
+  const historyStats = createMemo(() => {
+    const entries = history()?.entries ?? [];
+    if (entries.length === 0) return { total: 0, success: 0, rate: 0 };
+    const success = entries.filter((e) => e.outcome === 'success').length;
+    return { total: entries.length, success, rate: Math.round((success / entries.length) * 100) };
+  });
+
+  async function toggleMaintenance(active: boolean) {
+    setMaintenanceBusy(true);
+    try {
+      await adminApi.setMaintenance(active);
+      await refetchSettings();
+      uiStore.toast.success(active ? '维护模式已开启' : '维护模式已关闭');
+    } catch (e) {
+      uiStore.toast.error('维护模式切换失败', e instanceof Error ? e.message : '未知错误');
+    } finally {
+      setMaintenanceBusy(false);
+    }
+  }
+
+  async function confirmRollback() {
+    const prev = previousVersion();
+    const s = status();
+    if (!prev || !s) return;
+    setRollbackOpen(false);
+    setRollbackBusy(true);
+    try {
+      // 通过 apply 端点切到 prev 版本(后端可能拒绝向下迁移,此时返回错误)
+      // channel 默认走 stable;后端通过 apply payload 中的 targetVersion 直接覆盖
+      await adminApi.updatesApply('stable', prev, s.currentVersion);
+      uiStore.toast.success(`已下发回滚到 ${prev},等待重启...`);
+      setTimeout(() => window.location.reload(), 2000);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : '未知错误';
+      uiStore.toast.error('回滚被后端拒绝',
+        msg.includes('semver') || msg.includes('forbidden')
+          ? '后端策略要求版本只能向上迁移,请 SSH 手动 swap 二进制'
+          : msg,
+      );
+    } finally {
+      setRollbackBusy(false);
+    }
+  }
 
   // SSE: 订阅 release_available / update_progress；放进 onMount 避免 HMR/路由切换重复 connect
   onMount(() => {
@@ -224,24 +288,56 @@ export default function UpdatesPage() {
         <Show when={status()}>
           {(s) => (
             <>
-              {/* 顶部：当前版本 + 立即检查 */}
-              <Card>
-                <div class="flex items-start justify-between gap-4">
-                  <div>
-                    <p class="text-caption text-content-secondary mb-1">当前版本</p>
-                    <p class="text-2xl font-semibold text-content">{s().currentVersion}</p>
-                    <p class="text-xs text-content-tertiary mt-1">
-                      自动检查：{s().autoCheckEnabled ? '已开启（每小时）' : '已关闭'}
-                      <Show when={s().lastCheckedAt}>
-                        <span class="ml-3">
-                          最近检查：{new Date(s().lastCheckedAt!).toLocaleString('zh-CN')}
-                        </span>
-                      </Show>
-                    </p>
+              {/* Hero —— 版本运维总览(当前版本 / 自动检查 / 历史成功率 / 维护模式) */}
+              <HeroCard
+                eyebrow={s().stable?.hasUpdate || s().beta?.hasUpdate ? '有可用更新' : '当前最新'}
+                eyebrowVariant={s().stable?.hasUpdate || s().beta?.hasUpdate ? 'warning' : 'success'}
+                title="版本与自更新"
+                desc="一键升级走 GitHub Release · VACUUM INTO 数据库备份 · sha256 校验 · fork-exec 自重启。维护模式开启时,客户端 /api/* 全部返回 503。"
+                cta={
+                  <div class="flex flex-wrap items-center gap-2">
+                    <Show when={previousVersion()}>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => setRollbackOpen(true)}
+                        loading={rollbackBusy()}
+                      >
+                        回到 {previousVersion()}
+                      </Button>
+                    </Show>
+                    <Button variant="ghost" size="sm" onClick={handleCheck} loading={checking()}>
+                      立即检查
+                    </Button>
                   </div>
-                  <Button variant="ghost" onClick={handleCheck} loading={checking()}>
-                    立即检查
-                  </Button>
+                }
+                meta={[
+                  { value: s().currentVersion, label: '当前版本' },
+                  { value: s().autoCheckEnabled ? '每小时' : '已关闭', label: '自动检查' },
+                  { value: history() ? `${historyStats().rate}%` : '—', label: '历史成功率' },
+                  {
+                    value: settings()?.maintenanceMode ? '已开启' : '关闭',
+                    label: '维护模式',
+                  },
+                ]}
+              />
+
+              {/* 维护模式 toggle + 上次检查时间 */}
+              <Card>
+                <div class="flex flex-wrap items-center justify-between gap-3">
+                  <div class="flex items-center gap-4">
+                    <Switch
+                      checked={!!settings()?.maintenanceMode}
+                      onChange={(v) => toggleMaintenance(v)}
+                      disabled={maintenanceBusy()}
+                      label="维护模式 · 开启后客户端 /api/* 返回 503"
+                    />
+                  </div>
+                  <p class="text-xs text-content-tertiary tabular-nums font-mono">
+                    <Show when={s().lastCheckedAt} fallback="最近检查:从未">
+                      最近检查 · {new Date(s().lastCheckedAt!).toLocaleString('zh-CN')}
+                    </Show>
+                  </p>
                 </div>
               </Card>
 
@@ -343,6 +439,31 @@ export default function UpdatesPage() {
               </div>
             </div>
           )}
+        </Show>
+      </Modal>
+
+      {/* 回滚到上一版二次确认 */}
+      <Modal
+        open={rollbackOpen()}
+        onClose={() => setRollbackOpen(false)}
+        title="确认回滚到上一版"
+      >
+        <Show when={previousVersion() && status()}>
+          <div class="space-y-3">
+            <p class="text-sm text-content-secondary">
+              将从 <span class="font-mono text-content">{status()!.currentVersion}</span> 切换到{' '}
+              <span class="font-mono text-content font-semibold">{previousVersion()}</span>。
+            </p>
+            <p class="text-xs text-warning">
+              ⚠ 后端策略要求版本只能向上迁移,因此回滚很可能会被后端拒绝。
+              如确实需要降级,建议 SSH 登录服务器手动 swap 二进制 + 恢复对应 backup DB。
+              本按钮仅用于"尝试自动回滚",失败时会显示后端原因。
+            </p>
+            <div class="flex justify-end gap-2 pt-2">
+              <Button variant="ghost" onClick={() => setRollbackOpen(false)}>取消</Button>
+              <Button onClick={confirmRollback}>尝试回滚</Button>
+            </div>
+          </div>
         </Show>
       </Modal>
 

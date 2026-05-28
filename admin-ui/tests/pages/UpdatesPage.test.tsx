@@ -8,6 +8,9 @@ vi.mock('@/api/admin', () => ({
     updatesStatus: vi.fn(),
     updatesCheck: vi.fn(),
     updatesApply: vi.fn(),
+    updatesHistory: vi.fn(() => Promise.resolve({ entries: [] })),
+    getSettings: vi.fn(() => Promise.resolve({ maintenanceMode: false })),
+    setMaintenance: vi.fn(),
   },
 }));
 
