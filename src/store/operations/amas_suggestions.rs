@@ -236,6 +236,52 @@ impl Store {
         raw.into_iter().map(build).collect()
     }
 
+    /// C5：分页 + 可选状态 + 可选关键字（模糊匹配 rationale / patch_json）。
+    /// 现有 `list_amas_suggestions(status, limit)` 保留不动（offset=0、q=None 的特例）。
+    pub fn list_amas_suggestions_paged(
+        &self,
+        status: Option<SuggestionStatus>,
+        limit: usize,
+        offset: usize,
+        q: Option<&str>,
+    ) -> Result<Vec<TuningSuggestionRow>, StoreError> {
+        let limit = limit.min(500) as i64;
+        let offset = offset as i64;
+        let conn = self.conn()?;
+        let mut where_clauses: Vec<String> = Vec::new();
+        if status.is_some() {
+            where_clauses.push("status = :status".to_string());
+        }
+        if q.is_some() {
+            where_clauses.push("(rationale LIKE :q OR patch_json LIKE :q)".to_string());
+        }
+        let where_sql = if where_clauses.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", where_clauses.join(" AND "))
+        };
+        let sql = format!(
+            "SELECT {COLS} FROM amas_tuning_suggestions {where_sql}
+             ORDER BY created_at DESC LIMIT :limit OFFSET :offset"
+        );
+        let like = q.map(|s| format!("%{s}%"));
+        let mut stmt = conn.prepare(&sql)?;
+        let mut named: Vec<(&str, &dyn rusqlite::ToSql)> = Vec::new();
+        let status_str = status.map(|s| s.as_str());
+        if let Some(ref st) = status_str {
+            named.push((":status", st));
+        }
+        if let Some(ref l) = like {
+            named.push((":q", l));
+        }
+        named.push((":limit", &limit));
+        named.push((":offset", &offset));
+        let raw: Result<Vec<_>, _> = stmt
+            .query_map(named.as_slice(), row_to_suggestion)?
+            .collect();
+        raw?.into_iter().map(build).collect()
+    }
+
     pub fn get_amas_suggestion(&self, id: i64) -> Result<Option<TuningSuggestionRow>, StoreError> {
         let conn = self.conn()?;
         let raw = conn
@@ -482,5 +528,47 @@ mod tests {
         let rejected = counts.iter().find(|(s, _)| s == "rejected").map(|(_, n)| *n);
         assert_eq!(pending, Some(2));
         assert_eq!(rejected, Some(1));
+    }
+
+    fn ins_with(rationale: &str, patch_json: &str) -> InsertSuggestion {
+        let mut s = ins(SuggestionStatus::Pending);
+        s.rationale = rationale.to_string();
+        s.patch_json = patch_json.to_string();
+        s
+    }
+
+    #[test]
+    fn list_supports_offset_pagination() {
+        let store = fresh_store();
+        for i in 0..5 {
+            store
+                .insert_amas_suggestion(&ins_with(&format!("r{i}"), r#"{"memoryModel.w[0]":1.0}"#))
+                .unwrap();
+        }
+        // limit=2 offset=0 → 2 条；offset=4 → 1 条；offset=10 → 0 条
+        assert_eq!(store.list_amas_suggestions_paged(None, 2, 0, None).unwrap().len(), 2);
+        assert_eq!(store.list_amas_suggestions_paged(None, 2, 4, None).unwrap().len(), 1);
+        assert_eq!(store.list_amas_suggestions_paged(None, 2, 10, None).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn list_supports_keyword_filter() {
+        let store = fresh_store();
+        store
+            .insert_amas_suggestion(&ins_with("提升留存", r#"{"memoryModel.baseDesiredRetention":0.85}"#))
+            .unwrap();
+        store
+            .insert_amas_suggestion(&ins_with("降低疲劳", r#"{"memoryModel.w[2]":3.0}"#))
+            .unwrap();
+        // q 命中 rationale
+        let by_rationale = store.list_amas_suggestions_paged(None, 50, 0, Some("留存")).unwrap();
+        assert_eq!(by_rationale.len(), 1);
+        // q 命中 patch_json 中的 path 关键字
+        let by_path = store
+            .list_amas_suggestions_paged(None, 50, 0, Some("baseDesiredRetention"))
+            .unwrap();
+        assert_eq!(by_path.len(), 1);
+        // q 无命中
+        assert_eq!(store.list_amas_suggestions_paged(None, 50, 0, Some("nomatch")).unwrap().len(), 0);
     }
 }
