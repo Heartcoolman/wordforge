@@ -557,6 +557,8 @@ async fn compare_versions(
 struct ListSuggestionsQuery {
     status: Option<String>,
     limit: Option<usize>,
+    offset: Option<usize>,
+    q: Option<String>,
 }
 
 async fn list_suggestions(
@@ -566,6 +568,7 @@ async fn list_suggestions(
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     use crate::store::operations::amas_suggestions::SuggestionStatus;
     let limit = q.limit.unwrap_or(50).clamp(1, 500);
+    let offset = q.offset.unwrap_or(0);
     let status = if let Some(s) = q.status.as_deref() {
         Some(
             SuggestionStatus::parse(s)
@@ -574,9 +577,10 @@ async fn list_suggestions(
     } else {
         None
     };
+    let keyword = q.q.clone();
     let rows = state
         .run_store_task("admin.amas.list_suggestions", move |store| {
-            store.list_amas_suggestions(status, limit)
+            store.list_amas_suggestions_paged(status, limit, offset, keyword.as_deref())
         })
         .await??;
     Ok(ok(rows))

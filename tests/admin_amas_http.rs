@@ -845,3 +845,63 @@ async fn it_amas_advisor_whitelist_crud() {
     assert_eq!(s, StatusCode::OK);
     assert_eq!(body["data"]["deleted"], false);
 }
+
+#[tokio::test]
+async fn it_amas_suggestions_offset_and_q() {
+    let app = spawn_test_server().await;
+    let token = setup_amas_admin_token(&app).await;
+
+    // 直接经 store 落 3 条 pending
+    for (r, p) in [
+        ("提升留存目标", r#"{"memoryModel.baseDesiredRetention":0.85}"#),
+        ("降低疲劳阈值", r#"{"memoryModel.w[2]":3.0}"#),
+        ("调整初始稳定性", r#"{"memoryModel.w[0]":1.0}"#),
+    ] {
+        app.state
+            .store()
+            .insert_amas_suggestion(
+                &learning_backend::store::operations::amas_suggestions::InsertSuggestion {
+                    based_on_version_hash: "h".into(),
+                    patch_json: p.into(),
+                    rationale: r.into(),
+                    evidence_json: "{}".into(),
+                    cost_usd: Some(0.01),
+                    tokens_input: Some(10),
+                    tokens_output: Some(5),
+                    confidence: Some(0.7),
+                    initial_status:
+                        learning_backend::store::operations::amas_suggestions::SuggestionStatus::Pending,
+                    decided_by: None,
+                    decision_note: None,
+                    base_values_json: None,
+                },
+            )
+            .expect("insert suggestion");
+    }
+
+    // limit=1 offset=0 → 1 条
+    let p1 = request(
+        &app.app,
+        Method::GET,
+        "/api/admin/amas/suggestions?limit=1&offset=0",
+        None,
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (s, _, body) = response_json(p1).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(body["data"].as_array().unwrap().len(), 1);
+
+    // q=留存 → 命中 1 条
+    let pq = request(
+        &app.app,
+        Method::GET,
+        "/api/admin/amas/suggestions?q=%E7%95%99%E5%AD%98",
+        None,
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (s, _, body) = response_json(pq).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(body["data"].as_array().unwrap().len(), 1);
+}
