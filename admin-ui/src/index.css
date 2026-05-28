@@ -36,12 +36,11 @@
   src: url("/fonts/inter-700.woff2") format("woff2");
 }
 
-/* JetBrains Mono：当前用 fallback chain（ui-monospace / SF Mono / Menlo），未引入 woff2。
-   后续要求 100% 自托管时，下载 jetbrains-mono-{400,500,600}.woff2 到 public/fonts/ 并取消下面注释。
+/* JetBrains Mono v2 webfont(OFL,GitHub release),
+   ~92KB/weight × 3 = 282KB 总增量,font-display: swap 不阻塞首屏。 */
 @font-face { font-family: "JetBrains Mono"; font-weight: 400; src: url("/fonts/jetbrains-mono-400.woff2") format("woff2"); font-display: swap; }
 @font-face { font-family: "JetBrains Mono"; font-weight: 500; src: url("/fonts/jetbrains-mono-500.woff2") format("woff2"); font-display: swap; }
 @font-face { font-family: "JetBrains Mono"; font-weight: 600; src: url("/fonts/jetbrains-mono-600.woff2") format("woff2"); font-display: swap; }
-*/
 
 /* ═══════════════════════════════════════════
    Theme CSS Variables (Light / Dark)
