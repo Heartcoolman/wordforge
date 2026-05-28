@@ -8,7 +8,7 @@
  *   - D 类 confirm_required 弹 ConfirmDialog
  */
 
-import { createSignal, For, Show, onCleanup, onMount } from 'solid-js';
+import { createMemo, createSignal, For, Show, onCleanup, onMount } from 'solid-js';
 import { connectProbeBatchStream, probeApi, type ProbeResultEvent, type ProbeExecutionRow } from '@/api/probe';
 import ConfirmDialog from '@/components/probe/ConfirmDialog';
 import ResultCard from '@/components/probe/ResultCard';
@@ -25,6 +25,9 @@ interface ResultCardData extends ProbeResultEvent {
 }
 
 type TargetMode = 'single' | 'multi' | 'allOnline';
+
+/** results 数组的"ring buffer"软上限 - 超过该值新结果到达时丢弃最旧 */
+const RESULTS_BUFFER_CAP = 200;
 
 const DEFAULT_SCRIPT = `return {
   ua: ctx.nav.ua,
@@ -54,6 +57,27 @@ export default function ProbePage() {
 
   onMount(() => void loadRecent());
   onCleanup(() => stopStream?.());
+
+  // 错误聚类:按 status 聚合非 ok 结果(timeout/error/expired/...)
+  const errorClusters = createMemo(() => {
+    const buckets = new Map<string, number>();
+    for (const r of results()) {
+      if (r.status === 'ok') continue;
+      buckets.set(r.status, (buckets.get(r.status) ?? 0) + 1);
+    }
+    const clusters = Array.from(buckets.entries())
+      .map(([status, count]) => ({ status, count }))
+      .sort((a, b) => b.count - a.count);
+    return { clusters, total: clusters.reduce((a, b) => a + b.count, 0) };
+  });
+
+  // 现场重放:把当前 script 回填编辑器并把 target 切到该设备的 single 模式
+  function handleReplay(r: ResultCardData) {
+    setMode('single');
+    setSingleDeviceId(r.deviceId);
+    // 滚到顶部让 admin 能看到回填后的编辑器
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
 
   const loadRecent = async () => {
     try {
@@ -359,6 +383,60 @@ export default function ProbePage() {
                   </Show>
                 </div>
               </div>
+
+              {/* Ring buffer 状态 + 错误聚类 -- 仅在有结果时显示 */}
+              <Show when={results().length > 0}>
+                <div class="grid gap-2.5 sm:grid-cols-[1fr_1fr] text-[11.5px]">
+                  {/* buffer */}
+                  <div class="rounded-lg border border-border-hairline px-3 py-2">
+                    <div class="flex items-center justify-between mb-1.5">
+                      <span class="uppercase tracking-wide text-content-tertiary">RING BUFFER</span>
+                      <span class="font-mono tabular-nums text-content">
+                        {results().length} / {RESULTS_BUFFER_CAP}
+                      </span>
+                    </div>
+                    <div class="h-1.5 rounded-full bg-surface-secondary overflow-hidden">
+                      <div
+                        class="h-full transition-[width] duration-base ease-out-expo"
+                        style={{
+                          width: `${Math.min(100, (results().length / RESULTS_BUFFER_CAP) * 100).toFixed(1)}%`,
+                          background:
+                            results().length >= RESULTS_BUFFER_CAP * 0.9
+                              ? 'var(--warning)'
+                              : 'var(--accent)',
+                        }}
+                      />
+                    </div>
+                    <div class="mt-1 flex justify-between text-content-tertiary font-mono tabular-nums">
+                      <span title="最旧事件">{new Date(results()[0].receivedAt).toLocaleTimeString('zh-CN', { hour12: false })}</span>
+                      <span title="最新事件">{new Date(results()[results().length - 1].receivedAt).toLocaleTimeString('zh-CN', { hour12: false })}</span>
+                    </div>
+                  </div>
+                  {/* error 聚类 */}
+                  <div class="rounded-lg border border-border-hairline px-3 py-2">
+                    <div class="flex items-center justify-between mb-1.5">
+                      <span class="uppercase tracking-wide text-content-tertiary">错误聚类</span>
+                      <span class="font-mono tabular-nums text-content">{errorClusters().total} / {results().length}</span>
+                    </div>
+                    <Show
+                      when={errorClusters().clusters.length > 0}
+                      fallback={<p class="text-content-tertiary">全部 ok</p>}
+                    >
+                      <ul class="space-y-0.5">
+                        <For each={errorClusters().clusters}>
+                          {(c) => (
+                            <li class="flex items-center justify-between font-mono tabular-nums">
+                              <span class="text-content">{c.status}</span>
+                              <span class="text-content-tertiary">×{c.count}</span>
+                            </li>
+                          )}
+                        </For>
+                      </ul>
+                    </Show>
+                  </div>
+                </div>
+              </Show>
+
               <Show
                 when={results().length > 0}
                 fallback={<Empty title="尚无结果" description="点击发送后，实时结果会在这里以卡片网格展示" />}
@@ -375,6 +453,7 @@ export default function ProbePage() {
                         resultJson={r.resultJson}
                         stderr={r.stderr}
                         onConfirmClick={() => setConfirmTarget(r)}
+                        onReplayClick={() => handleReplay(r)}
                       />
                     )}
                   </For>

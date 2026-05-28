@@ -13,6 +13,11 @@ vi.mock('@/api/admin', () => ({
     checkUpdate: vi.fn(),
   },
 }));
+vi.mock('@/api/amas', () => ({
+  amasApi: {
+    getMonitoring: vi.fn(() => Promise.resolve([])),
+  },
+}));
 vi.mock('@/components/ui/EChart', () => ({
   EChart: () => <div data-testid="chart" />,
 }));

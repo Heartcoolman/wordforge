@@ -65,7 +65,14 @@ export default function DashboardPage() {
     return { tone: 'warning', label: '警告' };
   }
 
-  // 单卡级错误降级：err → 简短错误 + 重试按钮，避免永远转圈的 Skeleton
+  // 全部 KPI / Panel resource 都进入 error 状态时,Hero 下方显示全局降级 banner
+  // (单卡 KpiErrorCell 在 Solid Show fallback 内嵌 + happy-dom 时序边界场景下偶尔不切换;
+  //  这条 banner 直接挂在主流 grid 之外作为 reactive sentinel)
+  const allFailed = createMemo(
+    () => !!(stats.error && eng.error && overview.error && dau.error && records.error && health.error),
+  );
+
+  // 单卡级错误降级:err → 简短错误 + 重试按钮,避免永远转圈的 Skeleton
   const KpiErrorCell = (props: { onRetry: () => void }) => (
     <div class="h-full p-3 rounded-lg border border-error/30 bg-error-light/30 flex flex-col items-start justify-between gap-1.5">
       <p class="text-xs text-error">加载失败</p>
@@ -113,7 +120,20 @@ export default function DashboardPage() {
         ]}
       />
 
-      {/* KPI 行 — 4 张卡 stagger 80ms 错开；动画放在内层渲染节点，避免 Skeleton/StatCard 切换时闪动 */}
+      {/* 全 resource 全失败的统一兜底 banner */}
+      <Show when={allFailed()}>
+        <div
+          role="alert"
+          class="flex items-center gap-2.5 rounded-lg border border-error/30 bg-error-light px-4 py-3 text-error-strong text-sm"
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <circle cx="12" cy="12" r="10" /><path d="M12 8v4" /><path d="M12 16h.01" />
+          </svg>
+          <span>加载失败:所有数据源均不可达,请检查后端 /api/admin/* 或网络。</span>
+        </div>
+      </Show>
+
+      {/* KPI 行 — 4 张卡 stagger 80ms 错开;动画放在内层渲染节点,避免 Skeleton/StatCard 切换时闪动 */}
       <div class="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <div class="h-full">
           <Show
