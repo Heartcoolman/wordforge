@@ -1,6 +1,7 @@
 import { createSignal, Show, onMount, onCleanup, createMemo } from 'solid-js';
 import { A } from '@solidjs/router';
 import { Card } from '@/components/ui/Card';
+import { HeroCard } from '@/components/ui/HeroCard';
 import { Input } from '@/components/ui/Input';
 import { Button } from '@/components/ui/Button';
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
@@ -147,7 +148,12 @@ export default function SettingsPage() {
 
   return (
     <div class="space-y-6">
-      <h1 class="text-title text-content">系统设置</h1>
+      <HeroCard
+        eyebrow="通用 + 安全 + 集成"
+        eyebrowVariant="accent"
+        title="系统设置"
+        desc="基础参数、AMAS 调参自动化、维护模式。广播 / 资源包 / 版本更新等已迁出独立子页。"
+      />
 
       {/* 维护模式确认弹窗 */}
       <ConfirmDialog

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { screen, waitFor } from '@solidjs/testing-library';
+import { screen, waitFor, fireEvent } from '@solidjs/testing-library';
 import { renderWithProviders } from '../helpers/render';
 
 vi.mock('@/api/admin', () => ({
@@ -35,6 +35,20 @@ describe('SetupPage', () => {
     return renderWithProviders(() => <SetupPage />);
   }
 
+  /**
+   * PR redesign: SetupPage 现在是 3 步 wizard，初始 step=1（环境检测）。
+   * 检测通过后必须点"下一步：创建超管"才能进入表单（step 2）。
+   * 这个 helper 把页面推进到 step 2。
+   */
+  async function gotoFormStep() {
+    await waitFor(() => {
+      // step 1 自动检测完成后显示这个按钮
+      expect(screen.getByRole('button', { name: /下一步：创建超管/ })).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole('button', { name: /下一步：创建超管/ }));
+    await waitFor(() => expect(screen.getByLabelText('管理员邮箱')).toBeInTheDocument());
+  }
+
   it('shows "初始化管理后台" heading', async () => {
     await renderPage();
     await waitFor(() => {
@@ -42,40 +56,39 @@ describe('SetupPage', () => {
     });
   });
 
-  it('shows description text "首次使用，请创建管理员账户"', async () => {
+  it('shows wizard progress chips for 3 steps', async () => {
     await renderPage();
     await waitFor(() => {
-      expect(screen.getByText('首次使用，请创建管理员账户')).toBeInTheDocument();
+      // 3 步 chip 文案
+      expect(screen.getByText('环境检测')).toBeInTheDocument();
+      expect(screen.getByText('创建超管')).toBeInTheDocument();
+      expect(screen.getByText('登录')).toBeInTheDocument();
     });
   });
 
-  it('shows email input field', async () => {
+  it('shows email input field after entering step 2', async () => {
     await renderPage();
-    await waitFor(() => {
-      expect(screen.getByLabelText('管理员邮箱')).toBeInTheDocument();
-    });
+    await gotoFormStep();
+    expect(screen.getByLabelText('管理员邮箱')).toBeInTheDocument();
   });
 
-  it('shows password input field with placeholder', async () => {
+  it('shows password input field with placeholder after entering step 2', async () => {
     await renderPage();
-    await waitFor(() => {
-      const input = screen.getByLabelText('密码');
-      expect(input).toBeInTheDocument();
-      expect(input).toHaveAttribute('placeholder', '至少 8 位');
-    });
+    await gotoFormStep();
+    const input = screen.getByLabelText('密码');
+    expect(input).toBeInTheDocument();
+    expect(input).toHaveAttribute('placeholder', '至少 8 位');
   });
 
-  it('shows confirm password input field', async () => {
+  it('shows confirm password input field after entering step 2', async () => {
     await renderPage();
-    await waitFor(() => {
-      expect(screen.getByLabelText('确认密码')).toBeInTheDocument();
-    });
+    await gotoFormStep();
+    expect(screen.getByLabelText('确认密码')).toBeInTheDocument();
   });
 
-  it('shows "创建管理员" submit button', async () => {
+  it('shows "创建管理员" submit button after entering step 2', async () => {
     await renderPage();
-    await waitFor(() => {
-      expect(screen.getByRole('button', { name: '创建管理员' })).toBeInTheDocument();
-    });
+    await gotoFormStep();
+    expect(screen.getByRole('button', { name: '创建管理员' })).toBeInTheDocument();
   });
 });

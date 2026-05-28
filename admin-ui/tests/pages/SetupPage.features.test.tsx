@@ -25,6 +25,18 @@ describe('SetupPage extra', () => {
     return renderWithProviders(() => <Page />);
   }
 
+  /**
+   * PR redesign: SetupPage 现在是 3 步 wizard，初始 step=1（环境检测）。
+   * 检测通过后必须点"下一步：创建超管"按钮才能进入表单（step 2）。
+   */
+  async function gotoFormStep() {
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /下一步：创建超管/ })).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole('button', { name: /下一步：创建超管/ }));
+    await waitFor(() => expect(screen.getByRole('button', { name: '创建管理员' })).toBeInTheDocument());
+  }
+
   it('redirects to login when already initialized', async () => {
     mockApi.checkStatus.mockResolvedValue({ initialized: true });
     await renderPage();
@@ -40,7 +52,7 @@ describe('SetupPage extra', () => {
   it('shows error for empty fields', async () => {
     mockApi.checkStatus.mockResolvedValue({ initialized: false });
     await renderPage();
-    await waitFor(() => expect(screen.getByRole('button', { name: '创建管理员' })).toBeInTheDocument());
+    await gotoFormStep();
     // 输入框 required + jsdom 原生 form 校验会拦截 click submit；用 fireEvent.submit 绕过
     const form = document.querySelector('form') as HTMLFormElement;
     fireEvent.submit(form);
@@ -50,7 +62,7 @@ describe('SetupPage extra', () => {
   it('shows error when password mismatch', async () => {
     mockApi.checkStatus.mockResolvedValue({ initialized: false });
     await renderPage();
-    await waitFor(() => expect(screen.getByRole('button', { name: '创建管理员' })).toBeInTheDocument());
+    await gotoFormStep();
     const inputs = document.querySelectorAll('input');
     fireEvent.input(inputs[0], { target: { value: 'a@b.c' } });
     fireEvent.input(inputs[1], { target: { value: 'abcdefgh' } });
@@ -62,7 +74,7 @@ describe('SetupPage extra', () => {
   it('shows error when password too short', async () => {
     mockApi.checkStatus.mockResolvedValue({ initialized: false });
     await renderPage();
-    await waitFor(() => expect(screen.getByRole('button', { name: '创建管理员' })).toBeInTheDocument());
+    await gotoFormStep();
     const inputs = document.querySelectorAll('input');
     fireEvent.input(inputs[0], { target: { value: 'a@b.c' } });
     fireEvent.input(inputs[1], { target: { value: '123' } });
@@ -75,7 +87,7 @@ describe('SetupPage extra', () => {
     mockApi.checkStatus.mockResolvedValue({ initialized: false });
     mockApi.setup.mockResolvedValue({ token: 'tok' });
     await renderPage();
-    await waitFor(() => expect(screen.getByRole('button', { name: '创建管理员' })).toBeInTheDocument());
+    await gotoFormStep();
     const inputs = document.querySelectorAll('input');
     fireEvent.input(inputs[0], { target: { value: 'a@b.c' } });
     fireEvent.input(inputs[1], { target: { value: 'abcdefgh' } });
@@ -88,7 +100,7 @@ describe('SetupPage extra', () => {
     mockApi.checkStatus.mockResolvedValue({ initialized: false });
     mockApi.setup.mockRejectedValue(new Error('boom'));
     await renderPage();
-    await waitFor(() => expect(screen.getByRole('button', { name: '创建管理员' })).toBeInTheDocument());
+    await gotoFormStep();
     const inputs = document.querySelectorAll('input');
     fireEvent.input(inputs[0], { target: { value: 'a@b.c' } });
     fireEvent.input(inputs[1], { target: { value: 'abcdefgh' } });
