@@ -9,6 +9,21 @@ vi.mock('@/api/admin', () => ({
   },
 }));
 
+vi.mock('@/api/health', () => ({
+  healthApi: {
+    getStatus: vi.fn(() => Promise.resolve({
+      status: 'healthy',
+      uptimeSecs: 3600,
+      services: {
+        store: { healthy: true },
+        amas: { healthy: true },
+        sse: { healthy: true },
+        wordbookCenter: { healthy: true, url: null },
+      },
+    })),
+  },
+}));
+
 vi.mock('@/lib/token', () => ({
   tokenManager: {
     getAdminToken: vi.fn(() => null),
@@ -38,10 +53,10 @@ describe('LoginPage', () => {
     return renderWithProviders(() => <LoginPage />);
   }
 
-  it('shows "管理后台登录" heading', async () => {
+  it('shows "登录管理后台" heading', async () => {
     await renderPage();
     await waitFor(() => {
-      expect(screen.getByText('管理后台登录')).toBeInTheDocument();
+      expect(screen.getByText('登录管理后台')).toBeInTheDocument();
     });
   });
 
@@ -59,10 +74,10 @@ describe('LoginPage', () => {
     });
   });
 
-  it('shows "登录" submit button', async () => {
+  it('shows submit button "进入管理后台"', async () => {
     await renderPage();
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: '登录' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /进入管理后台/ })).toBeInTheDocument();
     });
   });
 
