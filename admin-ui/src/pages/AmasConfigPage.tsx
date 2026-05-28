@@ -17,7 +17,7 @@ import { PresetSelector } from './amas/PresetSelector';
 import { AmasVersionDrawer } from '@/components/admin/AmasVersionDrawer';
 import { validateConfig, diffKnown } from './amas/schema';
 
-type TabId = 'tier-a' | 'sections' | 'json';
+type TabId = 'tier-a' | 'sections' | 'json' | 'split';
 
 export default function AmasConfigPage() {
   // source-of-truth：宽松对象，承载 ~295 个参数全量
@@ -186,6 +186,7 @@ export default function AmasConfigPage() {
                 { id: 'tier-a', label: `重点参数（Tier-A · 11 维）` },
                 { id: 'sections', label: `分节配置` },
                 { id: 'json', label: `JSON 高级` },
+                { id: 'split', label: `并排视图` },
               ]}
               active={tab()}
               onChange={(id) => setTab(id as TabId)}
@@ -199,6 +200,20 @@ export default function AmasConfigPage() {
             </Show>
             <Show when={tab() === 'json'}>
               <JsonAdvancedPanel config={config()} onChange={setConfig} />
+            </Show>
+            {/* 并排视图: 左 JSON 编辑器 + 右 SectionPanel collapsible 面板,
+                对齐 plan'双栏 CodeMirror TOML + 24 子配置面板'结构。
+                现 CodeMirror TOML mode 待 @codemirror/legacy-modes 接入,
+                先用现有 JsonAdvancedPanel(textarea + 校验)兜底。 */}
+            <Show when={tab() === 'split'}>
+              <div class="grid grid-cols-1 xl:grid-cols-2 gap-3">
+                <div class="min-w-0">
+                  <JsonAdvancedPanel config={config()} onChange={setConfig} />
+                </div>
+                <div class="min-w-0">
+                  <SectionPanel config={config()} errors={errors()} onChange={setConfig} />
+                </div>
+              </div>
             </Show>
           </div>
         </Card>
