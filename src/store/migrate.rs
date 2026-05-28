@@ -57,6 +57,7 @@ fn migrations() -> Vec<(&'static str, MigrationFn)> {
         ("022_admin_ui_completeness", m022_admin_ui_completeness),
         ("023_user_profile_extras", m023_user_profile_extras),
         ("024_client_extras", m024_client_extras),
+        ("025_amas_advisor", m025_amas_advisor),
     ]
 }
 
@@ -97,6 +98,7 @@ fn migrations_down() -> Vec<(&'static str, MigrationFn)> {
         ("022_admin_ui_completeness", m022_admin_ui_completeness_down),
         ("023_user_profile_extras", m023_user_profile_extras_down),
         ("024_client_extras", m024_client_extras_down),
+        ("025_amas_advisor", m025_amas_advisor_down),
     ]
 }
 
@@ -1355,9 +1357,110 @@ fn m024_client_extras_down(store: &Store) -> Result<(), StoreError> {
     Ok(())
 }
 
+/// m025:amas-advisor 全栈对齐所需数据模型 ——
+///   1) amas_tuning_whitelist 新表(LLM 调参白名单,启动 seed 自 TIER_A_WHITELIST)
+///   2) amas_patch_canary 新表(per-patch 真灰度,多条 active,cohort [lo,hi) 不重叠)
+///   3) system_settings.llm_advisor_enabled 列(运行时巡查开关)
+fn m025_amas_advisor(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS amas_tuning_whitelist (
+            path        TEXT NOT NULL,
+            min_safe    REAL NOT NULL,
+            max_safe    REAL NOT NULL,
+            created_at  TEXT NOT NULL,
+            created_by  TEXT NOT NULL,
+            PRIMARY KEY (path)
+        );
+
+        CREATE TABLE IF NOT EXISTS amas_patch_canary (
+            id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+            suggestion_id         INTEGER NOT NULL,
+            version_hash          TEXT NOT NULL,
+            percent               INTEGER NOT NULL CHECK (percent BETWEEN 0 AND 100),
+            cohort_lo             INTEGER NOT NULL CHECK (cohort_lo BETWEEN 0 AND 100),
+            cohort_hi             INTEGER NOT NULL CHECK (cohort_hi BETWEEN 0 AND 100),
+            status                TEXT NOT NULL DEFAULT 'active'
+                                  CHECK (status IN ('active','effective','rolled_back')),
+            baseline_metrics_json TEXT NOT NULL,
+            started_at            TEXT NOT NULL,
+            updated_at            TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_amas_patch_canary_active
+            ON amas_patch_canary(status) WHERE status = 'active';
+        CREATE INDEX IF NOT EXISTS idx_amas_patch_canary_started
+            ON amas_patch_canary(started_at DESC);",
+    )?;
+
+    // system_settings.llm_advisor_enabled —— 列守卫(幂等)
+    let has_col: bool = conn
+        .prepare("PRAGMA table_info(system_settings)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .any(|c| c == "llm_advisor_enabled");
+    if !has_col {
+        conn.execute(
+            "ALTER TABLE system_settings ADD COLUMN llm_advisor_enabled
+                INTEGER NOT NULL DEFAULT 0 CHECK (llm_advisor_enabled IN (0, 1))",
+            [],
+        )?;
+    }
+
+    Ok(())
+}
+
+/// m025 down:DROP 两表;llm_advisor_enabled 列借 SQLite ALTER DROP 单删。生产严禁 down。
+fn m025_amas_advisor_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "DROP TABLE IF EXISTS amas_patch_canary;
+         DROP TABLE IF EXISTS amas_tuning_whitelist;",
+    )?;
+    let has_col: bool = conn
+        .prepare("PRAGMA table_info(system_settings)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .any(|c| c == "llm_advisor_enabled");
+    if has_col {
+        conn.execute(
+            "ALTER TABLE system_settings DROP COLUMN llm_advisor_enabled",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn m025_creates_advisor_tables_and_column() {
+        let store = Store::open(":memory:", 5000, 1).unwrap();
+        store.run_migrations().unwrap();
+        let conn = store.conn().unwrap();
+        // 两张新表存在
+        for tbl in ["amas_tuning_whitelist", "amas_patch_canary"] {
+            let n: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                    rusqlite::params![tbl],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1, "table {tbl} missing");
+        }
+        // system_settings.llm_advisor_enabled 列存在
+        let has_col = conn
+            .prepare("PRAGMA table_info(system_settings)")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|c| c == "llm_advisor_enabled");
+        assert!(has_col, "llm_advisor_enabled column missing");
+    }
 
     #[test]
     fn migration_is_idempotent() {

@@ -488,6 +488,7 @@ CREATE TABLE IF NOT EXISTS system_settings (
     amas_auto_apply_max_per_day INTEGER NOT NULL DEFAULT 1,
     amas_auto_apply_min_confidence REAL NOT NULL DEFAULT 0.8,
     llm_advisor_max_cost_per_month_yuan REAL NOT NULL DEFAULT 100.0,
+    llm_advisor_enabled INTEGER NOT NULL DEFAULT 0 CHECK (llm_advisor_enabled IN (0, 1)),
     PRIMARY KEY (singleton_id)
 );
 
