@@ -121,6 +121,11 @@ async fn main() {
     );
     store.run_migrations().expect("Failed to run migrations");
 
+    // C2：启动后 seed AMAS 调参白名单（空表才写自 const，失败仅 warn 不阻断启动）
+    if let Err(e) = store.seed_tuning_whitelist_if_empty() {
+        tracing::warn!(error = %e, "启动 seed AMAS 调参白名单失败，回退 const fallback");
+    }
+
     learning_backend::blocking::init_blocking_semaphore(config.sqlite_pool_size as usize);
 
     let (shutdown_tx, _) = broadcast::channel::<()>(8);

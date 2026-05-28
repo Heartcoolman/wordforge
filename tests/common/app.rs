@@ -178,6 +178,10 @@ async fn spawn_with_full_config_dual(
         .expect("open store"),
     );
     store.run_migrations().expect("run migrations");
+    // 与 main.rs 一致：启动后 seed AMAS 调参白名单（空表才写自 const）
+    store
+        .seed_tuning_whitelist_if_empty()
+        .expect("seed tuning whitelist");
 
     let amas_engine = Arc::new(AMASEngine::new(
         AMASConfig::from_env(&config.amas),
