@@ -366,7 +366,7 @@ export default function DevicesPage() {
           >
             <Table
               columns={sseColumns}
-              data={sseLive() as unknown as Record<string, unknown>[]}
+              data={sseLive()}
               aria-label="SSE 实时连接"
               caption="按设备 ID / 平台 / 用户 / 连接时长 / 连接数 / 数据上报状态 列展示活跃 SSE 连接"
             />
@@ -381,7 +381,7 @@ export default function DevicesPage() {
           >
             <Table
               columns={recentColumns}
-              data={recentlyActive() as unknown as Record<string, unknown>[]}
+              data={recentlyActive()}
               aria-label="近期活跃设备"
               caption="按设备 ID / 平台 / 用户 / 最后活跃 / 封禁状态 / 数据上报状态 列展示最近接入设备"
             />

@@ -491,6 +491,15 @@ body {
   }
 }
 
+@keyframes drawer-slide-in {
+  from {
+    transform: translateX(100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+
 @keyframes scale-in {
   from {
     opacity: 0;
@@ -644,6 +653,10 @@ body {
 .animate-fade-in-up {
   animation: fade-in-up 300ms ease-out;
 }
+.animate-drawer-slide-in {
+  animation: drawer-slide-in 320ms var(--ease-out-expo);
+}
+
 .animate-slide-in-right {
   animation: slide-in-right 300ms ease-out;
 }

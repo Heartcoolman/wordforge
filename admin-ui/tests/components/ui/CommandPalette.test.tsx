@@ -1,11 +1,11 @@
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen, fireEvent } from '@solidjs/testing-library';
-import { Router } from '@solidjs/router';
+import { screen, fireEvent } from '@solidjs/testing-library';
+import { renderWithProviders } from '../../helpers/render';
 import { CommandPalette } from '@/components/ui/CommandPalette';
 
 /** Router 包装：CommandPalette 用 useNavigate，需要 RouterContext */
 function withRouter(ui: () => any) {
-  return render(() => <Router root={() => ui()}>{() => null}</Router>);
+  return renderWithProviders(ui);
 }
 
 describe('CommandPalette', () => {

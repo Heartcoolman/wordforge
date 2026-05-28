@@ -522,8 +522,11 @@ export default function UpdatesPage() {
         </Show>
       </Collapsible>
 
-      {/* anyHasUpdate 当前不展示在 UI，但保留 helper 给将来 dashboard badge 用 */}
-      <Show when={false}>{anyHasUpdate(status())}{refetchHistory}</Show>
+      {/* anyHasUpdate 当前不展示在 UI,但保留 helper 给将来 dashboard badge 用;
+          refetchHistory 在 confirmRollback 之类的需要重拉 history 时用,留作 hook */}
+      <Show when={false}>
+        <span data-noop>{String(anyHasUpdate(status()))}{void refetchHistory}</span>
+      </Show>
     </div>
   );
 }

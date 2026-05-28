@@ -167,12 +167,24 @@ export const adminApi = {
   // 后端 paginated() 返回 {success, data:{ data, total, page, perPage, totalPages }}，
   // client.ts unwrap 剥外层 success/data 后，列表字段是 `data` 而非 `items`
   // —— v0.6.0-beta.1 这里曾错写 items，导致 FeedbackPage 渲染期 undefined.length 触发 ErrorBoundary。
-  listFeedback: (params?: { page?: number; perPage?: number }) =>
+  listFeedback: (params?: { page?: number; perPage?: number; category?: string; status?: string }) =>
     api.get<{ data: FeedbackItem[]; total: number; page: number; perPage: number; totalPages: number }>(
       '/api/admin/feedback',
       params as Record<string, string | number | boolean | undefined>,
       { useAdminToken: true },
     ),
+  /** PATCH /api/admin/feedback/:id — 更新优先级 / 状态 / 处理人 / 解决备注。
+   * assigneeAdminId 传 null 等于"取消指派";不传字段表示"不改动"。 */
+  updateFeedback: (
+    id: string,
+    payload: {
+      priority?: string;
+      status?: string;
+      assigneeAdminId?: string | null;
+      resolution?: string | null;
+    },
+  ) =>
+    api.patch<FeedbackItem>(`/api/admin/feedback/${id}`, payload, { useAdminToken: true }),
 
   // ─────────── AMAS 配置版本（PR-2） ───────────
   amasListVersions: (limit = 50) =>

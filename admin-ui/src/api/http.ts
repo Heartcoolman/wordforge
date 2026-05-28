@@ -416,6 +416,15 @@ export const api = {
       body: body ? JSON.stringify(body) : undefined,
     });
   },
+  patch<T>(path: string, body?: unknown, opts?: ReqOpts) {
+    if (opts?.body) {
+      return req<T>(path, { ...opts, method: 'PATCH' });
+    }
+    return req<T>(path, {
+      ...opts, method: 'PATCH',
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  },
   delete<T>(path: string, opts?: ReqOpts) {
     return req<T>(path, { ...opts, method: 'DELETE' });
   },
