@@ -460,45 +460,79 @@ export default function DevicesPage() {
           { value: sseLive().length, label: '在线连接数' },
           { value: recentlyActive().length, label: '近期接入设备' },
         ]}
-        cta={<Button size="sm" variant="outline" onClick={loadDevices} disabled={loading()}>刷新</Button>}
+        cta={
+          <div class="flex gap-2 flex-wrap">
+            <Button size="sm" variant="outline" onClick={loadDevices} disabled={loading()}>刷新</Button>
+            {/* m027:对齐设计图 page-header 2 action 按钮(全部强制升级 / 新建推送) */}
+            <Button
+              size="sm"
+              variant="warning"
+              disabled={policies().every((p) => !p.minVersion)}
+              onClick={() => {
+                // 找第一个有 minVersion 的 policy 作为入口(用户进 Modal 后可继续选别的平台)
+                const target = policies().find((p) => p.minVersion);
+                if (target) {
+                  setBroadcastUpgradeOpen({
+                    platform: target.platform,
+                    below: target.minVersion!,
+                    latest: target.suggestedVersion || target.minVersion!,
+                  });
+                }
+              }}
+            >
+              全部强制升级
+            </Button>
+            <Button size="sm" variant="primary" onClick={() => (window.location.href = '/admin/broadcast')}>
+              新建推送
+            </Button>
+          </div>
+        }
       />
 
-      {/* m027:平台 hero 3 卡(Web/iOS/Android × total/active7d/月环比) */}
-      <Show when={platforms().length > 0}>
-        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <For each={platforms()}>
-            {(p) => {
-              const total = createMemo(() => platforms().reduce((a, b) => a + b.total, 0) || 1);
-              const share = () => (p.total / total()) * 100;
-              const pctClass = p.monthOverMonthPct >= 0 ? 'text-success-strong' : 'text-error-strong';
-              const pctArrow = p.monthOverMonthPct >= 0 ? '▲' : '▼';
-              return (
-                <Card padding="md">
-                  <div class="flex items-center gap-2">
-                    <Badge size="sm" variant={p.platform === 'web' ? 'accent' : p.platform === 'ios' ? 'default' : 'success'}>
-                      {p.platform.toUpperCase()}
-                    </Badge>
-                  </div>
-                  <div class="mt-3 text-2xl font-bold tabular-nums">
-                    {p.total.toLocaleString()}
-                    <span class="text-xs text-content-tertiary font-medium ml-1.5">设备 · {share().toFixed(1)}%</span>
-                  </div>
-                  <div class="mt-2 flex gap-3 text-xs text-content-secondary tabular-nums">
-                    <span>
-                      <span class={pctClass}>{pctArrow} {Math.abs(p.monthOverMonthPct).toFixed(1)}%</span> 比上月
-                    </span>
-                    <span>{p.active7d.toLocaleString()} 在线 (7d)</span>
-                  </div>
-                </Card>
-              );
-            }}
-          </For>
-        </div>
-      </Show>
+      {/* m027:平台 hero 3 卡(Web/iOS/Android × total/active7d/月环比)。
+          固定渲染 3 平台,无数据时显示 0 设备占位,对齐设计图视觉骨架 */}
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <For each={['web', 'ios', 'android'] as const}>
+          {(name) => {
+            const agg = createMemo(() => platforms().find((p) => p.platform === name));
+            const total = createMemo(() => platforms().reduce((a, b) => a + b.total, 0) || 1);
+            const share = () => (agg() ? ((agg()!.total / total()) * 100) : 0);
+            const pct = () => agg()?.monthOverMonthPct ?? 0;
+            const pctClass = () => (pct() >= 0 ? 'text-success-strong' : 'text-error-strong');
+            const pctArrow = () => (pct() >= 0 ? '▲' : '▼');
+            const label: Record<typeof name, { name: string; sub: string }> = {
+              web: { name: 'Web 浏览器', sub: 'PWA · Chrome / Safari / Firefox' },
+              ios: { name: 'iOS 原生', sub: 'iPhone / iPad · App Store' },
+              android: { name: 'Android 原生', sub: 'Google Play / 应用宝 / APK' },
+            };
+            return (
+              <Card padding="md">
+                <div class="flex items-center gap-2">
+                  <Badge size="sm" variant={name === 'web' ? 'accent' : name === 'ios' ? 'default' : 'success'}>
+                    {name.toUpperCase()}
+                  </Badge>
+                  <div class="text-xs text-content-tertiary truncate">{label[name].sub}</div>
+                </div>
+                <div class="text-sm font-semibold mt-2">{label[name].name}</div>
+                <div class="mt-2 text-2xl font-bold tabular-nums">
+                  {(agg()?.total ?? 0).toLocaleString()}
+                  <span class="text-xs text-content-tertiary font-medium ml-1.5">设备 · {share().toFixed(1)}%</span>
+                </div>
+                <div class="mt-2 flex gap-3 text-xs text-content-secondary tabular-nums">
+                  <span>
+                    <span class={pctClass()}>{pctArrow()} {Math.abs(pct()).toFixed(1)}%</span> 比上月
+                  </span>
+                  <span>{(agg()?.active7d ?? 0).toLocaleString()} 在线 (7d)</span>
+                </div>
+              </Card>
+            );
+          }}
+        </For>
+      </div>
 
-      {/* m027:版本分布柱(三平台 × N 档版本)+ 升级策略面板(右侧) */}
-      <Show when={versionRows().length > 0 || policies().length > 0}>
-        <div class="grid grid-cols-1 lg:grid-cols-12 gap-4">
+      {/* m027:版本分布柱(三平台 × N 档版本)+ 升级策略面板(右侧)。
+          外层去 Show,空数据时显示骨架对齐设计图视觉;policies seed 至少 3 行 */}
+      <div class="grid grid-cols-1 lg:grid-cols-12 gap-4">
           <Card class="lg:col-span-7" padding="md">
             <div class="flex items-center justify-between mb-3">
               <h3 class="text-sm font-semibold text-content">版本分布 · 各平台</h3>
@@ -522,11 +556,14 @@ export default function DevicesPage() {
                 const max = createMemo(() => rows().reduce((m, r) => Math.max(m, r.count), 0) || 1);
                 const total = createMemo(() => rows().reduce((a, b) => a + b.count, 0));
                 return (
-                  <Show when={rows().length > 0}>
-                    <div class="mt-3 first:mt-0">
-                      <h4 class="text-[11px] font-semibold uppercase tracking-wider text-content-secondary mb-2">
-                        {plt.toUpperCase()} ({total().toLocaleString()} 设备)
-                      </h4>
+                  <div class="mt-3 first:mt-0">
+                    <h4 class="text-[11px] font-semibold uppercase tracking-wider text-content-secondary mb-2">
+                      {plt.toUpperCase()} ({total().toLocaleString()} 设备)
+                    </h4>
+                    <Show
+                      when={rows().length > 0}
+                      fallback={<div class="text-xs text-content-tertiary py-1">— 暂无数据 · 等待客户端上报 x-app-version 头</div>}
+                    >
                       <For each={rows().slice(0, 6)}>
                         {(r, idx) => (
                           <div class="grid grid-cols-[110px_1fr_60px] items-center gap-2 py-1 text-[12.5px]">
@@ -546,8 +583,8 @@ export default function DevicesPage() {
                           </div>
                         )}
                       </For>
-                    </div>
-                  </Show>
+                    </Show>
+                  </div>
                 );
               }}
             </For>
@@ -645,9 +682,13 @@ export default function DevicesPage() {
                 );
               }}
             </For>
+            <Show when={policies().length === 0}>
+              <div class="text-xs text-content-tertiary py-2 text-center">
+                — policies 未加载 · 请重启后端让 m024_client_extras migration 跑过
+              </div>
+            </Show>
           </Card>
         </div>
-      </Show>
 
       {/* Tabs / Telemetry Panel 不受 loading 影响：刷新时 Telemetry 已展开面板不被卸载 */}
       <Tabs
