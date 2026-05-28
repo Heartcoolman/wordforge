@@ -11,6 +11,12 @@ vi.mock('@/api/admin', () => ({
     getDailyRecords: vi.fn(),
     getHealth: vi.fn(),
     checkUpdate: vi.fn(),
+    // m023:Dashboard 新接的端点(默认空 / null,具体用例可 override)
+    amasMetricsTimeseries: vi.fn(() => Promise.resolve([])),
+    analyticsHourly: vi.fn(() => Promise.resolve(null)),
+    monitoringWorkers: vi.fn(() => Promise.resolve({ workers: [] })),
+    amasListSuggestions: vi.fn(() => Promise.resolve([])),
+    listFeedback: vi.fn(() => Promise.resolve({ data: [], total: 0, page: 1, perPage: 1, totalPages: 0 })),
   },
 }));
 vi.mock('@/api/amas', () => ({

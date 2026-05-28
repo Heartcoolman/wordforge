@@ -1,15 +1,28 @@
 use std::sync::atomic::Ordering;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use axum::extract::State;
 use axum::routing::get;
 use axum::Router;
+use once_cell::sync::Lazy;
+use sysinfo::{Disks, Pid, ProcessRefreshKind, RefreshKind, System};
 
 use crate::auth::AdminAuthUser;
 use crate::response::{ok, AppError};
 use crate::routes::health::{sse_probe_ok, wordbook_center_probe};
 use crate::routes::realtime::SSE_CONNECTION_COUNT;
 use crate::state::AppState;
+
+/// m023:进程级 sysinfo 单例。sysinfo 要求两次 refresh 之间 ≥200ms 才能拿到 CPU%,
+/// 所以挂全局 + Mutex 保持采样上下文(否则每次 new 出来 CPU 永远是 0)。
+static SYS_SNAPSHOT: Lazy<Mutex<System>> = Lazy::new(|| {
+    let mut s = System::new_with_specifics(
+        RefreshKind::new().with_processes(ProcessRefreshKind::everything()),
+    );
+    s.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+    Mutex::new(s)
+});
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -58,6 +71,10 @@ async fn system_health(
         0.0
     };
 
+    // m023:进程级 CPU/RSS + DB 池 + 工作目录磁盘。采样 ~negligible(~1ms),
+    // 失败时字段返回 null,前端不渲染进度条 ——不让监控干扰本体。
+    let resources = sample_resources(&state).await;
+
     Ok(ok(serde_json::json!({
         "status": status,
         "storeProbeOk": store_probe_ok,
@@ -65,6 +82,7 @@ async fn system_health(
         "uptimeSecs": uptime_secs,
         "version": env!("GIT_VERSION"),
         "errorRate": error_rate,
+        "resources": resources,
         "services": {
             "amas": { "healthy": amas_healthy },
             "sse": {
@@ -203,6 +221,66 @@ fn is_newer(latest: &str, current: &str) -> bool {
         }
     }
     false
+}
+
+/// m023:Dashboard 系统资源条。所有字段失败兜底 null,不让监控自身故障穿透 health。
+async fn sample_resources(state: &AppState) -> serde_json::Value {
+    // 1) sysinfo:进程 CPU% + RSS。两次 refresh 间隔填 200ms 由 sysinfo 自己保证(全局单例第 2 次起有效)
+    let pid = Pid::from_u32(std::process::id());
+    let (cpu_pct, rss_bytes) = {
+        let mut sys = match SYS_SNAPSHOT.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
+        sys.process(pid)
+            .map(|p| (Some(p.cpu_usage() as f64), Some(p.memory())))
+            .unwrap_or((None, None))
+    };
+
+    // 2) r2d2 池占用
+    let pool = state
+        .run_store_task("admin.monitoring.pool_status", |store| {
+            Ok::<_, crate::store::StoreError>(store.pool_status())
+        })
+        .await
+        .ok()
+        .and_then(Result::ok);
+
+    // 3) 磁盘:工作目录所在磁盘 free/total。Disks::new_with_refreshed_list 拿全部挂载点,
+    //    选第一个 mount_point 是当前 cwd 前缀的(覆盖大多数 Linux/macOS 部署形态)
+    let cwd = std::env::current_dir().ok();
+    let (disk_total, disk_free) = {
+        let disks = Disks::new_with_refreshed_list();
+        let mut best: Option<&sysinfo::Disk> = None;
+        if let Some(ref c) = cwd {
+            for d in disks.list() {
+                if c.starts_with(d.mount_point()) {
+                    let take = match best {
+                        None => true,
+                        Some(b) => d.mount_point().as_os_str().len() > b.mount_point().as_os_str().len(),
+                    };
+                    if take {
+                        best = Some(d);
+                    }
+                }
+            }
+        }
+        best.map(|d| (Some(d.total_space()), Some(d.available_space())))
+            .unwrap_or((None, None))
+    };
+
+    serde_json::json!({
+        "cpuPct": cpu_pct,
+        "memoryRssBytes": rss_bytes,
+        "diskTotalBytes": disk_total,
+        "diskFreeBytes": disk_free,
+        "pool": pool.map(|p| serde_json::json!({
+            "max": p.max,
+            "connections": p.connections,
+            "idle": p.idle,
+        })),
+    })
 }
 
 /// M1-A5：返回所有 worker 的最后执行记录，供 admin 控制台 "Worker 状态" 区展示。

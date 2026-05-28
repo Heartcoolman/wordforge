@@ -11,6 +11,12 @@ vi.mock('@/api/admin', () => ({
     getDailyRecords: vi.fn(),
     getHealth: vi.fn(),
     checkUpdate: vi.fn(),
+    // m023:Dashboard 新接的端点(默认空 / null,具体用例可 override)
+    amasMetricsTimeseries: vi.fn(() => Promise.resolve([])),
+    analyticsHourly: vi.fn(() => Promise.resolve(null)),
+    monitoringWorkers: vi.fn(() => Promise.resolve({ workers: [] })),
+    amasListSuggestions: vi.fn(() => Promise.resolve([])),
+    listFeedback: vi.fn(() => Promise.resolve({ data: [], total: 0, page: 1, perPage: 1, totalPages: 0 })),
   },
 }));
 vi.mock('@/api/amas', () => ({
@@ -68,7 +74,8 @@ describe('DashboardPage — status & update banner', () => {
     primeBase();
     mockApi.checkUpdate.mockResolvedValue({ currentVersion: '1.0.0', latestVersion: '1.1.0', hasUpdate: true, releaseUrl: 'https://x.com' });
     await renderPage();
-    await waitFor(() => expect(screen.getByText(/新版本 1.1.0/)).toBeInTheDocument());
+    // m023:redesign 后"新版本 X.Y.Z"出现在 SystemHealth chip + 待办事项两处,用 getAllByText
+    await waitFor(() => expect(screen.getAllByText(/新版本 1.1.0/).length).toBeGreaterThan(0));
   });
 
   it('changes days window via picker', async () => {

@@ -3,7 +3,7 @@ import type {
   AdminAuthResponse, AdminStats,
   AdminUsersPage, AdminUsersQuery,
   EngagementAnalytics, LearningAnalytics,
-  SystemHealth, DatabaseInfo, SystemSettings,
+  SystemHealth, DatabaseInfo, SystemSettings, WorkerStatusRow,
   UpdateCheck, AdminUpdateStatus, ApplyAccepted, UpdateAuditEntry, DailyActiveUsersEntry, DailyRecordsEntry,
   StudyOverview, RecordTypeBreakdown, WordStateDistribution, RetentionCurve,
   FeedbackItem,
@@ -118,6 +118,9 @@ export const adminApi = {
   getHealth: () => api.get<SystemHealth>('/api/admin/monitoring/health', undefined, { useAdminToken: true }),
   getDatabase: () => api.get<DatabaseInfo>('/api/admin/monitoring/database', undefined, { useAdminToken: true }),
   checkUpdate: () => api.get<UpdateCheck>('/api/admin/monitoring/check-update', undefined, { useAdminToken: true }),
+  /** m023:Dashboard worker 心跳网格数据源 */
+  monitoringWorkers: () =>
+    api.get<{ workers: WorkerStatusRow[] }>('/api/admin/monitoring/workers', undefined, { useAdminToken: true }),
 
   // 一键自更新（PR-auto-update）
   updatesStatus: () => api.get<AdminUpdateStatus>('/api/admin/updates/status', undefined, { useAdminToken: true }),

@@ -9,6 +9,7 @@ import { WindowPicker } from '@/components/ui/WindowPicker';
 import { Panel } from '@/components/ui/Panel';
 import { MiniStat } from '@/components/ui/MiniStat';
 import { HeroCard } from '@/components/ui/HeroCard';
+import { WorkerGridCell, type WorkerOutcome } from '@/components/ui/WorkerGridCell';
 import { adminApi } from '@/api/admin';
 import { amasApi } from '@/api/amas';
 import { formatNumber, formatDuration, formatAccuracy, formatBytes } from '@/utils/formatters';
@@ -26,6 +27,18 @@ const STAGGER_DELAYS: Array<{ 'animation-delay'?: string; 'animation-fill-mode':
   { 'animation-delay': '240ms', 'animation-fill-mode': STAGGER_FILL },
 ];
 
+// m023:worker outcome 字段 → WorkerGridCell 枚举映射
+function toWorkerOutcome(raw: string | null): WorkerOutcome {
+  if (!raw) return 'unknown';
+  const v = raw.toLowerCase();
+  if (v === 'ok' || v === 'success' || v === 'healthy') return 'ok';
+  if (v.includes('error') || v.includes('fail') || v === 'down') return 'error';
+  if (v === 'idle' || v === 'skipped') return 'idle';
+  return 'unknown';
+}
+
+const DOW_LABEL = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+
 export default function DashboardPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const days = createMemo(() => {
@@ -34,7 +47,7 @@ export default function DashboardPage() {
   });
   const setDays = (d: number) => setSearchParams({ days: d.toString() });
 
-  // Each resource is independent so a single failure doesn't black-out the page.
+  // 现有资源:每个独立失败不黑屏。catch(() => null|[]) 兜底,避免某个端点 404 把整页拉下。
   const [stats, { refetch: refetchStats }] = createResource(() => adminApi.getStats());
   const [eng, { refetch: refetchEng }] = createResource(() => adminApi.getEngagement());
   const [overview, { refetch: refetchOverview }] = createResource(days, (d) => adminApi.getStudyOverview(d));
@@ -42,10 +55,24 @@ export default function DashboardPage() {
   const [records] = createResource(days, (d) => adminApi.getDailyRecords(d));
   const [health] = createResource(() => adminApi.getHealth());
   const [updateInfo] = createResource(() => adminApi.checkUpdate());
-  // 近期告警：取最近 20 条 AMAS 监控事件,只筛 error/warning 级别(eventType 含 error|warn|fail|denied)
   const [monitoring] = createResource(() => amasApi.getMonitoring(20).catch(() => []));
 
-  // sparkline series:dau.registered 是每日新增注册,dau.count 是每日活跃
+  // m023:新增 4 块资源 —— 算法分布 / 时段热图 / Worker 网格 / LLM 待审
+  const [algoSeries] = createResource(days, (d) =>
+    adminApi.amasMetricsTimeseries(d).catch(() => [] as Awaited<ReturnType<typeof adminApi.amasMetricsTimeseries>>),
+  );
+  const [hourly] = createResource(days, (d) => adminApi.analyticsHourly(d).catch(() => null));
+  const [workersResp] = createResource(() => adminApi.monitoringWorkers().catch(() => ({ workers: [] })));
+  const workers = () => workersResp()?.workers ?? [];
+  const [suggestions] = createResource(() =>
+    adminApi.amasListSuggestions('pending', 50).catch(() => []),
+  );
+  // 待处理事项里需要"未处理反馈"计数。perPage=1 拿 total 即可,省带宽。
+  const [openFeedback] = createResource(() =>
+    adminApi.listFeedback({ status: 'open', perPage: 1 }).catch(() => null),
+  );
+
+  // sparkline 序列
   const registeredSpark = createMemo(() => dau()?.map((d) => d.registered) ?? []);
   const activeSpark = createMemo(() => dau()?.map((d) => d.count) ?? []);
   const recordsSpark = createMemo(() => records()?.map((d) => d.total) ?? []);
@@ -53,26 +80,35 @@ export default function DashboardPage() {
     () => records()?.map((d) => (d.total > 0 ? (d.correct / d.total) * 100 : 0)) ?? [],
   );
 
-  // 近期告警筛选 + 视觉级别
-  const alerts = createMemo(() => {
-    const events = monitoring() ?? [];
-    return events
-      .filter((e) => /error|warn|fail|denied|critical/i.test(e.eventType))
+  // m023:算法分布 —— 把 N 天的 timeseries 按 algorithm reduce + 取 top 6,算占比
+  const algoDistribution = createMemo(() => {
+    const points = algoSeries() ?? [];
+    if (points.length === 0) return { rows: [] as Array<{ name: string; count: number; pct: number }>, total: 0 };
+    const agg = new Map<string, number>();
+    let total = 0;
+    for (const p of points) {
+      agg.set(p.algorithm, (agg.get(p.algorithm) ?? 0) + p.callCount);
+      total += p.callCount;
+    }
+    if (total === 0) return { rows: [], total: 0 };
+    const rows = Array.from(agg.entries())
+      .map(([name, count]) => ({ name, count, pct: (count / total) * 100 }))
+      .sort((a, b) => b.count - a.count)
       .slice(0, 6);
+    return { rows, total };
   });
-  function alertSeverity(eventType: string): { tone: 'error' | 'warning'; label: string } {
-    if (/error|fail|critical|denied/i.test(eventType)) return { tone: 'error', label: '错误' };
-    return { tone: 'warning', label: '警告' };
-  }
 
-  // 全部 KPI / Panel resource 都进入 error 状态时,Hero 下方显示全局降级 banner
-  // (单卡 KpiErrorCell 在 Solid Show fallback 内嵌 + happy-dom 时序边界场景下偶尔不切换;
-  //  这条 banner 直接挂在主流 grid 之外作为 reactive sentinel)
+  // m023:监控告警(error/warn 级别) —— 仅用于"待处理事项"行计数,不再独立成卡
+  const alertCount = createMemo(() => {
+    const events = monitoring() ?? [];
+    return events.filter((e) => /error|warn|fail|denied|critical/i.test(e.eventType)).length;
+  });
+
+  // 全失败兜底 banner
   const allFailed = createMemo(
     () => !!(stats.error && eng.error && overview.error && dau.error && records.error && health.error),
   );
 
-  // 单卡级错误降级:err → 简短错误 + 重试按钮,避免永远转圈的 Skeleton
   const KpiErrorCell = (props: { onRetry: () => void }) => (
     <div class="h-full p-3 rounded-lg border border-error/30 bg-error-light/30 flex flex-col items-start justify-between gap-1.5">
       <p class="text-xs text-error">加载失败</p>
@@ -103,9 +139,22 @@ export default function DashboardPage() {
     return { text: '服务异常', variant: 'error' as const };
   });
 
+  // m023:Worker 健康统计 —— "16 健康 · 1 警告"摘要
+  const workerSummary = createMemo(() => {
+    const ws = workers();
+    let ok = 0;
+    let err = 0;
+    for (const w of ws) {
+      const o = toWorkerOutcome(w.lastOutcome);
+      if (o === 'ok') ok += 1;
+      else if (o === 'error') err += 1;
+    }
+    return { ok, err, total: ws.length };
+  });
+
   return (
     <div class="space-y-6">
-      {/* Hero — 全局健康状态 + 4 KPI count-up（来自 stats / eng / overview，sparkline 在 KPI 行另外展示） */}
+      {/* Hero — 全局健康状态 + 4 KPI count-up */}
       <HeroCard
         eyebrow={healthEyebrow().text}
         eyebrowVariant={healthEyebrow().variant}
@@ -120,7 +169,6 @@ export default function DashboardPage() {
         ]}
       />
 
-      {/* 全 resource 全失败的统一兜底 banner */}
       <Show when={allFailed()}>
         <div
           role="alert"
@@ -133,7 +181,7 @@ export default function DashboardPage() {
         </div>
       </Show>
 
-      {/* KPI 行 — 4 张卡 stagger 80ms 错开;动画放在内层渲染节点,避免 Skeleton/StatCard 切换时闪动 */}
+      {/* KPI 行 — 4 张卡 stagger 80ms 错开 */}
       <div class="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <div class="h-full">
           <Show
@@ -214,282 +262,646 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {/* Panel: 用户活跃趋势 */}
-      <Panel
-        title="用户活跃趋势"
-        aside={
-          <Show
-            when={dau() && dau()!.length > 0}
-            fallback={
-              <>
-                <Skeleton height="80px" />
-                <Skeleton height="80px" />
-              </>
+      {/* Row A:用户活跃趋势(8) + AMAS 算法分布(4) */}
+      <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+        <div class="lg:col-span-8 min-w-0">
+          <Panel
+            title="用户活跃趋势"
+            aside={
+              <Show
+                when={dau() && dau()!.length > 0}
+                fallback={
+                  <>
+                    <Skeleton height="80px" />
+                    <Skeleton height="80px" />
+                  </>
+                }
+              >
+                <MiniStat label="平均日活" value={formatNumber(dauStats().avg)} tone="accent" />
+                <MiniStat label="峰值日活" value={formatNumber(dauStats().peak)} tone="success" />
+              </Show>
             }
           >
-            <MiniStat label="平均日活" value={formatNumber(dauStats().avg)} tone="accent" />
-            <MiniStat label="峰值日活" value={formatNumber(dauStats().peak)} tone="success" />
-          </Show>
-        }
-      >
-        <Show
-          when={!dau.error}
-          fallback={<Empty title="加载失败" description="无法获取活跃数据" />}
-        >
-          <Show when={dau()} fallback={<Skeleton height="320px" />}>
-            {(data) => (
-              <EChart
-                option={() => {
-                  const accent = cssVar('--accent', '#6366f1');
-                  const info = cssVar('--info', '#0ea5e9');
-                  return {
-                    grid: { left: 40, right: 20, top: 30, bottom: 30 },
-                    legend: { data: ['日活跃', '新注册'], top: 0 },
-                    tooltip: { trigger: 'axis' },
-                    xAxis: { type: 'category', data: data().map((d) => d.date.slice(5)) },
-                    yAxis: { type: 'value', minInterval: 1 },
-                    series: [
-                      {
-                        name: '日活跃',
-                        type: 'line',
-                        data: data().map((d) => d.count),
-                        smooth: true,
-                        itemStyle: { color: accent },
-                        areaStyle: { opacity: 0.18 },
-                      },
-                      {
-                        name: '新注册',
-                        type: 'line',
-                        data: data().map((d) => d.registered),
-                        smooth: true,
-                        itemStyle: { color: info },
-                        areaStyle: { opacity: 0.12 },
-                      },
-                    ],
-                  };
-                }}
-              />
-            )}
-          </Show>
-        </Show>
-      </Panel>
-
-      {/* Panel: 学习产出 */}
-      <Panel
-        title="学习产出"
-        aside={
-          <Show
-            when={overview()}
-            fallback={
-              <>
-                <Skeleton height="80px" />
-                <Skeleton height="80px" />
-              </>
-            }
-          >
-            {(o) => (
-              <>
-                <MiniStat
-                  label={`${days()}天累计学习时长`}
-                  value={formatDuration(o().summary.totalDurationSecs)}
-                  tone="info"
-                />
-                <MiniStat
-                  label={`${days()}天新增单词`}
-                  value={formatNumber(o().summary.newWords)}
-                  tone="warning"
-                />
-              </>
-            )}
-          </Show>
-        }
-      >
-        <Show
-          when={!records.error}
-          fallback={<Empty title="加载失败" description="无法获取记录数据" />}
-        >
-          <Show when={records()} fallback={<Skeleton height="320px" />}>
-            {(data) => (
-              <EChart
-                option={() => {
-                  const accent = cssVar('--accent', '#6366f1');
-                  const warning = cssVar('--warning', '#eab308');
-                  return {
-                    grid: { left: 40, right: 50, top: 30, bottom: 30 },
-                    legend: { data: ['答题数', '正确率'], top: 0 },
-                    tooltip: { trigger: 'axis' },
-                    xAxis: { type: 'category', data: data().map((d) => d.date.slice(5)) },
-                    yAxis: [
-                      { type: 'value', minInterval: 1, name: '答题数' },
-                      {
-                        type: 'value',
-                        name: '正确率',
-                        min: 0,
-                        max: 100,
-                        axisLabel: { formatter: '{value}%' },
-                      },
-                    ],
-                    series: [
-                      {
-                        name: '答题数',
-                        type: 'bar',
-                        data: data().map((d) => d.total),
-                        itemStyle: { color: accent, borderRadius: [4, 4, 0, 0] },
-                      },
-                      {
-                        name: '正确率',
-                        type: 'line',
-                        yAxisIndex: 1,
-                        smooth: true,
-                        data: data().map((d) =>
-                          d.total > 0 ? Number(((d.correct / d.total) * 100).toFixed(1)) : 0,
-                        ),
-                        itemStyle: { color: warning },
-                      },
-                    ],
-                  };
-                }}
-              />
-            )}
-          </Show>
-        </Show>
-      </Panel>
-
-      {/* 系统状态卡 */}
-      <Show when={health()}>
-        {(h) => (
-          <Card variant="elevated">
-            <h2 class="text-lg font-semibold text-content mb-3">系统状态</h2>
-            <div class="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-4 gap-4 text-sm">
-              <div>
-                <p class="text-content-secondary">状态</p>
-                <p class="font-medium flex items-center gap-1.5">
-                  <span
-                    class={`w-2 h-2 rounded-full ${
-                      h().status === 'healthy'
-                        ? 'bg-success animate-ring-pulse'
-                        : h().status === 'degraded'
-                        ? 'bg-warning'
-                        : 'bg-error'
-                    }`}
+            <Show
+              when={!dau.error}
+              fallback={<Empty title="加载失败" description="无法获取活跃数据" />}
+            >
+              <Show when={dau()} fallback={<Skeleton height="320px" />}>
+                {(data) => (
+                  <EChart
+                    option={() => {
+                      const accent = cssVar('--accent', '#6366f1');
+                      const info = cssVar('--info', '#0ea5e9');
+                      return {
+                        grid: { left: 40, right: 20, top: 30, bottom: 30 },
+                        legend: { data: ['日活跃', '新注册'], top: 0 },
+                        tooltip: { trigger: 'axis' },
+                        xAxis: { type: 'category', data: data().map((d) => d.date.slice(5)) },
+                        yAxis: { type: 'value', minInterval: 1 },
+                        series: [
+                          {
+                            name: '日活跃',
+                            type: 'line',
+                            data: data().map((d) => d.count),
+                            smooth: true,
+                            itemStyle: { color: accent },
+                            areaStyle: { opacity: 0.18 },
+                          },
+                          {
+                            name: '新注册',
+                            type: 'line',
+                            data: data().map((d) => d.registered),
+                            smooth: true,
+                            itemStyle: { color: info },
+                            areaStyle: { opacity: 0.12 },
+                          },
+                        ],
+                      };
+                    }}
                   />
-                  <span
-                    class={
-                      h().status === 'healthy'
-                        ? 'text-success'
-                        : h().status === 'degraded'
-                        ? 'text-warning'
-                        : 'text-error'
-                    }
-                  >
-                    {h().status === 'healthy'
-                      ? '运行正常'
-                      : h().status === 'degraded'
-                      ? '性能降级'
-                      : '服务异常'}
-                  </span>
+                )}
+              </Show>
+            </Show>
+          </Panel>
+        </div>
+
+        {/* m023:AMAS 算法决策分布 —— 用 amasMetricsTimeseries N 天聚合 + top 6 占比 */}
+        <div class="lg:col-span-4 min-w-0">
+          <Card variant="elevated" class="h-full flex flex-col">
+            <div class="flex items-start justify-between pb-3 mb-3 border-b border-border-hairline">
+              <div>
+                <h2 class="text-headline text-content">AMAS 算法分布</h2>
+                <p class="font-mono text-[11.5px] text-content-tertiary mt-1">
+                  {days()} 天 · {formatNumber(algoDistribution().total)} 次决策
                 </p>
               </div>
+              <a href="/admin/amas-metrics" class="text-[12px] text-content-tertiary hover:text-accent">
+                详情 →
+              </a>
+            </div>
+            <Show
+              when={!algoSeries.loading}
+              fallback={<Skeleton height="220px" />}
+            >
+              <Show
+                when={algoDistribution().rows.length > 0}
+                fallback={<Empty title="暂无数据" description="决策事件未上报" />}
+              >
+                <ul class="flex flex-col gap-2.5">
+                  <For each={algoDistribution().rows}>
+                    {(row, i) => (
+                      <li class="grid grid-cols-[7ch_1fr_5ch] items-center gap-2.5 text-[12.5px]">
+                        <span class="text-content-secondary font-mono truncate">{row.name}</span>
+                        <div class="h-2 rounded-full bg-surface-sunken overflow-hidden">
+                          <div
+                            class="h-full rounded-full transition-[width] duration-500 ease-out"
+                            style={{
+                              width: `${row.pct.toFixed(1)}%`,
+                              background: `oklch(${58 + i() * 2}% 0.18 ${(269 + i() * 40) % 360})`,
+                            }}
+                          />
+                        </div>
+                        <span class="font-mono text-content tabular-nums text-right">
+                          {row.pct.toFixed(1)}%
+                        </span>
+                      </li>
+                    )}
+                  </For>
+                </ul>
+              </Show>
+            </Show>
+          </Card>
+        </div>
+      </div>
+
+      {/* Row B:学习产出(8) + 24h × 7d 学习时段热图(4) */}
+      <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+        <div class="lg:col-span-8 min-w-0">
+          <Panel
+            title="学习产出"
+            aside={
+              <Show
+                when={overview()}
+                fallback={
+                  <>
+                    <Skeleton height="80px" />
+                    <Skeleton height="80px" />
+                  </>
+                }
+              >
+                {(o) => (
+                  <>
+                    <MiniStat
+                      label={`${days()}天累计学习时长`}
+                      value={formatDuration(o().summary.totalDurationSecs)}
+                      tone="info"
+                    />
+                    <MiniStat
+                      label={`${days()}天新增单词`}
+                      value={formatNumber(o().summary.newWords)}
+                      tone="warning"
+                    />
+                  </>
+                )}
+              </Show>
+            }
+          >
+            <Show
+              when={!records.error}
+              fallback={<Empty title="加载失败" description="无法获取记录数据" />}
+            >
+              <Show when={records()} fallback={<Skeleton height="320px" />}>
+                {(data) => (
+                  <EChart
+                    option={() => {
+                      const accent = cssVar('--accent', '#6366f1');
+                      const warning = cssVar('--warning', '#eab308');
+                      return {
+                        grid: { left: 40, right: 50, top: 30, bottom: 30 },
+                        legend: { data: ['答题数', '正确率'], top: 0 },
+                        tooltip: { trigger: 'axis' },
+                        xAxis: { type: 'category', data: data().map((d) => d.date.slice(5)) },
+                        yAxis: [
+                          { type: 'value', minInterval: 1, name: '答题数' },
+                          {
+                            type: 'value',
+                            name: '正确率',
+                            min: 0,
+                            max: 100,
+                            axisLabel: { formatter: '{value}%' },
+                          },
+                        ],
+                        series: [
+                          {
+                            name: '答题数',
+                            type: 'bar',
+                            data: data().map((d) => d.total),
+                            itemStyle: { color: accent, borderRadius: [4, 4, 0, 0] },
+                          },
+                          {
+                            name: '正确率',
+                            type: 'line',
+                            yAxisIndex: 1,
+                            smooth: true,
+                            data: data().map((d) =>
+                              d.total > 0 ? Number(((d.correct / d.total) * 100).toFixed(1)) : 0,
+                            ),
+                            itemStyle: { color: warning },
+                          },
+                        ],
+                      };
+                    }}
+                  />
+                )}
+              </Show>
+            </Show>
+          </Panel>
+        </div>
+
+        {/* m023:24h × 7d 学习时段热图 —— 复用 analyticsHourly matrix[7][24] */}
+        <div class="lg:col-span-4 min-w-0">
+          <Card variant="elevated" class="h-full flex flex-col">
+            <div class="flex items-start justify-between pb-3 mb-3 border-b border-border-hairline">
               <div>
-                <p class="text-content-secondary">数据库大小</p>
-                <p class="font-medium text-content tabular-nums">
-                  {formatBytes(h().dbSizeBytes)}
-                </p>
-              </div>
-              <div>
-                <p class="text-content-secondary">运行时间</p>
-                <p class="font-medium text-content tabular-nums">{formatDuration(h().uptimeSecs)}</p>
-              </div>
-              <div>
-                <p class="text-content-secondary">版本</p>
-                <div class="flex items-center gap-2 min-w-0">
-                  <p class="font-medium text-content truncate max-w-[10ch]" title={h().version}>{h().version}</p>
-                  <Show when={updateInfo()?.hasUpdate && updateInfo()?.releaseUrl}>
-                    <a
-                      href={updateInfo()!.releaseUrl!}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      class="text-xs px-1.5 py-0.5 rounded bg-accent/10 text-accent hover:bg-accent/20 transition-colors"
-                    >
-                      新版本 {updateInfo()!.latestVersion}
-                    </a>
-                  </Show>
-                </div>
+                <h2 class="text-headline text-content">用户学习时段</h2>
+                <p class="font-mono text-[11.5px] text-content-tertiary mt-1">24h × 7d 热图</p>
               </div>
             </div>
-          </Card>
-        )}
-      </Show>
-
-      {/* 近期告警：从 AMAS monitoring 取最近 error/warning 级别事件,最多 6 条 */}
-      <Card variant="elevated">
-        <div class="flex items-center justify-between mb-3">
-          <div class="flex items-center gap-2">
-            <h2 class="text-lg font-semibold text-content">近期告警</h2>
-            <Show when={alerts().length > 0}>
-              <span class="inline-flex items-center px-2 py-0.5 rounded-pill text-[11px] font-medium bg-warning-light text-warning-strong tabular-nums">
-                {alerts().length}
-              </span>
+            <Show
+              when={!hourly.loading}
+              fallback={<Skeleton height="220px" />}
+            >
+              <Show
+                when={hourly()}
+                fallback={<Empty title="暂无数据" description="未生成学习时段数据" />}
+              >
+                {(h) => (
+                  <EChart
+                    height="220px"
+                    option={() => {
+                      const matrix = h().matrix; // [7][24]
+                      const accent = cssVar('--accent', '#6366f1');
+                      const points: Array<[number, number, number]> = [];
+                      let max = 0;
+                      for (let dow = 0; dow < matrix.length; dow += 1) {
+                        const row = matrix[dow] ?? [];
+                        for (let hour = 0; hour < row.length; hour += 1) {
+                          const v = row[hour] ?? 0;
+                          points.push([hour, dow, v]);
+                          if (v > max) max = v;
+                        }
+                      }
+                      return {
+                        grid: { left: 40, right: 10, top: 10, bottom: 30 },
+                        tooltip: {
+                          position: 'top',
+                          formatter: (p: unknown) => {
+                            const data = (p as { data: [number, number, number] }).data;
+                            return `${DOW_LABEL[data[1]]} ${String(data[0]).padStart(2, '0')}:00 · ${data[2]} 次`;
+                          },
+                        },
+                        xAxis: {
+                          type: 'category',
+                          data: Array.from({ length: 24 }, (_, i) => `${i}`),
+                          splitArea: { show: true },
+                        },
+                        yAxis: { type: 'category', data: DOW_LABEL, splitArea: { show: true } },
+                        visualMap: {
+                          min: 0,
+                          max: max || 1,
+                          calculable: false,
+                          orient: 'horizontal',
+                          left: 'center',
+                          bottom: 0,
+                          show: false,
+                          inRange: { color: ['transparent', accent] },
+                        },
+                        series: [
+                          {
+                            type: 'heatmap',
+                            data: points,
+                            itemStyle: { borderRadius: 2 },
+                          },
+                        ],
+                      };
+                    }}
+                  />
+                )}
+              </Show>
             </Show>
-          </div>
-          <a
-            href="/admin/monitoring"
-            class="text-[12.5px] text-content-tertiary hover:text-accent inline-flex items-center gap-0.5"
-          >
-            查看全部 →
-          </a>
+          </Card>
         </div>
-        <Show
-          when={!monitoring.loading}
-          fallback={<Skeleton height="80px" />}
-        >
-          <Show
-            when={alerts().length > 0}
-            fallback={
-              <div class="flex items-center gap-2 py-3 text-[13px] text-content-tertiary">
-                <span class="inline-block size-1.5 rounded-full bg-success animate-ring-pulse" aria-hidden="true" />
-                近 20 条监控事件未发现告警,系统运行平稳。
-              </div>
-            }
-          >
-            <ul class="divide-y divide-border-hairline">
-              <For each={alerts()}>
-                {(ev) => {
-                  const sev = alertSeverity(ev.eventType);
-                  return (
-                    <li class="flex items-start gap-3 py-2.5 text-[13px]">
-                      <span
-                        class={`mt-1 inline-block size-2 rounded-full shrink-0 ${
-                          sev.tone === 'error' ? 'bg-error' : 'bg-warning'
-                        }`}
-                        aria-hidden="true"
-                      />
-                      <div class="min-w-0 flex-1">
-                        <div class="flex items-center gap-2">
-                          <span class={`font-mono text-[11.5px] uppercase tracking-wide ${
-                            sev.tone === 'error' ? 'text-error-strong' : 'text-warning-strong'
-                          }`}>{sev.label}</span>
-                          <span class="font-mono text-content text-[12.5px] truncate">{ev.eventType}</span>
-                        </div>
-                        <Show when={Object.keys(ev.data).length > 0}>
-                          <p class="text-content-tertiary text-[11.5px] truncate font-mono">
-                            {JSON.stringify(ev.data).slice(0, 120)}
-                          </p>
-                        </Show>
-                      </div>
-                      <time class="text-content-tertiary text-[11.5px] tabular-nums shrink-0">
-                        {new Date(ev.timestamp).toLocaleString('zh-CN', { hour12: false })}
-                      </time>
-                    </li>
-                  );
-                }}
-              </For>
-            </ul>
-          </Show>
-        </Show>
-      </Card>
+      </div>
 
-      {/* 各 Resource 已在自身位置展示降级（KPI 卡 / Panel / 系统状态），不再叠加"全失败"Empty */}
+      {/* Row C:系统状态(5) + Worker 心跳网格(7) */}
+      <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+        <div class="lg:col-span-5 min-w-0">
+          <Show when={health()} fallback={<Card variant="elevated"><Skeleton height="280px" /></Card>}>
+            {(h) => (
+              <Card variant="elevated">
+                <h2 class="text-lg font-semibold text-content mb-3">系统状态</h2>
+                <div class="grid grid-cols-2 gap-3 text-sm">
+                  <div>
+                    <p class="text-content-secondary">状态</p>
+                    <p class="font-medium flex items-center gap-1.5">
+                      <span
+                        class={`w-2 h-2 rounded-full ${
+                          h().status === 'healthy'
+                            ? 'bg-success animate-ring-pulse'
+                            : h().status === 'degraded'
+                            ? 'bg-warning'
+                            : 'bg-error'
+                        }`}
+                      />
+                      <span
+                        class={
+                          h().status === 'healthy'
+                            ? 'text-success'
+                            : h().status === 'degraded'
+                            ? 'text-warning'
+                            : 'text-error'
+                        }
+                      >
+                        {h().status === 'healthy' ? '运行正常' : h().status === 'degraded' ? '性能降级' : '服务异常'}
+                      </span>
+                    </p>
+                  </div>
+                  <div>
+                    <p class="text-content-secondary">数据库</p>
+                    <p class="font-medium text-content tabular-nums">{formatBytes(h().dbSizeBytes)}</p>
+                  </div>
+                  <div>
+                    <p class="text-content-secondary">运行时间</p>
+                    <p class="font-medium text-content tabular-nums">{formatDuration(h().uptimeSecs)}</p>
+                  </div>
+                  <div>
+                    <p class="text-content-secondary">版本</p>
+                    <div class="flex items-center gap-2 min-w-0">
+                      <p class="font-medium text-content truncate max-w-[10ch]" title={h().version}>{h().version}</p>
+                      <Show when={updateInfo()?.hasUpdate && updateInfo()?.releaseUrl}>
+                        <a
+                          href={updateInfo()!.releaseUrl!}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          class="text-xs px-1.5 py-0.5 rounded bg-accent/10 text-accent hover:bg-accent/20 transition-colors"
+                        >
+                          新版本 {updateInfo()!.latestVersion}
+                        </a>
+                      </Show>
+                    </div>
+                  </div>
+                </div>
+
+                {/* m023:进程资源进度条 —— 仅在后端 resources 字段存在时渲染,失败兜底直接隐藏 */}
+                <Show when={h().resources}>
+                  {(res) => (
+                    <div class="mt-4 pt-4 border-t border-border-hairline flex flex-col gap-2.5">
+                      <Show when={res().cpuPct != null}>
+                        <ResourceBar
+                          label="CPU 使用"
+                          value={`${res().cpuPct!.toFixed(1)}%`}
+                          pct={Math.min(res().cpuPct!, 100)}
+                        />
+                      </Show>
+                      <Show when={res().memoryRssBytes != null}>
+                        <ResourceBar
+                          label="内存 (RSS)"
+                          value={formatBytes(res().memoryRssBytes!)}
+                          pct={null}
+                        />
+                      </Show>
+                      <Show when={res().pool}>
+                        {(p) => (
+                          <ResourceBar
+                            label="DB 连接池"
+                            value={`${p().connections} / ${p().max}`}
+                            pct={p().max > 0 ? (p().connections / p().max) * 100 : null}
+                            tone={p().max > 0 && p().connections / p().max > 0.8 ? 'warning' : 'success'}
+                          />
+                        )}
+                      </Show>
+                      <Show when={res().diskTotalBytes != null && res().diskFreeBytes != null}>
+                        <ResourceBar
+                          label="磁盘"
+                          value={`${formatBytes(res().diskTotalBytes! - res().diskFreeBytes!)} / ${formatBytes(res().diskTotalBytes!)}`}
+                          pct={
+                            res().diskTotalBytes! > 0
+                              ? ((res().diskTotalBytes! - res().diskFreeBytes!) / res().diskTotalBytes!) * 100
+                              : null
+                          }
+                        />
+                      </Show>
+                    </div>
+                  )}
+                </Show>
+              </Card>
+            )}
+          </Show>
+        </div>
+
+        {/* m023:Worker 心跳网格 */}
+        <div class="lg:col-span-7 min-w-0">
+          <Card variant="elevated" class="h-full flex flex-col">
+            <div class="flex items-start justify-between pb-3 mb-3 border-b border-border-hairline">
+              <div>
+                <h2 class="text-headline text-content">Worker 心跳</h2>
+                <p class="font-mono text-[11.5px] text-content-tertiary mt-1">
+                  {workerSummary().total} 个 tokio worker
+                </p>
+              </div>
+              <a href="/admin/monitoring" class="text-[12px] text-content-tertiary hover:text-accent">
+                完整监控 →
+              </a>
+            </div>
+            <Show
+              when={!workersResp.loading}
+              fallback={<Skeleton height="220px" />}
+            >
+              <Show
+                when={workers().length > 0}
+                fallback={<Empty title="暂无 worker" description="后端未注册 worker 心跳" />}
+              >
+                <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-3 xl:grid-cols-4 gap-2">
+                  <For each={workers()}>
+                    {(w) => (
+                      <WorkerGridCell
+                        name={w.workerName}
+                        outcome={toWorkerOutcome(w.lastOutcome)}
+                        lastRunAt={w.lastRunAt}
+                        lastDurationMs={w.lastDurationMs}
+                        lastError={w.lastError}
+                      />
+                    )}
+                  </For>
+                </div>
+                <Show when={workerSummary().total > 0}>
+                  <div class="mt-3 pt-3 border-t border-border-hairline flex items-center justify-between text-[12px] text-content-secondary">
+                    <span>
+                      <span class="text-success-strong tabular-nums">{workerSummary().ok}</span> 健康
+                      <Show when={workerSummary().err > 0}>
+                        {' · '}
+                        <span class="text-error-strong tabular-nums">{workerSummary().err}</span> 异常
+                      </Show>
+                    </span>
+                  </div>
+                </Show>
+              </Show>
+            </Show>
+          </Card>
+        </div>
+      </div>
+
+      {/* Row D:LLM 顾问待审 preview(7) + 待处理事项 4 源聚合(5) */}
+      <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+        <div class="lg:col-span-7 min-w-0">
+          <Card variant="elevated" class="h-full flex flex-col">
+            <div class="flex items-start justify-between pb-3 mb-3 border-b border-border-hairline">
+              <div>
+                <h2 class="text-headline text-content">LLM 调参顾问 · 待审建议</h2>
+                <p class="font-mono text-[11.5px] text-content-tertiary mt-1">
+                  pending {suggestions()?.length ?? 0} 条
+                </p>
+              </div>
+              <a href="/admin/amas-advisor" class="text-[12px] text-content-tertiary hover:text-accent">
+                前往顾问 →
+              </a>
+            </div>
+            <Show
+              when={!suggestions.loading}
+              fallback={<Skeleton height="180px" />}
+            >
+              <Show
+                when={(suggestions() ?? []).length > 0}
+                fallback={
+                  <div class="flex items-center gap-2 py-4 text-[13px] text-content-tertiary">
+                    <span class="inline-block size-1.5 rounded-full bg-success animate-ring-pulse" aria-hidden="true" />
+                    暂无待审建议,LLM advisor 未给出新提案。
+                  </div>
+                }
+              >
+                <ul class="flex flex-col divide-y divide-border-hairline">
+                  <For each={(suggestions() ?? []).slice(0, 2)}>
+                    {(s) => (
+                      <li class="py-3 first:pt-0 last:pb-0">
+                        <div class="flex items-start justify-between gap-3">
+                          <p class="text-[13.5px] font-medium text-content min-w-0 flex-1">{s.rationale}</p>
+                          <span class="shrink-0 inline-flex items-center px-2 py-0.5 rounded-pill text-[11px] font-medium bg-warning-light text-warning-strong">
+                            待审
+                          </span>
+                        </div>
+                        <div class="mt-2 flex items-center gap-2 flex-wrap text-[12px]">
+                          <span class="font-mono text-content-tertiary">
+                            patch {Object.keys(s.patchJson).length} 项
+                          </span>
+                          <Show when={s.confidence != null}>
+                            <span class="text-content-tertiary">
+                              · 置信度 <span class="font-mono tabular-nums">{(s.confidence! * 100).toFixed(0)}%</span>
+                            </span>
+                          </Show>
+                          <Show when={s.costUsd != null}>
+                            <span class="text-content-tertiary">
+                              · 成本 <span class="font-mono tabular-nums">${s.costUsd!.toFixed(4)}</span>
+                            </span>
+                          </Show>
+                          <a
+                            href="/admin/amas-advisor"
+                            class="ml-auto text-accent hover:underline"
+                          >
+                            查看 diff →
+                          </a>
+                        </div>
+                      </li>
+                    )}
+                  </For>
+                </ul>
+              </Show>
+            </Show>
+          </Card>
+        </div>
+
+        {/* m023:待处理事项 —— 4 源聚合(新版本/未处理反馈/告警/LLM 待审) */}
+        <div class="lg:col-span-5 min-w-0">
+          <Card variant="elevated" class="h-full flex flex-col">
+            <div class="flex items-start justify-between pb-3 mb-3 border-b border-border-hairline">
+              <div>
+                <h2 class="text-headline text-content">待处理事项</h2>
+                <p class="font-mono text-[11.5px] text-content-tertiary mt-1">需要管理员关注</p>
+              </div>
+            </div>
+            <ul class="flex flex-col divide-y divide-border-hairline -mx-2">
+              <Show when={updateInfo()?.hasUpdate}>
+                <TodoRow
+                  href={updateInfo()!.releaseUrl ?? '/admin/updates'}
+                  iconTone="accent"
+                  title={`新版本 ${updateInfo()!.latestVersion} 可用`}
+                  desc="点击查看发行说明并升级"
+                  external={!!updateInfo()!.releaseUrl}
+                />
+              </Show>
+              <Show when={(openFeedback()?.total ?? 0) > 0}>
+                <TodoRow
+                  href="/admin/feedback?status=open"
+                  iconTone="warning"
+                  title={`${openFeedback()!.total} 条未处理反馈`}
+                  desc="包含 bug 报告与功能请求"
+                />
+              </Show>
+              <Show when={alertCount() > 0}>
+                <TodoRow
+                  href="/admin/monitoring"
+                  iconTone="warning"
+                  title={`${alertCount()} 条监控告警`}
+                  desc="最近 20 条事件含 error / warn"
+                />
+              </Show>
+              <Show when={(suggestions()?.length ?? 0) > 0}>
+                <TodoRow
+                  href="/admin/amas-advisor"
+                  iconTone="accent"
+                  title={`LLM 顾问 · ${suggestions()!.length} 条建议待审`}
+                  desc="approve 后会进入灰度发布"
+                />
+              </Show>
+              <Show
+                when={
+                  !updateInfo()?.hasUpdate &&
+                  (openFeedback()?.total ?? 0) === 0 &&
+                  alertCount() === 0 &&
+                  (suggestions()?.length ?? 0) === 0 &&
+                  !openFeedback.loading &&
+                  !suggestions.loading
+                }
+              >
+                <li class="px-2 py-4 flex items-center gap-2 text-[13px] text-content-tertiary">
+                  <span class="inline-block size-1.5 rounded-full bg-success animate-ring-pulse" aria-hidden="true" />
+                  当前无待办,系统运行平稳。
+                </li>
+              </Show>
+            </ul>
+          </Card>
+        </div>
+      </div>
     </div>
+  );
+}
+
+// ─────────── 局部辅助组件 ───────────
+
+interface ResourceBarProps {
+  label: string;
+  value: string;
+  /** 0–100 占比,null 时不渲染进度条只显示数值 */
+  pct: number | null;
+  tone?: 'accent' | 'success' | 'warning';
+}
+
+function ResourceBar(props: ResourceBarProps) {
+  const tone = () => props.tone ?? 'accent';
+  const bg = () =>
+    tone() === 'success' ? 'bg-success' : tone() === 'warning' ? 'bg-warning' : 'bg-accent';
+  return (
+    <div class="flex flex-col gap-1">
+      <div class="flex items-center justify-between text-[12px]">
+        <span class="text-content-secondary">{props.label}</span>
+        <span class="font-mono text-content tabular-nums">{props.value}</span>
+      </div>
+      <Show when={props.pct != null}>
+        <div class="h-1.5 rounded-full bg-surface-sunken overflow-hidden">
+          <div
+            class={`h-full rounded-full transition-[width] duration-500 ease-out ${bg()}`}
+            style={{ width: `${Math.min(Math.max(props.pct!, 0), 100)}%` }}
+          />
+        </div>
+      </Show>
+    </div>
+  );
+}
+
+interface TodoRowProps {
+  href: string;
+  iconTone: 'accent' | 'warning' | 'error';
+  title: string;
+  desc: string;
+  external?: boolean;
+}
+
+function TodoRow(props: TodoRowProps) {
+  const bgClass = () =>
+    props.iconTone === 'warning'
+      ? 'bg-warning-light text-warning-strong'
+      : props.iconTone === 'error'
+      ? 'bg-error-light text-error-strong'
+      : 'bg-accent-light text-accent';
+  return (
+    <li>
+      <a
+        href={props.href}
+        target={props.external ? '_blank' : undefined}
+        rel={props.external ? 'noopener noreferrer' : undefined}
+        class="flex items-center gap-3 px-2 py-2.5 rounded transition-colors hover:bg-surface-sunken"
+      >
+        <span class={`size-8 rounded-lg grid place-items-center shrink-0 ${bgClass()}`}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <path d="M9 18l6-6-6-6" />
+          </svg>
+        </span>
+        <div class="min-w-0 flex-1">
+          <p class="text-[13px] font-medium text-content truncate">{props.title}</p>
+          <p class="text-[11.5px] text-content-tertiary truncate">{props.desc}</p>
+        </div>
+        <svg
+          width="12"
+          height="12"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          class="text-content-tertiary shrink-0"
+          aria-hidden="true"
+        >
+          <path d="M9 18l6-6-6-6" />
+        </svg>
+      </a>
+    </li>
   );
 }

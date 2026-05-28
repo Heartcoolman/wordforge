@@ -67,6 +67,29 @@ export interface SystemHealth {
   version: string;
   /** 生命周期内 5xx 错误率（0.0–1.0），M0-P1 计数器实装 */
   errorRate: number;
+  /** m023:Dashboard 系统资源条数据源。任一字段为 null 时前端不渲染对应进度条。 */
+  resources?: SystemResources;
+}
+
+export interface SystemResources {
+  /** 进程 CPU 占用百分比(0–100)。多核累加,可能 >100。null 表示采样失败。 */
+  cpuPct: number | null;
+  /** 进程 RSS 字节数 */
+  memoryRssBytes: number | null;
+  /** cwd 所在磁盘总容量字节 */
+  diskTotalBytes: number | null;
+  /** cwd 所在磁盘剩余可用字节 */
+  diskFreeBytes: number | null;
+  /** r2d2 连接池占用快照 */
+  pool: { max: number; connections: number; idle: number } | null;
+}
+
+export interface WorkerStatusRow {
+  workerName: string;
+  lastRunAt: string | null;
+  lastDurationMs: number | null;
+  lastOutcome: string | null;
+  lastError: string | null;
 }
 
 export interface DatabaseInfo {

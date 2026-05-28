@@ -19,6 +19,14 @@ pub struct Store {
     pool: Pool<SqliteConnectionManager>,
 }
 
+/// r2d2 池实时占用快照(m023)。
+#[derive(Debug, Clone, Copy)]
+pub struct PoolStatus {
+    pub max: u32,
+    pub connections: u32,
+    pub idle: u32,
+}
+
 #[derive(Debug, Error)]
 pub enum StoreError {
     #[error("sqlite error: {0}")]
@@ -137,6 +145,17 @@ impl Store {
         let conn = self.conn()?;
         conn.execute_batch("VACUUM;")?;
         Ok(())
+    }
+
+    /// m023:r2d2 池占用快照 —— Dashboard 系统资源条用。
+    /// `connections` 是当前已创建的连接数,`idle` 是空闲数,差值即"在用"。
+    pub fn pool_status(&self) -> PoolStatus {
+        let st = self.pool.state();
+        PoolStatus {
+            max: self.pool.max_size(),
+            connections: st.connections,
+            idle: st.idle_connections,
+        }
     }
 
     pub fn connection(
