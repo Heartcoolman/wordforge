@@ -80,19 +80,12 @@ describe('SettingsPage', () => {
     });
   });
 
-  it('shows "广播消息" section heading', async () => {
+  it('shows redirect card to /admin/broadcast (功能已迁出)', async () => {
     mockAdminApi.getSettings.mockResolvedValue(mockSettings);
     await renderPage();
     await waitFor(() => {
-      expect(screen.getByText('广播消息')).toBeInTheDocument();
+      expect(screen.getByText('广播 / 更新通知已迁出')).toBeInTheDocument();
     });
-  });
-
-  it('shows "发送广播" button', async () => {
-    mockAdminApi.getSettings.mockResolvedValue(mockSettings);
-    await renderPage();
-    await waitFor(() => {
-      expect(screen.getByRole('button', { name: '发送广播' })).toBeInTheDocument();
-    });
+    expect(screen.getByText('前往系统广播')).toBeInTheDocument();
   });
 });

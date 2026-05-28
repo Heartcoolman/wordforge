@@ -45,8 +45,8 @@ describe('SettingsPage — load, save, validation, broadcast, maintenance', () =
     await waitFor(() => expect(screen.getByText('系统设置')).toBeInTheDocument());
     expect(screen.getByText('基本设置')).toBeInTheDocument();
     expect(screen.getByText('AMAS 调参自动化')).toBeInTheDocument();
-    expect(screen.getByText('广播消息')).toBeInTheDocument();
-    expect(screen.getByText('更新通知')).toBeInTheDocument();
+    // 广播 / 更新通知模块已迁出到 /admin/broadcast，settings 留 redirect card
+    expect(screen.getByText('广播 / 更新通知已迁出')).toBeInTheDocument();
   });
 
   it('shows error toast on getSettings failure', async () => {
@@ -90,71 +90,8 @@ describe('SettingsPage — load, save, validation, broadcast, maintenance', () =
     await waitFor(() => expect(mockToast.warning).toHaveBeenCalled());
   });
 
-  it('shows warning when broadcast fields empty', async () => {
-    mockApi.getSettings.mockResolvedValue(baseSettings);
-    await renderPage();
-    await waitFor(() => expect(screen.getByText('发送广播')).toBeInTheDocument());
-    fireEvent.click(screen.getByText('发送广播'));
-    await waitFor(() => expect(mockToast.warning).toHaveBeenCalledWith('请填写标题和内容'));
-  });
-
-  it('sends broadcast successfully via confirm', async () => {
-    mockApi.getSettings.mockResolvedValue(baseSettings);
-    mockApi.broadcast.mockResolvedValue({ sent: 5 });
-    await renderPage();
-    await waitFor(() => expect(screen.getByText('发送广播')).toBeInTheDocument());
-    fireEvent.input(screen.getByPlaceholderText('通知标题'), { target: { value: '维护通知' } });
-    fireEvent.input(screen.getByPlaceholderText('通知内容'), { target: { value: '今晚 10 点维护' } });
-    fireEvent.click(screen.getByText('发送广播'));
-    await waitFor(() => expect(screen.getByText('确认发送广播')).toBeInTheDocument());
-    fireEvent.click(screen.getByText('确认发送'));
-    await waitFor(() => expect(mockApi.broadcast).toHaveBeenCalled());
-  });
-
-  it('cancels broadcast confirm dialog', async () => {
-    mockApi.getSettings.mockResolvedValue(baseSettings);
-    await renderPage();
-    await waitFor(() => expect(screen.getByText('发送广播')).toBeInTheDocument());
-    fireEvent.input(screen.getByPlaceholderText('通知标题'), { target: { value: 't' } });
-    fireEvent.input(screen.getByPlaceholderText('通知内容'), { target: { value: 'm' } });
-    fireEvent.click(screen.getByText('发送广播'));
-    await waitFor(() => expect(screen.getByText('确认发送广播')).toBeInTheDocument());
-    fireEvent.click(screen.getByText('取消'));
-    await waitFor(() => expect(screen.queryByText('确认发送广播')).not.toBeInTheDocument());
-  });
-
-  it('handles broadcast failure', async () => {
-    mockApi.getSettings.mockResolvedValue(baseSettings);
-    mockApi.broadcast.mockRejectedValue(new Error('boom'));
-    await renderPage();
-    await waitFor(() => expect(screen.getByText('发送广播')).toBeInTheDocument());
-    fireEvent.input(screen.getByPlaceholderText('通知标题'), { target: { value: 't' } });
-    fireEvent.input(screen.getByPlaceholderText('通知内容'), { target: { value: 'm' } });
-    fireEvent.click(screen.getByText('发送广播'));
-    fireEvent.click(screen.getByText('确认发送'));
-    await waitFor(() => expect(mockToast.error).toHaveBeenCalled());
-  });
-
-  it('sends update notification with default message', async () => {
-    mockApi.getSettings.mockResolvedValue(baseSettings);
-    mockApi.broadcastUpdate.mockResolvedValue(undefined);
-    await renderPage();
-    await waitFor(() => expect(screen.getByText('发送更新通知')).toBeInTheDocument());
-    fireEvent.click(screen.getByText('发送更新通知'));
-    await waitFor(() => expect(screen.getByText('确认发送更新通知')).toBeInTheDocument());
-    fireEvent.click(screen.getByText('确认发送'));
-    await waitFor(() => expect(mockApi.broadcastUpdate).toHaveBeenCalled());
-  });
-
-  it('handles update notification failure', async () => {
-    mockApi.getSettings.mockResolvedValue(baseSettings);
-    mockApi.broadcastUpdate.mockRejectedValue(new Error('fail'));
-    await renderPage();
-    await waitFor(() => expect(screen.getByText('发送更新通知')).toBeInTheDocument());
-    fireEvent.click(screen.getByText('发送更新通知'));
-    fireEvent.click(screen.getByText('确认发送'));
-    await waitFor(() => expect(mockToast.error).toHaveBeenCalled());
-  });
+  // 广播 / 更新通知相关测试已迁出到 BroadcastPage 测试（组 9 建立）。
+  // SettingsPage 只保留"已迁出"redirect card 断言（在 SettingsPage.test.tsx）。
 
   it('toggles maintenance mode with confirm and calls setMaintenance API', async () => {
     mockApi.getSettings.mockResolvedValue(baseSettings);
@@ -253,15 +190,5 @@ describe('SettingsPage — input handlers & AMAS toggles', () => {
     expect(p.amasAutoApplyMinConfidence).toBe(0.95);
   });
 
-  it('updateMsg textarea input is sent with broadcastUpdate', async () => {
-    mockApi.getSettings.mockResolvedValue(baseSettings);
-    mockApi.broadcastUpdate.mockResolvedValue(undefined);
-    await renderPage();
-    await waitFor(() => expect(screen.getByText('发送更新通知')).toBeInTheDocument());
-    const ta = screen.getByPlaceholderText('有新版本可用，请刷新页面获取最新内容') as HTMLTextAreaElement;
-    fireEvent.input(ta, { target: { value: '紧急更新' } });
-    fireEvent.click(screen.getByText('发送更新通知'));
-    fireEvent.click(screen.getByText('确认发送'));
-    await waitFor(() => expect(mockApi.broadcastUpdate).toHaveBeenCalledWith({ message: '紧急更新' }));
-  });
+  // updateMsg 测试也已迁出到 BroadcastPage。
 });

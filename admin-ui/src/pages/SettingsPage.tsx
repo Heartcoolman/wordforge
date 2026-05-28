@@ -1,6 +1,7 @@
 import { createSignal, Show, onMount, onCleanup, createMemo } from 'solid-js';
+import { A } from '@solidjs/router';
 import { Card } from '@/components/ui/Card';
-import { Input, TextArea } from '@/components/ui/Input';
+import { Input } from '@/components/ui/Input';
 import { Button } from '@/components/ui/Button';
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
 import { Switch } from '@/components/ui/Switch';
@@ -27,13 +28,7 @@ export default function SettingsPage() {
   // 拆分基本/AMAS 两块的 saving 标志，避免共用一个 signal 同时 spin
   const [savingBasic, setSavingBasic] = createSignal(false);
   const [savingAmas, setSavingAmas] = createSignal(false);
-  const [broadcastTitle, setBroadcastTitle] = createSignal('');
-  const [broadcastMsg, setBroadcastMsg] = createSignal('');
-  const [broadcasting, setBroadcasting] = createSignal(false);
-  const [showBroadcastConfirm, setShowBroadcastConfirm] = createSignal(false);
-  const [updateMsg, setUpdateMsg] = createSignal('');
-  const [sendingUpdate, setSendingUpdate] = createSignal(false);
-  const [showUpdateConfirm, setShowUpdateConfirm] = createSignal(false);
+  // 广播 / 更新通知模块已迁出到 /admin/broadcast（独立路由，三类广播 + 模板 + 历史）
 
   const [showMaintenanceConfirm, setShowMaintenanceConfirm] = createSignal(false);
   const [savingMaintenance, setSavingMaintenance] = createSignal(false);
@@ -119,43 +114,6 @@ export default function SettingsPage() {
     }
   }
 
-  function handleBroadcastClick() {
-    if (!broadcastTitle().trim() || !broadcastMsg().trim()) {
-      uiStore.toast.warning('请填写标题和内容');
-      return;
-    }
-    setShowBroadcastConfirm(true);
-  }
-
-  async function confirmBroadcast() {
-    setShowBroadcastConfirm(false);
-    setBroadcasting(true);
-    try {
-      const res = await adminApi.broadcast({ title: broadcastTitle(), message: broadcastMsg() });
-      uiStore.toast.success(`已发送给 ${res.sent} 位用户`);
-      setBroadcastTitle('');
-      setBroadcastMsg('');
-    } catch (err: unknown) {
-      uiStore.toast.error('发送失败', err instanceof Error ? err.message : '');
-    } finally {
-      setBroadcasting(false);
-    }
-  }
-
-  async function confirmUpdateBroadcast() {
-    setShowUpdateConfirm(false);
-    setSendingUpdate(true);
-    try {
-      await adminApi.broadcastUpdate(updateMsg().trim() ? { message: updateMsg() } : undefined);
-      uiStore.toast.success('更新通知已发送');
-      setUpdateMsg('');
-    } catch (err: unknown) {
-      uiStore.toast.error('发送失败', err instanceof Error ? err.message : '');
-    } finally {
-      setSendingUpdate(false);
-    }
-  }
-
   function handleMaintenanceToggle(value: boolean) {
     if (value) {
       setShowMaintenanceConfirm(true);
@@ -190,33 +148,6 @@ export default function SettingsPage() {
   return (
     <div class="space-y-6">
       <h1 class="text-title text-content">系统设置</h1>
-
-      {/* 广播确认弹窗 */}
-      <ConfirmDialog
-        open={showBroadcastConfirm()}
-        title="确认发送广播"
-        message={
-          <>
-            <p class="mb-2">标题: <span class="font-medium text-content">{broadcastTitle()}</span></p>
-            <p>此消息将发送给所有用户，确认发送吗？</p>
-          </>
-        }
-        confirmText="确认发送"
-        variant="warning"
-        onConfirm={confirmBroadcast}
-        onCancel={() => setShowBroadcastConfirm(false)}
-      />
-
-      {/* 更新通知确认弹窗 */}
-      <ConfirmDialog
-        open={showUpdateConfirm()}
-        title="确认发送更新通知"
-        message="此通知将提示所有在线用户刷新页面获取新版本，确认发送吗？"
-        confirmText="确认发送"
-        variant="warning"
-        onConfirm={confirmUpdateBroadcast}
-        onCancel={() => setShowUpdateConfirm(false)}
-      />
 
       {/* 维护模式确认弹窗 */}
       <ConfirmDialog
@@ -339,52 +270,24 @@ export default function SettingsPage() {
           )}
         </Show>
 
-        <Card variant="elevated">
-          <h2 class="text-headline text-content mb-4">广播消息</h2>
-          <div class="space-y-4">
-            <Input
-              label="标题"
-              value={broadcastTitle()}
-              disabled={broadcasting()}
-              onInput={(e) => setBroadcastTitle(e.currentTarget.value)}
-              placeholder="通知标题"
-            />
-            <TextArea
-              label="内容"
-              value={broadcastMsg()}
-              disabled={broadcasting()}
-              onInput={(e) => setBroadcastMsg(e.currentTarget.value)}
-              placeholder="通知内容"
-            />
-            <Button
-              onClick={handleBroadcastClick}
-              loading={broadcasting()}
-              disabled={broadcasting() || showBroadcastConfirm()}
-              variant="warning"
-            >
-              发送广播
-            </Button>
-          </div>
-        </Card>
-
-        <Card variant="elevated">
-          <h2 class="text-headline text-content mb-4">更新通知</h2>
-          <div class="space-y-4">
-            <TextArea
-              label="提示信息（可选）"
-              value={updateMsg()}
-              disabled={sendingUpdate()}
-              onInput={(e) => setUpdateMsg(e.currentTarget.value)}
-              placeholder="有新版本可用，请刷新页面获取最新内容"
-            />
-            <Button
-              onClick={() => setShowUpdateConfirm(true)}
-              loading={sendingUpdate()}
-              disabled={sendingUpdate() || showUpdateConfirm()}
-              variant="warning"
-            >
-              发送更新通知
-            </Button>
+        {/* 广播 / 更新通知模块已迁出到独立路由 */}
+        <Card variant="outlined">
+          <div class="flex items-start gap-3">
+            <div class="size-9 rounded-lg bg-info-light text-info-strong grid place-items-center shrink-0">
+              <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M11 5.882V19.24a1.76 1.76 0 01-3.417.592l-2.147-6.15M18 13a3 3 0 100-6M5.436 13.683A4.001 4.001 0 017 6h1.832c4.1 0 7.625-1.234 9.168-3v14c-1.543-1.766-5.067-3-9.168-3H7a3.988 3.988 0 01-1.564-.317z" />
+              </svg>
+            </div>
+            <div class="flex-1">
+              <h3 class="text-headline mb-1">广播 / 更新通知已迁出</h3>
+              <p class="text-sm text-content-secondary mb-3">
+                广播管理已移至独立的「系统广播」页（三类广播 + 模板库 + 发送历史 + 送达统计）。
+              </p>
+              <A href="/admin/broadcast" class="inline-flex items-center gap-1.5 text-accent text-sm font-medium hover:underline">
+                前往系统广播
+                <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M5 12h14M13 6l6 6-6 6" /></svg>
+              </A>
+            </div>
           </div>
         </Card>
       </Show>
