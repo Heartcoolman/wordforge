@@ -64,6 +64,8 @@ pub enum WorkerName {
     ErrorRateWatchdog,
     /// M1-A5：调度器健康监测，检测连续 3 周期未上报的 worker
     SchedulerHealthWatchdog,
+    /// C6:per-patch canary 自动回滚监测（每 5 分钟）
+    CanaryMonitor,
 }
 
 impl WorkerName {
@@ -86,6 +88,7 @@ impl WorkerName {
             Self::MonitoringRetention => "monitoring_retention",
             Self::ErrorRateWatchdog => "error_rate_watchdog",
             Self::SchedulerHealthWatchdog => "scheduler_health_watchdog",
+            Self::CanaryMonitor => "canary_monitor",
         }
     }
 }
@@ -275,6 +278,12 @@ impl WorkerManager {
                 name: WorkerName::SchedulerHealthWatchdog,
                 cron: "0 * * * * *",
                 enabled: self.health_state.is_some(),
+            },
+            // C6:per-patch canary 自动回滚监测，每 5 分钟；需 AppState 做 SSE
+            JobSpec {
+                name: WorkerName::CanaryMonitor,
+                cron: "0 */5 * * * *",
+                enabled: self.llm_advisor_state.is_some(),
             },
         ]
     }
@@ -496,6 +505,20 @@ impl WorkerManager {
                         let s = hw_store.clone();
                         async move {
                             scheduler_health_watchdog::run(&s, &state).await;
+                        }
+                    })
+                    .await;
+                }
+                // C6:canary_monitor —— 需 AppState 做 SSE 通知（复用 llm_advisor_state）
+                WorkerName::CanaryMonitor => {
+                    let cm_state = match self.llm_advisor_state.clone() {
+                        Some(s) => s,
+                        None => continue,
+                    };
+                    add_job(scheduler, spec.cron, name_str, job_store, health_state, move || {
+                        let state = cm_state.clone();
+                        async move {
+                            canary_monitor::run(&state).await;
                         }
                     })
                     .await;
@@ -769,6 +792,33 @@ mod tests {
                 result.err()
             );
         }
+    }
+
+    #[tokio::test]
+    async fn canary_monitor_is_registered_with_5min_cron() {
+        ensure_safe_secrets_in_env();
+        let cfg = Config::from_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(
+            Store::open(tmp.path().join("canary_mon.db").to_str().unwrap(), 5000, 1).unwrap(),
+        );
+        let amas = Arc::new(AMASEngine::new(AMASConfig::default(), store.clone()));
+        let (tx, _) = broadcast::channel(2);
+
+        let mut worker_cfg = cfg.worker.clone();
+        worker_cfg.is_leader = true;
+
+        let state =
+            crate::state::AppState::new(store.clone(), amas.clone(), &cfg, tx.clone(), false);
+        let manager = WorkerManager::new(store, amas, tx.subscribe(), &worker_cfg)
+            .with_llm_advisor_state(state);
+        let jobs = manager.planned_jobs();
+        let job = jobs
+            .iter()
+            .find(|j| j.name == WorkerName::CanaryMonitor)
+            .expect("canary_monitor 应在 planned_jobs 中");
+        assert_eq!(job.cron, "0 */5 * * * *");
+        assert!(job.enabled);
     }
 
     #[tokio::test]
