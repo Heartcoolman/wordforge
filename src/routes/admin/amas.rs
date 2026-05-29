@@ -51,6 +51,11 @@ pub fn admin_router() -> Router<AppState> {
         )
         .route("/metrics", get(get_metrics))
         .route("/metrics/timeseries", get(metrics_timeseries))
+        .route("/metrics/kpi", get(metrics_kpi))
+        .route(
+            "/metrics/algorithm-distribution",
+            get(metrics_algorithm_distribution),
+        )
         .route("/monitoring", get(get_monitoring_events))
         .route("/anomalies", get(anomalies_overview))
         .route("/user-state/distribution", get(user_state_distribution))
@@ -497,6 +502,40 @@ async fn metrics_timeseries(
         })
         .await??;
     Ok(ok(series))
+}
+
+async fn metrics_kpi(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Query(q): Query<DaysQuery>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let days = q.days.unwrap_or(7).clamp(1, 90);
+    // 疲劳触发阈值取实际生效配置（与 apply_constraints 同源），store 层无配置访问故在此读出传入。
+    let fatigue_threshold = state
+        .amas()
+        .get_config()
+        .constraints
+        .high_fatigue_threshold;
+    let kpi = state
+        .run_store_task("admin.amas.metrics_kpi", move |store| {
+            store.aggregate_amas_metrics_kpi(days, fatigue_threshold)
+        })
+        .await??;
+    Ok(ok(kpi))
+}
+
+async fn metrics_algorithm_distribution(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Query(q): Query<DaysQuery>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let days = q.days.unwrap_or(7).clamp(1, 90);
+    let dist = state
+        .run_store_task("admin.amas.metrics_algorithm_distribution", move |store| {
+            store.aggregate_amas_algorithm_distribution(days)
+        })
+        .await??;
+    Ok(ok(dist))
 }
 
 async fn anomalies_overview(
@@ -1775,6 +1814,20 @@ async fn create_canary(
     let parent_hash = suggestion.based_on_version_hash.clone();
     let percent = req.percent;
     let admin_id = admin.admin_id.clone();
+
+    // 分配下一个空闲 cohort 槽，支持多条并行 canary 占不重叠区间（[0,a)、[a,a+b)…）。
+    let active = state
+        .run_store_task("admin.amas.canary.active", |store| store.get_active_patch_canaries())
+        .await??;
+    let cohort_lo: u32 = active.iter().map(|c| c.cohort_hi).max().unwrap_or(0);
+    let cohort_hi = cohort_lo + percent;
+    if cohort_hi > 100 {
+        return Err(AppError::bad_request(
+            "CANARY_QUOTA_FULL",
+            &format!("灰度配额已满：已占用 {cohort_lo}%，再加 {percent}% 超过 100%"),
+        ));
+    }
+
     let inserted = state
         .run_store_task("admin.amas.canary.create", move |store| {
             let (_vid, vhash) = store.insert_amas_config_version(
@@ -1784,7 +1837,7 @@ async fn create_canary(
                 Some(&format!("canary suggestion#{sid}")),
                 Some(&parent_hash),
             )?;
-            let id = store.insert_patch_canary(sid, &vhash, percent, 0, percent, &baseline_json)?;
+            let id = store.insert_patch_canary(sid, &vhash, percent, cohort_lo, cohort_hi, &baseline_json)?;
             store.get_patch_canary(id)
         })
         .await??
@@ -1831,7 +1884,7 @@ async fn list_canaries(
     Ok(ok(rows))
 }
 
-/// POST /advisor/canary/:id/scale —— 扩量到目标 percent,cohort 重算 [0,percent)。
+/// POST /advisor/canary/:id/scale —— 扩量到目标 percent,保持 cohort_lo 不变扩展 hi(store 校验不与其它 active canary 重叠)。
 async fn scale_canary(
     _admin: AdminAuthUser,
     State(state): State<AppState>,
@@ -1847,7 +1900,12 @@ async fn scale_canary(
     let percent = req.percent;
     state
         .run_store_task("admin.amas.canary.scale", move |store| {
-            store.update_patch_canary_scale(id, percent, 0, percent)
+            // 保持 cohort_lo 不变，按目标 percent 扩展 hi；store 层校验与其它 active canary 不重叠。
+            let cur = store
+                .get_patch_canary(id)?
+                .ok_or_else(|| crate::store::StoreError::Validation("canary 不存在".into()))?;
+            let hi = cur.cohort_lo + percent;
+            store.update_patch_canary_scale(id, percent, cur.cohort_lo, hi)
         })
         .await?
         .map_err(|e| AppError::bad_request("SCALE_FAILED", &e.to_string()))?;

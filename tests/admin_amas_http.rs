@@ -1230,3 +1230,66 @@ async fn it_advisor_canary_manual_rollback_and_unknown_id() {
     let (status, _, _) = response_json(resp).await;
     assert!(status == StatusCode::BAD_REQUEST || status == StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn it_advisor_canary_parallel_cohorts_non_overlap() {
+    let app = spawn_test_server().await;
+    let token = common::auth::setup_admin_and_get_token(&app.app).await;
+
+    let (sid1, _) = seed_pending_suggestion(&app).await;
+    let (sid2, _) = seed_pending_suggestion(&app).await;
+    let (sid3, _) = seed_pending_suggestion(&app).await;
+
+    // canary #1 20% → 分到 cohort [0,20)
+    let resp = request(
+        &app.app,
+        Method::POST,
+        "/api/admin/amas/advisor/canary",
+        Some(serde_json::json!({ "suggestionId": sid1, "percent": 20 })),
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (status, _, body) = response_json(resp).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["cohortLo"], 0);
+    assert_eq!(body["data"]["cohortHi"], 20);
+
+    // canary #2 30% → 不应因重叠被拒,分到下一空闲槽 cohort [20,50)
+    let resp = request(
+        &app.app,
+        Method::POST,
+        "/api/admin/amas/advisor/canary",
+        Some(serde_json::json!({ "suggestionId": sid2, "percent": 30 })),
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (status, _, body) = response_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "第二条并行 canary 应成功而非 overlap 被拒");
+    assert_eq!(body["data"]["cohortLo"], 20);
+    assert_eq!(body["data"]["cohortHi"], 50);
+
+    // canary #3 60% → 50+60>100 配额满,拒绝
+    let resp = request(
+        &app.app,
+        Method::POST,
+        "/api/admin/amas/advisor/canary",
+        Some(serde_json::json!({ "suggestionId": sid3, "percent": 60 })),
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (status, _, body) = response_json(resp).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["code"], "CANARY_QUOTA_FULL");
+
+    // 两条并行 active canary 都在
+    let resp = request(
+        &app.app,
+        Method::GET,
+        "/api/admin/amas/advisor/canary",
+        None,
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (_, _, body) = response_json(resp).await;
+    assert_eq!(body["data"].as_array().unwrap().len(), 2);
+}
