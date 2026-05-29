@@ -580,7 +580,8 @@ async fn list_suggestions(
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     use crate::store::operations::amas_suggestions::SuggestionStatus;
     let limit = q.limit.unwrap_or(50).clamp(1, 500);
-    let offset = q.offset.unwrap_or(0);
+    // offset 上界裁剪：避免超大 OFFSET 触发 SQLite 顺序扫描型 DoS（limit 已 clamp）。
+    let offset = q.offset.unwrap_or(0).min(100_000);
     let status = if let Some(s) = q.status.as_deref() {
         Some(
             SuggestionStatus::parse(s)
@@ -600,12 +601,22 @@ async fn list_suggestions(
 
 // ─────────── C5: 历史导出 CSV ───────────
 
-/// CSV 字段转义：含逗号/引号/换行的值用双引号包裹，内部引号翻倍。
+/// CSV 字段转义：①公式注入中和——首字符为电子表格公式触发符时前置单引号；
+/// ②含逗号/引号/换行的值用双引号包裹，内部引号翻倍。
 fn csv_cell(s: &str) -> String {
-    if s.contains([',', '"', '\n', '\r']) {
-        format!("\"{}\"", s.replace('"', "\"\""))
+    let neutralized = if s
+        .chars()
+        .next()
+        .is_some_and(|c| matches!(c, '=' | '+' | '-' | '@' | '\t' | '\r'))
+    {
+        format!("'{s}")
     } else {
         s.to_string()
+    };
+    if neutralized.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", neutralized.replace('"', "\"\""))
+    } else {
+        neutralized
     }
 }
 
@@ -986,6 +997,13 @@ async fn delete_whitelist(
     State(state): State<AppState>,
     Path(path): Path<String>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
+    // 与 add_whitelist 一致的命名空间约束，避免单边删除非 memoryModel.* 条目削弱白名单完整性。
+    if !path.starts_with("memoryModel.") {
+        return Err(AppError::bad_request(
+            "INVALID_PATH",
+            "白名单 path 必须以 memoryModel. 开头",
+        ));
+    }
     let deleted = state
         .run_store_task("admin.amas.delete_whitelist", move |store| {
             store.delete_tuning_whitelist(&path)

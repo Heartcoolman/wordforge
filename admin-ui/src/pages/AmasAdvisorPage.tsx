@@ -234,6 +234,14 @@ export default function AmasAdvisorPage() {
               </For>
             </Show>
           </Show>
+          <Show when={tab() === 'effective' || tab() === 'rejected'}>
+            <Card variant="elevated">
+              <Empty
+                title={tab() === 'effective' ? '已生效 patch' : '已拒绝 patch'}
+                description="已决策记录见下方「已生效 Patch 历史」表，支持按状态/关键字搜索、分页与导出 CSV。"
+              />
+            </Card>
+          </Show>
         </div>
         <div class="lg:col-span-4 space-y-3">
           <Show when={costDaily()}>

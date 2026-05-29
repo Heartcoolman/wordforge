@@ -299,7 +299,10 @@ impl AMASEngine {
         );
 
         let latency_ms = start.elapsed().as_millis() as i64;
-        let config_version = self.config_hash.read().clone();
+        // 用本次请求实际生效的配置算 hash（命中 canary 时即 canary 配置），与 create_canary
+        // 落库的 version_hash 同源，保证 canary 切片可被 aggregate_amas_version_slice 聚合、
+        // 自动回滚/实测指标管线生效；否则恒打 stable hash 会让 canary 切片永远为空。
+        let config_version = monitoring::compute_config_hash(&context.config);
         drop(_guard);
         self.emit_monitoring(
             user_id,
