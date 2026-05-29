@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::amas::config::AMASConfig;
@@ -30,6 +32,15 @@ pub struct MonitoringEvent {
     pub reward_value: f64,
     #[serde(default)]
     pub config_version: String,
+    /// 本次决策最终采纳的主算法（权重最大者，与 algorithm_metrics_daily.algorithm_id 同口径小写）
+    #[serde(default)]
+    pub routing_algo: String,
+    /// 各候选算法路由权重分布，键为算法小写名，值为权重（ensemble 多项、fallback 单项=1.0）
+    #[serde(default)]
+    pub routing_weights: serde_json::Value,
+    /// 本次答题事件是否正确（来自 RawEvent.is_correct），用于按版本聚合命中率
+    #[serde(default)]
+    pub is_correct: bool,
 }
 
 pub fn check_invariants(result: &ProcessResult) -> Vec<InvariantViolation> {
@@ -141,6 +152,8 @@ pub fn record_event(
     config: &AMASConfig,
     pre_constraint_strategy: &StrategyParams,
     config_version: &str,
+    routing_weights: &HashMap<AlgorithmId, f64>,
+    is_correct: bool,
 ) {
     let violations = check_invariants(result);
     let is_anomaly = !violations.is_empty();
@@ -154,6 +167,19 @@ pub fn record_event(
     }
 
     let selection_constraints_met = result.strategy == *pre_constraint_strategy;
+
+    // 路由分布：主算法取权重最大者，权重 JSON 用小写算法名作键（对齐 algorithm_metrics_daily 口径）
+    let routing_algo = routing_weights
+        .iter()
+        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(algo, _)| algo.as_str().to_string())
+        .unwrap_or_default();
+    let routing_weights_value = serde_json::Value::Object(
+        routing_weights
+            .iter()
+            .map(|(algo, w)| (algo.as_str().to_string(), serde_json::json!(w)))
+            .collect(),
+    );
 
     let event = MonitoringEvent {
         id: uuid::Uuid::new_v4().to_string(),
@@ -171,6 +197,9 @@ pub fn record_event(
         selection_constraints_met,
         reward_value: result.reward.value,
         config_version: config_version.to_string(),
+        routing_algo,
+        routing_weights: routing_weights_value,
+        is_correct,
     };
 
     if is_anomaly {
@@ -299,7 +328,10 @@ mod tests {
         state.attention = 2.0; // 越界 → anomaly → 必落
         let strategy = StrategyParams::default();
         let result = make_result(state, strategy.clone(), None);
-        record_event(&store, "u1", "s1", &result, 12, &config, &strategy, "v1");
+        record_event(
+            &store, "u1", "s1", &result, 12, &config, &strategy, "v1",
+            &HashMap::new(), false,
+        );
         // 落库
         let evts = store.get_recent_monitoring_events(10).unwrap();
         assert!(!evts.is_empty());
@@ -312,7 +344,10 @@ mod tests {
         config.monitoring.sample_rate = 0.0;
         let strategy = StrategyParams::default();
         let result = make_result(UserState::default(), strategy.clone(), None);
-        record_event(&store, "u1", "s1", &result, 10, &config, &strategy, "v1");
+        record_event(
+            &store, "u1", "s1", &result, 10, &config, &strategy, "v1",
+            &HashMap::new(), false,
+        );
         assert!(store.get_recent_monitoring_events(10).unwrap().is_empty());
     }
 
@@ -327,7 +362,10 @@ mod tests {
             strategy.clone(),
             Some(ColdStartPhase::Explore),
         );
-        record_event(&store, "u1", "s1", &result, 10, &config, &strategy, "v1");
+        record_event(
+            &store, "u1", "s1", &result, 10, &config, &strategy, "v1",
+            &HashMap::new(), false,
+        );
         assert!(!store.get_recent_monitoring_events(10).unwrap().is_empty());
     }
 }

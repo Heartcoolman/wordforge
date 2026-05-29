@@ -58,6 +58,7 @@ fn migrations() -> Vec<(&'static str, MigrationFn)> {
         ("023_user_profile_extras", m023_user_profile_extras),
         ("024_client_extras", m024_client_extras),
         ("025_amas_advisor", m025_amas_advisor),
+        ("026_amas_decision_capture", m026_amas_decision_capture),
     ]
 }
 
@@ -99,6 +100,7 @@ fn migrations_down() -> Vec<(&'static str, MigrationFn)> {
         ("023_user_profile_extras", m023_user_profile_extras_down),
         ("024_client_extras", m024_client_extras_down),
         ("025_amas_advisor", m025_amas_advisor_down),
+        ("026_amas_decision_capture", m026_amas_decision_capture_down),
     ]
 }
 
@@ -1452,6 +1454,57 @@ fn m025_amas_advisor_down(store: &Store) -> Result<(), StoreError> {
             "ALTER TABLE system_settings DROP COLUMN amas_grayscale_steps",
             [],
         )?;
+    }
+    Ok(())
+}
+
+/// m026:engine_monitoring_events 决策埋点三列 —— routing_algo / routing_weights_json /
+/// is_correct。生产 INSERT 此前只写 6 列、14 个专用列恒为 DEFAULT，本迁移配合 INSERT 重写
+/// 让决策算法路由分布与首答对错可被 SQL 聚合（甜甜圈分布 / ensemble 路由占比 / 命中率）。
+/// 列守卫保证幂等。
+fn m026_amas_decision_capture(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    let cols: Vec<String> = conn
+        .prepare("PRAGMA table_info(engine_monitoring_events)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .collect();
+    if !cols.iter().any(|c| c == "routing_algo") {
+        conn.execute(
+            "ALTER TABLE engine_monitoring_events ADD COLUMN routing_algo TEXT NOT NULL DEFAULT ''",
+            [],
+        )?;
+    }
+    if !cols.iter().any(|c| c == "routing_weights_json") {
+        conn.execute(
+            "ALTER TABLE engine_monitoring_events ADD COLUMN routing_weights_json TEXT NOT NULL DEFAULT '{}'",
+            [],
+        )?;
+    }
+    if !cols.iter().any(|c| c == "is_correct") {
+        conn.execute(
+            "ALTER TABLE engine_monitoring_events ADD COLUMN is_correct INTEGER NOT NULL DEFAULT 0 CHECK (is_correct IN (0, 1))",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+/// m026 down:SQLite 支持 ALTER TABLE DROP COLUMN（仅 dev/test，生产严禁 down）。
+fn m026_amas_decision_capture_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    let cols: Vec<String> = conn
+        .prepare("PRAGMA table_info(engine_monitoring_events)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .collect();
+    for col in ["is_correct", "routing_weights_json", "routing_algo"] {
+        if cols.iter().any(|c| c == col) {
+            conn.execute(
+                &format!("ALTER TABLE engine_monitoring_events DROP COLUMN {col}"),
+                [],
+            )?;
+        }
     }
     Ok(())
 }

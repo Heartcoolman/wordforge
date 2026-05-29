@@ -279,6 +279,10 @@ export const adminApi = {
   // ─────────── AMAS 可视化指标（PR-3） ───────────
   amasMetricsTimeseries: (days = 7) =>
     api.get<AmasMetricsTimeseriesPoint[]>('/api/admin/amas/metrics/timeseries', { days }, { useAdminToken: true }),
+  amasMetricsKpi: (days = 7) =>
+    api.get<AmasMetricsKpi>('/api/admin/amas/metrics/kpi', { days }, { useAdminToken: true }),
+  amasAlgorithmDistribution: (days = 7) =>
+    api.get<AmasAlgorithmShare[]>('/api/admin/amas/metrics/algorithm-distribution', { days }, { useAdminToken: true }),
   amasAnomaliesOverview: (days = 7) =>
     api.get<AmasAnomalyOverview>('/api/admin/amas/anomalies', { days }, { useAdminToken: true }),
   amasUserStateDistribution: (days = 1, bins = 20) =>
@@ -545,6 +549,24 @@ export interface AmasMetricsTimeseriesPoint {
   callCount: number;
   avgLatencyUs: number;
   errorCount: number;
+}
+
+/** PR-1:metrics tab 顶部 4 KPI（决策总数/命中率/平均决策耗时/疲劳触发率） */
+export interface AmasMetricsKpi {
+  decisionTotal: number;
+  hitCount: number;
+  hitRate: number;
+  avgLatencyMs: number;
+  fatigueTriggerCount: number;
+  fatigueTriggerRate: number;
+  fatigueThreshold: number;
+}
+
+/** PR-1:8 算法决策分布甜甜圈单项（algorithm 为小写算法名，pct 为 0-1 占比） */
+export interface AmasAlgorithmShare {
+  algorithm: string;
+  count: number;
+  pct: number;
 }
 
 export interface AmasDailyAnomaly {

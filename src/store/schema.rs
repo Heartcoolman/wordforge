@@ -449,6 +449,9 @@ CREATE TABLE IF NOT EXISTS engine_monitoring_events (
     selection_constraints_met INTEGER NOT NULL DEFAULT 0 CHECK (selection_constraints_met IN (0, 1)),
     reward_value REAL NOT NULL DEFAULT 0.0,
     config_version TEXT NOT NULL DEFAULT '',
+    routing_algo TEXT NOT NULL DEFAULT '',
+    routing_weights_json TEXT NOT NULL DEFAULT '{}',
+    is_correct INTEGER NOT NULL DEFAULT 0 CHECK (is_correct IN (0, 1)),
     PRIMARY KEY (id)
 );
 CREATE INDEX IF NOT EXISTS idx_monitoring_events_timestamp

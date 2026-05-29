@@ -412,6 +412,112 @@ fn build_histogram(
     }
 }
 
+// ─────────── PR-1: metrics tab KPI 与算法决策分布 ───────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AmasMetricsKpi {
+    pub decision_total: u64,
+    pub hit_count: u64,
+    pub hit_rate: f64,
+    pub avg_latency_ms: f64,
+    pub fatigue_trigger_count: u64,
+    pub fatigue_trigger_rate: f64,
+    pub fatigue_threshold: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlgorithmShare {
+    pub algorithm: String,
+    pub count: u64,
+    pub pct: f64,
+}
+
+impl Store {
+    /// metrics tab 顶部 4 个 KPI：N 天决策总数 / 命中率(is_correct) / 平均决策耗时(latency_ms) /
+    /// 疲劳触发率(user_state_fatigue >= 阈值)。阈值来自 AMASConfig.constraints.high_fatigue_threshold，
+    /// 由 handler 读出后传入（store 层无配置访问）。
+    pub fn aggregate_amas_metrics_kpi(
+        &self,
+        days: u32,
+        fatigue_threshold: f64,
+    ) -> Result<AmasMetricsKpi, StoreError> {
+        let cutoff = (Utc::now() - Duration::days(days as i64)).to_rfc3339();
+        let conn = self.conn()?;
+        let row = conn.query_row(
+            "SELECT
+                COUNT(*),
+                COALESCE(SUM(is_correct), 0),
+                COALESCE(AVG(latency_ms), 0.0),
+                COALESCE(SUM(CASE WHEN user_state_fatigue >= ?2 THEN 1 ELSE 0 END), 0)
+             FROM engine_monitoring_events
+             WHERE timestamp >= ?1",
+            rusqlite::params![cutoff, fatigue_threshold],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)? as u64,
+                    row.get::<_, i64>(1)? as u64,
+                    row.get::<_, f64>(2)?,
+                    row.get::<_, i64>(3)? as u64,
+                ))
+            },
+        )?;
+        let decision_total = row.0;
+        let rate = |num: u64| {
+            if decision_total > 0 {
+                num as f64 / decision_total as f64
+            } else {
+                0.0
+            }
+        };
+        Ok(AmasMetricsKpi {
+            decision_total,
+            hit_count: row.1,
+            hit_rate: rate(row.1),
+            avg_latency_ms: row.2,
+            fatigue_trigger_count: row.3,
+            fatigue_trigger_rate: rate(row.3),
+            fatigue_threshold,
+        })
+    }
+
+    /// metrics tab 8 算法决策分布甜甜圈：按 routing_algo 分组统计 N 天决策占比。
+    /// 排除空 routing_algo（PR-0 前的历史行或未记录路由的行），降序返回。
+    pub fn aggregate_amas_algorithm_distribution(
+        &self,
+        days: u32,
+    ) -> Result<Vec<AlgorithmShare>, StoreError> {
+        let cutoff = (Utc::now() - Duration::days(days as i64)).to_rfc3339();
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT routing_algo, COUNT(*)
+             FROM engine_monitoring_events
+             WHERE timestamp >= ?1 AND routing_algo != ''
+             GROUP BY routing_algo
+             ORDER BY COUNT(*) DESC",
+        )?;
+        let rows = stmt
+            .query_map([&cutoff], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u64))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let total: u64 = rows.iter().map(|(_, c)| *c).sum();
+        Ok(rows
+            .into_iter()
+            .map(|(algorithm, count)| AlgorithmShare {
+                algorithm,
+                count,
+                pct: if total > 0 {
+                    count as f64 / total as f64
+                } else {
+                    0.0
+                },
+            })
+            .collect())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -525,5 +631,70 @@ mod tests {
         assert_eq!(series[0].call_count, 100);
         assert!((series[0].avg_latency_us - 2000.0).abs() < 1e-6);
         assert_eq!(series[0].error_count, 2);
+    }
+
+    #[test]
+    fn metrics_kpi_aggregates_hit_and_fatigue() {
+        let store = fresh_store();
+        let now = Utc::now().to_rfc3339();
+        {
+            let conn = store.conn().unwrap();
+            let rows = [
+                ("k1", 1, 0.2, 4),
+                ("k2", 0, 0.7, 6),
+                ("k3", 1, 0.9, 8),
+                ("k4", 0, 0.1, 2),
+            ];
+            for (id, correct, fatigue, lat) in rows {
+                conn.execute(
+                    "INSERT INTO engine_monitoring_events
+                     (id,user_id,session_id,timestamp,latency_ms,user_state_fatigue,is_correct,routing_algo)
+                     VALUES (?1,'u1','s1',?2,?3,?4,?5,'ensemble')",
+                    params![id, now, lat, fatigue, correct],
+                )
+                .unwrap();
+            }
+        }
+        let kpi = store.aggregate_amas_metrics_kpi(7, 0.6).unwrap();
+        assert_eq!(kpi.decision_total, 4);
+        assert_eq!(kpi.hit_count, 2);
+        assert!((kpi.hit_rate - 0.5).abs() < 1e-9);
+        assert!((kpi.avg_latency_ms - 5.0).abs() < 1e-9); // (4+6+8+2)/4
+        assert_eq!(kpi.fatigue_trigger_count, 2); // 0.7, 0.9 >= 0.6
+        assert!((kpi.fatigue_trigger_rate - 0.5).abs() < 1e-9);
+        assert!((kpi.fatigue_threshold - 0.6).abs() < 1e-9);
+    }
+
+    #[test]
+    fn algorithm_distribution_groups_and_excludes_empty() {
+        let store = fresh_store();
+        let now = Utc::now().to_rfc3339();
+        {
+            let conn = store.conn().unwrap();
+            let rows = [
+                ("a1", "ensemble"),
+                ("a2", "ensemble"),
+                ("a3", "ensemble"),
+                ("a4", "mdm"),
+                ("a5", ""),
+                ("a6", ""),
+            ];
+            for (id, algo) in rows {
+                conn.execute(
+                    "INSERT INTO engine_monitoring_events
+                     (id,user_id,session_id,timestamp,routing_algo)
+                     VALUES (?1,'u1','s1',?2,?3)",
+                    params![id, now, algo],
+                )
+                .unwrap();
+            }
+        }
+        let dist = store.aggregate_amas_algorithm_distribution(7).unwrap();
+        assert_eq!(dist.len(), 2); // 空 routing_algo 被排除
+        assert_eq!(dist[0].algorithm, "ensemble");
+        assert_eq!(dist[0].count, 3);
+        assert!((dist[0].pct - 0.75).abs() < 1e-9); // 3/(3+1)
+        assert_eq!(dist[1].algorithm, "mdm");
+        assert_eq!(dist[1].count, 1);
     }
 }

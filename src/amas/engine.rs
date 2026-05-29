@@ -311,6 +311,8 @@ impl AMASEngine {
             &context.config,
             &strategy.final_strategy,
             &config_version,
+            &strategy.weights,
+            raw_event.is_correct,
         );
 
         Ok(result)
@@ -1458,6 +1460,7 @@ impl AMASEngine {
         "综合多维度指标生成个性化学习策略".to_string()
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn emit_monitoring(
         &self,
         user_id: &str,
@@ -1466,6 +1469,8 @@ impl AMASEngine {
         config: &AMASConfig,
         pre_constraint_strategy: &StrategyParams,
         config_version: &str,
+        routing_weights: &HashMap<AlgorithmId, f64>,
+        is_correct: bool,
     ) {
         monitoring::record_event(
             &self.store,
@@ -1476,6 +1481,8 @@ impl AMASEngine {
             config,
             pre_constraint_strategy,
             config_version,
+            routing_weights,
+            is_correct,
         );
     }
 }
