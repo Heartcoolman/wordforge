@@ -80,7 +80,7 @@ describe('Advisor 关键路径：进灰度 → 扩量 → 回滚', () => {
 
     // 2. 扩量到 60%
     fireEvent.click(screen.getByText(/扩量到 60%/));
-    await waitFor(() => expect(screen.getByText('60%')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/60%/)).toBeInTheDocument());
     expect(mockApi.amasScaleCanary).toHaveBeenCalledWith(11, 60);
 
     // 3. 回滚

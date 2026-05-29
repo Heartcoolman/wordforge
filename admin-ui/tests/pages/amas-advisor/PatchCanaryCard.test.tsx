@@ -19,8 +19,8 @@ describe('PatchCanaryCard', () => {
       <PatchCanaryCard c={c} steps={[20, 60, 100]} busy={false}
         onScale={noop} onRollback={noop} onPromote={noop} />
     ));
-    expect(screen.getByText('20%')).toBeInTheDocument();
-    expect(screen.getByText(/实测 reward/)).toBeInTheDocument();
+    expect(screen.getByText(/20%/)).toBeInTheDocument();
+    expect(screen.getByText(/reward 0\.55/)).toBeInTheDocument();
     // liveReward 0.55 > baseline 0.5 → 升幅 +0.05
     expect(screen.getByText(/\+0\.05/)).toBeInTheDocument();
   });
