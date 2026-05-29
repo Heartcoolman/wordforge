@@ -1063,3 +1063,170 @@ async fn it_amas_suggestion_rollback() {
     let (_, _, got_body) = response_json(got).await;
     assert_eq!(got_body["data"]["status"], "superseded");
 }
+
+// ─────────────────── C6:per-patch canary 子系统 ───────────────────
+
+/// 落一条 pending suggestion(基于当前 stable 序列化后的真实 version snapshot),返回 (suggestion_id, version_hash)。
+async fn seed_pending_suggestion(app: &common::app::TestApp) -> (i64, String) {
+    use learning_backend::store::operations::amas_suggestions::{
+        InsertSuggestion, SuggestionStatus,
+    };
+    use learning_backend::store::operations::amas_versions::ConfigVersionSource;
+
+    let store = app.state.store();
+    // 1) 落一个可灰度的 version snapshot(取当前 stable 序列化)
+    let snap = serde_json::to_string(&app.state.amas().get_config()).unwrap();
+    let (_vid, vhash) = store
+        .insert_amas_config_version(&snap, "admin", ConfigVersionSource::Manual, None, None)
+        .unwrap();
+
+    // 2) 落一条 pending suggestion(patch 用一个白名单内合法字段)
+    let sid = store
+        .insert_amas_suggestion(&InsertSuggestion {
+            based_on_version_hash: vhash.clone(),
+            patch_json: r#"{"memoryModel.baseDesiredRetention":0.9}"#.into(),
+            rationale: "canary test".into(),
+            evidence_json: "{}".into(),
+            cost_usd: Some(0.0),
+            tokens_input: Some(0),
+            tokens_output: Some(0),
+            confidence: Some(0.9),
+            initial_status: SuggestionStatus::Pending,
+            decided_by: None,
+            decision_note: None,
+            base_values_json: None,
+        })
+        .unwrap();
+    (sid, vhash)
+}
+
+#[tokio::test]
+async fn it_advisor_canary_create_scale_rollback_promote() {
+    let app = spawn_test_server().await;
+    let token = common::auth::setup_admin_and_get_token(&app.app).await;
+
+    let (suggestion_id, _vhash) = seed_pending_suggestion(&app).await;
+
+    // 1) 创建 canary 20%
+    let resp = request(
+        &app.app,
+        Method::POST,
+        "/api/admin/amas/advisor/canary",
+        Some(serde_json::json!({ "suggestionId": suggestion_id, "percent": 20 })),
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (status, _, body) = response_json(resp).await;
+    assert_eq!(status, StatusCode::OK);
+    let canary_id = body["data"]["id"].as_i64().expect("canary id");
+    assert_eq!(body["data"]["percent"], 20);
+    assert_eq!(body["data"]["status"], "active");
+
+    // 2) GET 列表含 live 字段
+    let resp = request(
+        &app.app,
+        Method::GET,
+        "/api/admin/amas/advisor/canary",
+        None,
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (status, _, body) = response_json(resp).await;
+    assert_eq!(status, StatusCode::OK);
+    let arr = body["data"].as_array().expect("canary array");
+    assert_eq!(arr.len(), 1);
+    assert!(arr[0].get("liveReward").is_some());
+    assert!(arr[0].get("liveAnomalyRate").is_some());
+    assert!(arr[0].get("baselineReward").is_some());
+
+    // 3) 扩量到 60%
+    let resp = request(
+        &app.app,
+        Method::POST,
+        &format!("/api/admin/amas/advisor/canary/{canary_id}/scale"),
+        Some(serde_json::json!({ "percent": 60 })),
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (status, _, _) = response_json(resp).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // 4) percent 越界 → 400
+    let resp = request(
+        &app.app,
+        Method::POST,
+        &format!("/api/admin/amas/advisor/canary/{canary_id}/scale"),
+        Some(serde_json::json!({ "percent": 150 })),
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (status, _, _) = response_json(resp).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // 5) 100% 提升 stable
+    let resp = request(
+        &app.app,
+        Method::POST,
+        &format!("/api/admin/amas/advisor/canary/{canary_id}/scale"),
+        Some(serde_json::json!({ "percent": 100 })),
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (status, _, _) = response_json(resp).await;
+    assert_eq!(status, StatusCode::OK);
+    let resp = request(
+        &app.app,
+        Method::POST,
+        &format!("/api/admin/amas/advisor/canary/{canary_id}/promote"),
+        None,
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (status, _, body) = response_json(resp).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["promoted"], true);
+    assert!(body["data"]["versionHash"].is_string());
+}
+
+#[tokio::test]
+async fn it_advisor_canary_manual_rollback_and_unknown_id() {
+    let app = spawn_test_server().await;
+    let token = common::auth::setup_admin_and_get_token(&app.app).await;
+    let (suggestion_id, _vhash) = seed_pending_suggestion(&app).await;
+
+    let resp = request(
+        &app.app,
+        Method::POST,
+        "/api/admin/amas/advisor/canary",
+        Some(serde_json::json!({ "suggestionId": suggestion_id, "percent": 20 })),
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (_, _, body) = response_json(resp).await;
+    let canary_id = body["data"]["id"].as_i64().unwrap();
+
+    // 手动回滚
+    let resp = request(
+        &app.app,
+        Method::POST,
+        &format!("/api/admin/amas/advisor/canary/{canary_id}/rollback"),
+        None,
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (status, _, body) = response_json(resp).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["rolledBack"], true);
+
+    // 回滚不存在 id → 400/404
+    let resp = request(
+        &app.app,
+        Method::POST,
+        "/api/admin/amas/advisor/canary/99999/rollback",
+        None,
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (status, _, _) = response_json(resp).await;
+    assert!(status == StatusCode::BAD_REQUEST || status == StatusCode::NOT_FOUND);
+}

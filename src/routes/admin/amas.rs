@@ -82,6 +82,11 @@ pub fn admin_router() -> Router<AppState> {
             "/advisor/whitelist/:path",
             axum::routing::delete(delete_whitelist),
         )
+        // C6: per-patch canary 子系统
+        .route("/advisor/canary", get(list_canaries).post(create_canary))
+        .route("/advisor/canary/:id/scale", post(scale_canary))
+        .route("/advisor/canary/:id/rollback", post(rollback_canary))
+        .route("/advisor/canary/:id/promote", post(promote_canary))
 }
 
 // ─────────────────── m022:TOML 互转 + canary ───────────────────
@@ -1673,4 +1678,229 @@ async fn update_advisor_config(
 
     let llm = state.config().llm.clone();
     Ok(ok(build_advisor_config(&llm, &settings)))
+}
+
+// ─────────────────── C6:per-patch canary 子系统 ───────────────────
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateCanaryRequest {
+    suggestion_id: i64,
+    /// 灰度初始百分比 1..=100,cohort 取 [0, percent)。
+    percent: u32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ScaleCanaryRequest {
+    percent: u32,
+}
+
+/// POST /advisor/canary —— approve 一条 pending suggestion 进灰度(非直接生效)。
+/// 落 canary version snapshot + 抓 stable baseline 切片 + 建 patch_canary 行(cohort [0,percent))。
+async fn create_canary(
+    admin: AdminAuthUser,
+    State(state): State<AppState>,
+    JsonBody(req): JsonBody<CreateCanaryRequest>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    use crate::store::operations::amas_suggestions::SuggestionStatus;
+
+    if req.percent == 0 || req.percent > 100 {
+        return Err(AppError::bad_request(
+            "INVALID_PERCENT",
+            "percent must be in 1..=100",
+        ));
+    }
+
+    // 取 pending suggestion + 校验状态
+    let sid = req.suggestion_id;
+    let suggestion = state
+        .run_store_task("admin.amas.canary.create_lookup", move |store| {
+            store.get_amas_suggestion(sid)
+        })
+        .await??
+        .ok_or_else(|| AppError::not_found("建议不存在"))?;
+    if !matches!(suggestion.status, SuggestionStatus::Pending) {
+        return Err(AppError::bad_request("BAD_STATUS", "仅 pending 建议可进灰度"));
+    }
+
+    // baseline:当前 stable version 的切片(灰度起点)
+    let stable_hash = suggestion.based_on_version_hash.clone();
+    let baseline_json = state
+        .run_store_task("admin.amas.canary.baseline", move |store| {
+            store.aggregate_amas_version_slice(&stable_hash)
+        })
+        .await?
+        .map(|slice| serde_json::to_string(&slice).unwrap_or_else(|_| "{}".into()))
+        .unwrap_or_else(|_| "{}".into());
+
+    // 落 canary version snapshot:把 patch 应用到 stable 后入版本表(与 approve 同构造)
+    let patch_obj = suggestion
+        .patch_json
+        .as_object()
+        .ok_or_else(|| AppError::internal("patch_json 非对象"))?
+        .clone();
+    let current = state.amas().get_config();
+    let mut cfg_value =
+        serde_json::to_value(&current).map_err(|e| AppError::internal(&format!("ser: {e}")))?;
+    for (path, value) in &patch_obj {
+        write_path(&mut cfg_value, path, value.clone());
+    }
+    let new_cfg: crate::amas::config::AMASConfig = serde_json::from_value(cfg_value)
+        .map_err(|e| AppError::bad_request("PATCH_INVALID", &format!("应用 patch 失败: {e}")))?;
+    new_cfg
+        .validate()
+        .map_err(|e| AppError::bad_request("AMAS_INVALID_CONFIG", &e))?;
+    let snapshot_json = serde_json::to_string(&new_cfg)
+        .map_err(|e| AppError::internal(&format!("配置序列化失败: {e}")))?;
+
+    let parent_hash = suggestion.based_on_version_hash.clone();
+    let percent = req.percent;
+    let admin_id = admin.admin_id.clone();
+    let inserted = state
+        .run_store_task("admin.amas.canary.create", move |store| {
+            let (_vid, vhash) = store.insert_amas_config_version(
+                &snapshot_json,
+                &admin_id,
+                ConfigVersionSource::LlmSuggested,
+                Some(&format!("canary suggestion#{sid}")),
+                Some(&parent_hash),
+            )?;
+            let id = store.insert_patch_canary(sid, &vhash, percent, 0, percent, &baseline_json)?;
+            store.get_patch_canary(id)
+        })
+        .await??
+        .ok_or_else(|| AppError::internal("canary 落库后读取失败"))?;
+
+    Ok(ok(serde_json::to_value(&inserted).unwrap()))
+}
+
+/// GET /advisor/canary —— active+历史列表,每行附 live 切片(liveReward/liveAnomalyRate/baselineReward)。
+async fn list_canaries(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let rows = state
+        .run_store_task("admin.amas.canary.list", |store| {
+            let canaries = store.list_patch_canaries(None)?;
+            let mut out = Vec::with_capacity(canaries.len());
+            for c in canaries {
+                let live = store
+                    .aggregate_amas_version_slice(&c.version_hash)
+                    .unwrap_or_default();
+                let baseline: serde_json::Value =
+                    serde_json::from_str(&c.baseline_metrics_json).unwrap_or(serde_json::json!({}));
+                let mut v = serde_json::to_value(&c).unwrap_or(serde_json::json!({}));
+                if let Some(obj) = v.as_object_mut() {
+                    obj.insert("liveReward".into(), serde_json::json!(live.mean_reward));
+                    obj.insert(
+                        "liveAnomalyRate".into(),
+                        serde_json::json!(live.anomaly_rate),
+                    );
+                    obj.insert(
+                        "baselineReward".into(),
+                        baseline
+                            .get("meanReward")
+                            .cloned()
+                            .unwrap_or(serde_json::json!(0.0)),
+                    );
+                }
+                out.push(v);
+            }
+            Ok::<_, crate::store::StoreError>(out)
+        })
+        .await??;
+    Ok(ok(rows))
+}
+
+/// POST /advisor/canary/:id/scale —— 扩量到目标 percent,cohort 重算 [0,percent)。
+async fn scale_canary(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    JsonBody(req): JsonBody<ScaleCanaryRequest>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    if req.percent == 0 || req.percent > 100 {
+        return Err(AppError::bad_request(
+            "INVALID_PERCENT",
+            "percent must be in 1..=100",
+        ));
+    }
+    let percent = req.percent;
+    state
+        .run_store_task("admin.amas.canary.scale", move |store| {
+            store.update_patch_canary_scale(id, percent, 0, percent)
+        })
+        .await?
+        .map_err(|e| AppError::bad_request("SCALE_FAILED", &e.to_string()))?;
+    let updated = state
+        .run_store_task("admin.amas.canary.scale_read", move |store| {
+            store.get_patch_canary(id)
+        })
+        .await??
+        .ok_or_else(|| AppError::not_found("canary 不存在"))?;
+    Ok(ok(serde_json::to_value(&updated).unwrap()))
+}
+
+/// POST /advisor/canary/:id/rollback —— 手动回滚(status='rolled_back')。
+async fn rollback_canary(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    state
+        .run_store_task("admin.amas.canary.rollback", move |store| {
+            store.set_patch_canary_status(id, "rolled_back")
+        })
+        .await?
+        .map_err(|e| AppError::bad_request("ROLLBACK_FAILED", &e.to_string()))?;
+    Ok(ok(serde_json::json!({ "rolledBack": true })))
+}
+
+/// POST /advisor/canary/:id/promote —— 100% → 提升 stable,status='effective'。
+async fn promote_canary(
+    admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let canary = state
+        .run_store_task("admin.amas.canary.promote_lookup", move |store| {
+            store.get_patch_canary(id)
+        })
+        .await??
+        .ok_or_else(|| AppError::not_found("canary 不存在"))?;
+    if canary.status != "active" {
+        return Err(AppError::bad_request("BAD_STATUS", "仅 active canary 可提升"));
+    }
+    if canary.percent != 100 {
+        return Err(AppError::bad_request(
+            "NOT_FULL_ROLLOUT",
+            "仅 100% 灰度可提升 stable",
+        ));
+    }
+    // 把 canary version snapshot 提升为 stable(复用 restore 通路)
+    let vhash = canary.version_hash.clone();
+    let vhash_lookup = vhash.clone();
+    let detail = state
+        .run_store_task("admin.amas.canary.promote_version", move |store| {
+            store.get_amas_config_version(&vhash_lookup)
+        })
+        .await??
+        .ok_or_else(|| AppError::internal("canary version 不存在"))?;
+    let cfg: crate::amas::config::AMASConfig = serde_json::from_value(detail.snapshot_json)
+        .map_err(|e| AppError::internal(&format!("快照反序列化失败: {e}")))?;
+    apply_and_persist_config(
+        &state,
+        &admin.admin_id,
+        cfg,
+        ConfigVersionSource::Manual,
+        Some(format!("promote canary#{id} → stable")),
+    )
+    .await?;
+    state
+        .run_store_task("admin.amas.canary.promote_status", move |store| {
+            store.set_patch_canary_status(id, "effective")
+        })
+        .await??;
+    Ok(ok(serde_json::json!({ "promoted": true, "versionHash": vhash })))
 }
