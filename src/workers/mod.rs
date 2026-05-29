@@ -1,5 +1,6 @@
 pub mod algorithm_optimization;
 pub mod cache_cleanup;
+pub mod canary_monitor;
 pub mod config_watcher;
 pub mod confusion_pair_cache;
 pub mod daily_aggregation;
