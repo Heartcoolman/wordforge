@@ -205,6 +205,7 @@ pub struct AppState {
     /// m027：强制升级策略 60s 内存缓存。device_middleware 每请求都要读策略比较
     /// x-app-version，纯 SQLite 查询 ~100µs 但量大时也会成为瓶颈；缓存键 = platform。
     /// 写入端点(`PUT /admin/clients/upgrade-policy/:platform`)调 invalidate_upgrade_cache。
+    #[allow(clippy::type_complexity)]
     upgrade_policy_cache: Arc<
         std::sync::RwLock<
             Option<(

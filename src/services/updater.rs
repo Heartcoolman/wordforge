@@ -575,6 +575,7 @@ impl Updater {
         outcome
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn apply_locked<F>(
         &self,
         latest: &CachedRelease,
@@ -1282,7 +1283,7 @@ fn spawn_watcher_then_exit_parent(args: WatcherArgs) -> ! {
         unsafe {
             libc::setsid();
             // 关 stdio：避免 watcher 的输出污染 systemd journal 接管的新主进程
-            let null = libc::open(b"/dev/null\0".as_ptr() as *const _, libc::O_RDWR);
+            let null = libc::open(c"/dev/null".as_ptr(), libc::O_RDWR);
             if null >= 0 {
                 libc::dup2(null, 0);
                 libc::dup2(null, 1);
@@ -1313,6 +1314,7 @@ fn spawn_watcher_then_exit_parent(_args: WatcherArgs) -> ! {
 ///    - 通过 → 更新 audit outcome=success
 ///    - 超时 → rollback binary/static + kill 当前主进程让 systemd 起 rolled-back binary
 ///            + 更新 audit outcome=rolled_back
+#[allow(clippy::doc_overindented_list_items)]
 fn run_watcher(args: &WatcherArgs) {
     std::thread::sleep(std::time::Duration::from_secs(10));
 

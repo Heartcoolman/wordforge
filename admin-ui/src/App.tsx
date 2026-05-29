@@ -1,4 +1,4 @@
-import { Router, Route, useLocation } from '@solidjs/router';
+import { Router, Route, useLocation, type RouteSectionProps } from '@solidjs/router';
 import { lazy, Suspense, Show, onMount, onCleanup } from 'solid-js';
 import { Toaster } from '@/components/ui/Toast';
 import { AppErrorBoundary } from '@/components/ErrorBoundary';
@@ -43,7 +43,7 @@ function PageSpinner() {
   );
 }
 
-function MaintenanceProvider(props: { children: any }) {
+function MaintenanceProvider(props: RouteSectionProps) {
   let pollTimer: ReturnType<typeof setInterval> | undefined;
   let initialVersion: string | undefined;
   const location = useLocation();

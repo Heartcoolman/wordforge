@@ -162,7 +162,7 @@ impl Store {
              ORDER BY is_banned DESC, last_seen_at DESC",
         )?;
         let offset = format!("-{} minutes", minutes);
-        let rows = stmt.query_map(params![offset], |r| Ok(row_to_client_device(r)?))?;
+        let rows = stmt.query_map(params![offset], row_to_client_device)?;
         let mut result = Vec::new();
         for row in rows {
             result.push(row?);
@@ -250,7 +250,7 @@ impl Store {
              LIMIT ?2",
         )?;
         let rows = stmt.query_map(params![user_id, limit as i64], |r| {
-            Ok(row_to_client_device(r)?)
+            row_to_client_device(r)
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
@@ -334,7 +334,7 @@ impl Store {
         params_vec.push(&offset);
         let mut stmt = conn.prepare(&select_sql)?;
         let rows = stmt
-            .query_map(params_vec.as_slice(), |r| Ok(row_to_client_device(r)?))?
+            .query_map(params_vec.as_slice(), row_to_client_device)?
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok((rows, total))
