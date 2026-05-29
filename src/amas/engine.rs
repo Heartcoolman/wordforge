@@ -118,16 +118,41 @@ impl AMASEngine {
         self.config.read().as_ref().clone()
     }
 
-    /// m022:按 user_id 解析"有效配置"。
-    ///   - 无 active canary → 返回当前 stable config(`self.config.read()`)
-    ///   - 有 canary 且 user_id 在 force_user_ids 或 hash(user_id) % 100 < percent →
-    ///     从 amas_config_versions 表加载 canary version 的 snapshot
-    ///   - 反序列化失败或 version 不存在时回退 stable(打 warn log 不抛错)
+    /// C6:按 user_id 解析"有效配置"(per-patch canary 子系统)。
+    ///   1. 先遍历 get_active_patch_canaries(),按 hash(user_id)%100 ∈ [cohort_lo,cohort_hi)
+    ///      命中其一 → 从 amas_config_versions 加载该 version snapshot。
+    ///   2. 未命中任何 active patch canary → 回退到既有单 active `amas_canary_config` 路由
+    ///      (m022 逻辑,保持兼容)。
+    ///   3. 任一环节反序列化失败 / version 缺失 / 查表失败 → 回退 stable(打 warn log 不抛错)。
     ///
     /// process_event_blocking 在入口调一次此方法,后续整个 request 内的 ProcessingContext.config
     /// 都用同一份 Arc,保证一次请求内 config 一致。
     pub fn effective_config_for_user(&self, user_id: &str) -> Arc<AMASConfig> {
         let stable: Arc<AMASConfig> = Arc::clone(&self.config.read());
+        // hash(user_id) % 100 桶号,patch canary 与 m022 单 active 共用同一散列算法
+        let bucket = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            user_id.hash(&mut h);
+            (h.finish() % 100) as u32
+        };
+
+        // ① per-patch canary:多条并行 active,cohort 区间命中其一
+        match self.store.get_active_patch_canaries() {
+            Ok(canaries) => {
+                if let Some(hit) = canaries
+                    .iter()
+                    .find(|c| bucket >= c.cohort_lo && bucket < c.cohort_hi)
+                {
+                    return self.load_canary_snapshot(&hit.version_hash, &stable);
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error=%e, "effective_config_for_user: 查 patch canary 失败,回退既有路由");
+            }
+        }
+
+        // ② 兼容既有单 active amas_canary_config(m022)
         let canary = match self.store.get_active_amas_canary() {
             Ok(Some(c)) => c,
             Ok(None) => return stable,
@@ -137,41 +162,41 @@ impl AMASEngine {
             }
         };
         let is_forced = canary.force_user_ids.iter().any(|id| id == user_id);
-        // hash(user_id) % 100 < percent
-        let in_bucket = {
-            use std::hash::{Hash, Hasher};
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            user_id.hash(&mut h);
-            (h.finish() % 100) < canary.percent as u64
-        };
+        let in_bucket = (bucket as u64) < canary.percent as u64;
         if !is_forced && !in_bucket {
             return stable;
         }
-        // 从 versions 表拉 canary snapshot
-        match self.store.get_amas_config_version(&canary.version_hash) {
-            Ok(Some(version)) => {
-                match serde_json::from_value::<AMASConfig>(version.snapshot_json.clone()) {
-                    Ok(cfg) => Arc::new(cfg),
-                    Err(e) => {
-                        tracing::warn!(
-                            version_hash = %canary.version_hash,
-                            error = %e,
-                            "effective_config_for_user: 反序列化 canary snapshot 失败,回退 stable"
-                        );
-                        stable
-                    }
+        self.load_canary_snapshot(&canary.version_hash, &stable)
+    }
+
+    /// 从 amas_config_versions 拉 version snapshot,失败/缺失回退 stable + warn。
+    fn load_canary_snapshot(
+        &self,
+        version_hash: &str,
+        stable: &Arc<AMASConfig>,
+    ) -> Arc<AMASConfig> {
+        match self.store.get_amas_config_version(version_hash) {
+            Ok(Some(version)) => match serde_json::from_value::<AMASConfig>(version.snapshot_json) {
+                Ok(cfg) => Arc::new(cfg),
+                Err(e) => {
+                    tracing::warn!(
+                        version_hash = %version_hash,
+                        error = %e,
+                        "effective_config_for_user: 反序列化 canary snapshot 失败,回退 stable"
+                    );
+                    Arc::clone(stable)
                 }
-            }
+            },
             Ok(None) => {
                 tracing::warn!(
-                    version_hash = %canary.version_hash,
+                    version_hash = %version_hash,
                     "effective_config_for_user: canary version_hash 在 amas_config_versions 中不存在,回退 stable"
                 );
-                stable
+                Arc::clone(stable)
             }
             Err(e) => {
                 tracing::warn!(error=%e, "effective_config_for_user: 加载 canary version 失败,回退 stable");
-                stable
+                Arc::clone(stable)
             }
         }
     }
@@ -2505,5 +2530,65 @@ mod tests {
             .await
             .unwrap();
         assert!(r.word_mastery.is_none());
+    }
+
+    // ---- D3:per-patch canary 多路由 ----
+
+    #[test]
+    fn effective_config_routes_by_patch_canary_cohort() {
+        use crate::store::operations::amas_versions::ConfigVersionSource;
+        let engine = test_engine(AMASConfig::default());
+        // 落一个 canary version snapshot(改一个可观测字段,与 stable 不同)
+        let mut canary_cfg = engine.get_config();
+        canary_cfg.memory_model.base_desired_retention = 0.99;
+        let snap = serde_json::to_string(&canary_cfg).unwrap();
+        let (_id, vhash) = engine
+            .store
+            .insert_amas_config_version(&snap, "admin", ConfigVersionSource::Manual, None, None)
+            .unwrap();
+        // 灰度 [0,20):宽度=percent=20
+        engine
+            .store
+            .insert_patch_canary(1, &vhash, 20, 0, 20, "{}")
+            .unwrap();
+
+        // 命中桶的用户拿 canary,未命中的拿 stable
+        let mut hit = 0usize;
+        for i in 0..200 {
+            let uid = format!("user-{i}");
+            let cfg = engine.effective_config_for_user(&uid);
+            if (cfg.memory_model.base_desired_retention - 0.99).abs() < 1e-9 {
+                hit += 1;
+            }
+        }
+        // 20% 桶 → 200 用户里命中数应在合理区间(非 0、非全部)
+        assert!(hit > 0 && hit < 200, "hit={hit} 应落在 (0,200)");
+    }
+
+    #[test]
+    fn effective_config_falls_back_stable_on_missing_version() {
+        let engine = test_engine(AMASConfig::default());
+        // canary 指向不存在的 version_hash → 全员回退 stable
+        engine
+            .store
+            .insert_patch_canary(1, "nonexistent-hash", 100, 0, 100, "{}")
+            .unwrap();
+        let stable = engine.get_config();
+        let cfg = engine.effective_config_for_user("any-user");
+        assert_eq!(
+            cfg.memory_model.base_desired_retention,
+            stable.memory_model.base_desired_retention
+        );
+    }
+
+    #[test]
+    fn effective_config_no_active_canary_returns_stable() {
+        let engine = test_engine(AMASConfig::default());
+        let stable = engine.get_config();
+        let cfg = engine.effective_config_for_user("user-x");
+        assert_eq!(
+            cfg.memory_model.base_desired_retention,
+            stable.memory_model.base_desired_retention
+        );
     }
 }
