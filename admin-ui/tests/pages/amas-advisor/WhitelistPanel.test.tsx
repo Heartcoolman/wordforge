@@ -46,7 +46,7 @@ describe('WhitelistPanel', () => {
     mockApi.amasDeleteWhitelist.mockResolvedValue({ deleted: true });
     render(() => <WhitelistPanel />);
     await waitFor(() => expect(screen.getByText('memoryModel.w0')).toBeInTheDocument());
-    fireEvent.click(screen.getAllByText('删除')[0]);
+    fireEvent.click(screen.getAllByRole('button', { name: /删除/ })[0]);
     fireEvent.click(screen.getByText('确认删除'));
     await waitFor(() => expect(mockApi.amasDeleteWhitelist).toHaveBeenCalledWith('memoryModel.baseDesiredRetention'));
   });

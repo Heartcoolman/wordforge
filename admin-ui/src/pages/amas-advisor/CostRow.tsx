@@ -1,55 +1,67 @@
-import { Card } from '@/components/ui/Card';
-import { StatCard } from '@/components/ui/StatCard';
 import type { AdvisorCostStats } from '@/api/admin';
 
 function yuan(v: number, d = 2): string {
   return `¥${v.toFixed(d)}`;
 }
 
+/** 成本行：4 张 .cost-card，对齐设计图密集布局 + 紫色 quota-bar。 */
 export function CostRow(props: { stats: AdvisorCostStats }) {
   const s = () => props.stats;
   const decided = () => s().acceptedCount + s().rejectedCount;
   return (
-    <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
-      {/* 首卡：本月成本 + 配额条 + 预测（自定义，StatCard 无配额条槽） */}
-      <Card variant="elevated">
-        <div class="flex flex-col gap-2">
-          <span class="text-sm text-content-secondary">本月调用成本</span>
-          <span class="text-2xl font-semibold tabular-nums text-accent">
-            {yuan(s().monthYuan)}<span class="text-sm text-content-tertiary"> / {yuan(s().monthCapYuan)}</span>
-          </span>
-          <div class="h-1.5 rounded-full bg-surface-secondary overflow-hidden">
-            <div
-              data-testid="quota-bar-fill"
-              class="h-full bg-accent transition-[width]"
-              style={{ width: `${Math.min(s().quotaPct, 100)}%` }}
-            />
-          </div>
-          <span class="text-[11.5px] text-content-tertiary tabular-nums">
-            {s().quotaPct.toFixed(1)}% · 预计月底 {yuan(s().forecastYuan)}
-          </span>
+    <div class="cost-row">
+      {/* 首卡：本月成本 + 配额条 + 预测 */}
+      <div class="cost-card is-llm">
+        <div class="label">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" />
+          </svg>
+          本月调用成本
         </div>
-      </Card>
+        <div class="value">{yuan(s().monthYuan)}<span class="unit">/ {yuan(s().monthCapYuan)}</span></div>
+        <div class="quota-bar">
+          <span data-testid="quota-bar-fill" style={{ width: `${Math.min(s().quotaPct, 100)}%` }} />
+        </div>
+        <div class="sub">{s().quotaPct.toFixed(1)}% · 预计月底 {yuan(s().forecastYuan)}</div>
+      </div>
 
-      <StatCard
-        title="7 天平均单次成本"
-        value={yuan(s().avg7dCostYuan)}
-        color="info"
-        icon="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"
-      />
-      <StatCard
-        title="本月调用次数"
-        value={`${s().monthCalls}`}
-        color="accent"
-        icon="M13 10V3L4 14h7v7l9-11h-7z"
-      />
-      <StatCard
-        title="累计 patch · 接受率"
-        value={`${s().acceptedCount}/${decided()}`}
-        color="success"
-        icon="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
-        trend={{ value: Math.round(s().acceptanceRate * 100), label: '接受率', showZero: true }}
-      />
+      {/* 7 天平均单次成本 */}
+      <div class="cost-card">
+        <div class="label">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" />
+          </svg>
+          7 天平均单次成本
+        </div>
+        <div class="value">{yuan(s().avg7dCostYuan)}</div>
+        <div class="sub">DeepSeek · 单次调用均价</div>
+      </div>
+
+      {/* 本月调用次数 */}
+      <div class="cost-card">
+        <div class="label">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M18 6V4a2 2 0 0 0-2-2H8a2 2 0 0 0-2 2v2" /><rect x="3" y="6" width="18" height="14" rx="2" />
+          </svg>
+          本月调用次数
+        </div>
+        <div class="value">{s().monthCalls}<span class="unit">次</span></div>
+        <div class="sub">含产出 patch 与无建议巡查</div>
+      </div>
+
+      {/* 累计 patch · 接受率 */}
+      <div class="cost-card">
+        <div class="label">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="20 6 9 17 4 12" />
+          </svg>
+          累计 patch · 接受率
+        </div>
+        <div class="value">
+          {s().acceptedCount}/{decided()}<span class="unit">· {(s().acceptanceRate * 100).toFixed(1)}%</span>
+        </div>
+        <div class="sub">{s().rejectedCount} 拒绝 · 累计决策 {decided()} 条</div>
+      </div>
     </div>
   );
 }

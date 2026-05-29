@@ -2,7 +2,7 @@ import { createMemo, createResource, createSignal, For, Show } from 'solid-js';
 import { Card } from '@/components/ui/Card';
 import { Spinner } from '@/components/ui/Spinner';
 import { Empty } from '@/components/ui/Empty';
-import { HeroCard } from '@/components/ui/HeroCard';
+import './amas-advisor/cockpit.css';
 import { uiStore } from '@/stores/ui';
 import { adminApi, type AmasSuggestion, type PatchCanary } from '@/api/admin';
 import { PageHeaderOps } from '@/pages/amas-advisor/PageHeaderOps';
@@ -165,14 +165,13 @@ export default function AmasAdvisorPage() {
   }
 
   return (
-    <div class="space-y-4">
-      <div class="flex flex-wrap items-start justify-between gap-3">
-        <HeroCard
-          eyebrow="每 20 分钟 · 白名单"
-          eyebrowVariant="info"
-          title="LLM 调参顾问"
-          desc="每 20 分钟跑一次 DeepSeek，对照 7 日运营指标输出参数 patch。白名单内自动灰度，超出白名单待人工审核。所有 patch 可一键回滚，写入审计日志。"
-        />
+    <div class="amas-advisor space-y-4">
+      <div class="page-header flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <div class="chip chip-llm" style={{ 'margin-bottom': '8px' }}>每 20 分钟 · 白名单</div>
+          <h1 class="page-title">LLM 调参顾问</h1>
+          <p class="page-desc">每 20 分钟跑一次 DeepSeek，对照 7 日运营指标输出参数 patch。白名单内自动灰度，超出白名单待人工审核。所有 patch 可一键回滚，写入审计日志。</p>
+        </div>
         <Show when={config()}>
           {(c) => (
             <PageHeaderOps

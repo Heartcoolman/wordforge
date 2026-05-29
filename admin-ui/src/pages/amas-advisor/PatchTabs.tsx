@@ -1,4 +1,4 @@
-import { For } from 'solid-js';
+import { For, createSignal, onCleanup, onMount } from 'solid-js';
 
 export type PatchTabId = 'pending' | 'canary' | 'effective' | 'rejected';
 
@@ -30,13 +30,19 @@ export function PatchTabs(props: {
   active: PatchTabId;
   counts: PatchCounts;
   onChange: (id: PatchTabId) => void;
-  /** 测试可注入；默认 Date.now() */
+  /** 测试可注入；默认走每秒 tick 的实时时钟 */
   nowMs?: number;
 }) {
-  const now = () => props.nowMs ?? Date.now();
+  // 每秒 tick 让倒计时真实走动；测试注入 nowMs 时不依赖时钟，确定可测。
+  const [tick, setTick] = createSignal(0);
+  onMount(() => {
+    const t = setInterval(() => setTick((n) => n + 1), 1000);
+    onCleanup(() => clearInterval(t));
+  });
+  const now = () => (props.nowMs ?? (tick(), Date.now()));
   return (
     <div class="flex items-center justify-between border-b border-border-hairline">
-      <div role="tablist" class="flex gap-1">
+      <div role="tablist" class="tabs">
         <For each={TABS}>
           {(t) => (
             <button
@@ -44,16 +50,10 @@ export function PatchTabs(props: {
               role="tab"
               aria-selected={props.active === t.id}
               onClick={() => props.onChange(t.id)}
-              class={`px-3 py-2 text-sm flex items-center gap-1.5 border-b-2 -mb-px transition-colors ${
-                props.active === t.id
-                  ? 'border-accent text-accent'
-                  : 'border-transparent text-content-secondary hover:text-content'
-              }`}
+              class={`tab${props.active === t.id ? ' is-active' : ''}`}
             >
               <span>{t.label}</span>
-              <span class="text-[11px] tabular-nums px-1.5 rounded-full bg-surface-secondary text-content-tertiary">
-                {props.counts[t.id]}
-              </span>
+              <span class="count">{props.counts[t.id]}</span>
             </button>
           )}
         </For>
