@@ -214,6 +214,7 @@ async fn algorithm_optimization_lowers_difficulty_on_low_accuracy() {
             created_at: now,
             record_type: learning_backend::store::operations::records::RecordType::All,
             self_rating: None,
+            question_mode: None,
         };
         store.create_record(&rec).unwrap();
     }
@@ -258,6 +259,7 @@ async fn algorithm_optimization_raises_difficulty_on_high_accuracy() {
             created_at: now,
             record_type: learning_backend::store::operations::records::RecordType::All,
             self_rating: None,
+            question_mode: None,
         };
         store.create_record(&rec).unwrap();
     }

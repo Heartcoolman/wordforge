@@ -76,7 +76,8 @@ export default function DashboardPage() {
   const [suggestions, { refetch: refetchSuggestions }] = createResource(() =>
     adminApi.amasListSuggestions('pending', 50).catch(() => []),
   );
-  // 待处理事项里需要"未处理反馈"计数。perPage=1 拿 total 即可,省带宽。
+  // 待处理事项里需要"未处理反馈"计数。perPage=1 拿 total + facets 即可,省带宽。
+  // facets.byCategory/byType 由后端按 status=open 过滤聚合,与 perPage 无关,可拿到真实 bug 数。
   const [openFeedback, { refetch: refetchFeedback }] = createResource(() =>
     adminApi.listFeedback({ status: 'open', perPage: 1 }).catch(() => null),
   );
@@ -135,6 +136,22 @@ export default function DashboardPage() {
     uiStore.toast.success(`已导出 ${max} 行 CSV`);
   }
 
+  // 答题数 / 正确率 KPI 环比 trend chip —— 复用 study-overview summary 的 prev-period 字段。
+  // 答题数走百分比环比(recordCountDeltaPct),正确率走百分点差(accuracyDeltaPt,陪文带上周基线)。
+  const recordsTrend = createMemo<TrendField | null>(() => {
+    const pct = overview()?.summary.recordCountDeltaPct;
+    if (pct == null) return null;
+    return { value: pct, label: '比上周期' };
+  });
+  const accuracyTrend = createMemo<TrendField | null>(() => {
+    const s = overview()?.summary;
+    if (!s || s.accuracyDeltaPt == null) return null;
+    const prev = s.prevAccuracy != null ? `${(s.prevAccuracy * 100).toFixed(1)}%` : '上周期';
+    const up = s.accuracyDeltaPt >= 0;
+    // 正确率用百分点(pt)语义,trend.value 复用为 pt 值,文案点明高/低于上周基线
+    return { value: s.accuracyDeltaPt, label: `${up ? '高于' : '低于'}上周 ${prev}` };
+  });
+
   // sparkline 序列
   const registeredSpark = createMemo(() => dau()?.map((d) => d.registered) ?? []);
   const activeSpark = createMemo(() => dau()?.map((d) => d.count) ?? []);
@@ -159,6 +176,16 @@ export default function DashboardPage() {
       .sort((a, b) => b.count - a.count)
       .slice(0, 6);
     return { rows, total };
+  });
+
+  // 待处理事项 sub-copy 真实数据派生 —— 仅用已有资源真实字段,无源时降级为通用文案(不编造)。
+  // 反馈:后端 list 端点未透出按 category 的 facets,故 sub-copy 保持通用描述(honest-degradation)。
+  // LLM 顾问:汇总 pending 建议成本($,与卡片内 costUsd 同单位),无成本时降级。
+  const advisorTodoDesc = createMemo(() => {
+    const list = suggestions() ?? [];
+    if (list.length === 0) return 'approve 后会进入灰度发布';
+    const cost = list.reduce((a, s) => a + (s.costUsd ?? 0), 0);
+    return cost > 0 ? `approve 后进入灰度 · 本批调参成本 $${cost.toFixed(4)}` : 'approve 后会进入灰度发布';
   });
 
   // m023:监控告警(error/warn 级别) —— 仅用于"待处理事项"行计数,不再独立成卡
@@ -194,17 +221,29 @@ export default function DashboardPage() {
     };
   });
 
-  // m023:Worker 健康统计 —— "16 健康 · 1 警告"摘要
+  // m023:Worker 健康统计 —— "16 健康 · 1 异常"摘要。
+  // 后端 WorkerStatusRow 仅透出 lastOutcome,无心跳阈值字段;故"警告"语义按 outcome 派生,
+  // 设计图的「心跳超阈值」告警因后端未透出阈值/staleness,此处不编造(honest-degradation)。
   const workerSummary = createMemo(() => {
     const ws = workers();
     let ok = 0;
     let err = 0;
+    let other = 0;
     for (const w of ws) {
       const o = toWorkerOutcome(w.lastOutcome);
-      if (o === 'ok') ok += 1;
-      else if (o === 'error') err += 1;
+      if (o === 'error') err += 1;
+      else if (o === 'ok') ok += 1;
+      else other += 1;
     }
-    return { ok, err, total: ws.length };
+    return { ok, err, other, total: ws.length };
+  });
+
+  // outcome=error 的具名 worker —— 用于「待处理事项」具名告警行 + 直达探针/监控排查。
+  const failedWorker = createMemo(() => {
+    const ws = workers().filter((w) => toWorkerOutcome(w.lastOutcome) === 'error');
+    if (ws.length === 0) return null;
+    const w = ws[0];
+    return { name: w.workerName, error: w.lastError, extra: ws.length - 1 };
   });
 
   return (
@@ -316,7 +355,7 @@ export default function DashboardPage() {
                 icon={ICON_CALENDAR}
                 value={o().summary.recordCount}
                 format={formatNumber}
-                trend={null}
+                trend={recordsTrend()}
                 spark={recordsSpark()}
               />
             </div>
@@ -334,7 +373,7 @@ export default function DashboardPage() {
                 icon={ICON_CHECK_CIRCLE}
                 value={o().summary.accuracy != null ? Number((o().summary.accuracy! * 100).toFixed(1)) : '—'}
                 unit={o().summary.accuracy != null ? '%' : undefined}
-                trend={null}
+                trend={accuracyTrend()}
                 spark={accuracySpark()}
               />
             </div>
@@ -370,11 +409,12 @@ export default function DashboardPage() {
                 {(data) => (
                   <EChart
                     option={() => {
+                      // 对齐 dashboard.html:日活跃=accent 主线,新注册=success 绿副线
                       const accent = cssVar('--accent', '#6366f1');
-                      const info = cssVar('--info', '#0ea5e9');
+                      const success = cssVar('--success', '#10b981');
                       return {
                         grid: { left: 40, right: 20, top: 30, bottom: 30 },
-                        legend: { data: ['日活跃', '新注册'], top: 0 },
+                        legend: { data: ['日活跃', '新注册'], top: 0, icon: 'roundRect', itemWidth: 8, itemHeight: 8 },
                         tooltip: { trigger: 'axis' },
                         xAxis: { type: 'category', data: data().map((d) => d.date.slice(5)) },
                         yAxis: { type: 'value', minInterval: 1 },
@@ -385,6 +425,7 @@ export default function DashboardPage() {
                             data: data().map((d) => d.count),
                             smooth: true,
                             itemStyle: { color: accent },
+                            lineStyle: { color: accent },
                             areaStyle: { opacity: 0.18 },
                           },
                           {
@@ -392,7 +433,8 @@ export default function DashboardPage() {
                             type: 'line',
                             data: data().map((d) => d.registered),
                             smooth: true,
-                            itemStyle: { color: info },
+                            itemStyle: { color: success },
+                            lineStyle: { color: success },
                             areaStyle: { opacity: 0.12 },
                           },
                         ],
@@ -755,14 +797,24 @@ export default function DashboardPage() {
                   </For>
                 </div>
                 <Show when={workerSummary().total > 0}>
-                  <div class="mt-3 pt-3 border-t border-border-hairline flex items-center justify-between text-[12px] text-content-secondary">
+                  <div class="mt-3 pt-3 border-t border-border-hairline flex items-center justify-between gap-3 text-[12px] text-content-secondary">
                     <span>
                       <span class="text-success-strong tabular-nums">{workerSummary().ok}</span> 健康
                       <Show when={workerSummary().err > 0}>
                         {' · '}
                         <span class="text-error-strong tabular-nums">{workerSummary().err}</span> 异常
+                        <Show when={failedWorker()}>
+                          {(f) => (
+                            <span class="text-content-tertiary">（{f().name}{f().extra > 0 ? ` 等 ${f().extra + 1} 个` : ''}）</span>
+                          )}
+                        </Show>
                       </Show>
                     </span>
+                    <Show when={workerSummary().err > 0}>
+                      <a href="/admin/probe" class="shrink-0 text-warning-strong hover:underline">
+                        查看探针 →
+                      </a>
+                    </Show>
                   </div>
                 </Show>
               </Show>
@@ -866,6 +918,17 @@ export default function DashboardPage() {
                   desc="包含 bug 报告与功能请求"
                 />
               </Show>
+              {/* worker outcome=error —— 具名告警行,destination 直达探针(对齐设计图 probe 项) */}
+              <Show when={failedWorker()}>
+                {(f) => (
+                  <TodoRow
+                    href="/admin/probe"
+                    iconTone="error"
+                    title={`Worker ${f().name} 执行异常${f().extra > 0 ? ` 等 ${f().extra + 1} 个` : ''}`}
+                    desc={f().error ?? '最近一次执行返回 error,请前往探针排查'}
+                  />
+                )}
+              </Show>
               <Show when={alertCount() > 0}>
                 <TodoRow
                   href="/admin/monitoring"
@@ -879,13 +942,14 @@ export default function DashboardPage() {
                   href="/admin/amas-advisor"
                   iconTone="accent"
                   title={`LLM 顾问 · ${suggestions()!.length} 条建议待审`}
-                  desc="approve 后会进入灰度发布"
+                  desc={advisorTodoDesc()}
                 />
               </Show>
               <Show
                 when={
                   !updateInfo()?.hasUpdate &&
                   (openFeedback()?.total ?? 0) === 0 &&
+                  !failedWorker() &&
                   alertCount() === 0 &&
                   (suggestions()?.length ?? 0) === 0 &&
                   !openFeedback.loading &&

@@ -207,6 +207,34 @@ async fn submit_telemetry(
     let event_type = body.event_type;
     let request_id = body.request_id;
     let client_ts = body.client_ts;
+
+    // 数据探针采样注入(m031):locked 事件(on_demand/session_start)与配置里 locked
+    // 行恒落库;其余 event_type 按 probe_sampling_config / 全局默认 gate。rate<1.0 时用
+    // 确定性哈希 hash(device_id + id) mod 10000 / 10000.0 ∈ [0,1),>=rate 则采样丢弃。
+    // 默认全 1.0 → 零行为变化。
+    let always_keep =
+        event_type == "on_demand" || event_type == "session_start";
+    let sampled_out = if always_keep {
+        false
+    } else {
+        let et = event_type.clone();
+        let rate = state
+            .run_store_task("telemetry.sample_rate", move |store| {
+                store.effective_sample_rate(&et)
+            })
+            .await??;
+        if rate >= 1.0 {
+            false
+        } else {
+            let bucket = sampling_bucket(&device_id_for_store, &insert_id);
+            bucket >= rate
+        }
+    };
+
+    if sampled_out {
+        return Ok(ok(serde_json::json!({ "received": true, "sampledOut": true })));
+    }
+
     state
         .run_store_task("telemetry.submit", move |store| {
             store.insert_telemetry_and_summary(
@@ -244,6 +272,16 @@ fn strict_reject_or_warn(
         tracing::warn!(code, message, "telemetry strict-mode soft-block (放行)");
         Ok(())
     }
+}
+
+/// 确定性采样桶:hash(device_id + id) mod 10000 / 10000.0 ∈ [0,1)。
+/// 同一 (device_id, id) 复现同一值,与 effective_rate 比较决定是否落库。
+fn sampling_bucket(device_id: &str, id: &str) -> f64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    device_id.hash(&mut hasher);
+    id.hash(&mut hasher);
+    (hasher.finish() % 10_000) as f64 / 10_000.0
 }
 
 fn extract_summary(payload: &serde_json::Value) -> TelemetrySummaryInput {

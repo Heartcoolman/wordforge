@@ -1,7 +1,6 @@
 import { createSignal, onMount, onCleanup, Show, createMemo, createResource } from 'solid-js';
 import { useNavigate } from '@solidjs/router';
 import { adminApi } from '@/api/admin';
-import { healthApi } from '@/api/health';
 import { tokenManager } from '@/lib/token';
 import { themeStore } from '@/stores/theme';
 import { uiStore } from '@/stores/ui';
@@ -11,7 +10,8 @@ import { ADMIN_MAX_LOCK_WAIT_SECS } from '@/lib/constants';
  * 管理员登录 —— 按 admin后端/login.html 双栏设计。
  *
  * 左栏：brand + 表单 + footer 状态行
- * 右栏（≤920px 隐藏）：AMAS 品牌叙事 + 公共健康卡（UPTIME 来自 /health 公共端点）
+ * 右栏（≤920px 隐藏）：AMAS 品牌叙事 + 公共健康卡（UPTIME/SLO/DB SIZE 来自 /health 公共端点，
+ *   SLO 卡按 availability.effectiveSecs 动态标注真实测量窗口，无样本时降级 "—"）
  *
  * 现有锁定 / 失败计数 / token 恢复逻辑全部保留。
  */
@@ -20,6 +20,8 @@ export default function LoginPage() {
   const [email, setEmail] = createSignal('');
   const [password, setPassword] = createSignal('');
   const [showPw, setShowPw] = createSignal(false);
+  const [rememberMe, setRememberMe] = createSignal(true); // 30 天保持登录,默认勾选(与设计图一致)
+  const [locale, setLocale] = createSignal('zh-CN'); // i18n 未接入,纯视觉占位
   const [loading, setLoading] = createSignal(false);
   const [emailError, setEmailError] = createSignal('');
   const [formError, setFormError] = createSignal('');
@@ -30,8 +32,28 @@ export default function LoginPage() {
   let lockTimer: ReturnType<typeof setInterval> | undefined;
   let clockTimer: ReturnType<typeof setInterval> | undefined;
 
-  // 公共健康端点：未登录可访问，用于 UPTIME 显示
-  const [publicHealth] = createResource(() => healthApi.getStatus().catch(() => null));
+  // 公共健康端点：未登录可访问，透出 version / uptimeSecs / availability / dbSizeBytes
+  const [publicHealth] = createResource(() => adminApi.health().catch(() => null));
+  // HealthInfo 仅强类型化 version/dbSizeBytes,其余字段经 [key:string]:unknown 落地;此处收敛为数值或 null
+  const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+  const uptimeSecs = () => num(publicHealth()?.uptimeSecs);
+  // 可用性：来自 /health 的真实聚合(availability.pct)。窗口随进程运行时长增长(≤30d)，
+  // effectiveSecs 透出实际测量窗口,据此动态标注卡片标题,不冒充满 30 天。
+  const availability = () => publicHealth()?.availability ?? null;
+  const sloPct = () => num(availability()?.pct);
+  const sloEffectiveSecs = () => num(availability()?.effectiveSecs);
+  // 标签：实际窗口 ≥30d 显示 "SLO 30d"，否则按真实天/时降级("SLO 7d"/"SLO 12h")。
+  const sloLabel = () => {
+    const s = sloEffectiveSecs();
+    if (s == null) return 'SLO 30d';
+    const d = Math.floor(s / 86400);
+    if (d >= 30) return 'SLO 30d';
+    if (d >= 1) return `SLO ${d}d`;
+    const h = Math.max(1, Math.floor(s / 3600));
+    return `SLO ${h}h`;
+  };
+  const dbSizeBytes = () => num(publicHealth()?.dbSizeBytes);
+  const appVersion = () => { const v = publicHealth()?.version; return typeof v === 'string' && v ? v : null; };
 
   // 密码强度：3 级（≥8 / ≥8+大小写+数字 / ≥14+符号）
   const pwStrength = createMemo<0 | 1 | 2 | 3>(() => {
@@ -43,11 +65,18 @@ export default function LoginPage() {
     return s as 0 | 1 | 2 | 3;
   });
 
-  function formatUptime(secs: number | undefined): string {
+  function formatUptime(secs: number | null | undefined): string {
     if (!secs || secs < 0) return '—';
     const d = Math.floor(secs / 86400);
     const h = Math.floor((secs % 86400) / 3600);
     return `${d}d ${h}h`;
+  }
+
+  // DB SIZE：字节 → MB/GB,无权限(null)优雅省略为 —
+  function formatBytes(bytes: number | null | undefined): string {
+    if (bytes == null || bytes < 0) return '—';
+    if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
+    return `${(bytes / 1024 ** 2).toFixed(0)} MB`;
   }
 
   onMount(async () => {
@@ -97,7 +126,7 @@ export default function LoginPage() {
 
     setLoading(true);
     try {
-      const res = await adminApi.login({ email: email(), password: password() });
+      const res = await adminApi.login({ email: email(), password: password(), rememberMe: rememberMe() });
       setPassword('');
       setFailCount(0);
       setLockUntil(0);
@@ -247,6 +276,18 @@ export default function LoginPage() {
               <p class="mt-1.5 text-[11.5px] text-content-tertiary">已开启 IP 限流 · 多次失败递增冷却（最大 {ADMIN_MAX_LOCK_WAIT_SECS} s）</p>
             </div>
 
+            {/* 30 天保持登录 —— 勾选时 login 携带 rememberMe,后端签发 30 天 token(否则默认 2h) */}
+            <label class="flex items-center gap-2 my-1.5 text-[12.5px] text-content-secondary cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={rememberMe()}
+                disabled={loading() || lockSeconds() > 0}
+                onChange={(e) => setRememberMe(e.currentTarget.checked)}
+                class="size-3.5 rounded border-border text-accent focus:ring-2 focus:ring-accent/30 disabled:opacity-60"
+              />
+              30 天保持登录 · 仅限本设备
+            </label>
+
             <button
               type="submit"
               disabled={loading() || lockSeconds() > 0}
@@ -285,14 +326,31 @@ export default function LoginPage() {
         <div class="flex items-center justify-between gap-3 pt-4 border-t border-border-hairline text-[11.5px] text-content-tertiary">
           <span class="inline-flex items-center gap-1.5">
             <span
-              class={`size-1.5 rounded-full ${publicHealth()?.status === 'healthy' ? 'bg-success animate-ring-pulse' : 'bg-content-quaternary'}`}
+              class={`size-1.5 rounded-full ${publicHealth() ? 'bg-success animate-ring-pulse' : 'bg-content-quaternary'}`}
               aria-hidden="true"
             />
             <span>
-              API · {publicHealth()?.status === 'healthy' ? '健康' : publicHealth.loading ? '检查中' : '未知'} · <span class="font-mono tabular-nums">{clock()}</span>
+              API · {publicHealth() ? '健康' : publicHealth.loading ? '检查中' : '未知'} · <span class="font-mono tabular-nums">{clock()}</span>
             </span>
           </span>
-          <span class="font-mono">build {import.meta.env.MODE === 'production' ? 'prod' : 'dev'}</span>
+          <div class="flex items-center gap-3">
+            {/* app version：来自 /health 公开端点(CARGO_PKG_VERSION) */}
+            <span class="font-mono">
+              {appVersion() ? `v${appVersion()}` : `build ${import.meta.env.MODE === 'production' ? 'prod' : 'dev'}`}
+            </span>
+            {/* 语言切换 —— i18n 未接入,当前为视觉占位(选项不改变界面语言) */}
+            <select
+              value={locale()}
+              onChange={(e) => setLocale(e.currentTarget.value)}
+              class="bg-transparent border-0 text-[11.5px] text-content-secondary cursor-pointer focus:outline-none"
+              aria-label="界面语言（暂未生效）"
+              title="界面语言切换暂未接入"
+            >
+              <option value="zh-CN">中文（简体）</option>
+              <option value="en">English</option>
+              <option value="ja">日本語</option>
+            </select>
+          </div>
         </div>
       </div>
 
@@ -357,26 +415,24 @@ export default function LoginPage() {
           >
             <div class="flex flex-col gap-1">
               <span class="text-[10.5px] uppercase tracking-[0.06em]" style={{ color: 'rgba(255,255,255,0.5)' }}>UPTIME</span>
-              <span class="text-[17px] font-semibold tabular-nums" style={{ color: publicHealth() ? 'oklch(78% 0.13 162)' : 'rgba(255,255,255,0.7)' }}>
-                {formatUptime(publicHealth()?.uptimeSecs)}
+              <span class="text-[17px] font-semibold tabular-nums" style={{ color: uptimeSecs() != null ? 'oklch(78% 0.13 162)' : 'rgba(255,255,255,0.7)' }}>
+                {formatUptime(uptimeSecs())}
               </span>
             </div>
             <div class="flex flex-col gap-1">
-              <span class="text-[10.5px] uppercase tracking-[0.06em]" style={{ color: 'rgba(255,255,255,0.5)' }}>STORE</span>
+              <span class="text-[10.5px] uppercase tracking-[0.06em]" style={{ color: 'rgba(255,255,255,0.5)' }}>{sloLabel()}</span>
               <span
                 class="text-[17px] font-semibold tabular-nums"
-                style={{ color: publicHealth()?.services.store.healthy ? 'oklch(78% 0.13 162)' : 'rgba(255,255,255,0.7)' }}
+                style={{ color: sloPct() != null ? 'oklch(78% 0.13 162)' : 'rgba(255,255,255,0.7)' }}
+                title={sloPct() != null ? `真实可用性(${availability()!.totalRequests} 次请求样本)` : '暂无请求样本'}
               >
-                {publicHealth() ? (publicHealth()!.services.store.healthy ? 'OK' : 'ERR') : '—'}
+                {sloPct() != null ? `${sloPct()!.toFixed(2)}%` : '—'}
               </span>
             </div>
             <div class="flex flex-col gap-1">
-              <span class="text-[10.5px] uppercase tracking-[0.06em]" style={{ color: 'rgba(255,255,255,0.5)' }}>AMAS</span>
-              <span
-                class="text-[17px] font-semibold tabular-nums"
-                style={{ color: publicHealth()?.services.amas.healthy ? 'oklch(78% 0.13 162)' : 'rgba(255,255,255,0.7)' }}
-              >
-                {publicHealth() ? (publicHealth()!.services.amas.healthy ? 'OK' : 'ERR') : '—'}
+              <span class="text-[10.5px] uppercase tracking-[0.06em]" style={{ color: 'rgba(255,255,255,0.5)' }}>DB SIZE</span>
+              <span class="text-[17px] font-semibold tabular-nums" style={{ color: 'rgba(255,255,255,0.7)' }}>
+                {formatBytes(dbSizeBytes())}
               </span>
             </div>
           </div>

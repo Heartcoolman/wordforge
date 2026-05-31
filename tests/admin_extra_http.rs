@@ -1156,3 +1156,412 @@ async fn it_admin_feedback_patch_nonexistent_returns_404() {
     let (status, _, _) = response_json(resp).await;
     assert_eq!(status, axum::http::StatusCode::NOT_FOUND);
 }
+
+// ────────────────────── admin/feedback (m030 工单化) ──────────────────────
+
+/// 提交一条 feedback 并返回其 id（公共 helper）。
+async fn submit_feedback(app: &axum::Router, token: &str, body: &str) -> String {
+    let resp = request(
+        app,
+        Method::POST,
+        "/api/feedback",
+        Some(serde_json::json!({ "category": "bug", "body": body, "route": "/x" })),
+        &[("authorization", auth_header(token))],
+    )
+    .await;
+    let (status, _, body) = response_json(resp).await;
+    assert_eq!(status, StatusCode::OK);
+    body["data"]["id"].as_str().unwrap().to_string()
+}
+
+#[tokio::test]
+async fn it_admin_feedback_stats_endpoint() {
+    let app = spawn_test_server().await;
+    let token = login_and_get_token(&app.app).await;
+    let admin_token = setup_admin_and_get_token(&app.app).await;
+
+    submit_feedback(&app.app, &token, "first issue").await;
+    let id2 = submit_feedback(&app.app, &token, "second issue").await;
+    // 解决第二条
+    let resp = request(
+        &app.app,
+        Method::POST,
+        &format!("/api/admin/feedback/{id2}/resolve"),
+        Some(serde_json::json!({ "resolution": "done" })),
+        &[("authorization", auth_header(&admin_token))],
+    )
+    .await;
+    let (status, _, _) = response_json(resp).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let resp = request(
+        &app.app,
+        Method::GET,
+        "/api/admin/feedback/stats",
+        None,
+        &[("authorization", auth_header(&admin_token))],
+    )
+    .await;
+    let (status, _, body) = response_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["total"], 2);
+    assert_eq!(body["data"]["unresolved"], 1);
+    assert_eq!(body["data"]["resolvedCount"], 1);
+    assert_eq!(body["data"]["byStatus"]["open"], 1);
+    assert_eq!(body["data"]["byStatus"]["resolved"], 1);
+    assert!(body["data"]["byCategory"].is_object());
+}
+
+#[tokio::test]
+async fn it_admin_feedback_detail_marks_read() {
+    let app = spawn_test_server().await;
+    let token = login_and_get_token(&app.app).await;
+    let admin_token = setup_admin_and_get_token(&app.app).await;
+    let id = submit_feedback(&app.app, &token, "detail target").await;
+
+    // 详情：item + 空 replies/events/attachments（events 含 submitted）
+    let resp = request(
+        &app.app,
+        Method::GET,
+        &format!("/api/admin/feedback/{id}"),
+        None,
+        &[("authorization", auth_header(&admin_token))],
+    )
+    .await;
+    let (status, _, body) = response_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["item"]["id"], id);
+    assert!(body["data"]["replies"].as_array().unwrap().is_empty());
+    assert!(body["data"]["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|e| e["kind"] == "submitted"));
+
+    // 打开详情后该工单应被标记已读：unread 过滤不再包含它
+    let resp = request(
+        &app.app,
+        Method::GET,
+        "/api/admin/feedback?unread=true",
+        None,
+        &[("authorization", auth_header(&admin_token))],
+    )
+    .await;
+    let (status, _, body) = response_json(resp).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["total"], 0, "详情打开后应已读: {body}");
+}
+
+#[tokio::test]
+async fn it_admin_feedback_detail_nonexistent_404() {
+    let app = spawn_test_server().await;
+    let admin_token = setup_admin_and_get_token(&app.app).await;
+    let resp = request(
+        &app.app,
+        Method::GET,
+        "/api/admin/feedback/no-such-id",
+        None,
+        &[("authorization", auth_header(&admin_token))],
+    )
+    .await;
+    let (status, _, _) = response_json(resp).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn it_admin_feedback_reply_with_inapp_notification() {
+    let app = spawn_test_server().await;
+    let token = login_and_get_token(&app.app).await;
+    let admin_token = setup_admin_and_get_token(&app.app).await;
+    let id = submit_feedback(&app.app, &token, "needs reply").await;
+
+    // 空回复体 → 400
+    let resp = request(
+        &app.app,
+        Method::POST,
+        &format!("/api/admin/feedback/{id}/replies"),
+        Some(serde_json::json!({ "body": "   " })),
+        &[("authorization", auth_header(&admin_token))],
+    )
+    .await;
+    let (status, _, body) = response_json(resp).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["code"], "INVALID_REPLY");
+
+    // 正常回复，pushInapp=true
+    let resp = request(
+        &app.app,
+        Method::POST,
+        &format!("/api/admin/feedback/{id}/replies"),
+        Some(serde_json::json!({ "body": "我们正在处理", "pushInapp": true })),
+        &[("authorization", auth_header(&admin_token))],
+    )
+    .await;
+    let (status, _, body) = response_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["authorKind"], "admin");
+    assert_eq!(body["data"]["pushInapp"], true);
+
+    // 回复进入详情 timeline
+    let resp = request(
+        &app.app,
+        Method::GET,
+        &format!("/api/admin/feedback/{id}"),
+        None,
+        &[("authorization", auth_header(&admin_token))],
+    )
+    .await;
+    let (_, _, body) = response_json(resp).await;
+    assert_eq!(body["data"]["replies"].as_array().unwrap().len(), 1);
+
+    // 用户侧应收到一条应用内通知
+    let resp = request(
+        &app.app,
+        Method::GET,
+        "/api/notifications",
+        None,
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (status, _, body) = response_json(resp).await;
+    assert_eq!(status, StatusCode::OK);
+    let arr = body["data"]["data"]
+        .as_array()
+        .or_else(|| body["data"].as_array())
+        .expect("通知列表");
+    assert!(
+        arr.iter().any(|n| n["message"] == "我们正在处理"),
+        "用户应收到反馈回复通知: {body}"
+    );
+}
+
+#[tokio::test]
+async fn it_admin_feedback_reply_nonexistent_404() {
+    let app = spawn_test_server().await;
+    let admin_token = setup_admin_and_get_token(&app.app).await;
+    let resp = request(
+        &app.app,
+        Method::POST,
+        "/api/admin/feedback/no-such-id/replies",
+        Some(serde_json::json!({ "body": "hi" })),
+        &[("authorization", auth_header(&admin_token))],
+    )
+    .await;
+    let (status, _, _) = response_json(resp).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn it_admin_feedback_assign_and_filter() {
+    let app = spawn_test_server().await;
+    let token = login_and_get_token(&app.app).await;
+    let admin_token = setup_admin_and_get_token(&app.app).await;
+    let id = submit_feedback(&app.app, &token, "assign me").await;
+
+    let resp = request(
+        &app.app,
+        Method::POST,
+        &format!("/api/admin/feedback/{id}/assign"),
+        Some(serde_json::json!({ "assigneeAdminId": "admin-99" })),
+        &[("authorization", auth_header(&admin_token))],
+    )
+    .await;
+    let (status, _, body) = response_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["assigneeAdminId"], "admin-99");
+
+    // assigned 过滤可查到
+    let resp = request(
+        &app.app,
+        Method::GET,
+        "/api/admin/feedback?assigned=true",
+        None,
+        &[("authorization", auth_header(&admin_token))],
+    )
+    .await;
+    let (status, _, body) = response_json(resp).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["total"], 1);
+
+    // assign 不存在 → 404
+    let resp = request(
+        &app.app,
+        Method::POST,
+        "/api/admin/feedback/no-such-id/assign",
+        Some(serde_json::json!({ "assigneeAdminId": "x" })),
+        &[("authorization", auth_header(&admin_token))],
+    )
+    .await;
+    let (status, _, _) = response_json(resp).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn it_admin_feedback_merge() {
+    let app = spawn_test_server().await;
+    let token = login_and_get_token(&app.app).await;
+    let admin_token = setup_admin_and_get_token(&app.app).await;
+    let src = submit_feedback(&app.app, &token, "dup source").await;
+    let tgt = submit_feedback(&app.app, &token, "dup target").await;
+
+    let resp = request(
+        &app.app,
+        Method::POST,
+        &format!("/api/admin/feedback/{src}/merge"),
+        Some(serde_json::json!({ "targetId": tgt })),
+        &[("authorization", auth_header(&admin_token))],
+    )
+    .await;
+    let (status, _, body) = response_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["merged"], true);
+
+    // 源被 closed
+    let resp = request(
+        &app.app,
+        Method::GET,
+        &format!("/api/admin/feedback/{src}"),
+        None,
+        &[("authorization", auth_header(&admin_token))],
+    )
+    .await;
+    let (_, _, body) = response_json(resp).await;
+    assert_eq!(body["data"]["item"]["status"], "closed");
+
+    // 目标不存在 → 404
+    let resp = request(
+        &app.app,
+        Method::POST,
+        &format!("/api/admin/feedback/{src}/merge"),
+        Some(serde_json::json!({ "targetId": "no-such-id" })),
+        &[("authorization", auth_header(&admin_token))],
+    )
+    .await;
+    let (status, _, _) = response_json(resp).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn it_admin_feedback_mark_all_read() {
+    let app = spawn_test_server().await;
+    let token = login_and_get_token(&app.app).await;
+    let admin_token = setup_admin_and_get_token(&app.app).await;
+    submit_feedback(&app.app, &token, "u1").await;
+    submit_feedback(&app.app, &token, "u2").await;
+
+    let resp = request(
+        &app.app,
+        Method::POST,
+        "/api/admin/feedback/mark-all-read",
+        None,
+        &[("authorization", auth_header(&admin_token))],
+    )
+    .await;
+    let (status, _, body) = response_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["updated"], 2);
+
+    // 无未读后再标记 → 0
+    let resp = request(
+        &app.app,
+        Method::POST,
+        "/api/admin/feedback/mark-all-read",
+        None,
+        &[("authorization", auth_header(&admin_token))],
+    )
+    .await;
+    let (_, _, body) = response_json(resp).await;
+    assert_eq!(body["data"]["updated"], 0);
+}
+
+#[tokio::test]
+async fn it_admin_feedback_export_csv() {
+    let app = spawn_test_server().await;
+    let token = login_and_get_token(&app.app).await;
+    let admin_token = setup_admin_and_get_token(&app.app).await;
+    // body 含逗号，验证 RFC4180 转义
+    submit_feedback(&app.app, &token, "hello, world").await;
+
+    let resp = request(
+        &app.app,
+        Method::GET,
+        "/api/admin/feedback/export.csv",
+        None,
+        &[("authorization", auth_header(&admin_token))],
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let ct = resp
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(ct.starts_with("text/csv"), "content-type={ct}");
+    let cd = resp
+        .headers()
+        .get(axum::http::header::CONTENT_DISPOSITION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(cd.contains("feedback.csv"), "content-disposition={cd}");
+
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let csv = String::from_utf8(bytes.to_vec()).unwrap();
+    assert!(csv.starts_with("id,user_id,category,priority,status,created_at,body\n"));
+    // 含逗号的 body 被双引号包裹
+    assert!(csv.contains("\"hello, world\""), "csv={csv}");
+}
+
+#[tokio::test]
+async fn it_admin_feedback_github_issue_not_configured_409() {
+    let app = spawn_test_server().await;
+    let token = login_and_get_token(&app.app).await;
+    let admin_token = setup_admin_and_get_token(&app.app).await;
+    let id = submit_feedback(&app.app, &token, "to github").await;
+
+    // 测试环境未配置 GITHUB_TOKEN / FEEDBACK_GITHUB_REPO → 409
+    // 注：仅当 env 未设置时成立；CI/本地若设了相应 env 本断言不适用。
+    if std::env::var("GITHUB_TOKEN").ok().filter(|s| !s.is_empty()).is_some()
+        && std::env::var("FEEDBACK_GITHUB_REPO")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .is_some()
+    {
+        return;
+    }
+    let resp = request(
+        &app.app,
+        Method::POST,
+        &format!("/api/admin/feedback/{id}/github-issue"),
+        None,
+        &[("authorization", auth_header(&admin_token))],
+    )
+    .await;
+    let (status, _, body) = response_json(resp).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "GITHUB_NOT_CONFIGURED");
+}
+
+#[tokio::test]
+async fn it_admin_feedback_new_endpoints_unauthorized() {
+    let app = spawn_test_server().await;
+    for (method, path) in [
+        (Method::GET, "/api/admin/feedback/stats"),
+        (Method::GET, "/api/admin/feedback/export.csv"),
+        (Method::GET, "/api/admin/feedback/some-id"),
+        (Method::POST, "/api/admin/feedback/some-id/replies"),
+        (Method::POST, "/api/admin/feedback/some-id/assign"),
+        (Method::POST, "/api/admin/feedback/some-id/resolve"),
+        (Method::POST, "/api/admin/feedback/some-id/merge"),
+        (Method::POST, "/api/admin/feedback/some-id/github-issue"),
+        (Method::POST, "/api/admin/feedback/mark-all-read"),
+    ] {
+        let resp = request(&app.app, method, path, None, &[]).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "path {path} 应 401"
+        );
+    }
+}

@@ -81,6 +81,7 @@ fn sample_record(
         created_at,
         record_type: RecordType::All,
         self_rating: None,
+        question_mode: None,
     }
 }
 

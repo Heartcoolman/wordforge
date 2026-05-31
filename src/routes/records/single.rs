@@ -85,6 +85,10 @@ pub(crate) struct CreateRecordRequest {
     /// 客户端选填，落库供 AMAS half-life 模型分级回退使用。
     #[serde(default)]
     pub(crate) self_rating: Option<u8>,
+    /// 出题模式（word-to-meaning / meaning-to-word / audio-to-meaning / meaning-to-spelling）；
+    /// 客户端选填，落库供数据分析"答题分布·题型"使用。非法值原样存，NULL 视为"未标注"。
+    #[serde(default)]
+    pub(crate) question_mode: Option<String>,
     /// 内部派生路径专用：覆盖 created_at（不参与 JSON 反序列化）。
     #[serde(skip)]
     pub(crate) created_at_override: Option<DateTime<Utc>>,
@@ -272,6 +276,7 @@ async fn process_single_record(
         created_at: req.created_at_override.unwrap_or_else(Utc::now),
         record_type: req.record_type_or_default(),
         self_rating: req.self_rating,
+        question_mode: req.question_mode.clone(),
     };
     let word_id = req.word_id.clone();
     let record_for_store = record.clone();

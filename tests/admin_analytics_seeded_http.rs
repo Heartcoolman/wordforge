@@ -41,6 +41,7 @@ fn seed_records(
             created_at: at,
             record_type,
             self_rating: None,
+            question_mode: None,
         };
         store.create_record(&rec).expect("create_record");
     }

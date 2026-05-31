@@ -516,6 +516,7 @@ pub(super) async fn ingest_session_events(
             confused_with: None,
             record_type: Some(RecordType::Learning),
             self_rating: None,
+            question_mode: None,
             created_at_override: Some(clamp_event_created_at(event.client_ts_ms, session)),
         };
 

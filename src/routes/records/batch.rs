@@ -140,6 +140,7 @@ pub(crate) async fn process_batch_record(
         created_at: req.created_at_override.unwrap_or_else(Utc::now),
         record_type: req.record_type_or_default(),
         self_rating: req.self_rating,
+        question_mode: req.question_mode.clone(),
     };
     let word_id = req.word_id.clone();
     let record_for_store = record.clone();

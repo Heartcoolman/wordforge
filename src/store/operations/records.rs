@@ -50,6 +50,10 @@ pub struct LearningRecord {
     /// 客户端选填，落库供 AMAS half-life 模型未来分级回退使用。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub self_rating: Option<u8>,
+    /// 出题模式（word-to-meaning / meaning-to-word / audio-to-meaning / meaning-to-spelling）；
+    /// 客户端选填，落库供数据分析"答题分布·题型"使用。非法值原样存，NULL 视为"未标注"。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -62,7 +66,7 @@ pub struct UserStatsAgg {
 }
 
 const RECORD_COLS: &str =
-    "user_id, id, word_id, is_correct, response_time_ms, session_id, created_at, record_type, self_rating";
+    "user_id, id, word_id, is_correct, response_time_ms, session_id, created_at, record_type, self_rating, question_mode";
 
 fn parse_dt(s: String) -> rusqlite::Result<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(&s)
@@ -87,6 +91,7 @@ fn record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LearningRecord> 
         created_at: parse_dt(row.get(6)?)?,
         record_type,
         self_rating: row.get::<_, Option<i64>>(8)?.map(|v| v as u8),
+        question_mode: row.get(9)?,
     })
 }
 
@@ -136,14 +141,15 @@ impl Store {
         keys::validate_id(&record.user_id)?;
         let conn = self.conn()?;
         conn.execute(
-            "INSERT INTO learning_records (user_id, id, word_id, is_correct, response_time_ms, session_id, created_at, record_type, self_rating)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO learning_records (user_id, id, word_id, is_correct, response_time_ms, session_id, created_at, record_type, self_rating, question_mode)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 &record.user_id, &record.id, &record.word_id,
                 record.is_correct as i64, record.response_time_ms,
                 record.session_id.as_deref(), record.created_at.to_rfc3339(),
                 record.record_type.as_str(),
                 record.self_rating.map(|v| v as i64),
+                record.question_mode.as_deref(),
             ],
         )?;
         Ok(())
@@ -160,14 +166,15 @@ impl Store {
         let tx = conn.transaction()?;
 
         tx.execute(
-            "INSERT INTO learning_records (user_id, id, word_id, is_correct, response_time_ms, session_id, created_at, record_type, self_rating)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO learning_records (user_id, id, word_id, is_correct, response_time_ms, session_id, created_at, record_type, self_rating, question_mode)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 &record.user_id, &record.id, &record.word_id,
                 record.is_correct as i64, record.response_time_ms,
                 record.session_id.as_deref(), record.created_at.to_rfc3339(),
                 record.record_type.as_str(),
                 record.self_rating.map(|v| v as i64),
+                record.question_mode.as_deref(),
             ],
         )?;
 
@@ -602,6 +609,7 @@ mod tests {
             created_at,
             record_type: RecordType::All,
             self_rating: None,
+            question_mode: None,
         }
     }
 

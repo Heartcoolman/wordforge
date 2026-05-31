@@ -6,6 +6,10 @@ vi.mock('@/api/admin', () => ({
   adminApi: {
     checkStatus: vi.fn(),
     login: vi.fn(),
+    // 公共 /health 端点：未登录 createResource 在 mount 时拉取(version/uptime/availability/dbSize)
+    health: vi.fn(),
+    // 已登录 token 校验路径(本测试 token=null,不触发,但 page 引用故须存根)
+    getHealth: vi.fn(),
   },
 }));
 
@@ -46,6 +50,14 @@ describe('LoginPage', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockAdminApi.checkStatus.mockResolvedValue({ initialized: true });
+    mockAdminApi.health.mockResolvedValue({
+      status: 'healthy',
+      version: '1.1.0',
+      uptimeSecs: 90000,
+      dbSizeBytes: 5 * 1024 ** 2,
+      availability: { pct: 99.95, effectiveSecs: 7 * 86400, totalRequests: 1200 },
+    });
+    mockAdminApi.getHealth.mockResolvedValue({});
   });
 
   async function renderPage() {

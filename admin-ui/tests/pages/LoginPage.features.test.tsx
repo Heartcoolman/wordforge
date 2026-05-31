@@ -7,6 +7,8 @@ vi.mock('@/api/admin', () => ({
     login: vi.fn(),
     getHealth: vi.fn(),
     checkStatus: vi.fn(),
+    // 重设计后登录页右栏挂公共 /health 资源（adminApi.health），无 token 即可调用
+    health: vi.fn(() => Promise.resolve(null)),
   },
 }));
 vi.mock('@/api/health', () => ({
@@ -36,6 +38,8 @@ describe('LoginPage extra branches', () => {
     vi.clearAllMocks();
     mockToken.getAdminToken.mockReturnValue(null);
     mockApi.checkStatus.mockResolvedValue({ initialized: true });
+    // clearAllMocks 清掉默认实现，需重设 health 返回值（createResource 内 .catch 依赖 thenable）
+    mockApi.health.mockResolvedValue(null);
   });
 
   async function renderPage() {
