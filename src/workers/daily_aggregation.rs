@@ -35,6 +35,14 @@ pub async fn run(store: &Store) {
             tracing::warn!(error = %e, "Failed to store daily aggregation metrics");
         }
 
+        // AMAS 看板：ELO 日快照（散点 7d Δ 着色）+ 阶段分布日快照（趋势线）
+        if let Err(e) = store.snapshot_user_elo_daily(&today) {
+            tracing::warn!(error = %e, "Failed to snapshot user_elo_history");
+        }
+        if let Err(e) = store.snapshot_amas_stage_daily(&today) {
+            tracing::warn!(error = %e, "Failed to snapshot amas stage distribution");
+        }
+
         tracing::info!(
             date = %today,
             records = total_records,

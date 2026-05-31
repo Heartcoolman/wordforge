@@ -32,6 +32,7 @@ use crate::state::{AppState, SseEvent};
 use crate::store::operations::resource_packs::{
     ResourcePack, ResourcePackChannel, ResourcePackVersion,
 };
+use chrono::Datelike;
 
 /// Admin 上传单包硬上限：4 MiB（对接文档 §2.2 建议 ≤ 2 MB，这里留一倍余量）。
 const MAX_PACK_UPLOAD_SIZE: usize = 4 * 1024 * 1024;
@@ -39,6 +40,7 @@ const MAX_PACK_UPLOAD_SIZE: usize = 4 * 1024 * 1024;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(list_packs))
+        .route("/summary", get(pack_summary))
         .route("/:pack_id/versions", post(upload_version))
         .route("/:pack_id/versions/:version", delete(deactivate_version))
         .route(
@@ -67,6 +69,30 @@ struct AdminPackEntry {
     #[serde(flatten)]
     pack: ResourcePack,
     versions: Vec<ResourcePackVersion>,
+    /// 各通道当前激活版本号，无则 null。
+    active: ActiveChannels,
+    /// 该 pack 在 install_log 的全量记录数。
+    total_installs: i64,
+    /// 近 7 天该 pack 各 outcome 计数。
+    outcomes7d: OutcomeCounts,
+}
+
+/// 三通道激活版本号（null 表示该通道无激活）。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ActiveChannels {
+    stable: Option<String>,
+    beta: Option<String>,
+    internal: Option<String>,
+}
+
+/// 三态 outcome 计数。key 沿用 DB 真实枚举（snake_case：`verify_failed`），
+/// 故刻意不加 camelCase rename，与契约 `outcomes7d` / `failures7dByOutcome` 一致。
+#[derive(Debug, Serialize)]
+struct OutcomeCounts {
+    installed: i64,
+    verify_failed: i64,
+    rollback: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -88,13 +114,38 @@ async fn list_packs(
     _admin: AdminAuthUser,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
+    let since_7d = seven_days_ago_rfc3339();
     let entries = state
-        .run_store_task("admin.resource_packs.list", |store| {
+        .run_store_task("admin.resource_packs.list", move |store| {
             let packs = store.list_resource_packs()?;
             let mut out = Vec::with_capacity(packs.len());
             for p in packs {
                 let versions = store.list_pack_versions(&p.pack_id)?;
-                out.push(AdminPackEntry { pack: p, versions });
+                let total_installs = store.pack_total_installs(&p.pack_id)?;
+                let o7 = store.pack_outcomes_since(&p.pack_id, &since_7d)?;
+                let mut active = ActiveChannels {
+                    stable: None,
+                    beta: None,
+                    internal: None,
+                };
+                for (channel, version) in store.pack_active_versions(&p.pack_id)? {
+                    match channel {
+                        ResourcePackChannel::Stable => active.stable = Some(version),
+                        ResourcePackChannel::Beta => active.beta = Some(version),
+                        ResourcePackChannel::Internal => active.internal = Some(version),
+                    }
+                }
+                out.push(AdminPackEntry {
+                    pack: p,
+                    versions,
+                    active,
+                    total_installs,
+                    outcomes7d: OutcomeCounts {
+                        installed: o7.installed,
+                        verify_failed: o7.verify_failed,
+                        rollback: o7.rollback,
+                    },
+                });
             }
             Ok::<_, crate::store::StoreError>(out)
         })
@@ -228,6 +279,10 @@ async fn set_active(
     let channel = parse_channel(&channel_str)?;
     validate_version(&body.version)?;
 
+    // 受众客户端数：当前在线 SSE 连接数。切激活通过 broadcast_to_all_sse 推达全部在线连接，
+    // 注册表不按 channel 分桶，故目标通道受众即在线总数（设计稿 #audience-count）。
+    let audience_clients = state.active_sse().len() as i64;
+
     let pack_id_for_db = pack_id.clone();
     let version_for_db = body.version.clone();
     state
@@ -274,6 +329,8 @@ async fn set_active(
         "channel": channel.as_str(),
         "version": body.version,
         "activated": true,
+        // 受众客户端数（当前在线 SSE 连接数）—— 设计稿切换激活对话框 #audience-count
+        "audienceClients": audience_clients,
     })))
 }
 
@@ -337,7 +394,83 @@ async fn pack_stats(
     })))
 }
 
+/// `GET /api/admin/resource-packs/summary` — 跨包全局聚合 KPI。
+/// 时间边界在 Rust 侧用 chrono 算出 RFC3339 后传 SQL（同格式同时区下字典序==时间序）。
+async fn pack_summary(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let month_start = month_start_rfc3339();
+    let today_start = today_start_rfc3339();
+    let since_7d = seven_days_ago_rfc3339();
+
+    // 受众客户端数：当前在线 SSE 连接数（与 set_active 的 audience_clients 同源），
+    // 供切激活对话框预览 SSE 通告范围（设计稿 #audience-count）。
+    let online_clients = state.active_sse().len() as i64;
+
+    let sum = state
+        .run_store_task("admin.resource_packs.summary", move |store| {
+            store.resource_pack_summary(&month_start, &today_start, &since_7d)
+        })
+        .await??;
+
+    // 近 7 天失败率：分母为 0 时返回 0（不除零）
+    let total_7d = sum.outcomes_7d.total();
+    let failure_rate_7d = if total_7d == 0 {
+        0.0
+    } else {
+        sum.outcomes_7d.failures() as f64 / total_7d as f64
+    };
+
+    Ok(ok(serde_json::json!({
+        "totalPacks": sum.total_packs,
+        "newPacksThisMonth": sum.new_packs_this_month,
+        "totalVersions": sum.total_versions,
+        "versionsByChannel": {
+            "stable": sum.versions_by_channel.stable,
+            "beta": sum.versions_by_channel.beta,
+            "internal": sum.versions_by_channel.internal,
+        },
+        "installsToday": sum.installs_today,
+        "installsTodaySuccess": sum.installs_today_success,
+        "failureRate7d": failure_rate_7d,
+        "failures7dByOutcome": {
+            "verify_failed": sum.outcomes_7d.verify_failed,
+            "rollback": sum.outcomes_7d.rollback,
+        },
+        // 当前在线客户端数（在线 SSE 连接），切激活对话框「受众」与 SSE 通告范围
+        "onlineClients": online_clients,
+    })))
+}
+
 // ── helpers ────────────────────────────────────────────────────────────────
+
+/// 今日 00:00:00Z 的 RFC3339 字符串。
+fn today_start_rfc3339() -> String {
+    let now = chrono::Utc::now();
+    now.date_naive()
+        .and_hms_opt(0, 0, 0)
+        .expect("00:00:00 always valid")
+        .and_utc()
+        .to_rfc3339()
+}
+
+/// now - 7 天的 RFC3339 字符串（近 7 天窗口下界）。
+fn seven_days_ago_rfc3339() -> String {
+    (chrono::Utc::now() - chrono::Duration::days(7)).to_rfc3339()
+}
+
+/// 本月 1 号 00:00:00Z 的 RFC3339 字符串。
+fn month_start_rfc3339() -> String {
+    let now = chrono::Utc::now();
+    now.date_naive()
+        .with_day(1)
+        .expect("day 1 always valid")
+        .and_hms_opt(0, 0, 0)
+        .expect("00:00:00 always valid")
+        .and_utc()
+        .to_rfc3339()
+}
 
 /// v1.1-P2.10：写一条 admin 资源包审计。与 `updates.rs::insert_update_audit` 同范式，
 /// 同步入 DB（SQLite 写入廉价），失败仅打 warn，不阻塞主响应。

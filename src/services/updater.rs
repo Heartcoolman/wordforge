@@ -134,6 +134,10 @@ pub struct ChannelStatus {
     pub has_update: bool,
     /// 当前进程是否能用这条 release 自更新：架构匹配 + 找到 tar.gz / sha256 资产对。
     pub can_apply: bool,
+    /// tarball 字节大小（asset `size` 字段）。
+    pub tarball_size: u64,
+    /// tarball 的 sha256 hex；check 时 best-effort 填充，未拉取到则 None。
+    pub sha256: Option<String>,
 }
 
 /// 暴露给前端的版本视图，三个 admin updates API 都返回它。
@@ -151,6 +155,30 @@ pub struct UpdateStatus {
     pub allow_downgrade: bool,
 }
 
+/// changelog 单条 commit（conventional-commit 分类后）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangelogCommit {
+    pub category: String,
+    pub scope: Option<String>,
+    pub subject: String,
+    pub sha: String,
+    pub author: String,
+}
+
+/// 两个 tag 间的 changelog 汇总（GitHub compare API 结果）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangelogSummary {
+    pub base: String,
+    pub head: String,
+    pub total_commits: u32,
+    pub contributors: u32,
+    pub category_counts: std::collections::BTreeMap<String, u32>,
+    pub commits: Vec<ChangelogCommit>,
+    pub compare_url: String,
+}
+
 /// 已解析的最新 release，包含 apply 需要的全部 url 与元数据。
 #[derive(Debug, Clone)]
 struct CachedRelease {
@@ -163,6 +191,8 @@ struct CachedRelease {
     /// M0-R2：minisign 签名文件 URL（.tar.gz.minisig）；旧 release 无此 asset 时为空。
     sig_url: String,
     tarball_size: u64,
+    /// parse 时 None，check / fetch_release_by_tag 阶段 best-effort 拉 .sha256 填充。
+    sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -355,7 +385,7 @@ impl Updater {
             });
         }
         let body: serde_json::Value = resp.json().await?;
-        let parsed = parse_release_payload(&body).ok_or_else(|| {
+        let mut parsed = parse_release_payload(&body).ok_or_else(|| {
             UpdaterError::InvalidTarget(format!(
                 "release tag '{}' has no compatible asset for current arch",
                 target_tag
@@ -367,6 +397,10 @@ impl Updater {
                 parsed.tag, target_tag
             )));
         }
+
+        let mut slot = Some(parsed);
+        self.fill_release_sha256(&mut slot).await;
+        parsed = slot.expect("slot was Some");
 
         let mut cache = self.cache.write().await;
         match channel {
@@ -452,7 +486,11 @@ impl Updater {
             .and_then(|v| v.to_str().ok())
             .map(str::to_string);
         let body: serde_json::Value = resp.json().await?;
-        let parsed = parse_release_list_payload(&body);
+        let mut parsed = parse_release_list_payload(&body);
+
+        // best-effort 填充 sha256：仅对有 update 的通道拉 .sha256，失败仅 warn 不阻断。
+        self.fill_release_sha256(&mut parsed.stable).await;
+        self.fill_release_sha256(&mut parsed.beta).await;
 
         let mut cache = self.cache.write().await;
         cache.last_checked_at = Some(Utc::now());
@@ -828,6 +866,149 @@ impl Updater {
         Ok(hex)
     }
 
+    /// best-effort 给有 update 的 release 填 sha256：拉 `.sha256` 资产，失败仅 warn。
+    async fn fill_release_sha256(&self, slot: &mut Option<CachedRelease>) {
+        let Some(r) = slot.as_mut() else { return };
+        if r.sha256.is_some()
+            || r.sha256_url.is_empty()
+            || !is_strictly_newer(&r.tag, &self.current_tag)
+        {
+            return;
+        }
+        match self.fetch_sha256(&r.sha256_url).await {
+            Ok(hex) => r.sha256 = Some(hex),
+            Err(e) => tracing::warn!(tag = %r.tag, "拉 sha256 失败（不阻断）: {e}"),
+        }
+    }
+
+    /// 从 `api_url` 推导 GitHub repos base（截到 `/releases` 前）。
+    /// `https://api.github.com/repos/OWNER/REPO/releases?...` → `https://api.github.com/repos/OWNER/REPO`。
+    /// api_url 为空或不含 `/releases` 时返回 None。
+    fn repos_api_base(&self) -> Option<String> {
+        let url = self.api_url.trim();
+        if url.is_empty() {
+            return None;
+        }
+        url.split_once("/releases")
+            .map(|(base, _)| base.trim_end_matches('/').to_string())
+            .filter(|b| !b.is_empty())
+    }
+
+    /// GitHub compare API：`base...head` → 分类后的 commit 列表。
+    /// 403/429 → RateLimited；404 / 不可解析 → InvalidTarget；其它非 2xx → Api。
+    /// repos base 不可推导（api_url 空）→ Config。
+    pub async fn fetch_changelog(
+        &self,
+        base_tag: &str,
+        head_tag: &str,
+    ) -> Result<ChangelogSummary, UpdaterError> {
+        let repos_base = self.repos_api_base().ok_or_else(|| {
+            UpdaterError::Config("api_url 无法推导 repos base；无法拉 changelog".into())
+        })?;
+        let compare_api = format!("{repos_base}/compare/{base_tag}...{head_tag}");
+
+        let mut req = self
+            .client
+            .get(&compare_api)
+            .header("Accept", "application/vnd.github+json");
+        if let Some(ref token) = self.github_token {
+            req = req.header("Authorization", format!("Bearer {token}"));
+        }
+        let resp = req.send().await?;
+        let status = resp.status();
+        if status.as_u16() == 403 || status.as_u16() == 429 {
+            return Err(UpdaterError::RateLimited);
+        }
+        if status.as_u16() == 404 {
+            return Err(UpdaterError::InvalidTarget(format!(
+                "compare {base_tag}...{head_tag} not found"
+            )));
+        }
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(UpdaterError::Api {
+                status: status.as_u16(),
+                body,
+            });
+        }
+        let body: serde_json::Value = resp.json().await?;
+
+        let raw_commits = body
+            .get("commits")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| {
+                UpdaterError::InvalidTarget(format!(
+                    "compare {base_tag}...{head_tag} 响应无 commits 数组"
+                ))
+            })?;
+
+        let mut commits: Vec<ChangelogCommit> = Vec::with_capacity(raw_commits.len());
+        let mut category_counts: std::collections::BTreeMap<String, u32> =
+            std::collections::BTreeMap::new();
+        let mut authors: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for c in raw_commits {
+            let sha = c
+                .get("sha")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .chars()
+                .take(7)
+                .collect::<String>();
+            let message = c
+                .get("commit")
+                .and_then(|cm| cm.get("message"))
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let first_line = message.lines().next().unwrap_or_default().trim();
+            // author：优先 GitHub login，否则 commit.author.name。
+            let author = c
+                .get("author")
+                .and_then(|a| a.get("login"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    c.get("commit")
+                        .and_then(|cm| cm.get("author"))
+                        .and_then(|a| a.get("name"))
+                        .and_then(|v| v.as_str())
+                })
+                .unwrap_or("unknown")
+                .to_string();
+            if !author.is_empty() {
+                authors.insert(author.clone());
+            }
+            let (category, scope, subject) = classify_commit(first_line);
+            *category_counts.entry(category.clone()).or_insert(0) += 1;
+            commits.push(ChangelogCommit {
+                category,
+                scope,
+                subject,
+                sha,
+                author,
+            });
+        }
+
+        let total_commits = body
+            .get("total_commits")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as u32)
+            .unwrap_or(commits.len() as u32);
+
+        // html base：把 `api.github.com/repos` 换成 `github.com`。
+        let html_base = repos_base.replacen("api.github.com/repos", "github.com", 1);
+        let compare_url = format!("{html_base}/compare/{base_tag}...{head_tag}");
+
+        Ok(ChangelogSummary {
+            base: base_tag.to_string(),
+            head: head_tag.to_string(),
+            total_commits,
+            contributors: authors.len() as u32,
+            category_counts,
+            commits,
+            compare_url,
+        })
+    }
+
     /// M0-R2：从 sig_url 下载 .minisig 文件并验签 tarball。
     ///
     /// 决策 O5-a：公钥编译期嵌入（`env!("MINISIGN_PUBKEY")`）。
@@ -992,6 +1173,8 @@ impl Updater {
                     release_url: r.html_url.clone(),
                     has_update,
                     can_apply: has_update && assets_ok,
+                    tarball_size: r.tarball_size,
+                    sha256: r.sha256.clone(),
                 }
             })
         };
@@ -1071,6 +1254,7 @@ fn parse_release_payload(body: &serde_json::Value) -> Option<CachedRelease> {
         sha256_url: sha_url,
         sig_url,
         tarball_size: tar_size,
+        sha256: None,
     })
 }
 
@@ -1138,6 +1322,59 @@ fn parse_release_list_payload(body: &serde_json::Value) -> ParsedReleaseList {
         stable: stable_best.map(|(_, r)| r),
         beta: beta_best.map(|(_, r)| r),
     }
+}
+
+/// 已知的 conventional-commit category 白名单；其它一律归 `other`。
+const KNOWN_CATEGORIES: &[&str] = &[
+    "feat", "fix", "perf", "docs", "refactor", "style", "test", "chore", "build", "ci",
+];
+
+/// 解析 conventional-commit 头：`type(scope)!: subject`。
+/// 等价正则 `^(\w+)(\(([^)]+)\))?!?:\s*(.+)$`。
+/// 返回 `(category, scope, subject)`；不匹配 → `("other", None, 原文)`。
+fn classify_commit(subject_line: &str) -> (String, Option<String>, String) {
+    let none = || ("other".to_string(), None, subject_line.to_string());
+
+    // type = 起始连续 \w（字母/数字/下划线）。
+    let type_len = subject_line
+        .char_indices()
+        .take_while(|(_, c)| c.is_alphanumeric() || *c == '_')
+        .last()
+        .map(|(i, c)| i + c.len_utf8())
+        .unwrap_or(0);
+    if type_len == 0 {
+        return none();
+    }
+    let lower = subject_line[..type_len].to_lowercase();
+    // 白名单外 type 整行回退 other（不保留解析出的 scope/subject）。
+    if !KNOWN_CATEGORIES.contains(&lower.as_str()) {
+        return none();
+    }
+    let mut rest = &subject_line[type_len..];
+
+    // 可选 scope：`(...)`，内层不含 `)`。
+    let mut scope: Option<String> = None;
+    if let Some(stripped) = rest.strip_prefix('(') {
+        match stripped.find(')') {
+            Some(end) if !stripped[..end].contains('(') => {
+                scope = Some(stripped[..end].to_string());
+                rest = &stripped[end + 1..];
+            }
+            _ => return none(),
+        }
+    }
+
+    // 可选 breaking `!`，然后必须是 `:`。
+    let rest = rest.strip_prefix('!').unwrap_or(rest);
+    let Some(after_colon) = rest.strip_prefix(':') else {
+        return none();
+    };
+    let subject = after_colon.trim_start();
+    if subject.is_empty() {
+        return none();
+    }
+
+    (lower, scope, subject.to_string())
 }
 
 /// 严格 newer：semver 解析失败时回退到字符串比较，仍要求 latest != current。
@@ -1766,5 +2003,65 @@ wLMDjy9FLAuxZ3q4NlEvkgtyhrr0gtTu6KC4KBJdITbbOeAi1zBIYo0v4iTgt8jJpIidRJnp94ABQkJA
             result.is_err(),
             "篡改后的 tarball 内容应被 minisign 验签拒绝，实际：{result:?}"
         );
+    }
+
+    #[test]
+    fn classify_commit_conventional_prefixes() {
+        assert_eq!(
+            classify_commit("feat(amas): 新增甜甜圈"),
+            ("feat".into(), Some("amas".into()), "新增甜甜圈".into())
+        );
+        assert_eq!(
+            classify_commit("fix: 修边界 bug"),
+            ("fix".into(), None, "修边界 bug".into())
+        );
+        // breaking `!` 与大写 type 归一化
+        assert_eq!(
+            classify_commit("FEAT(api)!: drop v1"),
+            ("feat".into(), Some("api".into()), "drop v1".into())
+        );
+        // 白名单外 type → other
+        assert_eq!(
+            classify_commit("wip(x): 半成品"),
+            ("other".into(), None, "wip(x): 半成品".into())
+        );
+        // 无 conventional 头 → other + 原文
+        assert_eq!(
+            classify_commit("随手一改"),
+            ("other".into(), None, "随手一改".into())
+        );
+        // 缺 subject → other
+        assert_eq!(
+            classify_commit("docs:"),
+            ("other".into(), None, "docs:".into())
+        );
+    }
+
+    #[test]
+    fn repos_api_base_derivation() {
+        let cfg = UpdateCheckConfig {
+            api_url: "https://api.github.com/repos/Heartcoolman/wordforge/releases?per_page=10"
+                .into(),
+            cache_ttl_secs: 3600,
+            worker_enabled: false,
+            worker_interval_secs: 3600,
+            github_token: None,
+            allow_downgrade: false,
+            install_dir: Some(std::env::temp_dir()),
+            max_tarball_bytes: 1024,
+            download_mirror_prefix: None,
+        };
+        let u = Updater::new(&cfg, "v1.0.0").expect("build updater");
+        assert_eq!(
+            u.repos_api_base().as_deref(),
+            Some("https://api.github.com/repos/Heartcoolman/wordforge")
+        );
+
+        let cfg_empty = UpdateCheckConfig {
+            api_url: String::new(),
+            ..cfg.clone()
+        };
+        let u2 = Updater::new(&cfg_empty, "v1.0.0").expect("build updater");
+        assert!(u2.repos_api_base().is_none());
     }
 }

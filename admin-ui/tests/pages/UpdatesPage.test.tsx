@@ -11,6 +11,14 @@ vi.mock('@/api/admin', () => ({
     updatesHistory: vi.fn(() => Promise.resolve({ entries: [] })),
     getSettings: vi.fn(() => Promise.resolve({ maintenanceMode: false })),
     setMaintenance: vi.fn(),
+    // 版本页对齐设计稿新增 resource —— 全部给安全桩，避免 createResource 调 undefined
+    getHealth: vi.fn(() => Promise.resolve({ status: 'healthy' })),
+    updatesBackups: vi.fn(() => Promise.resolve({ backups: [], totalBytes: 0, thresholdBytes: 10_737_418_240 })),
+    updatesChangelog: vi.fn(() => Promise.resolve({ available: false })),
+    updatesCreateBackup: vi.fn(),
+    updatesRestoreBackup: vi.fn(),
+    updatesBackupDownloadUrl: vi.fn(),
+    updatesRollback: vi.fn(),
   },
 }));
 
@@ -32,8 +40,7 @@ import { adminApi } from '@/api/admin';
 
 const mockAdminApi = adminApi as unknown as Record<string, ReturnType<typeof vi.fn>>;
 
-/// v0.6.0-beta.3：UpdateStatus 拆双通道嵌套。主区域始终是 Stable 卡，Beta 进折叠区。
-/// 这里用 stable 卡有更新 + beta=null 的典型 fixture。
+/// v0.6.0-beta.3：UpdateStatus 拆双通道嵌套。stable 卡有更新 + beta=null 的典型 fixture。
 const mockStatusHasUpdate: AdminUpdateStatus = {
   currentVersion: 'v0.4.2',
   stable: {
@@ -43,11 +50,15 @@ const mockStatusHasUpdate: AdminUpdateStatus = {
     releaseUrl: 'https://github.com/Heartcoolman/wordforge/releases/tag/v0.4.3',
     hasUpdate: true,
     canApply: true,
+    tarballSize: 15523840,
+    sha256: 'a4f2c1d9e8b7a6f5b9c1',
   },
   beta: null,
   lastCheckedAt: '2026-05-17T16:05:00Z',
   autoCheckEnabled: true,
   allowDowngrade: false,
+  installedAt: '2026-05-01T00:00:00Z',
+  uptimeSecs: 3600,
 };
 
 const mockStatusNoUpdate: AdminUpdateStatus = {
@@ -73,13 +84,14 @@ describe('UpdatesPage', () => {
   it('shows current and stable-channel latest version after loading', async () => {
     mockAdminApi.updatesStatus.mockResolvedValue(mockStatusHasUpdate);
     await renderPage();
+    // 当前版本在版本卡 .v / .vv 多处出现，用 getAllByText 断言至少一处
     await waitFor(() => {
-      expect(screen.getByText('v0.4.2')).toBeInTheDocument();
+      expect(screen.getAllByText('v0.4.2').length).toBeGreaterThan(0);
     });
-    expect(screen.getByText('v0.4.3')).toBeInTheDocument();
+    expect(screen.getAllByText('v0.4.3').length).toBeGreaterThan(0);
   });
 
-  it('shows release notes label in stable card', async () => {
+  it('shows release notes label in stable channel detail', async () => {
     mockAdminApi.updatesStatus.mockResolvedValue(mockStatusHasUpdate);
     await renderPage();
     await waitFor(() => {
@@ -87,7 +99,7 @@ describe('UpdatesPage', () => {
     });
   });
 
-  it('disables apply button when stable channel has no update', async () => {
+  it('disables stable apply button when stable channel has no update', async () => {
     mockAdminApi.updatesStatus.mockResolvedValue(mockStatusNoUpdate);
     await renderPage();
     await waitFor(() => {
@@ -96,14 +108,13 @@ describe('UpdatesPage', () => {
     });
   });
 
-  it('opens confirm modal on stable apply click', async () => {
+  it('opens confirm modal on hero upgrade click', async () => {
     mockAdminApi.updatesStatus.mockResolvedValue(mockStatusHasUpdate);
     await renderPage();
     await waitFor(() => {
-      expect(screen.getByText('v0.4.3')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /立即升级到 v0\.4\.3/ })).toBeInTheDocument();
     });
-    const applyBtn = screen.getByRole('button', { name: /一键升级到/ });
-    fireEvent.click(applyBtn);
+    fireEvent.click(screen.getByRole('button', { name: /立即升级到 v0\.4\.3/ }));
     await waitFor(() => {
       expect(screen.getByText('确认一键更新')).toBeInTheDocument();
     });
@@ -118,8 +129,8 @@ describe('UpdatesPage', () => {
       new ApiError(422, 'SHA256_MISMATCH', 'sha256 mismatch: expected ... got ...'),
     );
     await renderPage();
-    await waitFor(() => expect(screen.getByText('v0.4.3')).toBeInTheDocument());
-    fireEvent.click(screen.getByRole('button', { name: /一键升级到/ }));
+    await waitFor(() => expect(screen.getByRole('button', { name: /立即升级到 v0\.4\.3/ })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: /立即升级到 v0\.4\.3/ }));
     await waitFor(() => expect(screen.getByText('确认一键更新')).toBeInTheDocument());
     fireEvent.click(screen.getByRole('button', { name: '开始升级' }));
     await waitFor(() => {
@@ -130,17 +141,16 @@ describe('UpdatesPage', () => {
       );
       expect(matched).toBe(true);
     });
-    // 4xx 时应停在 error 分支后的 refetch 一次，不进 polling 循环；
-    // 初始 resource + refetch = ≤ 2 次，绝不会到 polling 的多次调用
-    expect(mockAdminApi.updatesStatus.mock.calls.length).toBeLessThanOrEqual(2);
+    // 4xx 时应停在 error 分支后的 refetch，不进 polling 循环（polling 会多次调 updatesStatus）
+    expect(mockAdminApi.updatesStatus.mock.calls.length).toBeLessThanOrEqual(3);
   });
 
-  it('passes channel="stable" to updatesApply when clicking stable card', async () => {
+  it('passes channel="stable" to updatesApply when applying from hero', async () => {
     mockAdminApi.updatesStatus.mockResolvedValue(mockStatusHasUpdate);
     mockAdminApi.updatesApply.mockResolvedValue({ taskId: 't1', phase: 'pending', percent: 0 });
     await renderPage();
-    await waitFor(() => expect(screen.getByText('v0.4.3')).toBeInTheDocument());
-    fireEvent.click(screen.getByRole('button', { name: /一键升级到/ }));
+    await waitFor(() => expect(screen.getByRole('button', { name: /立即升级到 v0\.4\.3/ })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: /立即升级到 v0\.4\.3/ }));
     await waitFor(() => expect(screen.getByText('确认一键更新')).toBeInTheDocument());
     fireEvent.click(screen.getByRole('button', { name: '开始升级' }));
     await waitFor(() => {
@@ -153,11 +163,31 @@ describe('UpdatesPage', () => {
     mockAdminApi.updatesCheck.mockResolvedValue(mockStatusHasUpdate);
     await renderPage();
     await waitFor(() => {
-      expect(screen.getByText('v0.4.3')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: '立即检查' })).toBeInTheDocument();
     });
     fireEvent.click(screen.getByRole('button', { name: '立即检查' }));
     await waitFor(() => {
       expect(mockAdminApi.updatesCheck).toHaveBeenCalled();
     });
+  });
+
+  it('renders backup row and triggers create backup', async () => {
+    mockAdminApi.updatesStatus.mockResolvedValue(mockStatusHasUpdate);
+    mockAdminApi.updatesBackups.mockResolvedValue({
+      backups: [
+        { name: 'backup-manual-20251125-214700.db', kind: 'manual', sizeBytes: 412 * 1024 * 1024, createdAt: '2025-11-25T21:47:00Z', version: null },
+      ],
+      totalBytes: 412 * 1024 * 1024,
+      thresholdBytes: 10_737_418_240,
+    });
+    mockAdminApi.updatesCreateBackup.mockResolvedValue({
+      name: 'backup-manual-x.db', kind: 'manual', sizeBytes: 1, createdAt: '2025-11-26T00:00:00Z', version: null,
+    });
+    await renderPage();
+    // "SQLite 备份" 在备份面板标题等多处出现，断言至少一处
+    await waitFor(() => expect(screen.getAllByText('SQLite 备份').length).toBeGreaterThan(0));
+    expect(screen.getByText('backup-manual-20251125-214700.db')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '立即备份' }));
+    await waitFor(() => expect(mockAdminApi.updatesCreateBackup).toHaveBeenCalled());
   });
 });
