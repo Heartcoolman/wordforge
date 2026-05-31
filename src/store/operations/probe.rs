@@ -9,16 +9,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::store::{Store, StoreError};
 
-/// m022:/probe/cluster 返回的单 status 聚合行。
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProbeStatusCluster {
-    pub status: String,
-    pub count: u64,
-    /// 最近 3 条 stderr 摘要(80 字符截断,仅非 ok 状态);空表示该 status 无 stderr。
-    pub top_errors: Vec<String>,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProbeExecutionRow {
@@ -240,56 +230,6 @@ impl Store {
             |r| r.get(0),
         )?;
         Ok(n as u64)
-    }
-
-    /// m022:按 status 聚合最近 window 小时内的 probe 执行结果,
-    /// 并对每个 status 附 3 条最近 stderr 摘要(80 字符截断)。
-    /// 供 admin /probe/cluster 端点使用,前端做错误聚类视图。
-    pub fn cluster_probe_by_status(
-        &self,
-        window_hours: u32,
-    ) -> Result<Vec<ProbeStatusCluster>, StoreError> {
-        let cutoff = (chrono::Utc::now()
-            - chrono::Duration::hours(window_hours.max(1) as i64))
-        .to_rfc3339();
-        let conn = self.conn()?;
-
-        let mut stmt = conn.prepare(
-            "SELECT status, COUNT(*) FROM probe_executions
-             WHERE dispatched_at >= ?1
-             GROUP BY status
-             ORDER BY 2 DESC",
-        )?;
-        let counts: Vec<(String, u64)> = stmt
-            .query_map(params![cutoff], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let mut clusters = Vec::with_capacity(counts.len());
-        for (status, count) in counts {
-            // 仅对非 'ok' 状态拉 stderr 摘要,'ok' 没意义
-            let top_errors: Vec<String> = if status != "ok" {
-                let mut s = conn.prepare(
-                    "SELECT substr(COALESCE(stderr, ''), 1, 80) AS msg FROM probe_executions
-                     WHERE status = ?1 AND dispatched_at >= ?2
-                       AND stderr IS NOT NULL AND length(stderr) > 0
-                     ORDER BY dispatched_at DESC LIMIT 3",
-                )?;
-                let rows: Result<Vec<String>, _> = s
-                    .query_map(params![status, cutoff], |r| r.get::<_, String>(0))?
-                    .collect();
-                rows?
-            } else {
-                Vec::new()
-            };
-            clusters.push(ProbeStatusCluster {
-                status,
-                count,
-                top_errors,
-            });
-        }
-        Ok(clusters)
     }
 
     /// 删除 dispatched_at < cutoff 的行（probe_cleanup cron 用）。

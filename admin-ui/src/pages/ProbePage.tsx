@@ -153,7 +153,11 @@ export default function ProbePage() {
           // 同 requestId 的新结果覆盖旧的（confirm_required → ok 等场景）
           setResults((prev) => {
             const without = prev.filter((r) => r.requestId !== payload.requestId);
-            return [...without, { ...payload, receivedAt: Date.now() }];
+            const next = [...without, { ...payload, receivedAt: Date.now() }];
+            // ring buffer 软上限:超量丢弃最旧
+            return next.length > RESULTS_BUFFER_CAP
+              ? next.slice(next.length - RESULTS_BUFFER_CAP)
+              : next;
           });
         },
         onCompleted: (payload) => {

@@ -11,29 +11,6 @@ use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
-/// m022:admin /probe/buffer-stats 返回结构。
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProbeBufferStats {
-    /// broadcast channel 容量(每个 batch 独立),硬编码 256。超过会丢老消息。
-    pub broadcast_capacity_per_batch: usize,
-    /// 当前活跃 batch 数(有订阅者或刚创建未清理)。
-    pub active_batches: usize,
-    /// 未确认 ticket 数(D 类受控写二次确认中)。
-    pub pending_confirms: usize,
-    /// 受限速跟踪的 admin 数。
-    pub tracked_admins: usize,
-    /// 每 batch 详情。
-    pub per_batch: Vec<ProbeBatchStat>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProbeBatchStat {
-    pub batch_id: String,
-    pub capacity: usize,
-    pub receiver_count: usize,
-}
 
 /// admin SSE 流接收到的单条结果消息（与 client POST 的 body 字段一一对应）。
 /// 字段名走 camelCase，与前端 SSE 解析保持一致。
@@ -184,28 +161,6 @@ impl ProbeService {
     #[cfg(test)]
     pub fn pending_confirm_count(&self) -> usize {
         self.pending_confirm.len()
-    }
-
-    /// m022:admin probe 页"ring buffer 状态卡"数据源。
-    /// 暴露 broadcast channel 的容量 / 当前订阅数 / 活跃 batch 数。
-    /// `BROADCAST_CAPACITY` 是硬编码常量,所以 capacity 字段对所有 batch 相同。
-    pub fn buffer_stats(&self) -> ProbeBufferStats {
-        let per_batch: Vec<ProbeBatchStat> = self
-            .result_tx
-            .iter()
-            .map(|kv| ProbeBatchStat {
-                batch_id: kv.key().clone(),
-                capacity: BROADCAST_CAPACITY,
-                receiver_count: kv.value().receiver_count(),
-            })
-            .collect();
-        ProbeBufferStats {
-            broadcast_capacity_per_batch: BROADCAST_CAPACITY,
-            active_batches: per_batch.len(),
-            pending_confirms: self.pending_confirm.len(),
-            tracked_admins: self.admin_calls.len(),
-            per_batch,
-        }
     }
 
     /// per-admin 滑动窗口限速：检查最近 60s 内调用次数 <= max_per_min；通过则
