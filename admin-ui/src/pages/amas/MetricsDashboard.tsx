@@ -1,4 +1,4 @@
-import { createResource, createMemo, createSignal, For, Show } from 'solid-js';
+import { createResource, createMemo, Show } from 'solid-js';
 import { Card } from '@/components/ui/Card';
 import { Spinner } from '@/components/ui/Spinner';
 import { Empty } from '@/components/ui/Empty';
@@ -7,11 +7,17 @@ import { adminApi, type AmasMetricsTimeseriesPoint } from '@/api/admin';
 import { algorithmColor } from '@/lib/chartTheme';
 import { KpiCards } from './KpiCards';
 import { AlgorithmDonut } from './AlgorithmDonut';
+import { StageSwitchPanel } from './StageSwitchPanel';
+import { EloScatterPanel } from './EloScatterPanel';
+import { MdmHeatmapPanel } from './MdmHeatmapPanel';
+import { FatigueTimeseriesPanel } from './FatigueTimeseriesPanel';
+import { DecisionHistogramPanel } from './DecisionHistogramPanel';
+import { PanelBoundary } from './PanelBoundary';
 
-/** C1: 算法延迟 / 错误率时间序列。双 Y 轴 — 左 latency μs，右 error 数 */
-export function MetricsDashboard() {
-  const [days, setDays] = createSignal<7 | 14 | 30>(7);
-  const [series] = createResource(days, async (d) => adminApi.amasMetricsTimeseries(d));
+/** metrics tab：KPI + 算法分布甜甜圈 / 阶段切换 / ELO 散点 / MDM 热图 / 疲劳时序 / 决策直方图，
+ * 末尾保留算法延迟·错误率双轴时序（与 tab 名一致）。全部真实数据，days 时间窗联动。 */
+export function MetricsDashboard(props: { days: () => number }) {
+  const [series] = createResource(props.days, async (d) => adminApi.amasMetricsTimeseries(d));
 
   const grouped = createMemo(() => {
     const data = series() ?? [];
@@ -45,15 +51,8 @@ export function MetricsDashboard() {
       barGap: '5%',
     }));
     return {
-      // 12 项 legend（6 算法 × 2 维度）+ 双 y 轴 name，top 留 96px 给两行 legend，避免与 axis name 重叠
       grid: { left: 64, right: 64, top: 96, bottom: 40 },
-      legend: {
-        top: 4,
-        type: 'plain',          // 允许自动换行，比 scroll 模式更直观
-        itemGap: 14,
-        itemWidth: 14,
-        textStyle: { fontSize: 12 },
-      },
+      legend: { top: 4, type: 'plain', itemGap: 14, itemWidth: 14, textStyle: { fontSize: 12 } },
       tooltip: { trigger: 'axis' },
       xAxis: { type: 'category', data: dates },
       yAxis: [
@@ -66,31 +65,29 @@ export function MetricsDashboard() {
 
   return (
     <div class="space-y-4">
-      {/* 顶部时间窗口控制，KPI / 甜甜圈 / 延迟图共享 days 信号 */}
-      <div class="flex items-center justify-end gap-1.5" role="group" aria-label="时间窗口">
-        <For each={[7, 14, 30] as const}>
-          {(n) => (
-            <button
-              type="button"
-              onClick={() => setDays(n)}
-              aria-pressed={days() === n}
-              aria-label={`使用 ${n} 天窗口`}
-              class={`focus-ring-soft px-2.5 py-1 text-xs rounded-md transition-colors ${
-                days() === n ? 'bg-accent text-accent-content' : 'bg-surface-secondary text-content-secondary hover:text-content'
-              }`}
-            >
-              {n} 天
-            </button>
-          )}
-        </For>
+      <PanelBoundary><KpiCards days={props.days} /></PanelBoundary>
+
+      {/* 行 1：算法分布甜甜圈(7) + 阶段切换(5) */}
+      <div class="grid grid-cols-1 lg:grid-cols-12 gap-4">
+        <div class="lg:col-span-7"><PanelBoundary><AlgorithmDonut days={props.days} /></PanelBoundary></div>
+        <div class="lg:col-span-5"><PanelBoundary><StageSwitchPanel /></PanelBoundary></div>
       </div>
 
-      <KpiCards days={days} />
+      {/* 行 2：ELO 散点(7) + MDM 热图(5) */}
+      <div class="grid grid-cols-1 lg:grid-cols-12 gap-4">
+        <div class="lg:col-span-7"><PanelBoundary><EloScatterPanel /></PanelBoundary></div>
+        <div class="lg:col-span-5"><PanelBoundary><MdmHeatmapPanel days={props.days} /></PanelBoundary></div>
+      </div>
 
-      <AlgorithmDonut days={days} />
+      {/* 行 3：疲劳时序(7) + 决策直方图(5) */}
+      <div class="grid grid-cols-1 lg:grid-cols-12 gap-4">
+        <div class="lg:col-span-7"><PanelBoundary><FatigueTimeseriesPanel days={props.days} /></PanelBoundary></div>
+        <div class="lg:col-span-5"><PanelBoundary><DecisionHistogramPanel days={props.days} /></PanelBoundary></div>
+      </div>
 
-      <Card variant="elevated">
-        <h2 class="text-lg font-semibold text-content mb-3">算法延迟 / 错误率</h2>
+      {/* 算法延迟 / 错误率双轴时序（对齐 tab 名） */}
+      <Card variant="elevated" class="amas-panel">
+        <div class="amas-panel-head"><h3>算法延迟 / 错误率</h3><span class="amas-sub">左轴延迟 ms · 右轴错误数</span></div>
         <Show when={!series.loading} fallback={<div class="min-h-[440px] flex items-center justify-center"><Spinner /></div>}>
           <Show when={grouped().dates.length > 0} fallback={<Empty title="暂无聚合数据" description="algorithm_metrics_daily 表当前为空" />}>
             <EChart option={option} height="440px" />

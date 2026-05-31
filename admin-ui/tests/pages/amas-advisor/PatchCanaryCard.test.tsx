@@ -1,9 +1,9 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent } from '@solidjs/testing-library';
 import { PatchCanaryCard } from '@/pages/amas-advisor/PatchCanaryCard';
-import type { PatchCanary } from '@/api/admin';
+import type { PatchCanaryWithMetrics } from '@/api/admin';
 
-const c: PatchCanary = {
+const c: PatchCanaryWithMetrics = {
   id: 3, suggestionId: 7, versionHash: 'deadbeef1234',
   percent: 20, cohortLo: 0, cohortHi: 20, status: 'active',
   baselineMetricsJson: '{"reward":0.5}',

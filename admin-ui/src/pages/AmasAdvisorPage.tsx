@@ -3,6 +3,7 @@ import { Card } from '@/components/ui/Card';
 import { Spinner } from '@/components/ui/Spinner';
 import { Empty } from '@/components/ui/Empty';
 import './amas-advisor/cockpit.css';
+import './amas-advisor/sandbox.css';
 import { uiStore } from '@/stores/ui';
 import { adminApi, type AmasSuggestion, type PatchCanary } from '@/api/admin';
 import { PageHeaderOps } from '@/pages/amas-advisor/PageHeaderOps';
@@ -27,7 +28,13 @@ export default function AmasAdvisorPage() {
   const [config, { refetch: refetchConfig }] = createResource(() => adminApi.amasAdvisorConfig());
   const [pending, { refetch: refetchPending }] = createResource(() => adminApi.amasListSuggestions('pending', 50));
   const [canaries, { refetch: refetchCanaries }] = createResource(() => adminApi.amasListCanaries());
-  const [whitelist] = createResource(() => adminApi.amasListWhitelist());
+  const [whitelist, { refetch: refetchWhitelist }] = createResource(() => adminApi.amasListWhitelist());
+  // 已生效 = approved + auto_applied(端点单 status 过滤,故取两批合并按时间倒序);已拒绝单独拉
+  const [approved] = createResource(() => adminApi.amasListSuggestions('approved', 50));
+  const [autoApplied] = createResource(() => adminApi.amasListSuggestions('auto_applied', 50));
+  const [rejected] = createResource(() => adminApi.amasListSuggestions('rejected', 50));
+  const effectiveList = createMemo(() =>
+    [...(approved() ?? []), ...(autoApplied() ?? [])].sort((a, b) => b.createdAt.localeCompare(a.createdAt)));
 
   // cost 处于 error 态时直接 cost() 会 throw，统一走安全读取避免整页崩
   const costSafe = createMemo(() => (cost.error ? undefined : cost()));
@@ -118,6 +125,17 @@ export default function AmasAdvisorPage() {
       uiStore.toast.error('进灰度失败', e instanceof Error ? e.message : '');
     } finally {
       setDecidingId(null);
+    }
+  }
+
+  // be:amas-advisor-sandbox:inline 加入白名单(白名单外参数 quick add,区间留宽,后续可在右侧面板收紧)
+  async function whitelistPath(path: string) {
+    try {
+      await adminApi.amasAddWhitelist({ path, minSafe: -1e9, maxSafe: 1e9 });
+      uiStore.toast.success('已加入白名单', path);
+      void refetchWhitelist();
+    } catch (e) {
+      uiStore.toast.error('加入白名单失败', e instanceof Error ? e.message : '');
     }
   }
 
@@ -212,6 +230,7 @@ export default function AmasAdvisorPage() {
                     onApprove={() => void approveSuggestion(s)}
                     onReject={() => void rejectSuggestion(s)}
                     onCanary={() => void canarySuggestion(s)}
+                    onWhitelist={(path) => void whitelistPath(path)}
                   />
                 )}
               </For>
@@ -233,13 +252,39 @@ export default function AmasAdvisorPage() {
               </For>
             </Show>
           </Show>
-          <Show when={tab() === 'effective' || tab() === 'rejected'}>
-            <Card variant="elevated">
-              <Empty
-                title={tab() === 'effective' ? '已生效 patch' : '已拒绝 patch'}
-                description="已决策记录见下方「已生效 Patch 历史」表，支持按状态/关键字搜索、分页与导出 CSV。"
-              />
-            </Card>
+          <Show when={tab() === 'effective'}>
+            <Show when={effectiveList().length > 0} fallback={<Card variant="elevated"><Empty title="暂无已生效 patch" description="批准并应用 / auto-apply 的建议会在此列出；完整审计见下方历史表" /></Card>}>
+              <For each={effectiveList()}>
+                {(s) => (
+                  <SuggestionCard
+                    s={s}
+                    whitelist={whitelist() ?? []}
+                    busy={false}
+                    usdToCny={costSafe()?.usdToCny}
+                    onApprove={() => {}}
+                    onReject={() => {}}
+                    onCanary={() => {}}
+                  />
+                )}
+              </For>
+            </Show>
+          </Show>
+          <Show when={tab() === 'rejected'}>
+            <Show when={(rejected() ?? []).length > 0} fallback={<Card variant="elevated"><Empty title="暂无已拒绝 patch" description="被拒绝的建议会在此列出；完整审计见下方历史表" /></Card>}>
+              <For each={rejected() ?? []}>
+                {(s) => (
+                  <SuggestionCard
+                    s={s}
+                    whitelist={whitelist() ?? []}
+                    busy={false}
+                    usdToCny={costSafe()?.usdToCny}
+                    onApprove={() => {}}
+                    onReject={() => {}}
+                    onCanary={() => {}}
+                  />
+                )}
+              </For>
+            </Show>
           </Show>
         </div>
         <div class="lg:col-span-4 space-y-3">

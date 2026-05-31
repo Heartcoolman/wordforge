@@ -62,7 +62,11 @@ export default function AmasConfigPage() {
   }
 
   const errors = createMemo(() => validateConfig(config()));
-  const dirty = createMemo(() => diffKnown(baseline(), config()).length > 0);
+  // 页面级 dirty 用整对象深比较:TomlEditor 可改全量 ~295 参数,diffKnown 仅覆盖
+  // PARAM_DICT 收录字段,改字典外字段时 diffKnown 恒 0 会让"验证并应用"锁死无法保存。
+  // (深比较对 key 重排会偏 dirty=true,属安全方向:至多允许保存等价配置,绝不漏判。)
+  const dirty = createMemo(() => JSON.stringify(baseline()) !== JSON.stringify(config()));
+  // dirtyCount 仅用于 DiffSummary 展示"已知参数"改动数,保留 diffKnown 口径。
   const dirtyCount = createMemo(() => diffKnown(baseline(), config()).length);
 
   function requestSave() {
@@ -129,7 +133,7 @@ export default function AmasConfigPage() {
       {/* page-header(对齐 amas-config.html .page-header) */}
       <PageHeader
         title="AMAS 调参"
-        desc="295 个子参数 · 8 算法 flag(4 决策 + 4 记忆) · ELO + 疲劳信号融合。保存即触发 500ms 防抖 validate → 原子热加载,无需重启。"
+        desc="8 个子配置(~295 参数)· 8 算法 flag(4 决策 + 4 记忆)· ELO + 疲劳信号融合。保存即触发 500ms 防抖 validate → 原子热加载,无需重启。"
         actions={
           <>
             <Show when={errors().length > 0}>

@@ -7,6 +7,7 @@ import type { AdvisorCostStats } from '@/api/admin';
 const stats: AdvisorCostStats = {
   monthYuan: 4.21, monthCapYuan: 10, quotaPct: 42.1, forecastYuan: 6.84,
   avg7dCostYuan: 0.14, monthCalls: 31, acceptedCount: 47, rejectedCount: 6, acceptanceRate: 0.887,
+  usdToCny: 7.3,
 };
 
 describe('CostRow', () => {

@@ -112,7 +112,7 @@ impl Store {
         let mut stmt = conn.prepare(
             "SELECT timestamp, is_anomaly, invariant_violations_json, cold_start_phase
              FROM engine_monitoring_events
-             WHERE timestamp >= ?1",
+             WHERE datetime(timestamp) >= datetime(?1)",
         )?;
         let rows = stmt
             .query_map([&cutoff], |row| {
@@ -324,7 +324,7 @@ impl Store {
         let mut stmt = conn.prepare(
             "SELECT user_state_attention, user_state_fatigue, user_state_motivation, user_state_confidence, cold_start_phase
              FROM engine_monitoring_events
-             WHERE timestamp >= ?1",
+             WHERE datetime(timestamp) >= datetime(?1)",
         )?;
         let rows = stmt
             .query_map([&cutoff], |row| {
@@ -452,7 +452,7 @@ impl Store {
                 COALESCE(AVG(latency_ms), 0.0),
                 COALESCE(SUM(CASE WHEN user_state_fatigue >= ?2 THEN 1 ELSE 0 END), 0)
              FROM engine_monitoring_events
-             WHERE timestamp >= ?1",
+             WHERE datetime(timestamp) >= datetime(?1)",
             rusqlite::params![cutoff, fatigue_threshold],
             |row| {
                 Ok((
@@ -493,7 +493,7 @@ impl Store {
         let mut stmt = conn.prepare(
             "SELECT routing_algo, COUNT(*)
              FROM engine_monitoring_events
-             WHERE timestamp >= ?1 AND routing_algo != ''
+             WHERE datetime(timestamp) >= datetime(?1) AND routing_algo != ''
              GROUP BY routing_algo
              ORDER BY COUNT(*) DESC",
         )?;

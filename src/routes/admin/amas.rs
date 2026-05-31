@@ -44,6 +44,8 @@ pub fn admin_router() -> Router<AppState> {
         .route("/config/parse-toml", post(parse_toml))
         .route("/config/serialize-toml", post(serialize_toml))
         // m022:百分比抽样灰度发布
+        // 修改摘要"影响"列:逐字段计算的估算影响(替代静态敏感度文案)
+        .route("/config/diff-impact", post(diff_impact))
         .route("/config/canary", get(get_canary).put(set_canary))
         .route(
             "/config/canary/disable",
@@ -56,10 +58,29 @@ pub fn admin_router() -> Router<AppState> {
             "/metrics/algorithm-distribution",
             get(metrics_algorithm_distribution),
         )
+        // 看板对齐设计稿新增子面板（真实聚合，store 层已实现 aggregate_amas_*）
+        .route(
+            "/metrics/stage-distribution",
+            get(metrics_stage_distribution),
+        )
+        .route("/metrics/elo-scatter", get(metrics_elo_scatter))
+        .route("/metrics/mdm-heatmap", get(metrics_mdm_heatmap))
+        .route(
+            "/metrics/fatigue-timeseries",
+            get(metrics_fatigue_timeseries),
+        )
+        .route(
+            "/metrics/decision-histogram",
+            get(metrics_decision_histogram),
+        )
         .route("/monitoring", get(get_monitoring_events))
         .route("/anomalies", get(anomalies_overview))
+        .route("/anomalies/feed", get(anomalies_feed))
         .route("/user-state/distribution", get(user_state_distribution))
+        .route("/user-state/transitions", get(user_state_transitions))
+        .route("/user-state/clusters", get(user_state_clusters))
         .route("/compare", get(compare_versions))
+        .route("/compare/ext", get(compare_versions_ext))
         .route("/suggestions", get(list_suggestions))
         .route("/suggestions/explain", post(explain_param))
         .route("/suggestions/spend", get(suggestion_spend))
@@ -68,6 +89,11 @@ pub fn admin_router() -> Router<AppState> {
         .route("/suggestions/:id", get(get_suggestion))
         .route("/suggestions/:id/approve", post(approve_suggestion))
         .route("/suggestions/:id/reject", post(reject_suggestion))
+        // 沙箱试运行：基于 telemetry baseline 回放预估 patch 影响（不落库、不改 live config）
+        .route(
+            "/advisor/suggestions/:id/sandbox",
+            post(sandbox_suggestion),
+        )
         // C5: 建议回滚（版本链 restore parent）
         .route("/suggestions/:id/rollback", post(rollback_suggestion))
         // C1: advisor 成本/统计
@@ -136,6 +162,38 @@ struct SetCanaryRequest {
     /// 强制走 canary 的用户白名单,与 percent 抽样并存(任一命中即用 canary)。
     #[serde(default)]
     force_user_ids: Vec<String>,
+    // 发布策略人群过滤(crowd-filter),对齐设计稿"人群过滤"区。
+    /// 仅纳入账号年龄 >= N 天的设备(过滤新注册,留空=不限)。
+    #[serde(default)]
+    min_account_age_days: Option<u32>,
+    /// 仅纳入活跃设备(近 14 天有 last_seen_at)。
+    #[serde(default)]
+    prefer_active: bool,
+    /// 仅纳入 Web 端设备。
+    #[serde(default)]
+    web_only: bool,
+    /// 24h 监控窗口无异常自动扩量;后端持久化标记,扩量由运维侧消费(见 set_canary 文档)。
+    #[serde(default)]
+    auto_scale_24h: bool,
+}
+
+impl SetCanaryRequest {
+    /// 折叠为持久化用的 crowd_filters JSON;全部为空时返回 None。
+    fn crowd_filters_json(&self) -> Option<serde_json::Value> {
+        if self.min_account_age_days.is_none()
+            && !self.prefer_active
+            && !self.web_only
+            && !self.auto_scale_24h
+        {
+            return None;
+        }
+        Some(serde_json::json!({
+            "minAccountAgeDays": self.min_account_age_days,
+            "preferActive": self.prefer_active,
+            "webOnly": self.web_only,
+            "autoScale24h": self.auto_scale_24h,
+        }))
+    }
 }
 
 /// PUT /config/canary —— 设置 active canary 配置。
@@ -166,20 +224,49 @@ async fn set_canary(
         ));
     }
 
-    let req_for_store = req;
+    let crowd_filters = req.crowd_filters_json();
+    let filter_age = req.min_account_age_days;
+    let filter_active = req.prefer_active;
+    let filter_web = req.web_only;
+
+    let version_hash = req.version_hash.clone();
+    let percent_in = req.percent;
+    let force_user_ids = req.force_user_ids.clone();
     let admin_id_for_store = admin_id;
+    let filters_for_store = crowd_filters.clone();
     let inserted = state
         .run_store_task("admin.amas.canary.set", move |store| {
             store.set_amas_canary(
-                &req_for_store.version_hash,
-                req_for_store.percent,
-                &req_for_store.force_user_ids,
+                &version_hash,
+                percent_in,
+                &force_user_ids,
+                filters_for_store.as_ref(),
                 &admin_id_for_store,
             )
         })
         .await??;
+
+    // 真实影响范围估算(设计稿"影响范围"):过滤后基数 × percent 抽样。
+    let audience = state
+        .run_store_task("admin.amas.canary.audience", move |store| {
+            store.estimate_canary_audience(filter_age, filter_active, filter_web)
+        })
+        .await??;
+    let percent = inserted.percent;
+    let affected = (audience.eligible_users as f64 * percent as f64 / 100.0).round() as i64;
+
+    state.amas().mark_canary_active();
     Ok(ok(serde_json::json!({
         "canary": inserted,
+        "audience": {
+            "totalUsers": audience.total_users,
+            "eligibleUsers": audience.eligible_users,
+            "affectedUsers": affected,
+            // m035 已接线:crowd-filter(平台/账龄/活跃)在 effective_config_for_user 按
+            // user_id 做 per-user 人群分流,不满足者回退 stable。auto_scale_24h 仍为运维标记
+            // (扩量由运维侧消费),不参与人群判定。
+            "enforcement": "enforced"
+        },
     })))
 }
 
@@ -594,6 +681,181 @@ async fn compare_versions(
             move |store| -> Result<_, crate::store::StoreError> {
                 let a = store.aggregate_amas_version_slice(&va)?;
                 let b = store.aggregate_amas_version_slice(&vb)?;
+                Ok((a, b))
+            },
+        )
+        .await??;
+    Ok(ok(serde_json::json!({"a": a, "b": b})))
+}
+
+// ─────────── 看板对齐设计稿新增子面板 handlers（store 聚合已实现） ───────────
+
+/// GET /metrics/stage-distribution —— 阶段分布（cold/transition/stable）
+async fn metrics_stage_distribution(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let dist = state
+        .run_store_task("admin.amas.stage_distribution", move |store| {
+            store.aggregate_amas_stage_distribution()
+        })
+        .await??;
+    Ok(ok(dist))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EloScatterQuery {
+    limit: Option<u32>,
+}
+
+/// GET /metrics/elo-scatter —— ELO 散点（rating × games × 7d Δ）
+async fn metrics_elo_scatter(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Query(q): Query<EloScatterQuery>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let limit = q.limit.unwrap_or(400).clamp(1, 2000);
+    let scatter = state
+        .run_store_task("admin.amas.elo_scatter", move |store| {
+            store.aggregate_amas_elo_scatter(limit)
+        })
+        .await??;
+    Ok(ok(scatter))
+}
+
+/// GET /metrics/mdm-heatmap —— MDM 遗忘热图（天 × 难度段）
+async fn metrics_mdm_heatmap(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Query(q): Query<DaysQuery>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let days = q.days.unwrap_or(7).clamp(1, 90);
+    let heatmap = state
+        .run_store_task("admin.amas.mdm_heatmap", move |store| {
+            store.aggregate_amas_mdm_heatmap(days)
+        })
+        .await??;
+    Ok(ok(heatmap))
+}
+
+/// GET /metrics/fatigue-timeseries —— 疲劳时间序列（阈值取实际生效配置，与 metrics_kpi 同源）
+async fn metrics_fatigue_timeseries(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Query(q): Query<DaysQuery>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let days = q.days.unwrap_or(7).clamp(1, 90);
+    let threshold = state
+        .amas()
+        .get_config()
+        .constraints
+        .high_fatigue_threshold;
+    let ts = state
+        .run_store_task("admin.amas.fatigue_timeseries", move |store| {
+            store.aggregate_amas_fatigue_timeseries(days, threshold)
+        })
+        .await??;
+    Ok(ok(ts))
+}
+
+/// GET /metrics/decision-histogram —— 每用户决策数直方图 + P50/P95
+async fn metrics_decision_histogram(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Query(q): Query<DaysQuery>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let days = q.days.unwrap_or(7).clamp(1, 90);
+    let hist = state
+        .run_store_task("admin.amas.decision_histogram", move |store| {
+            store.aggregate_amas_decision_histogram(days)
+        })
+        .await??;
+    Ok(ok(hist))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AnomalyFeedQuery {
+    days: Option<u32>,
+    limit: Option<u32>,
+}
+
+/// GET /anomalies/feed —— 异常逐条 feed（严重度分级 + 影响面），供异常面板详情/忽略
+async fn anomalies_feed(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Query(q): Query<AnomalyFeedQuery>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let days = q.days.unwrap_or(7).clamp(1, 30);
+    let limit = q.limit.unwrap_or(50).clamp(1, 500);
+    let feed = state
+        .run_store_task("admin.amas.anomaly_feed", move |store| {
+            store.aggregate_amas_anomaly_feed(days, limit)
+        })
+        .await??;
+    Ok(ok(feed))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct HoursQuery {
+    hours: Option<u32>,
+}
+
+/// GET /user-state/transitions —— 状态流转（窗口内阶段穿越）
+async fn user_state_transitions(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Query(q): Query<HoursQuery>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let hours = q.hours.unwrap_or(24).clamp(1, 720);
+    let transitions = state
+        .run_store_task("admin.amas.state_transitions", move |store| {
+            store.aggregate_amas_state_transitions(hours)
+        })
+        .await??;
+    Ok(ok(transitions))
+}
+
+/// GET /user-state/clusters —— 学习风格 K-Means 聚类
+async fn user_state_clusters(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let clusters = state
+        .run_store_task("admin.amas.learning_clusters", move |store| {
+            store.aggregate_amas_learning_clusters()
+        })
+        .await??;
+    Ok(ok(clusters))
+}
+
+/// GET /compare/ext —— 双版本扩展指标对比（命中率/P95/疲劳/ensemble/reward/异常率/留存 + sparkline）
+async fn compare_versions_ext(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Query(q): Query<CompareQuery>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let fatigue_threshold = state
+        .amas()
+        .get_config()
+        .constraints
+        .high_fatigue_threshold;
+    // live config 的 epsilon 仅作版本无快照时的回退；config_epsilon 由 store 层按各版本 snapshot 解析。
+    let fallback_epsilon = state
+        .amas()
+        .get_config()
+        .memory_model
+        .half_life_base_epsilon;
+    let va = q.version_a.clone();
+    let vb = q.version_b.clone();
+    let (a, b) = state
+        .run_store_task(
+            "admin.amas.compare_ext",
+            move |store| -> Result<_, crate::store::StoreError> {
+                let a = store.aggregate_amas_version_slice_ext(&va, fatigue_threshold, fallback_epsilon)?;
+                let b = store.aggregate_amas_version_slice_ext(&vb, fatigue_threshold, fallback_epsilon)?;
                 Ok((a, b))
             },
         )
@@ -1737,6 +1999,392 @@ async fn update_advisor_config(
     Ok(ok(build_advisor_config(&llm, &settings)))
 }
 
+// ─────────────────── diff-impact:逐字段估算影响 ───────────────────
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DiffImpactRequest {
+    /// path → 新值 的扁平 patch(点分式路径),与当前 live config 对比。
+    patch: serde_json::Map<String, serde_json::Value>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MetricImpact {
+    metric: &'static str,
+    delta_low_pt: f64,
+    delta_high_pt: f64,
+    direction: &'static str,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FieldImpact {
+    path: String,
+    from: serde_json::Value,
+    to: serde_json::Value,
+    rel_change: Option<f64>,
+    in_whitelist: bool,
+    impacts: Vec<MetricImpact>,
+    confidence: &'static str,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DiffImpactResponse {
+    fields: Vec<FieldImpact>,
+    telemetry_sample_size: i64,
+    confidence: &'static str,
+    method: &'static str,
+}
+
+fn diff_impact_kpi_f64(kpi: &serde_json::Value, keys: &[&str]) -> Option<f64> {
+    for k in keys {
+        if let Some(v) = kpi.get(k).and_then(|v| v.as_f64()) {
+            return Some(v);
+        }
+    }
+    None
+}
+
+/// 按点分式路径读 config 值,支持 `mem.w[0]` 下标。
+fn diff_impact_read_path(cfg: &serde_json::Value, path: &str) -> Option<serde_json::Value> {
+    let mut cur = cfg;
+    for part in path.split('.') {
+        if let Some(open) = part.find('[') {
+            let (key, rest) = part.split_at(open);
+            let idx: usize = rest[1..rest.len() - 1].parse().ok()?;
+            cur = cur.get(key)?.get(idx)?;
+        } else {
+            cur = cur.get(part)?;
+        }
+    }
+    Some(cur.clone())
+}
+
+/// POST /config/diff-impact —— 对一组 config 变更逐字段返回**计算的**估算影响(替代设计稿
+/// "命中率 +2~4%" 等静态敏感度文案)。
+///
+/// 模型:仅白名单(记忆模型)参数可建模;以有符号相对变化为驱动,经保守系数映射到百分点区间;
+/// 非白名单字段返回 flat。区间宽度随样本量收窄。dry-run 方向性估算(非在线 counterfactual),
+/// 故标 confidence。复用既有 read_path / tuning_whitelist::find。
+async fn diff_impact(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    JsonBody(req): JsonBody<DiffImpactRequest>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let current = state.amas().get_config();
+    let current_value =
+        serde_json::to_value(&current).map_err(|e| AppError::internal(&format!("ser: {e}")))?;
+
+    let fatigue_threshold = current.constraints.high_fatigue_threshold;
+    let kpi: serde_json::Value = state
+        .run_store_task("admin.amas.diff_impact_kpi", move |store| {
+            store
+                .aggregate_amas_metrics_kpi(7, fatigue_threshold)
+                .map(|k| serde_json::to_value(&k).unwrap_or(serde_json::Value::Null))
+        })
+        .await??;
+    let sample = diff_impact_kpi_f64(
+        &kpi,
+        &["decisionTotal", "decision_total", "sampleSize", "totalEvents"],
+    )
+    .map(|v| v as i64)
+    .unwrap_or(0);
+
+    let width = if sample >= 200 {
+        0.6
+    } else if sample >= 50 {
+        1.0
+    } else {
+        1.6
+    };
+
+    let mut fields = Vec::with_capacity(req.patch.len());
+    let mut in_wl_count = 0usize;
+    for (path, to_val) in &req.patch {
+        let from_val = diff_impact_read_path(&current_value, path).unwrap_or(serde_json::Value::Null);
+        let rel_change = match (from_val.as_f64(), to_val.as_f64()) {
+            (Some(f), Some(t)) if f.abs() > 1e-9 => Some((t - f) / f.abs()),
+            _ => None,
+        };
+        let in_whitelist = crate::amas::tuning_whitelist::find(path).is_some();
+        if in_whitelist {
+            in_wl_count += 1;
+        }
+
+        let drive = rel_change.unwrap_or(0.0).clamp(-1.0, 1.0);
+        let modeled = in_whitelist && rel_change.is_some() && drive.abs() > 1e-6;
+        let mk = |center: f64, metric: &'static str| {
+            let mid = (drive * center).clamp(-8.0, 8.0);
+            let half = (mid.abs() * 0.4 * width).max(0.3);
+            let (lo, hi) = (mid - half, mid + half);
+            let direction = if mid > 0.05 {
+                "up"
+            } else if mid < -0.05 {
+                "down"
+            } else {
+                "flat"
+            };
+            MetricImpact {
+                metric,
+                delta_low_pt: (lo * 10.0).round() / 10.0,
+                delta_high_pt: (hi * 10.0).round() / 10.0,
+                direction,
+            }
+        };
+        let flat = |metric: &'static str| MetricImpact {
+            metric,
+            delta_low_pt: 0.0,
+            delta_high_pt: 0.0,
+            direction: "flat",
+        };
+        let impacts = if modeled {
+            vec![
+                mk(2.0, "accuracy"),
+                mk(-0.8, "fatigue"),
+                mk(4.0, "d7Retention"),
+            ]
+        } else {
+            vec![flat("accuracy"), flat("fatigue"), flat("d7Retention")]
+        };
+
+        let confidence = if !in_whitelist {
+            "low"
+        } else if sample >= 200 {
+            "high"
+        } else if sample >= 50 {
+            "medium"
+        } else {
+            "low"
+        };
+
+        fields.push(FieldImpact {
+            path: path.clone(),
+            from: from_val,
+            to: to_val.clone(),
+            rel_change,
+            in_whitelist,
+            impacts,
+            confidence,
+        });
+    }
+
+    let all_in_wl = !fields.is_empty() && in_wl_count == fields.len();
+    let confidence = if all_in_wl && sample >= 200 {
+        "high"
+    } else if (all_in_wl || in_wl_count > 0) && sample >= 50 {
+        "medium"
+    } else {
+        "low"
+    };
+
+    Ok(ok(DiffImpactResponse {
+        fields,
+        telemetry_sample_size: sample,
+        confidence,
+        method: "telemetry-baseline + 白名单参数相对变化启发式(逐字段区间,无在线 counterfactual)",
+    }))
+}
+
+// ─────────────────── 沙箱试运行：单条 suggestion 影响预估 ───────────────────
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SandboxChange {
+    path: String,
+    from: serde_json::Value,
+    to: serde_json::Value,
+    rel_change: Option<f64>,
+    in_whitelist: bool,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SandboxMetricImpact {
+    /// baseline 当前值（百分点）。telemetry 无留存维度时 d7Retention 恒 None（诚实降级）。
+    baseline: Option<f64>,
+    predicted: Option<f64>,
+    delta_pt: f64,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SandboxSuggestionResponse {
+    suggestion_id: i64,
+    based_on_version_hash: String,
+    config_valid: bool,
+    config_error: Option<String>,
+    whitelist_ok: bool,
+    whitelist_errors: Vec<String>,
+    changes: Vec<SandboxChange>,
+    accuracy: SandboxMetricImpact,
+    fatigue: SandboxMetricImpact,
+    d7_retention: SandboxMetricImpact,
+    confidence: &'static str,
+    method: &'static str,
+    telemetry_sample_size: i64,
+}
+
+/// POST /advisor/suggestions/:id/sandbox —— 对一条 suggestion 做沙箱试运行：把 patch 应用到 live
+/// config 副本（不落库、不热重载），校验 config 合法性 + 白名单，并以 telemetry KPI 为 baseline
+/// 用白名单参数相对变化启发式预估 accuracy / fatigue / d7Retention 的百分点偏移。
+///
+/// 诚实降级：telemetry 仅有命中率/疲劳触发率维度，无 d7 留存观测，故 d7Retention.baseline 恒 None，
+/// 只返回方向性预估 delta。method 字段如实标注非在线 counterfactual。
+async fn sandbox_suggestion(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let suggestion = state
+        .run_store_task("admin.amas.sandbox_lookup", move |store| {
+            store.get_amas_suggestion(id)
+        })
+        .await??
+        .ok_or_else(|| AppError::not_found("建议不存在"))?;
+
+    let patch_obj = suggestion
+        .patch_json
+        .as_object()
+        .ok_or_else(|| AppError::internal("patch_json 非对象"))?
+        .clone();
+
+    // 白名单校验（store 驱动，const fallback）
+    let patch_for_validate = patch_obj.clone();
+    let whitelist_errors = state
+        .run_store_task("admin.amas.sandbox_whitelist", move |store| {
+            Ok::<_, crate::store::StoreError>(
+                crate::amas::tuning_whitelist::validate_patch(&store, &patch_for_validate),
+            )
+        })
+        .await??;
+    let whitelist_ok = whitelist_errors.is_empty();
+
+    // 应用 patch 到 live config 副本并校验（不热重载、不落库）
+    let current = state.amas().get_config();
+    let current_value =
+        serde_json::to_value(&current).map_err(|e| AppError::internal(&format!("ser: {e}")))?;
+    let mut cfg_value = current_value.clone();
+    for (path, value) in &patch_obj {
+        write_path(&mut cfg_value, path, value.clone());
+    }
+    let (config_valid, config_error) =
+        match serde_json::from_value::<crate::amas::config::AMASConfig>(cfg_value) {
+            Ok(cfg) => match cfg.validate() {
+                Ok(()) => (true, None),
+                Err(e) => (false, Some(e)),
+            },
+            Err(e) => (false, Some(format!("应用 patch 后反序列化失败: {e}"))),
+        };
+
+    // telemetry baseline（7 日 KPI）
+    let fatigue_threshold = current.constraints.high_fatigue_threshold;
+    let kpi = state
+        .run_store_task("admin.amas.sandbox_kpi", move |store| {
+            store.aggregate_amas_metrics_kpi(7, fatigue_threshold)
+        })
+        .await??;
+    let sample = kpi.decision_total as i64;
+    let acc_baseline = kpi.hit_rate * 100.0;
+    let fatigue_baseline = kpi.fatigue_trigger_rate * 100.0;
+
+    // 区间宽度→单值取中点；样本越多越收窄（与 diff_impact 同源启发式）。
+    let scale = if sample >= 200 {
+        1.0
+    } else if sample >= 50 {
+        0.8
+    } else {
+        0.5
+    };
+
+    // 各 path 相对变化求和作为驱动信号（仅白名单参数计入建模）。
+    let mut drive = 0.0;
+    let mut changes = Vec::with_capacity(patch_obj.len());
+    let mut modeled_any = false;
+    let mut all_in_wl = true;
+    for (path, to_val) in &patch_obj {
+        let from_val =
+            diff_impact_read_path(&current_value, path).unwrap_or(serde_json::Value::Null);
+        let rel_change = match (from_val.as_f64(), to_val.as_f64()) {
+            (Some(f), Some(t)) if f.abs() > 1e-9 => Some((t - f) / f.abs()),
+            _ => None,
+        };
+        let in_whitelist = crate::amas::tuning_whitelist::find(path).is_some();
+        if !in_whitelist {
+            all_in_wl = false;
+        }
+        if in_whitelist {
+            if let Some(rc) = rel_change {
+                if rc.abs() > 1e-6 {
+                    drive += rc.clamp(-1.0, 1.0);
+                    modeled_any = true;
+                }
+            }
+        }
+        changes.push(SandboxChange {
+            path: path.clone(),
+            from: from_val,
+            to: to_val.clone(),
+            rel_change,
+            in_whitelist,
+        });
+    }
+    let drive = drive.clamp(-1.0, 1.0);
+
+    // 中点百分点偏移（accuracy +, fatigue -, d7 +）；不可建模时全 0。
+    let mk_delta = |center: f64| -> f64 {
+        if !modeled_any {
+            return 0.0;
+        }
+        ((drive * center * scale).clamp(-8.0, 8.0) * 10.0).round() / 10.0
+    };
+    let acc_delta = mk_delta(2.0);
+    let fatigue_delta = mk_delta(-0.8);
+    let d7_delta = mk_delta(4.0);
+
+    let accuracy = SandboxMetricImpact {
+        baseline: Some((acc_baseline * 10.0).round() / 10.0),
+        predicted: Some(((acc_baseline + acc_delta) * 10.0).round() / 10.0),
+        delta_pt: acc_delta,
+    };
+    let fatigue = SandboxMetricImpact {
+        baseline: Some((fatigue_baseline * 10.0).round() / 10.0),
+        predicted: Some(((fatigue_baseline + fatigue_delta) * 10.0).round() / 10.0),
+        delta_pt: fatigue_delta,
+    };
+    // 诚实降级：无 d7 留存观测，baseline/predicted 恒 None。
+    let d7_retention = SandboxMetricImpact {
+        baseline: None,
+        predicted: None,
+        delta_pt: d7_delta,
+    };
+
+    let confidence = if all_in_wl && modeled_any && sample >= 200 {
+        "high"
+    } else if modeled_any && sample >= 50 {
+        "medium"
+    } else {
+        "low"
+    };
+
+    Ok(ok(SandboxSuggestionResponse {
+        suggestion_id: id,
+        based_on_version_hash: suggestion.based_on_version_hash,
+        config_valid,
+        config_error,
+        whitelist_ok,
+        whitelist_errors,
+        changes,
+        accuracy,
+        fatigue,
+        d7_retention,
+        confidence,
+        method: "telemetry-baseline + 白名单参数相对变化启发式（dry-run 方向性预估，非在线 counterfactual）",
+        telemetry_sample_size: sample,
+    }))
+}
+
 // ─────────────────── C6:per-patch canary 子系统 ───────────────────
 
 #[derive(Debug, Deserialize)]
@@ -1843,6 +2491,7 @@ async fn create_canary(
         .await??
         .ok_or_else(|| AppError::internal("canary 落库后读取失败"))?;
 
+    state.amas().mark_canary_active();
     Ok(ok(serde_json::to_value(&inserted).unwrap()))
 }
 
@@ -1915,6 +2564,7 @@ async fn scale_canary(
         })
         .await??
         .ok_or_else(|| AppError::not_found("canary 不存在"))?;
+    state.amas().mark_canary_active();
     Ok(ok(serde_json::to_value(&updated).unwrap()))
 }
 

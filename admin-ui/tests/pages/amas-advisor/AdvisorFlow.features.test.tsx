@@ -13,7 +13,7 @@ vi.mock('@/stores/ui', () => ({
   uiStore: { toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() } },
 }));
 
-import { adminApi, type AmasSuggestion, type PatchCanary, type WhitelistRow } from '@/api/admin';
+import { adminApi, type AmasSuggestion, type PatchCanaryWithMetrics, type WhitelistRow } from '@/api/admin';
 import { SuggestionCard } from '@/pages/amas-advisor/SuggestionCard';
 import { PatchCanaryCard } from '@/pages/amas-advisor/PatchCanaryCard';
 const mockApi = adminApi as unknown as Record<string, ReturnType<typeof vi.fn>>;
@@ -29,14 +29,16 @@ const whitelist: WhitelistRow[] = [{ path: 'memoryModel.baseDesiredRetention', m
 
 // 轻量装配 harness：进灰度 → 出现 canary 卡 → 扩量/回滚
 function Harness() {
-  const [canary, setCanary] = createSignal<PatchCanary | null>(null);
+  // 真实页面 canary 卡数据来自 list 端点(含 metrics);本 harness 复用 create/scale 返回(基础
+  // PatchCanary)做展示,运行期 mock 对象含 metrics 字段,故 cast 为 WithMetrics 供卡片渲染。
+  const [canary, setCanary] = createSignal<PatchCanaryWithMetrics | null>(null);
   async function onCanary() {
     const c = await adminApi.amasCreateCanary({ suggestionId: sug.id, percent: 20 });
-    setCanary(c);
+    setCanary(c as PatchCanaryWithMetrics);
   }
   async function onScale(percent: number) {
     const c = await adminApi.amasScaleCanary(canary()!.id, percent);
-    setCanary(c);
+    setCanary(c as PatchCanaryWithMetrics);
   }
   async function onRollback() {
     await adminApi.amasRollbackCanary(canary()!.id);
@@ -56,7 +58,7 @@ function Harness() {
   );
 }
 
-const baseCanary: PatchCanary = {
+const baseCanary: PatchCanaryWithMetrics = {
   id: 11, suggestionId: 9, versionHash: 'deadbeef1234', percent: 20,
   cohortLo: 0, cohortHi: 20, status: 'active', baselineMetricsJson: '{}',
   startedAt: '2026-05-29T10:00:00Z', updatedAt: '2026-05-29T10:00:00Z',

@@ -3,7 +3,7 @@ import { screen, waitFor, fireEvent } from '@solidjs/testing-library';
 import { renderWithProviders } from '../../helpers/render';
 
 vi.mock('@/api/admin', () => ({
-  adminApi: { amasAnomaliesOverview: vi.fn() },
+  adminApi: { amasAnomalyFeed: vi.fn() },
 }));
 vi.mock('@/components/ui/EChart', () => ({ EChart: () => <div data-testid="chart" /> }));
 vi.mock('@/stores/ui', () => ({
@@ -13,16 +13,26 @@ vi.mock('@/stores/ui', () => ({
 import { adminApi } from '@/api/admin';
 const mockApi = adminApi as unknown as Record<string, ReturnType<typeof vi.fn>>;
 
-const emptyOverview = {
-  totalEvents: 0, anomalyCount: 0, violationCount: 0,
-  coldStartExplore: 0, coldStartExploit: 0,
-  byDay: [], topViolationFields: [],
+const emptyFeed = {
+  summary: { error: 0, warn: 0, info: 0, invariantPass: 120, invariantTotal: 120, passRate: 1 },
+  items: [],
 };
-const fullOverview = {
-  totalEvents: 100, anomalyCount: 5, violationCount: 3,
-  coldStartExplore: 1, coldStartExploit: 2,
-  byDay: [{ date: '2026-04-15', total: 50, anomalies: 2, violations: 1 }],
-  topViolationFields: [{ field: 'memoryModel.w[0]', count: 2 }],
+const fullFeed = {
+  summary: { error: 2, warn: 3, info: 4, invariantPass: 115, invariantTotal: 120, passRate: 0.9583 },
+  items: [
+    {
+      id: 'abc12345-def6-7890-ghij-klmnopqrstuv',
+      timestamp: '2026-05-28T10:00:00Z',
+      severity: 'error' as const,
+      code: 'mastery_bounds',
+      title: '掌握度越界',
+      userId: 'user-0001-aaaa-bbbb-cccc',
+      value: 1.234,
+      expectedRange: '[0, 1]',
+      impactedUsers: 7,
+      impactPct: 0.123,
+    },
+  ],
 };
 
 describe('AnomaliesPanel', () => {
@@ -34,32 +44,36 @@ describe('AnomaliesPanel', () => {
   }
 
   it('renders heading and window picker', async () => {
-    mockApi.amasAnomaliesOverview.mockResolvedValue(emptyOverview);
+    mockApi.amasAnomalyFeed.mockResolvedValue(emptyFeed);
     await renderPanel();
     await waitFor(() => expect(screen.getByText('异常 / 不变量违反')).toBeInTheDocument());
     expect(screen.getByText('7 天')).toBeInTheDocument();
+    expect(screen.getByText('14 天')).toBeInTheDocument();
+    expect(screen.getByText('30 天')).toBeInTheDocument();
   });
 
-  it('shows empty state when no events', async () => {
-    mockApi.amasAnomaliesOverview.mockResolvedValue(emptyOverview);
+  it('shows empty state when no items', async () => {
+    mockApi.amasAnomalyFeed.mockResolvedValue(emptyFeed);
     await renderPanel();
-    await waitFor(() => expect(screen.getByText('时间窗口内无事件')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('窗口内无异常事件')).toBeInTheDocument());
   });
 
-  it('shows charts and stats when populated', async () => {
-    mockApi.amasAnomaliesOverview.mockResolvedValue(fullOverview);
+  it('shows severity summary and items when populated', async () => {
+    mockApi.amasAnomalyFeed.mockResolvedValue(fullFeed);
     await renderPanel();
-    await waitFor(() => expect(screen.getByText('按天')).toBeInTheDocument());
-    expect(screen.getByText('Top 违反字段')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText('error 级')).toBeInTheDocument());
+    expect(screen.getByText('warn 级')).toBeInTheDocument();
+    expect(screen.getByText('info 级')).toBeInTheDocument();
+    expect(screen.getByText('不变量通过')).toBeInTheDocument();
+    // 逐条异常：code 渲染
+    expect(screen.getByText('mastery_bounds')).toBeInTheDocument();
   });
 
   it('switches days window via picker', async () => {
-    mockApi.amasAnomaliesOverview.mockResolvedValue(emptyOverview);
+    mockApi.amasAnomalyFeed.mockResolvedValue(emptyFeed);
     await renderPanel();
     await waitFor(() => expect(screen.getByText('14 天')).toBeInTheDocument());
     fireEvent.click(screen.getByText('14 天'));
-    await waitFor(() => expect(mockApi.amasAnomaliesOverview).toHaveBeenCalledWith(14));
-    fireEvent.click(screen.getByText('30 天'));
-    await waitFor(() => expect(mockApi.amasAnomaliesOverview).toHaveBeenCalledWith(30));
+    await waitFor(() => expect(mockApi.amasAnomalyFeed).toHaveBeenCalledWith(14, 50));
   });
 });

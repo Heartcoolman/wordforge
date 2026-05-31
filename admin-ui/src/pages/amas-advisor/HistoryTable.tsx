@@ -23,6 +23,25 @@ const STATUS_VARIANT: Record<AmasSuggestionStatus, 'default' | 'success' | 'erro
 function fmtTime(iso: string): string {
   try { return new Date(iso).toLocaleString('zh-CN', { hour12: false }); } catch { return iso; }
 }
+function fmtVal(v: unknown): string {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return v == null ? '—' : String(v);
+  if (v === 0) return '0';
+  if (Math.abs(v) < 1e-4) return v.toExponential(2);
+  return v.toPrecision(6).replace(/\.?0+$/, '');
+}
+// 取首个变更参数（多参数加 +N）
+function primaryPath(s: AmasSuggestion): { path: string; extra: number } {
+  const ks = Object.keys(s.patchJson);
+  return { path: ks[0] ?? '—', extra: Math.max(0, ks.length - 1) };
+}
+// per-metric Δ stat-pill：evidenceJson 含 *Delta（0-1 小数），goodWhenNegative 用于疲劳率
+function MetricPill(props: { s: AmasSuggestion; metric: string; goodWhenNegative?: boolean }) {
+  const raw = (props.s.evidenceJson as Record<string, unknown>)[props.metric];
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) return <span class="stat-pill flat">±0.0</span>;
+  const good = props.goodWhenNegative ? raw <= 0 : raw >= 0;
+  const cls = raw === 0 ? 'flat' : good ? 'up' : 'down';
+  return <span class={`stat-pill ${cls}`}>{raw >= 0 ? '+' : ''}{(raw * 100).toFixed(1)}</span>;
+}
 
 export function HistoryTable() {
   const [q, setQ] = createSignal('');
@@ -107,10 +126,33 @@ export function HistoryTable() {
         columns={[
           { key: 'status', title: '状态', render: (r) => <Badge variant={STATUS_VARIANT[r.status]} size="sm">{STATUS_LABEL[r.status]}</Badge> },
           { key: 'createdAt', title: '时间', render: (r) => <span class="text-xs tabular-nums text-content-tertiary">{fmtTime(r.createdAt)}</span> },
-          { key: 'basedOnVersionHash', title: '基于版本', render: (r) => <span class="font-mono text-xs">{r.basedOnVersionHash.slice(0, 10)}</span> },
-          { key: 'rationale', title: '理由', render: (r) => <span class="text-xs text-content truncate block max-w-[20rem]" title={r.rationale}>{r.rationale}</span> },
+          {
+            key: '_param', title: '参数变更', render: (r) => {
+              const p = primaryPath(r);
+              return (
+                <div class="hist-param">
+                  <span class="hist-path">{p.path}{p.extra > 0 ? ` +${p.extra}` : ''}</span>
+                  <span class="hist-rationale" title={r.rationale}>{r.rationale}</span>
+                </div>
+              );
+            },
+          },
+          {
+            key: '_change', title: '变化前后值', render: (r) => {
+              const path = Object.keys(r.patchJson)[0];
+              if (!path) return <span class="hist-change">—</span>;
+              const before = r.baseValuesJson?.[path];
+              return (
+                <span class="hist-change">
+                  <span class="from">{fmtVal(before)}</span><span class="arrow">→</span>{fmtVal(r.patchJson[path])}
+                </span>
+              );
+            },
+          },
+          { key: '_accDelta', title: '正确率Δ', render: (r) => <MetricPill s={r} metric="accuracyDelta" /> },
+          { key: '_fatDelta', title: '疲劳率Δ', render: (r) => <MetricPill s={r} metric="fatigueDelta" goodWhenNegative /> },
+          { key: '_retDelta', title: 'd7留存Δ', render: (r) => <MetricPill s={r} metric="retentionDelta" /> },
           { key: 'costUsd', title: '成本', render: (r) => <span class="text-xs tabular-nums">{r.costUsd != null ? formatMoney(r.costUsd, 4) : '—'}</span> },
-          { key: 'decidedBy', title: '决策人', render: (r) => <span class="text-xs text-content-tertiary">{r.decidedBy ?? '—'}</span> },
           {
             key: '_ops', title: '操作', render: (r) => (
               <div class="flex gap-1">

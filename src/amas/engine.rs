@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use parking_lot::{Mutex, RwLock};
@@ -29,6 +30,11 @@ pub struct AMASEngine {
     user_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     metrics_registry: Arc<metrics::MetricsRegistry>,
     ssp_policy: Arc<RwLock<Option<Arc<ssp::SspPolicy>>>>,
+    /// 热路径快路:无任何 active canary 时跳过 effective_config_for_user 的 1-2 次 SQLite 查询。
+    /// 安全不变式:**永不会错误地为 false**——仅在一次查询确认零 active canary 后置 false;
+    /// 任何激活 canary 的写路径(set_canary / create_canary / scale_canary)必须调
+    /// mark_canary_active() 置 true。stale-true 只是多查一次(无害),stale-false 才会漏路由。
+    canary_active: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -87,7 +93,14 @@ impl AMASEngine {
             user_locks: Arc::new(Mutex::new(HashMap::new())),
             metrics_registry: Arc::new(metrics::MetricsRegistry::new()),
             ssp_policy: Arc::new(RwLock::new(ssp_policy)),
+            // 初值 true:首个事件会真查一次并自校正为 false(若无 canary),不漏判。
+            canary_active: Arc::new(AtomicBool::new(true)),
         }
+    }
+
+    /// 标记"可能存在 active canary",激活 canary 的写路径调用后保证热路径不再跳过查询。
+    pub fn mark_canary_active(&self) {
+        self.canary_active.store(true, Ordering::Release);
     }
 
     pub fn reload_config(&self, new_config: AMASConfig) -> Result<(), String> {
@@ -129,6 +142,10 @@ impl AMASEngine {
     /// 都用同一份 Arc,保证一次请求内 config 一致。
     pub fn effective_config_for_user(&self, user_id: &str) -> Arc<AMASConfig> {
         let stable: Arc<AMASConfig> = Arc::clone(&self.config.read());
+        // 快路:确认无 active canary 时跳过下面 1-2 次 SQLite 查询(常态)。
+        if !self.canary_active.load(Ordering::Acquire) {
+            return stable;
+        }
         // hash(user_id) % 100 桶号,patch canary 与 m022 单 active 共用同一散列算法
         let bucket = {
             use std::hash::{Hash, Hasher};
@@ -137,9 +154,14 @@ impl AMASEngine {
             (h.finish() % 100) as u32
         };
 
+        // any_active:本轮是否观测到任一 active canary。仅当确认零 active 时才把快路标志置 false。
+        // 查询出错时保守视为 true(不清标志),避免错误跳过。
+        let mut any_active = false;
+
         // ① per-patch canary:多条并行 active,cohort 区间命中其一
         match self.store.get_active_patch_canaries() {
             Ok(canaries) => {
+                any_active |= !canaries.is_empty();
                 if let Some(hit) = canaries
                     .iter()
                     .find(|c| bucket >= c.cohort_lo && bucket < c.cohort_hi)
@@ -148,6 +170,7 @@ impl AMASEngine {
                 }
             }
             Err(e) => {
+                any_active = true;
                 tracing::warn!(error=%e, "effective_config_for_user: 查 patch canary 失败,回退既有路由");
             }
         }
@@ -155,7 +178,13 @@ impl AMASEngine {
         // ② 兼容既有单 active amas_canary_config(m022)
         let canary = match self.store.get_active_amas_canary() {
             Ok(Some(c)) => c,
-            Ok(None) => return stable,
+            Ok(None) => {
+                // 两类 canary 均无 active → 清快路标志,后续事件直接走快路。
+                if !any_active {
+                    self.canary_active.store(false, Ordering::Release);
+                }
+                return stable;
+            }
             Err(e) => {
                 tracing::warn!(error=%e, "effective_config_for_user: 查 canary 失败,回退 stable");
                 return stable;
@@ -165,6 +194,20 @@ impl AMASEngine {
         let in_bucket = (bucket as u64) < canary.percent as u64;
         if !is_forced && !in_bucket {
             return stable;
+        }
+        // m035 crowd_filters 接线:非强制命中的用户,还须落入人群过滤(平台/账龄/活跃)。
+        // force_user_ids 优先,无条件命中。查询出错保守回退 stable(不误推 canary)。
+        if !is_forced {
+            if let Some(filters) = &canary.crowd_filters {
+                match self.store.user_matches_crowd_filters(user_id, filters) {
+                    Ok(true) => {}
+                    Ok(false) => return stable,
+                    Err(e) => {
+                        tracing::warn!(error=%e, "effective_config_for_user: 查 crowd_filters 失败,回退 stable");
+                        return stable;
+                    }
+                }
+            }
         }
         self.load_canary_snapshot(&canary.version_hash, &stable)
     }

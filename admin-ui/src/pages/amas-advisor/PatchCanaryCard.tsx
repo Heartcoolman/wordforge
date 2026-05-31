@@ -1,7 +1,7 @@
 import { createMemo, Show } from 'solid-js';
 import { Button } from '@/components/ui/Button';
 import { Badge } from '@/components/ui/Badge';
-import type { PatchCanary, PatchCanaryStatus } from '@/api/admin';
+import type { PatchCanaryWithMetrics, PatchCanaryStatus } from '@/api/admin';
 
 const STATUS_LABEL: Record<PatchCanaryStatus, string> = {
   active: '灰度中', effective: '已生效', rolled_back: '已回滚',
@@ -15,7 +15,7 @@ function fmtDelta(v: number): string {
 }
 
 export function PatchCanaryCard(props: {
-  c: PatchCanary;
+  c: PatchCanaryWithMetrics;
   steps: [number, number, number];
   busy: boolean;
   onScale: (percent: number) => void;

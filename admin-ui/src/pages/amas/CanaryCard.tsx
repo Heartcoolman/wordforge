@@ -5,7 +5,7 @@ import { Badge } from '@/components/ui/Badge';
 import { Input } from '@/components/ui/Input';
 import { Spinner } from '@/components/ui/Spinner';
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
-import { adminApi } from '@/api/admin';
+import { adminApi, type CanaryAudience } from '@/api/admin';
 import { uiStore } from '@/stores/ui';
 
 /**
@@ -27,8 +27,26 @@ export function CanaryCard() {
   const [draftForceIds, setDraftForceIds] = createSignal('');
   const [saving, setSaving] = createSignal(false);
   const [confirmDisable, setConfirmDisable] = createSignal(false);
+  const [confirmEnable, setConfirmEnable] = createSignal(false);
+  // 人群过滤(对齐 amas-config.html "发布策略" 勾选项),透传 SetCanaryExtRequest
+  const [filterNewUsers, setFilterNewUsers] = createSignal(true); // 过滤新注册 <7d → minAccountAgeDays:7
+  const [preferActive, setPreferActive] = createSignal(true);
+  const [webOnly, setWebOnly] = createSignal(false);
+  const [autoScale24h, setAutoScale24h] = createSignal(true);
+  // set-canary 返回的真实受众估算(honest:enforcement=estimate-only)
+  const [audience, setAudience] = createSignal<CanaryAudience | null>(null);
+
+  // 启用/替换灰度会立即改变命中用户的线上配置 —— 与停用对称,先二次确认
+  function requestEnable() {
+    if (!draftVersion().trim()) {
+      uiStore.toast.error('请选择目标版本');
+      return;
+    }
+    setConfirmEnable(true);
+  }
 
   async function setCanary() {
+    setConfirmEnable(false);
     const v = draftVersion().trim();
     if (!v) {
       uiStore.toast.error('请选择目标版本');
@@ -41,8 +59,19 @@ export function CanaryCard() {
       .filter(Boolean);
     setSaving(true);
     try {
-      await adminApi.amasSetCanary({ versionHash: v, percent: p, forceUserIds });
-      uiStore.toast.success(`灰度已启用 · ${p}% + ${forceUserIds.length} 个强制用户`);
+      const r = await adminApi.amasSetCanaryExt({
+        versionHash: v,
+        percent: p,
+        forceUserIds,
+        minAccountAgeDays: filterNewUsers() ? 7 : undefined,
+        preferActive: preferActive() || undefined,
+        webOnly: webOnly() || undefined,
+        autoScale24h: autoScale24h() || undefined,
+      });
+      setAudience(r.audience);
+      uiStore.toast.success(
+        `灰度已启用 · ${p}% · 预估影响 ${r.audience.affectedUsers.toLocaleString('zh-CN')} 人`,
+      );
       await refetch();
     } catch (e) {
       uiStore.toast.error('灰度设置失败', e instanceof Error ? e.message : '');
@@ -56,6 +85,7 @@ export function CanaryCard() {
     setSaving(true);
     try {
       const r = await adminApi.amasDisableCanary();
+      setAudience(null);
       uiStore.toast.success(r.disabled ? '灰度已停用' : '当前无 active canary');
       await refetch();
     } catch (e) {
@@ -71,7 +101,7 @@ export function CanaryCard() {
         <div>
           <h2 class="text-headline text-content">灰度发布(Canary)</h2>
           <p class="text-xs text-content-tertiary mt-0.5">
-            按 user_id hash 百分比 + 强制用户 ID 抽样,引擎热路径每事件按用户分流读取
+            按 user_id hash 比例 + 人群过滤 + 强制用户 ID 抽样,引擎热路径每事件按用户分流读取
           </p>
         </div>
         <Show when={canary()}>
@@ -150,7 +180,7 @@ export function CanaryCard() {
           </div>
           <div>
             <p class="text-[11.5px] uppercase tracking-wide text-content-tertiary mb-1">
-              百分比 ({draftPercent()}%)
+              灰度比例 ({draftPercent()}%)
             </p>
             <input
               type="range"
@@ -160,10 +190,60 @@ export function CanaryCard() {
               value={draftPercent()}
               onInput={(e) => setDraftPercent(parseInt(e.currentTarget.value, 10))}
               class="w-full accent-accent"
-              aria-label="灰度百分比"
+              aria-label="灰度比例"
             />
+            <div class="flex justify-between text-[10.5px] font-mono text-content-tertiary mt-1">
+              <span>0%</span><span>20%</span><span>50%</span><span>100%</span>
+            </div>
           </div>
         </div>
+
+        {/* 人群过滤(对齐设计图发布策略勾选项) */}
+        <div class="space-y-1.5 rounded-md bg-surface-secondary p-3">
+          <p class="text-[11.5px] uppercase tracking-wide text-content-tertiary">人群过滤</p>
+          <label class="flex items-center gap-2 text-xs text-content-secondary cursor-pointer">
+            <input type="checkbox" class="accent-accent" checked={filterNewUsers()}
+              onChange={(e) => setFilterNewUsers(e.currentTarget.checked)} />
+            过滤掉新注册(&lt;7d)
+          </label>
+          <label class="flex items-center gap-2 text-xs text-content-secondary cursor-pointer">
+            <input type="checkbox" class="accent-accent" checked={preferActive()}
+              onChange={(e) => setPreferActive(e.currentTarget.checked)} />
+            优先 active 用户
+          </label>
+          <label class="flex items-center gap-2 text-xs text-content-secondary cursor-pointer">
+            <input type="checkbox" class="accent-accent" checked={webOnly()}
+              onChange={(e) => setWebOnly(e.currentTarget.checked)} />
+            仅 web 客户端
+          </label>
+          <label class="flex items-center gap-2 text-xs text-content-secondary cursor-pointer">
+            <input type="checkbox" class="accent-accent" checked={autoScale24h()}
+              onChange={(e) => setAutoScale24h(e.currentTarget.checked)} />
+            24h 后自动决策扩量 / 回滚
+          </label>
+        </div>
+
+        {/* 受众估算(set 成功后回填,honest:enforcement=estimate-only) */}
+        <Show when={audience()}>
+          {(a) => (
+            <div class="rounded-md bg-accent-light/10 border border-accent/20 p-3 text-xs space-y-1">
+              <div class="flex flex-wrap gap-x-4 gap-y-1 font-mono tabular-nums text-content">
+                <span class="text-content-secondary">
+                  总用户 · {a().totalUsers.toLocaleString('zh-CN')}
+                </span>
+                <span class="text-content-secondary">
+                  过滤后命中 · {a().eligibleUsers.toLocaleString('zh-CN')}
+                </span>
+                <span class="text-content-secondary">
+                  预估影响 · <span class="text-accent">{a().affectedUsers.toLocaleString('zh-CN')}</span>
+                </span>
+              </div>
+              <p class="text-[10.5px] text-content-tertiary">
+                分流口径 · {a().enforcement} · 引擎按 user_id hash 命中,人群过滤为估算用途
+              </p>
+            </div>
+          )}
+        </Show>
         <div>
           <p class="text-[11.5px] uppercase tracking-wide text-content-tertiary mb-1">
             强制命中的用户 ID(可选,逗号或换行分隔)
@@ -178,9 +258,19 @@ export function CanaryCard() {
           </p>
         </div>
         <div class="flex justify-end">
-          <Button size="sm" onClick={setCanary} loading={saving()}>启用 / 替换灰度</Button>
+          <Button size="sm" onClick={requestEnable} loading={saving()}>启用 / 替换灰度</Button>
         </div>
       </div>
+
+      <ConfirmDialog
+        open={confirmEnable()}
+        title="确认启用 / 替换灰度"
+        message={`将按 ${Math.max(0, Math.min(100, Math.round(draftPercent())))}% 比例 + 当前人群过滤把所选版本配置下发给命中用户,立即生效(替换当前 active canary)。`}
+        confirmText="确认启用"
+        variant="danger"
+        onConfirm={setCanary}
+        onCancel={() => setConfirmEnable(false)}
+      />
 
       <ConfirmDialog
         open={confirmDisable()}

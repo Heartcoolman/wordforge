@@ -1,7 +1,8 @@
 import { createMemo, createSignal, For, Show } from 'solid-js';
 import { Badge } from '@/components/ui/Badge';
 import { Button } from '@/components/ui/Button';
-import type { AmasSuggestion, AmasSuggestionStatus, WhitelistRow } from '@/api/admin';
+import { adminApi, type AmasSuggestion, type AmasSuggestionStatus, type WhitelistRow, type SandboxSuggestionResponse, type SandboxMetricImpact } from '@/api/admin';
+import { uiStore } from '@/stores/ui';
 
 const STATUS_LABEL: Record<AmasSuggestionStatus, string> = {
   pending: '待审批', approved: '已批准', rejected: '已拒绝',
@@ -38,15 +39,53 @@ function riskFor(path: string, value: unknown, whitelist: WhitelistRow[]): Risk 
   return { kind: 'ok', label: '白名单内' };
 }
 
+// 沙箱单指标格：deltaPt 着色 + baseline→predicted
+function MetricCell(props: { label: string; m: SandboxMetricImpact; goodWhenNegative?: boolean }) {
+  const m = () => props.m;
+  const good = () => (props.goodWhenNegative ? m().deltaPt <= 0 : m().deltaPt >= 0);
+  const sign = () => (m().deltaPt >= 0 ? '+' : '');
+  return (
+    <div class="sbx-metric">
+      <div class="l">{props.label}</div>
+      <div class={`d ${good() ? 'is-up' : 'is-down'}`}>{sign()}{m().deltaPt.toFixed(1)} pt</div>
+      <Show when={m().baseline != null}>
+        <div class="b">{m().baseline!.toFixed(1)} → {m().predicted != null ? m().predicted!.toFixed(1) : '?'}</div>
+      </Show>
+    </div>
+  );
+}
+
+const SBX_CONF_LABEL: Record<string, string> = { high: '高', medium: '中', low: '低' };
+
 export function SuggestionCard(props: {
   s: AmasSuggestion;
   whitelist: WhitelistRow[];
   busy: boolean;
+  /** USD→CNY 汇率,由父页从 cost 端点透传;缺省回退 7.3 */
+  usdToCny?: number;
   onApprove: () => void;
   onReject: () => void;
   onCanary: () => void;
+  /** be:amas-advisor-sandbox:inline 加入白名单(白名单外参数 quick button) */
+  onWhitelist?: (path: string) => void;
 }) {
   const [showEvidence, setShowEvidence] = createSignal(false);
+  const [sandbox, setSandbox] = createSignal<SandboxSuggestionResponse | null>(null);
+  const [sbxBusy, setSbxBusy] = createSignal(false);
+
+  async function runSandbox() {
+    setSbxBusy(true);
+    try {
+      setSandbox(await adminApi.amasSandboxSuggestion(props.s.id));
+    } catch (e) {
+      uiStore.toast.error('沙箱试运行失败', e instanceof Error ? e.message : '');
+    } finally {
+      setSbxBusy(false);
+    }
+  }
+  // 白名单外参数(可加入白名单):取首个不在白名单的 path
+  const outsidePath = createMemo<string | null>(() =>
+    Object.keys(props.s.patchJson).find((p) => !props.whitelist.some((w) => w.path === p)) ?? null);
   const entries = () => Object.entries(props.s.patchJson);
   const title = createMemo(() => {
     const ks = Object.keys(props.s.patchJson);
@@ -128,10 +167,14 @@ export function SuggestionCard(props: {
 
       <div class="patch-foot">
         <Button size="sm" variant="outline" loading={props.busy} onClick={props.onReject}>拒绝</Button>
+        <Button size="sm" variant="secondary" loading={sbxBusy()} onClick={() => void runSandbox()}>在沙箱试运行</Button>
+        <Show when={outsidePath() && props.onWhitelist}>
+          <Button size="sm" variant="secondary" onClick={() => props.onWhitelist!(outsidePath()!)}>把 {outsidePath()} 加入白名单</Button>
+        </Show>
         <Button size="sm" variant="secondary" loading={props.busy} onClick={props.onCanary}>进灰度 20%</Button>
         <Button size="sm" loading={props.busy} onClick={props.onApprove}>批准并应用</Button>
         <span class="cost">
-          <Show when={props.s.costUsd != null} fallback="—">¥{((props.s.costUsd ?? 0) * 7.3).toFixed(2)}</Show>
+          <Show when={props.s.costUsd != null} fallback="—">¥{((props.s.costUsd ?? 0) * (props.usdToCny ?? 7.3)).toFixed(2)}</Show>
           <Show when={props.s.tokensInput != null}> · {props.s.tokensInput}+{props.s.tokensOutput ?? 0} tok</Show>
         </span>
         <Button size="xs" variant="ghost" onClick={() => setShowEvidence(!showEvidence())}>
@@ -140,6 +183,31 @@ export function SuggestionCard(props: {
       </div>
       <Show when={showEvidence()}>
         <pre class="m-4 p-2 bg-surface-secondary rounded text-[10px] overflow-auto font-mono max-h-64">{JSON.stringify(props.s.evidenceJson, null, 2)}</pre>
+      </Show>
+
+      {/* 沙箱试运行结果：基于 telemetry 回放预估 Δ（诚实降级：d7 baseline 恒空） */}
+      <Show when={sandbox()}>
+        {(sb) => (
+          <div class="sandbox-result">
+            <div class="sandbox-head">
+              <span class="title">沙箱预估影响</span>
+              <span class="meta">
+                {sb().method} · 样本 {sb().telemetrySampleSize} · 置信 {SBX_CONF_LABEL[sb().confidence] ?? sb().confidence}
+              </span>
+            </div>
+            <Show when={!sb().configValid}>
+              <div class="sandbox-warn">配置无效：{sb().configError ?? '未知错误'}</div>
+            </Show>
+            <Show when={!sb().whitelistOk && sb().whitelistErrors.length > 0}>
+              <div class="sandbox-warn">白名单越界：{sb().whitelistErrors.join('；')}</div>
+            </Show>
+            <div class="sandbox-metrics">
+              <MetricCell label="正确率Δ" m={sb().accuracy} />
+              <MetricCell label="疲劳率Δ" m={sb().fatigue} goodWhenNegative />
+              <MetricCell label="d7留存Δ" m={sb().d7Retention} />
+            </div>
+          </div>
+        )}
       </Show>
     </div>
   );

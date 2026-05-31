@@ -1,9 +1,18 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { screen, waitFor, fireEvent } from '@solidjs/testing-library';
+import { screen, waitFor } from '@solidjs/testing-library';
 import { renderWithProviders } from '../../helpers/render';
 
 vi.mock('@/api/admin', () => ({
-  adminApi: { amasMetricsTimeseries: vi.fn() },
+  adminApi: {
+    amasMetricsTimeseries: vi.fn(),
+    amasMetricsKpi: vi.fn(),
+    amasAlgorithmDistribution: vi.fn(),
+    amasStageDistribution: vi.fn(),
+    amasEloScatter: vi.fn(),
+    amasMdmHeatmap: vi.fn(),
+    amasFatigueTimeseries: vi.fn(),
+    amasDecisionHistogram: vi.fn(),
+  },
 }));
 vi.mock('@/components/ui/EChart', () => ({ EChart: () => <div data-testid="chart" /> }));
 vi.mock('@/stores/ui', () => ({
@@ -14,11 +23,21 @@ import { adminApi } from '@/api/admin';
 const mockApi = adminApi as unknown as Record<string, ReturnType<typeof vi.fn>>;
 
 describe('MetricsDashboard', () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // 子面板由 PanelBoundary 兜底，给空安全返回避免噪音
+    mockApi.amasMetricsKpi.mockResolvedValue([]);
+    mockApi.amasAlgorithmDistribution.mockResolvedValue([]);
+    mockApi.amasStageDistribution.mockResolvedValue([]);
+    mockApi.amasEloScatter.mockResolvedValue([]);
+    mockApi.amasMdmHeatmap.mockResolvedValue([]);
+    mockApi.amasFatigueTimeseries.mockResolvedValue([]);
+    mockApi.amasDecisionHistogram.mockResolvedValue([]);
+  });
 
   async function renderPanel() {
     const { MetricsDashboard } = await import('@/pages/amas/MetricsDashboard');
-    return renderWithProviders(() => <MetricsDashboard />);
+    return renderWithProviders(() => <MetricsDashboard days={() => 7} />);
   }
 
   it('renders heading and empty state when no data', async () => {
@@ -43,15 +62,5 @@ describe('MetricsDashboard', () => {
     ]);
     await renderPanel();
     await waitFor(() => expect(screen.getByTestId('chart')).toBeInTheDocument());
-  });
-
-  it('changes days window via buttons', async () => {
-    mockApi.amasMetricsTimeseries.mockResolvedValue([]);
-    await renderPanel();
-    await waitFor(() => expect(screen.getByText('14 天')).toBeInTheDocument());
-    fireEvent.click(screen.getByText('14 天'));
-    await waitFor(() => expect(mockApi.amasMetricsTimeseries).toHaveBeenCalledWith(14));
-    fireEvent.click(screen.getByText('30 天'));
-    await waitFor(() => expect(mockApi.amasMetricsTimeseries).toHaveBeenCalledWith(30));
   });
 });

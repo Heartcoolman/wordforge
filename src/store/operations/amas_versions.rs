@@ -151,6 +151,21 @@ impl Store {
         Ok(rows)
     }
 
+    /// 按 note 精确定位最近一个版本(返回 parent_version_hash)。
+    /// 用于建议回滚:直接据 "approve suggestion#{id}" note 查,避免扫最近 N 条的窗口漏定位。
+    pub fn find_parent_hash_by_note(&self, note: &str) -> Result<Option<Option<String>>, StoreError> {
+        let conn = self.conn()?;
+        let row = conn
+            .query_row(
+                "SELECT parent_version_hash FROM amas_config_versions
+                 WHERE note = ?1 ORDER BY created_at DESC, id DESC LIMIT 1",
+                [note],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()?;
+        Ok(row)
+    }
+
     /// 取单个版本完整内容（含 snapshot_json）。
     pub fn get_amas_config_version(
         &self,
