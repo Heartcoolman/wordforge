@@ -6,9 +6,13 @@ pub mod clients;
 pub mod feedback;
 pub mod monitoring;
 pub mod probe;
+pub mod probe_telemetry;
+pub mod rbac;
 pub mod resource_packs;
 pub mod settings;
+pub mod settings_sections;
 pub mod updates;
+pub mod wordbooks;
 
 use axum::extract::{Path, Query, State};
 use axum::routing::{get, patch, post};
@@ -21,7 +25,7 @@ use crate::blocking;
 use crate::extractors::JsonBody;
 use crate::response::{ok, AppError};
 use crate::state::AppState;
-use crate::store::operations::users::{User, UserListFilter, UserStats};
+use crate::store::operations::users::{User, UserFacets, UserListFilter, UserStats};
 
 /// Safe admin view of a user (excludes password_hash).
 #[derive(Debug, Serialize)]
@@ -41,6 +45,8 @@ struct AdminUserView {
     status: String,
     /// m022:NULL 表示从未登录
     last_login_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// m025:推荐来源,NULL 表示无(admin 创建 / 老用户)
+    referrer_source: Option<String>,
     /// m024:仅 list?includeStats=true 时填充
     #[serde(skip_serializing_if = "Option::is_none")]
     stats: Option<UserStats>,
@@ -60,6 +66,7 @@ impl From<&User> for AdminUserView {
             role: u.role.clone(),
             status: u.status.clone(),
             last_login_at: u.last_login_at,
+            referrer_source: u.referrer_source.clone(),
             stats: None,
         }
     }
@@ -74,14 +81,18 @@ pub fn router() -> Router<AppState> {
         .route("/broadcast-update", post(broadcast::broadcast_update))
         .nest("/settings", settings::router())
         .nest("/wordbook-center", super::wordbook_center::admin_router())
+        .nest("/wordbooks", wordbooks::router())
         .nest("/amas", amas::admin_router())
         .nest("/updates", updates::router())
         .nest("/clients", clients::router())
         .nest("/feedback", feedback::router())
         .nest("/probe", probe::router())
+        .nest("/probe-telemetry", probe_telemetry::router())
         .nest("/resource-packs", resource_packs::router())
         .nest("/telemetry", clients::telemetry_router())
         .route("/users", get(list_users).post(admin_create_user))
+        // 用户管理页顶部筛选 chip 计数(全部/活跃/7天未登录/禁用/管理员)
+        .route("/users/facets", get(list_user_facets))
         .route("/users/:id/ban", post(ban_user))
         .route("/users/:id/unban", post(unban_user))
         .route("/stats", get(admin_stats))
@@ -176,6 +187,19 @@ async fn list_users(
     Ok(crate::response::paginated(
         safe_users, total, page, per_page,
     ))
+}
+
+/// GET /api/admin/users/facets —— 用户管理页顶部筛选 chip 的各类计数。
+async fn list_user_facets(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let facets: UserFacets = state
+        .run_store_task("admin.users.facets", |store| -> Result<_, AppError> {
+            Ok(store.admin_user_facets()?)
+        })
+        .await??;
+    Ok(ok(facets))
 }
 
 async fn ban_user(
@@ -682,8 +706,10 @@ async fn admin_user_sessions(
         "admin.user_sessions",
         move || -> Result<Vec<serde_json::Value>, crate::store::StoreError> {
             let conn = state.store().conn()?;
+            // learning_sessions 无 completed_at/words_count 列：用 updated_at 作完成时间
+            // (仅 completed 状态有意义)、total_count 作题量，保持前端 JSON 契约不变。
             let mut stmt = conn.prepare(
-                "SELECT id, status, created_at, completed_at, words_count, correct_count
+                "SELECT id, status, created_at, updated_at, total_count, correct_count
                  FROM learning_sessions
                  WHERE user_id = ?1
                  ORDER BY created_at DESC
@@ -691,13 +717,16 @@ async fn admin_user_sessions(
             )?;
             let rows: Result<Vec<serde_json::Value>, _> = stmt
                 .query_map(rusqlite::params![user_id, limit as i64], |r| {
+                    let status: String = r.get(1)?;
+                    let updated_at: String = r.get(3)?;
                     let total: Option<i64> = r.get(4)?;
                     let correct: Option<i64> = r.get(5)?;
+                    let completed_at = (status == "completed").then_some(updated_at);
                     Ok(serde_json::json!({
                         "id": r.get::<_, String>(0)?,
-                        "status": r.get::<_, String>(1)?,
+                        "status": status,
                         "createdAt": r.get::<_, String>(2)?,
-                        "completedAt": r.get::<_, Option<String>>(3)?,
+                        "completedAt": completed_at,
                         "wordsCount": total,
                         "correctCount": correct,
                         "accuracy": match (total, correct) {
@@ -743,31 +772,7 @@ async fn admin_users_bulk_ban(
             "userIds 数量需在 1..=200 之间",
         ));
     }
-    let mut results = Vec::with_capacity(req.user_ids.len());
-    for uid in &req.user_ids {
-        let r = admin_ban_user(&state, uid.clone()).await;
-        match r {
-            Ok(revoked) => {
-                results.push(BulkResultEntry {
-                    user_id: uid.clone(),
-                    success: true,
-                    error: None,
-                });
-                write_user_admin_audit(
-                    &state,
-                    &admin.admin_id,
-                    "user.bulk_ban",
-                    uid,
-                    serde_json::json!({"sessionsRevoked": revoked, "reason": req.reason}),
-                );
-            }
-            Err(e) => results.push(BulkResultEntry {
-                user_id: uid.clone(),
-                success: false,
-                error: Some(e.message.clone()),
-            }),
-        }
-    }
+    let results = admin_bulk_set_banned(&state, &admin.admin_id, &req, true, "user.bulk_ban").await?;
     let succeeded = results.iter().filter(|r| r.success).count();
     Ok(ok(serde_json::json!({
         "total": req.user_ids.len(),
@@ -775,6 +780,46 @@ async fn admin_users_bulk_ban(
         "failed": req.user_ids.len() - succeeded,
         "results": results,
     })))
+}
+
+/// 批量封禁/解封共用:单 run_blocking + 单事务批量处理,返回保留原 per-user result 结构。
+async fn admin_bulk_set_banned(
+    state: &AppState,
+    admin_id: &str,
+    req: &BulkUserIdsRequest,
+    banned: bool,
+    action: &str,
+) -> Result<Vec<BulkResultEntry>, AppError> {
+    let store = state.store().clone();
+    let ids = req.user_ids.clone();
+    let admin_id = admin_id.to_string();
+    let action = action.to_string();
+    let reason = req.reason.clone();
+    let affected = blocking::run_blocking("admin.bulk_set_banned", move || {
+        if banned {
+            store.batch_ban_users(&ids, &admin_id, &action, reason.as_deref())
+        } else {
+            store.batch_unban_users(&ids, &admin_id, &action, reason.as_deref())
+        }
+    })
+    .await??;
+    let affected: std::collections::HashSet<String> = affected.into_iter().collect();
+    Ok(req
+        .user_ids
+        .iter()
+        .map(|uid| {
+            let success = affected.contains(uid);
+            BulkResultEntry {
+                user_id: uid.clone(),
+                success,
+                error: if success {
+                    None
+                } else {
+                    Some("用户不存在".to_string())
+                },
+            }
+        })
+        .collect())
 }
 
 /// POST /api/admin/users/bulk-unban
@@ -789,31 +834,8 @@ async fn admin_users_bulk_unban(
             "userIds 数量需在 1..=200 之间",
         ));
     }
-    let mut results = Vec::with_capacity(req.user_ids.len());
-    for uid in &req.user_ids {
-        let r = admin_unban_user(&state, uid.clone()).await;
-        match r {
-            Ok(()) => {
-                results.push(BulkResultEntry {
-                    user_id: uid.clone(),
-                    success: true,
-                    error: None,
-                });
-                write_user_admin_audit(
-                    &state,
-                    &admin.admin_id,
-                    "user.bulk_unban",
-                    uid,
-                    serde_json::Value::Null,
-                );
-            }
-            Err(e) => results.push(BulkResultEntry {
-                user_id: uid.clone(),
-                success: false,
-                error: Some(e.message.clone()),
-            }),
-        }
-    }
+    let results =
+        admin_bulk_set_banned(&state, &admin.admin_id, &req, false, "user.bulk_unban").await?;
     let succeeded = results.iter().filter(|r| r.success).count();
     Ok(ok(serde_json::json!({
         "total": req.user_ids.len(),
@@ -962,6 +984,8 @@ async fn admin_user_devices(
         },
     )
     .await??;
+    // 脱敏:与 /clients/paginated 一致,用投影 DTO 不暴露 last_ip / banned_by / ban_reason
+    let devices: Vec<clients::ListedDevice> = devices.into_iter().map(Into::into).collect();
     Ok(ok(serde_json::json!({ "devices": devices })))
 }
 

@@ -6,14 +6,22 @@ import type {
   ClientDeviceRow, AdminAuditEntry, UserActivityEntry, UserExtras,
   EngagementAnalytics, LearningAnalytics,
   SystemHealth, DatabaseInfo, SystemSettings, WorkerStatusRow,
+  RequestMetrics, LogLine, AlertEvent,
   UpdateCheck, AdminUpdateStatus, ApplyAccepted, UpdateAuditEntry, DailyActiveUsersEntry, DailyRecordsEntry,
+  ChangelogSummary, BackupList, BackupEntry,
   StudyOverview, RecordTypeBreakdown, WordStateDistribution, RetentionCurve,
-  FeedbackItem,
+  FeedbackItem, FeedbackReply, FeedbackStats, FeedbackDetail,
   // m027:设备页对齐 clients.html 设计新增
   ListedDevice, ClientPlatformAgg, ClientVersionAgg, ClientUpgradePolicy,
+  BroadcastStats, BroadcastHistoryEntry,
 } from '@/types/admin';
 import type { AmasConfig } from '@/types/amas';
 import type { BrowseItem, WordbookPreview, ImportResult, UpdateInfo, SyncResult } from '@/types/wordbookCenter';
+import type {
+  WordbookListResponse, WordbookStats, WordEntriesPage, WordbookHeatmap,
+  WordbookUserDistribution, WordbookAuditPage, Wordbook, WordbookExport, WordEntryRow,
+  AdminWordbooksQuery, AdminWordEntriesQuery, CreateWordbookPayload, UpdateWordbookPayload, AddWordEntryPayload,
+} from '@/types/adminWordbooks';
 
 export type DataChannelValue = 'uploaded' | 'nil' | 'none';
 
@@ -83,13 +91,40 @@ export interface TelemetrySummary {
   featureUsage: Record<string, number>;
 }
 
+/** GET /api/admin/clients/:id 返回的单设备详情(脱敏:不含 last_ip / banned_by) */
+export interface ClientDetail {
+  deviceId: string;
+  platform: string;
+  userId: string | null;
+  appVersion: string | null;
+  /** GeoIP 反查国家/地区码(无样本时 null) */
+  country: string | null;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  isBanned: boolean;
+  bannedAt: string | null;
+  banReason: string | null;
+  /** 当前是否有活跃 SSE 连接 */
+  online: boolean;
+  /** 活跃 SSE 连接数(0 = 离线) */
+  connectionCount: number;
+  /** 近期遥测摘要:总条数 + 最近一条原始记录(latest 为 null 表示从未上报) */
+  telemetry: { total: number; latest: TelemetrySummary | null };
+}
+
 export const adminApi = {
   // Auth
   checkStatus: () => api.get<{ initialized: boolean }>('/api/admin/auth/status'),
   setup: (data: { email: string; password: string }) =>
     api.post<AdminAuthResponse>('/api/admin/auth/setup', data),
-  login: (data: { email: string; password: string }) =>
+  // be:login-health:rememberMe=true 签发 30 天 token(否则默认 2h)
+  login: (data: { email: string; password: string; rememberMe?: boolean }) =>
     api.post<AdminAuthResponse>('/api/admin/auth/login', data),
+  // be:setup-envcheck:登录前环境自检(公开,无需 admin token)
+  setupEnvCheck: () =>
+    api.get<EnvCheckResponse>('/api/admin/auth/setup/env-check'),
+  // be:login-health:公开 health 端点(含 version / dbSizeBytes,供 footer)
+  health: () => api.get<HealthInfo>('/health'),
   logout: () => api.post<{ loggedOut: boolean }>('/api/admin/auth/logout', undefined, { useAdminToken: true }),
   verifyToken: () => api.get<{ id: string; email: string }>('/api/admin/auth/verify', undefined, { useAdminToken: true }),
 
@@ -133,6 +168,14 @@ export const adminApi = {
   /** m023:Dashboard worker 心跳网格数据源 */
   monitoringWorkers: () =>
     api.get<{ workers: WorkerStatusRow[] }>('/api/admin/monitoring/workers', undefined, { useAdminToken: true }),
+  // m028:监控页对齐设计图新增——滚动请求指标 / 实时日志 / 派生告警时间线
+  /** window: 15m | 1h | 6h | 24h | 7d */
+  monitoringRequests: (window: '15m' | '1h' | '6h' | '24h' | '7d' = '1h') =>
+    api.get<RequestMetrics>('/api/admin/monitoring/requests', { window }, { useAdminToken: true }),
+  monitoringLogs: (limit = 200, level?: string) =>
+    api.get<{ logs: LogLine[] }>('/api/admin/monitoring/logs', { limit, level }, { useAdminToken: true }),
+  monitoringEvents: (hours = 6) =>
+    api.get<{ events: AlertEvent[] }>('/api/admin/monitoring/events', { hours }, { useAdminToken: true }),
 
   // 一键自更新（PR-auto-update）
   updatesStatus: () => api.get<AdminUpdateStatus>('/api/admin/updates/status', undefined, { useAdminToken: true }),
@@ -155,8 +198,38 @@ export const adminApi = {
       { channel, targetVersion, confirmCurrentVersion },
       { useAdminToken: true },
     ),
+  // CHANGELOG（GitHub compare API 分类）。available=false 时前端回退 releaseNotes。
+  updatesChangelog: (channel?: 'stable' | 'beta') =>
+    api.get<ChangelogSummary>('/api/admin/updates/changelog', channel ? { channel } : undefined, { useAdminToken: true }),
+  // SQLite 备份列表（升级备份 + 每日 / 手动 / 恢复前兜底）。
+  updatesBackups: () =>
+    api.get<BackupList>('/api/admin/updates/backups', undefined, { useAdminToken: true }),
+  // 立即手动备份（VACUUM INTO / Online Backup）。
+  updatesCreateBackup: () =>
+    api.post<BackupEntry>('/api/admin/updates/backups', undefined, { useAdminToken: true }),
+  // 从备份恢复（自动 pre-restore 兜底；恢复后建议重启）。
+  updatesRestoreBackup: (name: string) =>
+    api.post<{ restored: boolean; restartRecommended: boolean; preRestoreBackup: string }>(
+      `/api/admin/updates/backups/${encodeURIComponent(name)}/restore`, undefined, { useAdminToken: true }),
+  // 备份下载：Bearer 鉴权无法走 <a href>，故 fetch 取 Blob 生成 ObjectURL。
+  updatesBackupDownloadUrl: async (name: string): Promise<string> => {
+    const token = tokenManager.getAdminToken();
+    const res = await fetch(buildUrl(`/api/admin/updates/backups/${encodeURIComponent(name)}/download`), {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (!res.ok) throw new Error(`下载失败 (${res.status})`);
+    return URL.createObjectURL(await res.blob());
+  },
 
   // Broadcast & Settings
+  /** 系统广播看板：近 30 天统计 + 历史列表（GET 与 POST 同路径）。
+   *  be:broadcast-packs-minor:支持 offset/limit 分页,响应新增 pagination。 */
+  listBroadcasts: (params?: { offset?: number; limit?: number }) =>
+    api.get<{ stats: BroadcastStats; broadcasts: BroadcastHistoryEntry[]; pagination: BroadcastPagination }>(
+      '/api/admin/broadcast',
+      params as Record<string, string | number | boolean | undefined>,
+      { useAdminToken: true },
+    ),
   broadcast: (data: {
     title: string;
     message: string;
@@ -195,6 +268,9 @@ export const adminApi = {
     api.post<{ requestId: string }>(`/api/admin/clients/${id}/request-telemetry`, undefined, { useAdminToken: true }),
   getTelemetry: (deviceId: string, params?: { limit?: number; offset?: number }) =>
     api.get<{ records: TelemetrySummary[]; total: number }>(`/api/admin/telemetry/${deviceId}`, params as Record<string, string | number | boolean | undefined>, { useAdminToken: true }),
+  // be:client-detail:单设备详情抽屉数据源(country/online/firstSeenAt/ban 元数据 + 遥测摘要)
+  getClientDetail: (id: string) =>
+    api.get<ClientDetail>(`/api/admin/clients/${id}`, undefined, { useAdminToken: true }),
 
   // m027:设备表后端分页 + 平台聚合 + 升级策略 CRUD + 强制升级广播
   getClientsPaginated: (params?: {
@@ -211,8 +287,6 @@ export const adminApi = {
       versions: ClientVersionAgg[];
       policies: ClientUpgradePolicy[];
     }>('/api/admin/clients/distribution', undefined, { useAdminToken: true }),
-  listUpgradePolicy: () =>
-    api.get<{ policies: ClientUpgradePolicy[] }>('/api/admin/clients/upgrade-policy', undefined, { useAdminToken: true }),
   putUpgradePolicy: (platform: string, payload: {
     minVersion?: string | null; suggestedVersion?: string | null;
     grayscalePct?: number; pwaSilentUpdate?: boolean;
@@ -235,11 +309,58 @@ export const adminApi = {
   wbCenterSync: (id: string) =>
     api.post<SyncResult>(`/api/admin/wordbook-center/updates/${id}/sync`, undefined, { useAdminToken: true }),
 
+  // ─────────── 词库中心:本地系统+用户词库管理(/api/admin/wordbooks/*) ───────────
+  adminWordbooksList: (params?: AdminWordbooksQuery) =>
+    api.get<WordbookListResponse>(
+      '/api/admin/wordbooks',
+      params as Record<string, string | number | boolean | undefined>,
+      { useAdminToken: true },
+    ),
+  adminWordbookStats: (id: string) =>
+    api.get<WordbookStats>(`/api/admin/wordbooks/${id}/stats`, undefined, { useAdminToken: true }),
+  adminWordbookWords: (id: string, params?: AdminWordEntriesQuery) =>
+    api.get<WordEntriesPage>(
+      `/api/admin/wordbooks/${id}/words`,
+      params as Record<string, string | number | boolean | undefined>,
+      { useAdminToken: true },
+    ),
+  adminWordbookHeatmap: (id: string, limit = 600) =>
+    api.get<WordbookHeatmap>(`/api/admin/wordbooks/${id}/heatmap`, { limit }, { useAdminToken: true }),
+  adminWordbookDistribution: (id: string) =>
+    api.get<WordbookUserDistribution>(`/api/admin/wordbooks/${id}/user-distribution`, undefined, { useAdminToken: true }),
+  adminWordbookHistory: (id: string, params?: { page?: number; perPage?: number }) =>
+    api.get<WordbookAuditPage>(
+      `/api/admin/wordbooks/${id}/history`,
+      params as Record<string, string | number | boolean | undefined>,
+      { useAdminToken: true },
+    ),
+  adminWordbookCreate: (payload: CreateWordbookPayload) =>
+    api.post<Wordbook>('/api/admin/wordbooks', payload, { useAdminToken: true }),
+  adminWordbookUpdate: (id: string, payload: UpdateWordbookPayload) =>
+    api.patch<Wordbook>(`/api/admin/wordbooks/${id}`, payload, { useAdminToken: true }),
+  adminWordbookDelete: (id: string) =>
+    api.delete<{ deleted: boolean }>(`/api/admin/wordbooks/${id}`, { useAdminToken: true }),
+  adminWordbookAddWord: (id: string, payload: AddWordEntryPayload) =>
+    api.post<WordEntryRow>(`/api/admin/wordbooks/${id}/words`, payload, { useAdminToken: true }),
+  adminWordbookRemoveWord: (id: string, wordId: string) =>
+    api.delete<{ removed: boolean }>(`/api/admin/wordbooks/${id}/words/${wordId}`, { useAdminToken: true }),
+  adminWordbookExport: (id: string) =>
+    api.get<WordbookExport>(`/api/admin/wordbooks/${id}/export`, undefined, { useAdminToken: true }),
+
   // ─────────── 用户反馈（PR-feedback） ───────────
   // 后端 paginated() 返回 {success, data:{ data, total, page, perPage, totalPages }}，
   // client.ts unwrap 剥外层 success/data 后，列表字段是 `data` 而非 `items`
   // —— v0.6.0-beta.1 这里曾错写 items，导致 FeedbackPage 渲染期 undefined.length 触发 ErrorBoundary。
-  listFeedback: (params?: { page?: number; perPage?: number; category?: string; status?: string }) =>
+  listFeedback: (params?: {
+    page?: number;
+    perPage?: number;
+    category?: string;
+    status?: string;
+    /** m030:仅未读(readAt IS NULL) */
+    unread?: boolean;
+    /** m030:仅已分派(assigneeAdminId IS NOT NULL) */
+    assigned?: boolean;
+  }) =>
     api.get<{ data: FeedbackItem[]; total: number; page: number; perPage: number; totalPages: number }>(
       '/api/admin/feedback',
       params as Record<string, string | number | boolean | undefined>,
@@ -257,6 +378,48 @@ export const adminApi = {
     },
   ) =>
     api.patch<FeedbackItem>(`/api/admin/feedback/${id}`, payload, { useAdminToken: true }),
+
+  // ─────────── 反馈中心工单化（m030） ───────────
+  /** GET /api/admin/feedback/stats — 反馈中心 KPI 聚合 */
+  getFeedbackStats: () =>
+    api.get<FeedbackStats>('/api/admin/feedback/stats', undefined, { useAdminToken: true }),
+  /** GET /api/admin/feedback/:id — 工单详情(条目+回复+时间线+附件) */
+  getFeedbackDetail: (id: string) =>
+    api.get<FeedbackDetail>(`/api/admin/feedback/${id}`, undefined, { useAdminToken: true }),
+  /** POST /api/admin/feedback/:id/replies — 回复用户;pushInapp 发应用内通知,ccEmail 抄送邮箱 */
+  createFeedbackReply: (
+    id: string,
+    payload: { body: string; pushInapp?: boolean; ccEmail?: boolean },
+  ) => api.post<FeedbackReply>(`/api/admin/feedback/${id}/replies`, payload, { useAdminToken: true }),
+  /** POST /api/admin/feedback/:id/assign — 分派给指定 admin,传 null 取消分派 */
+  assignFeedback: (id: string, assigneeAdminId: string | null) =>
+    api.post<FeedbackItem>(`/api/admin/feedback/${id}/assign`, { assigneeAdminId }, { useAdminToken: true }),
+  /** POST /api/admin/feedback/:id/resolve — 标记已解决 */
+  resolveFeedback: (id: string, resolution?: string | null) =>
+    api.post<FeedbackItem>(`/api/admin/feedback/${id}/resolve`, { resolution }, { useAdminToken: true }),
+  /** POST /api/admin/feedback/:id/merge — 合并到目标工单(本工单标 closed,目标 dedupCount+1) */
+  mergeFeedback: (id: string, targetId: string) =>
+    api.post<{ merged: boolean }>(`/api/admin/feedback/${id}/merge`, { targetId }, { useAdminToken: true }),
+  /** POST /api/admin/feedback/:id/github-issue — 转 GitHub Issue;未配置返回 409 GITHUB_NOT_CONFIGURED */
+  createFeedbackGithubIssue: (id: string) =>
+    api.post<{ issueUrl: string }>(`/api/admin/feedback/${id}/github-issue`, {}, { useAdminToken: true }),
+  /** POST /api/admin/feedback/mark-all-read — 全部标记已读 */
+  markAllFeedbackRead: () =>
+    api.post<{ updated: number }>('/api/admin/feedback/mark-all-read', {}, { useAdminToken: true }),
+  /**
+   * GET /api/admin/feedback/export.csv — 导出 CSV。
+   * 端点走 Bearer 鉴权,浏览器直接打开 URL 无法携带 admin token,
+   * 故 fetch 带头取回正文生成 Blob ObjectURL,页面用 <a download> 触发后 revoke。
+   */
+  feedbackCsvUrl: async (): Promise<string> => {
+    const token = tokenManager.getAdminToken();
+    const res = await fetch(buildUrl('/api/admin/feedback/export.csv'), {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (!res.ok) throw new Error(`导出失败 (${res.status})`);
+    const blob = await res.blob();
+    return URL.createObjectURL(blob);
+  },
 
   // ─────────── AMAS 配置版本（PR-2） ───────────
   amasListVersions: (limit = 50) =>
@@ -289,6 +452,26 @@ export const adminApi = {
     api.get<AmasUserStateDistribution>('/api/admin/amas/user-state/distribution', { days, bins }, { useAdminToken: true }),
   amasCompareVersions: (versionA: string, versionB: string) =>
     api.get<{ a: AmasVersionSlice; b: AmasVersionSlice }>('/api/admin/amas/compare', { versionA, versionB }, { useAdminToken: true }),
+
+  // ─────────── AMAS 看板对齐设计稿新增端点（真实聚合） ───────────
+  amasStageDistribution: () =>
+    api.get<AmasStageDistribution>('/api/admin/amas/metrics/stage-distribution', undefined, { useAdminToken: true }),
+  amasEloScatter: (limit = 400) =>
+    api.get<AmasEloScatter>('/api/admin/amas/metrics/elo-scatter', { limit }, { useAdminToken: true }),
+  amasMdmHeatmap: (days = 7) =>
+    api.get<AmasMdmHeatmap>('/api/admin/amas/metrics/mdm-heatmap', { days }, { useAdminToken: true }),
+  amasFatigueTimeseries: (days = 7) =>
+    api.get<AmasFatigueTimeseries>('/api/admin/amas/metrics/fatigue-timeseries', { days }, { useAdminToken: true }),
+  amasDecisionHistogram: (days = 7) =>
+    api.get<AmasDecisionHistogram>('/api/admin/amas/metrics/decision-histogram', { days }, { useAdminToken: true }),
+  amasStateTransitions: (hours = 24) =>
+    api.get<AmasStateTransitions>('/api/admin/amas/user-state/transitions', { hours }, { useAdminToken: true }),
+  amasLearningClusters: () =>
+    api.get<AmasLearningStyleClusters>('/api/admin/amas/user-state/clusters', undefined, { useAdminToken: true }),
+  amasAnomalyFeed: (days = 7, limit = 50) =>
+    api.get<AmasAnomalyFeed>('/api/admin/amas/anomalies/feed', { days, limit }, { useAdminToken: true }),
+  amasCompareVersionsExt: (versionA: string, versionB: string) =>
+    api.get<{ a: AmasVersionSliceExt; b: AmasVersionSliceExt }>('/api/admin/amas/compare/ext', { versionA, versionB }, { useAdminToken: true }),
 
   // ─────────── AMAS Advisor / Suggestions（PR-5/6） ───────────
   amasListSuggestions: (status?: AmasSuggestionStatus, limit = 50, offset = 0, q?: string) =>
@@ -347,7 +530,7 @@ export const adminApi = {
 
   // ─────────── per-patch canary（C6） ───────────
   amasListCanaries: () =>
-    api.get<PatchCanary[]>('/api/admin/amas/advisor/canary', undefined, { useAdminToken: true }),
+    api.get<PatchCanaryWithMetrics[]>('/api/admin/amas/advisor/canary', undefined, { useAdminToken: true }),
   amasCreateCanary: (payload: { suggestionId: number; percent: number }) =>
     api.post<PatchCanary>('/api/admin/amas/advisor/canary', payload, { useAdminToken: true }),
   amasScaleCanary: (id: number, percent: number) =>
@@ -371,16 +554,6 @@ export const adminApi = {
     api.put<{ canary: AmasCanaryConfig }>('/api/admin/amas/config/canary', payload, { useAdminToken: true }),
   amasDisableCanary: () =>
     api.post<{ disabled: boolean }>('/api/admin/amas/config/canary/disable', undefined, { useAdminToken: true }),
-
-  // Probe ring buffer + cluster
-  probeBufferStats: () =>
-    api.get<ProbeBufferStats>('/api/admin/probe/buffer-stats', undefined, { useAdminToken: true }),
-  probeCluster: (windowHours = 24) =>
-    api.get<{ windowHours: number; clusters: ProbeStatusCluster[] }>(
-      '/api/admin/probe/cluster',
-      { windowHours },
-      { useAdminToken: true },
-    ),
 
   // Wordbook 本地上传 + 标签覆盖
   wbCenterUpload: (payload: {
@@ -422,6 +595,47 @@ export const adminApi = {
       useAdminToken: true,
     }),
 
+  // Analytics 看板深化（KPI / 漏斗 / cohort 矩阵 / 题型分布 / 高频词 / 洞察）
+  // 窗口型端点：days ∈ 7|14|30|90（默认 7），可选 from/to(YYYY-MM-DD) 覆盖 days（from/to 都给时优先）。
+  analyticsKpiSummary: (params?: { days?: number; from?: string; to?: string }) =>
+    api.get<AnalyticsKpiSummary>(
+      '/api/admin/analytics/kpi-summary',
+      params as Record<string, string | number | boolean | undefined>,
+      { useAdminToken: true },
+    ),
+  analyticsFunnel: (params?: { days?: number; from?: string; to?: string }) =>
+    api.get<AnalyticsFunnel>(
+      '/api/admin/analytics/funnel',
+      params as Record<string, string | number | boolean | undefined>,
+      { useAdminToken: true },
+    ),
+  analyticsRetentionMatrix: (weeks = 7) =>
+    api.get<AnalyticsRetentionMatrix>(
+      '/api/admin/analytics/retention-matrix',
+      { weeks },
+      { useAdminToken: true },
+    ),
+  analyticsQuestionDistribution: (params?: { days?: number; from?: string; to?: string }) =>
+    api.get<AnalyticsQuestionDistribution>(
+      '/api/admin/analytics/question-distribution',
+      params as Record<string, string | number | boolean | undefined>,
+      { useAdminToken: true },
+    ),
+  analyticsWordFrequency: (params?: {
+    days?: number; limit?: number; sort?: 'count' | 'accuracy' | 'elo' | 'mastery'; from?: string; to?: string;
+  }) =>
+    api.get<AnalyticsWordFrequency>(
+      '/api/admin/analytics/word-frequency',
+      params as Record<string, string | number | boolean | undefined>,
+      { useAdminToken: true },
+    ),
+  analyticsInsights: (params?: { days?: number; from?: string; to?: string }) =>
+    api.get<AnalyticsInsights>(
+      '/api/admin/analytics/insights',
+      params as Record<string, string | number | boolean | undefined>,
+      { useAdminToken: true },
+    ),
+
   // Users 扩展
   userProfile: (id: string) =>
     api.get<UserProfile>(`/api/admin/users/${id}/profile`, undefined, { useAdminToken: true }),
@@ -455,6 +669,95 @@ export const adminApi = {
       undefined,
       { useAdminToken: true },
     ),
+
+  // ═══════════ be:analytics-misc:用户筛选 chip 计数 ═══════════
+  userFacets: () =>
+    api.get<UserFacets>('/api/admin/users/facets', undefined, { useAdminToken: true }),
+
+  // ═══════════ be:settings-*:通用配置存储 ═══════════
+  /** GET /config — 全部 section(密钥已遮蔽) */
+  settingsConfig: () =>
+    api.get<SettingsConfigResponse>('/api/admin/settings/config', undefined, { useAdminToken: true }),
+  /** PUT /config/:section — section ∈ 白名单;typed section 强类型校验,其余裸 JSON 透传 */
+  putSettingsSection: (section: string, json: Record<string, unknown>) =>
+    api.put<SettingsSection>(`/api/admin/settings/config/${section}`, json, { useAdminToken: true }),
+  /** GET /snapshots — 倒序,上限 100 */
+  settingsSnapshots: () =>
+    api.get<SettingsSnapshotListResponse>('/api/admin/settings/snapshots', undefined, { useAdminToken: true }),
+  /** POST /snapshots — 创建快照(全 section 聚合) */
+  createSettingsSnapshot: (label?: string) =>
+    api.post<SettingsSnapshotMeta>('/api/admin/settings/snapshots', label !== undefined ? { label } : {}, { useAdminToken: true }),
+  /** POST /snapshots/:id/restore — 回滚;不存在 404 */
+  restoreSettingsSnapshot: (id: number) =>
+    api.post<SettingsConfigResponse>(`/api/admin/settings/snapshots/${id}/restore`, undefined, { useAdminToken: true }),
+  /** GET /export.toml — TOML 文本(text/plain);keys/secrets 永不导出。走原始 fetch 避开 JSON unwrap。 */
+  exportSettingsToml: async (): Promise<string> => {
+    const token = tokenManager.getAdminToken();
+    const res = await fetch(buildUrl('/api/admin/settings/export.toml'), {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (!res.ok) throw new Error(`导出失败 HTTP ${res.status}`);
+    return res.text();
+  },
+
+  // ═══════════ be:settings-rbac-keys:RBAC 管理员 ═══════════
+  rbacAdmins: () =>
+    api.get<RbacAdminListResponse>('/api/admin/settings/admins', undefined, { useAdminToken: true }),
+  /** email 冲突 409 */
+  createRbacAdmin: (payload: { email: string; password: string; role?: AdminRole }) =>
+    api.post<RbacAdmin>('/api/admin/settings/admins', payload, { useAdminToken: true }),
+  /** 降级最后一个 super-admin 409 LAST_SUPER_ADMIN;不存在 404 */
+  updateRbacAdminRole: (id: string, role: AdminRole) =>
+    api.patch<RbacAdmin>(`/api/admin/settings/admins/${id}/role`, { role }, { useAdminToken: true }),
+  /** 删自己 400 CANNOT_DELETE_SELF;删最后 super-admin 409;不存在 404 */
+  deleteRbacAdmin: (id: string) =>
+    api.delete<RbacAdminDeleteResponse>(`/api/admin/settings/admins/${id}`, { useAdminToken: true }),
+
+  // ═══════════ be:settings-rbac-keys:API Keys ═══════════
+  apiKeys: () =>
+    api.get<ApiKeyListResponse>('/api/admin/settings/api-keys', undefined, { useAdminToken: true }),
+  /** 明文仅此一次 */
+  createApiKey: (payload: { name: string; scope?: ApiKeyScope; expiresAt?: string }) =>
+    api.post<ApiKeyCreateResponse>('/api/admin/settings/api-keys', payload, { useAdminToken: true }),
+  /** 新明文一次,旧失效;不存在 404 */
+  rotateApiKey: (id: string) =>
+    api.post<ApiKeyCreateResponse>(`/api/admin/settings/api-keys/${id}/rotate`, undefined, { useAdminToken: true }),
+  /** 不存在 404 */
+  deleteApiKey: (id: string) =>
+    api.delete<ApiKeyRevokeResponse>(`/api/admin/settings/api-keys/${id}`, { useAdminToken: true }),
+
+  // ═══════════ be:amas-advisor-sandbox:沙箱试运行 ═══════════
+  amasSandboxSuggestion: (id: number) =>
+    api.post<SandboxSuggestionResponse>(`/api/admin/amas/advisor/suggestions/${id}/sandbox`, undefined, { useAdminToken: true }),
+
+  // ═══════════ be:amas-config-canary:人群过滤 canary + diff-impact ═══════════
+  /** PUT /amas/config/canary 扩展版(带 crowd-filter,响应含真实 audience)。
+   *  与既有 amasSetCanary 同端点,此重载透出 audience + crowdFilters。 */
+  amasSetCanaryExt: (payload: SetCanaryExtRequest) =>
+    api.put<SetCanaryExtResponse>('/api/admin/amas/config/canary', payload, { useAdminToken: true }),
+  /** POST /amas/config/diff-impact — patch 对比当前 live config 的指标影响估计 */
+  amasConfigDiffImpact: (patch: Record<string, unknown>) =>
+    api.post<DiffImpactResponse>('/api/admin/amas/config/diff-impact', { patch }, { useAdminToken: true }),
+
+  // ═══════════ be:feedback-announce:公告 / FAQ ═══════════
+  feedbackAnnouncements: (params?: { kind?: AnnouncementKind; published?: boolean }) =>
+    api.get<{ data: FeedbackAnnouncement[] }>(
+      '/api/admin/feedback/announcements',
+      params as Record<string, string | number | boolean | undefined>,
+      { useAdminToken: true },
+    ),
+  createFeedbackAnnouncement: (payload: { title: string; body: string; kind?: AnnouncementKind; published?: boolean }) =>
+    api.post<FeedbackAnnouncement>('/api/admin/feedback/announcements', payload, { useAdminToken: true }),
+  updateFeedbackAnnouncement: (id: string, payload: { title?: string; body?: string; kind?: AnnouncementKind; published?: boolean }) =>
+    api.patch<FeedbackAnnouncement>(`/api/admin/feedback/announcements/${id}`, payload, { useAdminToken: true }),
+  deleteFeedbackAnnouncement: (id: string) =>
+    api.delete<{ deleted: boolean }>(`/api/admin/feedback/announcements/${id}`, { useAdminToken: true }),
+
+  // ═══════════ be:feedback-announce:工单回复草稿(每工单一份 upsert) ═══════════
+  getFeedbackDraft: (feedbackId: string) =>
+    api.get<{ draft: FeedbackReplyDraft | null }>(`/api/admin/feedback/${feedbackId}/draft`, undefined, { useAdminToken: true }),
+  saveFeedbackDraft: (feedbackId: string, payload: { body: string; pushInapp?: boolean; ccEmail?: boolean }) =>
+    api.post<FeedbackReplyDraft>(`/api/admin/feedback/${feedbackId}/draft`, payload, { useAdminToken: true }),
 };
 
 // ─────────── m022:新端点附属类型 ───────────
@@ -465,26 +768,6 @@ export interface AmasCanaryConfig {
   forceUserIds: string[];
   createdAt: string;
   createdBy: string;
-}
-
-export interface ProbeBatchStat {
-  batchId: string;
-  capacity: number;
-  receiverCount: number;
-}
-
-export interface ProbeBufferStats {
-  broadcastCapacityPerBatch: number;
-  activeBatches: number;
-  pendingConfirms: number;
-  trackedAdmins: number;
-  perBatch: ProbeBatchStat[];
-}
-
-export interface ProbeStatusCluster {
-  status: string;
-  count: number;
-  topErrors: string[];
 }
 
 export interface WordbookRankRow {
@@ -662,6 +945,146 @@ export interface AmasVersionSlice {
   lastEventAt: string | null;
 }
 
+// ─────────── 看板对齐设计稿新增类型（camelCase 镜像后端序列化） ───────────
+
+/** 阶段分布：cold/transition/stable + 7d 趋势 */
+export interface AmasStageStat {
+  stage: 'cold' | 'transition' | 'stable';
+  users: number;
+  pct: number;
+  avgDecisions: number;
+  retention7d: number;
+  mainRoute: string;
+}
+export interface AmasStageTrendPoint {
+  date: string;
+  cold: number;
+  transition: number;
+  stable: number;
+}
+export interface AmasStageDistribution {
+  totalUsers: number;
+  stages: AmasStageStat[];
+  trend: AmasStageTrendPoint[];
+}
+
+/** ELO 散点：x=elo, y=decisions, color=deltaElo(7d) */
+export interface AmasEloPoint {
+  elo: number;
+  decisions: number;
+  deltaElo: number;
+}
+export interface AmasEloScatter {
+  points: AmasEloPoint[];
+  total: number;
+  meanElo: number;
+}
+
+/** MDM 遗忘热图：days × 14 难度段，cell=平均遗忘概率（-1 表示空白） */
+export interface AmasMdmHeatmap {
+  days: string[];
+  bandCount: number;
+  cells: number[][];
+  peak: number;
+}
+
+/** 疲劳信号时序 */
+export interface AmasFatiguePoint {
+  date: string;
+  avgFatigue: number;
+  peakFatigue: number;
+  triggerCount: number;
+}
+export interface AmasFatigueTimeseries {
+  points: AmasFatiguePoint[];
+  avgIntensity: number;
+  totalTriggers: number;
+  threshold: number;
+}
+
+/** 每用户决策数直方图 */
+export interface AmasDecisionBucket {
+  label: string;
+  count: number;
+}
+export interface AmasDecisionHistogram {
+  buckets: AmasDecisionBucket[];
+  p50: number;
+  p95: number;
+  totalUsers: number;
+}
+
+/** 状态流转（窗口内阶段穿越） */
+export interface AmasTransition {
+  from: string;
+  to: string;
+  count: number;
+}
+export interface AmasStateTransitions {
+  windowHours: number;
+  transitions: AmasTransition[];
+}
+
+/** 学习风格聚类（k-means k=4） */
+export interface AmasLearningCluster {
+  label: string;
+  count: number;
+  pct: number;
+  avgResponseMs: number;
+  errorRate: number;
+  recordsPerActiveDay: number;
+}
+export interface AmasLearningStyleClusters {
+  k: number;
+  totalUsers: number;
+  clusters: AmasLearningCluster[];
+}
+
+/** 异常分级 + 逐条列表 */
+export interface AmasAnomalyItem {
+  id: string;
+  timestamp: string;
+  severity: 'error' | 'warn' | 'info';
+  code: string;
+  title: string;
+  userId: string;
+  value: number;
+  expectedRange: string;
+  impactedUsers: number;
+  impactPct: number;
+}
+export interface AmasAnomalySeveritySummary {
+  error: number;
+  warn: number;
+  info: number;
+  invariantPass: number;
+  invariantTotal: number;
+  passRate: number;
+}
+export interface AmasAnomalyFeed {
+  summary: AmasAnomalySeveritySummary;
+  items: AmasAnomalyItem[];
+}
+
+/** 版本对比扩展切片 */
+export interface AmasVersionSliceExt {
+  versionHash: string;
+  eventCount: number;
+  hitRate: number;
+  p95LatencyMs: number;
+  meanLatencyMs: number;
+  fatigueRate: number;
+  ensembleShare: number;
+  meanReward: number;
+  anomalyRate: number;
+  retention7d: number;
+  p95CompletionMs: number;
+  spark: number[];
+  configEpsilon: number | null;
+  firstEventAt: string | null;
+  lastEventAt: string | null;
+}
+
 // ─────────── advisor 全栈对齐类型（camelCase 镜像后端序列化） ───────────
 export interface AdvisorCostStats {
   monthYuan: number;
@@ -673,6 +1096,8 @@ export interface AdvisorCostStats {
   acceptedCount: number;
   rejectedCount: number;
   acceptanceRate: number;
+  /** USD→CNY 汇率(后端可配置),前端单条建议成本¥换算用,勿硬编码 */
+  usdToCny: number;
 }
 
 export interface AdvisorCostDaily {
@@ -711,8 +1136,364 @@ export interface PatchCanary {
   baselineMetricsJson: string;
   startedAt: string;
   updatedAt: string;
-  /** GET /advisor/canary 端点联表附带的实测口径 */
+}
+
+/** 仅 GET /advisor/canary 列表端点联表附带实测口径;create/scale 端点返回基础 PatchCanary 不含这三字段。 */
+export interface PatchCanaryWithMetrics extends PatchCanary {
   liveReward: number;
   liveAnomalyRate: number;
   baselineReward: number;
+}
+
+// ─────────── Analytics 看板深化响应类型（camelCase 镜像后端序列化） ───────────
+
+/** KPI 卡：同比上一等长窗口。retention 用百分点(deltaPt)，其余用增长率(deltaPct)。 */
+export interface AnalyticsKpiPctDelta {
+  value: number;
+  prevValue: number;
+  /** (cur-prev)/prev；prev=0 时为 null */
+  deltaPct: number | null;
+}
+export interface AnalyticsKpiPtDelta {
+  /** 0-1 小数 */
+  value: number;
+  prevValue: number;
+  /** cur-prev（百分点） */
+  deltaPt: number | null;
+}
+export interface AnalyticsKpiSummary {
+  generatedAt: string;
+  days: number;
+  rangeStart: string;
+  rangeEnd: string;
+  /** 本窗口新注册数 */
+  newRegistrations: AnalyticsKpiPctDelta;
+  /** 窗口内日活均值（每日 distinct 答题用户取平均，四舍五入） */
+  dauAverage: AnalyticsKpiPctDelta;
+  /** d7 留存 0-1 小数 */
+  d7Retention: AnalyticsKpiPtDelta;
+  /** 窗口内 learning_sessions.summary_duration_secs 求和 */
+  studyDurationSecs: AnalyticsKpiPctDelta;
+}
+
+/** 漏斗单步骤 */
+export interface AnalyticsFunnelStep {
+  key: string;
+  label: string;
+  sublabel: string;
+  count: number;
+  /** 0-1，相对 register */
+  pct: number;
+  /** vs 上一等长窗口同步骤 pct（百分点）；无可比时 null */
+  deltaPt: number | null;
+  tone: 'good' | 'normal' | 'warn';
+}
+export interface AnalyticsFunnel {
+  generatedAt: string;
+  days: number;
+  rangeStart: string;
+  rangeEnd: string;
+  /** 仅统计"在本窗口注册"的用户队列 */
+  steps: AnalyticsFunnelStep[];
+  biggestDropFrom: string;
+  biggestDropTo: string;
+  biggestDropPt: number;
+}
+
+/** cohort 留存矩阵：按注册周分组 */
+export interface AnalyticsRetentionCohort {
+  /** 周一，YYYY-MM-DD */
+  cohortStart: string;
+  size: number;
+  /** 长度=weeks；cells[k]=注册后第 k 周仍活跃用户/size，0-1；cells[0]=1.0；未过完的周=null */
+  cells: (number | null)[];
+}
+export interface AnalyticsRetentionMatrix {
+  generatedAt: string;
+  weeks: number;
+  /** 按 cohortStart 升序，最多最近 weeks 个 cohort */
+  cohorts: AnalyticsRetentionCohort[];
+}
+
+/** 题型分布 + 难度分箱 */
+export interface AnalyticsQuestionTypeStat {
+  key: string;
+  label: string;
+  count: number;
+  /** count/totalRecords，0-1 */
+  pct: number;
+}
+export interface AnalyticsDifficultyBin {
+  label: string;
+  min: number | null;
+  max: number | null;
+  count: number;
+  /** 0-1 */
+  pct: number;
+}
+export interface AnalyticsQuestionDistribution {
+  generatedAt: string;
+  days: number;
+  totalRecords: number;
+  questionTypes: AnalyticsQuestionTypeStat[];
+  /** 按 word_elo.rating 分 5 箱（无评分按 1200 计） */
+  difficultyBins: AnalyticsDifficultyBin[];
+}
+
+/** 高频词 */
+export interface AnalyticsWordFrequencyRow {
+  rank: number;
+  wordId: string;
+  spelling: string;
+  pos: string | null;
+  recordCount: number;
+  /** AVG(is_correct)，0-1；无答题为 null */
+  accuracy: number | null;
+  elo: number | null;
+  /** be:analytics-misc:窗口内答该词用户的 mastery_level 均值(0..1),无数据 null */
+  mastery: number | null;
+}
+export interface AnalyticsWordFrequency {
+  generatedAt: string;
+  days: number;
+  limit: number;
+  sort: string;
+  rows: AnalyticsWordFrequencyRow[];
+}
+
+/** 自动洞察条目（后端启发式产出 3-4 条） */
+export interface AnalyticsInsightItem {
+  tone: 'success' | 'warning' | 'info' | 'accent';
+  title: string;
+  body: string;
+}
+export interface AnalyticsInsights {
+  generatedAt: string;
+  days: number;
+  items: AnalyticsInsightItem[];
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  新一批后端端点附属类型（settings / rbac / api-keys / setup /
+//  health / facets / amas sandbox+diff-impact / feedback 公告·草稿）
+//  —— 与 adminApi 同文件 colocate，供 per-page agents 直接 import。
+// ═══════════════════════════════════════════════════════════════════
+
+/* ---------- be:analytics-misc:users.html 筛选 chip 计数 ---------- */
+export interface UserFacets {
+  total: number;
+  active: number;
+  /** 7 天未登录(含从未登录) */
+  inactive7d: number;
+  banned: number;
+  admins: number;
+}
+
+/* ---------- be:login-health:/health 公开端点 ---------- */
+export interface HealthInfo {
+  status?: string;
+  /** CARGO_PKG_VERSION，对应 footer "vX.Y.Z" */
+  version: string;
+  /** sqlite 主库+wal+shm 磁盘占用之和；内存库/缺失/失败为 null(前端展示 "—") */
+  dbSizeBytes: number | null;
+  /** 可用性：源自 http_metrics 真实 5xx 错误率聚合；无请求样本时为 null(展示 "—")。
+   *  effectiveSecs = 实际测量窗口(≤30d，进程重启清零)，前端据此动态标注真实窗口而非冒充 30d。 */
+  availability?: {
+    pct: number;
+    effectiveSecs: number;
+    totalRequests: number;
+  } | null;
+  [key: string]: unknown;
+}
+
+/* ---------- be:setup-envcheck:登录前环境自检 ---------- */
+export interface EnvCheckItem {
+  key: string;
+  label: string;
+  ok: boolean;
+  detail: string;
+}
+export interface EnvCheckResponse {
+  /** 固定 5 项顺序:db_schema/static_writable/listening_port/signing_key/admin_table */
+  checks: EnvCheckItem[];
+}
+
+/* ---------- be:settings-* :通用配置存储 ---------- */
+/** 11 个设置面板的 section 标识(含 typed 与裸 JSON 透传两类) */
+export type SettingsSectionKey =
+  | 'site' | 'auth' | 'ratelimit' | 'audit-config' | 'backup-policy'
+  | 'roles' | 'email' | 'smtp' | 'sms' | 'sms_push'
+  | 'storage' | 'db' | 'db_cache' | 'limits' | 'audit' | 'backup' | 'keys';
+
+export interface SettingsSection {
+  section: string;
+  /** 归一化后的 section JSON(密钥字段在 GET/PUT 响应里已遮蔽为 ••••••) */
+  json: Record<string, unknown>;
+  updatedAt: string;
+}
+export interface SettingsConfigResponse {
+  sections: SettingsSection[];
+}
+export interface SettingsSnapshotMeta {
+  id: number;
+  label: string | null;
+  createdAt: string;
+}
+export interface SettingsSnapshotListResponse {
+  snapshots: SettingsSnapshotMeta[];
+}
+
+/* ---------- be:settings-rbac-keys:RBAC 管理员 ---------- */
+export type AdminRole = 'super_admin' | 'admin';
+export interface RbacAdmin {
+  id: string;
+  email: string;
+  role: AdminRole;
+  createdAt: string;
+  lockedUntil: string | null;
+}
+export interface RbacAdminListResponse {
+  admins: RbacAdmin[];
+}
+export interface RbacAdminDeleteResponse {
+  deleted: boolean;
+  adminId: string;
+}
+
+/* ---------- be:settings-rbac-keys:API Keys ---------- */
+export type ApiKeyScope = 'read' | 'write' | 'admin';
+/** 掩码视图,绝不含明文/hash */
+export interface ApiKey {
+  id: string;
+  name: string;
+  scope: ApiKeyScope;
+  prefix: string;
+  createdAt: string;
+  createdBy: string | null;
+  expiresAt: string | null;
+  lastUsedAt: string | null;
+  revokedAt: string | null;
+}
+export interface ApiKeyListResponse {
+  keys: ApiKey[];
+}
+/** create / rotate 返回:明文仅此一次 */
+export interface ApiKeyCreateResponse {
+  key: ApiKey;
+  plaintext: string;
+  message: string;
+}
+export interface ApiKeyRevokeResponse {
+  revoked: boolean;
+  keyId: number;
+}
+
+/* ---------- be:amas-advisor-sandbox:沙箱试运行 ---------- */
+export type SandboxConfidence = 'high' | 'medium' | 'low';
+export interface SandboxChange {
+  path: string;
+  from: unknown;
+  to: unknown;
+  relChange: number | null;
+  inWhitelist: boolean;
+}
+export interface SandboxMetricImpact {
+  baseline: number | null;
+  predicted: number | null;
+  deltaPt: number;
+}
+export interface SandboxSuggestionResponse {
+  suggestionId: number;
+  basedOnVersionHash: string;
+  configValid: boolean;
+  configError: string | null;
+  whitelistOk: boolean;
+  whitelistErrors: string[];
+  changes: SandboxChange[];
+  accuracy: SandboxMetricImpact;
+  fatigue: SandboxMetricImpact;
+  /** d7 baseline 恒 null(telemetry 无留存维度),仅返回预估 delta */
+  d7Retention: SandboxMetricImpact;
+  confidence: SandboxConfidence;
+  method: string;
+  telemetrySampleSize: number;
+}
+
+/* ---------- be:amas-config-canary:人群过滤 + diff-impact ---------- */
+export interface CanaryCrowdFilters {
+  minAccountAgeDays?: number;
+  preferActive?: boolean;
+  webOnly?: boolean;
+  autoScale24h?: boolean;
+}
+export interface CanaryAudience {
+  totalUsers: number;
+  eligibleUsers: number;
+  affectedUsers: number;
+  /** 当前恒为 "estimate-only"(引擎未按 per-user 人群分流) */
+  enforcement: string;
+}
+/** PUT /amas/config/canary 扩展请求(在 versionHash/percent/forceUserIds 上新增过滤) */
+export interface SetCanaryExtRequest {
+  versionHash?: string;
+  percent?: number;
+  forceUserIds?: string[];
+  minAccountAgeDays?: number;
+  preferActive?: boolean;
+  webOnly?: boolean;
+  autoScale24h?: boolean;
+}
+export interface SetCanaryExtResponse {
+  canary: AmasCanaryConfig & { crowdFilters?: CanaryCrowdFilters };
+  audience: CanaryAudience;
+}
+export type DiffImpactMetric = 'accuracy' | 'fatigue' | 'd7Retention';
+export interface DiffImpactEntry {
+  metric: DiffImpactMetric;
+  deltaLowPt: number;
+  deltaHighPt: number;
+  direction: string;
+}
+export interface DiffImpactField {
+  path: string;
+  from: unknown;
+  to: unknown;
+  relChange: number | null;
+  inWhitelist: boolean;
+  impacts: DiffImpactEntry[];
+  confidence: SandboxConfidence;
+}
+export interface DiffImpactResponse {
+  fields: DiffImpactField[];
+  telemetrySampleSize: number;
+  confidence: SandboxConfidence;
+  method: string;
+}
+
+/* ---------- be:feedback-announce:公告 / FAQ + 回复草稿 ---------- */
+export type AnnouncementKind = 'announcement' | 'faq';
+export interface FeedbackAnnouncement {
+  id: string;
+  title: string;
+  body: string;
+  kind: AnnouncementKind;
+  published: boolean;
+  authorId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+export interface FeedbackReplyDraft {
+  feedbackId: string;
+  body: string;
+  pushInapp: boolean;
+  ccEmail: boolean;
+  authorId: string | null;
+  updatedAt: string;
+}
+
+/* ---------- be:broadcast-packs-minor:广播分页元信息 ---------- */
+export interface BroadcastPagination {
+  total: number;
+  offset: number;
+  limit: number;
 }

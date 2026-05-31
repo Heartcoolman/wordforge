@@ -292,6 +292,28 @@ async fn main() {
         shutdown_tx.subscribe(),
     ));
 
+    // 每日 DB 备份（独立 interval 循环，与 cron worker 解耦）
+    {
+        let store = store.clone();
+        let backups_dir = std::path::Path::new(&config.database_url)
+            .parent()
+            .map(|p| p.join("backups"));
+        if let Some(dir) = backups_dir {
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(Duration::from_secs(24 * 3600));
+                tick.tick().await; // 跳过启动即触发
+                loop {
+                    tick.tick().await;
+                    if let Err(e) =
+                        learning_backend::workers::db_backup::run_once(&store, &dir, 30).await
+                    {
+                        tracing::warn!(error = %e, "每日 DB 备份失败");
+                    }
+                }
+            });
+        }
+    }
+
     let worker_handle = if config.worker.is_leader {
         let mut worker_manager = WorkerManager::new(
             store.clone(),

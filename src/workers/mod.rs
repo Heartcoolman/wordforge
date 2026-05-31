@@ -4,6 +4,7 @@ pub mod canary_monitor;
 pub mod config_watcher;
 pub mod confusion_pair_cache;
 pub mod daily_aggregation;
+pub mod db_backup;
 pub mod delayed_reward;
 pub mod error_rate_watchdog;
 pub mod forgetting_alert;

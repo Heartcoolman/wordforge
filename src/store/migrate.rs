@@ -59,6 +59,19 @@ fn migrations() -> Vec<(&'static str, MigrationFn)> {
         ("024_client_extras", m024_client_extras),
         ("025_amas_advisor", m025_amas_advisor),
         ("026_amas_decision_capture", m026_amas_decision_capture),
+        ("027_amas_dashboard", m027_amas_dashboard),
+        (
+            "028_learning_record_question_mode",
+            m028_learning_record_question_mode,
+        ),
+        ("029_wordbook_audit_log", m029_wordbook_audit_log),
+        ("030_feedback_ticketing", m030_feedback_ticketing),
+        ("031_probe_telemetry_sampling", m031_probe_telemetry_sampling),
+        ("032_broadcasts_history", m032_broadcasts_history),
+        ("033_settings_config", m033_settings_config),
+        ("034_admin_rbac_api_keys", m034_admin_rbac_api_keys),
+        ("035_amas_canary_crowd_filters", m035_amas_canary_crowd_filters),
+        ("036_feedback_announcements", m036_feedback_announcements),
     ]
 }
 
@@ -101,6 +114,25 @@ fn migrations_down() -> Vec<(&'static str, MigrationFn)> {
         ("024_client_extras", m024_client_extras_down),
         ("025_amas_advisor", m025_amas_advisor_down),
         ("026_amas_decision_capture", m026_amas_decision_capture_down),
+        ("027_amas_dashboard", m027_amas_dashboard_down),
+        (
+            "028_learning_record_question_mode",
+            m028_learning_record_question_mode_down,
+        ),
+        ("029_wordbook_audit_log", m029_wordbook_audit_log_down),
+        ("030_feedback_ticketing", m030_feedback_ticketing_down),
+        (
+            "031_probe_telemetry_sampling",
+            m031_probe_telemetry_sampling_down,
+        ),
+        ("032_broadcasts_history", m032_broadcasts_history_down),
+        ("033_settings_config", m033_settings_config_down),
+        ("034_admin_rbac_api_keys", m034_admin_rbac_api_keys_down),
+        (
+            "035_amas_canary_crowd_filters",
+            m035_amas_canary_crowd_filters_down,
+        ),
+        ("036_feedback_announcements", m036_feedback_announcements_down),
     ]
 }
 
@@ -119,6 +151,11 @@ pub fn run(store: &Store) -> Result<(), StoreError> {
     }
 
     Ok(())
+}
+
+/// 全量迁移条数，即完全迁移后 `schema_version` 应到达的版本号。
+pub fn migration_count() -> usize {
+    migrations().len()
 }
 
 pub fn get_current_version(store: &Store) -> Result<u32, StoreError> {
@@ -1162,7 +1199,7 @@ fn m022_admin_ui_completeness_down(store: &Store) -> Result<(), StoreError> {
     Ok(())
 }
 
-/// m025-a:用户档案补全 —— 设计图 Drawer "资料 / 答题 / 设备 / 操作日志" 完整化。
+/// m023:用户档案补全 —— 设计图 Drawer "资料 / 答题 / 设备 / 操作日志" 完整化。
 ///
 /// 新增:
 ///   1) `user_activity_log`(用户**自有**活动日志,区别于 admin_audit_log)
@@ -1285,7 +1322,7 @@ fn m023_user_profile_extras_down(store: &Store) -> Result<(), StoreError> {
     Ok(())
 }
 
-/// m027-A:设备页对齐设计图 clients.html 所需补强 ——
+/// m024:设备页对齐设计图 clients.html 所需补强 ——
 ///   1) `client_devices.country`(GeoIP ISO-3166-1 alpha-2)
 ///   2) `client_devices.last_ip`(便于审计、变更检测)
 ///   3) `client_devices(platform, last_seen_at)` 复合索引(平台聚合 + 月环比加速)
@@ -1509,9 +1546,507 @@ fn m026_amas_decision_capture_down(store: &Store) -> Result<(), StoreError> {
     Ok(())
 }
 
+/// m027:AMAS 指标看板 —— ELO 日快照表，供"用户 ELO 散点"的 7 天 Δ ELO 着色。
+/// `user_elo` 仅存当前 rating，无历史；daily_aggregation worker 每天写一行快照，
+/// 散点端点用 `today.rating - rating_7d_ago` 计算颜色档（无历史时 Δ=0 取中性色）。
+/// 阶段分布 7 天趋势复用既有 `monitoring_timeseries` 表，无需额外建表。
+fn m027_amas_dashboard(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS user_elo_history (
+            user_id       TEXT NOT NULL,
+            snapshot_date TEXT NOT NULL,
+            rating        REAL NOT NULL,
+            games         INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (user_id, snapshot_date)
+        );
+        CREATE INDEX IF NOT EXISTS idx_user_elo_history_date
+            ON user_elo_history(snapshot_date);",
+    )?;
+    Ok(())
+}
+
+/// m027 down:DROP user_elo_history。仅 dev/test。
+fn m027_amas_dashboard_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS idx_user_elo_history_date;
+         DROP TABLE IF EXISTS user_elo_history;",
+    )?;
+    Ok(())
+}
+
+/// m028:learning_records 增加 question_mode（出题模式）列，供数据分析"答题分布·题型"使用。
+/// 约定取值 word-to-meaning / meaning-to-word / audio-to-meaning / meaning-to-spelling；
+/// 可空、无 CHECK（非法值原样存，聚合端按映射处理），历史与默认为 NULL → 聚合端按"未标注"。
+/// 列守卫保证幂等。
+fn m028_learning_record_question_mode(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    let has_column: bool = conn
+        .prepare("PRAGMA table_info(learning_records)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .any(|name| name == "question_mode");
+    if !has_column {
+        conn.execute(
+            "ALTER TABLE learning_records ADD COLUMN question_mode TEXT DEFAULT NULL",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+/// m028 down:DROP question_mode 列。该列无索引引用，可直接 DROP。仅 dev/test。
+fn m028_learning_record_question_mode_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    let has_column: bool = conn
+        .prepare("PRAGMA table_info(learning_records)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .any(|name| name == "question_mode");
+    if has_column {
+        conn.execute(
+            "ALTER TABLE learning_records DROP COLUMN question_mode",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+/// m029:词库管理审计日志表,供 admin 词库中心记录 create/update/delete/add_word/
+/// remove_word/import/sync 操作。IF NOT EXISTS 保证幂等。
+fn m029_wordbook_audit_log(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS wordbook_audit_log (
+            id TEXT NOT NULL,
+            wordbook_id TEXT NOT NULL,
+            action TEXT NOT NULL,
+            detail TEXT NOT NULL DEFAULT '',
+            admin_id TEXT DEFAULT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_wordbook_audit_wordbook
+            ON wordbook_audit_log(wordbook_id, created_at DESC);",
+    )?;
+    Ok(())
+}
+
+/// m029 down:DROP wordbook_audit_log。仅 dev/test。
+fn m029_wordbook_audit_log_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS idx_wordbook_audit_wordbook;
+         DROP TABLE IF EXISTS wordbook_audit_log;",
+    )?;
+    Ok(())
+}
+
+/// m030:反馈工单化 —— feedback_items 增 6 列（read_at/first_response_at/csat_score/
+/// csat_comment/dedup_count/github_issue_url）+ 三张新表（回复 / 时间线事件 / 附件）。
+/// 列守卫保证幂等;新表 IF NOT EXISTS。
+fn m030_feedback_ticketing(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    let cols: Vec<String> = conn
+        .prepare("PRAGMA table_info(feedback_items)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .collect();
+    for (col, ddl) in [
+        ("read_at", "TEXT"),
+        ("first_response_at", "TEXT"),
+        ("csat_score", "INTEGER"),
+        ("csat_comment", "TEXT"),
+        ("dedup_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("github_issue_url", "TEXT"),
+    ] {
+        if !cols.iter().any(|c| c == col) {
+            conn.execute(
+                &format!("ALTER TABLE feedback_items ADD COLUMN {col} {ddl}"),
+                [],
+            )?;
+        }
+    }
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS feedback_replies (
+            id TEXT NOT NULL PRIMARY KEY,
+            feedback_id TEXT NOT NULL,
+            author_kind TEXT NOT NULL,
+            author_id TEXT,
+            body TEXT NOT NULL,
+            push_inapp INTEGER NOT NULL DEFAULT 0,
+            cc_email INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_feedback_replies_fb
+            ON feedback_replies(feedback_id, created_at);
+
+        CREATE TABLE IF NOT EXISTS feedback_events (
+            id TEXT NOT NULL PRIMARY KEY,
+            feedback_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            actor TEXT,
+            summary TEXT NOT NULL DEFAULT '',
+            ref_id TEXT,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_feedback_events_fb
+            ON feedback_events(feedback_id, created_at);
+
+        CREATE TABLE IF NOT EXISTS feedback_attachments (
+            id TEXT NOT NULL PRIMARY KEY,
+            feedback_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            url TEXT NOT NULL,
+            kind TEXT NOT NULL DEFAULT 'image',
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_feedback_attachments_fb
+            ON feedback_attachments(feedback_id);",
+    )?;
+    Ok(())
+}
+
+/// m030 down:DROP 三张新表;feedback_items 6 个增列借 SQLite ALTER DROP 单删。仅 dev/test。
+fn m030_feedback_ticketing_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS idx_feedback_attachments_fb;
+         DROP TABLE IF EXISTS feedback_attachments;
+         DROP INDEX IF EXISTS idx_feedback_events_fb;
+         DROP TABLE IF EXISTS feedback_events;
+         DROP INDEX IF EXISTS idx_feedback_replies_fb;
+         DROP TABLE IF EXISTS feedback_replies;",
+    )?;
+    let cols: Vec<String> = conn
+        .prepare("PRAGMA table_info(feedback_items)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .collect();
+    for col in [
+        "github_issue_url",
+        "dedup_count",
+        "csat_comment",
+        "csat_score",
+        "first_response_at",
+        "read_at",
+    ] {
+        if cols.iter().any(|c| c == col) {
+            conn.execute(
+                &format!("ALTER TABLE feedback_items DROP COLUMN {col}"),
+                [],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// m031:数据探针看板采样配置 ——
+///   1) system_settings.telemetry_sample_rate（全局默认采样率，[0,1]）
+///   2) probe_sampling_config 新表（按 telemetry event_type 主键的采样规则）
+///   3) probe_sampling_audit 新表（每次 PATCH 成功落一行）
+///
+/// seed:'*'=1.0（兜底）/'periodic'=1.0（看板 click 行滑杆绑定）/
+/// 'on_demand' 与 'session_start' locked=1 恒 1.0（核心数据强制 100%）。
+/// 默认全 1.0 → 采样注入零行为变化。
+fn m031_probe_telemetry_sampling(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+
+    // 1) system_settings.telemetry_sample_rate（列守卫幂等）
+    let has_col: bool = conn
+        .prepare("PRAGMA table_info(system_settings)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .any(|c| c == "telemetry_sample_rate");
+    if !has_col {
+        conn.execute(
+            "ALTER TABLE system_settings ADD COLUMN telemetry_sample_rate
+                REAL NOT NULL DEFAULT 1.0",
+            [],
+        )?;
+    }
+
+    // 2)+3) 两张新表 + 索引
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS probe_sampling_config (
+            event_type  TEXT NOT NULL PRIMARY KEY,
+            sample_rate REAL NOT NULL DEFAULT 1.0 CHECK (sample_rate BETWEEN 0.0 AND 1.0),
+            enabled     INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+            locked      INTEGER NOT NULL DEFAULT 0 CHECK (locked IN (0, 1)),
+            priority    INTEGER NOT NULL DEFAULT 100,
+            updated_at  TEXT NOT NULL,
+            updated_by  TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS probe_sampling_audit (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_type  TEXT NOT NULL,
+            action      TEXT NOT NULL CHECK (action IN ('add', 'mod', 'del', 'pause')),
+            old_value   TEXT,
+            new_value   TEXT,
+            admin_id    TEXT,
+            created_at  TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_probe_sampling_audit_time
+            ON probe_sampling_audit(created_at DESC);",
+    )?;
+
+    // seed:'*' 兜底 + 'periodic' 真实 gate + 两个 locked 核心事件。
+    // priority 越小越优先(命中行 > '*' 行)。locked 行 sample_rate 恒 1.0。
+    conn.execute_batch(
+        "INSERT OR IGNORE INTO probe_sampling_config
+            (event_type, sample_rate, enabled, locked, priority, updated_at, updated_by)
+         VALUES
+            ('*',             1.0, 1, 0, 1000, datetime('now'), 'seed'),
+            ('periodic',      1.0, 1, 0,  100, datetime('now'), 'seed'),
+            ('on_demand',     1.0, 1, 1,   10, datetime('now'), 'seed'),
+            ('session_start', 1.0, 1, 1,   10, datetime('now'), 'seed');",
+    )?;
+
+    Ok(())
+}
+
+/// m031 down:DROP 两表 + telemetry_sample_rate 列。仅 dev/test。
+fn m031_probe_telemetry_sampling_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS idx_probe_sampling_audit_time;
+         DROP TABLE IF EXISTS probe_sampling_audit;
+         DROP TABLE IF EXISTS probe_sampling_config;",
+    )?;
+    let has_col: bool = conn
+        .prepare("PRAGMA table_info(system_settings)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .any(|c| c == "telemetry_sample_rate");
+    if has_col {
+        conn.execute(
+            "ALTER TABLE system_settings DROP COLUMN telemetry_sample_rate",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+/// m032:系统广播历史表 —— 设计稿 broadcast.html 依赖的"近 30 天广播列表 + 统计"。
+/// 每次发送一条广播写一行;已读/发送量供看板算 readRate。
+fn m032_broadcasts_history(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS broadcasts (
+            id          TEXT PRIMARY KEY,
+            title       TEXT NOT NULL,
+            message     TEXT NOT NULL,
+            admin_id    TEXT NOT NULL,
+            sent_count  INTEGER NOT NULL DEFAULT 0,
+            created_at  TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_broadcasts_created_at
+            ON broadcasts(created_at DESC);",
+    )?;
+    Ok(())
+}
+
+/// m032 down:DROP 索引 + broadcasts 表。仅 dev/test。
+fn m032_broadcasts_history_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS idx_broadcasts_created_at;
+         DROP TABLE IF EXISTS broadcasts;",
+    )?;
+    Ok(())
+}
+
+/// m033:可扩展设置配置存储 + 快照表。settings.html 的 11 个面板各按 section 持久化
+/// 为 JSON;快照表存全部 section 的聚合用于 rollback。
+fn m033_settings_config(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS settings_config (
+            section     TEXT PRIMARY KEY,
+            json        TEXT NOT NULL,
+            updated_at  TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS settings_snapshots (
+            id          TEXT PRIMARY KEY,
+            label       TEXT,
+            json        TEXT NOT NULL,
+            created_at  TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_settings_snapshots_created_at
+            ON settings_snapshots(created_at DESC);",
+    )?;
+    Ok(())
+}
+
+/// m033 down:DROP 索引 + 两张设置表。仅 dev/test。
+fn m033_settings_config_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS idx_settings_snapshots_created_at;
+         DROP TABLE IF EXISTS settings_snapshots;
+         DROP TABLE IF EXISTS settings_config;",
+    )?;
+    Ok(())
+}
+
+/// m034:settings.html「管理员与角色」+「API 密钥」落地。
+///   1. admins.role —— RBAC 角色('super_admin' / 'admin'),既有行默认 'super_admin'
+///      (首个/历史 admin 视为超管,避免迁移后无人能管角色)。
+///   2. api_keys —— 服务端集成密钥。明文仅生成时返回一次;库里只存 argon2 hash + 前缀掩码。
+fn m034_admin_rbac_api_keys(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+
+    // 1) admins.role(历史行回填 super_admin)
+    let has_role: bool = conn
+        .prepare("PRAGMA table_info(admins)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .any(|n| n == "role");
+    if !has_role {
+        conn.execute(
+            "ALTER TABLE admins ADD COLUMN role TEXT NOT NULL DEFAULT 'super_admin'
+             CHECK (role IN ('super_admin','admin'))",
+            [],
+        )?;
+    }
+
+    // 2) api_keys
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS api_keys (
+            id           TEXT NOT NULL PRIMARY KEY,
+            name         TEXT NOT NULL,
+            scope        TEXT NOT NULL CHECK (scope IN ('read','write','admin')),
+            prefix       TEXT NOT NULL,
+            hash         TEXT NOT NULL,
+            created_at   TEXT NOT NULL,
+            created_by   TEXT,
+            expires_at   TEXT,
+            last_used_at TEXT,
+            revoked_at   TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_api_keys_created
+            ON api_keys(created_at DESC);",
+    )?;
+    Ok(())
+}
+
+fn m034_admin_rbac_api_keys_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS idx_api_keys_created;
+         DROP TABLE IF EXISTS api_keys;",
+    )?;
+    let has_role: bool = conn
+        .prepare("PRAGMA table_info(admins)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .any(|n| n == "role");
+    if has_role {
+        conn.execute("ALTER TABLE admins DROP COLUMN role", [])?;
+    }
+    Ok(())
+}
+
+/// m035:灰度发布人群过滤(crowd-filter)——amas_canary_config 增 crowd_filters TEXT 列
+/// (JSON: minAccountAgeDays/preferActive/webOnly/autoScale24h)。列守卫幂等。
+fn m035_amas_canary_crowd_filters(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    let has_col: bool = conn
+        .prepare("PRAGMA table_info(amas_canary_config)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .any(|n| n == "crowd_filters");
+    if !has_col {
+        conn.execute(
+            "ALTER TABLE amas_canary_config ADD COLUMN crowd_filters TEXT",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+/// m036:反馈中心公告/FAQ（feedback.html "新建公告 / FAQ" 入口，存为草稿）
+/// + 回复草稿持久化（composer "存为草稿" 按钮，每工单一份）。两张新表，IF NOT EXISTS 幂等。
+fn m036_feedback_announcements(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS feedback_announcements (
+            id          TEXT NOT NULL PRIMARY KEY,
+            title       TEXT NOT NULL,
+            body        TEXT NOT NULL,
+            kind        TEXT NOT NULL DEFAULT 'announcement'
+                        CHECK (kind IN ('announcement', 'faq')),
+            published   INTEGER NOT NULL DEFAULT 0 CHECK (published IN (0, 1)),
+            author_id   TEXT,
+            created_at  TEXT NOT NULL,
+            updated_at  TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_feedback_announcements_kind
+            ON feedback_announcements(kind, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS feedback_reply_drafts (
+            feedback_id TEXT NOT NULL PRIMARY KEY,
+            body        TEXT NOT NULL,
+            push_inapp  INTEGER NOT NULL DEFAULT 0,
+            cc_email    INTEGER NOT NULL DEFAULT 0,
+            author_id   TEXT,
+            updated_at  TEXT NOT NULL
+        );",
+    )?;
+    Ok(())
+}
+
+/// m036 down:DROP 两表 + 索引。仅 dev/test。
+fn m036_feedback_announcements_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "DROP TABLE IF EXISTS feedback_reply_drafts;
+         DROP INDEX IF EXISTS idx_feedback_announcements_kind;
+         DROP TABLE IF EXISTS feedback_announcements;",
+    )?;
+    Ok(())
+}
+
+/// m035 down:DROP crowd_filters 列。仅 dev/test。
+fn m035_amas_canary_crowd_filters_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    let has_col: bool = conn
+        .prepare("PRAGMA table_info(amas_canary_config)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .any(|n| n == "crowd_filters");
+    if has_col {
+        conn.execute(
+            "ALTER TABLE amas_canary_config DROP COLUMN crowd_filters",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn m033_creates_settings_config_tables() {
+        let store = Store::open(":memory:", 5000, 1).unwrap();
+        store.run_migrations().unwrap();
+        let conn = store.conn().unwrap();
+        for tbl in ["settings_config", "settings_snapshots"] {
+            let n: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                    rusqlite::params![tbl],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1, "table {tbl} missing");
+        }
+    }
 
     #[test]
     fn m025_creates_advisor_tables_and_column() {
@@ -1538,6 +2073,98 @@ mod tests {
             .filter_map(Result::ok)
             .any(|c| c == "llm_advisor_enabled");
         assert!(has_col, "llm_advisor_enabled column missing");
+    }
+
+    #[test]
+    fn m032_creates_broadcasts_table_and_index() {
+        let store = Store::open(":memory:", 5000, 1).unwrap();
+        store.run_migrations().unwrap();
+        let conn = store.conn().unwrap();
+        let table: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='broadcasts'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(table, 1, "broadcasts table missing");
+        let index: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_broadcasts_created_at'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(index, 1, "idx_broadcasts_created_at index missing");
+    }
+
+    /// 单列签名:(name, type, notnull, dflt_value, pk)。
+    type ColSig = (String, String, i64, Option<String>, i64);
+    /// schema 快照:表名→列签名列表 + 索引名集合。
+    type SchemaSnapshot = (
+        std::collections::BTreeMap<String, Vec<ColSig>>,
+        std::collections::BTreeSet<String>,
+    );
+
+    /// 转储 user 表结构(表→列签名)与索引名集合,排除 schema_version(迁移记账)与
+    /// sqlite 内部对象。
+    fn dump_schema(conn: &rusqlite::Connection) -> SchemaSnapshot {
+        let tables: Vec<String> = conn
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type='table'
+                 AND name NOT LIKE 'sqlite_%' AND name <> 'schema_version' ORDER BY name",
+            )
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        let mut cols = std::collections::BTreeMap::new();
+        for t in &tables {
+            let sig: Vec<_> = conn
+                .prepare(&format!("PRAGMA table_info({t})"))
+                .unwrap()
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(1)?,         // name
+                        r.get::<_, String>(2)?,         // type
+                        r.get::<_, i64>(3)?,            // notnull
+                        r.get::<_, Option<String>>(4)?, // dflt_value
+                        r.get::<_, i64>(5)?,            // pk
+                    ))
+                })
+                .unwrap()
+                .filter_map(Result::ok)
+                .collect();
+            cols.insert(t.clone(), sig);
+        }
+        let indexes: std::collections::BTreeSet<String> = conn
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type='index'
+                 AND name NOT LIKE 'sqlite_%'",
+            )
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        (cols, indexes)
+    }
+
+    /// 升级幂等性回归:已跑完全部迁移的库,再次 run_migrations 不得改变任何表/列/索引。
+    /// 这是本架构下可靠可测的核心不变式 —— init_schema 的 DDL 是 bootstrap,migrations
+    /// 是 schema 演进的唯一权威,二者叠加后必须收敛且重入安全(防迁移把已建对象改坏)。
+    /// (注:全新安装与升级部署都会跑全部迁移,故二者 schema 一致;"仅 DDL vs DDL+迁移"
+    ///  并非两条真实部署路径,base 表只由 schema.rs 建、m001 为 no-op,无法从空库重建。)
+    #[test]
+    fn migrated_schema_is_stable_on_rerun() {
+        let store = Store::open(":memory:", 5000, 1).unwrap();
+        store.run_migrations().unwrap();
+        let before = dump_schema(&store.conn().unwrap());
+        store.run_migrations().unwrap();
+        let after = dump_schema(&store.conn().unwrap());
+        assert_eq!(before.0, after.0, "重跑迁移改变了表/列结构");
+        assert_eq!(before.1, after.1, "重跑迁移改变了索引集合");
     }
 
     #[test]

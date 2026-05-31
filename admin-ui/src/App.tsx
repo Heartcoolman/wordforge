@@ -32,6 +32,7 @@ const WordbookCenterPage = lazy(() => import('@/pages/WordbookCenterPage'));
 const DevicesPage = lazy(() => import('@/pages/DevicesPage'));
 const FeedbackPage = lazy(() => import('@/pages/FeedbackPage'));
 const ProbePage = lazy(() => import('@/pages/ProbePage'));
+const ProbeMetricsPage = lazy(() => import('@/pages/ProbeMetricsPage'));
 const BroadcastPage = lazy(() => import('@/pages/BroadcastPage'));
 const ResourcePacksPage = lazy(() => import('@/pages/ResourcePacksPage'));
 
@@ -121,7 +122,8 @@ export default function App() {
             <Route path="/updates" component={() => (<AdminProtectedRoute><Suspense fallback={<PageSpinner />}><UpdatesPage /></Suspense></AdminProtectedRoute>)} />
             <Route path="/wordbook-center" component={() => (<AdminProtectedRoute><Suspense fallback={<PageSpinner />}><WordbookCenterPage /></Suspense></AdminProtectedRoute>)} />
             <Route path="/feedback" component={() => (<AdminProtectedRoute><Suspense fallback={<PageSpinner />}><FeedbackPage /></Suspense></AdminProtectedRoute>)} />
-            <Route path="/probe" component={() => (<AdminProtectedRoute><Suspense fallback={<PageSpinner />}><ProbePage /></Suspense></AdminProtectedRoute>)} />
+            <Route path="/probe" component={() => (<AdminProtectedRoute><Suspense fallback={<PageSpinner />}><ProbeMetricsPage /></Suspense></AdminProtectedRoute>)} />
+            <Route path="/remote-probe" component={() => (<AdminProtectedRoute><Suspense fallback={<PageSpinner />}><ProbePage /></Suspense></AdminProtectedRoute>)} />
             <Route path="/broadcast" component={() => (<AdminProtectedRoute><Suspense fallback={<PageSpinner />}><BroadcastPage /></Suspense></AdminProtectedRoute>)} />
             <Route path="/resource-packs" component={() => (<AdminProtectedRoute><Suspense fallback={<PageSpinner />}><ResourcePacksPage /></Suspense></AdminProtectedRoute>)} />
           </Route>
