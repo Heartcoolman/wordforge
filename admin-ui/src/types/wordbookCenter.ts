@@ -15,6 +15,8 @@ export interface BrowseItem extends RemoteWordbookMeta {
   localWordbookId?: string;
   localVersion?: string;
   hasUpdate: boolean;
+  /** 本地标签(wordbook_local_tags),与远端 tags 区分;未导入则为空数组。标签编辑器用此预填。 */
+  localTags: string[];
 }
 
 export interface RemoteWordPreview {

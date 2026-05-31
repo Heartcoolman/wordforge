@@ -92,6 +92,9 @@ struct BrowseItem {
     local_wordbook_id: Option<String>,
     local_version: Option<String>,
     has_update: bool,
+    /// 本地标签(wordbook_local_tags),与远端 meta.tags 区分;未导入则空。
+    /// 标签编辑器用此预填(而非远端 tags),避免 replace 保存污染本地表。
+    local_tags: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -220,6 +223,7 @@ async fn fetch_remote_json<T: serde::de::DeserializeOwned>(
 fn build_browse_items(
     catalog: Vec<RemoteWordbookMeta>,
     imports: &[WordbookCenterImport],
+    local_tags: &HashMap<String, Vec<String>>,
 ) -> Vec<BrowseItem> {
     let import_map: HashMap<&str, &WordbookCenterImport> =
         imports.iter().map(|i| (i.remote_id.as_str(), i)).collect();
@@ -228,6 +232,9 @@ fn build_browse_items(
         .into_iter()
         .map(|meta| {
             let imp = import_map.get(meta.id.as_str());
+            let local_tags = imp
+                .and_then(|i| local_tags.get(&i.local_wordbook_id).cloned())
+                .unwrap_or_default();
             BrowseItem {
                 imported: imp.is_some(),
                 local_wordbook_id: imp.map(|i| i.local_wordbook_id.clone()),
@@ -235,10 +242,26 @@ fn build_browse_items(
                 has_update: imp
                     .map(|i| !meta.version.is_empty() && i.version != meta.version)
                     .unwrap_or(false),
+                local_tags,
                 meta,
             }
         })
         .collect()
+}
+
+/// 批量取若干已导入词书的本地标签,key 为 local_wordbook_id。
+fn local_tags_map(
+    store: &crate::store::Store,
+    imports: &[WordbookCenterImport],
+) -> HashMap<String, Vec<String>> {
+    let mut m = HashMap::new();
+    for imp in imports {
+        let tags = store
+            .list_wordbook_local_tags(&imp.local_wordbook_id)
+            .unwrap_or_default();
+        m.insert(imp.local_wordbook_id.clone(), tags);
+    }
+    m
 }
 
 fn map_remote_word(rw: &RemoteWord, remote_id: &str) -> Word {
@@ -469,6 +492,35 @@ async fn do_sync(
     .await?
 }
 
+/// best-effort 写词库审计:从 do_import/do_sync/admin_upload 的结果里取
+/// wordbook.id + name,失败仅 tracing::warn 不影响主流程。
+fn write_wb_audit_from_result(
+    state: &AppState,
+    action: &str,
+    admin_id: &str,
+    result: &serde_json::Value,
+) {
+    let wb = result.get("wordbook");
+    let wordbook_id = wb
+        .and_then(|w| w.get("id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if wordbook_id.is_empty() {
+        return;
+    }
+    let detail = wb
+        .and_then(|w| w.get("name"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if let Err(e) = state
+        .store()
+        .insert_wordbook_audit(wordbook_id, action, &detail, Some(admin_id))
+    {
+        tracing::warn!(error=%e, action=%action, "写 wordbook 远端导入审计失败(不影响主流程)");
+    }
+}
+
 fn source_name_from_url(url: &str) -> Option<String> {
     url.rsplit('/')
         .next()
@@ -592,13 +644,17 @@ async fn admin_browse(
         .ok_or_else(|| AppError::bad_request("WB_CENTER_NOT_CONFIGURED", "词书中心URL未配置"))?;
 
     let catalog: RemoteCatalog = fetch_remote_json(&base_url, "index.json").await?;
-    let imports = state
+    let (imports, tags_map) = state
         .run_store_task("wordbook_center.admin_browse.imports", {
             let base_url = base_url.clone();
-            move |store| store.list_wb_center_imports_by_source(&base_url)
+            move |store| {
+                let imports = store.list_wb_center_imports_by_source(&base_url)?;
+                let tags = local_tags_map(&store, &imports);
+                Ok::<_, crate::store::StoreError>((imports, tags))
+            }
         })
         .await??;
-    let items = build_browse_items(catalog.data, &imports);
+    let items = build_browse_items(catalog.data, &imports, &tags_map);
     Ok(ok(items))
 }
 
@@ -649,7 +705,7 @@ async fn admin_preview(
 }
 
 async fn admin_import(
-    _admin: AdminAuthUser,
+    admin: AdminAuthUser,
     Path(id): Path<String>,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
@@ -663,6 +719,7 @@ async fn admin_import(
         .ok_or_else(|| AppError::bad_request("WB_CENTER_NOT_CONFIGURED", "词书中心URL未配置"))?;
 
     let result = do_import(&state, &base_url, &id, WordbookType::System, None).await?;
+    write_wb_audit_from_result(&state, "import", &admin.admin_id, &result);
     Ok(created(result))
 }
 
@@ -736,7 +793,7 @@ struct UploadWordbookRequest {
 }
 
 async fn admin_upload(
-    _admin: AdminAuthUser,
+    admin: AdminAuthUser,
     State(state): State<AppState>,
     JsonBody(req): JsonBody<UploadWordbookRequest>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
@@ -774,6 +831,8 @@ async fn admin_upload(
     })
     .await??;
 
+    write_wb_audit_from_result(&state, "import", &admin.admin_id, &result);
+
     // 把 upload 时携带的 tags 直接落 wordbook_local_tags(免去前端再调 PATCH)
     if !initial_tags.is_empty() {
         // 从 result 里取 wordbook.id(persist_remote_wordbook_import 返回 wordbook 对象)
@@ -784,10 +843,20 @@ async fn admin_upload(
             .unwrap_or(&wordbook_id_for_tags)
             .to_string();
         let store2 = state.store().clone();
-        let _ = crate::blocking::run_blocking("wordbook_center.admin_upload.tags", move || {
+        let local_id_for_log = local_id.clone();
+        let tag_write = crate::blocking::run_blocking("wordbook_center.admin_upload.tags", move || {
             store2.set_wordbook_local_tags(&local_id, &initial_tags, Some("admin-upload"))
         })
         .await;
+        // 失败仅 warn 不阻断:词书已入库,本地标签缺失可后续 PATCH 补写
+        match tag_write {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::warn!(
+                wordbook_id = %local_id_for_log, error = %e,
+                "upload 携带标签落 wordbook_local_tags 失败"
+            ),
+            Err(e) => tracing::warn!(error = %e, "upload 标签写入任务 join 失败"),
+        }
     }
 
     Ok(created(result))
@@ -835,7 +904,7 @@ async fn admin_patch_tags(
 }
 
 async fn admin_sync(
-    _admin: AdminAuthUser,
+    admin: AdminAuthUser,
     Path(id): Path<String>,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
@@ -858,6 +927,7 @@ async fn admin_sync(
         .ok_or_else(|| AppError::not_found("导入记录不存在"))?;
 
     let result = do_sync(&state, &base_url, &import_record).await?;
+    write_wb_audit_from_result(&state, "sync", &admin.admin_id, &result);
     Ok(ok(result))
 }
 
@@ -973,7 +1043,13 @@ async fn user_browse(
         .into_iter()
         .filter(|i| i.user_id.as_deref() == Some(&auth.user_id))
         .collect();
-    let items = build_browse_items(catalog.data, &user_imports);
+    let tags_map = state
+        .run_store_task("wordbook_center.user_browse.local_tags", {
+            let imports = user_imports.clone();
+            move |store| Ok::<_, crate::store::StoreError>(local_tags_map(&store, &imports))
+        })
+        .await??;
+    let items = build_browse_items(catalog.data, &user_imports, &tags_map);
     Ok(ok(items))
 }
 
