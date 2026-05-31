@@ -1,0 +1,216 @@
+/* 数据分析页视觉：移植设计图 admin后端/analytics.html，scoped 在 .analytics 下。
+   admin-ui 已有 surface/content/accent/status/radius/font/ease 全套 token，
+   这里补设计稿页面级布局原语 + funnel/cohort-table/dist-row/heat-week/word-row/
+   ministat-grid/insight 等组件类。全局工具类（text-mono/text-small/animate-*）直接复用。 */
+
+/* —— 页头 —— */
+.analytics .page-header { margin-bottom: 4px; }
+.analytics .page-title { font: 700 24px/1.2 var(--font-display); letter-spacing: -0.02em; color: var(--content); }
+.analytics .page-desc { color: var(--content-secondary); font-size: 13px; margin-top: 4px; max-width: 88ch; }
+
+/* —— 布局原语 —— */
+.analytics .row { display: flex; align-items: center; gap: 12px; }
+.analytics .row.spread { justify-content: space-between; }
+.analytics .row.wrap { flex-wrap: wrap; }
+.analytics .gap-1 { gap: 4px; }
+.analytics .gap-2 { gap: 8px; }
+.analytics .gap-3 { gap: 12px; }
+.analytics .stack { display: flex; flex-direction: column; gap: 16px; }
+.analytics .mt-2 { margin-top: 8px; }
+.analytics .mt-3 { margin-top: 12px; }
+
+.analytics .grid { display: grid; gap: 16px; }
+.analytics .grid.cols-12 { grid-template-columns: repeat(12, minmax(0, 1fr)); }
+@media (max-width: 1100px) {
+  .analytics .grid.cols-12 > * { grid-column: 1 / -1 !important; }
+}
+
+/* —— divider —— */
+.analytics .divider { height: 1px; background: var(--border-hairline); margin: 14px 0; }
+
+/* —— panel —— */
+.analytics .panel { background: var(--surface-elevated); border-radius: var(--radius-lg); box-shadow: var(--elevation-1); overflow: hidden; }
+.analytics .panel-header { padding: 14px 18px; display: flex; align-items: center; gap: 12px; border-bottom: 1px solid var(--border-hairline); }
+.analytics .panel-header h3 { font: 600 14px/1.3 var(--font-display); letter-spacing: -0.005em; color: var(--content); }
+.analytics .panel-header .aside { margin-left: auto; display: flex; align-items: center; gap: 12px; }
+.analytics .panel-body { padding: 18px; }
+
+/* —— btn / segmented —— */
+.analytics .btn { display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 12px; border-radius: var(--radius-md); font-size: 13px; font-weight: 500; letter-spacing: -0.005em; transition: background var(--duration-fast), color var(--duration-fast), box-shadow var(--duration-fast); white-space: nowrap; user-select: none; cursor: pointer; }
+.analytics .btn svg { width: 15px; height: 15px; }
+.analytics .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.analytics .btn-secondary { background: var(--surface-elevated); color: var(--content); box-shadow: inset 0 0 0 1px var(--border); }
+.analytics .btn-secondary:hover { background: var(--surface-secondary); box-shadow: inset 0 0 0 1px var(--border-hover); }
+.analytics .btn-secondary.is-on { background: var(--accent-light); color: var(--accent); box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--accent) 30%, transparent); }
+.analytics .btn-primary { background: var(--accent); color: #fff; }
+.analytics .btn-primary:hover { background: color-mix(in oklab, var(--accent) 88%, #000); }
+.analytics .btn-ghost { background: transparent; color: var(--content-secondary); }
+.analytics .btn-ghost:hover { background: var(--surface-secondary); color: var(--content); }
+.analytics .btn-sm { height: 26px; padding: 0 9px; font-size: 12px; }
+.analytics .btn-sm svg { width: 13px; height: 13px; }
+
+.analytics .segmented { display: inline-flex; background: var(--surface-secondary); border: 1px solid var(--border-hairline); border-radius: var(--radius-md); padding: 3px; gap: 2px; }
+.analytics .segmented button { height: 26px; padding: 0 10px; font-size: 12px; font-weight: 500; color: var(--content-secondary); border-radius: var(--radius-sm); transition: background var(--duration-fast), color var(--duration-fast); cursor: pointer; }
+.analytics .segmented button:hover { color: var(--content); }
+.analytics .segmented button.is-active { background: var(--surface-elevated); color: var(--content); box-shadow: var(--elevation-1); }
+
+/* —— 自定义区间浮层 —— */
+.analytics .range-pop-wrap { position: relative; }
+.analytics .range-pop { position: absolute; top: calc(100% + 8px); right: 0; z-index: 30; min-width: 280px; padding: 14px; background: var(--surface-elevated); border: 1px solid var(--border-hairline); border-radius: var(--radius-lg); box-shadow: var(--elevation-2, var(--elevation-1)); animation: fade-in-up 200ms var(--ease-out-expo); }
+.analytics .range-pop .field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }
+.analytics .range-pop .field label { font-size: 11px; color: var(--content-tertiary); letter-spacing: 0.02em; text-transform: uppercase; }
+.analytics .range-pop input[type="date"] { height: 32px; padding: 0 10px; font: 12px/1 var(--font-mono); color: var(--content); background: var(--surface-secondary); border: 1px solid var(--border-hairline); border-radius: var(--radius-md); }
+.analytics .range-pop .actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 4px; }
+
+/* —— Mini KPI grid —— */
+.analytics .ministat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; background: var(--border-hairline); border-radius: var(--radius-lg); overflow: hidden; }
+@media (max-width: 900px) { .analytics .ministat-grid { grid-template-columns: repeat(2, 1fr); } }
+.analytics .ministat-grid > div { background: var(--surface-elevated); padding: 14px 18px; }
+.analytics .ministat-grid .l { font-size: 11px; color: var(--content-tertiary); letter-spacing: 0.04em; text-transform: uppercase; }
+.analytics .ministat-grid .v { font: 700 22px/1.05 var(--font-display); letter-spacing: -0.02em; margin-top: 4px; font-variant-numeric: tabular-nums; color: var(--content); }
+.analytics .ministat-grid .v .unit { font-size: 12px; color: var(--content-tertiary); font-weight: 500; margin-left: 4px; }
+.analytics .ministat-grid .delta { font-family: var(--font-mono); font-size: 11px; margin-top: 4px; color: var(--content-tertiary); }
+.analytics .ministat-grid .delta.up { color: var(--success-strong); }
+.analytics .ministat-grid .delta.down { color: var(--error-strong); }
+
+/* —— Funnel —— */
+.analytics .funnel { display: flex; flex-direction: column; gap: 6px; position: relative; }
+.analytics .funnel-row {
+  display: grid;
+  grid-template-columns: 180px 1fr 140px;
+  gap: 12px;
+  align-items: center;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border-hairline);
+}
+.analytics .funnel-row:last-child { border-bottom: 0; }
+.analytics .funnel-row .name { display: flex; flex-direction: column; min-width: 0; }
+.analytics .funnel-row .name strong { font: 600 13px/1.3 var(--font-display); color: var(--content); }
+.analytics .funnel-row .name span { font-size: 11px; color: var(--content-tertiary); margin-top: 2px; }
+.analytics .funnel-row .bar-wrap { position: relative; height: 32px; background: var(--surface-secondary); border-radius: var(--radius-md); overflow: hidden; }
+.analytics .funnel-row .bar {
+  position: absolute; left: 0; top: 0; bottom: 0;
+  background: linear-gradient(90deg, var(--accent), oklch(58% 0.20 300));
+  border-radius: var(--radius-md);
+  animation: funnel-fill 700ms var(--ease-out-expo) both;
+}
+.analytics .funnel-row .bar.is-good { background: linear-gradient(90deg, var(--success), oklch(56% 0.18 162)); }
+.analytics .funnel-row .bar.is-warn { background: linear-gradient(90deg, var(--warning), oklch(64% 0.18 60)); }
+.analytics .funnel-row .bar-label {
+  position: absolute; right: 12px; top: 50%; transform: translateY(-50%);
+  font: 600 12px/1 var(--font-mono);
+  color: #fff;
+  font-variant-numeric: tabular-nums;
+}
+@keyframes funnel-fill { from { transform: scaleX(0); transform-origin: left; } to { transform: scaleX(1); } }
+.analytics .funnel-row .conv {
+  text-align: right;
+  font: 500 12.5px/1.2 var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--content);
+}
+.analytics .funnel-row .conv .pct { font-weight: 600; }
+.analytics .funnel-row .conv .delta { color: var(--content-tertiary); font-size: 11px; }
+.analytics .funnel-row .conv .delta.up { color: var(--success-strong); }
+.analytics .funnel-row .conv .delta.down { color: var(--error-strong); }
+
+/* —— Cohort retention matrix —— */
+.analytics .cohort-table { font-size: 12px; width: 100%; border-collapse: collapse; }
+.analytics .cohort-table th, .analytics .cohort-table td { padding: 8px 6px; text-align: center; }
+.analytics .cohort-table th { font-size: 10.5px; color: var(--content-tertiary); font-weight: 500; letter-spacing: 0.04em; text-transform: uppercase; border-bottom: 1px solid var(--border-hairline); }
+.analytics .cohort-table .cohort-name { text-align: left; padding-left: 12px; font-weight: 500; font-family: var(--font-mono); white-space: nowrap; color: var(--content); }
+.analytics .cohort-table .cohort-size { color: var(--content-tertiary); font-size: 11px; font-family: var(--font-mono); }
+.analytics .cell-retention {
+  display: inline-block;
+  min-width: 42px;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--content);
+}
+.analytics .cell-retention.r-100 { background: var(--accent); color: #fff; }
+.analytics .cell-retention.r-70  { background: color-mix(in oklab, var(--accent) 60%, var(--surface-elevated)); color: #fff; }
+.analytics .cell-retention.r-50  { background: color-mix(in oklab, var(--accent) 38%, var(--surface-elevated)); color: var(--accent); }
+.analytics .cell-retention.r-30  { background: color-mix(in oklab, var(--accent) 22%, var(--surface-elevated)); color: var(--accent); }
+.analytics .cell-retention.r-15  { background: color-mix(in oklab, var(--accent) 12%, var(--surface-elevated)); color: var(--content-secondary); }
+.analytics .cell-retention.r-5   { background: var(--surface-secondary); color: var(--content-tertiary); }
+.analytics .cell-retention.r-na  { background: transparent; color: var(--content-quaternary); }
+
+/* —— Distribution chart (horizontal bars) —— */
+.analytics .dist-group-title { font: 600 12px/1.3 var(--font-display); color: var(--content-secondary); margin-bottom: 8px; letter-spacing: 0.02em; text-transform: uppercase; }
+.analytics .dist-row { display: grid; grid-template-columns: 90px 1fr 60px; align-items: center; gap: 10px; padding: 5px 0; font-size: 12px; }
+.analytics .dist-row .lbl { color: var(--content-secondary); }
+.analytics .dist-row .track { height: 10px; background: var(--surface-tertiary); border-radius: var(--radius-pill); overflow: hidden; }
+.analytics .dist-row .fill { height: 100%; background: linear-gradient(90deg, var(--accent), oklch(58% 0.20 300)); border-radius: var(--radius-pill); animation: bar-fill 700ms var(--ease-out-expo) both; }
+.analytics .dist-row .fill.is-success { background: linear-gradient(90deg, var(--success), oklch(56% 0.16 162)); }
+.analytics .dist-row .fill.is-info { background: linear-gradient(90deg, var(--info), oklch(56% 0.16 245)); }
+.analytics .dist-row .fill.is-warning { background: linear-gradient(90deg, var(--warning), oklch(62% 0.18 60)); }
+.analytics .dist-row .fill.is-violet { background: linear-gradient(90deg, oklch(58% 0.22 290), oklch(56% 0.22 320)); }
+.analytics .dist-row .v { text-align: right; font-family: var(--font-mono); font-variant-numeric: tabular-nums; color: var(--content); }
+@keyframes bar-fill { from { width: 0 !important; } }
+
+/* —— Hour×weekday heatmap —— */
+.analytics .heat-week {
+  display: grid;
+  grid-template-columns: 32px repeat(24, 1fr);
+  gap: 2px;
+  align-items: center;
+}
+.analytics .heat-week .heat-h { height: 14px; border-radius: 2px; transition: outline 120ms; }
+.analytics .heat-week .heat-h:hover { outline: 2px solid var(--accent); }
+.analytics .heat-week .heat-day-label { font: 500 10.5px/1 var(--font-mono); color: var(--content-tertiary); text-align: right; padding-right: 4px; }
+.analytics .heat-week .lvl-0 { background: var(--surface-secondary); }
+.analytics .heat-week .lvl-1 { background: color-mix(in oklab, var(--accent) 18%, var(--surface-secondary)); }
+.analytics .heat-week .lvl-2 { background: color-mix(in oklab, var(--accent) 36%, var(--surface-secondary)); }
+.analytics .heat-week .lvl-3 { background: color-mix(in oklab, var(--accent) 55%, var(--surface-elevated)); }
+.analytics .heat-week .lvl-4 { background: color-mix(in oklab, var(--accent) 75%, var(--surface-elevated)); }
+.analytics .heat-week .lvl-5 { background: var(--accent); }
+.analytics .heat-axis { display: flex; justify-content: space-between; padding-left: 36px; margin-top: 12px; }
+.analytics .heat-axis span { font: 10px/1 var(--font-mono); color: var(--content-tertiary); }
+
+/* —— Word top —— */
+.analytics .word-row { display: grid; grid-template-columns: 24px 1fr 70px 80px 90px; gap: 10px; align-items: center; padding: 9px 0; border-bottom: 1px solid var(--border-hairline); font-size: 12.5px; }
+.analytics .word-row:last-child { border-bottom: 0; }
+.analytics .word-row.head { font-size: 11px; color: var(--content-tertiary); text-transform: uppercase; letter-spacing: 0.04em; font-weight: 500; }
+.analytics .word-row .rank { width: 24px; text-align: center; font: 600 11px/1 var(--font-mono); color: var(--content-tertiary); }
+.analytics .word-row .word { font-weight: 500; font-family: var(--font-display); color: var(--content); }
+.analytics .word-row .word .pos { font-size: 10.5px; color: var(--content-tertiary); margin-left: 6px; font-style: italic; }
+.analytics .word-row .num { text-align: right; font-family: var(--font-mono); font-variant-numeric: tabular-nums; color: var(--content); }
+.analytics .word-row .acc { display: inline-flex; align-items: center; gap: 4px; justify-content: flex-end; }
+.analytics .word-row .acc .bar { display: inline-block; width: 40px; height: 5px; background: var(--surface-tertiary); border-radius: var(--radius-pill); overflow: hidden; vertical-align: middle; }
+.analytics .word-row .acc .bar > span { display: block; height: 100%; background: var(--success); border-radius: var(--radius-pill); }
+.analytics .word-row .acc .bar > span.is-warn { background: var(--warning); }
+.analytics .word-row .acc .bar > span.is-error { background: var(--error); }
+
+/* —— 本期洞察 —— */
+.analytics .insight-item { padding: 14px 18px; border-bottom: 1px solid var(--border-hairline); display: flex; gap: 10px; align-items: flex-start; }
+.analytics .insight-item:last-child { border-bottom: 0; }
+.analytics .insight-item .ico { width: 24px; height: 24px; border-radius: 6px; display: grid; place-items: center; flex-shrink: 0; }
+.analytics .insight-item .ico.is-success { background: var(--success-light); color: var(--success-strong); }
+.analytics .insight-item .ico.is-warning { background: var(--warning-light); color: var(--warning-strong); }
+.analytics .insight-item .ico.is-info { background: var(--info-light); color: var(--info-strong); }
+.analytics .insight-item .ico.is-accent { background: var(--accent-light); color: var(--accent); }
+.analytics .insight-item .body { flex: 1; min-width: 0; }
+.analytics .insight-item .body strong { font-size: 13px; color: var(--content); }
+.analytics .insight-item .body p { font-size: 12.5px; line-height: 1.5; color: var(--content-secondary); margin-top: 8px; }
+
+/* —— 空态 —— */
+.analytics .empty-hint { padding: 24px 8px; text-align: center; font-size: 12.5px; color: var(--content-tertiary); }
+
+/* —— 下钻链接（漏斗→离开用户决策序列） —— */
+.analytics .drill-link { cursor: pointer; white-space: nowrap; }
+.analytics .drill-link:hover { text-decoration: underline; }
+
+/* —— SQL / 下钻浮层 —— */
+.analytics-modal-backdrop { position: fixed; inset: 0; z-index: 60; background: color-mix(in oklab, var(--content) 45%, transparent); display: flex; align-items: center; justify-content: center; padding: 24px; }
+.analytics-modal { width: min(720px, 100%); max-height: 84vh; overflow: auto; background: var(--surface-elevated); border: 1px solid var(--border-hairline); border-radius: var(--radius-lg); box-shadow: var(--elevation-3, var(--elevation-1)); padding: 18px; }
+.analytics-modal .row { display: flex; align-items: center; gap: 12px; }
+.analytics-modal .row.spread { justify-content: space-between; }
+.analytics-modal .btn { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 9px; border-radius: var(--radius-md); font-size: 12px; font-weight: 500; cursor: pointer; background: transparent; color: var(--content-secondary); }
+.analytics-modal .btn:hover { background: var(--surface-secondary); color: var(--content); }
+.analytics-modal .mt-2 { margin-top: 8px; }
+.analytics-modal code { font: 11.5px/1 var(--font-mono); color: var(--accent); background: var(--accent-light); padding: 1px 5px; border-radius: var(--radius-xs); }
+.analytics-modal .empty-hint { text-align: center; font-size: 12.5px; color: var(--content-tertiary); }
+.analytics .sql-box { margin-top: 12px; padding: 14px; background: var(--surface-secondary); border: 1px solid var(--border-hairline); border-radius: var(--radius-md); font: 12px/1.6 var(--font-mono); color: var(--content); white-space: pre; overflow-x: auto; }

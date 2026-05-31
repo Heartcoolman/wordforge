@@ -1,0 +1,142 @@
+/* 系统监控页视觉：移植设计图 admin后端/monitoring.html，scoped 在 .monitoring 下。
+   admin-ui 已有 surface/content/elevation/radius/font/status 全套 token + ring-pulse/
+   list-item-enter keyframes，这里仅补设计稿的页面级组件类与共享布局类。 */
+
+/* —— 页头 —— */
+.monitoring .page-header { margin-bottom: 4px; }
+.monitoring .page-title { font: 700 24px/1.2 var(--font-display); letter-spacing: -0.02em; color: var(--content); }
+.monitoring .page-desc { color: var(--content-secondary); font-size: 13px; margin-top: 4px; max-width: 76ch; }
+
+/* —— 布局原语 —— */
+.monitoring .row { display: flex; align-items: center; gap: 12px; }
+.monitoring .row.spread { justify-content: space-between; }
+.monitoring .row.wrap { flex-wrap: wrap; }
+.monitoring .gap-2 { gap: 8px; }
+.monitoring .gap-3 { gap: 12px; }
+.monitoring .stack { display: flex; flex-direction: column; gap: 16px; }
+.monitoring .tnum { font-variant-numeric: tabular-nums; }
+
+.monitoring .grid { display: grid; gap: 16px; }
+.monitoring .grid.cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.monitoring .grid.cols-12 { grid-template-columns: repeat(12, minmax(0, 1fr)); }
+@media (max-width: 1100px) {
+  .monitoring .grid.cols-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .monitoring .grid.cols-12 > * { grid-column: 1 / -1 !important; }
+}
+@media (max-width: 640px) {
+  .monitoring .grid.cols-4 { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* —— panel —— */
+.monitoring .panel { background: var(--surface-elevated); border-radius: var(--radius-lg); box-shadow: var(--elevation-1); overflow: hidden; }
+.monitoring .panel-header { padding: 14px 18px; display: flex; align-items: center; gap: 12px; border-bottom: 1px solid var(--border-hairline); }
+.monitoring .panel-header h3 { font: 600 14px/1.3 var(--font-display); letter-spacing: -0.005em; color: var(--content); }
+.monitoring .panel-header .aside { margin-left: auto; display: flex; align-items: center; gap: 12px; }
+.monitoring .panel-body { padding: 18px; }
+
+/* —— btn / segmented —— */
+.monitoring .btn { display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 12px; border-radius: var(--radius-md); font-size: 13px; font-weight: 500; letter-spacing: -0.005em; transition: background var(--duration-fast), color var(--duration-fast), box-shadow var(--duration-fast); white-space: nowrap; user-select: none; }
+.monitoring .btn svg { width: 15px; height: 15px; }
+.monitoring .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.monitoring .btn-secondary { background: var(--surface-elevated); color: var(--content); box-shadow: inset 0 0 0 1px var(--border); cursor: pointer; }
+.monitoring .btn-secondary:hover { background: var(--surface-secondary); box-shadow: inset 0 0 0 1px var(--border-hover); }
+.monitoring .btn-secondary.is-on { background: var(--accent-light); color: var(--accent); box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--accent) 30%, transparent); }
+.monitoring .btn-icon { width: 30px; height: 30px; padding: 0; justify-content: center; background: transparent; color: var(--content-secondary); border-radius: var(--radius-md); cursor: pointer; display: inline-flex; align-items: center; }
+.monitoring .btn-icon:hover { background: var(--surface-secondary); color: var(--content); }
+.monitoring .btn-icon.is-on { background: var(--accent-light); color: var(--accent); }
+
+.monitoring .segmented { display: inline-flex; background: var(--surface-secondary); border: 1px solid var(--border-hairline); border-radius: var(--radius-md); padding: 3px; gap: 2px; }
+.monitoring .segmented button { height: 26px; padding: 0 10px; font-size: 12px; font-weight: 500; color: var(--content-secondary); border-radius: var(--radius-sm); transition: background var(--duration-fast), color var(--duration-fast); cursor: pointer; }
+.monitoring .segmented button:hover { color: var(--content); }
+.monitoring .segmented button.is-active { background: var(--surface-elevated); color: var(--content); box-shadow: var(--elevation-1); }
+
+/* —— chip —— */
+.monitoring .chip { display: inline-flex; align-items: center; gap: 5px; height: 22px; padding: 0 8px; border-radius: var(--radius-pill); font: 500 11.5px/1 var(--font-body); background: var(--surface-secondary); color: var(--content-secondary); white-space: nowrap; }
+.monitoring .chip-success { background: var(--success-light); color: var(--success-strong); }
+.monitoring .chip-warning { background: var(--warning-light); color: var(--warning-strong); }
+.monitoring .chip-error { background: var(--error-light); color: var(--error-strong); }
+.monitoring .chip-info { background: var(--info-light); color: var(--info-strong); }
+
+/* —— progress —— */
+.monitoring .progress { width: 100%; height: 6px; background: var(--surface-tertiary); border-radius: var(--radius-pill); overflow: hidden; position: relative; }
+.monitoring .progress > span { display: block; height: 100%; background: var(--accent); border-radius: var(--radius-pill); transition: width var(--duration-slow) var(--ease-out-expo); }
+.monitoring .progress.is-success > span { background: var(--success); }
+.monitoring .progress.is-warning > span { background: var(--warning); }
+.monitoring .progress.is-error > span { background: var(--error); }
+
+/* —— ministat（图例小件） —— */
+.monitoring .ministat { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.monitoring .ministat .label { font-size: 11px; color: var(--content-tertiary); }
+
+/* —— chart wrap —— */
+.monitoring .chart { width: 100%; height: 280px; position: relative; }
+.monitoring .chart > div { width: 100%; height: 100%; }
+
+/* —— pill-time（实时时钟） —— */
+.monitoring .pill-time { display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px; background: var(--surface-secondary); border: 1px solid var(--border-hairline); border-radius: var(--radius-pill); font: 500 12px/1 var(--font-mono); color: var(--content-secondary); }
+.monitoring .pill-time .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--success); box-shadow: 0 0 0 3px color-mix(in oklab, var(--success) 25%, transparent); animation: ring-pulse 1.8s var(--ease-out-expo) infinite; }
+
+/* ═══════════ 设计稿页面级组件（monitoring.html <style>）═══════════ */
+
+/* —— SLO 卡 —— */
+.monitoring .slo-card { background: var(--surface-elevated); border-radius: var(--radius-lg); box-shadow: var(--elevation-1); padding: 16px 18px; position: relative; overflow: hidden; }
+.monitoring .slo-card .l { font-size: 11.5px; color: var(--content-tertiary); letter-spacing: 0.02em; text-transform: uppercase; font-weight: 500; }
+.monitoring .slo-card .v { font: 700 26px/1.05 var(--font-display); letter-spacing: -0.022em; margin-top: 6px; font-variant-numeric: tabular-nums; color: var(--content); }
+.monitoring .slo-card .unit { font-size: 14px; color: var(--content-tertiary); }
+.monitoring .slo-card .target { font-size: 11.5px; color: var(--content-tertiary); margin-top: 2px; font-family: var(--font-mono); }
+.monitoring .slo-card .bar { height: 4px; background: var(--surface-tertiary); border-radius: var(--radius-pill); overflow: hidden; margin-top: 10px; }
+.monitoring .slo-card .bar > span { display: block; height: 100%; border-radius: var(--radius-pill); width: var(--p, 0%); animation: bar-fill 800ms var(--ease-out-expo) both; }
+.monitoring .slo-card.is-ok .v { color: var(--success-strong); }
+.monitoring .slo-card.is-ok .bar > span { background: var(--success); }
+.monitoring .slo-card.is-warn .v { color: var(--warning-strong); }
+.monitoring .slo-card.is-warn .bar > span { background: var(--warning); }
+.monitoring .slo-card.is-bad .v { color: var(--error-strong); }
+.monitoring .slo-card.is-bad .bar > span { background: var(--error); }
+@keyframes bar-fill { from { width: 0 !important; } }
+
+/* —— 服务状态行 —— */
+.monitoring .svc-row { display: flex; align-items: center; gap: 12px; padding: 11px 14px; background: var(--surface-secondary); border-radius: var(--radius-md); transition: background var(--duration-fast); }
+.monitoring .svc-row:hover { background: var(--surface-tertiary); }
+.monitoring .svc-row .name { flex: 1; font-weight: 500; font-size: 13px; color: var(--content); min-width: 0; }
+.monitoring .svc-row .name span { display: block; font-size: 11px; color: var(--content-tertiary); font-weight: 400; margin-top: 1px; }
+.monitoring .svc-row .v { font-family: var(--font-mono); font-size: 12px; color: var(--content-secondary); white-space: nowrap; }
+.monitoring .svc-row .led { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; background: var(--content-tertiary); }
+.monitoring .svc-row.is-up .led { background: var(--success); box-shadow: 0 0 0 3px color-mix(in oklab, var(--success) 25%, transparent); animation: ring-pulse 2.4s var(--ease-out-expo) infinite; }
+.monitoring .svc-row.is-warn .led { background: var(--warning); box-shadow: 0 0 0 3px color-mix(in oklab, var(--warning) 25%, transparent); }
+.monitoring .svc-row.is-down .led { background: var(--error); box-shadow: 0 0 0 3px color-mix(in oklab, var(--error) 25%, transparent); }
+
+/* —— worker 心跳网格 —— */
+.monitoring .workers-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px; }
+.monitoring .worker-cell { display: flex; align-items: center; gap: 8px; padding: 10px 12px; background: var(--surface-secondary); border-radius: var(--radius-md); font-size: 12px; }
+.monitoring .worker-cell .label { flex: 1; font-weight: 500; color: var(--content); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.monitoring .worker-cell .age { color: var(--content-tertiary); font: 500 10.5px/1 var(--font-mono); }
+.monitoring .worker-cell .led { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; background: var(--content-tertiary); }
+.monitoring .worker-cell.is-up .led { background: var(--success); box-shadow: 0 0 0 3px color-mix(in oklab, var(--success) 25%, transparent); animation: ring-pulse 2.4s var(--ease-out-expo) infinite; }
+.monitoring .worker-cell.is-warn .led { background: var(--warning); box-shadow: 0 0 0 3px color-mix(in oklab, var(--warning) 25%, transparent); }
+.monitoring .worker-cell.is-down .led { background: var(--error); box-shadow: 0 0 0 3px color-mix(in oklab, var(--error) 25%, transparent); }
+
+/* —— 实时日志流 —— */
+.monitoring .log-stream { font: 12px/1.6 var(--font-mono); background: var(--surface-sunken); border-radius: var(--radius-md); border: 1px solid var(--border-hairline); height: 280px; overflow-y: auto; padding: 10px 14px; }
+.monitoring .log-line { display: flex; gap: 8px; align-items: baseline; padding: 1px 0; animation: list-item-enter var(--duration-base) var(--ease-out-expo); }
+.monitoring .log-line .ts { color: var(--content-tertiary); white-space: nowrap; }
+.monitoring .log-line .lvl { font-weight: 600; flex-shrink: 0; }
+.monitoring .log-line.lvl-INFO .lvl { color: var(--info-strong); }
+.monitoring .log-line.lvl-WARN .lvl { color: var(--warning-strong); }
+.monitoring .log-line.lvl-ERROR .lvl { color: var(--error-strong); }
+.monitoring .log-line.lvl-DEBUG .lvl, .monitoring .log-line.lvl-TRACE .lvl { color: var(--content-tertiary); }
+.monitoring .log-line .msg { color: var(--content); word-break: break-word; }
+
+/* —— 告警时间线 —— */
+.monitoring .alert-timeline { display: flex; flex-direction: column; gap: 0; }
+.monitoring .alert-item { display: grid; grid-template-columns: 90px 24px 1fr; gap: 12px; padding: 12px 0; position: relative; }
+.monitoring .alert-item .ts { font: 500 12px/1.2 var(--font-mono); color: var(--content-tertiary); text-align: right; padding-top: 2px; }
+.monitoring .alert-item .marker { position: relative; }
+.monitoring .alert-item .marker::before { content: ''; position: absolute; left: 50%; top: 12px; bottom: -12px; width: 1px; background: var(--border-hairline); transform: translateX(-50%); }
+.monitoring .alert-item:last-child .marker::before { display: none; }
+.monitoring .alert-item .marker .dot { width: 12px; height: 12px; border-radius: 50%; background: var(--surface-elevated); border: 2px solid var(--content-tertiary); margin: 4px auto 0; }
+.monitoring .alert-item.is-error .marker .dot { border-color: var(--error); box-shadow: 0 0 0 4px color-mix(in oklab, var(--error) 18%, transparent); }
+.monitoring .alert-item.is-warn .marker .dot { border-color: var(--warning); }
+.monitoring .alert-item.is-info .marker .dot { border-color: var(--info); }
+.monitoring .alert-item.is-resolved .marker .dot { border-color: var(--success); background: var(--success); }
+.monitoring .alert-item .body strong { font-size: 13px; color: var(--content); }
+.monitoring .alert-item .body .desc { font-size: 12px; color: var(--content-secondary); margin-top: 2px; }

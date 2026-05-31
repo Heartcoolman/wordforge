@@ -2,10 +2,13 @@ use std::sync::atomic::Ordering;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::routing::get;
 use axum::Router;
+use chrono::{Duration as ChronoDuration, Utc};
 use once_cell::sync::Lazy;
+use serde::Deserialize;
+use serde_json::json;
 use sysinfo::{Disks, Pid, ProcessRefreshKind, RefreshKind, System};
 
 use crate::auth::AdminAuthUser;
@@ -31,6 +34,10 @@ pub fn router() -> Router<AppState> {
         .route("/check-update", get(check_update))
         // M1-A5：worker 执行状态区
         .route("/workers", get(worker_status))
+        // M0-P5：监控页对齐设计图新增——滚动请求指标 / 实时日志 / 派生告警时间线
+        .route("/requests", get(request_metrics))
+        .route("/logs", get(recent_logs))
+        .route("/events", get(alert_events))
 }
 
 // B62: System health monitoring
@@ -89,6 +96,7 @@ async fn system_health(
                 "healthy": sse_healthy,
                 "activeConnections": SSE_CONNECTION_COUNT.load(Ordering::Relaxed),
                 "activeDevices": state.active_sse().len(),
+                "maxConnections": state.config().limits.max_sse_connections,
             },
             "wordbookCenter": {
                 "healthy": wbc_healthy,
@@ -110,13 +118,14 @@ async fn database_stats(
                 store.db_page_size()?,
                 store.db_page_count()?,
                 store.db_wal_enabled()?,
+                store.db_wal_size_bytes()?,
             ))
         })
         .await
         .ok()
         .and_then(Result::ok)
-        .unwrap_or((0, Vec::new(), 0, 0, false));
-    let (size, tables, page_size, page_count, wal_enabled) = size;
+        .unwrap_or((0, Vec::new(), 0, 0, false, 0));
+    let (size, tables, page_size, page_count, wal_enabled, wal_size) = size;
 
     Ok(ok(serde_json::json!({
         "sizeOnDisk": size,
@@ -125,6 +134,7 @@ async fn database_stats(
         "pageSize": page_size,
         "pageCount": page_count,
         "walEnabled": wal_enabled,
+        "walSizeBytes": wal_size,
     })))
 }
 
@@ -238,14 +248,16 @@ async fn sample_resources(state: &AppState) -> serde_json::Value {
             .unwrap_or((None, None))
     };
 
-    // 2) r2d2 池占用
-    let pool = state
-        .run_store_task("admin.monitoring.pool_status", |store| {
-            Ok::<_, crate::store::StoreError>(store.pool_status())
+    // 2) r2d2 池占用 + WAL 文件大小（同一 store task,避免二次调度）
+    let (pool, wal_size) = state
+        .run_store_task("admin.monitoring.resources_db", |store| {
+            Ok::<_, crate::store::StoreError>((store.pool_status(), store.db_wal_size_bytes()?))
         })
         .await
         .ok()
-        .and_then(Result::ok);
+        .and_then(Result::ok)
+        .map(|(p, w)| (Some(p), Some(w)))
+        .unwrap_or((None, None));
 
     // 3) 磁盘:工作目录所在磁盘 free/total。Disks::new_with_refreshed_list 拿全部挂载点,
     //    选第一个 mount_point 是当前 cwd 前缀的(覆盖大多数 Linux/macOS 部署形态)
@@ -270,11 +282,27 @@ async fn sample_resources(state: &AppState) -> serde_json::Value {
             .unwrap_or((None, None))
     };
 
+    // 4) 系统总内存（让 RSS 进度条有真实分母）。新建轻量 System 只刷内存。
+    let mem_total = {
+        let mut s = System::new_with_specifics(
+            RefreshKind::new().with_memory(sysinfo::MemoryRefreshKind::everything()),
+        );
+        s.refresh_memory();
+        let t = s.total_memory();
+        if t > 0 {
+            Some(t)
+        } else {
+            None
+        }
+    };
+
     serde_json::json!({
         "cpuPct": cpu_pct,
         "memoryRssBytes": rss_bytes,
+        "memoryTotalBytes": mem_total,
         "diskTotalBytes": disk_total,
         "diskFreeBytes": disk_free,
+        "walSizeBytes": wal_size,
         "pool": pool.map(|p| serde_json::json!({
             "max": p.max,
             "connections": p.connections,
@@ -310,6 +338,178 @@ async fn worker_status(
         .collect();
 
     Ok(ok(serde_json::json!({ "workers": workers })))
+}
+
+// ─────────────── M0-P5：监控页对齐设计图新增端点 ───────────────
+
+#[derive(Debug, Deserialize)]
+struct WindowQuery {
+    window: Option<String>,
+}
+
+/// 设计图分段控件 15m / 1h / 6h / 24h / 7d → 秒。未识别回退 1h。
+fn parse_window_secs(w: Option<&str>) -> u64 {
+    match w.unwrap_or("1h") {
+        "15m" => 15 * 60,
+        "1h" => 3600,
+        "6h" => 6 * 3600,
+        "24h" => 24 * 3600,
+        "7d" => 7 * 24 * 3600,
+        _ => 3600,
+    }
+}
+
+/// GET /api/admin/monitoring/requests?window=1h —— 滚动请求指标。
+/// 喂设计图 SLO 卡(P50/P99/错误率/可用性)、请求延迟图(QPS+P99 时序)、
+/// axum 服务行(rps)。可用性按实际可得窗口如实标注(见 effectiveSecs)。
+async fn request_metrics(
+    _admin: AdminAuthUser,
+    Query(q): Query<WindowQuery>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let secs = parse_window_secs(q.window.as_deref());
+    Ok(ok(crate::middleware::http_metrics::aggregate(secs)))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LogsQuery {
+    limit: Option<usize>,
+    level: Option<String>,
+}
+
+/// GET /api/admin/monitoring/logs?limit=200&level=WARN —— 进程内日志环形缓冲快照(最新在前)。
+async fn recent_logs(
+    _admin: AdminAuthUser,
+    Query(q): Query<LogsQuery>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let limit = q.limit.unwrap_or(200).clamp(1, 1000);
+    let logs = crate::logging_buffer::snapshot(limit, q.level.as_deref());
+    Ok(ok(json!({ "logs": logs })))
+}
+
+#[derive(Debug, Deserialize)]
+struct EventsQuery {
+    hours: Option<i64>,
+}
+
+/// GET /api/admin/monitoring/events?hours=6 —— 派生告警时间线。
+/// 由真实信号聚合:worker 失败(worker_last_run)、版本更新(update_cache)、
+/// AMAS 决策异常(engine_monitoring_events.is_anomaly)。无独立告警表。
+async fn alert_events(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Query(q): Query<EventsQuery>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let hours = q.hours.unwrap_or(6).clamp(1, 168);
+    let cutoff_dt = Utc::now() - ChronoDuration::hours(hours);
+    let cutoff_unix = cutoff_dt.timestamp();
+    let cutoff_rfc = cutoff_dt.to_rfc3339();
+
+    // DB 派生:worker 最近执行 + 近窗口 AMAS 异常计数/最近时间
+    let (workers, anomaly) = state
+        .run_store_task("admin.monitoring.events", move |store| {
+            let workers = store.list_worker_last_run()?;
+            // is_anomaly 列若不存在则吞错返回 (0, None),不产生异常告警
+            let anomaly: (i64, Option<String>) = store
+                .conn()?
+                .query_row(
+                    "SELECT COUNT(*), MAX(timestamp) FROM engine_monitoring_events \
+                     WHERE is_anomaly = 1 AND timestamp >= ?1",
+                    rusqlite::params![cutoff_rfc],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap_or((0, None));
+            Ok::<_, crate::store::StoreError>((workers, anomaly))
+        })
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or((Vec::new(), (0, None)));
+
+    let mut events: Vec<serde_json::Value> = Vec::new();
+
+    // 1) worker 失败/异常(窗口内)
+    for w in &workers {
+        let outcome = w.last_outcome.to_ascii_lowercase();
+        let healthy = matches!(
+            outcome.as_str(),
+            "success" | "ok" | "completed" | "skipped" | "idle"
+        ) && w.last_error.is_none();
+        if !healthy && w.last_run_at >= cutoff_unix {
+            events.push(json!({
+                "tsMs": w.last_run_at * 1000,
+                "severity": "error",
+                "title": format!("worker {} {}", w.worker_name, w.last_outcome),
+                "desc": w.last_error.clone()
+                    .unwrap_or_else(|| format!("最近一次耗时 {} ms", w.last_duration_ms)),
+            }));
+        }
+    }
+
+    // 1b) 周期任务成功完成 → resolved(绿点)事件,对齐设计图「每日备份完成」类条目
+    const DONE_WORKERS: &[&str] = &[
+        "daily_aggregation",
+        "weekly_report",
+        "monitoring_retention",
+        "backup_vacuum",
+        "log_export",
+    ];
+    for w in &workers {
+        let outcome = w.last_outcome.to_ascii_lowercase();
+        let succeeded = matches!(outcome.as_str(), "success" | "ok" | "completed");
+        if succeeded
+            && w.last_error.is_none()
+            && w.last_run_at >= cutoff_unix
+            && DONE_WORKERS.contains(&w.worker_name.as_str())
+        {
+            events.push(json!({
+                "tsMs": w.last_run_at * 1000,
+                "severity": "resolved",
+                "title": format!("{} 已完成", w.worker_name),
+                "desc": format!("周期任务成功 · 耗时 {} ms", w.last_duration_ms),
+            }));
+        }
+    }
+
+    // 2) 版本更新可用(update_cache)
+    {
+        let cache = state.update_cache().read().await;
+        if let Some((_, ref data)) = *cache {
+            if data["hasUpdate"].as_bool().unwrap_or(false) {
+                let latest = data["latestVersion"].as_str().unwrap_or("?");
+                events.push(json!({
+                    "tsMs": Utc::now().timestamp_millis(),
+                    "severity": "info",
+                    "title": format!("新版本 {latest} 可用"),
+                    "desc": "GitHub release 检测到可升级版本",
+                }));
+            }
+        }
+    }
+
+    // 3) AMAS 决策异常聚合
+    if anomaly.0 > 0 {
+        let ts_ms = anomaly
+            .1
+            .as_deref()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| dt.timestamp_millis())
+            .unwrap_or_else(|| Utc::now().timestamp_millis());
+        events.push(json!({
+            "tsMs": ts_ms,
+            "severity": "warning",
+            "title": format!("AMAS 决策异常 {} 次", anomaly.0),
+            "desc": format!("近 {hours}h 内 engine_monitoring_events 标记 is_anomaly"),
+        }));
+    }
+
+    // 最新在前,限 30 条
+    events.sort_by(|a, b| {
+        b["tsMs"].as_i64().unwrap_or(0).cmp(&a["tsMs"].as_i64().unwrap_or(0))
+    });
+    events.truncate(30);
+
+    Ok(ok(json!({ "events": events })))
 }
 
 #[cfg(test)]

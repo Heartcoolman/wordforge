@@ -1,15 +1,16 @@
 use axum::extract::{Query, State};
 use axum::routing::get;
 use axum::Router;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::auth::AdminAuthUser;
 use crate::response::{ok, AppError};
 use crate::state::AppState;
 use crate::store::operations::admin_analytics::{
-    AdminDailyRecordTypeRow, AdminDailyRegisteredUsersRow, AdminHourlyBucketRow,
-    AdminRetentionCohortRow, AdminRetentionSampleRow, AdminStudyDailyRow, AdminStudySummaryRow,
+    AdminDailyRecordTypeRow, AdminDailyRegisteredUsersRow, AdminFunnelRow, AdminHourlyBucketRow,
+    AdminKpiWindowRow, AdminQuestionDistRow, AdminRetentionCohortRow, AdminRetentionMatrixRow,
+    AdminRetentionSampleRow, AdminStudyDailyRow, AdminStudySummaryRow, AdminWordFreqRow,
     AdminWordbookRankRow,
 };
 use crate::store::operations::records::RecordType;
@@ -28,6 +29,13 @@ pub fn router() -> Router<AppState> {
         .route("/hourly", get(hourly_buckets))
         .route("/wordbook-rank", get(wordbook_rank))
         .route("/retention-cohort", get(retention_cohort))
+        // 数据看板 6 端点(KPI / 漏斗 / 留存矩阵 / 题型难度分布 / 高频词 / 洞察)
+        .route("/kpi-summary", get(kpi_summary))
+        .route("/funnel", get(funnel))
+        .route("/retention-matrix", get(retention_matrix))
+        .route("/question-distribution", get(question_distribution))
+        .route("/word-frequency", get(word_frequency))
+        .route("/insights", get(insights))
 }
 
 // ---------------------------------------------------------------------------
@@ -306,12 +314,24 @@ struct StudySummary {
     new_words: i64,
     review_words: i64,
     mastered_words: i64,
+    /// 上一等长窗口的答题数(环比基数)。
+    prev_record_count: i64,
+    /// 上一等长窗口的正确率(0..1),无答题为 null。
+    prev_accuracy: Option<f64>,
+    /// 答题数环比变化率((cur-prev)/prev),prev=0 时 null。
+    record_count_delta_pct: Option<f64>,
+    /// 正确率环比变化(百分点,cur-prev),任一窗口无答题为 null。
+    accuracy_delta_pt: Option<f64>,
 }
 
-impl From<AdminStudySummaryRow> for StudySummary {
-    fn from(r: AdminStudySummaryRow) -> Self {
+impl StudySummary {
+    /// 由当前窗口 summary + 上一窗口 `(record_count, correct_count)` 组装,算环比。
+    fn from_rows(r: AdminStudySummaryRow, prev: (i64, i64)) -> Self {
+        let (prev_records, prev_correct) = prev;
+        let cur_acc = accuracy(r.correct_count, r.record_count);
+        let prev_acc = accuracy(prev_correct, prev_records);
         Self {
-            accuracy: accuracy(r.correct_count, r.record_count),
+            accuracy: cur_acc,
             total_duration_secs: r.total_duration_secs,
             session_count: r.session_count,
             record_count: r.record_count,
@@ -319,6 +339,17 @@ impl From<AdminStudySummaryRow> for StudySummary {
             new_words: r.new_words,
             review_words: r.review_words,
             mastered_words: r.mastered_words,
+            prev_record_count: prev_records,
+            prev_accuracy: prev_acc,
+            record_count_delta_pct: if prev_records > 0 {
+                Some((r.record_count - prev_records) as f64 / prev_records as f64)
+            } else {
+                None
+            },
+            accuracy_delta_pt: match (cur_acc, prev_acc) {
+                (Some(c), Some(p)) => Some(c - p),
+                _ => None,
+            },
         }
     }
 }
@@ -380,10 +411,11 @@ async fn study_overview(
     ensure_days(q.days)?;
     let category = parse_category(q.category.as_deref())?;
     let days = q.days;
-    let (summary, daily) = state
+    let (summary, prev, daily) = state
         .run_store_task("admin.analytics.study_overview", move |store| {
             Ok::<_, crate::store::StoreError>((
                 store.admin_study_overview_summary(days, category)?,
+                store.admin_study_summary_prev_window(days, category)?,
                 store.admin_daily_study_overview(days, category)?,
             ))
         })
@@ -393,7 +425,7 @@ async fn study_overview(
         generated_at: Utc::now(),
         days: q.days,
         category: category_label(category).to_string(),
-        summary: summary.into(),
+        summary: StudySummary::from_rows(summary, prev),
         daily: fill_study_daily(&daily, q.days),
     }))
 }
@@ -835,5 +867,766 @@ async fn retention_cohort(
         cohort_unit,
         max_days: q.max_days,
         rows,
+    }))
+}
+
+// ===========================================================================
+// 数据看板 6 端点
+// ===========================================================================
+
+/// 解析出的窗口:`[start, end]` 闭区间(`YYYY-MM-DD`),`end_excl` = end 次日(供
+/// `created_at < end_excl` 半开比较),`days` = 窗口天数;另带"上一等长窗口"
+/// `[prev_start, prev_end_excl)`(紧邻在 start 之前、等长往前推)。
+struct Window {
+    start: String,
+    end: String,
+    end_excl: String,
+    days: i64,
+    prev_start: String,
+    prev_end_excl: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct WindowQuery {
+    #[serde(default = "default_days")]
+    days: u32,
+    from: Option<String>,
+    to: Option<String>,
+}
+
+const ALLOWED_WINDOW_DAYS: [u32; 4] = [7, 14, 30, 90];
+
+fn parse_ymd(s: &str) -> Result<NaiveDate, AppError> {
+    NaiveDate::parse_from_str(s, "%Y-%m-%d")
+        .map_err(|_| AppError::bad_request("INVALID_DATE", "from/to must be YYYY-MM-DD"))
+}
+
+/// from&to 都给时优先(闭区间);否则用 days(默认 7,仅允许 7/14/30/90),
+/// 窗口 = [today-(days-1), today]。
+fn resolve_window(q: &WindowQuery) -> Result<Window, AppError> {
+    let (start_d, end_d) = match (q.from.as_deref(), q.to.as_deref()) {
+        (Some(f), Some(t)) => {
+            let (f, t) = (parse_ymd(f)?, parse_ymd(t)?);
+            if f > t {
+                return Err(AppError::bad_request("INVALID_RANGE", "from must be <= to"));
+            }
+            (f, t)
+        }
+        _ => {
+            if !ALLOWED_WINDOW_DAYS.contains(&q.days) {
+                return Err(AppError::bad_request(
+                    "INVALID_DAYS",
+                    "days must be one of 7, 14, 30, 90",
+                ));
+            }
+            let today = Utc::now().date_naive();
+            (today - Duration::days((q.days - 1) as i64), today)
+        }
+    };
+    let days = (end_d - start_d).num_days() + 1;
+    let prev_end_excl = start_d;
+    let prev_start = start_d - Duration::days(days);
+    Ok(Window {
+        start: start_d.format("%Y-%m-%d").to_string(),
+        end: end_d.format("%Y-%m-%d").to_string(),
+        end_excl: (end_d + Duration::days(1)).format("%Y-%m-%d").to_string(),
+        days,
+        prev_start: prev_start.format("%Y-%m-%d").to_string(),
+        prev_end_excl: prev_end_excl.format("%Y-%m-%d").to_string(),
+    })
+}
+
+fn delta_pct(cur: f64, prev: f64) -> Option<f64> {
+    if prev == 0.0 {
+        None
+    } else {
+        Some((cur - prev) / prev)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 1) kpi-summary
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct KpiMetricPct {
+    value: f64,
+    prev_value: f64,
+    delta_pct: Option<f64>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct KpiMetricPt {
+    value: f64,
+    prev_value: f64,
+    delta_pt: Option<f64>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct KpiSummaryResponse {
+    generated_at: DateTime<Utc>,
+    days: i64,
+    range_start: String,
+    range_end: String,
+    new_registrations: KpiMetricPct,
+    dau_average: KpiMetricPct,
+    d7_retention: KpiMetricPt,
+    study_duration_secs: KpiMetricPct,
+}
+
+fn d7_ratio(row: &AdminKpiWindowRow) -> f64 {
+    if row.d7_eligible > 0 {
+        row.d7_retained as f64 / row.d7_eligible as f64
+    } else {
+        0.0
+    }
+}
+
+async fn kpi_summary(
+    _admin: AdminAuthUser,
+    Query(q): Query<WindowQuery>,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let w = resolve_window(&q)?;
+    let (cur, prev) = {
+        let (s, e, pd, ps, pe) = (
+            w.start.clone(),
+            w.end_excl.clone(),
+            w.days,
+            w.prev_start.clone(),
+            w.prev_end_excl.clone(),
+        );
+        state
+            .run_store_task("admin.analytics.kpi_summary", move |store| {
+                Ok::<_, crate::store::StoreError>((
+                    store.admin_kpi_window(&s, &e, pd)?,
+                    store.admin_kpi_window(&ps, &pe, pd)?,
+                ))
+            })
+            .await??
+    };
+
+    Ok(ok(KpiSummaryResponse {
+        generated_at: Utc::now(),
+        days: w.days,
+        range_start: w.start,
+        range_end: w.end,
+        new_registrations: KpiMetricPct {
+            value: cur.new_registrations as f64,
+            prev_value: prev.new_registrations as f64,
+            delta_pct: delta_pct(cur.new_registrations as f64, prev.new_registrations as f64),
+        },
+        dau_average: KpiMetricPct {
+            value: cur.dau_average as f64,
+            prev_value: prev.dau_average as f64,
+            delta_pct: delta_pct(cur.dau_average as f64, prev.dau_average as f64),
+        },
+        d7_retention: {
+            let (c, p) = (d7_ratio(&cur), d7_ratio(&prev));
+            KpiMetricPt {
+                value: c,
+                prev_value: p,
+                // 上一窗口无 d7-eligible 用户 → 无可比基准,置 null
+                // (与其它 pct 指标零分母语义一致;前端按 null 渲染占位符)
+                delta_pt: if prev.d7_eligible > 0 { Some(c - p) } else { None },
+            }
+        },
+        study_duration_secs: KpiMetricPct {
+            value: cur.study_duration_secs as f64,
+            prev_value: prev.study_duration_secs as f64,
+            delta_pct: delta_pct(
+                cur.study_duration_secs as f64,
+                prev.study_duration_secs as f64,
+            ),
+        },
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// 2) funnel
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct FunnelStep {
+    key: String,
+    label: String,
+    sublabel: String,
+    count: i64,
+    pct: f64,
+    delta_pt: Option<f64>,
+    tone: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FunnelResponse {
+    generated_at: DateTime<Utc>,
+    days: i64,
+    range_start: String,
+    range_end: String,
+    steps: Vec<FunnelStep>,
+    biggest_drop_from: String,
+    biggest_drop_to: String,
+    biggest_drop_pt: f64,
+}
+
+/// 步骤静态定义:(key, label, sublabel, tone),与契约逐字对齐。
+const FUNNEL_DEFS: [(&str, &str, &str, &str); 7] = [
+    ("register", "注册", "邮箱验证完成", "good"),
+    ("choose_wordbook", "选择词库", "至少选一个词库", "good"),
+    ("first_answer", "首次答题", "完成第一道题", "good"),
+    (
+        "first_session",
+        "完成首个会话(≥20题)",
+        "展示AMAS节奏价值",
+        "normal",
+    ),
+    ("d1_return", "d1 回访", "注册次日有有效答题", "normal"),
+    ("d7_retention", "d7 留存", "注册第7天有有效答题", "normal"),
+    ("d30_retention", "d30 留存", "稳态期", "warn"),
+];
+
+fn funnel_counts(row: &AdminFunnelRow) -> [i64; 7] {
+    [
+        row.register,
+        row.choose_wordbook,
+        row.first_answer,
+        row.first_session,
+        row.d1_return,
+        row.d7_retention,
+        row.d30_retention,
+    ]
+}
+
+fn build_funnel_steps(cur: &AdminFunnelRow, prev: &AdminFunnelRow) -> Vec<FunnelStep> {
+    let cur_c = funnel_counts(cur);
+    let prev_c = funnel_counts(prev);
+    let base = cur_c[0] as f64;
+    let prev_base = prev_c[0] as f64;
+    FUNNEL_DEFS
+        .iter()
+        .enumerate()
+        .map(|(i, (key, label, sublabel, tone))| {
+            let pct = if base > 0.0 { cur_c[i] as f64 / base } else { 0.0 };
+            let prev_pct = if prev_base > 0.0 {
+                Some(prev_c[i] as f64 / prev_base)
+            } else {
+                None
+            };
+            FunnelStep {
+                key: key.to_string(),
+                label: label.to_string(),
+                sublabel: sublabel.to_string(),
+                count: cur_c[i],
+                pct,
+                delta_pt: prev_pct.map(|p| pct - p),
+                tone: tone.to_string(),
+            }
+        })
+        .collect()
+}
+
+async fn funnel(
+    _admin: AdminAuthUser,
+    Query(q): Query<WindowQuery>,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let w = resolve_window(&q)?;
+    let (cur, prev) = {
+        let (s, e, ps, pe) = (
+            w.start.clone(),
+            w.end_excl.clone(),
+            w.prev_start.clone(),
+            w.prev_end_excl.clone(),
+        );
+        state
+            .run_store_task("admin.analytics.funnel", move |store| {
+                Ok::<_, crate::store::StoreError>((
+                    store.admin_funnel_window(&s, &e)?,
+                    store.admin_funnel_window(&ps, &pe)?,
+                ))
+            })
+            .await??
+    };
+
+    let steps = build_funnel_steps(&cur, &prev);
+    let (from, to, drop) = biggest_drop(&steps);
+    Ok(ok(FunnelResponse {
+        generated_at: Utc::now(),
+        days: w.days,
+        range_start: w.start,
+        range_end: w.end,
+        steps,
+        biggest_drop_from: from,
+        biggest_drop_to: to,
+        biggest_drop_pt: drop,
+    }))
+}
+
+/// 相邻步骤 pct 降幅最大者;返回 (from_label, to_label, drop_pt)。
+fn biggest_drop(steps: &[FunnelStep]) -> (String, String, f64) {
+    let mut best = (String::new(), String::new(), 0.0_f64);
+    for pair in steps.windows(2) {
+        let drop = pair[0].pct - pair[1].pct;
+        if drop > best.2 {
+            best = (pair[0].label.clone(), pair[1].label.clone(), drop);
+        }
+    }
+    best
+}
+
+// ---------------------------------------------------------------------------
+// 3) retention-matrix
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct RetentionMatrixQuery {
+    #[serde(default = "default_weeks")]
+    weeks: u32,
+}
+
+fn default_weeks() -> u32 {
+    7
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MatrixCohort {
+    cohort_start: String,
+    size: i64,
+    cells: Vec<Option<f64>>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RetentionMatrixResponse {
+    generated_at: DateTime<Utc>,
+    weeks: u32,
+    cohorts: Vec<MatrixCohort>,
+}
+
+async fn retention_matrix(
+    _admin: AdminAuthUser,
+    Query(q): Query<RetentionMatrixQuery>,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let weeks = q.weeks.clamp(1, 26);
+    let rows: Vec<AdminRetentionMatrixRow> = state
+        .run_store_task("admin.analytics.retention_matrix", move |store| {
+            store.admin_retention_matrix(weeks)
+        })
+        .await??;
+
+    let now = Utc::now().date_naive();
+    let cohorts = rows
+        .into_iter()
+        .map(|r| {
+            let cohort_d = NaiveDate::parse_from_str(&r.cohort_start, "%Y-%m-%d").ok();
+            let cells = (0..weeks as usize)
+                .map(|k| {
+                    // cells[0] 恒 1.0(注册周本身即基准)。
+                    if k == 0 {
+                        return Some(1.0);
+                    }
+                    // 第 k 周窗口 [cohortStart+7k, cohortStart+7(k+1));若窗口尾未过完
+                    // (> now)则该 cell = null。
+                    let week_end = cohort_d.map(|d| d + Duration::days(7 * (k as i64 + 1)));
+                    match week_end {
+                        Some(end) if end > now => None,
+                        _ => {
+                            if r.size > 0 {
+                                Some(r.active_by_week[k] as f64 / r.size as f64)
+                            } else {
+                                Some(0.0)
+                            }
+                        }
+                    }
+                })
+                .collect();
+            MatrixCohort {
+                cohort_start: r.cohort_start,
+                size: r.size,
+                cells,
+            }
+        })
+        .collect();
+
+    Ok(ok(RetentionMatrixResponse {
+        generated_at: Utc::now(),
+        weeks,
+        cohorts,
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// 4) question-distribution
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct QuestionTypeEntry {
+    key: String,
+    label: String,
+    count: i64,
+    pct: f64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DifficultyBinEntry {
+    label: String,
+    min: Option<f64>,
+    max: Option<f64>,
+    count: i64,
+    pct: f64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct QuestionDistResponse {
+    generated_at: DateTime<Utc>,
+    days: i64,
+    total_records: i64,
+    question_types: Vec<QuestionTypeEntry>,
+    difficulty_bins: Vec<DifficultyBinEntry>,
+}
+
+/// question_mode 原始值 → (key, label)。NULL/空/未知归 "未标注"。
+fn question_type_label(raw: &str) -> (&'static str, &'static str) {
+    match raw {
+        "word-to-meaning" => ("word-to-meaning", "单词 → 释义"),
+        "meaning-to-word" => ("meaning-to-word", "释义 → 单词"),
+        "audio-to-meaning" => ("audio-to-meaning", "听音 → 释义"),
+        "meaning-to-spelling" => ("meaning-to-spelling", "拼写"),
+        _ => ("unknown", "未标注"),
+    }
+}
+
+async fn question_distribution(
+    _admin: AdminAuthUser,
+    Query(q): Query<WindowQuery>,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let w = resolve_window(&q)?;
+    let dist: AdminQuestionDistRow = {
+        let (s, e) = (w.start.clone(), w.end_excl.clone());
+        state
+            .run_store_task("admin.analytics.question_distribution", move |store| {
+                store.admin_question_distribution(&s, &e)
+            })
+            .await??
+    };
+
+    let total = dist.total;
+    let pct = |c: i64| if total > 0 { c as f64 / total as f64 } else { 0.0 };
+
+    // 合并同 label(unknown 折叠"未标注")并按 count 降序。
+    let mut by_key: std::collections::BTreeMap<&str, (&str, i64)> = std::collections::BTreeMap::new();
+    for (raw, count) in &dist.question_modes {
+        let (key, label) = question_type_label(raw);
+        let e = by_key.entry(key).or_insert((label, 0));
+        e.1 += count;
+    }
+    let mut question_types: Vec<QuestionTypeEntry> = by_key
+        .into_iter()
+        .map(|(key, (label, count))| QuestionTypeEntry {
+            key: key.to_string(),
+            label: label.to_string(),
+            count,
+            pct: pct(count),
+        })
+        .collect();
+    question_types.sort_by(|a, b| b.count.cmp(&a.count));
+
+    let bin_meta: [(&str, Option<f64>, Option<f64>); 5] = [
+        ("≤1000", None, Some(1000.0)),
+        ("1000–1200", Some(1000.0), Some(1200.0)),
+        ("1200–1400", Some(1200.0), Some(1400.0)),
+        ("1400–1600", Some(1400.0), Some(1600.0)),
+        ("≥1600", Some(1600.0), None),
+    ];
+    let difficulty_bins = bin_meta
+        .iter()
+        .enumerate()
+        .map(|(i, (label, min, max))| DifficultyBinEntry {
+            label: label.to_string(),
+            min: *min,
+            max: *max,
+            count: dist.difficulty_bins[i],
+            pct: pct(dist.difficulty_bins[i]),
+        })
+        .collect();
+
+    Ok(ok(QuestionDistResponse {
+        generated_at: Utc::now(),
+        days: w.days,
+        total_records: total,
+        question_types,
+        difficulty_bins,
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// 5) word-frequency
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct WordFreqQuery {
+    #[serde(default = "default_days")]
+    days: u32,
+    from: Option<String>,
+    to: Option<String>,
+    #[serde(default = "default_limit")]
+    limit: u32,
+    #[serde(default = "default_sort")]
+    sort: String,
+}
+
+fn default_sort() -> String {
+    "count".to_string()
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WordFreqRowOut {
+    rank: i64,
+    word_id: String,
+    spelling: String,
+    pos: Option<String>,
+    record_count: i64,
+    accuracy: Option<f64>,
+    elo: Option<f64>,
+    /// 掌握度(0..1),窗口内答该词的用户 mastery_level 均值;无数据为 null。
+    mastery: Option<f64>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WordFreqResponse {
+    generated_at: DateTime<Utc>,
+    days: i64,
+    limit: u32,
+    sort: String,
+    rows: Vec<WordFreqRowOut>,
+}
+
+async fn word_frequency(
+    _admin: AdminAuthUser,
+    Query(q): Query<WordFreqQuery>,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let w = resolve_window(&WindowQuery {
+        days: q.days,
+        from: q.from.clone(),
+        to: q.to.clone(),
+    })?;
+    let sort = match q.sort.as_str() {
+        "count" | "accuracy" | "elo" | "mastery" => q.sort.clone(),
+        _ => {
+            return Err(AppError::bad_request(
+                "INVALID_SORT",
+                "sort must be count, accuracy, elo, or mastery",
+            ))
+        }
+    };
+    let limit = q.limit.clamp(1, 100);
+    let rows: Vec<AdminWordFreqRow> = {
+        let (s, e, srt) = (w.start.clone(), w.end_excl.clone(), sort.clone());
+        state
+            .run_store_task("admin.analytics.word_frequency", move |store| {
+                store.admin_word_frequency(&s, &e, &srt, limit)
+            })
+            .await??
+    };
+
+    let rows = rows
+        .into_iter()
+        .enumerate()
+        .map(|(i, r)| WordFreqRowOut {
+            rank: i as i64 + 1,
+            word_id: r.word_id,
+            spelling: r.spelling,
+            pos: r.pos,
+            record_count: r.record_count,
+            accuracy: r.accuracy,
+            elo: r.elo,
+            mastery: r.mastery,
+        })
+        .collect();
+
+    Ok(ok(WordFreqResponse {
+        generated_at: Utc::now(),
+        days: w.days,
+        limit,
+        sort,
+        rows,
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// 6) insights
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InsightItem {
+    tone: String,
+    title: String,
+    body: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InsightsResponse {
+    generated_at: DateTime<Utc>,
+    days: i64,
+    items: Vec<InsightItem>,
+}
+
+const WEEKDAY_CN: [&str; 7] = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
+
+async fn insights(
+    _admin: AdminAuthUser,
+    Query(q): Query<WindowQuery>,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let w = resolve_window(&q)?;
+    let days_u32 = w.days.clamp(1, 60) as u32;
+
+    let (funnel_cur, funnel_prev, matrix, freq, hourly) = {
+        let (s, e, ps, pe) = (
+            w.start.clone(),
+            w.end_excl.clone(),
+            w.prev_start.clone(),
+            w.prev_end_excl.clone(),
+        );
+        state
+            .run_store_task("admin.analytics.insights", move |store| {
+                Ok::<_, crate::store::StoreError>((
+                    store.admin_funnel_window(&s, &e)?,
+                    store.admin_funnel_window(&ps, &pe)?,
+                    store.admin_retention_matrix(8)?,
+                    store.admin_word_frequency(&s, &e, "count", 50)?,
+                    store.admin_hourly_buckets(days_u32)?,
+                ))
+            })
+            .await??
+    };
+
+    let mut items: Vec<InsightItem> = Vec::new();
+
+    // (1) accent:漏斗最大流失点。
+    let steps = build_funnel_steps(&funnel_cur, &funnel_prev);
+    let (from, to, drop) = biggest_drop(&steps);
+    if drop > 0.0 && !from.is_empty() {
+        items.push(InsightItem {
+            tone: "accent".into(),
+            title: "漏斗最大流失点".into(),
+            body: format!(
+                "{from} → {to} 流失 {:.0}%,是当前转化的最大瓶颈。",
+                drop * 100.0
+            ),
+        });
+    }
+
+    // (2) success/warning:d7 留存近两周趋势(取最近两个"成熟"cohort 的第 1 周留存)。
+    //     成熟 = cells[1] 非 null。比较较新 vs 较旧。
+    let mature: Vec<(&str, f64)> = matrix
+        .iter()
+        .filter(|c| c.size > 0)
+        .filter_map(|c| {
+            // 第 1 周窗口需已过完;用 size>0 且至少 14 天前的 cohort 近似(此处直接
+            // 用 active_by_week[1]/size,route 不重复 null 判定,取存在的最近两个)。
+            let cohort_d = NaiveDate::parse_from_str(&c.cohort_start, "%Y-%m-%d").ok()?;
+            let week1_end = cohort_d + Duration::days(14);
+            if week1_end <= Utc::now().date_naive() && c.active_by_week.len() > 1 {
+                Some((
+                    c.cohort_start.as_str(),
+                    c.active_by_week[1] as f64 / c.size as f64,
+                ))
+            } else {
+                None
+            }
+        })
+        .collect();
+    if mature.len() >= 2 {
+        let older = mature[mature.len() - 2].1;
+        let newer = mature[mature.len() - 1].1;
+        let diff = newer - older;
+        let (tone, word) = if diff >= 0.0 {
+            ("success", "回升")
+        } else {
+            ("warning", "下滑")
+        };
+        items.push(InsightItem {
+            tone: tone.into(),
+            title: "d7 留存趋势".into(),
+            body: format!(
+                "最近两个成熟队列的第 1 周留存从 {:.0}% {word}到 {:.0}%({:+.0} 个百分点)。",
+                older * 100.0,
+                newer * 100.0,
+                diff * 100.0
+            ),
+        });
+    }
+
+    // (3) warning:高频低正确率词(recordCount 高且 accuracy < 0.5),列 1-2 个。
+    let mut low_acc: Vec<&AdminWordFreqRow> = freq
+        .iter()
+        .filter(|r| r.record_count >= 5 && r.accuracy.map(|a| a < 0.5).unwrap_or(false))
+        .collect();
+    low_acc.sort_by(|a, b| b.record_count.cmp(&a.record_count));
+    if !low_acc.is_empty() {
+        let desc = low_acc
+            .iter()
+            .take(2)
+            .map(|r| {
+                format!(
+                    "{}(正确率 {:.0}%、{} 次)",
+                    r.spelling,
+                    r.accuracy.unwrap_or(0.0) * 100.0,
+                    r.record_count
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("、");
+        items.push(InsightItem {
+            tone: "warning".into(),
+            title: "高频易错词".into(),
+            body: format!("{desc} 高频出现但正确率偏低,建议检查题面或加强讲解。"),
+        });
+    }
+
+    // (4) info:时段峰值(7×24 矩阵最大单元)。dow:0=周日。
+    let mut peak: Option<(usize, usize, i64)> = None;
+    for row in &hourly {
+        if (0..7).contains(&row.dow) && (0..24).contains(&row.hour) {
+            let cur = (row.dow as usize, row.hour as usize, row.count);
+            if peak.map(|p| cur.2 > p.2).unwrap_or(true) {
+                peak = Some(cur);
+            }
+        }
+    }
+    if let Some((dow, hour, count)) = peak {
+        if count > 0 {
+            items.push(InsightItem {
+                tone: "info".into(),
+                title: "活跃时段峰值".into(),
+                body: format!(
+                    "{} {hour:02}:00 时段最活跃,共 {count} 次答题,可作为推送/活动的黄金窗口。",
+                    WEEKDAY_CN[dow]
+                ),
+            });
+        }
+    }
+
+    Ok(ok(InsightsResponse {
+        generated_at: Utc::now(),
+        days: w.days,
+        items,
     }))
 }
