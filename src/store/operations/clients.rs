@@ -514,17 +514,22 @@ impl Store {
                 .filter_map(|(uid, ver)| uid.map(|u| (u, ver)))
                 .collect();
             let v_min_clean = v_min.trim_start_matches('v');
-            let v_min_parsed = semver::Version::parse(v_min_clean).ok();
+            // version_min 必须可解析,否则会把全员误判为不命中(静默零发送)
+            let v_min_parsed = semver::Version::parse(v_min_clean).map_err(|_| {
+                StoreError::Validation(format!("受众最低版本号非法: {v_min}"))
+            })?;
             let from_device = std::collections::HashSet::<String>::from_iter(device_user_ids);
             pairs
                 .into_iter()
                 .filter(|(uid, _)| from_device.contains(uid))
-                .filter(|(_, ver)| match (&v_min_parsed, ver.as_deref()) {
-                    (Some(min), Some(v)) => {
+                .filter(|(_, ver)| match ver.as_deref() {
+                    Some(v) => {
                         let v_clean = v.trim_start_matches('v');
-                        semver::Version::parse(v_clean).map(|av| av >= *min).unwrap_or(false)
+                        semver::Version::parse(v_clean)
+                            .map(|av| av >= v_min_parsed)
+                            .unwrap_or(false)
                     }
-                    _ => false,
+                    None => false,
                 })
                 .map(|(uid, _)| uid)
                 .collect()

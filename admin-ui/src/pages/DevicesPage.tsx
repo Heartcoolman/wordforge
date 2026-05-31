@@ -12,6 +12,7 @@ import { adminApi, type SseLiveEntry, type RecentlyActiveEntry, type TelemetrySu
 import type { ClientPlatformAgg, ClientVersionAgg, ClientUpgradePolicy, ListedDevice } from '@/types/admin';
 import { uiStore } from '@/stores/ui';
 import { Switch } from '@/components/ui/Switch';
+import { DeviceDetailDrawer, type DeviceDetailSeed } from './devices/DeviceDetailDrawer';
 
 const CHANNEL_LABELS: Record<string, string> = {
   amas: 'AMAS',
@@ -57,6 +58,9 @@ export default function DevicesPage() {
   const [recentlyActive, setRecentlyActive] = createSignal<RecentlyActiveEntry[]>([]);
   const [loading, setLoading] = createSignal(true);
   const [tab, setTab] = createSignal<'sse' | 'recent' | 'all'>('sse');
+
+  // m032:单设备详情抽屉 — 任意行"详情"按钮打开,带入行快照 + 抽屉内拉遥测补全
+  const [detailDevice, setDetailDevice] = createSignal<DeviceDetailSeed | null>(null);
 
   // Ban confirm
   const [banTarget, setBanTarget] = createSignal<{ id: string; action: 'ban' | 'unban' } | null>(null);
@@ -342,6 +346,13 @@ export default function DevicesPage() {
       ),
     },
     {
+      key: 'country',
+      title: '国家',
+      render: () => (
+        <span class="text-xs text-content-tertiary" title="实时连接未透出国家字段,点详情按设备 IP 解析">—</span>
+      ),
+    },
+    {
       key: 'connectedSecs',
       title: '连接时长',
       render: (r: SseLiveEntry) => <span class="tabular-nums">{Math.floor(r.connectedSecs / 60)}m</span>,
@@ -374,6 +385,11 @@ export default function DevicesPage() {
           </Show>
           <Button size="xs" variant="outline" disabled={requestingTelemetry() === r.deviceId} onClick={() => requestTelemetry(r.deviceId)}>拉取遥测</Button>
           <Button size="xs" variant="ghost" onClick={() => loadTelemetry(r.deviceId)}>历史</Button>
+          <Button size="xs" variant="ghost" onClick={() => setDetailDevice({
+            deviceId: r.deviceId, platform: r.platform, userId: r.userId, appVersion: r.appVersion,
+            isBanned: r.isBanned, dataChannels: r.dataChannels,
+            connectionCount: r.connectionCount, connectedSecs: r.connectedSecs,
+          })}>详情</Button>
         </div>
       ),
     },
@@ -406,6 +422,13 @@ export default function DevicesPage() {
       title: '用户',
       render: (r: RecentlyActiveEntry) => (
         <span class="font-mono text-xs tabular-nums">{r.userId ? truncateId(r.userId) : '-'}</span>
+      ),
+    },
+    {
+      key: 'country',
+      title: '国家',
+      render: () => (
+        <span class="text-xs text-content-tertiary" title="近期活跃聚合未透出国家字段,点详情按设备 IP 解析">—</span>
       ),
     },
     {
@@ -444,6 +467,10 @@ export default function DevicesPage() {
             <Button size="xs" variant="success" disabled={loading()} onClick={() => setBanTarget({ id: r.deviceId, action: 'unban' })}>解封</Button>
           </Show>
           <Button size="xs" variant="ghost" onClick={() => loadTelemetry(r.deviceId)}>历史</Button>
+          <Button size="xs" variant="ghost" onClick={() => setDetailDevice({
+            deviceId: r.deviceId, platform: r.platform, userId: r.userId, appVersion: r.appVersion,
+            isBanned: r.isBanned, dataChannels: r.dataChannels, lastSeenAt: r.lastSeenAt,
+          })}>详情</Button>
         </div>
       ),
     },
@@ -452,6 +479,31 @@ export default function DevicesPage() {
   // m027:动态 page-desc 数字 — 对齐设计图 'X 个绑定设备 · Y 个 7 天内在线 · 三端版本分布...'
   const totalDevices = createMemo(() => platforms().reduce((a, b) => a + b.total, 0));
   const totalActive7d = createMemo(() => platforms().reduce((a, b) => a + b.active7d, 0));
+
+  // m032:版本分布底部"低版本汇总" — 跨平台统计低于各自 minVersion 的设备数(无法支持新 AMAS 协议)
+  const cmpVersion = (a: string, b: string): number => {
+    const norm = (s: string) => s.replace(/^v/i, '').split(/[.+-]/).map((x) => Number(x) || 0);
+    const pa = norm(a);
+    const pb = norm(b);
+    for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+      const d = (pa[i] ?? 0) - (pb[i] ?? 0);
+      if (d !== 0) return d > 0 ? 1 : -1;
+    }
+    return 0;
+  };
+  // 取首个配了 minVersion 的平台作为强制升级目标(设计图为单按钮)
+  const lowVersionTarget = createMemo(() => policies().find((p) => p.minVersion) ?? null);
+  const lowVersionCount = createMemo(() => {
+    let n = 0;
+    for (const p of policies()) {
+      if (!p.minVersion) continue;
+      for (const v of versionRows()) {
+        if (v.platform !== p.platform || v.version === 'unknown') continue;
+        if (cmpVersion(v.version, p.minVersion) < 0) n += v.count;
+      }
+    }
+    return n;
+  });
 
   // m027:嵌入式广播推送 section(对齐 clients.html 设计图 compose 区块)
   const [bcTitle, setBcTitle] = createSignal('');
@@ -741,6 +793,31 @@ export default function DevicesPage() {
                 );
               }}
             </For>
+            {/* m032:低版本汇总行 + inline 强制升级(对齐设计图 .vd 底部 row spread) */}
+            <Show when={lowVersionTarget()}>
+              <div class="border-t border-border-hairline mt-3 pt-3 flex items-center justify-between gap-3 flex-wrap">
+                <span class="text-[12.5px] text-content-secondary">
+                  <span class="tabular-nums font-semibold">{lowVersionCount().toLocaleString()}</span> 个设备低于 {lowVersionTarget()!.minVersion},无法支持新 AMAS 协议
+                </span>
+                <button
+                  type="button"
+                  class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-warning-light text-warning-strong text-[12.5px] font-medium hover:brightness-95 transition cursor-pointer"
+                  onClick={() => {
+                    const t = lowVersionTarget()!;
+                    setBroadcastUpgradeOpen({
+                      platform: t.platform,
+                      below: t.minVersion!,
+                      latest: t.suggestedVersion || t.minVersion!,
+                    });
+                  }}
+                >
+                  <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M12 2L4 6v6c0 5.5 3.5 10 8 10s8-4.5 8-10V6l-8-4z" />
+                  </svg>
+                  对老版本强制升级
+                </button>
+              </div>
+            </Show>
           </Card>
 
           {/* m027:强制升级策略面板(右 5/12) */}
@@ -1204,6 +1281,18 @@ export default function DevicesPage() {
                         <Badge size="sm" variant={r.isBanned ? 'error' : 'success'} dot>
                           {r.isBanned ? '已封禁' : '正常'}
                         </Badge>
+                      ),
+                    },
+                    {
+                      key: 'actions',
+                      title: '操作',
+                      render: (r: ListedDevice) => (
+                        <Button size="xs" variant="ghost" onClick={() => setDetailDevice({
+                          deviceId: r.deviceId, platform: r.platform, userId: r.userId, appVersion: r.appVersion,
+                          isBanned: r.isBanned, lastSeenAt: r.lastSeenAt,
+                          // 分页列表端点不透出数据通道,详情抽屉以遥测补全
+                          dataChannels: { amas: 'none', learning: 'none', telemetry: 'none' },
+                        })}>详情</Button>
                       ),
                     },
                   ]}

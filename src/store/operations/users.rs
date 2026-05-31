@@ -99,6 +99,23 @@ pub struct UserStats {
     pub last20_outcomes: Vec<i64>,
 }
 
+/// 用户管理页顶部筛选 chip 的各类计数(对齐设计图:全部 / 活跃 / 7 天未登录 /
+/// 禁用 / 管理员)。各计数相互独立(非互斥),前端 chip 点击切换对应过滤参数。
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserFacets {
+    /// 全部用户。
+    pub total: i64,
+    /// status='active'(活跃)。
+    pub active: i64,
+    /// 7 天未登录:last_login_at IS NULL 或 < now-7d(与 list inactive_days=7 同口径)。
+    pub inactive7d: i64,
+    /// is_banned=1(禁用)。
+    pub banned: i64,
+    /// role='admin'(管理员)。
+    pub admins: i64,
+}
+
 fn user_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<User> {
     Ok(User {
         id: row.get(0)?,
@@ -311,6 +328,112 @@ impl Store {
             key: user_id.into(),
             attempts: MAX_CAS_RETRIES,
         })
+    }
+
+    /// 批量封禁:单事务内对存在的用户批量改 is_banned、撤销其 session,并为每个
+    /// 被操作用户写一条 admin 审计。返回实际存在(受影响)的 user_id,供 handler 计数。
+    pub fn batch_ban_users(
+        &self,
+        user_ids: &[String],
+        admin_id: &str,
+        action: &str,
+        reason: Option<&str>,
+    ) -> Result<Vec<String>, StoreError> {
+        self.batch_set_banned(user_ids, true, admin_id, action, reason)
+    }
+
+    /// 批量解封:语义同 batch_ban_users,但不撤销 session(参照原 unban 口径)。
+    pub fn batch_unban_users(
+        &self,
+        user_ids: &[String],
+        admin_id: &str,
+        action: &str,
+        reason: Option<&str>,
+    ) -> Result<Vec<String>, StoreError> {
+        self.batch_set_banned(user_ids, false, admin_id, action, reason)
+    }
+
+    fn batch_set_banned(
+        &self,
+        user_ids: &[String],
+        banned: bool,
+        admin_id: &str,
+        action: &str,
+        reason: Option<&str>,
+    ) -> Result<Vec<String>, StoreError> {
+        for id in user_ids {
+            keys::validate_id(id)?;
+        }
+        if user_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+
+        // IN(...) 占位符按 id 数量动态构建
+        let placeholders = vec!["?"; user_ids.len()].join(",");
+        let bind: Vec<&dyn rusqlite::ToSql> =
+            user_ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+
+        // 先取出确实存在的 user_id(只对存在的写状态/session/审计)
+        let existing: Vec<String> = {
+            let mut stmt = tx.prepare(&format!(
+                "SELECT id FROM users WHERE id IN ({placeholders})"
+            ))?;
+            let rows = stmt.query_map(bind.as_slice(), |r| r.get::<_, String>(0))?;
+            rows.collect::<Result<_, _>>()?
+        };
+        if existing.is_empty() {
+            tx.commit()?;
+            return Ok(existing);
+        }
+
+        let exist_ph = vec!["?"; existing.len()].join(",");
+        let exist_bind: Vec<&dyn rusqlite::ToSql> =
+            existing.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+        let now = Utc::now().to_rfc3339();
+
+        let mut update_params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(existing.len() + 2);
+        update_params.push(&banned);
+        update_params.push(&now);
+        update_params.extend_from_slice(exist_bind.as_slice());
+        tx.execute(
+            &format!(
+                "UPDATE users SET is_banned=?1, updated_at=?2 WHERE id IN ({exist_ph})"
+            ),
+            update_params.as_slice(),
+        )?;
+
+        if banned {
+            tx.execute(
+                &format!("DELETE FROM sessions WHERE user_id IN ({exist_ph})"),
+                exist_bind.as_slice(),
+            )?;
+        }
+
+        // 每个被操作用户写一条审计(同事务内循环 INSERT,合并到一次连接)
+        let metadata = reason.map(|r| serde_json::json!({ "reason": r }).to_string());
+        for uid in &existing {
+            tx.execute(
+                "INSERT INTO update_audit_log
+                    (id, admin_id, from_version, to_version, channel,
+                     started_at, completed_at, outcome,
+                     action, target_type, target_id, metadata_json)
+                 VALUES (?1, ?2, '', '', '', ?3, ?3, 'success',
+                         ?4, 'user', ?5, ?6)",
+                params![
+                    uuid::Uuid::new_v4().to_string(),
+                    admin_id,
+                    now,
+                    action,
+                    uid,
+                    metadata
+                ],
+            )?;
+        }
+
+        tx.commit()?;
+        Ok(existing)
     }
 
     pub fn list_user_ids(&self) -> Result<Vec<String>, StoreError> {
@@ -609,6 +732,34 @@ impl Store {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// 一次连接内算齐用户管理页 5 个 chip 计数。inactive7d 与 list_users_filtered
+    /// 的 `inactive_days=7` 谓词逐字一致(含从未登录),保证 chip 数与点击后列表条数对齐。
+    pub fn admin_user_facets(&self) -> Result<UserFacets, StoreError> {
+        let conn = self.conn()?;
+        let row = conn.query_row(
+            "SELECT
+                COUNT(*),
+                COALESCE(SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN last_login_at IS NULL
+                    OR datetime(last_login_at) < datetime('now', '-7 days')
+                    THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN is_banned = 1 THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN role = 'admin' THEN 1 ELSE 0 END), 0)
+             FROM users",
+            [],
+            |r| {
+                Ok(UserFacets {
+                    total: r.get(0)?,
+                    active: r.get(1)?,
+                    inactive7d: r.get(2)?,
+                    banned: r.get(3)?,
+                    admins: r.get(4)?,
+                })
+            },
+        )?;
+        Ok(row)
     }
 
     pub fn count_users_registered_on_date(&self, date_str: &str) -> Result<usize, StoreError> {

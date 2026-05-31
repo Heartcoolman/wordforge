@@ -76,7 +76,11 @@ function MiniGrid(props: { outcomes: number[] }) {
     return arr;
   });
   return (
-    <div class="grid grid-cols-10 gap-[2px] w-[88px]" aria-label="最近 20 题答题结果">
+    <div
+      class="grid gap-[2px] w-[120px]"
+      style={{ 'grid-template-columns': 'repeat(20, minmax(0, 1fr))' }}
+      aria-label="最近 20 题答题结果"
+    >
       <For each={cells()}>
         {(v) => (
           <span
@@ -107,6 +111,21 @@ export default function UserManagementPage() {
   // 顶部 KPI 数据
   const [stats] = createResource(() => adminApi.getStats().catch(() => null));
   const [engagement] = createResource(() => adminApi.getEngagement().catch(() => null));
+  // header "本周新增":对近 7 天 daily-active-users 的 registered 求和(真实注册数)
+  const [dau] = createResource(() => adminApi.getDailyActiveUsers(7).catch(() => null));
+  const newThisWeek = (): number | null => {
+    const rows = dau();
+    return rows ? rows.reduce((s, r) => s + r.registered, 0) : null;
+  };
+  // 各筛选分面计数(GET /users/facets):chip 逐项计数
+  const [facets] = createResource(() => adminApi.userFacets().catch(() => null));
+  const FACET_FIELD: Record<ChipKey, keyof NonNullable<ReturnType<typeof facets>>> = {
+    all: 'total', active: 'active', inactive7d: 'inactive7d', banned: 'banned', admin: 'admins',
+  };
+  const facetCount = (key: ChipKey): number | null => {
+    const f = facets();
+    return f ? f[FACET_FIELD[key]] : null;
+  };
 
   // 搜索 + 筛选 chip
   const [filterChip, setFilterChip] = createSignal<ChipKey>('all');
@@ -524,12 +543,17 @@ export default function UserManagementPage() {
     }
   }
 
-  // KPI 行文案:用户聚合 · 今日活跃 · 较昨日趋势
+  // KPI 行文案:用户聚合 · 今日活跃 · 本周新增 · 较昨日趋势
   const headerDesc = createMemo(() => {
     const s = stats();
     const e = engagement();
     if (!s || !e) return null;
-    return { total: s.users, active: e.activeToday, trend: s.trend?.users?.value ?? null };
+    return {
+      total: s.users,
+      active: e.activeToday,
+      newThisWeek: newThisWeek(),
+      trend: s.trend?.users?.value ?? null,
+    };
   });
 
   return (
@@ -547,6 +571,10 @@ export default function UserManagementPage() {
                 <>
                   <span class="font-mono tabular-nums text-content">{formatNumber(d().total)}</span> 个用户 ·{' '}
                   <span class="font-mono tabular-nums text-content">{formatNumber(d().active)}</span> 今日活跃
+                  <Show when={d().newThisWeek != null}>
+                    {' '}·{' '}
+                    <span class="font-mono tabular-nums text-content">{formatNumber(d().newThisWeek!)}</span> 本周新增
+                  </Show>
                   <Show when={d().trend != null}>
                     {' '}·{' '}
                     <span
@@ -588,13 +616,16 @@ export default function UserManagementPage() {
                 aria-checked={filterChip() === chip.key}
                 onClick={() => setFilterChip(chip.key)}
                 class={cn(
-                  'px-3 py-1.5 rounded-full text-xs transition-colors',
+                  'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs transition-colors',
                   filterChip() === chip.key
                     ? 'bg-accent-light text-accent border border-accent/20 font-medium'
                     : 'bg-surface-secondary hover:bg-surface-tertiary text-content-secondary border border-transparent',
                 )}
               >
                 {chip.label}
+                <Show when={facetCount(chip.key) != null}>
+                  <span class="font-mono tabular-nums text-content-tertiary">{formatNumber(facetCount(chip.key)!)}</span>
+                </Show>
               </button>
             )}
           </For>

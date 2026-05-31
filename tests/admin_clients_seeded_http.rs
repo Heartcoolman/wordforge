@@ -426,3 +426,48 @@ async fn it_admin_clients_broadcast_upgrade_returns_matched_count() {
     // pushedConnections 是 0(无活跃 SSE 连接)
     assert_eq!(body["data"]["pushedConnections"], 0);
 }
+
+/// 回归:learning_sessions 无 completed_at/words_count 列，SELECT 误用会致端点恒 500。
+/// 断言端点 200 且 completed 会话正确映射出 completedAt/wordsCount/correctCount。
+#[tokio::test]
+async fn it_admin_user_sessions_maps_real_columns() {
+    use learning_backend::store::operations::learning_sessions::{LearningSession, SessionStatus};
+
+    let app = spawn_test_server().await;
+    let admin_token = setup_admin_and_get_token(&app.app).await;
+
+    let now = chrono::Utc::now();
+    app.state
+        .store()
+        .create_learning_session(&LearningSession {
+            id: "sess-1".into(),
+            user_id: "u-sessions".into(),
+            status: SessionStatus::Completed,
+            target_mastery_count: 10,
+            total_questions: 12,
+            actual_mastery_count: 8,
+            context_shifts: 0,
+            created_at: now,
+            updated_at: now,
+            summary: None,
+            correct_count: 9,
+            total_count: 12,
+        })
+        .expect("seed learning session");
+
+    let resp = request(
+        &app.app,
+        Method::GET,
+        "/api/admin/users/u-sessions/sessions",
+        None,
+        &[("authorization", auth_header(&admin_token))],
+    )
+    .await;
+    let (status, _, body) = response_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "body={body}");
+    let sessions = body["data"]["sessions"].as_array().expect("sessions array");
+    let s = sessions.iter().find(|s| s["id"] == "sess-1").expect("sess-1");
+    assert_eq!(s["wordsCount"], 12);
+    assert_eq!(s["correctCount"], 9);
+    assert!(s["completedAt"].is_string(), "completed 会话应有 completedAt: {s}");
+}

@@ -29,6 +29,7 @@ pub fn router() -> Router<AppState> {
             "/broadcast-upgrade/:platform",
             post(broadcast_upgrade_handler),
         )
+        .route("/:id", get(get_client_detail))
         .route("/:id/ban", post(ban_client))
         .route("/:id/unban", post(unban_client))
         .route("/:id/request-telemetry", post(request_telemetry))
@@ -330,7 +331,7 @@ struct PaginatedClientsQuery {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ListedDevice {
+pub(crate) struct ListedDevice {
     device_id: String,
     platform: String,
     user_id: Option<String>,
@@ -549,23 +550,27 @@ async fn broadcast_upgrade_handler(
         ));
     }
 
-    // 找全平台 + version < below 的设备 id list
+    // 找全平台 + version < below 的设备 id list。分页循环拉全量,避免大舰队
+    // (>单页上限)被静默截断漏推。广播是低频 admin 操作,全量扫描可接受。
     let platform_owned = platform.to_string();
     let below_for_db = below.clone();
+    const PAGE: i64 = 5_000;
     let targets: Vec<String> = state
         .run_store_task(
             "admin.clients.broadcast_upgrade.list",
             move |store| -> Result<_, AppError> {
-                let (rows, _) = store.list_client_devices_paginated(
-                    None,
-                    Some(&platform_owned),
-                    None,
-                    10_000,
-                    0,
-                )?;
-                Ok(rows
-                    .into_iter()
-                    .filter(|d| {
+                let mut out: Vec<String> = Vec::new();
+                let mut offset: i64 = 0;
+                loop {
+                    let (rows, total) = store.list_client_devices_paginated(
+                        None,
+                        Some(&platform_owned),
+                        None,
+                        PAGE,
+                        offset,
+                    )?;
+                    let fetched = rows.len() as i64;
+                    out.extend(rows.into_iter().filter(|d| {
                         d.app_version
                             .as_deref()
                             .map(|v| {
@@ -580,9 +585,13 @@ async fn broadcast_upgrade_handler(
                                 }
                             })
                             .unwrap_or(false)
-                    })
-                    .map(|d| d.device_id)
-                    .collect())
+                    }).map(|d| d.device_id));
+                    offset += fetched;
+                    if fetched == 0 || offset >= total {
+                        break;
+                    }
+                }
+                Ok(out)
             },
         )
         .await??;
@@ -668,6 +677,99 @@ async fn get_telemetry(
     Ok(ok(
         serde_json::json!({ "records": records, "total": total }),
     ))
+}
+
+/// 单设备详情视图。脱敏:不暴露 last_ip / banned_by(审计字段),其余 client_devices
+/// 列 + 在线状态 + 近期 telemetry 摘要给设计图"详情"抽屉。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ClientDetail {
+    device_id: String,
+    platform: String,
+    user_id: Option<String>,
+    app_version: Option<String>,
+    country: Option<String>,
+    first_seen_at: String,
+    last_seen_at: String,
+    is_banned: bool,
+    banned_at: Option<String>,
+    ban_reason: Option<String>,
+    /// 当前是否有活跃 SSE 连接(在线)。
+    online: bool,
+    /// 活跃 SSE 连接数(0 = 离线)。
+    connection_count: usize,
+    /// 近期 telemetry 摘要:总条数 + 最近一条原始记录(None 表示从未上报)。
+    telemetry: TelemetrySummaryView,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TelemetrySummaryView {
+    total: i64,
+    latest: Option<serde_json::Value>,
+}
+
+/// GET /api/admin/clients/:id —— 单设备详情(设计图设备列表"详情"按钮)。
+/// 复用 get_recently_active_clients(取全量后按 device_id 命中)避免新增 store 方法,
+/// telemetry 摘要复用 get_telemetry_summaries_by_device。
+async fn get_client_detail(
+    _admin: AdminAuthUser,
+    Path(id): Path<String>,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    // 在线状态来自内存 SSE 表(与 list_clients 一致)。
+    let connection_count = state
+        .active_sse()
+        .get(&id)
+        .map(|c| c.len())
+        .unwrap_or(0);
+
+    let device_id = id.clone();
+    let (device, telemetry_total, telemetry_latest) = state
+        .run_store_task(
+            "admin.clients.detail",
+            move |store| -> Result<_, AppError> {
+                if !store.client_device_exists(&device_id)? {
+                    return Err(AppError::not_found("设备不存在"));
+                }
+                // 复用既有查询:get_recently_active_clients(全表 + banned)按 id 命中。
+                // 历史(非近期且非 banned)设备用极大窗口兜底,确保任何存在的设备都能取到。
+                let device = store
+                    .get_recently_active_clients(i64::MAX / 2)?
+                    .into_iter()
+                    .find(|d| d.device_id == device_id)
+                    .ok_or_else(|| AppError::not_found("设备不存在"))?;
+                // telemetry 摘要:近 1 条 + 总数(复用 get_telemetry_summaries_by_device)。
+                let (records, total) =
+                    store.get_telemetry_summaries_by_device(&device_id, 1, 0)?;
+                let latest = serde_json::to_value(records)
+                    .ok()
+                    .and_then(|v| v.as_array().and_then(|a| a.first().cloned()));
+                Ok((device, total, latest))
+            },
+        )
+        .await??;
+
+    let detail = ClientDetail {
+        device_id: device.device_id,
+        platform: device.platform,
+        user_id: device.user_id,
+        app_version: device.app_version,
+        country: device.country,
+        first_seen_at: device.first_seen_at,
+        last_seen_at: device.last_seen_at,
+        is_banned: device.is_banned,
+        banned_at: device.banned_at,
+        ban_reason: device.ban_reason,
+        online: connection_count > 0,
+        connection_count,
+        telemetry: TelemetrySummaryView {
+            total: telemetry_total as i64,
+            latest: telemetry_latest,
+        },
+    };
+
+    Ok(ok(serde_json::json!(detail)))
 }
 
 #[cfg(test)]

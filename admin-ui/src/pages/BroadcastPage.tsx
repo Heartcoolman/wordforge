@@ -1,140 +1,190 @@
-import { createSignal, Show, For } from 'solid-js';
-import { Card } from '@/components/ui/Card';
-import { Input, TextArea } from '@/components/ui/Input';
-import { Button } from '@/components/ui/Button';
-import { Tabs } from '@/components/ui/Tabs';
-import { Badge } from '@/components/ui/Badge';
+import { type JSX, createSignal, createResource, createMemo, Show, For } from 'solid-js';
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
-import { HeroCard } from '@/components/ui/HeroCard';
-import { SectionTitle } from '@/components/ui/SectionTitle';
+import { Modal } from '@/components/ui/Modal';
 import { uiStore } from '@/stores/ui';
 import { adminApi } from '@/api/admin';
+import type { BroadcastHistoryEntry } from '@/types/admin';
+import './broadcast.css';
 
 /**
- * 系统广播页。原 SettingsPage 内嵌的广播 + 更新通知拆出独立页。
+ * 系统广播页（对齐设计稿 broadcast.html）。
  *
- * 三种广播类型（按设计图 broadcast.html）：
- *   - 系统消息（最常用）：通用通知，需标题 + 内容
- *   - 更新通知：触发用户刷新，可选附加文字
- *   - 维护通告：仅提示，不强制行为
- *
- * 后端 endpoint：
- *   - POST /api/admin/broadcast            → 系统消息
- *   - POST /api/admin/broadcast-update     → 更新通知
- *   - （维护通告本质也走 /broadcast，但模板预填 + 不同 tone）
+ * 单一撰写表单 + 历史表 + 右栏。后端契约：
+ *   - GET  /api/admin/broadcast          → { stats, broadcasts }（近 30 天看板）
+ *   - POST /api/admin/broadcast          → { sent, broadcastId }（全员广播，写入历史）
+ *   - POST /api/admin/broadcast/preview  → { matched, total }（取全员总数做批次预估）
  */
-type Tab = 'system' | 'update' | 'maintenance';
 
-interface SendHistoryEntry {
-  ts: string;
-  tab: Tab;
-  title?: string;
-  message?: string;
-  sentCount?: number;
-  ok: boolean;
+const BATCH_SIZE = 100;
+const TITLE_MAX = 200;
+const MSG_MAX = 10000;
+const PAGE_SIZE = 20;
+
+type HistoryFilter = 'all' | 'week' | 'failed';
+
+interface Template {
+  cls: 't-warn' | 't-update' | 't-info' | 't-success';
+  icon: () => JSX.Element;
+  name: string;
+  desc: string;
+  title: string;
+  message: string;
 }
 
-const tabMeta: Record<Tab, { label: string; chip: string; chipVariant: 'accent' | 'info' | 'warning'; hint: string }> = {
-  system: {
-    label: '系统消息',
-    chip: '通用',
-    chipVariant: 'accent',
-    hint: '面向全体在线用户的通用广播。需标题和正文。',
+const TEMPLATES: Template[] = [
+  {
+    cls: 't-warn',
+    name: '计划内维护通知',
+    desc: '含影响范围、持续时间、应对建议',
+    title: '计划内维护 — [日期 时段]',
+    message:
+      '我们将在 [日期 时段] 进行计划内系统维护，预计持续 [N] 分钟。\n\n影响范围：\n· AMAS 推荐与决策记录暂停\n· LLM 顾问与广播通知暂停\n· 用户答题数据本地保留，恢复后自动同步\n\n给您带来的不便我们深表歉意。',
+    icon: () => (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" /></svg>
+    ),
   },
-  update: {
-    label: '更新通知',
-    chip: '提示刷新',
-    chipVariant: 'info',
-    hint: '触发用户端 UpdateBanner 弹出，提示刷新页面获取新版本。可附加自定义文字。',
+  {
+    cls: 't-update',
+    name: '版本通告',
+    desc: '新版本发布 + 主要变化',
+    title: 'vX.Y.Z 现已可用 — [一句话亮点]',
+    message:
+      '新版本 vX.Y.Z 已发布。\n\n主要变化：\n· [feat] [...]\n· [fix] [...]\n· [perf] [...]\n\n客户端会在下次启动时自动检测，也可在「设置 → 关于」手动触发更新。',
+    icon: () => (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10" /><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" /></svg>
+    ),
   },
-  maintenance: {
-    label: '维护通告',
-    chip: '运维',
-    chipVariant: 'warning',
-    hint: '维护窗口前向用户预告。建议提前 24h 发，并配合 SettingsPage 维护模式 toggle。',
+  {
+    cls: 't-info',
+    name: '周报 / 月报',
+    desc: '运营节奏类公告',
+    title: '本周更新摘要 — [主题]',
+    message:
+      '本周更新摘要：\n\n1. [...] \n2. [...] \n3. [...] \n\n详细 CHANGELOG 可在「设置 → 更新」查看。',
+    icon: () => (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9" /><polyline points="12 6 12 12 16 14" /></svg>
+    ),
   },
-};
+  {
+    cls: 't-success',
+    name: '安全公告',
+    desc: 'CVE / 漏洞修复 / 强升级',
+    title: '安全更新 vX.Y.Z — 强烈建议立即升级',
+    message:
+      '为修复 [简述] 问题，我们发布了安全更新 vX.Y.Z。\n\n请尽快升级。客户端可在「设置 → 关于 → 检查更新」中触发。\n\n如有问题请通过反馈中心联系我们。',
+    icon: () => (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" /></svg>
+    ),
+  },
+];
 
-const templates: Record<Tab, { title: string; message: string }[]> = {
-  system: [
-    { title: '功能上线公告', message: '我们新增了 [功能名] 功能，欢迎试用并反馈意见。' },
-    { title: '账号安全提醒', message: '建议定期更换密码以保障账号安全。' },
-  ],
-  update: [
-    { title: '', message: '有新版本可用，请刷新页面获取最新内容。' },
-    { title: '', message: '为获得最佳体验，请刷新页面加载最新版本。' },
-  ],
-  maintenance: [
-    { title: '维护通告', message: '系统将于 [时间] 进行维护升级，预计耗时 [时长]，期间服务可能不可用。' },
-    { title: '紧急维护', message: '系统发现紧急问题需立即维护，预计 30 分钟内恢复，请保存当前学习进度。' },
-  ],
-};
+function pad2(n: number): string {
+  return n < 10 ? `0${n}` : `${n}`;
+}
+
+/** 设计稿格式：MM-DD HH:mm */
+function fmtTs(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return `${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+}
+
+function fmtRelative(iso: string): string {
+  const d = new Date(iso).getTime();
+  if (Number.isNaN(d)) return '';
+  const diff = Date.now() - d;
+  if (diff < 0) return '刚刚';
+  const min = Math.floor(diff / 60000);
+  if (min < 1) return '刚刚';
+  if (min < 60) return `${min} min 前`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr} 小时前`;
+  const day = Math.floor(hr / 24);
+  return `${day} 天前`;
+}
+
+function avatarText(author: string): string {
+  const a = (author || '').trim();
+  if (!a) return '?';
+  // ASCII 取前两位大写首字母，否则取末字（中文姓名取后两字更自然，这里取首字）
+  if (/^[\x00-\x7F]+$/.test(a)) return a.slice(0, 2).toUpperCase();
+  return a.slice(0, 1);
+}
 
 export default function BroadcastPage() {
-  const [tab, setTab] = createSignal<Tab>('system');
   const [title, setTitle] = createSignal('');
   const [message, setMessage] = createSignal('');
   const [sending, setSending] = createSignal(false);
   const [showConfirm, setShowConfirm] = createSignal(false);
-  const [history, setHistory] = createSignal<SendHistoryEntry[]>([]);
+  const [showConfirmClear, setShowConfirmClear] = createSignal(false);
+  const [filter, setFilter] = createSignal<HistoryFilter>('all');
+  const [detail, setDetail] = createSignal<BroadcastHistoryEntry | null>(null);
+  // 进度提示：null=隐藏；in-flight=请求中（不定进度）；done=填满后短暂保留
+  const [progress, setProgress] = createSignal<{ phase: 'in-flight' | 'done'; sent: number } | null>(null);
+  // 历史分页：offset 驱动，total 取自后端 pagination，不再静默截断 50 条
+  const [offset, setOffset] = createSignal(0);
 
-  // m027:受众过滤(可选)。任一为空都视为该维度不过滤,全部为空 = 全员广播。
-  const [audPlatforms, setAudPlatforms] = createSignal<Set<string>>(new Set());
-  const [audVersionMin, setAudVersionMin] = createSignal('');
-  const [audLastActiveDays, setAudLastActiveDays] = createSignal('');
-  const [audUserIdsText, setAudUserIdsText] = createSignal('');
+  // 看板数据：近 30 天统计 + 历史（按 offset/limit 翻页）
+  const [board, { refetch: refetchBoard }] = createResource(
+    offset,
+    (off) => adminApi.listBroadcasts({ offset: off, limit: PAGE_SIZE }),
+  );
+  // 全员总数（批次预估）
+  const [preview, { refetch: refetchPreview }] = createResource(() => adminApi.broadcastPreview({}));
 
-  // 构造 audience payload,所有维度都空时返 undefined(对应后端"全员广播"路径)
-  const buildAudience = () => {
-    const platforms = Array.from(audPlatforms());
-    const versionMin = audVersionMin().trim();
-    const daysStr = audLastActiveDays().trim();
-    const userIds = audUserIdsText()
-      .split(/[\s,]+/)
-      .map((s) => s.trim())
-      .filter(Boolean);
-    if (platforms.length === 0 && !versionMin && !daysStr && userIds.length === 0) {
-      return undefined;
-    }
-    return {
-      platforms: platforms.length > 0 ? platforms : undefined,
-      versionMin: versionMin || undefined,
-      lastActiveDays: daysStr ? Number(daysStr) || undefined : undefined,
-      userIds: userIds.length > 0 ? userIds : undefined,
-    };
-  };
+  const total = createMemo(() => preview()?.total ?? 0);
+  const batches = createMemo(() => Math.max(1, Math.ceil(total() / BATCH_SIZE)));
 
-  const togglePlatform = (p: string) => {
-    setAudPlatforms((prev) => {
-      const next = new Set(prev);
-      if (next.has(p)) next.delete(p);
-      else next.add(p);
-      return next;
-    });
-  };
+  const stats = createMemo(() => board()?.stats ?? { total: 0, totalSent: 0, avgReadRate: 0, online: 0 });
+  const broadcasts = createMemo<BroadcastHistoryEntry[]>(() => board()?.broadcasts ?? []);
 
-  const audienceLabel = () => {
-    const a = buildAudience();
-    if (!a) return '全员';
-    const parts: string[] = [];
-    if (a.platforms) parts.push(`platform = ${a.platforms.join(' / ')}`);
-    if (a.versionMin) parts.push(`version ≥ ${a.versionMin}`);
-    if (a.lastActiveDays) parts.push(`last_active ≤ ${a.lastActiveDays}d`);
-    if (a.userIds) parts.push(`${a.userIds.length} 个 user_id`);
-    return parts.join(' · ');
-  };
+  // 分页：total 来自后端 pagination；本周/失败筛选仅作用于当前页，故页脚展示「当前页 / 全部历史总数」
+  const totalHistory = createMemo(() => board()?.pagination?.total ?? broadcasts().length);
+  const pageStart = createMemo(() => (totalHistory() === 0 ? 0 : offset() + 1));
+  const pageEnd = createMemo(() => offset() + broadcasts().length);
+  const hasPrev = createMemo(() => offset() > 0);
+  const hasNext = createMemo(() => offset() + broadcasts().length < totalHistory());
 
-  function pickTemplate(t: { title: string; message: string }) {
+  function prevPage() {
+    if (hasPrev()) setOffset(Math.max(0, offset() - PAGE_SIZE));
+  }
+  function nextPage() {
+    if (hasNext()) setOffset(offset() + PAGE_SIZE);
+  }
+
+  const filtered = createMemo(() => {
+    const list = broadcasts();
+    const f = filter();
+    if (f === 'all') return list;
+    if (f === 'failed') return list.filter((b) => b.sentCount === 0);
+    // week：createdAt 在 7 天内
+    const cutoff = Date.now() - 7 * 24 * 3600 * 1000;
+    return list.filter((b) => new Date(b.createdAt).getTime() >= cutoff);
+  });
+
+  const titleLen = createMemo(() => title().length);
+  const msgLen = createMemo(() => message().length);
+  const canSend = createMemo(() => !!title().trim() && !!message().trim() && !sending());
+
+  function pickTemplate(t: Template) {
     setTitle(t.title);
     setMessage(t.message);
   }
 
+  function onClear() {
+    if (!title() && !message()) return;
+    setShowConfirmClear(true);
+  }
+  function doClear() {
+    setShowConfirmClear(false);
+    setTitle('');
+    setMessage('');
+  }
+
   function onSendClick() {
-    if (tab() === 'system' || tab() === 'maintenance') {
-      if (!title().trim() || !message().trim()) {
-        uiStore.toast.warning('请填写标题和内容');
-        return;
-      }
+    if (!title().trim() || !message().trim()) {
+      uiStore.toast.warning('请填写标题和正文');
+      return;
     }
     setShowConfirm(true);
   }
@@ -142,224 +192,396 @@ export default function BroadcastPage() {
   async function doSend() {
     setShowConfirm(false);
     setSending(true);
-    const current = tab();
+    setProgress({ phase: 'in-flight', sent: 0 });
     try {
-      let sentCount: number | undefined;
-      if (current === 'update') {
-        const payload = message().trim() ? { message: message() } : undefined;
-        await adminApi.broadcastUpdate(payload);
-      } else {
-        // m027:audience 为 undefined 时后端走全员广播路径(对齐现有行为)
-        const res = await adminApi.broadcast({
-          title: title(),
-          message: message(),
-          audience: buildAudience(),
-        });
-        sentCount = res.sent;
-      }
-      const ok = current === 'update' ? true : (sentCount ?? 0) >= 0;
-      uiStore.toast.success(
-        current === 'update' ? '更新通知已发送' : `已发送给 ${sentCount} 位用户`,
-      );
-      setHistory((h) => [
-        { ts: new Date().toISOString(), tab: current, title: title() || undefined, message: message() || undefined, sentCount, ok },
-        ...h,
-      ].slice(0, 50));
+      const res = await adminApi.broadcast({ title: title(), message: message() });
+      setProgress({ phase: 'done', sent: res.sent });
+      uiStore.toast.success(`广播已发送 · 写入 ${res.sent.toLocaleString()} 条通知`);
       setTitle('');
       setMessage('');
+      // 刷新历史与统计
+      await Promise.all([refetchBoard(), refetchPreview()]);
+      // 进度提示填满后短暂保留再隐藏
+      setTimeout(() => setProgress(null), 1400);
     } catch (err: unknown) {
+      setProgress(null);
       uiStore.toast.error('发送失败', err instanceof Error ? err.message : '');
-      setHistory((h) => [
-        { ts: new Date().toISOString(), tab: current, title: title() || undefined, message: message() || undefined, ok: false },
-        ...h,
-      ].slice(0, 50));
     } finally {
       setSending(false);
     }
   }
 
-  return (
-    <div class="space-y-6">
-      <HeroCard
-        eyebrow="实时 SSE"
-        eyebrowVariant="info"
-        title="系统广播"
-        desc="向在线用户推送系统消息、更新提醒与维护通告。三类广播 + 模板库 + 发送历史。"
-      />
+  function exportCsv() {
+    const list = broadcasts();
+    if (list.length === 0) {
+      uiStore.toast.warning('暂无可导出的历史');
+      return;
+    }
+    const esc = (v: string) => `"${String(v).replace(/"/g, '""')}"`;
+    const head = 'id,createdAt,author,title,message,sentCount,readCount,readRate';
+    const rows = list.map((b) =>
+      [b.id, b.createdAt, b.author, b.title, b.message, b.sentCount, b.readCount, b.readRate]
+        .map((v) => esc(String(v)))
+        .join(','),
+    );
+    const blob = new Blob([`${head}\n${rows.join('\n')}`], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `broadcast-history-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
 
+  function onRefresh() {
+    refetchBoard();
+    refetchPreview();
+  }
+
+  return (
+    <div class="broadcast">
+      <div class="page-header">
+        <div class="row spread">
+          <div>
+            <h1 class="page-title">系统广播</h1>
+            <p class="page-desc">
+              向所有用户的通知中心写入一条系统消息。后端分批 100 条入库以避免内存峰值，幂等 ID 防重，写入完成后即对在线用户立即可见。
+            </p>
+          </div>
+          <div class="head-actions">
+            <button type="button" class="btn btn-secondary" onClick={exportCsv}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
+              导出历史
+            </button>
+            <button type="button" class="btn btn-secondary" onClick={onRefresh}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10" /><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" /></svg>
+              刷新
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div class="bc-grid">
+        {/* ====== LEFT: compose + history ====== */}
+        <div>
+          <div class="bc-compose animate-fade-in-up">
+            <div class="bc-compose-head">
+              <div class="ic">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 11l18-5v12L3 14v-3z" /><path d="M11.6 16.8a3 3 0 1 1-5.8-1.6" /></svg>
+              </div>
+              <h3>撰写广播</h3>
+              <span class="sub">POST /api/admin/broadcast</span>
+            </div>
+            <div class="bc-form">
+              <div class="bc-field">
+                <div class="bc-field-label">
+                  <label for="bc-title">标题 <span class="bc-req">*</span></label>
+                  <span
+                    class="count"
+                    classList={{ 'is-warn': titleLen() > 150 && titleLen() < TITLE_MAX, 'is-bad': titleLen() >= TITLE_MAX }}
+                  >
+                    {titleLen().toLocaleString()} / {TITLE_MAX.toLocaleString()}
+                  </span>
+                </div>
+                <input
+                  id="bc-title"
+                  class="bc-input"
+                  type="text"
+                  maxlength={TITLE_MAX}
+                  disabled={sending()}
+                  value={title()}
+                  onInput={(e) => setTitle(e.currentTarget.value)}
+                  placeholder="例：12 月 5 日 02:00–04:00 计划内维护"
+                />
+              </div>
+
+              <div class="bc-field">
+                <div class="bc-field-label">
+                  <label for="bc-message">正文 <span class="bc-req">*</span></label>
+                  <span
+                    class="count"
+                    classList={{ 'is-warn': msgLen() > 8000 && msgLen() < MSG_MAX, 'is-bad': msgLen() >= MSG_MAX }}
+                  >
+                    {msgLen().toLocaleString()} / {MSG_MAX.toLocaleString()}
+                  </span>
+                </div>
+                <textarea
+                  id="bc-message"
+                  class="bc-textarea"
+                  maxlength={MSG_MAX}
+                  disabled={sending()}
+                  value={message()}
+                  onInput={(e) => setMessage(e.currentTarget.value)}
+                  placeholder={'支持纯文本与 \\n 换行。客户端通知中心会原样渲染。\n\n建议：\n1. 第一行用主动语态说明影响范围与持续时间\n2. 第二段写应对措施 / 用户需要做的事情\n3. 末尾留备用联系方式（可选）'}
+                />
+              </div>
+
+              <div class="bc-field">
+                <div class="bc-field-label">
+                  <label>实时预览（客户端通知中心样式）</label>
+                  <span class="count">{msgLen().toLocaleString()} 字</span>
+                </div>
+                <div class="bc-preview">
+                  <div class="pv-head">
+                    <div class="pv-ic">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 11l18-5v12L3 14v-3z" /><path d="M11.6 16.8a3 3 0 1 1-5.8-1.6" /></svg>
+                    </div>
+                    <div class="pv-from">WordForge 系统</div>
+                    <div class="pv-time">刚刚</div>
+                  </div>
+                  <div class="pv-title" classList={{ 'pv-empty': !title() }}>
+                    {title() || '（标题预览）'}
+                  </div>
+                  <div class="pv-msg" classList={{ 'pv-empty': !message() }}>
+                    {message() || '（正文预览。撰写时会同步刷新。）'}
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="bc-actions">
+              <span class="meta">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 3" /></svg>
+                预计写入 <strong>{total().toLocaleString()}</strong> 条通知 · 分 <strong>{batches().toLocaleString()}</strong> 批
+              </span>
+              <span class="spacer" />
+              <button type="button" class="btn btn-ghost" disabled={sending()} onClick={onClear}>清空</button>
+              <button type="button" class="btn btn-primary" disabled={!canSend()} onClick={onSendClick}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" /></svg>
+                发送广播
+              </button>
+            </div>
+          </div>
+
+          {/* history */}
+          <div class="bc-history animate-fade-in-up bc-d80">
+            <div class="bc-history-head">
+              <h3>最近广播</h3>
+              <span class="sub">近 30 天 · 后端无定时 / 无撤回</span>
+              <div class="filter">
+                <button type="button" classList={{ 'is-active': filter() === 'all' }} onClick={() => setFilter('all')}>全部</button>
+                <button type="button" classList={{ 'is-active': filter() === 'week' }} onClick={() => setFilter('week')}>本周</button>
+                <button type="button" classList={{ 'is-active': filter() === 'failed' }} onClick={() => setFilter('failed')}>失败</button>
+              </div>
+            </div>
+            <div>
+              <Show
+                when={!board.loading}
+                fallback={<div class="bc-empty">加载中…</div>}
+              >
+                <Show when={!board.error} fallback={<div class="bc-empty">加载失败，请点右上角刷新重试</div>}>
+                  <Show when={filtered().length > 0} fallback={<div class="bc-empty">暂无广播记录</div>}>
+                    <For each={filtered()}>
+                      {(b) => {
+                        const pct = Math.round((b.readRate || 0) * 100);
+                        return (
+                          <div class="bc-row">
+                            <div class="ts">
+                              {fmtTs(b.createdAt)} <span>{fmtRelative(b.createdAt)}</span>
+                            </div>
+                            <div class="ti">
+                              {b.title}
+                              <div class="desc">{b.message}</div>
+                            </div>
+                            <div class="au">
+                              <div class="avatar">{avatarText(b.author)}</div>
+                              {b.author}
+                            </div>
+                            <div class="num">
+                              {b.sentCount.toLocaleString()} <span>送达</span>
+                            </div>
+                            <div class="read">
+                              <div class="pct">{pct}%</div>
+                              <div class="bar"><span style={{ width: `${pct}%` }} /></div>
+                            </div>
+                            <div class="ops">
+                              <button type="button" onClick={() => setDetail(b)}>详情</button>
+                            </div>
+                          </div>
+                        );
+                      }}
+                    </For>
+                  </Show>
+                </Show>
+              </Show>
+            </div>
+            <Show when={!board.loading && !board.error && totalHistory() > 0}>
+              <div class="bc-pager">
+                <span class="bc-pager-info">
+                  第 <strong>{pageStart().toLocaleString()}</strong>–<strong>{pageEnd().toLocaleString()}</strong> 条 · 共 <strong>{totalHistory().toLocaleString()}</strong> 条
+                </span>
+                <span class="spacer" />
+                <button type="button" class="bc-pager-btn" disabled={!hasPrev()} onClick={prevPage}>
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6" /></svg>
+                  上一页
+                </button>
+                <button type="button" class="bc-pager-btn" disabled={!hasNext()} onClick={nextPage}>
+                  下一页
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6" /></svg>
+                </button>
+              </div>
+            </Show>
+          </div>
+        </div>
+
+        {/* ====== RIGHT: stats + templates + constraints ====== */}
+        <div>
+          <div class="bc-side-stats animate-fade-in-up bc-d40">
+            <h4>近 30 天</h4>
+            <div class="bc-stat-grid">
+              <div class="bc-stat is-up">
+                <div class="v">{stats().total.toLocaleString()}</div>
+                <div class="l">广播总数</div>
+              </div>
+              <div class="bc-stat">
+                <div class="v">{stats().totalSent.toLocaleString()}</div>
+                <div class="l">总送达</div>
+              </div>
+              <div class="bc-stat">
+                <div class="v">{Math.round(stats().avgReadRate * 100)}<small>%</small></div>
+                <div class="l">平均阅读率</div>
+              </div>
+              <div class="bc-stat is-up">
+                <div class="v">{stats().online.toLocaleString()}</div>
+                <div class="l">当前在线</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="bc-templates animate-fade-in-up bc-d80">
+            <h4>快捷模板</h4>
+            <For each={TEMPLATES}>
+              {(t) => (
+                <button type="button" class={`bc-tpl ${t.cls}`} onClick={() => pickTemplate(t)}>
+                  <div class="ic">{t.icon()}</div>
+                  <div class="tx">
+                    <strong>{t.name}</strong>
+                    <div class="d">{t.desc}</div>
+                  </div>
+                </button>
+              )}
+            </For>
+          </div>
+
+          <div class="bc-constraints">
+            <h5>后端契约</h5>
+            <ul>
+              <li>调用 <code>POST /api/admin/broadcast</code>，body 为 <code>{'{ title, message }'}</code></li>
+              <li>title 1–200 字符，message 1–10,000 字符；超长服务端返回 <code>INVALID_*</code></li>
+              <li>分批 100 条入库，避免一次性加载所有用户导致内存峰值</li>
+              <li>每条广播对应一个 UUID <code>broadcastId</code>，幂等防重，单次最多 ~3K 通知耗时 1–2 秒</li>
+              <li>无定时发送、无撤回 — 一旦点击发送即不可逆，请谨慎</li>
+              <li>SSE 实时通道仅用于更新通告 <code>broadcast_update</code>，普通消息走通知中心</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+
+      {/* 发送确认弹窗（复用 ConfirmDialog） */}
       <ConfirmDialog
         open={showConfirm()}
-        title={`确认发送 ${tabMeta[tab()].label}`}
+        title="确认发送广播？"
+        variant="warning"
+        confirmText="立即发送"
+        loading={sending()}
         message={
           <>
-            <p class="mb-1">类型: <Badge variant={tabMeta[tab()].chipVariant}>{tabMeta[tab()].chip}</Badge></p>
-            <Show when={title().trim()}>
-              <p class="mb-1">标题: <span class="font-medium text-content">{title()}</span></p>
-            </Show>
-            <Show when={message().trim()}>
-              <p class="mb-2 text-content-secondary text-sm">内容预览: {message().slice(0, 80)}{message().length > 80 ? '…' : ''}</p>
-            </Show>
-            <p class="mb-2">受众: <span class="font-mono text-accent">{audienceLabel()}</span></p>
-            <p>此消息将广播到{audienceLabel() === '全员' ? '所有在线客户端' : '受众过滤命中的用户'}，确认发送？</p>
+            <p>
+              广播一旦发出 <strong class="text-content">不可撤回</strong>，会立即写入所有用户的通知中心，并通过 SSE 推送给在线客户端。请最后确认下面的内容。
+            </p>
+            <div class="mt-3 flex flex-col gap-2">
+              <div class="flex items-center justify-between px-2.5 py-2 rounded bg-surface-secondary">
+                <span class="text-[11.5px] text-content-tertiary">收件人</span>
+                <span class="font-mono text-xs text-content tabular-nums">{total().toLocaleString()} 用户 ({batches().toLocaleString()} 批)</span>
+              </div>
+              <div class="flex items-center justify-between px-2.5 py-2 rounded bg-surface-secondary">
+                <span class="text-[11.5px] text-content-tertiary">标题长度</span>
+                <span class="font-mono text-xs text-content tabular-nums">{titleLen()} 字符</span>
+              </div>
+              <div class="flex items-center justify-between px-2.5 py-2 rounded bg-surface-secondary">
+                <span class="text-[11.5px] text-content-tertiary">正文长度</span>
+                <span class="font-mono text-xs text-content tabular-nums">{msgLen()} 字符</span>
+              </div>
+              <div class="flex items-center justify-between px-2.5 py-2 rounded bg-surface-secondary">
+                <span class="text-[11.5px] text-content-tertiary">幂等 ID</span>
+                <span class="font-mono text-[10.5px] text-content">将在发送时生成</span>
+              </div>
+            </div>
           </>
         }
-        confirmText="确认发送"
-        variant="warning"
         onConfirm={doSend}
         onCancel={() => setShowConfirm(false)}
       />
 
-      <Card variant="elevated" padding="lg">
-        <Tabs
-          active={tab()}
-          onChange={(v) => { setTab(v as Tab); setTitle(''); setMessage(''); }}
-          tabs={[
-            { id: 'system', label: tabMeta.system.label },
-            { id: 'update', label: tabMeta.update.label },
-            { id: 'maintenance', label: tabMeta.maintenance.label },
-          ]}
-        />
-        <div class="mt-4 space-y-4 animate-tab-content-slide" data-tab={tab()}>
-          <p class="text-sm text-content-tertiary">{tabMeta[tab()].hint}</p>
+      {/* 清空二次确认 */}
+      <ConfirmDialog
+        open={showConfirmClear()}
+        title="清空已撰写的内容？"
+        variant="warning"
+        confirmText="清空"
+        message={<p>标题与正文将被清空，此操作不可恢复。</p>}
+        onConfirm={doClear}
+        onCancel={() => setShowConfirmClear(false)}
+      />
 
-          {/* 模板库 */}
-          <div>
-            <SectionTitle as="h3" title="模板" sub="点击插入到表单" />
-            <div class="flex flex-wrap gap-2">
-              <For each={templates[tab()]}>{(t, i) => (
-                <button
-                  type="button"
-                  onClick={() => pickTemplate(t)}
-                  class="text-left max-w-xs px-3 py-2 rounded-md bg-surface-secondary hover:bg-surface-tertiary border border-border-hairline transition-colors duration-fast cursor-pointer"
-                >
-                  <div class="text-[12.5px] font-medium text-content truncate">
-                    {t.title || `模板 ${i() + 1}`}
-                  </div>
-                  <div class="mt-0.5 text-[11.5px] text-content-tertiary line-clamp-2">{t.message}</div>
-                </button>
-              )}</For>
-            </div>
-          </div>
-
-          <Show when={tab() !== 'update'}>
-            <Input
-              label="标题"
-              value={title()}
-              disabled={sending()}
-              onInput={(e) => setTitle(e.currentTarget.value)}
-              placeholder="通知标题"
-            />
-          </Show>
-          <TextArea
-            label={tab() === 'update' ? '提示文字（可选）' : '内容'}
-            value={message()}
-            disabled={sending()}
-            onInput={(e) => setMessage(e.currentTarget.value)}
-            placeholder={tab() === 'update' ? '有新版本可用，请刷新页面获取最新内容' : '通知内容'}
-            rows={4}
-          />
-
-          {/* m027:受众过滤(仅 system/maintenance 类需要;update 通知是 SSE 广播无受众概念) */}
-          <Show when={tab() !== 'update'}>
-            <div class="rounded-lg border border-border-hairline bg-surface-secondary p-3 space-y-2.5">
-              <div class="flex items-center justify-between">
-                <SectionTitle as="h3" title="受众过滤" sub="可叠加 · 任一为空表示该维度不限" class="!mb-0" />
-                <Badge variant={buildAudience() ? 'accent' : 'default'} size="sm">{audienceLabel()}</Badge>
+      {/* 历史详情（只读） */}
+      <Modal open={!!detail()} onClose={() => setDetail(null)} title="广播详情" size="md">
+        <Show when={detail()}>
+          {(d) => (
+            <div class="space-y-3 text-sm">
+              <div>
+                <div class="text-[11.5px] text-content-tertiary mb-1">标题</div>
+                <div class="font-medium text-content">{d().title}</div>
               </div>
-              <div class="grid grid-cols-1 md:grid-cols-2 gap-2.5 text-xs">
+              <div>
+                <div class="text-[11.5px] text-content-tertiary mb-1">正文</div>
+                <div class="text-content-secondary whitespace-pre-wrap break-words">{d().message}</div>
+              </div>
+              <div class="grid grid-cols-2 gap-3 pt-1">
                 <div>
-                  <div class="text-content-tertiary mb-1">平台</div>
-                  <div class="flex gap-1.5">
-                    <For each={['web', 'ios', 'android']}>
-                      {(p) => (
-                        <Button
-                          size="xs"
-                          variant={audPlatforms().has(p) ? 'primary' : 'outline'}
-                          disabled={sending()}
-                          onClick={() => togglePlatform(p)}
-                        >
-                          {p}
-                        </Button>
-                      )}
-                    </For>
-                  </div>
+                  <div class="text-[11.5px] text-content-tertiary mb-1">作者</div>
+                  <div class="text-content">{d().author}</div>
                 </div>
-                <Input
-                  label="版本下限(≥)"
-                  size="sm"
-                  placeholder="例如 v0.7.0"
-                  value={audVersionMin()}
-                  disabled={sending()}
-                  onInput={(e) => setAudVersionMin(e.currentTarget.value)}
-                />
-                <Input
-                  label="最近活跃 ≤ N 天"
-                  size="sm"
-                  type="number"
-                  min="1"
-                  placeholder="例如 7"
-                  value={audLastActiveDays()}
-                  disabled={sending()}
-                  onInput={(e) => setAudLastActiveDays(e.currentTarget.value)}
-                />
-                <Input
-                  label="指定 user_id(逗号/空格分隔, 高级)"
-                  size="sm"
-                  placeholder="u-1, u-2 …"
-                  value={audUserIdsText()}
-                  disabled={sending()}
-                  onInput={(e) => setAudUserIdsText(e.currentTarget.value)}
-                />
+                <div>
+                  <div class="text-[11.5px] text-content-tertiary mb-1">发送时间</div>
+                  <div class="font-mono text-content tabular-nums">{fmtTs(d().createdAt)}</div>
+                </div>
+                <div>
+                  <div class="text-[11.5px] text-content-tertiary mb-1">送达</div>
+                  <div class="font-mono text-content tabular-nums">{d().sentCount.toLocaleString()}</div>
+                </div>
+                <div>
+                  <div class="text-[11.5px] text-content-tertiary mb-1">阅读率</div>
+                  <div class="font-mono text-content tabular-nums">{Math.round((d().readRate || 0) * 100)}%（{d().readCount.toLocaleString()} 已读）</div>
+                </div>
               </div>
             </div>
-          </Show>
+          )}
+        </Show>
+      </Modal>
 
-          <div class="flex items-center justify-between gap-3">
-            <p class="text-xs text-content-tertiary">
-              送达统计在发送完成后写入下方"发送历史"。
-            </p>
-            <Button
-              onClick={onSendClick}
-              loading={sending()}
-              disabled={sending() || showConfirm()}
-              variant={tab() === 'maintenance' ? 'warning' : 'primary'}
-            >
-              发送广播
-            </Button>
-          </div>
-        </div>
-      </Card>
-
-      <Show when={history().length > 0}>
-        <Card variant="elevated" padding="lg">
-          <SectionTitle title="发送历史" sub={`最近 ${history().length} 条`} />
-          <div class="divide-y divide-border-hairline">
-            <For each={history()}>{(h) => (
-              <div class="py-2.5 flex items-start gap-3">
-                <Badge variant={h.ok ? tabMeta[h.tab].chipVariant : 'error'} size="sm">
-                  {tabMeta[h.tab].chip}
-                </Badge>
-                <div class="flex-1 min-w-0">
-                  <div class="text-sm font-medium text-content truncate">
-                    {h.title || (h.tab === 'update' ? '（更新通知）' : '（无标题）')}
-                  </div>
-                  <Show when={h.message}>
-                    <div class="mt-0.5 text-xs text-content-tertiary line-clamp-2">{h.message}</div>
-                  </Show>
-                </div>
-                <div class="text-right shrink-0">
-                  <div class="text-xs text-content-tertiary font-mono">{new Date(h.ts).toLocaleTimeString('zh-CN', { hour12: false })}</div>
-                  <Show when={typeof h.sentCount === 'number'}>
-                    <div class="text-xs text-success-strong tabular-nums">送达 {h.sentCount}</div>
-                  </Show>
-                  <Show when={!h.ok}>
-                    <div class="text-xs text-error-strong">失败</div>
-                  </Show>
-                </div>
+      {/* 发送进度提示（真实 in-flight 状态驱动，非伪造逐批 SSE） */}
+      <Show when={progress()}>
+        {(p) => (
+          <div class="bc-progress-toast">
+            <div class="ph">
+              <div class="ic">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10" /><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" /></svg>
               </div>
-            )}</For>
+              <strong>{p().phase === 'done' ? '广播已写入通知中心' : '正在分批写入通知…'}</strong>
+            </div>
+            <div class="bar">
+              <span classList={{ 'is-indeterminate': p().phase === 'in-flight' }} style={p().phase === 'done' ? { width: '100%' } : undefined} />
+            </div>
+            <div class="stats">
+              <Show
+                when={p().phase === 'done'}
+                fallback={<span>提交中 · 全员 {total().toLocaleString()} 用户 / {batches().toLocaleString()} 批</span>}
+              >
+                <span>已写入 <strong>{p().sent.toLocaleString()}</strong> 条通知</span>
+              </Show>
+            </div>
           </div>
-        </Card>
+        )}
       </Show>
     </div>
   );

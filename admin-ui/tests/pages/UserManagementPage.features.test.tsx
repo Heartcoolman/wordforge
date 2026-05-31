@@ -15,6 +15,10 @@ vi.mock('@/api/admin', () => ({
     resetUserPassword: vi.fn(),
     getStats: vi.fn(() => Promise.resolve({ users: 100, words: 0, records: 0, trend: { users: { value: 5, label: '较昨日' } } })),
     getEngagement: vi.fn(() => Promise.resolve({ totalUsers: 100, activeToday: 12, retentionRate: 0.12 })),
+    // m027:header "本周新增" 取近 7 天 daily-active-users 的 registered 求和
+    getDailyActiveUsers: vi.fn(() => Promise.resolve([{ date: '2026-05-30', active: 10, registered: 3 }])),
+    // m027:筛选 chip 逐项计数 GET /users/facets
+    userFacets: vi.fn(() => Promise.resolve({ total: 100, active: 80, inactive7d: 12, banned: 5, admins: 3 })),
     userProfile: vi.fn(() => Promise.resolve({ userId: 'x', totalRecords: 0, correctRecords: 0, accuracy: null, sessionCount: 0, wordbookDistribution: [] })),
     userSessions: vi.fn(() => Promise.resolve({ sessions: [] })),
     usersBulkBan: vi.fn(),
