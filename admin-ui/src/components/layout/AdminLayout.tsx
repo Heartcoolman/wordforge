@@ -8,6 +8,8 @@ import { themeStore } from '@/stores/theme';
 import { Skeleton } from '@/components/ui/Skeleton';
 import { Kbd } from '@/components/ui/Kbd';
 import { CommandPalette } from '@/components/ui/CommandPalette';
+import { OnboardingTour } from '@/components/onboarding/OnboardingTour';
+import { useOnboarding } from '@/components/onboarding/useOnboarding';
 import { useIndicatorTrack } from '@/lib/motion';
 import { ClockDriftWarning } from '@/components/admin/ClockDriftWarning';
 
@@ -76,6 +78,7 @@ export function AdminLayout(props: ParentProps) {
   const [mobileOpen, setMobileOpen] = createSignal(false);
   const [adminEmail, setAdminEmail] = createSignal<string | null>(null);
   const [emailLoading, setEmailLoading] = createSignal(true);
+  const onboarding = useOnboarding();
   let navRef: HTMLElement | undefined;
 
   const isActive = (href: string, exact?: boolean) =>
@@ -107,6 +110,12 @@ export function AdminLayout(props: ParentProps) {
       setAdminEmail(res.email);
     } catch { /* silent */ }
     finally { setEmailLoading(false); }
+    // 这一大版本波次(1.1.x~1.2.x)首次进入自动弹一次新功能导览；
+    // 同波重复升级不重弹，跨大版本(1.3+)再弹。版本取自公开 /health。
+    try {
+      const h = await adminApi.health();
+      onboarding.autoShowIfNeeded(h.version);
+    } catch { /* 拿不到版本则不弹 */ }
   });
 
   return (
@@ -281,6 +290,21 @@ export function AdminLayout(props: ParentProps) {
               <Kbd size="sm">⌘K</Kbd>
             </button>
 
+            {/* 新功能导览入口（随时重看） */}
+            <button
+              type="button"
+              onClick={() => onboarding.show()}
+              class="p-1.5 rounded-md text-content-tertiary hover:text-content hover:bg-surface-secondary transition-colors duration-fast cursor-pointer focus-ring-soft"
+              aria-label="新功能导览"
+              title="新功能导览"
+            >
+              <svg class="w-[18px] h-[18px]" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M12 22a10 10 0 100-20 10 10 0 000 20z" />
+                <path stroke-linecap="round" stroke-linejoin="round" d="M9.1 9a3 3 0 015.8 1c0 2-3 3-3 3" />
+                <path stroke-linecap="round" stroke-linejoin="round" d="M12 17h.01" />
+              </svg>
+            </button>
+
             {/* 主题切换 */}
             <button
               type="button"
@@ -340,6 +364,9 @@ export function AdminLayout(props: ParentProps) {
 
       {/* 全局命令面板 —— 仅 admin 区域内挂载；监听全局 ⌘K，外部点击 [data-palette-open] 也触发 */}
       <CommandPalette />
+
+      {/* 新功能导览 —— 全屏 overlay，受 useOnboarding 单例 signal 控制 */}
+      <OnboardingTour />
     </div>
   );
 }

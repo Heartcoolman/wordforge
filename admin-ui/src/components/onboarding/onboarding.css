@@ -1,0 +1,26 @@
+/* 新功能导览 —— 全屏 overlay，scoped 在 .onboarding 下。
+   复用 admin-ui token；--llm 仅在 amas-advisor/cockpit.css 加载后存在，这里给 fallback。 */
+.onboarding {
+  --ob-accent: var(--accent);
+  --ob-accent-light: var(--accent-light);
+  --ob-llm: var(--llm, oklch(54% 0.20 290));
+  --ob-llm-light: var(--llm-light, oklch(96% 0.04 290));
+  --ob-info: var(--info);
+  --ob-info-light: var(--info-light);
+}
+
+/* accent 字段 → 主色映射 */
+.onboarding[data-accent='accent'] { --ob-tone: var(--ob-accent); --ob-tone-light: var(--ob-accent-light); }
+.onboarding[data-accent='llm']    { --ob-tone: var(--ob-llm);    --ob-tone-light: var(--ob-llm-light); }
+.onboarding[data-accent='info']   { --ob-tone: var(--ob-info);   --ob-tone-light: var(--ob-info-light); }
+
+.onboarding .ob-icon-wrap {
+  background: color-mix(in oklab, var(--ob-tone) 12%, transparent);
+  color: var(--ob-tone);
+}
+.onboarding .ob-check { color: var(--ob-tone); }
+
+/* 进度点 */
+.onboarding .ob-dot { background: var(--border-strong); transition: width var(--duration-base) var(--ease-out-expo), background-color var(--duration-base) var(--ease-out-expo); }
+.onboarding .ob-dot[data-state='current'] { background: var(--ob-tone); }
+.onboarding .ob-dot[data-state='done'] { background: color-mix(in oklab, var(--ob-tone) 55%, transparent); }
