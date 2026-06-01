@@ -244,6 +244,30 @@ export interface SystemResources {
   walSizeBytes?: number | null;
   /** r2d2 连接池占用快照 */
   pool: { max: number; connections: number; idle: number } | null;
+  /** 当前在途(处理中)请求数。过载饱和度信号:CPU 钉死但 5xx=0 时,堆积即过载证据。 */
+  inflightRequests?: number | null;
+  /** nginx 边缘(stub_status)。未配置 NGINX_STATUS_URL 时为 null(功能关闭)。 */
+  nginxEdge?: NginxEdge | null;
+}
+
+/** nginx stub_status 解析结果。accepts/handled/requests 为进程生命周期累计。 */
+export interface NginxEdge {
+  /** 当前活跃连接数 */
+  active: number;
+  /** 累计接受的连接 */
+  accepts: number;
+  /** 累计成功处理的连接(< accepts 即有连接被丢弃) */
+  handled: number;
+  /** 累计请求数 */
+  requests: number;
+  /** 累计被丢弃连接 = accepts - handled */
+  dropped: number;
+  /** 正在读请求头的连接 */
+  reading?: number | null;
+  /** 正在写响应(含等上游)的连接——高值=上游慢/饱和 */
+  writing?: number | null;
+  /** keepalive 空闲连接 */
+  waiting?: number | null;
 }
 
 export interface WorkerStatusRow {

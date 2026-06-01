@@ -296,6 +296,10 @@ async fn sample_resources(state: &AppState) -> serde_json::Value {
         }
     };
 
+    // 5) 在途请求数（饱和度信号）+ nginx 边缘指标（连接层真实压力，env 门控）
+    let inflight = crate::metrics_counters::inflight();
+    let nginx_edge = sample_nginx_edge().await;
+
     serde_json::json!({
         "cpuPct": cpu_pct,
         "memoryRssBytes": rss_bytes,
@@ -308,7 +312,90 @@ async fn sample_resources(state: &AppState) -> serde_json::Value {
             "connections": p.connections,
             "idle": p.idle,
         })),
+        "inflightRequests": inflight,
+        "nginxEdge": nginx_edge,
     })
+}
+
+/// 抓取 nginx stub_status（默认 localhost）并解析。
+/// 未配置 `NGINX_STATUS_URL` env 时返回 null（功能关闭，无部署形态依赖）；
+/// 抓取/解析失败同样兜底 null，不让边缘探针穿透 health 本体。
+async fn sample_nginx_edge() -> Option<serde_json::Value> {
+    let url = std::env::var("NGINX_STATUS_URL").ok().filter(|s| !s.is_empty())?;
+    let body = reqwest::Client::new()
+        .get(&url)
+        .timeout(Duration::from_millis(800))
+        .send()
+        .await
+        .ok()?
+        .text()
+        .await
+        .ok()?;
+    parse_stub_status(&body)
+}
+
+/// 解析 nginx stub_status 文本：
+/// ```text
+/// Active connections: 291
+/// server accepts handled requests
+///  16630948 16630948 31070465
+/// Reading: 6 Writing: 179 Waiting: 106
+/// ```
+/// `dropped = accepts - handled`（累计被丢弃的连接）。任一关键行缺失即返回 None。
+fn parse_stub_status(body: &str) -> Option<serde_json::Value> {
+    let mut active = None;
+    let mut reading = None;
+    let mut writing = None;
+    let mut waiting = None;
+    let mut accepts = None;
+    let mut handled = None;
+    let mut requests = None;
+
+    let mut lines = body.lines().peekable();
+    while let Some(line) = lines.next() {
+        let l = line.trim();
+        if let Some(rest) = l.strip_prefix("Active connections:") {
+            active = rest.trim().parse::<u64>().ok();
+        } else if l.starts_with("server accepts") {
+            // 计数三元组在下一行
+            if let Some(data) = lines.next() {
+                let nums: Vec<u64> = data
+                    .split_whitespace()
+                    .filter_map(|t| t.parse().ok())
+                    .collect();
+                if nums.len() >= 3 {
+                    accepts = Some(nums[0]);
+                    handled = Some(nums[1]);
+                    requests = Some(nums[2]);
+                }
+            }
+        } else if l.starts_with("Reading:") {
+            let nums: Vec<u64> = l
+                .split_whitespace()
+                .filter_map(|t| t.parse().ok())
+                .collect();
+            if nums.len() >= 3 {
+                reading = Some(nums[0]);
+                writing = Some(nums[1]);
+                waiting = Some(nums[2]);
+            }
+        }
+    }
+
+    let active = active?;
+    let accepts = accepts?;
+    let handled = handled?;
+    let requests = requests?;
+    Some(serde_json::json!({
+        "active": active,
+        "accepts": accepts,
+        "handled": handled,
+        "requests": requests,
+        "dropped": accepts.saturating_sub(handled),
+        "reading": reading,
+        "writing": writing,
+        "waiting": waiting,
+    }))
 }
 
 /// M1-A5：返回所有 worker 的最后执行记录，供 admin 控制台 "Worker 状态" 区展示。
@@ -549,5 +636,24 @@ mod tests {
     fn prerelease_suffix_ignored() {
         // filter_map 会跳过无法解析的段，"3-beta" 解析失败变成空
         assert!(!is_newer("0.1.3-beta", "0.1.3"));
+    }
+
+    #[test]
+    fn parse_stub_status_extracts_fields() {
+        let body = "Active connections: 291 \nserver accepts handled requests\n 16630948 16630940 31070465 \nReading: 6 Writing: 179 Waiting: 106 \n";
+        let v = super::parse_stub_status(body).expect("parse ok");
+        assert_eq!(v["active"], 291);
+        assert_eq!(v["accepts"], 16630948u64);
+        assert_eq!(v["handled"], 16630940u64);
+        assert_eq!(v["requests"], 31070465u64);
+        assert_eq!(v["dropped"], 8); // accepts - handled
+        assert_eq!(v["writing"], 179);
+        assert_eq!(v["waiting"], 106);
+    }
+
+    #[test]
+    fn parse_stub_status_rejects_garbage() {
+        assert!(super::parse_stub_status("not nginx output").is_none());
+        assert!(super::parse_stub_status("").is_none());
     }
 }

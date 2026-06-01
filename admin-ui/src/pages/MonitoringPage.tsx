@@ -183,6 +183,37 @@ export default function MonitoringPage() {
     return max.p99Ms > Math.max(rq.p99Ms * 1.3, 400) ? max : null;
   });
 
+  // 综合饱和度徽标:CPU 钉死 / 延迟 SLO 大幅突破 / in-flight 堆积 / nginx 上游积压。
+  // 解决"5xx=0 但系统被打挂时面板仍显绿"的盲区——这些信号不依赖 5xx。
+  const saturation = createMemo(() => {
+    const r = res();
+    const rq = requests();
+    const reasons: string[] = [];
+    let level = 0; // 0 健康 / 1 繁忙 / 2 过载降级
+    const bump = (n: number, reason: string) => { if (n > level) level = n; reasons.push(reason); };
+
+    const cpu = r?.cpuPct ?? null;
+    if (cpu != null) {
+      if (cpu >= 90) bump(2, `CPU ${cpu.toFixed(0)}%`);
+      else if (cpu >= 70) bump(1, `CPU ${cpu.toFixed(0)}%`);
+    }
+    const p99 = rq?.p99Ms ?? null;
+    if (p99 != null) {
+      if (p99 > 1200) bump(2, `P99 ${Math.round(p99)}ms`);
+      else if (p99 > 400) bump(1, `P99 ${Math.round(p99)}ms`);
+    }
+    const inflight = r?.inflightRequests ?? null;
+    const poolMax = r?.pool?.max ?? null;
+    if (inflight != null && poolMax) {
+      if (inflight > poolMax * 4) bump(2, `在途 ${inflight}`);
+      else if (inflight > poolMax) bump(1, `在途 ${inflight}`);
+    }
+    const writing = r?.nginxEdge?.writing ?? null;
+    if (writing != null && writing > 100) bump(2, `nginx 积压 ${writing}`);
+
+    return { level, reasons };
+  });
+
   // ── 图表 option ──
   const chartOption = (): EChartsOption => {
     const s = requests()?.series ?? [];
@@ -243,6 +274,15 @@ export default function MonitoringPage() {
                 </p>
               </div>
               <div class="row gap-2 wrap">
+                <span
+                  class={`chip ${saturation().level === 2 ? 'chip-error' : saturation().level === 1 ? 'chip-warning' : 'chip-success'}`}
+                  title={saturation().reasons.length ? `饱和信号:${saturation().reasons.join(' · ')}` : '各项饱和指标均在目标内'}
+                >
+                  {saturation().level === 2 ? '过载降级' : saturation().level === 1 ? '繁忙' : '健康'}
+                  <Show when={saturation().level > 0}>
+                    <span class="text-small" style={{ 'margin-left': '4px', opacity: 0.85 }}>· {saturation().reasons[0]}</span>
+                  </Show>
+                </span>
                 <span class="pill-time"><span class="dot" /> 实时 · {clock()}</span>
                 <div class="segmented">
                   <For each={WINDOWS}>
@@ -269,11 +309,11 @@ export default function MonitoringPage() {
           <Show when={requests()} fallback={<SloPlaceholder />}>
             {(rq) => (
               <div class="grid cols-4">
-                {/* 可用性（如实窗口标注，非伪造 30d） */}
+                {/* 后端可用性:口径=到达后端的请求成功率,边缘失败(TCP/nginx/超时)不计入 */}
                 <div class={`slo-card ${toneAvail(rq().availabilityPct)}`}>
-                  <div class="l">可用性</div>
+                  <div class="l" title="仅统计到达后端的请求的非 5xx 比例;TCP 被拒 / nginx 502 / 客户端超时等边缘失败后端无感知,不计入。系统过载时请看右上角饱和徽标。">后端可用性 <span class="text-small" style={{ opacity: 0.6 }}>ⓘ</span></div>
                   <div class="v">{rq().availabilityPct.toFixed(2)}<span class="unit">%</span></div>
-                  <div class="target">目标 ≥ 99.9% · 窗口 {fmtWindow(rq().effectiveSecs)} · 预算剩余 {Math.max(0, Math.floor(rq().totalRequests * 0.001) - rq().total5xx)} 次</div>
+                  <div class="target">目标 ≥ 99.9% · 仅到达后端的请求 · 预算剩余 {Math.max(0, Math.floor(rq().totalRequests * 0.001) - rq().total5xx)} 次</div>
                   <div class="bar"><span style={{ width: `${clamp(rq().availabilityPct, 0, 100)}%` }} /></div>
                 </div>
                 {/* P50 */}
@@ -464,6 +504,33 @@ export default function MonitoringPage() {
                 <ResourceBar label="入站带宽"
                   value={requests() ? `${(requests()!.bandwidthInBps * 8 / 1e6).toFixed(2)} Mbps` : '—'}
                   pct={requests() ? clamp((requests()!.bandwidthInBps * 8 / 1e6 / 100) * 100, 0, 100) : 0} tone="is-success" />
+                {/* 在途请求:过载饱和度直接信号(5xx=0 也能看出堆积) */}
+                <ResourceBar label="在途请求 (并发)"
+                  value={res()?.inflightRequests != null ? `${res()!.inflightRequests}${res()?.pool?.max ? ` · 池上限 ${res()!.pool!.max}` : ''}` : '—'}
+                  pct={res()?.inflightRequests != null && res()?.pool?.max ? clamp((res()!.inflightRequests! / (res()!.pool!.max * 4)) * 100, 0, 100) : 0}
+                  tone={res()?.inflightRequests != null && res()?.pool?.max
+                    ? (res()!.inflightRequests! > res()!.pool!.max * 4 ? 'is-error' : res()!.inflightRequests! > res()!.pool!.max ? 'is-warning' : '')
+                    : ''} />
+                {/* nginx 边缘(连接层)——唯一能反映"到达后端之前"的真实压力 */}
+                <Show when={res()?.nginxEdge}>
+                  {(edge) => (
+                    <>
+                      <div class="text-small text-content-tertiary" style={{ 'margin-top': '6px', 'border-top': '1px solid var(--border-subtle, #e5e7eb)', 'padding-top': '8px' }}>nginx 边缘 · 连接层</div>
+                      <ResourceBar label="活跃连接"
+                        value={`${edge().active}`}
+                        pct={clamp((edge().active / 1000) * 100, 0, 100)}
+                        tone={edge().active > 800 ? 'is-error' : edge().active > 500 ? 'is-warning' : ''} />
+                      <ResourceBar label="写中 / 等上游"
+                        value={`写 ${edge().writing ?? '—'} · 待 ${edge().waiting ?? '—'}`}
+                        pct={clamp(((edge().writing ?? 0) / 200) * 100, 0, 100)}
+                        tone={(edge().writing ?? 0) > 100 ? 'is-error' : (edge().writing ?? 0) > 50 ? 'is-warning' : ''} />
+                      <ResourceBar label="累计丢弃连接"
+                        value={`${edge().dropped}`}
+                        pct={edge().dropped > 0 ? 100 : 2}
+                        tone={edge().dropped > 0 ? 'is-error' : 'is-success'} />
+                    </>
+                  )}
+                </Show>
               </div>
             </div>
           </div>

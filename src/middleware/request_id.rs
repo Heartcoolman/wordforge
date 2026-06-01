@@ -9,6 +9,9 @@ use tracing::Instrument;
 use crate::response::ErrorBody;
 
 pub async fn request_id_middleware(req: Request, next: Next) -> Response {
+    // 在途请求计数：RAII 守卫覆盖整个处理周期（含 panic / early-return 回收）
+    let _inflight = crate::metrics_counters::InflightGuard::enter();
+
     let request_id = req
         .headers()
         .get("x-request-id")

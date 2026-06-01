@@ -137,6 +137,13 @@ pub async fn metrics_handler(
         "",
         total_5xx as f64,
     );
+    gauge(
+        &mut out,
+        "http_inflight_requests",
+        "当前在途（正在处理中）的 HTTP 请求数——过载饱和度信号",
+        "",
+        crate::metrics_counters::inflight() as f64,
+    );
 
     // --- 是否处于维护模式 ---
     gauge(
