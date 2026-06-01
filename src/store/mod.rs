@@ -69,14 +69,16 @@ impl Store {
         pool_size: u32,
         connection_timeout_ms: u64,
     ) -> Result<Self, StoreError> {
+        // cache_size/mmap_size 为每连接独占，乘 pool_size：压测实测 -64000(62.5MB)×16≈1GB
+        // 峰值，在 2h2g 机型上是 OOM 风险，故收到 16MB/128MB。勿无依据调高。
         let manager = SqliteConnectionManager::file(db_path).with_init(move |conn| {
             conn.execute_batch(&format!(
                 "PRAGMA journal_mode = WAL;
                  PRAGMA synchronous = NORMAL;
                  PRAGMA foreign_keys = ON;
                  PRAGMA busy_timeout = {};
-                 PRAGMA cache_size = -64000;
-                 PRAGMA mmap_size = 268435456;
+                 PRAGMA cache_size = -16000;
+                 PRAGMA mmap_size = 134217728;
                  PRAGMA temp_store = MEMORY;",
                 busy_timeout_ms
             ))
