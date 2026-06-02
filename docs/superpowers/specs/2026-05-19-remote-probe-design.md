@@ -2,7 +2,7 @@
 
 **日期**：2026-05-19
 **作者**：brainstorming 会话产出
-**状态**：待用户复核
+**状态**：已实现
 **关联模块**：admin 控制台、telemetry worker、SSE 通道
 
 ---
@@ -12,7 +12,7 @@
 ### 1.1 现状
 
 * 现有遥测下发：`POST /api/admin/clients/:id/request-telemetry` → SSE 推 `SseEvent::TelemetryRequest { request_id }`。
-* 客户端 `frontend/src/workers/telemetry.ts` 收到后调用 `sendTelemetry('on_demand', requestId, includeDevice=true)`。
+* 客户端 `admin-ui/src/workers/telemetry.ts` 收到后调用 `sendTelemetry('on_demand', requestId, includeDevice=true)`。
 * 采集内容**编译期写死**：device fingerprint（UA / 屏幕 / 时区 / CPU 核数 / 内存 GB / 触控 / 在线状态）+ behavior buffer（点击数、滚动深度、route 切换数）。
 * 上报：`POST /api/telemetry` → 入 `telemetry_events`（原始 JSON）+ `telemetry_summaries`（强类型摘要字段）。
 
@@ -33,13 +33,13 @@ admin 「触发遥测」的实际语义只是「让客户端立刻上报预制�
 ### 2.1 数据流
 
 ```
-┌──────────────────┐        ┌────────────────────┐
-│ Admin REPL 面板   │        │ Web 客户端          │
-│ /admin/probe     │        │ (telemetry worker) │
-└────────┬─────────┘        └──────────▲─────────┘
-         │ ① POST                      │ ② SSE 推 ProbeRequest
-         │   /api/admin/probe          │   { request_id, script_b64,
-         ▼                             │     timeout_ms, ctx_version }
+┌─────────────────────┐     ┌────────────────────┐
+│ Admin REPL 面板      │     │ Web 客户端          │
+│ /admin/remote-probe │     │ (telemetry worker) │
+└──────────┬──────────┘     └──────────▲─────────┘
+           │ ① POST                    │ ② SSE 推 ProbeRequest
+           │   /api/admin/probe        │   { request_id, script_b64,
+           ▼                           │     timeout_ms, ctx_version }
 ┌─────────────────────────────────────┴────────────┐
 │            后端 (axum)                            │
 │  ├── POST /api/admin/probe        下发 + 审计落库 │
@@ -67,7 +67,7 @@ admin 「触发遥测」的实际语义只是「让客户端立刻上报预制�
 | `POST /api/admin/clients/:id/request-telemetry` | `POST /api/admin/probe` |
 | `POST /api/telemetry` | `POST /api/probe/results` |
 | `telemetry_events` / `telemetry_summaries` | `probe_executions` |
-| `frontend/src/workers/telemetry.ts`（不动） | `frontend/src/workers/probe/*`（新增） |
+| `admin-ui/src/workers/telemetry.ts`（不动） | `admin-ui/src/workers/probe/*`（新增） |
 
 两条链路**完全独立**，仅共享 SSE 连接通道与 admin 鉴权中间件。
 
@@ -257,7 +257,7 @@ CREATE INDEX idx_probe_exec_pending ON probe_executions(status, dispatched_at)
 ### 5.1 文件结构
 
 ```
-frontend/src/workers/probe/
+admin-ui/src/workers/probe/
 ├── runner.worker.ts     # 在 Dedicated Worker 里跑，无 DOM/fetch/storage
 ├── api-bridge.ts        # 主线程：监 SSE → 采 ctx → 起 worker → 收结果 → POST
 ├── ctx-factory.ts       # 主线程构造 ctx 快照
@@ -395,7 +395,7 @@ export type Ctx = {
 | 离线设备处理 | 下发时检查 active_sse → `status='offline'`，不重试 | 自动 | 否 |
 | ctx schema 兼容 | 客户端 `ctx_version` 校验 | 自动 | 否 |
 | 全局 kill-switch | `config.toml [probe] enabled=false` 默认关 | 关 | 是 |
-| 前端路由 gate | `enabled=false` 时 `/admin/probe` 404 | 自动 | 自动 |
+| 前端路由 gate | `enabled=false` 时 `/admin/remote-probe` 404 | 自动 | 自动 |
 
 **enabled=false 时的具体行为**：
 * `POST /api/admin/probe` → 503 `PROBE_DISABLED`
@@ -408,9 +408,11 @@ export type Ctx = {
 
 ### 8.1 路由与入口
 
-* 新增路由 `/admin/probe`（在 admin 路由组下）。
+* 新增路由 `/admin/remote-probe`（在 admin 路由组下）。
 * 管理后台侧栏新增「远程探针」入口。
 * 不启用（`enabled=false`）时路由不挂载。
+
+> 注：`/admin/probe` 现已是数据采集看板（m031 probe-telemetry），远程 REPL 平移至 `/admin/remote-probe`。
 
 ### 8.2 布局
 
@@ -444,7 +446,7 @@ export type Ctx = {
 └────────────────────────────────────────────────────────────┘
 ```
 
-模板定义：`frontend/src/views/admin/probe-templates.ts` 导出数组 `[{name, body, ctx_version_min}]`。
+模板定义：`admin-ui/src/pages/probe-templates.ts` 导出数组 `[{name, body, ctx_version_min}]`。
 
 ### 8.3 受控写确认对话框
 
@@ -480,7 +482,7 @@ export type Ctx = {
 
 ### 9.3 集成 (`playwright`)
 
-* admin 打开 `/admin/probe` → 自己当 target → `return ctx.nav.ua` → 卡片显示 UA
+* admin 打开 `/admin/remote-probe` → 自己当 target → `return ctx.nav.ua` → 卡片显示 UA
 * 模板下拉「设备指纹」→ 一键填入 → 发送 → 收到完整指纹
 
 ---

@@ -26,27 +26,23 @@ WordForge 是**自托管软件**。你的所有数据（账号、学习记录、
 
 你有权导出你的所有可携带数据（数据可携权，GDPR Article 20）。
 
-> **注意**：数据导出端点正在实现中（M1-G1 任务），预计 v1.0 正式版发布时可用。
-
-完成后，可通过以下方式导出数据：
+端点已可用，通过以下方式导出数据：
 
 ```
 GET /api/users/me/export
 Authorization: Bearer <your-token>
 ```
 
-返回 JSON Lines 格式，包含：
+返回 JSON Lines 格式，每行是一个数据块，格式为 `{"table":"<name>","data":<value>}`，按顺序包含以下表：
 - 个人档案（profile）
-- 学习记录（learning_records）
+- 学习配置（study_config）
 - 单词状态（word_states）
 - 收藏（favorites）
 - 备注（notes）
-- 学习配置（study_config）
 - 历史会话（sessions）
+- 学习记录（records，分页流式输出）
 
-每用户每 24 小时限导出 1 次，防止服务器过载。
-
-**当前过渡方案**：在 v1.0 发布前，如需导出数据，请联系服务器管理员手动提取。
+每用户每 24 小时限导出 1 次，防止服务器过载；超限返回 `429` 并附带 `Retry-After` 响应头。
 
 ---
 

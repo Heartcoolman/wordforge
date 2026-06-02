@@ -1,5 +1,7 @@
 # WordForge v1.0 客户端对接 — 接口变更清单
 
+> **注**：本文为 v1.0.0 一次性迁移历史快照，v1.1+ 变更见 [更新日志](./changelog.md) / [`api-endpoints.md`](./api-endpoints.md)。
+
 > 基线：v0.6.0-beta.4 → v1.0.0
 > 起草日期：2026-05-22
 > 覆盖范围：仅变更部分（Breaking + 新增 + 字段调整 + SSE 事件 + 头部约束）
@@ -28,7 +30,7 @@
 {
   "error": "GONE",
   "message": "该端点已永久废止，请迁移至 /api/learning/* 或 /api/records/*",
-  "sunset": "2027-05-22"
+  "sunset": "2027-01-01"
 }
 ```
 
@@ -36,7 +38,7 @@
 
 ```http
 Deprecation: true
-Sunset: Sat, 22 May 2027 00:00:00 GMT
+Sunset: Fri, 01 Jan 2027 00:00:00 GMT
 Link: </api/learning>; rel="successor-version"
 ```
 
@@ -50,9 +52,9 @@ Link: </api/learning>; rel="successor-version"
 |---|---|
 | `New` | `new` |
 | `Learning` | `learning` |
-| `Familiar` | `familiar` |
+| `Reviewing` | `reviewing` |
 | `Mastered` | `mastered` |
-| `Skipped` | `skipped` |
+| `Forgotten` | `forgotten` |
 
 涉及所有 records / word-states / favorites 端点的 `state` 字段读写（含请求 body 与响应 body）。
 
@@ -223,12 +225,14 @@ worker_last_run_timestamp_seconds{worker="error_rate_watchdog"} ...
 
 ## 5. 🔒 strict-mode 头部强制
 
-`/api/telemetry` 与 `/api/learning/session-start` 在 strict-mode 开启时必须携带：
+strict-mode 是挂在 `/api/*` 上的全局中间件（豁免 `admin` / `status` / `realtime` / `telemetry` / `v1` 五组路由）。开启时受检请求必须携带：
 
 ```http
 X-Device-Id: <设备唯一 ID>
 X-Device-Platform: ios | android | web | macos | windows | linux
 ```
+
+> 注：`session_start` 不是独立端点，而是 `/api/telemetry` 的 `eventType` 取值。telemetry 路由本身豁免上述中间件，其 payload 级校验（`MISSING_TIMEZONE` / `MISSING_LANGUAGE` / `MISSING_DEVICE_FINGERPRINT`）由 `routes/telemetry.rs` 在 body 解析后单独完成。
 
 payload 必须含：
 

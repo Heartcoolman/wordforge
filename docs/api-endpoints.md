@@ -2367,13 +2367,13 @@ Server-Sent Events（SSE）持久连接，用于接收服务端实时推送。
 |---|---|---|
 | `amas_state` | AMAS 引擎状态变化（服务端每 5 秒轮询，仅当 `totalEventCount` 增长时推送） | `{"type": "state_change", "attention": 0.72, "fatigue": 0.28, "motivation": 0.65, "confidence": 0.54, "sessionEventCount": 12, "totalEventCount": 834}` |
 | `maintenance` | 维护模式变化 | `{"type": "maintenance", "active": true}` |
-| `update_available` | 新版本可用（面向所有用户的刷新提示，由 `broadcast_update` 发出；与管理员专属的 `release_available` 不同） | `{"version": "v0.3.3", "message": "新版本已发布"}` |
+| `update_available` | 新版本可用（面向所有用户的刷新提示，由 `broadcast_update` 发出；与管理员专属的 `release_available` 不同） | `{"version": "v1.1.1", "message": "新版本已发布"}` |
 | `telemetry_request` | 服务器请求遥测上报 | `{"type": "telemetry_request", "requestId": "<uuid>"}` |
 | `banned` | 账号被封禁 | `{"type": "banned"}` |
 | `unbanned` | 账号解封 | `{"type": "unbanned"}` |
 | `data_corrupted` | 数据异常通知 | `{"type": "data_corrupted"}` |
 | `new_llm_suggestion` | 新的 LLM 调参建议到达（管理员专属，advisor 页可立即刷新） | `{"type": "new_llm_suggestion", "suggestionId": 42}` |
-| `release_available` | 自更新 worker 探测到 GitHub Releases 有新二进制；v0.6.0-beta.3 起含 `channel`（管理员专属） | `{"type": "release_available", "latestTag": "v0.5.6", "channel": "stable"}` |
+| `release_available` | 自更新 worker 探测到 GitHub Releases 有新二进制；v0.6.0-beta.3 起含 `channel`（管理员专属） | `{"type": "release_available", "latestTag": "v1.1.1", "channel": "stable"}` |
 | `update_progress` | 一键更新执行阶段进度（管理员专属，0–100） | `{"type": "update_progress", "phase": "downloading", "percent": 35}` |
 | `probe_request` | 远程探针脚本下发：admin 通过 `POST /api/admin/probe` 派发，客户端在 Worker 沙箱 eval 后回传结果 | `{"type": "probe_request", "requestId": "<uuid>", "batchId": "<uuid>", "scriptB64": "...", "timeoutMs": 3000, "ctxVersion": 1}` |
 | `probe_confirm` | 远程探针二次确认：客户端首次返回 `confirm_required` 后，admin 输入设备后 5 位确认，后端推此事件 | `{"type": "probe_confirm", "requestId": "<uuid>", "confirmToken": "<uuid>"}` |
@@ -2490,12 +2490,12 @@ Server-Sent Events（SSE）持久连接，用于接收服务端实时推送。
   "success": true,
   "data": {
     "maintenanceMode": false,
-    "version": "v0.3.2"
+    "version": "v1.1.2-beta.3"
   }
 }
 ```
 
-> `version` 为构建时注入的 git tag 名称（如 `v0.3.2`），非严格 semver。
+> `version` 为构建时注入的 git tag 名称（如 `v1.1.2-beta.3`），非严格 semver。
 
 ---
 
@@ -2585,82 +2585,60 @@ AMAS 算法指标快照（需 Admin Token）。
 
 ## 18. V1 兼容层
 
-> **⚠️ 永久冻结 / 已弃用 — 新客户端禁止接入**
+> **⚠️ 已停止维护 — 所有端点返回 410 Gone**
 >
-> `/api/v1/*` 为历史兼容层，于 **v0.6.0-beta.4（2026-05-21）起正式标记弃用**，预计在 **v2.0.0（2027-01-01）随 major bump 一并移除**。
+> `/api/v1/*` 为历史兼容层，于 **v0.6.0-beta.4（2026-05-21）起停止处理业务逻辑**，全部端点统一返回 **410 Gone**，预计在 **v2.0.0（2027-01-01）随 major bump 一并移除路由**。
 >
-> - **不接受任何新功能或破坏性变更**：字段集永久冻结，不会同步 AMAS 算法改进。
-> - **不触发 AMAS 自适应引擎**：`POST /api/v1/records` 仅做 5 秒去重，不更新 ELO / word_state；使用 v1 层意味着**静默退化为非自适应学习**。
+> - **业务逻辑已冻结**：v1 层不再读写任何数据，不触发 AMAS 自适应引擎，调用方无法再获取单词、记录或会话数据。
 > - **运行时弃用信号**：所有 v1 端点响应均携带 `Deprecation` + `Sunset` header（RFC 8594），客户端 logger 应据此告警并引导升级。
 > - **现有调用方**：当前 iOS / Web 客户端**均已迁移至 `/api/*` 主端点**，无任何生产流量经过 v1 层。
->
-> **迁移指引**：将 `/api/v1/words` → `/api/words`，`/api/v1/records` → `/api/records`，`/api/v1/study-config` → `/api/study-config`，`/api/v1/learning/session` → `/api/learning/sessions`。
 
 **路径前缀：** `/api/v1`
-**认证：** Bearer Token（必须）
-**说明：** 历史兼容层，永久冻结，不触发 AMAS 自适应引擎
+**认证：** 无（请求未进入业务逻辑即被 410 拦截）
 
 ---
 
-### GET /api/v1/words
+### 统一 410 Gone 响应
 
-分页获取单词列表。仅支持 `page`、`perPage` 查询参数；v1 兼容层不支持 `search`。
+以下所有端点均返回 410 Gone，不接受任何请求参数，响应体一致：
 
----
+- `GET /api/v1/words`
+- `GET /api/v1/words/:id`
+- `GET /api/v1/records`
+- `POST /api/v1/records`
+- `GET /api/v1/study-config`
+- `POST /api/v1/learning/session`
 
-### GET /api/v1/words/:id
-
-获取单个单词。
-
----
-
-### GET /api/v1/records
-
-分页获取学习记录。
-
----
-
-### POST /api/v1/records
-
-创建学习记录（**不触发 AMAS**，不返回 AMAS 计算结果）。
-
-**请求体：**
+**响应 410：**
 ```json
 {
-  "wordId": "<uuid>",
-  "isCorrect": true,
-  "responseTimeMs": 1200
+  "error": "GONE",
+  "message": "/api/v1/* 端点已停止维护，请迁移至 /api/* 主端点",
+  "sunset": "Fri, 01 Jan 2027 00:00:00 GMT",
+  "migrationDoc": "https://docs.wordforge.app/api/v1-deprecation"
 }
 ```
 
-**响应 200：** 直接返回 `LearningRecord` 对象（结构同 §5 头部定义），无 `amasResult` / `duplicate` 封装。
+**响应头（RFC 8594，整个 `/api/v1/*` 路由器统一注入）：**
 
-> **幂等行为**：同一用户对同一 `wordId` 的相同 `isCorrect` 结果，在 **5 秒内**重复提交会被服务端去重返回既有记录（该规则仅存在于 v1，主线 `/api/records` 依赖 `clientRecordId` 持久去重）。
-
----
-
-### GET /api/v1/study-config
-
-获取学习配置（同 `/api/study-config`）。
+| 响应头 | 值 |
+|---|---|
+| `Deprecation` | `Wed, 21 May 2026 00:00:00 GMT` |
+| `Sunset` | `Fri, 01 Jan 2027 00:00:00 GMT` |
+| `Link` | `<https://docs.wordforge.app/api/v1-deprecation>; rel="sunset"` |
 
 ---
 
-### POST /api/v1/learning/session
+### 迁移对照表
 
-创建或恢复学习会话（轻量版）。
-
-**请求体：** 空
-
-**响应 200：**
-```json
-{
-  "success": true,
-  "data": {
-    "sessionId": "<uuid>",
-    "resumed": false
-  }
-}
-```
+| v1 路径 | 新路径 |
+|---|---|
+| `GET /api/v1/words` | `GET /api/words` |
+| `GET /api/v1/words/:id` | `GET /api/words/:id` |
+| `GET /api/v1/records` | `GET /api/records` |
+| `POST /api/v1/records` | `POST /api/records` |
+| `GET /api/v1/study-config` | `GET /api/study-config` |
+| `POST /api/v1/learning/session` | `POST /api/learning/session` |
 
 ---
 

@@ -26,7 +26,7 @@ admin REPL ──POST /api/admin/probe──► 后端
                        POST /api/probe/results { status: "confirm_required", confirmToken }
                                        │  缓存 ticket（60s TTL）
                                        ▼
-                       admin REPL ──POST /probe/:req/confirm──► 后端
+                       admin REPL ──POST /api/admin/probe/:request_id/confirm──► 后端
                                        │  校验 device_id 后 5 位 + 推 SseEvent::ProbeConfirm
                                        ▼
                        客户端 SSE ◄────┘
@@ -384,7 +384,7 @@ ctx schema 一旦发布，**字段只增不减、不改名**。需要破坏性�
 | ctx 包装（Worker 内） | `admin-ui/src/workers/probe/build-ctx.ts` |
 | 沙箱 eval | `admin-ui/src/workers/probe/runner.worker.ts` |
 | 主线程编排 / 确认链 / 序列化 | `admin-ui/src/workers/probe/api-bridge.ts` |
-| SSE 解析分支 | `admin-ui/src/api/client.ts`（`onProbeRequest` / `onProbeConfirm`） |
+| SSE 解析分支 | `admin-ui/src/api/http.ts`（`onProbeRequest` / `onProbeConfirm`） |
 | 启动钩子 | `admin-ui/src/App.tsx`（`installRingBuffers` + `startProbeBridge`） |
 | 后端 SSE 事件 | `src/state.rs::SseEvent::{ProbeRequest, ProbeConfirm}` |
 | 上报端点 | `src/routes/probe_results.rs` |
