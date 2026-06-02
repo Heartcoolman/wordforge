@@ -6,6 +6,22 @@
 
 ---
 
+## [v1.1.2-beta.4] — 2026-06-02 · Pre-release · 遥测硬识别 + AMAS 数据软拦截告警
+
+在 v1.1.2-beta.3 基础上叠加遥测身份强制与 AMAS 数据失败告警，其余一致。
+
+### ✨ 新增与变更
+
+- **遥测硬识别（破坏性契约变更，无开关）**：`POST /api/telemetry` 强制四要素——平台（`x-device-platform`）、版本（`x-app-version`）、时区（`payload.device.timezone`）、设备型号（`payload.device.model`，**新增必填字段**），缺任一直接 4xx；并校验设备已注册且归属一致（盗用 / 伪造 device_id → 403），归属为空时由首个登录用户认领。**需客户端配合上报 `device.model` 等字段，否则遥测被拦**
+- **AMAS 数据软拦截告警**：`metrics_flush` / `daily_aggregation` worker 与学习记录上报失败不再静默吞掉——失败不阻断流程，但主动告警。新增 `system_alerts` 表经 `/admin/monitoring` 监控时间线透出（admin 运维），受影响用户收应用内通知（小时桶去重防风暴）
+- **设备型号落库展示**：设备列表新增「型号」列、详情抽屉展示型号、CSV 导出含型号；版本 / 型号分布「未知」改「未上报」
+
+### 🗄️ 迁移
+
+- `m037` 新增 `system_alerts` 表；`m038` `client_devices` 新增 `model` 列
+
+---
+
 ## [v1.1.2-beta.3] — 2026-06-01 · Pre-release · 系统监控过载饱和信号 + SQLite 防 OOM 收紧
 
 在 v1.1.2-beta.2 基础上叠加两项运维加固，其余一致。
