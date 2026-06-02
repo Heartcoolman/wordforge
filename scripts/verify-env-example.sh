@@ -54,7 +54,7 @@ check SELF_WATCHDOG_FAILURE_THRESHOLD "3"
 check DATABASE_URL                  "./data/learning.db"
 check SQLITE_BUSY_TIMEOUT_MS        "5000"
 check SQLITE_CONNECTION_TIMEOUT_MS  "250"
-check SQLITE_POOL_SIZE              "16"
+check SQLITE_POOL_SIZE              "8"
 
 # --- Auth (仅检查非密钥数值项) ---
 check JWT_EXPIRES_IN_HOURS          "24"
@@ -95,6 +95,7 @@ check PAGINATION_MAX_SIZE           "100"
 # --- Strict mode ---
 check STRICT_MODE_ENABLED           "false"
 check STRICT_MODE_HARD_BLOCK        "false"
+check RECORDS_OUTBOX_ASYNC          "false"
 
 # --- Probe ---
 check PROBE_ENABLED                 "false"
