@@ -85,6 +85,21 @@ async fn batch_create_records(
             .await?;
     }
 
+    // m037 软拦截:部分/全部失败时告警(admin 监控 + 给该 user 应用内通知),不阻断响应。
+    if !errors.is_empty() {
+        let severity = if has_new_records { "warning" } else { "error" };
+        crate::services::alerting::raise_data_alert(
+            &state,
+            "amas.learning_record",
+            "batch_process_failed",
+            severity,
+            "学习数据上报处理失败".to_string(),
+            format!("批量上报 {} 条中 {} 条处理失败", req.records.len(), errors.len()),
+            Some(user_id.clone()),
+        )
+        .await;
+    }
+
     let payload = serde_json::json!({
         "count": results.len(),
         "failed": errors.len(),

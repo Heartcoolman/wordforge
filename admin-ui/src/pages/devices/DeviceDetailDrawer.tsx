@@ -101,6 +101,7 @@ export function DeviceDetailDrawer(props: { device: DeviceDetailSeed | null; onC
             <div class="grid grid-cols-2 md:grid-cols-3 gap-3">
               <Field label="用户 ID">{detail()?.userId ?? d().userId ?? '—'}</Field>
               <Field label="App 版本"><span class="font-mono">{detail()?.appVersion ?? d().appVersion ?? '—'}</span></Field>
+              <Field label="设备型号"><span class="font-mono">{detail()?.model ?? '未上报'}</span></Field>
               <Field label="国家 / 地区">
                 <Show when={detail()?.country} fallback={<span title="该设备暂无可反查的 GeoIP 样本">—</span>}>
                   <span class="font-mono">{detail()!.country}</span>

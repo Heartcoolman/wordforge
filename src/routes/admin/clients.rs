@@ -336,6 +336,7 @@ pub(crate) struct ListedDevice {
     platform: String,
     user_id: Option<String>,
     app_version: Option<String>,
+    model: Option<String>,
     country: Option<String>,
     first_seen_at: String,
     last_seen_at: String,
@@ -349,6 +350,7 @@ impl From<ClientDevice> for ListedDevice {
             platform: d.platform,
             user_id: d.user_id,
             app_version: d.app_version,
+            model: d.model,
             country: d.country,
             first_seen_at: d.first_seen_at,
             last_seen_at: d.last_seen_at,
@@ -688,6 +690,7 @@ struct ClientDetail {
     platform: String,
     user_id: Option<String>,
     app_version: Option<String>,
+    model: Option<String>,
     country: Option<String>,
     first_seen_at: String,
     last_seen_at: String,
@@ -755,6 +758,7 @@ async fn get_client_detail(
         platform: device.platform,
         user_id: device.user_id,
         app_version: device.app_version,
+        model: device.model,
         country: device.country,
         first_seen_at: device.first_seen_at,
         last_seen_at: device.last_seen_at,
@@ -790,6 +794,7 @@ mod tests {
             app_version: None,
             country: None,
             last_ip: None,
+            model: None,
         }
     }
 

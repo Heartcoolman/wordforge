@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use crate::store::{Store, StoreError};
 
-/// 12 列 SELECT 的统一行解析(device_id..app_version, country, last_ip)。
+/// 13 列 SELECT 的统一行解析(device_id..app_version, country, last_ip, model)。
 /// SELECT 顺序必须严格对齐:列变化时只改这一处。
 fn row_to_client_device(r: &rusqlite::Row<'_>) -> rusqlite::Result<ClientDevice> {
     Ok(ClientDevice {
@@ -20,6 +20,7 @@ fn row_to_client_device(r: &rusqlite::Row<'_>) -> rusqlite::Result<ClientDevice>
         app_version: r.get(9)?,
         country: r.get(10)?,
         last_ip: r.get(11)?,
+        model: r.get(12)?,
     })
 }
 
@@ -44,6 +45,9 @@ pub struct ClientDevice {
     /// m027:最近一次请求源 IP。仅用于审计与故障排查,不对前端暴露(见 admin/clients 路由过滤)。
     #[serde(default)]
     pub last_ip: Option<String>,
+    /// m038:遥测硬识别上报的设备型号(payload.device.model)。NULL=该设备从未上报过型号。
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 /// m027:强制升级策略一行(每平台独立)。
@@ -104,10 +108,12 @@ impl Store {
         user_id: &str,
         app_version: Option<&str>,
     ) -> Result<(), StoreError> {
-        self.upsert_client_device_with_extras(device_id, platform, user_id, app_version, None, None)
+        self.upsert_client_device_with_extras(
+            device_id, platform, user_id, app_version, None, None, None,
+        )
     }
 
-    /// m027:同上,再加 `country` 和 `last_ip`(GeoIP 反查产物)。
+    /// m027:同上,再加 `country` 和 `last_ip`(GeoIP 反查产物)。m038:再加 `model`(设备型号)。
     /// 所有 Option 字段都用 COALESCE 保留 DB 已有值。
     pub fn upsert_client_device_with_extras(
         &self,
@@ -117,21 +123,23 @@ impl Store {
         app_version: Option<&str>,
         country: Option<&str>,
         last_ip: Option<&str>,
+        model: Option<&str>,
     ) -> Result<(), StoreError> {
         let conn = self.conn()?;
         conn.execute(
             "INSERT INTO client_devices
-                (device_id, platform, user_id, app_version, country, last_ip,
+                (device_id, platform, user_id, app_version, country, last_ip, model,
                  first_seen_at, last_seen_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, datetime('now'), datetime('now'))
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now'), datetime('now'))
              ON CONFLICT(device_id) DO UPDATE SET
                 last_seen_at = datetime('now'),
                 platform = ?2,
                 user_id = ?3,
                 app_version = COALESCE(?4, app_version),
                 country = COALESCE(?5, country),
-                last_ip = COALESCE(?6, last_ip)",
-            params![device_id, platform, user_id, app_version, country, last_ip],
+                last_ip = COALESCE(?6, last_ip),
+                model = COALESCE(?7, model)",
+            params![device_id, platform, user_id, app_version, country, last_ip, model],
         )?;
         Ok(())
     }
@@ -156,7 +164,7 @@ impl Store {
         let mut stmt = conn.prepare(
             "SELECT device_id, platform, user_id, first_seen_at, last_seen_at,
                     is_banned, banned_at, banned_by, ban_reason, app_version,
-                    country, last_ip
+                    country, last_ip, model
              FROM client_devices
              WHERE last_seen_at >= datetime('now', ?1) OR is_banned = 1
              ORDER BY is_banned DESC, last_seen_at DESC",
@@ -243,7 +251,7 @@ impl Store {
         let mut stmt = conn.prepare(
             "SELECT device_id, platform, user_id, first_seen_at, last_seen_at,
                     is_banned, banned_at, banned_by, ban_reason, app_version,
-                    country, last_ip
+                    country, last_ip, model
              FROM client_devices
              WHERE user_id = ?1
              ORDER BY last_seen_at DESC
@@ -324,7 +332,7 @@ impl Store {
         let select_sql = format!(
             "SELECT device_id, platform, user_id, first_seen_at, last_seen_at,
                     is_banned, banned_at, banned_by, ban_reason, app_version,
-                    country, last_ip
+                    country, last_ip, model
              FROM client_devices
              {where_clause}
              ORDER BY is_banned DESC, last_seen_at DESC
@@ -592,6 +600,25 @@ impl Store {
             |r| r.get(0),
         )?;
         Ok(exists)
+    }
+
+    /// m038 遥测硬识别:查设备注册状态与归属(三态)。
+    /// Ok(None)            = 设备未注册;
+    /// Ok(Some(None))      = 已注册但归属未认领(user_id 为 NULL,首个带 token 的 user 可 claim);
+    /// Ok(Some(Some(uid))) = 已注册且归属 uid。
+    pub fn get_client_device_owner(
+        &self,
+        device_id: &str,
+    ) -> Result<Option<Option<String>>, StoreError> {
+        let conn = self.conn()?;
+        let owner = conn
+            .query_row(
+                "SELECT user_id FROM client_devices WHERE device_id = ?1",
+                params![device_id],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()?;
+        Ok(owner)
     }
 
     pub fn get_data_upload_status(

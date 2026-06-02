@@ -303,13 +303,17 @@ async fn it_telemetry_sampling_gate_enforced() {
                 Method::POST,
                 "/api/telemetry",
                 Some(serde_json::json!({
+                    // 遥测硬识别:payload 需含 timezone + model(四要素之二)
                     "eventType": et,
                     "clientTs": ts,
-                    "payload": { "device": { "timezone": "UTC", "language": "en" } }
+                    "payload": { "device": { "timezone": "UTC", "language": "en", "model": "TestPhone1" } }
                 })),
                 &[
                     ("authorization", auth_header(&token)),
                     ("x-device-id", device.to_string()),
+                    // 遥测硬识别:平台 + 版本号走 header(四要素之二)
+                    ("x-device-platform", "web".to_string()),
+                    ("x-app-version", "1.0.0".to_string()),
                 ],
             )
             .await;
@@ -322,6 +326,19 @@ async fn it_telemetry_sampling_gate_enforced() {
         conn.query_row("SELECT COUNT(*) FROM telemetry_events", [], |r| r.get(0))
             .unwrap()
     };
+
+    // 遥测硬识别:device 必须已注册。seed 三台未认领设备(user_id NULL),submit 时由
+    // handler claim(owner NULL → 放行并写入当前 user)。中间件已对 telemetry 跳过 upsert,
+    // 故测试需自行 seed,不能依赖中间件注册。
+    for dev in ["dev-keep", "dev-drop", "dev-locked"] {
+        let conn = store.connection().unwrap();
+        conn.execute(
+            "INSERT INTO client_devices (device_id, platform, first_seen_at, last_seen_at)
+             VALUES (?1, 'web', datetime('now'), datetime('now'))",
+            rusqlite::params![dev],
+        )
+        .unwrap();
+    }
 
     // 1) 默认 rate=1.0 → periodic 落库
     let before = count_events(store);

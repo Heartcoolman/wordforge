@@ -70,6 +70,13 @@ pub async fn device_middleware(
         return next.run(req).await;
     }
 
+    // m038:遥测主上报端点的设备注册/归属/型号落库收归 handler,在硬识别核验通过后再写;
+    // 中间件此处跳过 upsert——否则会在核验前无条件覆盖 owner,使 handler 的归属核验失效
+    // 并污染受害者设备。ban 检查与 upgrade hint 仍生效。
+    // axum nest 对 `/api/telemetry` 与 `/api/telemetry/` 两种形态都路由到 submit,故都需跳过。
+    let tele_path = req.uri().path();
+    let skip_telemetry_upsert = tele_path == "/api/telemetry" || tele_path == "/api/telemetry/";
+
     let device_id = req
         .headers()
         .get("x-device-id")
@@ -146,7 +153,7 @@ pub async fn device_middleware(
             .filter(|c| c.token_type == "user")
             .map(|c| c.sub);
 
-        if let Some(ref uid) = user_id {
+        if let (Some(uid), false) = (user_id.as_ref(), skip_telemetry_upsert) {
             let upsert = {
                 let did = did.clone();
                 let platform = platform.to_string();
@@ -163,6 +170,7 @@ pub async fn device_middleware(
                             app_version.as_deref(),
                             country.as_deref(),
                             client_ip.as_deref(),
+                            None, // model:中间件无 payload,型号由 telemetry handler 落库
                         )
                     })
                     .await

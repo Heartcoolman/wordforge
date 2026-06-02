@@ -552,6 +552,8 @@ CREATE TABLE IF NOT EXISTS client_devices (
     -- m024:GeoIP 反查的 ISO-3166-1 alpha-2 国家码(CN/US/...);last_ip 兼记本次 lookup 源
     country TEXT DEFAULT NULL,
     last_ip TEXT DEFAULT NULL,
+    -- m038:遥测硬识别上报的设备型号(payload.device.model),供 admin 设备列表/详情展示
+    model TEXT DEFAULT NULL,
     PRIMARY KEY (device_id)
 );
 CREATE INDEX IF NOT EXISTS idx_client_devices_user ON client_devices(user_id, last_seen_at DESC);
@@ -587,6 +589,24 @@ CREATE TABLE IF NOT EXISTS telemetry_events (
 );
 CREATE INDEX IF NOT EXISTS idx_telemetry_device ON telemetry_events(device_id, server_ts DESC);
 CREATE INDEX IF NOT EXISTS idx_telemetry_server_ts ON telemetry_events(server_ts DESC);
+
+-- m037:系统级告警表(AMAS 数据软拦截告警的可写载体)。
+-- admin 无应用内通知箱,告警靠此表落库 + /api/admin/monitoring/events 时间线透出。
+-- dedup key=(source,kind):同源同类失败合并计数,防 worker 周期失败把表打爆。
+CREATE TABLE IF NOT EXISTS system_alerts (
+    id TEXT NOT NULL,
+    source TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    severity TEXT NOT NULL,
+    title TEXT NOT NULL,
+    message TEXT NOT NULL DEFAULT '',
+    count INTEGER NOT NULL DEFAULT 1,
+    first_seen_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    PRIMARY KEY (id),
+    UNIQUE (source, kind)
+);
+CREATE INDEX IF NOT EXISTS idx_system_alerts_last_seen ON system_alerts(last_seen_at DESC);
 
 CREATE TABLE IF NOT EXISTS feedback_items (
     id TEXT NOT NULL,

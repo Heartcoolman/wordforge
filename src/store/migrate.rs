@@ -72,6 +72,8 @@ fn migrations() -> Vec<(&'static str, MigrationFn)> {
         ("034_admin_rbac_api_keys", m034_admin_rbac_api_keys),
         ("035_amas_canary_crowd_filters", m035_amas_canary_crowd_filters),
         ("036_feedback_announcements", m036_feedback_announcements),
+        ("037_system_alerts", m037_system_alerts),
+        ("038_client_devices_model", m038_client_devices_model),
     ]
 }
 
@@ -133,6 +135,8 @@ fn migrations_down() -> Vec<(&'static str, MigrationFn)> {
             m035_amas_canary_crowd_filters_down,
         ),
         ("036_feedback_announcements", m036_feedback_announcements_down),
+        ("037_system_alerts", m037_system_alerts_down),
+        ("038_client_devices_model", m038_client_devices_model_down),
     ]
 }
 
@@ -2007,6 +2011,72 @@ fn m036_feedback_announcements_down(store: &Store) -> Result<(), StoreError> {
          DROP INDEX IF EXISTS idx_feedback_announcements_kind;
          DROP TABLE IF EXISTS feedback_announcements;",
     )?;
+    Ok(())
+}
+
+/// m037:系统告警表(AMAS 数据软拦截告警的可写载体)。admin 无应用内通知箱,
+/// 失败告警落此表 + /api/admin/monitoring/events 时间线透出。
+/// dedup key=(source,kind):同源同类失败合并计数,防 worker 周期失败打爆表。
+fn m037_system_alerts(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS system_alerts (
+            id            TEXT NOT NULL,
+            source        TEXT NOT NULL,
+            kind          TEXT NOT NULL,
+            severity      TEXT NOT NULL,
+            title         TEXT NOT NULL,
+            message       TEXT NOT NULL DEFAULT '',
+            count         INTEGER NOT NULL DEFAULT 1,
+            first_seen_at TEXT NOT NULL,
+            last_seen_at  TEXT NOT NULL,
+            PRIMARY KEY (id),
+            UNIQUE (source, kind)
+        );
+        CREATE INDEX IF NOT EXISTS idx_system_alerts_last_seen
+            ON system_alerts(last_seen_at DESC);",
+    )?;
+    Ok(())
+}
+
+/// m037 down:DROP 表 + 索引。仅 dev/test。
+fn m037_system_alerts_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS idx_system_alerts_last_seen;
+         DROP TABLE IF EXISTS system_alerts;",
+    )?;
+    Ok(())
+}
+
+/// m038:client_devices 加 model 列(遥测硬识别上报的设备型号)。幂等加列。
+fn m038_client_devices_model(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    let cols: Vec<String> = conn
+        .prepare("PRAGMA table_info(client_devices)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .collect();
+    if !cols.iter().any(|c| c == "model") {
+        conn.execute(
+            "ALTER TABLE client_devices ADD COLUMN model TEXT DEFAULT NULL",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+/// m038 down:DROP model 列。仅 dev/test。
+fn m038_client_devices_model_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    let cols: Vec<String> = conn
+        .prepare("PRAGMA table_info(client_devices)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .collect();
+    if cols.iter().any(|c| c == "model") {
+        conn.execute("ALTER TABLE client_devices DROP COLUMN model", [])?;
+    }
     Ok(())
 }
 

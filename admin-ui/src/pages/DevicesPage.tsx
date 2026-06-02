@@ -150,7 +150,7 @@ export default function DevicesPage() {
       uiStore.toast.info('当前页无数据可导出');
       return;
     }
-    const header = ['deviceId', 'platform', 'userId', 'appVersion', 'country', 'firstSeenAt', 'lastSeenAt', 'isBanned'];
+    const header = ['deviceId', 'platform', 'userId', 'appVersion', 'model', 'country', 'firstSeenAt', 'lastSeenAt', 'isBanned'];
     const escape = (v: unknown) => {
       const s = v == null ? '' : String(v);
       return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
@@ -773,7 +773,7 @@ export default function DevicesPage() {
                         {(r, idx) => (
                           <div class="grid grid-cols-[110px_1fr_60px] items-center gap-2 py-1 text-[12.5px]">
                             <span class="font-mono tabular-nums">
-                              <span class={idx() === 0 ? 'text-success-strong font-semibold' : ''}>{r.version === 'unknown' ? '未知' : r.version}</span>
+                              <span class={idx() === 0 ? 'text-success-strong font-semibold' : ''}>{r.version === 'unknown' ? '未上报' : r.version}</span>
                             </span>
                             <div class="h-2 rounded-full bg-surface-secondary overflow-hidden">
                               <div
@@ -1251,6 +1251,13 @@ export default function DevicesPage() {
                       title: '版本',
                       render: (r: ListedDevice) => (
                         <span class="font-mono text-xs tabular-nums">{r.appVersion ?? '—'}</span>
+                      ),
+                    },
+                    {
+                      key: 'model',
+                      title: '型号',
+                      render: (r: ListedDevice) => (
+                        <span class="font-mono text-xs tabular-nums">{r.model ?? '未上报'}</span>
                       ),
                     },
                     {

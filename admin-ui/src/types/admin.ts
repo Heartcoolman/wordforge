@@ -60,6 +60,8 @@ export interface ClientDeviceRow {
   platform: string;
   userId: string | null;
   appVersion: string | null;
+  /** m038:遥测硬识别上报的设备型号,未上报为 null */
+  model: string | null;
   /** m027:GeoIP 反查 ISO-3166-1 alpha-2;无 mmdb / 私网 IP 时为 null */
   country: string | null;
   firstSeenAt: string;
@@ -74,6 +76,8 @@ export interface ListedDevice {
   platform: string;
   userId: string | null;
   appVersion: string | null;
+  /** m038:遥测硬识别上报的设备型号,未上报为 null */
+  model: string | null;
   country: string | null;
   firstSeenAt: string;
   lastSeenAt: string;

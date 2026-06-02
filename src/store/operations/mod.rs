@@ -26,6 +26,7 @@ pub mod resource_packs;
 pub mod sessions;
 pub mod settings_config;
 pub mod study_configs;
+pub mod system_alerts;
 pub mod system_settings;
 pub mod telemetry;
 pub mod update_audit;

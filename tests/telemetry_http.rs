@@ -13,8 +13,31 @@ use common::app::spawn_test_server;
 use common::auth::{auth_header, login_and_get_token};
 use common::http::{request, response_json};
 
+use learning_backend::store::Store;
+
 fn dev_header(device_id: &str) -> (&'static str, String) {
     ("x-device-id", device_id.to_string())
+}
+
+/// 遥测硬识别:四要素 header(token + device + 平台 + 版本)。
+fn hard_headers(token: &str, device_id: &str) -> [(&'static str, String); 4] {
+    [
+        ("authorization", auth_header(token)),
+        ("x-device-id", device_id.to_string()),
+        ("x-device-platform", "web".to_string()),
+        ("x-app-version", "1.0.0".to_string()),
+    ]
+}
+
+/// 遥测硬识别:seed 一台未认领设备(user_id NULL),submit 时由 handler claim。
+fn seed_unclaimed_device(store: &Store, device_id: &str) {
+    let conn = store.connection().unwrap();
+    conn.execute(
+        "INSERT OR IGNORE INTO client_devices (device_id, platform, first_seen_at, last_seen_at)
+         VALUES (?1, 'web', datetime('now'), datetime('now'))",
+        rusqlite::params![device_id],
+    )
+    .unwrap();
 }
 
 #[tokio::test]
@@ -81,15 +104,18 @@ async fn it_telemetry_on_demand_requires_request_id() {
 async fn it_telemetry_negative_numeric_payloads_return_422() {
     // 表驱动：4 个负数字段（sessionDurationSecs / errorCount / actionsPerMin / avgResponseTimeMs）
     // 都应被 INVALID_PAYLOAD 拒绝。
+    // 负数校验在硬识别四要素+归属核验之后,故 payload 需含 device.timezone/model,
+    // 请求带平台/版本 header,并 seed 设备。
     let cases: &[(&str, serde_json::Value)] = &[
-        ("sessionDurationSecs", serde_json::json!({"sessionDurationSecs": -1})),
-        ("errorCount", serde_json::json!({"errorCount": -3})),
-        ("actionsPerMin", serde_json::json!({"actionsPerMin": -0.5})),
-        ("avgResponseTimeMs", serde_json::json!({"avgResponseTimeMs": -2.0})),
+        ("sessionDurationSecs", serde_json::json!({"device":{"timezone":"UTC","model":"M"},"sessionDurationSecs": -1})),
+        ("errorCount", serde_json::json!({"device":{"timezone":"UTC","model":"M"},"errorCount": -3})),
+        ("actionsPerMin", serde_json::json!({"device":{"timezone":"UTC","model":"M"},"actionsPerMin": -0.5})),
+        ("avgResponseTimeMs", serde_json::json!({"device":{"timezone":"UTC","model":"M"},"avgResponseTimeMs": -2.0})),
     ];
     for (field, payload) in cases {
         let app = spawn_test_server().await;
         let token = login_and_get_token(&app.app).await;
+        seed_unclaimed_device(app.state.store(), "d1");
         let resp = request(
             &app.app,
             Method::POST,
@@ -99,7 +125,7 @@ async fn it_telemetry_negative_numeric_payloads_return_422() {
                 "clientTs": "2026-05-18T00:00:00Z",
                 "payload": payload
             })),
-            &[("authorization", auth_header(&token)), dev_header("d1")],
+            &hard_headers(&token, "d1"),
         )
         .await;
         let (status, _, body) = response_json(resp).await;
@@ -116,6 +142,7 @@ async fn it_telemetry_negative_numeric_payloads_return_422() {
 async fn it_telemetry_minimal_heartbeat_success() {
     let app = spawn_test_server().await;
     let token = login_and_get_token(&app.app).await;
+    seed_unclaimed_device(app.state.store(), "dev-mini");
     let resp = request(
         &app.app,
         Method::POST,
@@ -123,9 +150,9 @@ async fn it_telemetry_minimal_heartbeat_success() {
         Some(serde_json::json!({
             "eventType": "heartbeat",
             "clientTs": "2026-05-18T00:00:00Z",
-            "payload": {}
+            "payload": {"device": {"timezone": "UTC", "model": "TestPhone"}}
         })),
-        &[("authorization", auth_header(&token)), dev_header("dev-mini")],
+        &hard_headers(&token, "dev-mini"),
     )
     .await;
     let (status, _, body) = response_json(resp).await;
@@ -149,6 +176,7 @@ async fn it_telemetry_full_payload_extracts_summary_fields() {
             "browserVersion": "120",
             "timezone": "Asia/Shanghai",
             "language": "zh-CN",
+            "model": "MacBookPro18,1",
             "touchSupport": false,
             "onlineStatus": true,
         },
@@ -166,6 +194,7 @@ async fn it_telemetry_full_payload_extracts_summary_fields() {
         "avgResponseTimeMs": 150.0,
         "featureUsage": {"flashcard": 10, "quiz": 5}
     });
+    seed_unclaimed_device(app.state.store(), "dev-full");
     let resp = request(
         &app.app,
         Method::POST,
@@ -175,7 +204,7 @@ async fn it_telemetry_full_payload_extracts_summary_fields() {
             "clientTs": "2026-05-18T00:00:00Z",
             "payload": payload
         })),
-        &[("authorization", auth_header(&token)), dev_header("dev-full")],
+        &hard_headers(&token, "dev-full"),
     )
     .await;
     let (status, _, body) = response_json(resp).await;
@@ -186,6 +215,7 @@ async fn it_telemetry_full_payload_extracts_summary_fields() {
 async fn it_telemetry_on_demand_with_request_id_succeeds() {
     let app = spawn_test_server().await;
     let token = login_and_get_token(&app.app).await;
+    seed_unclaimed_device(app.state.store(), "dev-od");
     let resp = request(
         &app.app,
         Method::POST,
@@ -194,9 +224,9 @@ async fn it_telemetry_on_demand_with_request_id_succeeds() {
             "eventType": "on_demand",
             "requestId": "req-abc",
             "clientTs": "2026-05-18T00:00:00Z",
-            "payload": {"sessionDurationSecs": 100}
+            "payload": {"device": {"timezone": "UTC", "model": "TestPhone"}, "sessionDurationSecs": 100}
         })),
-        &[("authorization", auth_header(&token)), dev_header("dev-od")],
+        &hard_headers(&token, "dev-od"),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::OK);

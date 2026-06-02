@@ -435,7 +435,24 @@ async fn create_record(
     State(state): State<AppState>,
     JsonBody(req): JsonBody<CreateRecordRequest>,
 ) -> Result<axum::response::Response, AppError> {
-    let result = process_single_record(&auth.user_id, &req, &state).await?;
+    // m037 软拦截:处理失败时告警 admin(单条失败客户端已收错误响应,不重复发 user 通知),
+    // 仍返回原错误不吞。
+    let result = match process_single_record(&auth.user_id, &req, &state).await {
+        Ok(r) => r,
+        Err(e) => {
+            crate::services::alerting::raise_data_alert(
+                &state,
+                "amas.learning_record",
+                "single_process_failed",
+                "warning",
+                "学习数据上报处理失败".to_string(),
+                format!("单条上报失败: {}", e.code),
+                None,
+            )
+            .await;
+            return Err(e);
+        }
+    };
     if result.duplicate {
         Ok(ok(result).into_response())
     } else {

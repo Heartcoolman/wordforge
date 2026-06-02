@@ -97,6 +97,8 @@ export interface ClientDetail {
   platform: string;
   userId: string | null;
   appVersion: string | null;
+  /** m038:遥测硬识别上报的设备型号,未上报为 null */
+  model: string | null;
   /** GeoIP 反查国家/地区码(无样本时 null) */
   country: string | null;
   firstSeenAt: string;

@@ -18,6 +18,14 @@ pub async fn run(store: &Store) {
                 Ok(stats) => stats,
                 Err(e) => {
                     tracing::warn!(error = %e, "Daily aggregation: failed to query stats");
+                    // m037 软拦截:统计失败会连带跳过下方 ELO/阶段快照,主动告警 admin。
+                    let _ = store.record_system_alert(
+                        "amas.daily_aggregation",
+                        "stats_failed",
+                        "error",
+                        "AMAS 日聚合统计失败",
+                        &e.to_string(),
+                    );
                     return;
                 }
             };
@@ -38,9 +46,23 @@ pub async fn run(store: &Store) {
         // AMAS 看板：ELO 日快照（散点 7d Δ 着色）+ 阶段分布日快照（趋势线）
         if let Err(e) = store.snapshot_user_elo_daily(&today) {
             tracing::warn!(error = %e, "Failed to snapshot user_elo_history");
+            let _ = store.record_system_alert(
+                "amas.daily_aggregation",
+                "elo_snapshot_failed",
+                "warning",
+                "AMAS ELO 日快照失败",
+                &e.to_string(),
+            );
         }
         if let Err(e) = store.snapshot_amas_stage_daily(&today) {
             tracing::warn!(error = %e, "Failed to snapshot amas stage distribution");
+            let _ = store.record_system_alert(
+                "amas.daily_aggregation",
+                "stage_snapshot_failed",
+                "warning",
+                "AMAS 阶段分布日快照失败",
+                &e.to_string(),
+            );
         }
 
         tracing::info!(

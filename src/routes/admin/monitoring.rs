@@ -493,7 +493,7 @@ async fn alert_events(
     let cutoff_rfc = cutoff_dt.to_rfc3339();
 
     // DB 派生:worker 最近执行 + 近窗口 AMAS 异常计数/最近时间
-    let (workers, anomaly) = state
+    let (workers, anomaly, sys_alerts) = state
         .run_store_task("admin.monitoring.events", move |store| {
             let workers = store.list_worker_last_run()?;
             // is_anomaly 列若不存在则吞错返回 (0, None),不产生异常告警
@@ -506,12 +506,14 @@ async fn alert_events(
                     |r| Ok((r.get(0)?, r.get(1)?)),
                 )
                 .unwrap_or((0, None));
-            Ok::<_, crate::store::StoreError>((workers, anomaly))
+            // m037:AMAS 软拦截告警(失败则空 Vec,保持降级语义)
+            let sys_alerts = store.list_recent_system_alerts(&cutoff_rfc).unwrap_or_default();
+            Ok::<_, crate::store::StoreError>((workers, anomaly, sys_alerts))
         })
         .await
         .ok()
         .and_then(Result::ok)
-        .unwrap_or((Vec::new(), (0, None)));
+        .unwrap_or((Vec::new(), (0, None), Vec::new()));
 
     let mut events: Vec<serde_json::Value> = Vec::new();
 
@@ -590,11 +592,24 @@ async fn alert_events(
         }));
     }
 
-    // 最新在前,限 30 条
+    // 4) 系统告警(m037 AMAS 数据软拦截:worker 落库失败 / 学习记录处理失败)
+    for a in &sys_alerts {
+        let ts_ms = chrono::DateTime::parse_from_rfc3339(&a.last_seen_at)
+            .map(|dt| dt.timestamp_millis())
+            .unwrap_or_else(|_| Utc::now().timestamp_millis());
+        events.push(json!({
+            "tsMs": ts_ms,
+            "severity": a.severity,
+            "title": a.title,
+            "desc": format!("近 {hours}h 内 {} 次 · 首次 {}", a.count, a.first_seen_at),
+        }));
+    }
+
+    // 最新在前,限 50 条(放宽自 30,避免新告警被 worker resolved 绿点挤掉)
     events.sort_by(|a, b| {
         b["tsMs"].as_i64().unwrap_or(0).cmp(&a["tsMs"].as_i64().unwrap_or(0))
     });
-    events.truncate(30);
+    events.truncate(50);
 
     Ok(ok(json!({ "events": events })))
 }
