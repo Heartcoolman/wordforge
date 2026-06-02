@@ -2583,7 +2583,7 @@ AMAS 算法指标快照（需 Admin Token）。
 
 ---
 
-## 18. V1 兼容层
+## 18. V1 兼容层 {#v1-deprecation}
 
 > **⚠️ 已停止维护 — 所有端点返回 410 Gone**
 >
@@ -2615,7 +2615,7 @@ AMAS 算法指标快照（需 Admin Token）。
   "error": "GONE",
   "message": "/api/v1/* 端点已停止维护，请迁移至 /api/* 主端点",
   "sunset": "Fri, 01 Jan 2027 00:00:00 GMT",
-  "migrationDoc": "https://docs.wordforge.app/api/v1-deprecation"
+  "migrationDoc": "https://heartcoolman.github.io/wordforge/api-endpoints#v1-deprecation"
 }
 ```
 
@@ -2625,7 +2625,7 @@ AMAS 算法指标快照（需 Admin Token）。
 |---|---|
 | `Deprecation` | `Wed, 21 May 2026 00:00:00 GMT` |
 | `Sunset` | `Fri, 01 Jan 2027 00:00:00 GMT` |
-| `Link` | `<https://docs.wordforge.app/api/v1-deprecation>; rel="sunset"` |
+| `Link` | `<https://heartcoolman.github.io/wordforge/api-endpoints#v1-deprecation>; rel="sunset"` |
 
 ---
 

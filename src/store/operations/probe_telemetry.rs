@@ -478,10 +478,15 @@ impl Store {
     // ---------------------------------------------------------------------
 
     /// 单个 SQLite 表的 rowCount + lastWriteTs(用给定时间戳列)。
-    fn sink_count_and_last(&self, table: &str, ts_col: &str) -> Result<(i64, Option<String>), StoreError> {
+    fn sink_count_and_last(
+        &self,
+        table: &str,
+        ts_col: &str,
+    ) -> Result<(i64, Option<String>), StoreError> {
         let conn = self.conn()?;
         // table / ts_col 来自硬编码白名单(下方 sinks_status),非用户输入。
-        let count: i64 = conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))?;
+        let count: i64 =
+            conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))?;
         let last: Option<String> = conn
             .query_row(&format!("SELECT MAX({ts_col}) FROM {table}"), [], |r| {
                 r.get::<_, Option<String>>(0)

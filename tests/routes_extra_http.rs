@@ -188,10 +188,7 @@ async fn it_users_stats_no_records_returns_zero() {
 #[tokio::test]
 async fn it_users_unauthorized_paths() {
     let app = spawn_test_server().await;
-    for path in [
-        "/api/users/me",
-        "/api/users/me/stats",
-    ] {
+    for path in ["/api/users/me", "/api/users/me/stats"] {
         let resp = request(&app.app, Method::GET, path, None, &[]).await;
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "path {path}");
     }

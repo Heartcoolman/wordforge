@@ -9,7 +9,8 @@ import { Empty } from '@/components/ui/Empty';
 import { Tabs } from '@/components/ui/Tabs';
 import { Table } from '@/components/ui/Table';
 import { adminApi, type SseLiveEntry, type RecentlyActiveEntry, type TelemetrySummary, type DataChannelValue } from '@/api/admin';
-import type { ClientPlatformAgg, ClientVersionAgg, ClientUpgradePolicy, ListedDevice } from '@/types/admin';
+import { ApiError } from '@/api/http';
+import type { ClientPlatformAgg, ClientVersionAgg, ClientUpgradePolicy, ListedDevice, VersionGate } from '@/types/admin';
 import { uiStore } from '@/stores/ui';
 import { Switch } from '@/components/ui/Switch';
 import { DeviceDetailDrawer, type DeviceDetailSeed } from './devices/DeviceDetailDrawer';
@@ -75,6 +76,23 @@ export default function DevicesPage() {
   // m027:升级策略编辑态(per-platform draft;保存后 invalidate)
   const [policyDraft, setPolicyDraft] = createSignal<Record<string, Partial<ClientUpgradePolicy>>>({});
   const [savingPolicy, setSavingPolicy] = createSignal<string | null>(null);
+
+  // D4:全局客户端最低版本门控(strict-mode 运行时,即时生效)
+  const [versionGate, setVersionGate] = createSignal<VersionGate | null>(null);
+  const [vgEnabled, setVgEnabled] = createSignal(false);
+  const [vgMinVersion, setVgMinVersion] = createSignal('');
+  const [vgSaving, setVgSaving] = createSignal(false);
+  // 合法 semver(\d+.\d+.\d+) 前端预校验,把非法值拦在请求前
+  const VG_SEMVER_RE = /^\d+\.\d+\.\d+(?:[-+].+)?$/;
+  const vgVersionInvalid = createMemo(() => {
+    const v = vgMinVersion().trim();
+    return v.length > 0 && !VG_SEMVER_RE.test(v);
+  });
+  const vgDirty = createMemo(() => {
+    const g = versionGate();
+    if (!g) return false;
+    return vgEnabled() !== g.enabled || vgMinVersion().trim() !== (g.minClientVersion ?? '');
+  });
 
   // m027:强制升级广播 modal
   const [broadcastUpgradeOpen, setBroadcastUpgradeOpen] = createSignal<{ platform: string; below: string; latest: string } | null>(null);
@@ -192,6 +210,45 @@ export default function DevicesPage() {
     }
   };
 
+  // D4:加载版本门控配置(失败仅 warn,不阻断设备页)
+  const loadVersionGate = async () => {
+    try {
+      const g = await adminApi.getVersionGate();
+      batch(() => {
+        setVersionGate(g);
+        setVgEnabled(g.enabled);
+        setVgMinVersion(g.minClientVersion ?? '');
+      });
+    } catch (e: any) {
+      uiStore.toast.warning('版本门控配置加载失败', e?.message);
+    }
+  };
+
+  // D4:保存版本门控(写端点即时生效,后端刷新 strict-mode 运行时快照)
+  const saveVersionGate = async () => {
+    if (vgVersionInvalid()) {
+      uiStore.toast.error('版本号非法', '请输入合法 semver,如 1.2.0');
+      return;
+    }
+    setVgSaving(true);
+    try {
+      const g = await adminApi.setVersionGate({
+        enabled: vgEnabled(),
+        minClientVersion: vgMinVersion().trim() || null,
+      });
+      batch(() => {
+        setVersionGate(g);
+        setVgEnabled(g.enabled);
+        setVgMinVersion(g.minClientVersion ?? '');
+      });
+      uiStore.toast.success('版本门控已更新', g.enabled ? `低于 ${g.effectiveMinClientVersion ?? '—'} 的客户端将被拒绝` : '门控已关闭');
+    } catch (e: any) {
+      uiStore.toast.error('版本门控保存失败', e?.message);
+    } finally {
+      setVgSaving(false);
+    }
+  };
+
   // m027:强制升级广播
   const sendBroadcastUpgrade = async () => {
     const target = broadcastUpgradeOpen();
@@ -273,6 +330,7 @@ export default function DevicesPage() {
   };
 
   onMount(loadDevices);
+  onMount(loadVersionGate);
 
   // m027:进入"全部设备"tab 或筛选变化时,拉分页。
   createEffect(() => {
@@ -513,7 +571,22 @@ export default function DevicesPage() {
   const [bcLastActiveDays, setBcLastActiveDays] = createSignal('');
   const [bcPreviewMatched, setBcPreviewMatched] = createSignal<number | null>(null);
   const [bcPreviewTotal, setBcPreviewTotal] = createSignal<number | null>(null);
+  // E1:preview 失败原因——'invalid_version'(版本号非法,可操作) / 'network'(真实网络失败) / null(正常)
+  const [bcPreviewError, setBcPreviewError] = createSignal<'invalid_version' | 'network' | null>(null);
   const [bcSending, setBcSending] = createSignal(false);
+  // m042/D2:投递时机(now=立即 / at=指定时间) + 指定时间值(datetime-local) + 草稿保存态
+  const [bcSchedule, setBcSchedule] = createSignal<'now' | 'at'>('now');
+  const [bcScheduledAt, setBcScheduledAt] = createSignal('');
+  const [bcSavingDraft, setBcSavingDraft] = createSignal(false);
+
+  // E1:前端 semver 预校验,与后端 `semver::Version::parse(v.trim_start_matches('v'))` 行为对齐——
+  // 去前导 v 后须为合法语义化版本(major.minor.patch + 可选 -prerelease / +build)。把 INVALID_VERSION_MIN 拦在请求前。
+  const isValidVersionMin = (raw: string): boolean => {
+    // 后端为 `trim_start_matches('v')`(区分大小写、去连续小写 v)后 semver::Version::parse,这里同样仅去小写前导 v
+    const v = raw.trim().replace(/^v+/, '');
+    if (!v) return false;
+    return /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(v);
+  };
 
   const buildBcAudience = () => {
     const platforms = Array.from(bcPlatforms());
@@ -543,30 +616,70 @@ export default function DevicesPage() {
     bcVersionMin();
     bcLastActiveDays();
     clearTimeout(previewTimer);
+    // E1:版本号填了但非法时不发请求,直接标为可操作错误(否则后端必回 400,白白吞掉)
+    const vRaw = bcVersionMin().trim();
+    if (vRaw && !isValidVersionMin(vRaw)) {
+      setBcPreviewMatched(null);
+      setBcPreviewTotal(null);
+      setBcPreviewError('invalid_version');
+      return;
+    }
     previewTimer = setTimeout(async () => {
       try {
         const result = await adminApi.broadcastPreview({ audience: buildBcAudience() });
         setBcPreviewMatched(result.matched);
         setBcPreviewTotal(result.total);
-      } catch {
-        // 静默失败,UI 显示 '—'
+        setBcPreviewError(null);
+      } catch (e) {
+        // E1:区分「非法版本号」(可操作)与真实网络失败
         setBcPreviewMatched(null);
         setBcPreviewTotal(null);
+        setBcPreviewError(e instanceof ApiError && e.code === 'INVALID_VERSION_MIN' ? 'invalid_version' : 'network');
       }
     }, 500);
   });
+
+  // m042/D2:把 datetime-local 值(本地时区,无 offset)转为后端要的 RFC3339。
+  const scheduledAtRfc3339 = (): string | undefined => {
+    if (bcSchedule() !== 'at') return undefined;
+    const raw = bcScheduledAt().trim();
+    if (!raw) return undefined;
+    const d = new Date(raw); // datetime-local 按本地时区解析
+    if (Number.isNaN(d.getTime())) return undefined;
+    return d.toISOString();
+  };
 
   const sendBc = async (preview: boolean) => {
     if (!bcTitle().trim() || !bcMessage().trim()) {
       uiStore.toast.warning('请填写标题和正文');
       return;
     }
+    // 指定时间模式必须填且为未来时间
+    if (!preview && bcSchedule() === 'at') {
+      const at = scheduledAtRfc3339();
+      if (!at) {
+        uiStore.toast.warning('请选择投递时间');
+        return;
+      }
+      if (new Date(at).getTime() <= Date.now()) {
+        uiStore.toast.warning('投递时间需晚于当前时间');
+        return;
+      }
+    }
+    // E1:正式发送带受众,版本号填了但非法时前端拦截,把 INVALID_VERSION_MIN 挡在请求前
+    if (!preview) {
+      const vRaw = bcVersionMin().trim();
+      if (vRaw && !isValidVersionMin(vRaw)) {
+        uiStore.toast.warning('受众版本号非法', '需为合法语义化版本(如 v1.2.3),已停止发送');
+        return;
+      }
+    }
     setBcSending(true);
     try {
       if (preview) {
         // 预演 = 只发给当前 admin。后端没有 self user_id 透出,这里复用 audience userIds 留空但
         // 加 title 前缀 "[预演]" 让 admin 端能识别。前端发送时 audience platforms=[admin 自身的 platform]
-        // 但因为 admin 不是 client 不会命中,降级方案直接走全员发送 + 标题前缀。
+        // 但因为 admin 不是 client 不会命中,降级方案直接走全员发送 + 标题前缀。预演恒立即。
         await adminApi.broadcast({ title: `[预演] ${bcTitle()}`, message: bcMessage() });
         uiStore.toast.success('预演已发送(标题前缀 [预演])');
       } else {
@@ -574,17 +687,73 @@ export default function DevicesPage() {
           title: bcTitle(),
           message: bcMessage(),
           audience: buildBcAudience(),
+          scheduledAt: scheduledAtRfc3339(),
         });
-        uiStore.toast.success(`已发送给 ${result.sent} 位用户`);
+        if (result.scheduled) {
+          uiStore.toast.success(`已排程,将于 ${new Date(result.scheduledAt!).toLocaleString()} 自动下发`);
+        } else {
+          uiStore.toast.success(`已发送给 ${result.sent} 位用户`);
+        }
         setBcTitle('');
         setBcMessage('');
+        setBcSchedule('now');
+        setBcScheduledAt('');
       }
     } catch (e: any) {
-      uiStore.toast.error('发送失败', e?.message);
+      // E1:广播受众过滤 400 错误码 → 具体可操作中文提示;其余落通用「发送失败」
+      if (e instanceof ApiError && e.code === 'INVALID_VERSION_MIN') {
+        uiStore.toast.error('受众版本号非法', '请填写合法语义化版本(如 v1.2.3)后重试');
+      } else if (e instanceof ApiError && e.code === 'EMPTY_AUDIENCE') {
+        uiStore.toast.error('受众过滤后 0 人', '当前条件未匹配到任何设备,广播未发送,请放宽受众条件');
+      } else {
+        uiStore.toast.error('发送失败', e?.message);
+      }
     } finally {
       setBcSending(false);
     }
   };
+
+  // m042/D2:保存推送草稿(全局单份,覆盖)。
+  const saveDraft = async () => {
+    if (!bcTitle().trim() && !bcMessage().trim()) {
+      uiStore.toast.warning('草稿至少需要标题或正文');
+      return;
+    }
+    setBcSavingDraft(true);
+    try {
+      const aud = buildBcAudience();
+      await adminApi.savePushDraft({
+        title: bcTitle(),
+        message: bcMessage(),
+        platforms: aud?.platforms,
+        versionMin: aud?.versionMin,
+        lastActiveDays: aud?.lastActiveDays,
+      });
+      uiStore.toast.success('草稿已保存');
+    } catch (e: any) {
+      uiStore.toast.error('保存草稿失败', e?.message);
+    } finally {
+      setBcSavingDraft(false);
+    }
+  };
+
+  // m042/D2:进入页面时回填上次保存的草稿(有则填,无则静默)。
+  const loadDraft = async () => {
+    try {
+      const { draft } = await adminApi.getPushDraft();
+      if (!draft) return;
+      batch(() => {
+        if (draft.title) setBcTitle(draft.title);
+        if (draft.message) setBcMessage(draft.message);
+        if (draft.platforms?.length) setBcPlatforms(new Set(draft.platforms));
+        if (draft.versionMin) setBcVersionMin(draft.versionMin);
+        if (draft.lastActiveDays != null) setBcLastActiveDays(String(draft.lastActiveDays));
+      });
+    } catch {
+      // 草稿回填失败不阻塞页面
+    }
+  };
+  onMount(loadDraft);
 
   const audienceChips = createMemo(() => {
     const chips: { label: string; remove: () => void }[] = [];
@@ -934,6 +1103,70 @@ export default function DevicesPage() {
           </Card>
         </div>
 
+      {/* D4:客户端最低版本门控 — 全局 strict-mode 运行时切流(独立于上面的每平台升级策略)。
+          开启后服务端直接对低于阈值的客户端返回 CLIENT_OUTDATED,即时生效。 */}
+      <div>
+        <div class="flex items-baseline gap-3 mb-3">
+          <h2 class="text-sm font-semibold">版本门控</h2>
+          <span class="text-xs text-content-tertiary">全局服务端切流 · 低于阈值的客户端请求直接被拒(CLIENT_OUTDATED) · 即时生效</span>
+        </div>
+        <Card padding="md">
+          <div class="flex flex-col gap-3">
+            <div class="flex items-center justify-between py-1.5">
+              <div class="min-w-0 pr-4">
+                <div class="text-[13px] font-semibold">启用版本门控</div>
+                <div class="text-[11px] text-content-tertiary mt-0.5">
+                  开启后,所有 /api/* 客户端请求若 UA 版本低于阈值,服务端返回 400 CLIENT_OUTDATED。
+                  与"强制升级策略"(客户端启动弹窗,可绕过)不同,这是硬性服务端拒绝。
+                </div>
+              </div>
+              <Switch checked={vgEnabled()} onChange={setVgEnabled} />
+            </div>
+            <div class="flex items-center justify-between py-1.5 border-t border-border-hairline">
+              <div class="min-w-0 pr-4">
+                <div class="text-[13px] font-semibold">最低客户端版本</div>
+                <div class="text-[11px] text-content-tertiary mt-0.5">
+                  semver(如 1.2.0)。留空则回落环境变量 MIN_CLIENT_VERSION
+                  <Show when={versionGate()?.envMinClientVersion}>
+                    {(env) => <span class="font-mono">（当前 env: {env()}）</span>}
+                  </Show>
+                  。
+                </div>
+              </div>
+              <div class="flex flex-col items-end gap-1">
+                <Input
+                  size="sm"
+                  placeholder="1.2.0"
+                  value={vgMinVersion()}
+                  onInput={(e) => setVgMinVersion(e.currentTarget.value)}
+                  class="!w-[130px] font-mono"
+                />
+                <Show when={vgVersionInvalid()}>
+                  <span class="text-[11px] text-error">非法 semver,应为 x.y.z</span>
+                </Show>
+              </div>
+            </div>
+            <div class="flex items-center justify-between pt-2 border-t border-border-hairline">
+              <div class="text-[11px] text-content-tertiary">
+                实际生效阈值:
+                <span class="font-mono text-content">{versionGate()?.effectiveMinClientVersion ?? '—'}</span>
+                <Show when={!versionGate()?.enabled && (versionGate()?.effectiveMinClientVersion)}>
+                  <span class="ml-1">(门控未启用,阈值不生效)</span>
+                </Show>
+              </div>
+              <Button
+                size="sm"
+                variant="primary"
+                disabled={vgSaving() || !vgDirty() || vgVersionInvalid()}
+                onClick={saveVersionGate}
+              >
+                {vgSaving() ? '保存中…' : '保存并即时生效'}
+              </Button>
+            </div>
+          </div>
+        </Card>
+      </div>
+
       {/* m027:嵌入式广播推送 section — 对齐 clients.html .compose 区块。
           含真功能(标题/正文/chip 受众/预估命中/发送/预演)+ 占位控件(投递时机/渠道/优先级) */}
       <div>
@@ -1013,12 +1246,19 @@ export default function DevicesPage() {
                 <Show when={bcVersionMin().trim() || bcLastActiveDays().trim()}>
                   <div class="grid grid-cols-2 gap-2 mt-2">
                     <Show when={bcVersionMin().trim()}>
-                      <Input
-                        size="sm"
-                        placeholder="版本下限,如 v0.7.0"
-                        value={bcVersionMin()}
-                        onInput={(e) => setBcVersionMin(e.currentTarget.value)}
-                      />
+                      <div class="flex flex-col gap-0.5">
+                        <Input
+                          size="sm"
+                          placeholder="版本下限,如 v0.7.0"
+                          value={bcVersionMin()}
+                          onInput={(e) => setBcVersionMin(e.currentTarget.value)}
+                          aria-invalid={!isValidVersionMin(bcVersionMin())}
+                        />
+                        {/* E1:semver 内联校验提示 */}
+                        <Show when={!isValidVersionMin(bcVersionMin())}>
+                          <span class="text-[11px] text-error">版本号非法,需为语义化版本(如 v1.2.3)</span>
+                        </Show>
+                      </div>
                     </Show>
                     <Show when={bcLastActiveDays().trim()}>
                       <Input
@@ -1032,27 +1272,42 @@ export default function DevicesPage() {
                     </Show>
                   </div>
                 </Show>
-                <div class="text-[11px] text-content-tertiary mt-1.5">
-                  预估命中 <strong class="text-accent tabular-nums">{bcPreviewMatched()?.toLocaleString() ?? '—'}</strong>
-                  {' '}/ {bcPreviewTotal()?.toLocaleString() ?? '—'} 用户
-                </div>
+                {/* E1:预估命中 — 区分非法版本号(可操作)与真实网络失败,不再静默显「—」 */}
+                <Show
+                  when={bcPreviewError() === null}
+                  fallback={
+                    <div class="text-[11px] text-error mt-1.5">
+                      {bcPreviewError() === 'invalid_version'
+                        ? '版本号非法,无法预估命中 — 请填写语义化版本(如 v1.2.3)'
+                        : '预估命中加载失败,请检查网络后重试'}
+                    </div>
+                  }
+                >
+                  <div class="text-[11px] text-content-tertiary mt-1.5">
+                    预估命中 <strong class="text-accent tabular-nums">{bcPreviewMatched()?.toLocaleString() ?? '—'}</strong>
+                    {' '}/ {bcPreviewTotal()?.toLocaleString() ?? '—'} 用户
+                  </div>
+                </Show>
               </div>
 
-              {/* 投递时机 / 渠道 / 优先级 — 占位 disabled */}
-              <div class="grid grid-cols-3 gap-3" aria-label="投递扩展选项(尚未接入 push provider)">
+              {/* 投递时机(可用) / 渠道(待 provider,保持 disabled) / 优先级(待协议扩展,保持 disabled) */}
+              <div class="grid grid-cols-3 gap-3">
                 <label class="flex flex-col gap-0.5">
                   <span class="text-xs text-content-tertiary">投递时机</span>
                   <select
-                    class="text-sm rounded-md border border-border-hairline bg-surface px-2 py-1.5 text-content-tertiary cursor-not-allowed"
-                    disabled
-                    title="接入调度系统后启用"
+                    aria-label="投递时机"
+                    class="text-sm rounded-md border border-border-hairline bg-surface px-2 py-1.5 text-content-secondary"
+                    value={bcSchedule()}
+                    onChange={(e) => setBcSchedule(e.currentTarget.value as 'now' | 'at')}
                   >
-                    <option>立即</option>
+                    <option value="now">立即</option>
+                    <option value="at">指定时间</option>
                   </select>
                 </label>
                 <div class="flex flex-col gap-0.5">
                   <span class="text-xs text-content-tertiary">渠道</span>
-                  <div class="flex gap-2 text-xs mt-1 text-content-tertiary" title="接入 Web Push / APNs / FCM 后启用">
+                  {/* APNs/FCM 需外部 provider,保持 disabled(D2 陷阱:勿动) */}
+                  <div class="flex gap-2 text-xs mt-1 text-content-tertiary" title="APNs / FCM 需接入外部 push provider 后启用">
                     <label class="flex gap-1 items-center"><input type="checkbox" disabled checked /> Web Push</label>
                     <label class="flex gap-1 items-center"><input type="checkbox" disabled /> APNs</label>
                     <label class="flex gap-1 items-center"><input type="checkbox" disabled /> FCM</label>
@@ -1070,8 +1325,24 @@ export default function DevicesPage() {
                 </label>
               </div>
 
+              {/* 指定时间模式:datetime-local 输入 */}
+              <Show when={bcSchedule() === 'at'}>
+                <label class="flex flex-col gap-0.5">
+                  <span class="text-xs text-content-tertiary">投递时间</span>
+                  <Input
+                    aria-label="投递时间"
+                    size="sm"
+                    type="datetime-local"
+                    value={bcScheduledAt()}
+                    onInput={(e) => setBcScheduledAt(e.currentTarget.value)}
+                  />
+                </label>
+              </Show>
+
               <div class="flex gap-2 pt-1 flex-wrap">
-                <Button size="sm" variant="outline" disabled title="草稿存储未实施">保存草稿</Button>
+                <Button size="sm" variant="outline" disabled={bcSavingDraft()} onClick={saveDraft}>
+                  {bcSavingDraft() ? '保存中…' : '保存草稿'}
+                </Button>
                 <Button size="sm" variant="outline" disabled={bcSending() || !bcTitle().trim() || !bcMessage().trim()} onClick={() => sendBc(true)}>
                   先发给我(预演)
                 </Button>
@@ -1084,7 +1355,7 @@ export default function DevicesPage() {
                   <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
                     <path stroke-linecap="round" stroke-linejoin="round" d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z" />
                   </svg>
-                  推送给 {bcPreviewMatched()?.toLocaleString() ?? '—'} 用户
+                  {bcSchedule() === 'at' ? '排程' : '推送'}给 {bcPreviewMatched()?.toLocaleString() ?? '—'} 用户
                 </Button>
               </div>
             </div>

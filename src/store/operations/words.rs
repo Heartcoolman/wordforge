@@ -210,7 +210,6 @@ mod tests {
     use super::*;
 
     fn test_store() -> Store {
-        
         Store::open(":memory:", 5000, 1).unwrap()
     }
 

@@ -59,10 +59,10 @@ fn seed_user(store: &Store, suffix: &str) -> User {
         updated_at: now,
         failed_login_count: 0,
         locked_until: None,
-            role: "user".to_string(),
-            status: "active".to_string(),
-            last_login_at: None,
-    referrer_source: None,
+        role: "user".to_string(),
+        status: "active".to_string(),
+        last_login_at: None,
+        referrer_source: None,
     };
     store.create_user(&user).expect("create user");
     user
@@ -329,7 +329,7 @@ async fn it_admin_analytics_retention_curve_with_history() {
         seed_records(
             app.state.store(),
             &user.id,
-            std::slice::from_ref(wid),  // wid 是 String，from_ref 拿到 &[String] 切片
+            std::slice::from_ref(wid), // wid 是 String，from_ref 拿到 &[String] 切片
             0.6,
             RecordType::Review,
             first_learned + Duration::days(1),

@@ -80,17 +80,14 @@ impl Store {
              GROUP BY stage",
         )?;
         let mut rows: std::collections::HashMap<String, (u64, f64, u64)> = Default::default();
-        let mapped = stmt.query_map(
-            rusqlite::params![COLD_MAX, STABLE_MIN, cutoff7d],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)? as u64,
-                    row.get::<_, f64>(2)?,
-                    row.get::<_, i64>(3)? as u64,
-                ))
-            },
-        )?;
+        let mapped = stmt.query_map(rusqlite::params![COLD_MAX, STABLE_MIN, cutoff7d], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)? as u64,
+                row.get::<_, f64>(2)?,
+                row.get::<_, i64>(3)? as u64,
+            ))
+        })?;
         for r in mapped {
             let (stage, users, avg, retained) = r?;
             rows.insert(stage, (users, avg, retained));
@@ -182,7 +179,10 @@ impl Store {
 
         let mut points: Vec<StageTrendPoint> = Vec::new();
         for (period, json) in rows.into_iter().rev() {
-            let date = period.strip_prefix("amas_stage:").unwrap_or(&period).to_string();
+            let date = period
+                .strip_prefix("amas_stage:")
+                .unwrap_or(&period)
+                .to_string();
             let v: serde_json::Value = serde_json::from_str(&json).unwrap_or_default();
             let (c, t, s) = (
                 v.get("cold").and_then(|x| x.as_f64()).unwrap_or(0.0),
@@ -207,8 +207,7 @@ impl Store {
         let mut cold = 0u64;
         let mut tran = 0u64;
         let mut stable = 0u64;
-        let mut stmt =
-            conn.prepare("SELECT total_event_count FROM engine_user_states")?;
+        let mut stmt = conn.prepare("SELECT total_event_count FROM engine_user_states")?;
         let rows = stmt.query_map([], |row| row.get::<_, i64>(0))?;
         for r in rows {
             match stage_of(r?) {
@@ -254,7 +253,9 @@ impl Store {
     /// 取 games>0 的用户，按 games 降序最多 limit 个。
     pub fn aggregate_amas_elo_scatter(&self, limit: u32) -> Result<EloScatter, StoreError> {
         let conn = self.conn()?;
-        let cutoff = (Utc::now() - Duration::days(7)).format("%Y-%m-%d").to_string();
+        let cutoff = (Utc::now() - Duration::days(7))
+            .format("%Y-%m-%d")
+            .to_string();
         let mut stmt = conn.prepare(
             "SELECT e.rating, e.games,
                 (SELECT h.rating FROM user_elo_history h
@@ -350,7 +351,8 @@ impl Store {
                 Some(i) => *i,
                 None => continue,
             };
-            let band = ((difficulty.clamp(0.0, 1.0) * BANDS as f64).floor() as usize).min(BANDS - 1);
+            let band =
+                ((difficulty.clamp(0.0, 1.0) * BANDS as f64).floor() as usize).min(BANDS - 1);
             let forget = (1.0 - mastery).clamp(0.0, 1.0);
             sums[di][band] += forget;
             counts[di][band] += 1;
@@ -605,9 +607,7 @@ impl Store {
         ];
         // 其余非零流向也带上（例如 cold→stable 跨级）
         for ((f, t), c) in &counts {
-            let known = transitions
-                .iter()
-                .any(|x| x.from == *f && x.to == *t);
+            let known = transitions.iter().any(|x| x.from == *f && x.to == *t);
             if !known && *c > 0 {
                 transitions.push(Transition {
                     from: f.to_string(),
@@ -962,8 +962,7 @@ impl Store {
             Default::default();
         let mut parsed: Vec<Parsed> = Vec::with_capacity(rows.len());
         for (id, user_id, ts, viol_json) in rows {
-            let arr: Vec<serde_json::Value> =
-                serde_json::from_str(&viol_json).unwrap_or_default();
+            let arr: Vec<serde_json::Value> = serde_json::from_str(&viol_json).unwrap_or_default();
             let first = arr.first();
             let field = first
                 .and_then(|v| v.get("field"))
@@ -989,14 +988,25 @@ impl Store {
                 .entry(field.clone())
                 .or_default()
                 .insert(user_id.clone());
-            parsed.push(Parsed { id, user_id, ts, field, value, expected, sev });
+            parsed.push(Parsed {
+                id,
+                user_id,
+                ts,
+                field,
+                value,
+                expected,
+                sev,
+            });
         }
 
         let items = parsed
             .into_iter()
             .take(limit as usize)
             .map(|p| {
-                let impacted = code_users.get(&p.field).map(|s| s.len() as u64).unwrap_or(1);
+                let impacted = code_users
+                    .get(&p.field)
+                    .map(|s| s.len() as u64)
+                    .unwrap_or(1);
                 let val_disp = if p.value.is_nan() {
                     "NaN".to_string()
                 } else {
@@ -1008,7 +1018,11 @@ impl Store {
                     title: format!(
                         "不变量违反：{} = {val_disp}（期望 {}）",
                         p.field,
-                        if p.expected.is_empty() { "合法区间" } else { &p.expected }
+                        if p.expected.is_empty() {
+                            "合法区间"
+                        } else {
+                            &p.expected
+                        }
                     ),
                     code: p.field,
                     user_id: p.user_id,
@@ -1260,7 +1274,9 @@ mod tests {
                 [],
             )
             .unwrap();
-            let week_ago = (Utc::now() - Duration::days(8)).format("%Y-%m-%d").to_string();
+            let week_ago = (Utc::now() - Duration::days(8))
+                .format("%Y-%m-%d")
+                .to_string();
             conn.execute(
                 "INSERT INTO user_elo_history (user_id, snapshot_date, rating, games)
                  VALUES ('u1', ?1, 1250.0, 20)",
@@ -1313,7 +1329,10 @@ mod tests {
                 "INSERT INTO engine_monitoring_events
                  (id,user_id,session_id,timestamp,is_anomaly,invariant_violations_json)
                  VALUES ('e1','u1','s1',?1,1,?2)",
-                params![now, r#"[{"field":"fatigue","value":1.2,"expected_range":"[0, 1]"}]"#],
+                params![
+                    now,
+                    r#"[{"field":"fatigue","value":1.2,"expected_range":"[0, 1]"}]"#
+                ],
             )
             .unwrap();
             conn.execute(

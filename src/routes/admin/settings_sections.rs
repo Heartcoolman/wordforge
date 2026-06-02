@@ -23,13 +23,7 @@ use serde::{Deserialize, Serialize};
 use crate::response::AppError;
 
 /// 已强类型化的 section 白名单。命中则走 [`parse_typed_section`];否则按裸 JSON 透传。
-pub const TYPED_SECTIONS: &[&str] = &[
-    "site",
-    "auth",
-    "ratelimit",
-    "audit-config",
-    "backup-policy",
-];
+pub const TYPED_SECTIONS: &[&str] = &["site", "auth", "ratelimit", "audit-config", "backup-policy"];
 
 /// 各 section 的敏感字段路径(顶层 key 或 "outer.inner" 一层嵌套)。GET 时按此遮蔽,
 /// PUT 时若传入空/遮蔽串则保留旧值。当前无 section 含密钥字段。
@@ -151,8 +145,7 @@ fn deser<T: for<'de> Deserialize<'de>>(body: &serde_json::Value) -> Result<T, Ap
 }
 
 fn to_value<T: Serialize>(v: &T) -> Result<serde_json::Value, AppError> {
-    serde_json::to_value(v)
-        .map_err(|_| AppError::bad_request("SERIALIZE_FAILED", "配置序列化失败"))
+    serde_json::to_value(v).map_err(|_| AppError::bad_request("SERIALIZE_FAILED", "配置序列化失败"))
 }
 
 // ───────────────────────────── 通用校验工具 ─────────────────────────────
@@ -568,7 +561,6 @@ fn is_valid_cron(s: &str) -> bool {
     s.split_whitespace().count() == 5
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -654,7 +646,8 @@ mod tests {
         assert!(parse_typed_section("audit-config", &off).is_ok());
         let bad = json!({"retentionDays": 365, "siem": {"target": "datadog"}});
         assert!(parse_typed_section("audit-config", &bad).is_err());
-        let ok = json!({"retentionDays": 365, "siem": {"target": "datadog", "url": "https://intake"}});
+        let ok =
+            json!({"retentionDays": 365, "siem": {"target": "datadog", "url": "https://intake"}});
         assert!(parse_typed_section("audit-config", &ok).is_ok());
     }
 
@@ -675,5 +668,4 @@ mod tests {
         });
         assert!(parse_typed_section("backup-policy", &no_targets).is_err());
     }
-
 }

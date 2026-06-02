@@ -82,6 +82,16 @@ async fn system_health(
     // 失败时字段返回 null,前端不渲染进度条 ——不让监控干扰本体。
     let resources = sample_resources(&state).await;
 
+    // S2-1：outbox 异步消费健康（待处理数 / lag 秒 / 死信累计）。读失败降级为默认零值。
+    let outbox = state
+        .run_store_task("admin.monitoring.outbox_stats", |store| {
+            store.outbox_stats()
+        })
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or_default();
+
     Ok(ok(serde_json::json!({
         "status": status,
         "storeProbeOk": store_probe_ok,
@@ -90,6 +100,7 @@ async fn system_health(
         "version": env!("GIT_VERSION"),
         "errorRate": error_rate,
         "resources": resources,
+        "outbox": outbox,
         "services": {
             "amas": { "healthy": amas_healthy },
             "sse": {
@@ -270,7 +281,9 @@ async fn sample_resources(state: &AppState) -> serde_json::Value {
                 if c.starts_with(d.mount_point()) {
                     let take = match best {
                         None => true,
-                        Some(b) => d.mount_point().as_os_str().len() > b.mount_point().as_os_str().len(),
+                        Some(b) => {
+                            d.mount_point().as_os_str().len() > b.mount_point().as_os_str().len()
+                        }
                     };
                     if take {
                         best = Some(d);
@@ -321,7 +334,9 @@ async fn sample_resources(state: &AppState) -> serde_json::Value {
 /// 未配置 `NGINX_STATUS_URL` env 时返回 null（功能关闭，无部署形态依赖）；
 /// 抓取/解析失败同样兜底 null，不让边缘探针穿透 health 本体。
 async fn sample_nginx_edge() -> Option<serde_json::Value> {
-    let url = std::env::var("NGINX_STATUS_URL").ok().filter(|s| !s.is_empty())?;
+    let url = std::env::var("NGINX_STATUS_URL")
+        .ok()
+        .filter(|s| !s.is_empty())?;
     let body = reqwest::Client::new()
         .get(&url)
         .timeout(Duration::from_millis(800))
@@ -507,7 +522,9 @@ async fn alert_events(
                 )
                 .unwrap_or((0, None));
             // m037:AMAS 软拦截告警(失败则空 Vec,保持降级语义)
-            let sys_alerts = store.list_recent_system_alerts(&cutoff_rfc).unwrap_or_default();
+            let sys_alerts = store
+                .list_recent_system_alerts(&cutoff_rfc)
+                .unwrap_or_default();
             Ok::<_, crate::store::StoreError>((workers, anomaly, sys_alerts))
         })
         .await
@@ -607,7 +624,10 @@ async fn alert_events(
 
     // 最新在前,限 50 条(放宽自 30,避免新告警被 worker resolved 绿点挤掉)
     events.sort_by(|a, b| {
-        b["tsMs"].as_i64().unwrap_or(0).cmp(&a["tsMs"].as_i64().unwrap_or(0))
+        b["tsMs"]
+            .as_i64()
+            .unwrap_or(0)
+            .cmp(&a["tsMs"].as_i64().unwrap_or(0))
     });
     events.truncate(50);
 

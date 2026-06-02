@@ -5,7 +5,7 @@ import type {
   AdminUser, AdminUsersPage, AdminUsersQuery, AdminCreateUserPayload,
   ClientDeviceRow, AdminAuditEntry, UserActivityEntry, UserExtras,
   EngagementAnalytics, LearningAnalytics,
-  SystemHealth, DatabaseInfo, SystemSettings, WorkerStatusRow,
+  SystemHealth, DatabaseInfo, SystemSettings, VersionGate, WorkerStatusRow,
   RequestMetrics, LogLine, AlertEvent,
   UpdateCheck, AdminUpdateStatus, ApplyAccepted, UpdateAuditEntry, DailyActiveUsersEntry, DailyRecordsEntry,
   ChangelogSummary, BackupList, BackupEntry,
@@ -225,8 +225,9 @@ export const adminApi = {
 
   // Broadcast & Settings
   /** 系统广播看板：近 30 天统计 + 历史列表（GET 与 POST 同路径）。
-   *  be:broadcast-packs-minor:支持 offset/limit 分页,响应新增 pagination。 */
-  listBroadcasts: (params?: { offset?: number; limit?: number }) =>
+   *  be:broadcast-packs-minor:支持 offset/limit 分页,响应新增 pagination。
+   *  E2:filter（all/week/failed）下推后端跨页生效;pagination.total 随 filter 变,KPI 卡 stats 不变。 */
+  listBroadcasts: (params?: { offset?: number; limit?: number; filter?: 'all' | 'week' | 'failed' }) =>
     api.get<{ stats: BroadcastStats; broadcasts: BroadcastHistoryEntry[]; pagination: BroadcastPagination }>(
       '/api/admin/broadcast',
       params as Record<string, string | number | boolean | undefined>,
@@ -242,7 +243,9 @@ export const adminApi = {
       lastActiveDays?: number | null;
       userIds?: string[];
     };
-  }) => api.post<{ sent: number }>('/api/admin/broadcast', data, { useAdminToken: true }),
+    /** m042/D2:投递时机。未来 RFC3339 时间→入定时队列(返回 scheduled:true);省略/过去→立即下发。 */
+    scheduledAt?: string;
+  }) => api.post<{ sent?: number; scheduled?: boolean; scheduledAt?: string; broadcastId: string }>('/api/admin/broadcast', data, { useAdminToken: true }),
   /** m027:广播受众预估命中(不持久化),供 DevicesPage 嵌入 broadcast section "X / N 用户" 显示 */
   broadcastPreview: (data: {
     audience?: {
@@ -252,9 +255,25 @@ export const adminApi = {
       userIds?: string[];
     };
   }) => api.post<{ matched: number; total: number }>('/api/admin/broadcast/preview', data, { useAdminToken: true }),
+  /** m042/D2:推送编辑器「保存草稿」全局单份(存/取/删) */
+  getPushDraft: () =>
+    api.get<{ draft: PushDraft | null }>('/api/admin/broadcast/draft', undefined, { useAdminToken: true }),
+  savePushDraft: (data: {
+    title: string;
+    message: string;
+    platforms?: string[];
+    versionMin?: string | null;
+    lastActiveDays?: number | null;
+  }) => api.post<{ draft: PushDraft }>('/api/admin/broadcast/draft', data, { useAdminToken: true }),
+  deletePushDraft: () =>
+    api.delete<{ deleted: boolean }>('/api/admin/broadcast/draft', { useAdminToken: true }),
   getSettings: () => api.get<SystemSettings>('/api/admin/settings', undefined, { useAdminToken: true }),
   updateSettings: (data: Partial<SystemSettings>) => api.put<SystemSettings>('/api/admin/settings', data, { useAdminToken: true }),
   setMaintenance: (active: boolean) => api.post<{ active: boolean }>('/api/admin/settings/maintenance', { active }, { useAdminToken: true }),
+  // D4:客户端最低版本门控运行时读写(即时生效,strict-mode 发布切流)
+  getVersionGate: () => api.get<VersionGate>('/api/admin/settings/version-gate', undefined, { useAdminToken: true }),
+  setVersionGate: (data: { enabled?: boolean; minClientVersion?: string | null }) =>
+    api.put<VersionGate>('/api/admin/settings/version-gate', data, { useAdminToken: true }),
   reloadAmas: (data: AmasConfig) => api.post<AmasConfig>('/api/admin/settings/reload-amas', data, { useAdminToken: true }),
   broadcastUpdate: (data?: { message?: string; version?: string }) =>
     api.post<{ broadcasted: boolean }>('/api/admin/broadcast-update', data || {}, { useAdminToken: true }),
@@ -1498,4 +1517,15 @@ export interface BroadcastPagination {
   total: number;
   offset: number;
   limit: number;
+}
+
+/* ---------- m042/D2:推送编辑器草稿 ---------- */
+export interface PushDraft {
+  title: string;
+  message: string;
+  platforms: string[];
+  versionMin: string | null;
+  lastActiveDays: number | null;
+  authorId: string | null;
+  updatedAt: string;
 }

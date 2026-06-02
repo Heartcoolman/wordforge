@@ -159,15 +159,17 @@ mod tests {
 
         let state = make_state();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        state.active_sse().entry("dev-1".into()).or_default().push(
-            crate::state::SseClientInfo {
+        state
+            .active_sse()
+            .entry("dev-1".into())
+            .or_default()
+            .push(crate::state::SseClientInfo {
                 conn_id: "test-conn".into(),
                 user_id: "u1".into(),
                 platform: "test".into(),
                 connected_at: std::time::Instant::now(),
                 tx,
-            },
-        );
+            });
 
         run(&state).await;
 
@@ -184,23 +186,31 @@ mod tests {
 
         let state = make_state();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::state::SseEvent>();
-        state.active_sse().entry("dev-2".into()).or_default().push(
-            crate::state::SseClientInfo {
+        state
+            .active_sse()
+            .entry("dev-2".into())
+            .or_default()
+            .push(crate::state::SseClientInfo {
                 conn_id: "conn-2".into(),
                 user_id: "u2".into(),
                 platform: "test".into(),
                 connected_at: std::time::Instant::now(),
                 tx,
-            },
-        );
+            });
 
         run(&state).await;
 
         // 应收到 Incident 事件
         let event = rx.try_recv().expect("incident event should be broadcast");
         match event {
-            crate::state::SseEvent::Incident { error_rate, window_secs } => {
-                assert!((error_rate - 0.3).abs() < 1e-9, "error_rate mismatch: {error_rate}");
+            crate::state::SseEvent::Incident {
+                error_rate,
+                window_secs,
+            } => {
+                assert!(
+                    (error_rate - 0.3).abs() < 1e-9,
+                    "error_rate mismatch: {error_rate}"
+                );
                 assert_eq!(window_secs, WINDOW_SECS);
             }
             other => panic!("expected Incident, got {:?}", other),
@@ -220,20 +230,25 @@ mod tests {
 
         let state = make_state();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::state::SseEvent>();
-        state.active_sse().entry("dev-3".into()).or_default().push(
-            crate::state::SseClientInfo {
+        state
+            .active_sse()
+            .entry("dev-3".into())
+            .or_default()
+            .push(crate::state::SseClientInfo {
                 conn_id: "conn-3".into(),
                 user_id: "u3".into(),
                 platform: "test".into(),
                 connected_at: std::time::Instant::now(),
                 tx,
-            },
-        );
+            });
 
         run(&state).await;
 
         // 去重静默：不应有新事件推送
-        assert!(rx.try_recv().is_err(), "no incident should be broadcast during dedup window");
+        assert!(
+            rx.try_recv().is_err(),
+            "no incident should be broadcast during dedup window"
+        );
         // 去重时间戳不应变化
         assert_eq!(LAST_INCIDENT_AT.load(Ordering::SeqCst), recent);
     }

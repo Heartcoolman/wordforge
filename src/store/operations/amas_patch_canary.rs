@@ -151,12 +151,7 @@ impl Store {
     }
 
     /// cohort 校验:[lo,hi) ⊂ 0..100 且 lo<hi,且不与现存 active 行(可排除 exclude_id)重叠。
-    fn validate_cohort(
-        &self,
-        lo: u32,
-        hi: u32,
-        exclude_id: Option<i64>,
-    ) -> Result<(), StoreError> {
+    fn validate_cohort(&self, lo: u32, hi: u32, exclude_id: Option<i64>) -> Result<(), StoreError> {
         if lo >= hi || hi > 100 {
             return Err(StoreError::Validation(format!(
                 "cohort range invalid: [{lo}, {hi}) must satisfy 0<=lo<hi<=100"
@@ -257,11 +252,13 @@ mod tests {
     fn out_of_bounds_cohort_rejected() {
         let s = store();
         assert!(matches!(
-            s.insert_patch_canary(1, "h1", 20, 90, 110, "{}").unwrap_err(),
+            s.insert_patch_canary(1, "h1", 20, 90, 110, "{}")
+                .unwrap_err(),
             StoreError::Validation(_)
         ));
         assert!(matches!(
-            s.insert_patch_canary(1, "h1", 20, 30, 30, "{}").unwrap_err(),
+            s.insert_patch_canary(1, "h1", 20, 30, 30, "{}")
+                .unwrap_err(),
             StoreError::Validation(_)
         ));
     }
@@ -330,7 +327,15 @@ mod tests {
             updated_at: "t".into(),
         };
         let v = serde_json::to_value(&c).unwrap();
-        for k in ["suggestionId", "versionHash", "cohortLo", "cohortHi", "baselineMetricsJson", "startedAt", "updatedAt"] {
+        for k in [
+            "suggestionId",
+            "versionHash",
+            "cohortLo",
+            "cohortHi",
+            "baselineMetricsJson",
+            "startedAt",
+            "updatedAt",
+        ] {
             assert!(v.get(k).is_some(), "missing key {k}");
         }
     }

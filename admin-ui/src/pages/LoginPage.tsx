@@ -21,7 +21,6 @@ export default function LoginPage() {
   const [password, setPassword] = createSignal('');
   const [showPw, setShowPw] = createSignal(false);
   const [rememberMe, setRememberMe] = createSignal(true); // 30 天保持登录,默认勾选(与设计图一致)
-  const [locale, setLocale] = createSignal('zh-CN'); // i18n 未接入,纯视觉占位
   const [loading, setLoading] = createSignal(false);
   const [emailError, setEmailError] = createSignal('');
   const [formError, setFormError] = createSignal('');
@@ -338,18 +337,6 @@ export default function LoginPage() {
             <span class="font-mono">
               {appVersion() ? `v${appVersion()}` : `build ${import.meta.env.MODE === 'production' ? 'prod' : 'dev'}`}
             </span>
-            {/* 语言切换 —— i18n 未接入,当前为视觉占位(选项不改变界面语言) */}
-            <select
-              value={locale()}
-              onChange={(e) => setLocale(e.currentTarget.value)}
-              class="bg-transparent border-0 text-[11.5px] text-content-secondary cursor-pointer focus:outline-none"
-              aria-label="界面语言（暂未生效）"
-              title="界面语言切换暂未接入"
-            >
-              <option value="zh-CN">中文（简体）</option>
-              <option value="en">English</option>
-              <option value="ja">日本語</option>
-            </select>
           </div>
         </div>
       </div>

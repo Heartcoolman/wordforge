@@ -677,10 +677,7 @@ impl Store {
     /// 按 (day_of_week, hour_of_day) 聚合最近 N 天的答题计数。
     /// 返回原始稀疏行,前端组装 7×24 矩阵。
     /// strftime('%w') 返回 0-6(0=Sunday),strftime('%H') 返回 00-23。
-    pub fn admin_hourly_buckets(
-        &self,
-        days: u32,
-    ) -> Result<Vec<AdminHourlyBucketRow>, StoreError> {
+    pub fn admin_hourly_buckets(&self, days: u32) -> Result<Vec<AdminHourlyBucketRow>, StoreError> {
         let conn = self.conn()?;
         let since = window_since_date(days);
         let mut stmt = conn.prepare(
@@ -1099,8 +1096,7 @@ impl Store {
         })?;
         for r in rows {
             let (mode, count) = r?;
-            out.question_modes
-                .push((mode.unwrap_or_default(), count));
+            out.question_modes.push((mode.unwrap_or_default(), count));
         }
 
         // difficultyBins:LEFT JOIN word_elo,COALESCE(rating, 1200) 分 5 箱。
@@ -1585,11 +1581,17 @@ mod tests {
             self_rating: None,
             question_mode: mode.map(|s| s.to_string()),
         };
-        store.create_record(&mk("a", Some("word-to-meaning"))).unwrap();
-        store.create_record(&mk("b", Some("word-to-meaning"))).unwrap();
+        store
+            .create_record(&mk("a", Some("word-to-meaning")))
+            .unwrap();
+        store
+            .create_record(&mk("b", Some("word-to-meaning")))
+            .unwrap();
         store.create_record(&mk("c", None)).unwrap();
         let (start, end_excl) = week_window();
-        let d = store.admin_question_distribution(&start, &end_excl).unwrap();
+        let d = store
+            .admin_question_distribution(&start, &end_excl)
+            .unwrap();
         assert_eq!(d.total, 3);
         let wtm = d
             .question_modes

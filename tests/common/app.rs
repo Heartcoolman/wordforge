@@ -57,8 +57,15 @@ async fn spawn_with_limits_inner(
 /// v1.1-P2.3：spawn TestApp 并显式注入匿名/已登录双轨配额。
 /// `anon`/`authed` 为 0 时落回 `api_limit` fallback。
 pub async fn spawn_test_server_with_dual_limits(api_limit: u64, anon: u64, authed: u64) -> TestApp {
-    spawn_with_full_config_dual(api_limit, 10, Default::default(), Default::default(), anon, authed)
-        .await
+    spawn_with_full_config_dual(
+        api_limit,
+        10,
+        Default::default(),
+        Default::default(),
+        anon,
+        authed,
+    )
+    .await
 }
 
 async fn spawn_with_full_config(
@@ -100,6 +107,7 @@ async fn spawn_with_full_config_dual(
         // CI 上 ubuntu 磁盘 IO 较慢，并发测试时 pool 等连接 250ms 不够导致 Pool(Error(None)) panic
         sqlite_connection_timeout_ms: 2000,
         sqlite_pool_size: 2,
+        records_outbox_async: false,
         jwt_secret: test_secret,
         refresh_jwt_secret: test_refresh_secret,
         jwt_expires_in_hours: 24,

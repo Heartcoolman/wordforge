@@ -13,8 +13,8 @@ use std::time::Instant;
 
 use chrono::{DateTime, Utc};
 use fs2::FileExt;
-use serde::{Deserialize, Serialize};
 use minisign_verify::{PublicKey, Signature};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::RwLock;
@@ -87,7 +87,10 @@ pub enum UpdaterError {
     SignatureInvalid(String),
     /// M0-P5：phase 超过 watchdog 限制（5 分钟）未推进，强制 abort
     #[error("phase timeout: {phase} 超过 {timeout_secs}s 未完成")]
-    PhaseTimeout { phase: &'static str, timeout_secs: u64 },
+    PhaseTimeout {
+        phase: &'static str,
+        timeout_secs: u64,
+    },
 }
 
 /// 更新通道：stable 排除 prerelease，beta 包含所有（含 stable 自身）。
@@ -198,7 +201,10 @@ struct CachedRelease {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase", tag = "phase")]
 pub enum UpdatePhase {
-    Downloading { downloaded: u64, total: u64 },
+    Downloading {
+        downloaded: u64,
+        total: u64,
+    },
     Verifying,
     Extracting,
     BackingUpDb,
@@ -644,9 +650,13 @@ impl Updater {
         let phase_timeout = std::time::Duration::from_secs(PHASE_TIMEOUT_SECS);
 
         // 1) 下载 sha256
-        let sha_expected = tokio::time::timeout(phase_timeout, self.fetch_sha256(&latest.sha256_url))
-            .await
-            .map_err(|_| UpdaterError::PhaseTimeout { phase: "downloading_sha256", timeout_secs: PHASE_TIMEOUT_SECS })??;
+        let sha_expected =
+            tokio::time::timeout(phase_timeout, self.fetch_sha256(&latest.sha256_url))
+                .await
+                .map_err(|_| UpdaterError::PhaseTimeout {
+                    phase: "downloading_sha256",
+                    timeout_secs: PHASE_TIMEOUT_SECS,
+                })??;
 
         // 2) 流式下载 + 计算 sha256（M0-P5 watchdog 覆盖整体下载，per-chunk 由 download_client.read_timeout 兜底）
         progress(UpdatePhase::Downloading {
@@ -655,10 +665,18 @@ impl Updater {
         });
         let actual_sha = tokio::time::timeout(
             phase_timeout,
-            self.stream_download(&latest.tarball_url, &tarball_path, &progress, latest.tarball_size),
+            self.stream_download(
+                &latest.tarball_url,
+                &tarball_path,
+                &progress,
+                latest.tarball_size,
+            ),
         )
         .await
-        .map_err(|_| UpdaterError::PhaseTimeout { phase: "downloading", timeout_secs: PHASE_TIMEOUT_SECS })??;
+        .map_err(|_| UpdaterError::PhaseTimeout {
+            phase: "downloading",
+            timeout_secs: PHASE_TIMEOUT_SECS,
+        })??;
         progress(UpdatePhase::Verifying);
         if !actual_sha.eq_ignore_ascii_case(&sha_expected) {
             let _ = blocking_io(|| {
@@ -672,9 +690,15 @@ impl Updater {
         }
 
         // 2b) minisign 验签（M0-R2）
-        tokio::time::timeout(phase_timeout, self.verify_minisign_tarball(&latest.sig_url, &tarball_path))
-            .await
-            .map_err(|_| UpdaterError::PhaseTimeout { phase: "verifying_signature", timeout_secs: PHASE_TIMEOUT_SECS })??;
+        tokio::time::timeout(
+            phase_timeout,
+            self.verify_minisign_tarball(&latest.sig_url, &tarball_path),
+        )
+        .await
+        .map_err(|_| UpdaterError::PhaseTimeout {
+            phase: "verifying_signature",
+            timeout_secs: PHASE_TIMEOUT_SECS,
+        })??;
 
         // 3) 解压到 staging
         progress(UpdatePhase::Extracting);
@@ -1049,7 +1073,10 @@ impl Updater {
             let status = resp.status();
             if !status.is_success() {
                 let body = resp.text().await.unwrap_or_default();
-                return Err(UpdaterError::Api { status: status.as_u16(), body });
+                return Err(UpdaterError::Api {
+                    status: status.as_u16(),
+                    body,
+                });
             }
             resp.text().await?
         };
@@ -1558,13 +1585,7 @@ fn run_watcher(args: &WatcherArgs) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     while std::time::Instant::now() < deadline {
         if watcher_probe_health(&args.health_url) {
-            watcher_update_audit_outcome(
-                &args.audit_db_path,
-                &args.task_id,
-                "success",
-                None,
-                true,
-            );
+            watcher_update_audit_outcome(&args.audit_db_path, &args.task_id, "success", None, true);
             return;
         }
         std::thread::sleep(std::time::Duration::from_secs(2));
@@ -1819,7 +1840,10 @@ mod tests {
         assert!(matches!(s, Channel::Stable));
         let b: Channel = serde_json::from_str("\"beta\"").unwrap();
         assert!(matches!(b, Channel::Beta));
-        assert_eq!(serde_json::to_string(&Channel::Stable).unwrap(), "\"stable\"");
+        assert_eq!(
+            serde_json::to_string(&Channel::Stable).unwrap(),
+            "\"stable\""
+        );
         assert_eq!(serde_json::to_string(&Channel::Beta).unwrap(), "\"beta\"");
     }
 
@@ -1928,7 +1952,13 @@ mod tests {
             })
             .and_then(|r| r);
         assert!(
-            matches!(result, Err(UpdaterError::PhaseTimeout { phase: "test_phase", .. })),
+            matches!(
+                result,
+                Err(UpdaterError::PhaseTimeout {
+                    phase: "test_phase",
+                    ..
+                })
+            ),
             "超时应映射为 PhaseTimeout"
         );
     }

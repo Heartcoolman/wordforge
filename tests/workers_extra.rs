@@ -45,6 +45,7 @@ fn build_test_config(database_url: String) -> Config {
         sqlite_busy_timeout_ms: 5000,
         sqlite_connection_timeout_ms: 250,
         sqlite_pool_size: 2,
+        records_outbox_async: false,
         jwt_secret: "test-jwt-secret".repeat(2),
         refresh_jwt_secret: "test-refresh-secret".repeat(2),
         jwt_expires_in_hours: 1,
@@ -167,9 +168,7 @@ async fn cache_cleanup_removes_old_monitoring_events() {
 
     workers::cache_cleanup::run(&store).await;
 
-    let remaining = store
-        .get_recent_monitoring_events(100)
-        .expect("get events");
+    let remaining = store.get_recent_monitoring_events(100).expect("get events");
     // new 还在，old 被清
     assert!(!remaining.is_empty());
     assert!(remaining
@@ -195,10 +194,10 @@ async fn algorithm_optimization_lowers_difficulty_on_low_accuracy() {
         updated_at: Utc::now(),
         failed_login_count: 0,
         locked_until: None,
-            role: "user".to_string(),
-            status: "active".to_string(),
-            last_login_at: None,
-    referrer_source: None,
+        role: "user".to_string(),
+        status: "active".to_string(),
+        last_login_at: None,
+        referrer_source: None,
     };
     store.create_user(&user).unwrap();
 
@@ -222,7 +221,10 @@ async fn algorithm_optimization_lowers_difficulty_on_low_accuracy() {
     let before = engine.get_config().constraints.max_difficulty_when_fatigued;
     workers::algorithm_optimization::run(&store, &engine).await;
     let after = engine.get_config().constraints.max_difficulty_when_fatigued;
-    assert!(after < before, "difficulty should be lowered: {before} -> {after}");
+    assert!(
+        after < before,
+        "difficulty should be lowered: {before} -> {after}"
+    );
 }
 
 #[tokio::test]
@@ -240,10 +242,10 @@ async fn algorithm_optimization_raises_difficulty_on_high_accuracy() {
         updated_at: Utc::now(),
         failed_login_count: 0,
         locked_until: None,
-            role: "user".to_string(),
-            status: "active".to_string(),
-            last_login_at: None,
-    referrer_source: None,
+        role: "user".to_string(),
+        status: "active".to_string(),
+        last_login_at: None,
+        referrer_source: None,
     };
     store.create_user(&user).unwrap();
 
@@ -267,7 +269,10 @@ async fn algorithm_optimization_raises_difficulty_on_high_accuracy() {
     let before = engine.get_config().constraints.max_difficulty_when_fatigued;
     workers::algorithm_optimization::run(&store, &engine).await;
     let after = engine.get_config().constraints.max_difficulty_when_fatigued;
-    assert!(after > before, "difficulty should be raised: {before} -> {after}");
+    assert!(
+        after > before,
+        "difficulty should be raised: {before} -> {after}"
+    );
 }
 
 #[tokio::test]
@@ -569,4 +574,110 @@ async fn weekly_report_runs_on_empty_store() {
 async fn health_analysis_runs_on_empty_store() {
     let (_tmp, store) = setup_store("ha-empty.db");
     workers::health_analysis::run(&store).await;
+}
+
+// ────────────────────── scheduled_broadcast (m042/D2) ──────────────────────
+
+fn seed_user(store: &Store, id: &str) {
+    let user = learning_backend::store::operations::users::User {
+        id: id.to_string(),
+        email: format!("{id}@test.com"),
+        username: id.to_string(),
+        password_hash: "h".to_string(),
+        is_banned: false,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        failed_login_count: 0,
+        locked_until: None,
+        role: "user".to_string(),
+        status: "active".to_string(),
+        last_login_at: None,
+        referrer_source: None,
+    };
+    store.create_user(&user).unwrap();
+}
+
+/// 到期的全员定时广播经 worker 一次 scan 后应 fan-out:用户收到通知、队列置 sent、写历史。
+#[tokio::test]
+async fn scheduled_broadcast_delivers_due_full_audience() {
+    use learning_backend::store::operations::scheduled_broadcasts::NewScheduledBroadcast;
+
+    let (_tmp, store) = setup_store("sched-bc-due.db");
+    seed_user(&store, "u-sched-1");
+
+    let now = Utc::now();
+    let past = (now - Duration::minutes(5)).to_rfc3339();
+    store
+        .insert_scheduled_broadcast(&NewScheduledBroadcast {
+            id: "sb-1",
+            title: "定时公告",
+            message: "正文",
+            admin_id: "adm",
+            platforms: &[],
+            version_min: None,
+            last_active_days: None,
+            user_ids: &[],
+            scheduled_at: &past,
+            created_at: &now.to_rfc3339(),
+        })
+        .unwrap();
+
+    let cfg = build_test_config(":memory:".to_string());
+    let (state, _tx) = build_state(store.clone(), &cfg);
+    workers::scheduled_broadcast::scan_once(&state).await;
+
+    // 用户收到广播通知
+    let notifs = store.list_notifications("u-sched-1", 50, false).unwrap();
+    assert_eq!(notifs.len(), 1, "用户应收到 1 条定时广播通知");
+
+    // 队列记录已置 sent(不再到期)
+    let due = store
+        .list_due_scheduled_broadcasts(&Utc::now().to_rfc3339(), 100)
+        .unwrap();
+    assert!(due.is_empty(), "已下发的定时广播不应再到期");
+
+    // 写入广播历史
+    let since = "1970-01-01T00:00:00+00:00";
+    let hist = store
+        .list_broadcasts_30d(
+            since,
+            learning_backend::store::operations::broadcasts::BroadcastFilter::All,
+            since,
+            50,
+            0,
+        )
+        .unwrap();
+    assert!(hist.iter().any(|b| b.id == "sb-1"), "应写广播历史");
+}
+
+/// 未来时间的定时广播不应被 worker 提前下发。
+#[tokio::test]
+async fn scheduled_broadcast_skips_future() {
+    use learning_backend::store::operations::scheduled_broadcasts::NewScheduledBroadcast;
+
+    let (_tmp, store) = setup_store("sched-bc-future.db");
+    seed_user(&store, "u-sched-2");
+
+    let future = (Utc::now() + Duration::hours(1)).to_rfc3339();
+    store
+        .insert_scheduled_broadcast(&NewScheduledBroadcast {
+            id: "sb-future",
+            title: "T",
+            message: "M",
+            admin_id: "adm",
+            platforms: &[],
+            version_min: None,
+            last_active_days: None,
+            user_ids: &[],
+            scheduled_at: &future,
+            created_at: &Utc::now().to_rfc3339(),
+        })
+        .unwrap();
+
+    let cfg = build_test_config(":memory:".to_string());
+    let (state, _tx) = build_state(store.clone(), &cfg);
+    workers::scheduled_broadcast::scan_once(&state).await;
+
+    let notifs = store.list_notifications("u-sched-2", 50, false).unwrap();
+    assert!(notifs.is_empty(), "未来定时广播不应提前下发");
 }

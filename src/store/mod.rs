@@ -293,7 +293,8 @@ mod tests {
 
     #[test]
     fn restore_from_missing_src_returns_not_found() {
-        let dir = std::env::temp_dir().join(format!("wf-restore-test-missing-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("wf-restore-test-missing-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("create temp dir");
         let live_path = dir.join("live.db");
         let _ = std::fs::remove_file(&live_path);

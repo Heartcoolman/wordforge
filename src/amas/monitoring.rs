@@ -329,8 +329,16 @@ mod tests {
         let strategy = StrategyParams::default();
         let result = make_result(state, strategy.clone(), None);
         record_event(
-            &store, "u1", "s1", &result, 12, &config, &strategy, "v1",
-            &HashMap::new(), false,
+            &store,
+            "u1",
+            "s1",
+            &result,
+            12,
+            &config,
+            &strategy,
+            "v1",
+            &HashMap::new(),
+            false,
         );
         // 落库
         let evts = store.get_recent_monitoring_events(10).unwrap();
@@ -345,8 +353,16 @@ mod tests {
         let strategy = StrategyParams::default();
         let result = make_result(UserState::default(), strategy.clone(), None);
         record_event(
-            &store, "u1", "s1", &result, 10, &config, &strategy, "v1",
-            &HashMap::new(), false,
+            &store,
+            "u1",
+            "s1",
+            &result,
+            10,
+            &config,
+            &strategy,
+            "v1",
+            &HashMap::new(),
+            false,
         );
         assert!(store.get_recent_monitoring_events(10).unwrap().is_empty());
     }
@@ -363,8 +379,16 @@ mod tests {
             Some(ColdStartPhase::Explore),
         );
         record_event(
-            &store, "u1", "s1", &result, 10, &config, &strategy, "v1",
-            &HashMap::new(), false,
+            &store,
+            "u1",
+            "s1",
+            &result,
+            10,
+            &config,
+            &strategy,
+            "v1",
+            &HashMap::new(),
+            false,
         );
         assert!(!store.get_recent_monitoring_events(10).unwrap().is_empty());
     }

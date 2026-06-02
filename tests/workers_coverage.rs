@@ -39,7 +39,7 @@ fn sample_user(id: &str, email: &str) -> User {
         role: "user".to_string(),
         status: "active".to_string(),
         last_login_at: None,
-    referrer_source: None,
+        referrer_source: None,
     }
 }
 

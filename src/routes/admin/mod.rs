@@ -5,6 +5,7 @@ pub mod broadcast;
 pub mod clients;
 pub mod feedback;
 pub mod monitoring;
+pub mod notifications;
 pub mod probe;
 pub mod probe_telemetry;
 pub mod rbac;
@@ -77,6 +78,7 @@ pub fn router() -> Router<AppState> {
         // 注意：/auth 路由已移至 build_router 中单独挂载（附加专用速率限制）
         .nest("/analytics", analytics::router())
         .nest("/monitoring", monitoring::router())
+        .nest("/notifications", notifications::router())
         .nest("/broadcast", broadcast::router())
         .route("/broadcast-update", post(broadcast::broadcast_update))
         .nest("/settings", settings::router())
@@ -113,9 +115,15 @@ pub fn router() -> Router<AppState> {
         .route("/users/:id/extras", get(admin_user_extras))
         .route("/users/:id/activity-log", get(admin_user_activity_log))
         // m026:批量操作 + 设备封禁
-        .route("/users/bulk-reset-password", post(admin_users_bulk_reset_password))
+        .route(
+            "/users/bulk-reset-password",
+            post(admin_users_bulk_reset_password),
+        )
         .route("/users/bulk-delete", post(admin_users_bulk_delete))
-        .route("/users/:id/devices/:device_id/ban", post(admin_user_device_ban))
+        .route(
+            "/users/:id/devices/:device_id/ban",
+            post(admin_user_device_ban),
+        )
 }
 
 /// 导出 admin 认证路由（用于在外层添加专用速率限制）
@@ -166,8 +174,18 @@ async fn list_users(
     let filter = UserListFilter {
         search,
         banned: q.banned,
-        role: q.role.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string),
-        status: q.status.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string),
+        role: q
+            .role
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+        status: q
+            .status
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
         inactive_days: q.inactive_days,
     };
 
@@ -438,9 +456,10 @@ fn write_user_admin_audit(
     } else {
         Some(&metadata)
     };
-    if let Err(e) = state
-        .store()
-        .insert_admin_audit(admin_id, action, Some("user"), Some(user_id), meta)
+    if let Err(e) =
+        state
+            .store()
+            .insert_admin_audit(admin_id, action, Some("user"), Some(user_id), meta)
     {
         tracing::warn!(error=%e, action=%action, "写 admin audit 失败（不影响主流程）");
     }
@@ -454,7 +473,14 @@ async fn admin_list_users(
     per_page: u64,
     filter: UserListFilter,
     include_stats: bool,
-) -> Result<(Vec<User>, u64, Option<std::collections::HashMap<String, UserStats>>), AppError> {
+) -> Result<
+    (
+        Vec<User>,
+        u64,
+        Option<std::collections::HashMap<String, UserStats>>,
+    ),
+    AppError,
+> {
     let store = state.store().clone();
     let limit = per_page as usize;
     let offset = ((page - 1) * per_page) as usize;
@@ -772,7 +798,8 @@ async fn admin_users_bulk_ban(
             "userIds 数量需在 1..=200 之间",
         ));
     }
-    let results = admin_bulk_set_banned(&state, &admin.admin_id, &req, true, "user.bulk_ban").await?;
+    let results =
+        admin_bulk_set_banned(&state, &admin.admin_id, &req, true, "user.bulk_ban").await?;
     let succeeded = results.iter().filter(|r| r.success).count();
     Ok(ok(serde_json::json!({
         "total": req.user_ids.len(),
@@ -862,16 +889,19 @@ async fn admin_patch_user_role(
     let store = state.store().clone();
     let user_id = id.clone();
     let role_for_task = new_role.clone();
-    let updated: User = blocking::run_blocking("admin.update_user_role", move || -> Result<User, AppError> {
-        if store.get_user_by_id(&user_id)?.is_none() {
-            return Err(AppError::not_found("用户不存在"));
-        }
-        store.update_user_role(&user_id, &role_for_task)?;
-        let u = store
-            .get_user_by_id(&user_id)?
-            .ok_or_else(|| AppError::not_found("用户不存在"))?;
-        Ok(u)
-    })
+    let updated: User = blocking::run_blocking(
+        "admin.update_user_role",
+        move || -> Result<User, AppError> {
+            if store.get_user_by_id(&user_id)?.is_none() {
+                return Err(AppError::not_found("用户不存在"));
+            }
+            store.update_user_role(&user_id, &role_for_task)?;
+            let u = store
+                .get_user_by_id(&user_id)?
+                .ok_or_else(|| AppError::not_found("用户不存在"))?;
+            Ok(u)
+        },
+    )
     .await??;
 
     tracing::info!(
@@ -1182,9 +1212,8 @@ async fn admin_user_extras(
                     Vec::new()
                 } else {
                     let placeholders = vec!["?"; ids.len()].join(",");
-                    let sql = format!(
-                        "SELECT id, name FROM wordbooks WHERE id IN ({placeholders})"
-                    );
+                    let sql =
+                        format!("SELECT id, name FROM wordbooks WHERE id IN ({placeholders})");
                     let mut stmt = conn.prepare(&sql)?;
                     let rows: Vec<serde_json::Value> = stmt
                         .query_map(rusqlite::params_from_iter(ids.iter()), |r| {
@@ -1330,10 +1359,7 @@ async fn admin_users_bulk_delete(
     JsonBody(req): JsonBody<BulkUserIdsRequest>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     if req.user_ids.is_empty() || req.user_ids.len() > 50 {
-        return Err(AppError::bad_request(
-            "BULK_SIZE",
-            "删除批量上限 50",
-        ));
+        return Err(AppError::bad_request("BULK_SIZE", "删除批量上限 50"));
     }
     let reason = req.reason.as_deref().unwrap_or("(未填写)").to_string();
     let mut results = Vec::with_capacity(req.user_ids.len());
@@ -1404,10 +1430,12 @@ async fn admin_user_device_ban(
                 .ok();
             match owner {
                 Some(Some(uid)) if uid == user_id_for_task => {}
-                Some(_) => return Err(AppError::bad_request(
-                    "DEVICE_USER_MISMATCH",
-                    "该设备不归属此用户",
-                )),
+                Some(_) => {
+                    return Err(AppError::bad_request(
+                        "DEVICE_USER_MISMATCH",
+                        "该设备不归属此用户",
+                    ))
+                }
                 None => return Err(AppError::not_found("设备不存在")),
             }
             let ok = store.ban_client_device(
@@ -1428,7 +1456,9 @@ async fn admin_user_device_ban(
         &user_id,
         serde_json::json!({ "deviceId": &device_id, "applied": banned }),
     );
-    Ok(ok(serde_json::json!({ "banned": banned, "deviceId": device_id })))
+    Ok(ok(
+        serde_json::json!({ "banned": banned, "deviceId": device_id }),
+    ))
 }
 
 async fn admin_do_set_user_password(
@@ -1437,19 +1467,16 @@ async fn admin_do_set_user_password(
     new_password: String,
 ) -> Result<u32, AppError> {
     let store = state.store().clone();
-    blocking::run_blocking(
-        "admin.set_user_password",
-        move || -> Result<_, AppError> {
-            let mut user = store
-                .get_user_by_id(&user_id)?
-                .ok_or_else(|| AppError::not_found("用户不存在"))?;
+    blocking::run_blocking("admin.set_user_password", move || -> Result<_, AppError> {
+        let mut user = store
+            .get_user_by_id(&user_id)?
+            .ok_or_else(|| AppError::not_found("用户不存在"))?;
 
-            user.password_hash = hash_password(&new_password)?;
-            user.updated_at = Utc::now();
-            store.update_user(&user)?;
+        user.password_hash = hash_password(&new_password)?;
+        user.updated_at = Utc::now();
+        store.update_user(&user)?;
 
-            Ok(store.delete_user_sessions(&user_id)?)
-        },
-    )
+        Ok(store.delete_user_sessions(&user_id)?)
+    })
     .await?
 }

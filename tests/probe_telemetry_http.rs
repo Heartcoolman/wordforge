@@ -83,11 +83,7 @@ fn seed_probe_execution(store: &Store, id: &str, completed: bool) {
              has_cmd_call, timeout_ms, status, dispatched_at, completed_at)
          VALUES (?1, 'b-1', 'dev-1', 'a-1', 'a@x', 'noop', 'sha', 0, 1000,
              ?2, datetime('now'), ?3)",
-        rusqlite::params![
-            id,
-            if completed { "ok" } else { "pending" },
-            completed_at
-        ],
+        rusqlite::params![id, if completed { "ok" } else { "pending" }, completed_at],
     )
     .expect("insert probe_execution");
 }
@@ -107,8 +103,20 @@ async fn it_probe_telemetry_dashboard_full_flow() {
     seed_learning_record(store, "rec-1", "-1 hour"); // word_answer 探针
     seed_learning_record(store, "rec-2", "-2 hour");
 
-    seed_telemetry_event(store, "te-1", "periodic", r#"{"device":{"timezone":"UTC"}}"#, "-1 hour");
-    seed_telemetry_event(store, "te-2", "session_start", r#"{"device":{"cpuCores":8}}"#, "-2 hour");
+    seed_telemetry_event(
+        store,
+        "te-1",
+        "periodic",
+        r#"{"device":{"timezone":"UTC"}}"#,
+        "-1 hour",
+    );
+    seed_telemetry_event(
+        store,
+        "te-2",
+        "session_start",
+        r#"{"device":{"cpuCores":8}}"#,
+        "-2 hour",
+    );
 
     seed_probe_execution(store, "pe-1", false); // 未完成 → 队列积压
     seed_probe_execution(store, "pe-2", true); // 已完成
@@ -116,7 +124,14 @@ async fn it_probe_telemetry_dashboard_full_flow() {
     let hdr = [("authorization", auth_header(&admin_token))];
 
     // ---- GET /overview ----
-    let resp = request(&app.app, Method::GET, "/api/admin/probe-telemetry/overview", None, &hdr).await;
+    let resp = request(
+        &app.app,
+        Method::GET,
+        "/api/admin/probe-telemetry/overview",
+        None,
+        &hdr,
+    )
+    .await;
     let (status, _, body) = response_json(resp).await;
     assert_eq!(status, StatusCode::OK, "body={body}");
     let d = &body["data"];
@@ -132,7 +147,14 @@ async fn it_probe_telemetry_dashboard_full_flow() {
     assert!((rate - 1.5).abs() < 1e-9, "rate={rate}");
 
     // ---- GET /probes ----
-    let resp = request(&app.app, Method::GET, "/api/admin/probe-telemetry/probes", None, &hdr).await;
+    let resp = request(
+        &app.app,
+        Method::GET,
+        "/api/admin/probe-telemetry/probes",
+        None,
+        &hdr,
+    )
+    .await;
     let (status, _, body) = response_json(resp).await;
     assert_eq!(status, StatusCode::OK);
     let groups = body["data"]["groups"].as_array().expect("groups");
@@ -142,7 +164,10 @@ async fn it_probe_telemetry_dashboard_full_flow() {
         for p in g["probes"].as_array().unwrap() {
             all_probes.insert(
                 p["key"].as_str().unwrap().to_string(),
-                (p["locked"].as_bool().unwrap(), p["count24h"].as_i64().unwrap()),
+                (
+                    p["locked"].as_bool().unwrap(),
+                    p["count24h"].as_i64().unwrap(),
+                ),
             );
         }
     }
@@ -157,7 +182,14 @@ async fn it_probe_telemetry_dashboard_full_flow() {
     assert_eq!(all_probes["click"].1, 1);
 
     // ---- GET /sampling ----
-    let resp = request(&app.app, Method::GET, "/api/admin/probe-telemetry/sampling", None, &hdr).await;
+    let resp = request(
+        &app.app,
+        Method::GET,
+        "/api/admin/probe-telemetry/sampling",
+        None,
+        &hdr,
+    )
+    .await;
     let (status, _, body) = response_json(resp).await;
     assert_eq!(status, StatusCode::OK);
     assert!((body["data"]["globalDefault"].as_f64().unwrap() - 1.0).abs() < 1e-9);
@@ -190,7 +222,14 @@ async fn it_probe_telemetry_dashboard_full_flow() {
     assert!(!body["data"]["locked"].as_bool().unwrap());
 
     // audit 应有 1 行
-    let resp = request(&app.app, Method::GET, "/api/admin/probe-telemetry/audit?limit=20", None, &hdr).await;
+    let resp = request(
+        &app.app,
+        Method::GET,
+        "/api/admin/probe-telemetry/audit?limit=20",
+        None,
+        &hdr,
+    )
+    .await;
     let (status, _, body) = response_json(resp).await;
     assert_eq!(status, StatusCode::OK);
     let rows = body["data"]["rows"].as_array().expect("audit rows");
@@ -212,7 +251,14 @@ async fn it_probe_telemetry_dashboard_full_flow() {
     assert_eq!(body["code"], "SAMPLING_RULE_LOCKED");
 
     // ---- GET /sinks ----
-    let resp = request(&app.app, Method::GET, "/api/admin/probe-telemetry/sinks", None, &hdr).await;
+    let resp = request(
+        &app.app,
+        Method::GET,
+        "/api/admin/probe-telemetry/sinks",
+        None,
+        &hdr,
+    )
+    .await;
     let (status, _, body) = response_json(resp).await;
     assert_eq!(status, StatusCode::OK);
     let sinks = body["data"]["sinks"].as_array().expect("sinks");
@@ -223,7 +269,10 @@ async fn it_probe_telemetry_dashboard_full_flow() {
         .expect("telemetry_events sink");
     assert_eq!(te_sink["rowCount"].as_i64().unwrap(), 2);
     assert_eq!(te_sink["kind"], "sqlite_table");
-    assert!(te_sink["retentionDays"].is_null(), "retentionDays 应为 null");
+    assert!(
+        te_sink["retentionDays"].is_null(),
+        "retentionDays 应为 null"
+    );
     assert!(te_sink["lagSecs"].as_i64().unwrap() >= 0);
 
     // ---- GET /schema 有数据 ----
@@ -256,7 +305,14 @@ async fn it_probe_telemetry_dashboard_full_flow() {
     assert!(body["data"]["sampledAt"].is_null());
 
     // ---- 无 token → 401 ----
-    let resp = request(&app.app, Method::GET, "/api/admin/probe-telemetry/overview", None, &[]).await;
+    let resp = request(
+        &app.app,
+        Method::GET,
+        "/api/admin/probe-telemetry/overview",
+        None,
+        &[],
+    )
+    .await;
     let (status, _, _) = response_json(resp).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
@@ -342,7 +398,13 @@ async fn it_telemetry_sampling_gate_enforced() {
 
     // 1) 默认 rate=1.0 → periodic 落库
     let before = count_events(store);
-    let (st, _, b) = submit(user_token.clone(), "dev-keep", "2026-05-29T00:00:00Z", "periodic").await;
+    let (st, _, b) = submit(
+        user_token.clone(),
+        "dev-keep",
+        "2026-05-29T00:00:00Z",
+        "periodic",
+    )
+    .await;
     assert_eq!(st, StatusCode::OK, "b={b}");
     assert!(b["data"]["id"].is_string());
     assert_eq!(count_events(store), before + 1, "rate=1 应落库");
@@ -360,7 +422,13 @@ async fn it_telemetry_sampling_gate_enforced() {
     assert_eq!(st, StatusCode::OK);
 
     let before = count_events(store);
-    let (st, _, b) = submit(user_token.clone(), "dev-drop", "2026-05-29T00:00:01Z", "periodic").await;
+    let (st, _, b) = submit(
+        user_token.clone(),
+        "dev-drop",
+        "2026-05-29T00:00:01Z",
+        "periodic",
+    )
+    .await;
     assert_eq!(st, StatusCode::OK, "b={b}");
     assert_eq!(b["data"]["sampledOut"], true, "rate=0 应 sampledOut");
     assert_eq!(count_events(store), before, "rate=0 不应落库");

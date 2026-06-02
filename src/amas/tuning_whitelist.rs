@@ -15,20 +15,64 @@ pub struct WhitelistEntry {
 /// Tier-A 11 维白名单。范围比前端 schema.ts 略保守，避免极端值。
 pub const TIER_A_WHITELIST: &[WhitelistEntry] = &[
     // FSRS-5 初始稳定性
-    WhitelistEntry { path: "memoryModel.w[0]", min_safe: 0.05, max_safe: 3.0 },
-    WhitelistEntry { path: "memoryModel.w[1]", min_safe: 0.1, max_safe: 3.0 },
-    WhitelistEntry { path: "memoryModel.w[2]", min_safe: 0.5, max_safe: 15.0 },
-    WhitelistEntry { path: "memoryModel.w[3]", min_safe: 1.0, max_safe: 25.0 },
+    WhitelistEntry {
+        path: "memoryModel.w[0]",
+        min_safe: 0.05,
+        max_safe: 3.0,
+    },
+    WhitelistEntry {
+        path: "memoryModel.w[1]",
+        min_safe: 0.1,
+        max_safe: 3.0,
+    },
+    WhitelistEntry {
+        path: "memoryModel.w[2]",
+        min_safe: 0.5,
+        max_safe: 15.0,
+    },
+    WhitelistEntry {
+        path: "memoryModel.w[3]",
+        min_safe: 1.0,
+        max_safe: 25.0,
+    },
     // 稳定性增长
-    WhitelistEntry { path: "memoryModel.w[8]", min_safe: 0.5, max_safe: 3.0 },
-    WhitelistEntry { path: "memoryModel.w[9]", min_safe: 0.05, max_safe: 0.8 },
-    WhitelistEntry { path: "memoryModel.w[10]", min_safe: 0.1, max_safe: 1.6 },
+    WhitelistEntry {
+        path: "memoryModel.w[8]",
+        min_safe: 0.5,
+        max_safe: 3.0,
+    },
+    WhitelistEntry {
+        path: "memoryModel.w[9]",
+        min_safe: 0.05,
+        max_safe: 0.8,
+    },
+    WhitelistEntry {
+        path: "memoryModel.w[10]",
+        min_safe: 0.1,
+        max_safe: 1.6,
+    },
     // 评级 bonus
-    WhitelistEntry { path: "memoryModel.w[15]", min_safe: 0.05, max_safe: 0.5 },
-    WhitelistEntry { path: "memoryModel.w[16]", min_safe: 1.0, max_safe: 6.0 },
+    WhitelistEntry {
+        path: "memoryModel.w[15]",
+        min_safe: 0.05,
+        max_safe: 0.5,
+    },
+    WhitelistEntry {
+        path: "memoryModel.w[16]",
+        min_safe: 1.0,
+        max_safe: 6.0,
+    },
     // 留存目标 + 间隔上限
-    WhitelistEntry { path: "memoryModel.baseDesiredRetention", min_safe: 0.75, max_safe: 0.95 },
-    WhitelistEntry { path: "memoryModel.maxIntervalDays", min_safe: 30.0, max_safe: 365.0 },
+    WhitelistEntry {
+        path: "memoryModel.baseDesiredRetention",
+        min_safe: 0.75,
+        max_safe: 0.95,
+    },
+    WhitelistEntry {
+        path: "memoryModel.maxIntervalDays",
+        min_safe: 30.0,
+        max_safe: 365.0,
+    },
 ];
 
 /// 运行期可解析的白名单条目（owned，来自 store row 或 const）。
@@ -171,7 +215,10 @@ mod tests {
     fn store_backed_rejects_unknown_and_out_of_range() {
         let store = seeded_store();
         let unknown = json!({ "ensemble.baseWeightHeuristic": 0.5 });
-        assert_eq!(validate_patch(&store, unknown.as_object().unwrap()).len(), 1);
+        assert_eq!(
+            validate_patch(&store, unknown.as_object().unwrap()).len(),
+            1
+        );
         let oob = json!({ "memoryModel.baseDesiredRetention": 0.5 });
         let e = validate_patch(&store, oob.as_object().unwrap());
         assert_eq!(e.len(), 1);

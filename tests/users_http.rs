@@ -138,11 +138,13 @@ async fn it_user_delete_me_cascades_favorites_notes_history_and_user_wordbooks()
 
     // 直接查 store 验证四类数据全部清空
     let conn = store.connection().unwrap();
-    let cnt = |sql: &str, uid: &str| -> i64 {
-        conn.query_row(sql, params![uid], |r| r.get(0)).unwrap()
-    };
+    let cnt =
+        |sql: &str, uid: &str| -> i64 { conn.query_row(sql, params![uid], |r| r.get(0)).unwrap() };
     assert_eq!(
-        cnt("SELECT COUNT(*) FROM word_favorites WHERE user_id=?1", &user_id),
+        cnt(
+            "SELECT COUNT(*) FROM word_favorites WHERE user_id=?1",
+            &user_id
+        ),
         0
     );
     assert_eq!(

@@ -121,6 +121,24 @@ async fn main() {
     );
     store.run_migrations().expect("Failed to run migrations");
 
+    // D3：回灌持久化的可用率小时桶，恢复跨重启的 SLO 30d 窗口（失败仅 warn 不阻断启动）。
+    {
+        let now_hour = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64 / 3600)
+            .unwrap_or(0);
+        match store.load_availability_rollup(now_hour - 30 * 24) {
+            Ok(rows) => {
+                let n = rows.len();
+                learning_backend::middleware::http_metrics::import_hour_rollup(rows);
+                if n > 0 {
+                    tracing::info!(hours = n, "回灌可用率小时桶，SLO 窗口跨重启恢复");
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "回灌可用率小时桶失败"),
+        }
+    }
+
     // C2：启动后 seed AMAS 调参白名单（空表才写自 const，失败仅 warn 不阻断启动）
     if let Err(e) = store.seed_tuning_whitelist_if_empty() {
         tracing::warn!(error = %e, "启动 seed AMAS 调参白名单失败，回退 const fallback");
@@ -261,12 +279,39 @@ async fn main() {
         });
     }
 
+    // S2-1：outbox 异步消费 worker（领域事件持久化处理 + 指数退避重试 + 死信兜底）。
+    // 默认 records 走同步老路时 outbox 为空，本 loop 每 10s 一次空查询、零影响；opt-in
+    // (RECORDS_OUTBOX_ASYNC=true) 后驱动异步消费，关闭后仍排空残留事件。需 AppState 故走 interval loop。
+    {
+        let outbox_state = state.clone();
+        let mut shutdown_rx = shutdown_tx.subscribe();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(10));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            tick.tick().await; // 跳过启动即触发
+            loop {
+                tokio::select! {
+                    _ = shutdown_rx.recv() => break,
+                    _ = tick.tick() => {
+                        learning_backend::workers::outbox_processor::run(&outbox_state).await;
+                    }
+                }
+            }
+        });
+    }
+
     tokio::spawn(learning_backend::workers::probe_confirm_sweeper::run(
         state.clone(),
         shutdown_tx.subscribe(),
     ));
 
     tokio::spawn(learning_backend::workers::probe_cleanup::run(
+        state.clone(),
+        shutdown_tx.subscribe(),
+    ));
+
+    // m042/D2:定时广播下发 worker（每 60s 扫到期 scheduled_broadcasts 并 fan-out）
+    tokio::spawn(learning_backend::workers::scheduled_broadcast::run(
         state.clone(),
         shutdown_tx.subscribe(),
     ));
@@ -304,10 +349,12 @@ async fn main() {
                 tick.tick().await; // 跳过启动即触发
                 loop {
                     tick.tick().await;
-                    if let Err(e) =
-                        learning_backend::workers::db_backup::run_once(&store, &dir, 30).await
-                    {
-                        tracing::warn!(error = %e, "每日 DB 备份失败");
+                    match learning_backend::workers::db_backup::run_once(&store, &dir, 30).await {
+                        Ok(path) => {
+                            // B1:本地备份成功后逐 target 推送离站（file/rsync/s3），失败仅告警不中断
+                            learning_backend::workers::backup_offsite::run(&store, &path).await;
+                        }
+                        Err(e) => tracing::warn!(error = %e, "每日 DB 备份失败"),
                     }
                 }
             });

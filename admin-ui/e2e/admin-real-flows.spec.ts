@@ -238,8 +238,26 @@ async function mockAdminApi(page: Page, overrides: { wordbookUrl?: string } = {}
       state.settings = { ...state.settings, ...(body as Record<string, unknown>) };
       return json(ok(state.settings));
     }
+    if (path === '/api/admin/broadcast/preview') {
+      return json(ok({ matched: 428, total: 1024 }));
+    }
+    // m042/D2:推送草稿存/取/删
+    if (path === '/api/admin/broadcast/draft' && method === 'GET') {
+      return json(ok({ draft: null }));
+    }
+    if (path === '/api/admin/broadcast/draft' && method === 'POST') {
+      return json(ok({ draft: { ...((body as Record<string, unknown>) ?? {}), authorId: 'admin-1', updatedAt: '2026-06-02T00:00:00Z' } }));
+    }
+    if (path === '/api/admin/broadcast/draft' && method === 'DELETE') {
+      return json(ok({ deleted: true }));
+    }
     if (path === '/api/admin/broadcast') {
-      return json(ok({ sent: 3 }));
+      // m042/D2:scheduledAt 为未来时间→排程响应;否则即时
+      const scheduledAt = (body as { scheduledAt?: string } | undefined)?.scheduledAt;
+      if (scheduledAt) {
+        return json(ok({ scheduled: true, scheduledAt, broadcastId: 'bc-scheduled-1' }));
+      }
+      return json(ok({ sent: 3, broadcastId: 'bc-1' }));
     }
     if (path === '/api/admin/broadcast-update') {
       return json(ok({ broadcasted: true }));
@@ -674,6 +692,49 @@ test.describe('Admin real UI flows', () => {
     await page.getByRole('button', { name: '解封' }).click();
     await page.getByRole('button', { name: '确认解封' }).click();
     await expect.poll(() => state.calls.some((c) => c.path === '/api/admin/clients/device-recent-987654/unban')).toBe(true);
+  });
+
+  // m042/D2:设备页广播编辑器「投递时机调度」+「保存草稿」
+  test('devices page schedules a broadcast at a future time', async ({ page }) => {
+    const state = await mockAdminApi(page);
+    await page.goto('/admin/clients');
+
+    await expect(page.getByRole('heading', { name: '广播推送' })).toBeVisible();
+    await page.getByLabel('标题').fill('定时维护通知');
+    await page.locator('textarea').first().fill('今晚 02:00 维护');
+
+    // 切到「指定时间」并填一个未来时间(明年,稳过未来校验)
+    await page.getByLabel('投递时机').selectOption('at');
+    await page.getByLabel('投递时间').fill('2099-01-01T02:00');
+
+    await page.getByRole('button', { name: /排程给/ }).click();
+    await expect
+      .poll(() =>
+        state.calls.some(
+          (c) => c.path === '/api/admin/broadcast' && c.method === 'POST',
+        ),
+      )
+      .toBe(true);
+    const call = state.calls.find(
+      (c) => c.path === '/api/admin/broadcast' && c.method === 'POST',
+    );
+    expect((call?.body as { scheduledAt?: string } | undefined)?.scheduledAt).toBeTruthy();
+  });
+
+  test('devices page saves a push draft', async ({ page }) => {
+    const state = await mockAdminApi(page);
+    await page.goto('/admin/clients');
+
+    await page.getByLabel('标题').fill('草稿标题');
+    await page.locator('textarea').first().fill('草稿正文');
+    await page.getByRole('button', { name: '保存草稿' }).click();
+    await expect
+      .poll(() =>
+        state.calls.some(
+          (c) => c.path === '/api/admin/broadcast/draft' && c.method === 'POST',
+        ),
+      )
+      .toBe(true);
   });
 
   test('updates page checks release and opens apply confirmation', async ({ page }) => {

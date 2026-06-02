@@ -17,14 +17,8 @@ pub fn router() -> Router<AppState> {
         // m027:设备表后端分页 + 平台聚合 + 升级策略 CRUD + 强制升级广播
         .route("/paginated", get(list_clients_paginated))
         .route("/distribution", get(get_distribution))
-        .route(
-            "/upgrade-policy",
-            get(list_upgrade_policy_handler),
-        )
-        .route(
-            "/upgrade-policy/:platform",
-            put(put_upgrade_policy_handler),
-        )
+        .route("/upgrade-policy", get(list_upgrade_policy_handler))
+        .route("/upgrade-policy/:platform", put(put_upgrade_policy_handler))
         .route(
             "/broadcast-upgrade/:platform",
             post(broadcast_upgrade_handler),
@@ -383,7 +377,11 @@ async fn list_clients_paginated(
         )
         .await??;
     let data: Vec<ListedDevice> = rows.into_iter().map(Into::into).collect();
-    let total_pages = if total == 0 { 0 } else { (total + per_page - 1) / per_page };
+    let total_pages = if total == 0 {
+        0
+    } else {
+        (total + per_page - 1) / per_page
+    };
     Ok(ok(serde_json::json!({
         "data": data,
         "total": total,
@@ -572,22 +570,24 @@ async fn broadcast_upgrade_handler(
                         offset,
                     )?;
                     let fetched = rows.len() as i64;
-                    out.extend(rows.into_iter().filter(|d| {
-                        d.app_version
-                            .as_deref()
-                            .map(|v| {
-                                let a = v.trim_start_matches('v');
-                                let t = below_for_db.trim_start_matches('v');
-                                match (
-                                    semver::Version::parse(a),
-                                    semver::Version::parse(t),
-                                ) {
-                                    (Ok(av), Ok(tv)) => av < tv,
-                                    _ => false,
-                                }
+                    out.extend(
+                        rows.into_iter()
+                            .filter(|d| {
+                                d.app_version
+                                    .as_deref()
+                                    .map(|v| {
+                                        let a = v.trim_start_matches('v');
+                                        let t = below_for_db.trim_start_matches('v');
+                                        match (semver::Version::parse(a), semver::Version::parse(t))
+                                        {
+                                            (Ok(av), Ok(tv)) => av < tv,
+                                            _ => false,
+                                        }
+                                    })
+                                    .unwrap_or(false)
                             })
-                            .unwrap_or(false)
-                    }).map(|d| d.device_id));
+                            .map(|d| d.device_id),
+                    );
                     offset += fetched;
                     if fetched == 0 || offset >= total {
                         break;
@@ -721,11 +721,7 @@ async fn get_client_detail(
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     // 在线状态来自内存 SSE 表(与 list_clients 一致)。
-    let connection_count = state
-        .active_sse()
-        .get(&id)
-        .map(|c| c.len())
-        .unwrap_or(0);
+    let connection_count = state.active_sse().get(&id).map(|c| c.len()).unwrap_or(0);
 
     let device_id = id.clone();
     let (device, telemetry_total, telemetry_latest) = state
@@ -743,8 +739,7 @@ async fn get_client_detail(
                     .find(|d| d.device_id == device_id)
                     .ok_or_else(|| AppError::not_found("设备不存在"))?;
                 // telemetry 摘要:近 1 条 + 总数(复用 get_telemetry_summaries_by_device)。
-                let (records, total) =
-                    store.get_telemetry_summaries_by_device(&device_id, 1, 0)?;
+                let (records, total) = store.get_telemetry_summaries_by_device(&device_id, 1, 0)?;
                 let latest = serde_json::to_value(records)
                     .ok()
                     .and_then(|v| v.as_array().and_then(|a| a.first().cloned()));

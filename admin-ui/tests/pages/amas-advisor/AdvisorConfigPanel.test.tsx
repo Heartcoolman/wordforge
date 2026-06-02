@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@solidjs/testing-library';
 
 vi.mock('@/api/admin', () => ({
-  adminApi: { amasAdvisorConfig: vi.fn(), amasUpdateAdvisorConfig: vi.fn() },
+  adminApi: { amasAdvisorConfig: vi.fn(), amasUpdateAdvisorConfig: vi.fn(), getSettings: vi.fn(), updateSettings: vi.fn() },
 }));
 vi.mock('@/stores/ui', () => ({
   uiStore: { toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() } },
@@ -19,7 +19,12 @@ const cfg = {
 };
 
 describe('AdvisorConfigPanel', () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // E3:AdvisorConfigPanel 现额外从 SystemSettings 读/写 canary 两阈值。
+    mockApi.getSettings.mockResolvedValue({ canaryRewardDropThreshold: 0.05, canaryAnomalyRiseThreshold: 0.05 });
+    mockApi.updateSettings.mockResolvedValue({});
+  });
 
   it('渲染只读 model / 脱敏 API Key 尾号', async () => {
     mockApi.amasAdvisorConfig.mockResolvedValue(cfg);

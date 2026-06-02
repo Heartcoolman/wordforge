@@ -38,6 +38,36 @@ pub async fn run(registry: &MetricsRegistry, store: &Store) {
             }
         }
     }
+
+    // D3：旁路 flush HTTP 可用率小时桶（与 AMAS 指标 flush 同 5 分钟周期）。
+    flush_availability_rollup(store);
+}
+
+/// D3：导出内存 hour 槽 → 升序 upsert 到 availability_rollup + 裁剪超 30d 旧桶。失败仅告警。
+fn flush_availability_rollup(store: &Store) {
+    let exported = crate::middleware::http_metrics::export_hour_rollup();
+    if exported.is_empty() {
+        return;
+    }
+    let rows: Vec<(i64, u64, u64, u64, String)> = exported
+        .into_iter()
+        .map(|(k, c, e, b, buckets)| {
+            (
+                k,
+                c,
+                e,
+                b,
+                serde_json::to_string(&buckets).unwrap_or_else(|_| "[]".into()),
+            )
+        })
+        .collect();
+    let now_hour = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64 / 3600)
+        .unwrap_or(0);
+    if let Err(e) = store.flush_availability_rollup(&rows, now_hour - 30 * 24) {
+        tracing::warn!(error=%e, "availability rollup flush failed");
+    }
 }
 
 #[cfg(test)]

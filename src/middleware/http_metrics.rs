@@ -117,7 +117,9 @@ pub async fn record_http_metrics(req: Request, next: Next) -> Response {
 
         {
             let mut map = registry().write().await;
-            map.entry(key).or_insert_with(HistogramData::new).observe(elapsed);
+            map.entry(key)
+                .or_insert_with(HistogramData::new)
+                .observe(elapsed);
         }
 
         // M0-P5：滚动窗口聚合（SLO 卡 / 请求延迟图 / axum 服务行 rps 的数据源）
@@ -130,9 +132,7 @@ pub async fn record_http_metrics(req: Request, next: Next) -> Response {
 /// 获取当前所有 histogram 数据的快照（用于 /metrics 端点输出）。
 pub async fn snapshot() -> Vec<(HistogramKey, HistogramData)> {
     let map = registry().read().await;
-    map.iter()
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect()
+    map.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
 }
 
 /// 以 OpenMetrics text 格式输出 `http_request_duration_seconds` histogram。
@@ -159,9 +159,7 @@ pub async fn write_histogram_exposition(out: &mut String) {
     }
 
     for ((method, route, status), hist) in &data {
-        let labels_prefix = format!(
-            "method=\"{method}\",route=\"{route}\",status=\"{status}\""
-        );
+        let labels_prefix = format!("method=\"{method}\",route=\"{route}\",status=\"{status}\"");
         // 输出有限 bucket
         for (i, &bound) in BUCKET_BOUNDS.iter().enumerate() {
             let _ = writeln!(
@@ -194,12 +192,13 @@ pub async fn write_histogram_exposition(out: &mut String) {
 //
 // 在累积直方图之外，额外维护「每分钟」与「每小时」两级环形缓冲，
 // 供 admin 监控页计算窗口内 P50/P99、QPS、错误率、可用性、入站带宽 +
-// 下采样时序图。计数随进程生命周期，重启清零 —— 因此「可用性」按实际
-// 可得窗口（min(window, 自首条记录以来)）如实标注，不伪造 30 天历史。
+// 下采样时序图。minute 层随进程生命周期、重启清零；hour 层经 D3 持久化到
+// availability_rollup 表并在启动回灌，故「可用性」hour 窗口（≤30d）跨重启可达；
+// effective 窗口仍按 min(window, 自首条记录以来) 如实标注，不伪造历史。
 // ═══════════════════════════════════════════════════════════════════
 
 const MINUTE_CAP: usize = 24 * 60; // 24h 的每分钟槽
-const HOUR_CAP: usize = 7 * 24; // 7d 的每小时槽
+const HOUR_CAP: usize = 30 * 24; // D3:30d 的每小时槽（持久化到 availability_rollup 跨重启）
 const MINUTE_SOURCE_MAX_SECS: u64 = 24 * 3600; // ≤24h 用分钟槽，更长用小时槽
 
 /// 单个时间槽（分钟或小时粒度）的累积量。
@@ -285,6 +284,55 @@ fn record_rolling(latency_secs: f64, is_5xx: bool, bytes_in: u64) {
     touch_slot(&mut store.hour, now / 3600, HOUR_CAP).observe(latency_secs, is_5xx, bytes_in);
 }
 
+/// D3：导出当前内存 hour 槽，供 metrics_flush 持久化到 availability_rollup。
+/// 返回 (hour_key, count, err5xx, bytes_in, buckets)，按内存顺序（升序）。
+pub fn export_hour_rollup() -> Vec<(i64, u64, u64, u64, Vec<u64>)> {
+    let store = match ROLLING.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    store
+        .hour
+        .iter()
+        .map(|s| (s.key, s.count, s.err5xx, s.bytes_in, s.buckets.clone()))
+        .collect()
+}
+
+/// D3：启动回灌持久化的 hour 槽，恢复跨重启的 ≤30d 可用率窗口。
+/// 仅追加内存中尚不存在的 hour_key（启动期 deque 通常为空），据最早 key 回填
+/// first_record_unix，并保证 deque 按 key 升序（aggregate/downsample 不变式）。
+pub fn import_hour_rollup(rows: Vec<(i64, u64, u64, u64, Vec<u64>)>) {
+    if rows.is_empty() {
+        return;
+    }
+    let want = BUCKET_BOUNDS.len() + 1;
+    let mut store = match ROLLING.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    for (key, count, err5xx, bytes_in, mut buckets) in rows {
+        if store.hour.iter().any(|s| s.key == key) {
+            continue;
+        }
+        buckets.resize(want, 0);
+        let mut slot = Slot::new(key);
+        slot.count = count;
+        slot.err5xx = err5xx;
+        slot.bytes_in = bytes_in;
+        slot.buckets = buckets;
+        store.hour.push_back(slot);
+        let first = key * 3600;
+        store.first_record_unix = Some(match store.first_record_unix {
+            Some(f) => f.min(first),
+            None => first,
+        });
+    }
+    while store.hour.len() > HOUR_CAP {
+        store.hour.pop_front();
+    }
+    store.hour.make_contiguous().sort_by_key(|s| s.key);
+}
+
 /// 从累积桶估算分位延迟（毫秒），桶内线性插值。
 fn percentile_ms(buckets: &[u64], count: u64, p: f64) -> f64 {
     if count == 0 {
@@ -360,7 +408,11 @@ pub fn aggregate(window_secs: u64) -> RequestMetricsAggregate {
         Ok(g) => g,
         Err(p) => p.into_inner(),
     };
-    let src = if use_minute { &store.minute } else { &store.hour };
+    let src = if use_minute {
+        &store.minute
+    } else {
+        &store.hour
+    };
 
     // 窗口内的槽（按时间升序）
     let slots: Vec<&Slot> = src.iter().filter(|s| s.key * gran >= cutoff).collect();

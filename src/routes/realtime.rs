@@ -234,6 +234,7 @@ mod tests {
             sqlite_busy_timeout_ms: 5000,
             sqlite_connection_timeout_ms: 250,
             sqlite_pool_size: 4,
+            records_outbox_async: false,
             jwt_secret: "test-jwt-secret-abcdefghijklmnopqrstuvwxyz".to_string(),
             refresh_jwt_secret: "test-refresh-secret-abcdefghijklmnopqrstuvwxyz".to_string(),
             jwt_expires_in_hours: 24,

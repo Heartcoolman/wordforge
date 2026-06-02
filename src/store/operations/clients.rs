@@ -109,7 +109,13 @@ impl Store {
         app_version: Option<&str>,
     ) -> Result<(), StoreError> {
         self.upsert_client_device_with_extras(
-            device_id, platform, user_id, app_version, None, None, None,
+            device_id,
+            platform,
+            user_id,
+            app_version,
+            None,
+            None,
+            None,
         )
     }
 
@@ -139,7 +145,15 @@ impl Store {
                 country = COALESCE(?5, country),
                 last_ip = COALESCE(?6, last_ip),
                 model = COALESCE(?7, model)",
-            params![device_id, platform, user_id, app_version, country, last_ip, model],
+            params![
+                device_id,
+                platform,
+                user_id,
+                app_version,
+                country,
+                last_ip,
+                model
+            ],
         )?;
         Ok(())
     }
@@ -257,9 +271,7 @@ impl Store {
              ORDER BY last_seen_at DESC
              LIMIT ?2",
         )?;
-        let rows = stmt.query_map(params![user_id, limit as i64], |r| {
-            row_to_client_device(r)
-        })?;
+        let rows = stmt.query_map(params![user_id, limit as i64], |r| row_to_client_device(r))?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
@@ -295,7 +307,9 @@ impl Store {
             where_sqls.push(s.as_str());
         }
         let recent_placeholder = if recent_offset.is_some() {
-            Some(format!("(last_seen_at >= datetime('now', ?{param_idx}) OR is_banned = 1)"))
+            Some(format!(
+                "(last_seen_at >= datetime('now', ?{param_idx}) OR is_banned = 1)"
+            ))
         } else {
             None
         };
@@ -322,8 +336,7 @@ impl Store {
         }
 
         let count_sql = format!("SELECT COUNT(*) FROM client_devices {where_clause}");
-        let total: i64 =
-            conn.query_row(&count_sql, params_vec.as_slice(), |r| r.get(0))?;
+        let total: i64 = conn.query_row(&count_sql, params_vec.as_slice(), |r| r.get(0))?;
 
         // page slice
         let next_idx = params_vec.len() + 1;
@@ -398,7 +411,11 @@ impl Store {
         )?;
         let rows = stmt
             .query_map([], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?))
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
@@ -481,8 +498,9 @@ impl Store {
         let mut binds: Vec<rusqlite::types::Value> = Vec::new();
         let mut idx = 1usize;
         if !platforms.is_empty() {
-            let placeholders: Vec<String> =
-                (0..platforms.len()).map(|i| format!("?{}", idx + i)).collect();
+            let placeholders: Vec<String> = (0..platforms.len())
+                .map(|i| format!("?{}", idx + i))
+                .collect();
             clauses.push(format!("platform IN ({})", placeholders.join(",")));
             idx += platforms.len();
             for p in platforms {
@@ -516,16 +534,18 @@ impl Store {
             )?;
             let pairs: Vec<(String, Option<String>)> = stmt
                 .query_map([], |r| {
-                    Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?))
+                    Ok((
+                        r.get::<_, Option<String>>(0)?,
+                        r.get::<_, Option<String>>(1)?,
+                    ))
                 })?
                 .filter_map(Result::ok)
                 .filter_map(|(uid, ver)| uid.map(|u| (u, ver)))
                 .collect();
             let v_min_clean = v_min.trim_start_matches('v');
             // version_min 必须可解析,否则会把全员误判为不命中(静默零发送)
-            let v_min_parsed = semver::Version::parse(v_min_clean).map_err(|_| {
-                StoreError::Validation(format!("受众最低版本号非法: {v_min}"))
-            })?;
+            let v_min_parsed = semver::Version::parse(v_min_clean)
+                .map_err(|_| StoreError::Validation(format!("受众最低版本号非法: {v_min}")))?;
             let from_device = std::collections::HashSet::<String>::from_iter(device_user_ids);
             pairs
                 .into_iter()

@@ -215,9 +215,9 @@ fn parse_dt_opt(s: Option<String>) -> rusqlite::Result<Option<DateTime<Utc>>> {
     use chrono::NaiveDateTime;
     NaiveDateTime::parse_from_str(&v, "%Y-%m-%d %H:%M:%S")
         .map(|ndt| Some(ndt.and_utc()))
-        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(
-            0, rusqlite::types::Type::Text, Box::new(e),
-        ))
+        .map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+        })
 }
 
 /// feedback_items 基础列（不含 enrich JOIN 列）；feedback_from_row 按此顺序读 0..=18。
@@ -256,8 +256,12 @@ fn feedback_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FeedbackItem> 
         body: row.get(3)?,
         route: row.get(4)?,
         created_at: parse_dt(row.get(5)?)?,
-        priority: row.get::<_, String>(6).unwrap_or_else(|_| "normal".to_string()),
-        status: row.get::<_, String>(7).unwrap_or_else(|_| "open".to_string()),
+        priority: row
+            .get::<_, String>(6)
+            .unwrap_or_else(|_| "normal".to_string()),
+        status: row
+            .get::<_, String>(7)
+            .unwrap_or_else(|_| "open".to_string()),
         assignee_admin_id: row.get(8)?,
         resolved_at: parse_dt_opt(row.get(9)?)?,
         resolution: row.get(10)?,
@@ -463,17 +467,14 @@ impl Store {
         let items: Vec<FeedbackItem> = stmt
             .query_map(
                 rusqlite::params_from_iter(
-                    filter_params
-                        .iter()
-                        .map(|s| s.as_str())
-                        .chain(
-                            [per_page as i64, offset as i64]
-                                .iter()
-                                .map(|n| n.to_string())
-                                .collect::<Vec<_>>()
-                                .iter()
-                                .map(|s| s.as_str()),
-                        ),
+                    filter_params.iter().map(|s| s.as_str()).chain(
+                        [per_page as i64, offset as i64]
+                            .iter()
+                            .map(|n| n.to_string())
+                            .collect::<Vec<_>>()
+                            .iter()
+                            .map(|s| s.as_str()),
+                    ),
                 ),
                 |row| {
                     let mut item = feedback_from_row(row)?;
@@ -559,14 +560,10 @@ impl Store {
                 .optional()?);
         }
 
-        let set_clause = format!(
-            "{} {}",
-            resolved_at_sql,
-            set_parts.join(", ")
-        )
-        .trim()
-        .trim_end_matches(',')
-        .to_string();
+        let set_clause = format!("{} {}", resolved_at_sql, set_parts.join(", "))
+            .trim()
+            .trim_end_matches(',')
+            .to_string();
 
         let sql = format!("UPDATE feedback_items SET {} WHERE id = ?1", set_clause);
         let mut stmt = conn.prepare(&sql)?;
@@ -591,8 +588,7 @@ impl Store {
     /// 中位首响时长（分钟）/ 近 7 日解决率 / CSAT 均值与样本数。
     pub fn feedback_stats(&self) -> Result<FeedbackStats, StoreError> {
         let conn = self.conn()?;
-        let total: i64 =
-            conn.query_row("SELECT COUNT(*) FROM feedback_items", [], |r| r.get(0))?;
+        let total: i64 = conn.query_row("SELECT COUNT(*) FROM feedback_items", [], |r| r.get(0))?;
         let unresolved: i64 = conn.query_row(
             "SELECT COUNT(*) FROM feedback_items WHERE status IN ('open','in_progress')",
             [],
@@ -615,9 +611,7 @@ impl Store {
             let mut stmt = conn.prepare(
                 "SELECT COALESCE(category, 'unknown') AS c, COUNT(*) FROM feedback_items GROUP BY c",
             )?;
-            let rows = stmt.query_map([], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
-            })?;
+            let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
             for row in rows {
                 let (c, n) = row?;
                 by_category.insert(c, n);
@@ -634,9 +628,7 @@ impl Store {
         {
             let mut stmt =
                 conn.prepare("SELECT status, COUNT(*) FROM feedback_items GROUP BY status")?;
-            let rows = stmt.query_map([], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
-            })?;
+            let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
             for row in rows {
                 let (s, n) = row?;
                 match s.as_str() {
@@ -656,15 +648,12 @@ impl Store {
                 "SELECT created_at, first_response_at FROM feedback_items
                  WHERE first_response_at IS NOT NULL",
             )?;
-            let rows = stmt.query_map([], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-            })?;
+            let rows =
+                stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
             let mut v = Vec::new();
             for row in rows {
                 let (c, f) = row?;
-                if let (Ok(Some(c)), Ok(Some(f))) =
-                    (parse_dt_opt(Some(c)), parse_dt_opt(Some(f)))
-                {
+                if let (Ok(Some(c)), Ok(Some(f))) = (parse_dt_opt(Some(c)), parse_dt_opt(Some(f))) {
                     let mins = (f - c).num_seconds() as f64 / 60.0;
                     if mins >= 0.0 {
                         v.push(mins);
@@ -737,7 +726,9 @@ impl Store {
             })?;
             for row in rows {
                 let (c_raw, fr_raw, status, csat) = row?;
-                let Ok(Some(created)) = parse_dt_opt(Some(c_raw)) else { continue };
+                let Ok(Some(created)) = parse_dt_opt(Some(c_raw)) else {
+                    continue;
+                };
                 let offset = (today - created.date_naive()).num_days();
                 if offset < 0 {
                     continue;
@@ -745,7 +736,11 @@ impl Store {
                 let resp_mins = match parse_dt_opt(fr_raw).ok().flatten() {
                     Some(fr) => {
                         let m = (fr - created).num_seconds() as f64 / 60.0;
-                        if m >= 0.0 { Some(m) } else { None }
+                        if m >= 0.0 {
+                            Some(m)
+                        } else {
+                            None
+                        }
                     }
                     None => None,
                 };
@@ -787,23 +782,39 @@ impl Store {
             }
 
             let avg = |v: &[f64]| -> Option<f64> {
-                if v.is_empty() { None } else { Some(v.iter().sum::<f64>() / v.len() as f64) }
+                if v.is_empty() {
+                    None
+                } else {
+                    Some(v.iter().sum::<f64>() / v.len() as f64)
+                }
             };
             let resp_spark: Vec<f64> = resp_day
                 .iter_mut()
                 .map(|d| median(d).unwrap_or(0.0))
                 .collect();
             let resolve_spark: Vec<f64> = (0..7)
-                .map(|i| if created_day[i] > 0 { resolved_day[i] as f64 / created_day[i] as f64 } else { 0.0 })
+                .map(|i| {
+                    if created_day[i] > 0 {
+                        resolved_day[i] as f64 / created_day[i] as f64
+                    } else {
+                        0.0
+                    }
+                })
                 .collect();
             let csat_spark: Vec<f64> = csat_day.iter().map(|d| avg(d).unwrap_or(0.0)).collect();
 
-            let resp_delta = match (median(&mut this_resp.clone()), median(&mut prev_resp.clone())) {
+            let resp_delta = match (
+                median(&mut this_resp.clone()),
+                median(&mut prev_resp.clone()),
+            ) {
                 (Some(t), Some(p)) => Some(t - p),
                 _ => None,
             };
             let resolve_delta = if this_created > 0 && prev_created > 0 {
-                Some(this_resolved as f64 / this_created as f64 - prev_resolved as f64 / prev_created as f64)
+                Some(
+                    this_resolved as f64 / this_created as f64
+                        - prev_resolved as f64 / prev_created as f64,
+                )
             } else {
                 None
             };
@@ -811,7 +822,14 @@ impl Store {
                 (Some(t), Some(p)) => Some(t - p),
                 _ => None,
             };
-            (resp_spark, resolve_spark, csat_spark, resp_delta, resolve_delta, csat_delta)
+            (
+                resp_spark,
+                resolve_spark,
+                csat_spark,
+                resp_delta,
+                resolve_delta,
+                csat_delta,
+            )
         };
 
         Ok(FeedbackStats {
@@ -1014,25 +1032,29 @@ impl Store {
         keys::validate_id(id)?;
         keys::validate_id(target_id)?;
         if id == target_id {
-            return Err(StoreError::Validation("cannot merge a feedback into itself".into()));
+            return Err(StoreError::Validation(
+                "cannot merge a feedback into itself".into(),
+            ));
         }
         let mut conn = self.conn()?;
         let now = Utc::now().to_rfc3339();
         // 先做存在性校验，避免任一不存在时仍对目标 dedup_count 误加。
-        let src_exists: bool = conn.query_row(
-            "SELECT 1 FROM feedback_items WHERE id = ?1",
-            params![id],
-            |_| Ok(()),
-        )
-        .optional()?
-        .is_some();
-        let tgt_exists: bool = conn.query_row(
-            "SELECT 1 FROM feedback_items WHERE id = ?1",
-            params![target_id],
-            |_| Ok(()),
-        )
-        .optional()?
-        .is_some();
+        let src_exists: bool = conn
+            .query_row(
+                "SELECT 1 FROM feedback_items WHERE id = ?1",
+                params![id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        let tgt_exists: bool = conn
+            .query_row(
+                "SELECT 1 FROM feedback_items WHERE id = ?1",
+                params![target_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
         if !src_exists || !tgt_exists {
             return Ok(false);
         }
@@ -1139,7 +1161,15 @@ impl Store {
             "INSERT INTO feedback_announcements
                 (id, title, body, kind, published, author_id, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
-            params![&id, title, body, kind, published as i64, author_id, &now_str],
+            params![
+                &id,
+                title,
+                body,
+                kind,
+                published as i64,
+                author_id,
+                &now_str
+            ],
         )?;
         Ok(FeedbackAnnouncement {
             id,
@@ -1181,15 +1211,15 @@ impl Store {
         );
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt
-            .query_map(rusqlite::params_from_iter(binds.iter()), announcement_from_row)?
+            .query_map(
+                rusqlite::params_from_iter(binds.iter()),
+                announcement_from_row,
+            )?
             .collect::<Result<_, _>>()?;
         Ok(rows)
     }
 
-    pub fn get_announcement(
-        &self,
-        id: &str,
-    ) -> Result<Option<FeedbackAnnouncement>, StoreError> {
+    pub fn get_announcement(&self, id: &str) -> Result<Option<FeedbackAnnouncement>, StoreError> {
         keys::validate_id(id)?;
         let conn = self.conn()?;
         Ok(conn
@@ -1292,7 +1322,14 @@ impl Store {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(feedback_id) DO UPDATE SET
                 body = ?2, push_inapp = ?3, cc_email = ?4, author_id = ?5, updated_at = ?6",
-            params![feedback_id, body, push_inapp as i64, cc_email as i64, author_id, &now_str],
+            params![
+                feedback_id,
+                body,
+                push_inapp as i64,
+                cc_email as i64,
+                author_id,
+                &now_str
+            ],
         )?;
         Ok(Some(FeedbackReplyDraft {
             feedback_id: feedback_id.to_string(),
@@ -1432,7 +1469,9 @@ mod tests {
         item2.status = "resolved".to_string();
         s.create_feedback(&item2, &[]).unwrap();
 
-        let (open_items, open_total) = s.list_feedback_filtered(1, 10, None, Some("open"), false, false).unwrap();
+        let (open_items, open_total) = s
+            .list_feedback_filtered(1, 10, None, Some("open"), false, false)
+            .unwrap();
         assert_eq!(open_total, 1);
         assert_eq!(open_items[0].id, "fb-005");
 
@@ -1498,7 +1537,10 @@ mod tests {
             .iter()
             .map(|a| (a.name.clone(), a.kind.clone()))
             .collect();
-        assert_eq!(by_name.get("screenshot.png").map(String::as_str), Some("image"));
+        assert_eq!(
+            by_name.get("screenshot.png").map(String::as_str),
+            Some("image")
+        );
         assert_eq!(by_name.get("log.txt").map(String::as_str), Some("file"));
         // create 会写一条 'submitted' 事件
         assert!(detail.events.iter().any(|e| e.kind == "submitted"));
@@ -1553,9 +1595,15 @@ mod tests {
         s.create_feedback(&make_item("fb-as"), &[]).unwrap();
 
         // 不存在 → None
-        assert!(s.assign_feedback("missing", Some("admin-1")).unwrap().is_none());
+        assert!(s
+            .assign_feedback("missing", Some("admin-1"))
+            .unwrap()
+            .is_none());
 
-        let assigned = s.assign_feedback("fb-as", Some("admin-7")).unwrap().unwrap();
+        let assigned = s
+            .assign_feedback("fb-as", Some("admin-7"))
+            .unwrap()
+            .unwrap();
         assert_eq!(assigned.assignee_admin_id.as_deref(), Some("admin-7"));
 
         // 取消分派
@@ -1624,7 +1672,10 @@ mod tests {
         assert!(first_read.is_some());
         // 幂等：再次调用不覆盖
         s.set_feedback_read("fb-u1").unwrap();
-        assert_eq!(s.get_feedback("fb-u1").unwrap().unwrap().read_at, first_read);
+        assert_eq!(
+            s.get_feedback("fb-u1").unwrap().unwrap().read_at,
+            first_read
+        );
 
         // mark-all-read 只影响剩余未读的 fb-u2
         let updated = s.mark_all_feedback_read().unwrap();
@@ -1678,7 +1729,10 @@ mod tests {
         assert_eq!(stats.csat_count, 2);
         assert_eq!(stats.csat_avg, Some(4.0));
         // 有一条首响 → median 非空且 >= 0
-        assert!(stats.median_response_minutes.map(|m| m >= 0.0).unwrap_or(false));
+        assert!(stats
+            .median_response_minutes
+            .map(|m| m >= 0.0)
+            .unwrap_or(false));
         // 近 7 日刚创建 5 条、其中 2 条 resolved → 解决率 0.4
         assert_eq!(stats.resolve_rate7d, Some(0.4));
     }

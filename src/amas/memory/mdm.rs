@@ -228,8 +228,7 @@ pub fn compute_interval(
 ) -> i64 {
     let s = state.stability.max(0.01);
     let floor = config.forgetting_curve_floor;
-    let adjusted_target = ((target_recall - floor) / (1.0 - floor).max(1e-9))
-        .clamp(1e-6, 1.0);
+    let adjusted_target = ((target_recall - floor) / (1.0 - floor).max(1e-9)).clamp(1e-6, 1.0);
     let interval_days = s / config.forgetting_curve_factor
         * (adjusted_target.powf(1.0 / config.forgetting_curve_decay) - 1.0);
     let interval_secs = interval_days * 86400.0;

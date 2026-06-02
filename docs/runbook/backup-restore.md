@@ -57,6 +57,65 @@ aws s3 cp "$INSTALL_DIR/data/$BACKUP_NAME" s3://your-bucket/wordforge/backups/
 
 ---
 
+## 内置离站备份（B1，每日自动外迁）
+
+> 自 v1.1.3 起，后端**每日本地备份成功后**会自动把产物（`backup-daily-*.db`）推送到管理后台
+> **设置 → 备份策略**里配置的离站目标。无需额外 cron。本地备份失败则不触发离站；单个离站目标失败仅
+> 落 `system_alerts` 告警（可在 admin 监控时间线 / 收件箱看到），不影响其余目标与本地备份。
+
+### 配置离站目标
+
+在 admin 设置页 `backup-policy` section 的 `targets[]` 中按需添加。每条 target 含 `name` /
+`uri` / `retentionDays` 三字段，按 `uri` 的 scheme 分发：
+
+| scheme | 形态示例 | 凭据来源 | 远端保留策略 |
+|---|---|---|---|
+| `file://` | `file:///mnt/nas/wordforge` | 无（依赖挂载点写权限） | 按 `retentionDays` 删目标目录内超期 `backup-daily-*.db` |
+| `rsync://` 或 `rsync:` | `rsync:backup@host:/backup/wordforge` | SSH key（运维侧 `~/.ssh` 免密） | 由 rsync 服务端 / cron 负责，本端不远端删 |
+| `s3://` | `s3://your-bucket/wordforge/backups` | **环境变量**（见下） | 按 `retentionDays` 删前缀下超期 `backup-daily-*.db` |
+
+> `glacier://` 等未支持的 scheme 会被拒绝并落告警；如需冷归档可经 S3 lifecycle policy 在桶侧迁移。
+
+### S3 凭据注入（环境变量）
+
+凭据**不落库**，由进程环境变量提供（systemd unit 的 `Environment=` 或 `.env`）。底层用
+`object_store` 的标准 AWS 变量：
+
+```ini
+# /opt/wordforge/.env 或 systemd unit [Service]
+AWS_ACCESS_KEY_ID=AKIA...
+AWS_SECRET_ACCESS_KEY=...
+AWS_REGION=us-east-1
+# 兼容 MinIO / 自建 S3 时指定 endpoint（非 AWS 官方桶）
+AWS_ENDPOINT=https://s3.example.com
+# 仅当 endpoint 为 http（如本地 MinIO）时需要
+# AWS_ALLOW_HTTP=true
+```
+
+bucket 名从 `uri`（`s3://<bucket>/<prefix>`）解析，无需重复在 env 配置。
+
+### rsync 前置条件
+
+后端调用系统 `rsync` 命令（`rsync -az --timeout=120 <local> <dest>/`），需：
+
+- 宿主机已安装 `rsync`
+- 运行后端的用户对 `dest`（如 `backup@host:/path`）已配置 SSH 免密（`~/.ssh/id_*` + `known_hosts`）
+
+### 验证离站备份生效
+
+```bash
+# file:// target —— 直接查目标目录
+ls -lt /mnt/nas/wordforge/backup-daily-*.db | head
+
+# s3:// target
+aws s3 ls s3://your-bucket/wordforge/backups/
+
+# 失败排查：查 admin 监控告警（source=backup_offsite）或后端日志
+journalctl -u wordforge | grep -i offsite
+```
+
+---
+
 ## 从备份恢复
 
 ### 症状

@@ -73,9 +73,10 @@ pub async fn device_middleware(
     // m038:遥测主上报端点的设备注册/归属/型号落库收归 handler,在硬识别核验通过后再写;
     // 中间件此处跳过 upsert——否则会在核验前无条件覆盖 owner,使 handler 的归属核验失效
     // 并污染受害者设备。ban 检查与 upgrade hint 仍生效。
-    // axum nest 对 `/api/telemetry` 与 `/api/telemetry/` 两种形态都路由到 submit,故都需跳过。
+    // 该中间件 layer 挂在 `/api` nest 之内,axum 已剥掉 `/api` 前缀,故此处看到的是
+    // `/telemetry`(及带尾斜杠的 `/telemetry/`);两种形态都路由到 submit,均需跳过。
     let tele_path = req.uri().path();
-    let skip_telemetry_upsert = tele_path == "/api/telemetry" || tele_path == "/api/telemetry/";
+    let skip_telemetry_upsert = tele_path == "/telemetry" || tele_path == "/telemetry/";
 
     let device_id = req
         .headers()
@@ -227,12 +228,7 @@ mod tests {
         let cfg = Config::from_env();
         let tmp = tempfile::tempdir().expect("tempdir");
         let store = Arc::new(
-            Store::open(
-                tmp.path().join("device_mw.db").to_str().unwrap(),
-                5000,
-                4,
-            )
-            .unwrap(),
+            Store::open(tmp.path().join("device_mw.db").to_str().unwrap(), 5000, 4).unwrap(),
         );
         store.run_migrations().unwrap();
         let amas = Arc::new(AMASEngine::new(AMASConfig::default(), store.clone()));
@@ -327,10 +323,7 @@ mod tests {
             .uri("/api/ping")
             .header("x-device-id", "dev-auth")
             .header("x-device-platform", "android")
-            .header(
-                axum::http::header::AUTHORIZATION,
-                format!("Bearer {token}"),
-            )
+            .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
@@ -363,8 +356,7 @@ mod tests {
         let (state, _tmp) = build_state().await;
         let secret = state.config().jwt_secret.clone();
         // admin token (token_type="admin") 应被 filter 掉
-        let admin_token =
-            crate::auth::sign_jwt_for_admin("admin-1", &secret, 1).unwrap();
+        let admin_token = crate::auth::sign_jwt_for_admin("admin-1", &secret, 1).unwrap();
         let app = build_router(state.clone());
         let req = Request::builder()
             .uri("/api/ping")

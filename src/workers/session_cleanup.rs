@@ -16,11 +16,9 @@ pub async fn run(store: &Store) {
     })
     .await
     {
-        Ok(Ok((cleaned, pruned_shown))) => tracing::info!(
-            cleaned,
-            pruned_shown,
-            "session_cleanup: done"
-        ),
+        Ok(Ok((cleaned, pruned_shown))) => {
+            tracing::info!(cleaned, pruned_shown, "session_cleanup: done")
+        }
         Ok(Err(e)) => tracing::error!(error=%e, "session_cleanup failed"),
         Err(e) => tracing::error!(error=%e, "session_cleanup task failed"),
     }

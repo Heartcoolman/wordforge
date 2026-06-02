@@ -6,15 +6,17 @@
 ///
 /// 导出由 `tests/openapi_export.rs` 驱动（`cargo test --test openapi_export`），
 /// CI 通过 `git diff --exit-code docs/openapi.yaml` 防止规格漂移。
-use utoipa::openapi::path::{HttpMethod, OperationBuilder, ParameterBuilder, ParameterIn, PathItemBuilder};
+use utoipa::openapi::path::{
+    HttpMethod, OperationBuilder, ParameterBuilder, ParameterIn, PathItemBuilder,
+};
 use utoipa::openapi::request_body::RequestBodyBuilder;
 use utoipa::openapi::schema::{
     AllOfBuilder, ArrayBuilder, KnownFormat, ObjectBuilder, SchemaFormat, SchemaType, Type,
 };
 use utoipa::openapi::security::{Http, HttpAuthScheme, SecurityScheme};
 use utoipa::openapi::{
-    ComponentsBuilder, ContentBuilder, InfoBuilder, OpenApiBuilder, PathsBuilder, RefOr,
-    Required, ResponseBuilder, ResponsesBuilder, Schema, SecurityRequirement, Server, Tag,
+    ComponentsBuilder, ContentBuilder, InfoBuilder, OpenApiBuilder, PathsBuilder, RefOr, Required,
+    ResponseBuilder, ResponsesBuilder, Schema, SecurityRequirement, Server, Tag,
 };
 
 // ─── 便捷构造 ────────────────────────────────────────────────────────────────
@@ -71,7 +73,9 @@ fn datetime_schema() -> RefOr<Schema> {
 }
 
 fn schema_ref(name: &str) -> RefOr<Schema> {
-    RefOr::Ref(utoipa::openapi::Ref::new(format!("#/components/schemas/{name}")))
+    RefOr::Ref(utoipa::openapi::Ref::new(format!(
+        "#/components/schemas/{name}"
+    )))
 }
 
 fn paginated_schema(item_name: &str) -> RefOr<Schema> {
@@ -197,13 +201,20 @@ fn path_auth_register() -> (String, utoipa::openapi::PathItem) {
             ResponsesBuilder::new()
                 .response("201", ok_response("注册成功，含 accessToken 和用户信息"))
                 .response("400", bad_request())
-                .response("409", ResponseBuilder::new().description("邮箱已注册 — CONFLICT").build())
+                .response(
+                    "409",
+                    ResponseBuilder::new()
+                        .description("邮箱已注册 — CONFLICT")
+                        .build(),
+                )
                 .build(),
         )
         .build();
     (
         "/auth/register".to_string(),
-        PathItemBuilder::new().operation(HttpMethod::Post, op).build(),
+        PathItemBuilder::new()
+            .operation(HttpMethod::Post, op)
+            .build(),
     )
 }
 
@@ -218,13 +229,20 @@ fn path_auth_login() -> (String, utoipa::openapi::PathItem) {
                 .response("200", ok_response("登录成功，含 accessToken 和用户信息"))
                 .response("400", bad_request())
                 .response("401", unauthorized())
-                .response("429", ResponseBuilder::new().description("认证限流或账号锁定 — RATE_LIMITED / AUTH_RATE_LIMITED").build())
+                .response(
+                    "429",
+                    ResponseBuilder::new()
+                        .description("认证限流或账号锁定 — RATE_LIMITED / AUTH_RATE_LIMITED")
+                        .build(),
+                )
                 .build(),
         )
         .build();
     (
         "/auth/login".to_string(),
-        PathItemBuilder::new().operation(HttpMethod::Post, op).build(),
+        PathItemBuilder::new()
+            .operation(HttpMethod::Post, op)
+            .build(),
     )
 }
 
@@ -242,7 +260,9 @@ fn path_auth_refresh() -> (String, utoipa::openapi::PathItem) {
         .build();
     (
         "/auth/refresh".to_string(),
-        PathItemBuilder::new().operation(HttpMethod::Post, op).build(),
+        PathItemBuilder::new()
+            .operation(HttpMethod::Post, op)
+            .build(),
     )
 }
 
@@ -261,7 +281,9 @@ fn path_auth_logout() -> (String, utoipa::openapi::PathItem) {
         .build();
     (
         "/auth/logout".to_string(),
-        PathItemBuilder::new().operation(HttpMethod::Post, op).build(),
+        PathItemBuilder::new()
+            .operation(HttpMethod::Post, op)
+            .build(),
     )
 }
 
@@ -272,13 +294,18 @@ fn path_auth_forgot_password() -> (String, utoipa::openapi::PathItem) {
         .request_body(Some(json_body("ForgotPasswordRequest")))
         .responses(
             ResponsesBuilder::new()
-                .response("200", ok_response("邮件已发送（无论邮箱是否存在均返回 200）"))
+                .response(
+                    "200",
+                    ok_response("邮件已发送（无论邮箱是否存在均返回 200）"),
+                )
                 .build(),
         )
         .build();
     (
         "/auth/forgot-password".to_string(),
-        PathItemBuilder::new().operation(HttpMethod::Post, op).build(),
+        PathItemBuilder::new()
+            .operation(HttpMethod::Post, op)
+            .build(),
     )
 }
 
@@ -296,7 +323,9 @@ fn path_auth_reset_password() -> (String, utoipa::openapi::PathItem) {
         .build();
     (
         "/auth/reset-password".to_string(),
-        PathItemBuilder::new().operation(HttpMethod::Post, op).build(),
+        PathItemBuilder::new()
+            .operation(HttpMethod::Post, op)
+            .build(),
     )
 }
 
@@ -348,7 +377,9 @@ fn path_words() -> (String, utoipa::openapi::PathItem) {
         .build();
     (
         "/words".to_string(),
-        PathItemBuilder::new().operation(HttpMethod::Get, op).build(),
+        PathItemBuilder::new()
+            .operation(HttpMethod::Get, op)
+            .build(),
     )
 }
 
@@ -368,7 +399,9 @@ fn path_words_id() -> (String, utoipa::openapi::PathItem) {
         .build();
     (
         "/words/{wordId}".to_string(),
-        PathItemBuilder::new().operation(HttpMethod::Get, op).build(),
+        PathItemBuilder::new()
+            .operation(HttpMethod::Get, op)
+            .build(),
     )
 }
 
@@ -376,7 +409,9 @@ fn path_records() -> (String, utoipa::openapi::PathItem) {
     let post_op = OperationBuilder::new()
         .tag("learning")
         .summary(Some("提交学习记录"))
-        .description(Some("记录一次单词作答。`recordType` 缺省落库 `all`；`selfRating` 可选。"))
+        .description(Some(
+            "记录一次单词作答。`recordType` 缺省落库 `all`；`selfRating` 可选。",
+        ))
         .security(bearer_security())
         .request_body(Some(json_body("CreateRecordRequest")))
         .responses(
@@ -423,7 +458,9 @@ fn path_learning_sessions() -> (String, utoipa::openapi::PathItem) {
         .build();
     (
         "/learning/sessions".to_string(),
-        PathItemBuilder::new().operation(HttpMethod::Post, op).build(),
+        PathItemBuilder::new()
+            .operation(HttpMethod::Post, op)
+            .build(),
     )
 }
 
@@ -485,7 +522,9 @@ fn path_word_favorites() -> (String, utoipa::openapi::PathItem) {
         .build();
     (
         "/word-favorites".to_string(),
-        PathItemBuilder::new().operation(HttpMethod::Get, op).build(),
+        PathItemBuilder::new()
+            .operation(HttpMethod::Get, op)
+            .build(),
     )
 }
 
@@ -504,7 +543,9 @@ fn path_word_favorites_id() -> (String, utoipa::openapi::PathItem) {
         .build();
     (
         "/word-favorites/{wordId}".to_string(),
-        PathItemBuilder::new().operation(HttpMethod::Post, op).build(),
+        PathItemBuilder::new()
+            .operation(HttpMethod::Post, op)
+            .build(),
     )
 }
 
@@ -554,7 +595,9 @@ fn path_wordbooks() -> (String, utoipa::openapi::PathItem) {
         .build();
     (
         "/wordbooks".to_string(),
-        PathItemBuilder::new().operation(HttpMethod::Get, op).build(),
+        PathItemBuilder::new()
+            .operation(HttpMethod::Get, op)
+            .build(),
     )
 }
 
@@ -594,7 +637,9 @@ fn path_analytics_dashboard() -> (String, utoipa::openapi::PathItem) {
     let op = OperationBuilder::new()
         .tag("analytics")
         .summary(Some("学习统计 dashboard"))
-        .description(Some("支持 `?range=day|week|month`，时区固定为 Asia/Shanghai。"))
+        .description(Some(
+            "支持 `?range=day|week|month`，时区固定为 Asia/Shanghai。",
+        ))
         .security(bearer_security())
         .parameter(query_param(
             "range",
@@ -607,14 +652,19 @@ fn path_analytics_dashboard() -> (String, utoipa::openapi::PathItem) {
         ))
         .responses(
             ResponsesBuilder::new()
-                .response("200", ok_response("Dashboard 统计数据，含 summary / daily 数组"))
+                .response(
+                    "200",
+                    ok_response("Dashboard 统计数据，含 summary / daily 数组"),
+                )
                 .response("401", unauthorized())
                 .build(),
         )
         .build();
     (
         "/analytics/dashboard".to_string(),
-        PathItemBuilder::new().operation(HttpMethod::Get, op).build(),
+        PathItemBuilder::new()
+            .operation(HttpMethod::Get, op)
+            .build(),
     )
 }
 
@@ -659,7 +709,9 @@ fn path_realtime_sse() -> (String, utoipa::openapi::PathItem) {
         .build();
     (
         "/realtime/events".to_string(),
-        PathItemBuilder::new().operation(HttpMethod::Get, op).build(),
+        PathItemBuilder::new()
+            .operation(HttpMethod::Get, op)
+            .build(),
     )
 }
 
@@ -677,7 +729,9 @@ fn path_feedback() -> (String, utoipa::openapi::PathItem) {
         .build();
     (
         "/feedback".to_string(),
-        PathItemBuilder::new().operation(HttpMethod::Post, op).build(),
+        PathItemBuilder::new()
+            .operation(HttpMethod::Post, op)
+            .build(),
     )
 }
 
@@ -685,7 +739,9 @@ fn path_status() -> (String, utoipa::openapi::PathItem) {
     let op = OperationBuilder::new()
         .tag("misc")
         .summary(Some("版本探测"))
-        .description(Some("返回服务器版本号；客户端用于最低版本门检查。无需认证。"))
+        .description(Some(
+            "返回服务器版本号；客户端用于最低版本门检查。无需认证。",
+        ))
         .responses(
             ResponsesBuilder::new()
                 .response("200", ok_response("服务器版本信息"))
@@ -694,7 +750,9 @@ fn path_status() -> (String, utoipa::openapi::PathItem) {
         .build();
     (
         "/status".to_string(),
-        PathItemBuilder::new().operation(HttpMethod::Get, op).build(),
+        PathItemBuilder::new()
+            .operation(HttpMethod::Get, op)
+            .build(),
     )
 }
 
@@ -702,17 +760,29 @@ fn path_health() -> (String, utoipa::openapi::PathItem) {
     let op = OperationBuilder::new()
         .tag("misc")
         .summary(Some("健康检查"))
-        .description(Some("LB / k8s 探针。不使用统一 success/data 包装，直接返回健康数据。"))
+        .description(Some(
+            "LB / k8s 探针。不使用统一 success/data 包装，直接返回健康数据。",
+        ))
         .responses(
             ResponsesBuilder::new()
-                .response("200", ResponseBuilder::new().description("服务正常").build())
-                .response("503", ResponseBuilder::new().description("服务异常或维护中").build())
+                .response(
+                    "200",
+                    ResponseBuilder::new().description("服务正常").build(),
+                )
+                .response(
+                    "503",
+                    ResponseBuilder::new()
+                        .description("服务异常或维护中")
+                        .build(),
+                )
                 .build(),
         )
         .build();
     (
         "/health".to_string(),
-        PathItemBuilder::new().operation(HttpMethod::Get, op).build(),
+        PathItemBuilder::new()
+            .operation(HttpMethod::Get, op)
+            .build(),
     )
 }
 

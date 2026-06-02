@@ -80,10 +80,10 @@ fn revert_to_zero_clears_migration_only_tables_and_columns() {
 
     // migrations 独有、schema.rs 不建的表 —— 必须全部消失
     for t in [
-        "gdpr_export_log",       // m015
-        "update_audit_log",      // m017
-        "worker_last_run",       // m019
-        "resource_packs",        // m020
+        "gdpr_export_log",  // m015
+        "update_audit_log", // m017
+        "worker_last_run",  // m019
+        "resource_packs",   // m020
         "resource_pack_versions",
         "resource_pack_active",
         "resource_pack_install_log",
@@ -176,12 +176,19 @@ fn partial_revert_then_up_round_trip() {
     let conn = store.connection().unwrap();
     // ≤ m015 的副作用在场
     assert!(table_exists(&conn, "gdpr_export_log"), "m015 应仍在场");
-    assert!(table_exists(&conn, "amas_tuning_suggestions"), "m010 应在场");
+    assert!(
+        table_exists(&conn, "amas_tuning_suggestions"),
+        "m010 应在场"
+    );
     assert!(column_exists(&conn, "learning_records", "record_type"));
     // > m015 的副作用不在场
     assert!(!table_exists(&conn, "update_audit_log"), "m017 应已 revert");
     assert!(
-        !column_exists(&conn, "system_settings", "llm_advisor_max_cost_per_month_yuan"),
+        !column_exists(
+            &conn,
+            "system_settings",
+            "llm_advisor_max_cost_per_month_yuan"
+        ),
         "m016 列应已 revert"
     );
     assert!(!table_exists(&conn, "worker_last_run"), "m019 应已 revert");

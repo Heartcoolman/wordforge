@@ -117,8 +117,16 @@ async fn it_admin_clients_ban_handles_various_reason_bodies() {
     let long_reason: String = "x".repeat(2000);
     let cases: Vec<(&str, Option<serde_json::Value>, &str)> = vec![
         ("dev-nobody", None, "missing body"),
-        ("dev-long", Some(serde_json::json!({ "reason": long_reason })), "long reason truncated"),
-        ("dev-empty", Some(serde_json::json!({ "reason": "" })), "empty reason"),
+        (
+            "dev-long",
+            Some(serde_json::json!({ "reason": long_reason })),
+            "long reason truncated",
+        ),
+        (
+            "dev-empty",
+            Some(serde_json::json!({ "reason": "" })),
+            "empty reason",
+        ),
     ];
     for (device_id, body, label) in cases {
         let app = spawn_test_server().await;
@@ -293,21 +301,25 @@ async fn it_admin_clients_distribution_returns_platforms_versions_policies() {
 
     let platforms = body["data"]["platforms"].as_array().unwrap();
     assert_eq!(platforms.len(), 3);
-    let web_total = platforms
-        .iter()
-        .find(|p| p["platform"] == "web")
-        .unwrap()["total"]
+    let web_total = platforms.iter().find(|p| p["platform"] == "web").unwrap()["total"]
         .as_i64()
         .unwrap();
     assert_eq!(web_total, 3);
 
     let versions = body["data"]["versions"].as_array().unwrap();
-    assert!(versions.iter().any(|v| v["platform"] == "web" && v["version"] == "v0.7.3"));
-    assert!(versions.iter().any(|v| v["platform"] == "android" && v["version"] == "unknown"));
+    assert!(versions
+        .iter()
+        .any(|v| v["platform"] == "web" && v["version"] == "v0.7.3"));
+    assert!(versions
+        .iter()
+        .any(|v| v["platform"] == "android" && v["version"] == "unknown"));
 
     // 三个 seed 平台必出现在 policies
     let policies = body["data"]["policies"].as_array().unwrap();
-    let names: Vec<&str> = policies.iter().filter_map(|p| p["platform"].as_str()).collect();
+    let names: Vec<&str> = policies
+        .iter()
+        .filter_map(|p| p["platform"].as_str())
+        .collect();
     assert!(names.contains(&"web"));
     assert!(names.contains(&"ios"));
     assert!(names.contains(&"android"));
@@ -466,8 +478,14 @@ async fn it_admin_user_sessions_maps_real_columns() {
     let (status, _, body) = response_json(resp).await;
     assert_eq!(status, StatusCode::OK, "body={body}");
     let sessions = body["data"]["sessions"].as_array().expect("sessions array");
-    let s = sessions.iter().find(|s| s["id"] == "sess-1").expect("sess-1");
+    let s = sessions
+        .iter()
+        .find(|s| s["id"] == "sess-1")
+        .expect("sess-1");
     assert_eq!(s["wordsCount"], 12);
     assert_eq!(s["correctCount"], 9);
-    assert!(s["completedAt"].is_string(), "completed 会话应有 completedAt: {s}");
+    assert!(
+        s["completedAt"].is_string(),
+        "completed 会话应有 completedAt: {s}"
+    );
 }

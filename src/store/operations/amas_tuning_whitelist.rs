@@ -69,16 +69,19 @@ impl Store {
     /// 删除一条白名单条目;返回是否真的删掉一行。
     pub fn delete_tuning_whitelist(&self, path: &str) -> Result<bool, StoreError> {
         let conn = self.conn()?;
-        let affected =
-            conn.execute("DELETE FROM amas_tuning_whitelist WHERE path = ?1", params![path])?;
+        let affected = conn.execute(
+            "DELETE FROM amas_tuning_whitelist WHERE path = ?1",
+            params![path],
+        )?;
         Ok(affected > 0)
     }
 
     /// 若表为空,用 TIER_A_WHITELIST seed(created_by='system')。返回 seed 进的条数(已有则 0)。
     pub fn seed_tuning_whitelist_if_empty(&self) -> Result<usize, StoreError> {
         let mut conn = self.conn()?;
-        let count: i64 =
-            conn.query_row("SELECT COUNT(*) FROM amas_tuning_whitelist", [], |r| r.get(0))?;
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM amas_tuning_whitelist", [], |r| {
+            r.get(0)
+        })?;
         if count > 0 {
             return Ok(0);
         }
@@ -156,7 +159,10 @@ mod tests {
         assert!((hit.min_safe - 0.2).abs() < 1e-9);
         assert!((hit.max_safe - 3.0).abs() < 1e-9);
         // 仍只有一行
-        assert_eq!(list.iter().filter(|r| r.path == "memoryModel.w[5]").count(), 1);
+        assert_eq!(
+            list.iter().filter(|r| r.path == "memoryModel.w[5]").count(),
+            1
+        );
     }
 
     #[test]

@@ -17,9 +17,8 @@ use crate::store::operations::learning_sessions::{LearningSession, SessionStatus
 use crate::store::operations::records::RecordType;
 
 use super::{
-    EVENT_CLIENT_EVENT_ID_MAX_LEN,
-    EVENT_CLIENT_TS_BACKFILL_LIMIT_MIN, EVENT_CLIENT_TS_FUTURE_TOLERANCE_MIN,
-    EVENT_RESPONSE_TIME_MAX_MS,
+    EVENT_CLIENT_EVENT_ID_MAX_LEN, EVENT_CLIENT_TS_BACKFILL_LIMIT_MIN,
+    EVENT_CLIENT_TS_FUTURE_TOLERANCE_MIN, EVENT_RESPONSE_TIME_MAX_MS,
 };
 
 // ── session list helpers ──

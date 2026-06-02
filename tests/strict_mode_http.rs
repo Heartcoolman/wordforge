@@ -27,7 +27,9 @@ async fn disabled_lets_invalid_ua_through() {
         .uri("/api/auth/login")
         .header("User-Agent", "curl/7.84.0")
         .header("content-type", "application/json")
-        .body(Body::from(json!({"email":"x@x.com","password":"yyyyyyyy"}).to_string()))
+        .body(Body::from(
+            json!({"email":"x@x.com","password":"yyyyyyyy"}).to_string(),
+        ))
         .unwrap();
     let resp = app.app.clone().oneshot(req).await.unwrap();
     // /api/status 是公开的，应正常响应而非 400
@@ -42,7 +44,9 @@ async fn hard_block_rejects_missing_user_agent() {
         .uri("/api/auth/login")
         .header("User-Agent", "curl/7.84.0")
         .header("content-type", "application/json")
-        .body(Body::from(json!({"email":"x@x.com","password":"yyyyyyyy"}).to_string()))
+        .body(Body::from(
+            json!({"email":"x@x.com","password":"yyyyyyyy"}).to_string(),
+        ))
         .unwrap();
     let resp = app.app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
@@ -62,7 +66,9 @@ async fn hard_block_rejects_missing_platform() {
         .header("User-Agent", "WordForge-iOS/1.0.0 (iPhone15,2; iOS 17.5)")
         .header("content-type", "application/json")
         // 故意不带 x-device-platform
-        .body(Body::from(json!({"email":"x@x.com","password":"yyyyyyyy"}).to_string()))
+        .body(Body::from(
+            json!({"email":"x@x.com","password":"yyyyyyyy"}).to_string(),
+        ))
         .unwrap();
     let resp = app.app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
@@ -82,7 +88,9 @@ async fn hard_block_rejects_outdated_client() {
         .header("User-Agent", "WordForge-iOS/1.0.0 (iPhone15,2; iOS 17.5)")
         .header("x-device-platform", "ios")
         .header("content-type", "application/json")
-        .body(Body::from(json!({"email":"x@x.com","password":"yyyyyyyy"}).to_string()))
+        .body(Body::from(
+            json!({"email":"x@x.com","password":"yyyyyyyy"}).to_string(),
+        ))
         .unwrap();
     let resp = app.app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
@@ -102,7 +110,9 @@ async fn hard_block_allows_compliant_client() {
         .header("User-Agent", "WordForge-iOS/1.5.2 (iPhone15,2; iOS 17.5)")
         .header("x-device-platform", "ios")
         .header("content-type", "application/json")
-        .body(Body::from(json!({"email":"x@x.com","password":"yyyyyyyy"}).to_string()))
+        .body(Body::from(
+            json!({"email":"x@x.com","password":"yyyyyyyy"}).to_string(),
+        ))
         .unwrap();
     let resp = app.app.clone().oneshot(req).await.unwrap();
     assert_ne!(resp.status(), StatusCode::BAD_REQUEST);
@@ -116,7 +126,9 @@ async fn admin_path_bypasses_strict_mode() {
         .uri("/api/admin/auth/login")
         .header("User-Agent", "curl/7.84.0")
         .header("content-type", "application/json")
-        .body(Body::from(json!({"username":"x","password":"y"}).to_string()))
+        .body(Body::from(
+            json!({"username":"x","password":"y"}).to_string(),
+        ))
         .unwrap();
     let resp = app.app.clone().oneshot(req).await.unwrap();
     // 401 / 422 都可，关键是不能是 MISSING_USER_AGENT
@@ -135,7 +147,9 @@ async fn soft_block_warns_but_passes() {
         .uri("/api/auth/login")
         .header("User-Agent", "curl/7.84.0")
         .header("content-type", "application/json")
-        .body(Body::from(json!({"email":"x@x.com","password":"yyyyyyyy"}).to_string()))
+        .body(Body::from(
+            json!({"email":"x@x.com","password":"yyyyyyyy"}).to_string(),
+        ))
         .unwrap();
     let resp = app.app.clone().oneshot(req).await.unwrap();
     // soft-block: 不拒绝
@@ -191,6 +205,97 @@ async fn hard_block_bypasses_realtime_events() {
         v["code"], "MISSING_OS",
         "/realtime/events 应豁免 strict-mode 拦截"
     );
+}
+
+// ─────────────── D4:运行时版本门控（settings 驱动，独立于 strict-mode 开关） ───────────────
+
+/// strict-mode 整体关闭时，仅靠 system_settings 的版本门控开关即可拒绝旧客户端。
+/// 验证「门控独立于 cfg.enabled」+「settings 优先于 env」+「即时硬拒绝」。
+#[tokio::test]
+async fn runtime_version_gate_blocks_outdated_when_strict_mode_disabled() {
+    let app = spawn_test_app().await; // strict_mode_enabled = false
+                                      // admin 运行时开门控 + 设阈值
+    {
+        let mut s = app.state.store().get_system_settings().unwrap();
+        s.version_gate_enabled = true;
+        s.min_client_version = Some("2.0.0".into());
+        app.state.store().save_system_settings(&s).unwrap();
+        // 模拟写端点刷新运行时快照（即时生效）
+        app.state.refresh_version_gate();
+    }
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/auth/login")
+        .header("User-Agent", "WordForge-iOS/1.0.0 (iPhone15,2; iOS 17.5)")
+        .header("x-device-platform", "ios")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({"email":"x@x.com","password":"yyyyyyyy"}).to_string(),
+        ))
+        .unwrap();
+    let resp = app.app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["code"], "CLIENT_OUTDATED");
+}
+
+/// 门控开关关闭时（即使设了阈值），旧客户端放行；strict-mode 也关闭故 UA 校验不触发。
+#[tokio::test]
+async fn runtime_version_gate_disabled_lets_outdated_through() {
+    let app = spawn_test_app().await;
+    {
+        let mut s = app.state.store().get_system_settings().unwrap();
+        s.version_gate_enabled = false;
+        s.min_client_version = Some("2.0.0".into());
+        app.state.store().save_system_settings(&s).unwrap();
+        app.state.refresh_version_gate();
+    }
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/auth/login")
+        .header("User-Agent", "WordForge-iOS/1.0.0 (iPhone15,2; iOS 17.5)")
+        .header("x-device-platform", "ios")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({"email":"x@x.com","password":"yyyyyyyy"}).to_string(),
+        ))
+        .unwrap();
+    let resp = app.app.clone().oneshot(req).await.unwrap();
+    assert_ne!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+/// strict-mode 启用时，settings 的 min_client_version 覆盖 env 兜底（settings 优先）。
+#[tokio::test]
+async fn runtime_version_gate_settings_override_env() {
+    // env 兜底 1.0.0；settings 拉高到 3.0.0
+    let app = build_strict_app(true, Some("1.0.0")).await;
+    {
+        let mut s = app.state.store().get_system_settings().unwrap();
+        s.min_client_version = Some("3.0.0".into());
+        app.state.store().save_system_settings(&s).unwrap();
+        app.state.refresh_version_gate();
+    }
+    // 2.0.0 高于 env 1.0.0 但低于 settings 3.0.0 → 应被拒
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/auth/login")
+        .header("User-Agent", "WordForge-iOS/2.0.0 (iPhone15,2; iOS 17.5)")
+        .header("x-device-platform", "ios")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({"email":"x@x.com","password":"yyyyyyyy"}).to_string(),
+        ))
+        .unwrap();
+    let resp = app.app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["code"], "CLIENT_OUTDATED");
 }
 
 /// admin updates apply / status 路径也应畅通（admin 豁免路径已有，加 explicit 测试覆盖）

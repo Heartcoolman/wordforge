@@ -104,9 +104,7 @@ fn parse_dt(s: String) -> Result<DateTime<Utc>, StoreError> {
         .map_err(|e| StoreError::Validation(format!("bad datetime: {e}")))
 }
 
-fn row_to_suggestion(
-    row: &rusqlite::Row<'_>,
-) -> rusqlite::Result<SuggestionRow> {
+fn row_to_suggestion(row: &rusqlite::Row<'_>) -> rusqlite::Result<SuggestionRow> {
     Ok((
         row.get::<_, i64>(0)?,
         row.get::<_, String>(1)?,
@@ -495,8 +493,12 @@ mod tests {
     fn daily_cost_groups_by_date_and_converts() {
         let store = fresh_store();
         // 两条 today,各 cost_usd=0.01 → 合计 0.02 USD;汇率 7.0 → 0.14 元
-        store.insert_amas_suggestion(&ins(SuggestionStatus::Pending)).unwrap();
-        store.insert_amas_suggestion(&ins(SuggestionStatus::AutoApplied)).unwrap();
+        store
+            .insert_amas_suggestion(&ins(SuggestionStatus::Pending))
+            .unwrap();
+        store
+            .insert_amas_suggestion(&ins(SuggestionStatus::AutoApplied))
+            .unwrap();
         let daily = store.aggregate_daily_suggestion_cost_yuan(30, 7.0).unwrap();
         assert_eq!(daily.len(), 1, "all rows same day");
         assert!((daily[0].1 - 0.14).abs() < 1e-6, "got {}", daily[0].1);
@@ -507,10 +509,18 @@ mod tests {
     #[test]
     fn acceptance_counts_approved_vs_rejected() {
         let store = fresh_store();
-        store.insert_amas_suggestion(&ins(SuggestionStatus::Approved)).unwrap();
-        store.insert_amas_suggestion(&ins(SuggestionStatus::AutoApplied)).unwrap();
-        store.insert_amas_suggestion(&ins(SuggestionStatus::Rejected)).unwrap();
-        store.insert_amas_suggestion(&ins(SuggestionStatus::Pending)).unwrap();
+        store
+            .insert_amas_suggestion(&ins(SuggestionStatus::Approved))
+            .unwrap();
+        store
+            .insert_amas_suggestion(&ins(SuggestionStatus::AutoApplied))
+            .unwrap();
+        store
+            .insert_amas_suggestion(&ins(SuggestionStatus::Rejected))
+            .unwrap();
+        store
+            .insert_amas_suggestion(&ins(SuggestionStatus::Pending))
+            .unwrap();
         let (approved, rejected) = store.aggregate_suggestion_acceptance().unwrap();
         // approved + auto_applied 计入 approved
         assert_eq!(approved, 2);
@@ -520,12 +530,21 @@ mod tests {
     #[test]
     fn count_by_status_buckets() {
         let store = fresh_store();
-        store.insert_amas_suggestion(&ins(SuggestionStatus::Pending)).unwrap();
-        store.insert_amas_suggestion(&ins(SuggestionStatus::Pending)).unwrap();
-        store.insert_amas_suggestion(&ins(SuggestionStatus::Rejected)).unwrap();
+        store
+            .insert_amas_suggestion(&ins(SuggestionStatus::Pending))
+            .unwrap();
+        store
+            .insert_amas_suggestion(&ins(SuggestionStatus::Pending))
+            .unwrap();
+        store
+            .insert_amas_suggestion(&ins(SuggestionStatus::Rejected))
+            .unwrap();
         let counts = store.count_suggestions_by_status().unwrap();
         let pending = counts.iter().find(|(s, _)| s == "pending").map(|(_, n)| *n);
-        let rejected = counts.iter().find(|(s, _)| s == "rejected").map(|(_, n)| *n);
+        let rejected = counts
+            .iter()
+            .find(|(s, _)| s == "rejected")
+            .map(|(_, n)| *n);
         assert_eq!(pending, Some(2));
         assert_eq!(rejected, Some(1));
     }
@@ -546,22 +565,45 @@ mod tests {
                 .unwrap();
         }
         // limit=2 offset=0 → 2 条；offset=4 → 1 条；offset=10 → 0 条
-        assert_eq!(store.list_amas_suggestions_paged(None, 2, 0, None).unwrap().len(), 2);
-        assert_eq!(store.list_amas_suggestions_paged(None, 2, 4, None).unwrap().len(), 1);
-        assert_eq!(store.list_amas_suggestions_paged(None, 2, 10, None).unwrap().len(), 0);
+        assert_eq!(
+            store
+                .list_amas_suggestions_paged(None, 2, 0, None)
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            store
+                .list_amas_suggestions_paged(None, 2, 4, None)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            store
+                .list_amas_suggestions_paged(None, 2, 10, None)
+                .unwrap()
+                .len(),
+            0
+        );
     }
 
     #[test]
     fn list_supports_keyword_filter() {
         let store = fresh_store();
         store
-            .insert_amas_suggestion(&ins_with("提升留存", r#"{"memoryModel.baseDesiredRetention":0.85}"#))
+            .insert_amas_suggestion(&ins_with(
+                "提升留存",
+                r#"{"memoryModel.baseDesiredRetention":0.85}"#,
+            ))
             .unwrap();
         store
             .insert_amas_suggestion(&ins_with("降低疲劳", r#"{"memoryModel.w[2]":3.0}"#))
             .unwrap();
         // q 命中 rationale
-        let by_rationale = store.list_amas_suggestions_paged(None, 50, 0, Some("留存")).unwrap();
+        let by_rationale = store
+            .list_amas_suggestions_paged(None, 50, 0, Some("留存"))
+            .unwrap();
         assert_eq!(by_rationale.len(), 1);
         // q 命中 patch_json 中的 path 关键字
         let by_path = store
@@ -569,6 +611,12 @@ mod tests {
             .unwrap();
         assert_eq!(by_path.len(), 1);
         // q 无命中
-        assert_eq!(store.list_amas_suggestions_paged(None, 50, 0, Some("nomatch")).unwrap().len(), 0);
+        assert_eq!(
+            store
+                .list_amas_suggestions_paged(None, 50, 0, Some("nomatch"))
+                .unwrap()
+                .len(),
+            0
+        );
     }
 }

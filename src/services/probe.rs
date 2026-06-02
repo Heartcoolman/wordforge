@@ -11,7 +11,6 @@ use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
-
 /// admin SSE 流接收到的单条结果消息（与 client POST 的 body 字段一一对应）。
 /// 字段名走 camelCase，与前端 SSE 解析保持一致。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,8 +99,7 @@ impl ProbeService {
     /// 客户端首次回传 `status=confirm_required` 时，admin probe results 路由
     /// 写入 ticket；TTL 默认 60s。
     pub fn issue_confirm(&self, request_id: &str, ticket: ConfirmTicket) {
-        self.pending_confirm
-            .insert(request_id.to_string(), ticket);
+        self.pending_confirm.insert(request_id.to_string(), ticket);
     }
 
     /// admin POST /confirm 校验：device 后 5 位匹配 + 未过期。
@@ -176,10 +174,7 @@ impl ProbeService {
         let now = std::time::Instant::now();
         let window = std::time::Duration::from_secs(60);
 
-        let mut entry = self
-            .admin_calls
-            .entry(admin_id.to_string())
-            .or_default();
+        let mut entry = self.admin_calls.entry(admin_id.to_string()).or_default();
         // 清理过期时间戳
         entry.retain(|t| now.duration_since(*t) <= window);
         if entry.len() as u32 >= max_per_min {
@@ -321,9 +316,7 @@ mod tests {
             assert!(svc.check_and_record_admin_call("admin-A", max).is_ok());
         }
         // 第 4 次被拒
-        let err = svc
-            .check_and_record_admin_call("admin-A", max)
-            .unwrap_err();
+        let err = svc.check_and_record_admin_call("admin-A", max).unwrap_err();
         assert_eq!(err, RateLimitError::Exceeded);
         // 不影响其他 admin
         assert!(svc.check_and_record_admin_call("admin-B", max).is_ok());

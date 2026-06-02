@@ -1,8 +1,8 @@
 /// M0-C5：验证 /api/v1/* 全部端点返回 410 Gone + JSON 错误体。
 mod common;
 
-use axum::http::{Method, StatusCode};
 use axum::body::to_bytes;
+use axum::http::{Method, StatusCode};
 
 use common::app::spawn_test_server;
 use common::auth::{auth_header, login_and_get_token};

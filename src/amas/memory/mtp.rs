@@ -102,11 +102,7 @@ mod tests {
 
     #[test]
     fn bonus_zero_when_no_overlap() {
-        let v = morpheme_transfer_bonus(
-            &["x".to_string()],
-            &[("a".into(), 1.0)],
-            &cfg(),
-        );
+        let v = morpheme_transfer_bonus(&["x".to_string()], &[("a".into(), 1.0)], &cfg());
         assert_eq!(v, 0.0);
     }
 
@@ -151,11 +147,7 @@ mod tests {
             ..Default::default()
         };
         let mut state = MtpState {
-            known_morphemes: vec![
-                ("x".into(), 0.9),
-                ("y".into(), 0.5),
-                ("z".into(), 0.1),
-            ],
+            known_morphemes: vec![("x".into(), 0.9), ("y".into(), 0.5), ("z".into(), 0.1)],
         };
         update_known_morphemes(&mut state, &["new".into()], 1.0, &cfg);
         assert_eq!(state.known_morphemes.len(), 2);

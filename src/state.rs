@@ -217,6 +217,20 @@ pub struct AppState {
             )>,
         >,
     >,
+    /// D4：客户端最低版本门控运行时快照。strict_mode 中间件每请求读此处而非
+    /// 不可变 config 快照，使 admin 写端点改动「即时生效」。60s TTL 兜底（DB 直改时
+    /// 最终一致），写端点调 `refresh_version_gate` 立即刷新。
+    /// 元组 = (enabled, min_client_version)。
+    version_gate: Arc<std::sync::RwLock<VersionGate>>,
+}
+
+/// D4：版本门控运行时状态。`enabled=true` 时按 `min_client_version` 拒绝旧客户端。
+#[derive(Debug, Clone, Default)]
+pub struct VersionGate {
+    pub enabled: bool,
+    pub min_client_version: Option<String>,
+    /// 上次从 DB 刷新的时间；None 表示尚未加载（首请求触发 reload）。
+    refreshed_at: Option<Instant>,
 }
 
 pub struct RuntimeConfig {
@@ -269,17 +283,61 @@ impl AppState {
             clock_health: Arc::new(crate::clock_health::ClockHealth::new()),
             geoip: None,
             upgrade_policy_cache: Arc::new(std::sync::RwLock::new(None)),
+            version_gate: Arc::new(std::sync::RwLock::new(VersionGate::default())),
         }
+    }
+
+    /// D4：解析当前版本门控配置（settings 优先，回落 env MIN_CLIENT_VERSION）。
+    /// strict_mode 中间件每请求调用：内存快照 60s TTL 命中即返回，否则从 DB reload。
+    /// reload 失败不阻断请求，沿用上次快照（首次失败则等价于「门控关闭」）。
+    pub fn get_version_gate(&self) -> VersionGate {
+        const TTL_SECS: u64 = 60;
+        if let Ok(guard) = self.version_gate.read() {
+            if let Some(at) = guard.refreshed_at {
+                if at.elapsed().as_secs() < TTL_SECS {
+                    return guard.clone();
+                }
+            }
+        }
+        self.refresh_version_gate()
+    }
+
+    /// D4：从 system_settings 重载版本门控快照并写回缓存。
+    /// admin 写端点改动后调此方法实现「即时生效」；同时供 TTL 过期时 lazy reload。
+    /// settings.min_client_version 优先，回落 env（config.strict_mode.min_client_version）。
+    pub fn refresh_version_gate(&self) -> VersionGate {
+        let gate = match self.store.get_system_settings() {
+            Ok(s) => {
+                let min = s
+                    .min_client_version
+                    .filter(|v| !v.is_empty())
+                    .or_else(|| self.config.strict_mode.min_client_version.clone());
+                VersionGate {
+                    enabled: s.version_gate_enabled,
+                    min_client_version: min,
+                    refreshed_at: Some(Instant::now()),
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "version_gate reload 失败，沿用上次快照");
+                if let Ok(guard) = self.version_gate.read() {
+                    return guard.clone();
+                }
+                VersionGate::default()
+            }
+        };
+        if let Ok(mut guard) = self.version_gate.write() {
+            *guard = gate.clone();
+        }
+        gate
     }
 
     /// m027:60s TTL 升级策略缓存读取(读尝试 → 过期 / 缺失 → DB 重载)。
     /// 失败时返回空 HashMap,middleware 把 X-Upgrade-Hint 退化为不塞。
     pub fn get_upgrade_policies_cached(
         &self,
-    ) -> std::collections::HashMap<
-        String,
-        crate::store::operations::clients::ClientUpgradePolicy,
-    > {
+    ) -> std::collections::HashMap<String, crate::store::operations::clients::ClientUpgradePolicy>
+    {
         const TTL_SECS: u64 = 60;
         if let Ok(guard) = self.upgrade_policy_cache.read() {
             if let Some((at, ref map)) = *guard {

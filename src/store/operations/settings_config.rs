@@ -207,7 +207,9 @@ mod tests {
         store
             .upsert_settings_config("site", &serde_json::json!({"title": "A"}))
             .unwrap();
-        let snap = store.create_settings_snapshot(Some("before-change")).unwrap();
+        let snap = store
+            .create_settings_snapshot(Some("before-change"))
+            .unwrap();
         // 改了再回滚
         store
             .upsert_settings_config("site", &serde_json::json!({"title": "B"}))

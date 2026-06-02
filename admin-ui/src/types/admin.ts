@@ -231,6 +231,8 @@ export interface SystemHealth {
     sse: { healthy: boolean; activeConnections: number; activeDevices: number; maxConnections?: number };
     wordbookCenter: { healthy: boolean; probeSkipped?: boolean };
   };
+  /** S2-1:领域事件 outbox 异步消费健康（默认同步路径时恒 0）。 */
+  outbox?: { pending: number; lagSecs: number; deadLetter: number };
 }
 
 export interface SystemResources {
@@ -487,6 +489,24 @@ export interface SystemSettings {
   amasAutoApplyEnabled: boolean;
   amasAutoApplyMaxPerDay: number;
   amasAutoApplyMinConfidence: number;
+  canaryRewardDropThreshold: number;
+  canaryAnomalyRiseThreshold: number;
+  /** D4:客户端最低版本门控阈值(semver),null=未设置(回落 env) */
+  minClientVersion?: string | null;
+  /** D4:版本门控开关 */
+  versionGateEnabled: boolean;
+}
+
+/** D4:客户端版本门控运行时配置(读/写端点共用) */
+export interface VersionGate {
+  enabled: boolean;
+  minClientVersion?: string | null;
+  /** env MIN_CLIENT_VERSION 兜底值(只读,供 UI 提示) */
+  envMinClientVersion?: string | null;
+  /** 实际生效阈值(settings 优先回落 env) */
+  effectiveMinClientVersion?: string | null;
+  /** strict-mode 全量契约校验是否启用(只读) */
+  strictModeEnabled: boolean;
 }
 
 export interface DailyActiveUsersEntry {

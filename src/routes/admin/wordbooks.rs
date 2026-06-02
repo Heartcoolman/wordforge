@@ -53,10 +53,9 @@ fn write_audit(
     detail: &str,
     admin_id: Option<&str>,
 ) {
-    if let Err(e) =
-        state
-            .store()
-            .insert_wordbook_audit(wordbook_id, action, detail, admin_id)
+    if let Err(e) = state
+        .store()
+        .insert_wordbook_audit(wordbook_id, action, detail, admin_id)
     {
         tracing::warn!(error=%e, action=%action, "写 wordbook audit 失败(不影响主流程)");
     }
@@ -401,19 +400,22 @@ async fn patch_wordbook(
     let desc = req.description.clone();
     let name_for_task = name.clone();
     let updated: Wordbook = state
-        .run_store_task("admin.wordbooks.patch", move |store| -> Result<Wordbook, AppError> {
-            let mut wb = store
-                .get_wordbook(&id_for_task)?
-                .ok_or_else(|| AppError::not_found("词库不存在"))?;
-            if let Some(n) = name_for_task {
-                wb.name = n;
-            }
-            if let Some(d) = desc {
-                wb.description = d;
-            }
-            store.upsert_wordbook(&wb)?;
-            Ok(wb)
-        })
+        .run_store_task(
+            "admin.wordbooks.patch",
+            move |store| -> Result<Wordbook, AppError> {
+                let mut wb = store
+                    .get_wordbook(&id_for_task)?
+                    .ok_or_else(|| AppError::not_found("词库不存在"))?;
+                if let Some(n) = name_for_task {
+                    wb.name = n;
+                }
+                if let Some(d) = desc {
+                    wb.description = d;
+                }
+                store.upsert_wordbook(&wb)?;
+                Ok(wb)
+            },
+        )
         .await??;
 
     write_audit(&state, &id, "update", &updated.name, Some(&admin.admin_id));
@@ -500,14 +502,17 @@ async fn add_word(
     let id_for_task = id.clone();
     let word_for_task = word.clone();
     state
-        .run_store_task("admin.wordbooks.add_word", move |store| -> Result<(), AppError> {
-            if store.get_wordbook(&id_for_task)?.is_none() {
-                return Err(AppError::not_found("词库不存在"));
-            }
-            store.upsert_word(&word_for_task)?;
-            store.add_word_to_wordbook(&id_for_task, &word_for_task.id)?;
-            Ok(())
-        })
+        .run_store_task(
+            "admin.wordbooks.add_word",
+            move |store| -> Result<(), AppError> {
+                if store.get_wordbook(&id_for_task)?.is_none() {
+                    return Err(AppError::not_found("词库不存在"));
+                }
+                store.upsert_word(&word_for_task)?;
+                store.add_word_to_wordbook(&id_for_task, &word_for_task.id)?;
+                Ok(())
+            },
+        )
         .await??;
 
     write_audit(&state, &id, "add_word", &text, Some(&admin.admin_id));

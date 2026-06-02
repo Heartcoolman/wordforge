@@ -117,8 +117,9 @@ pub async fn health_check(State(state): State<AppState>) -> impl axum::response:
     // 失败（文件缺失/权限）时返回 None，前端展示 "—"，不伪造数据。
     let db_size_bytes = db_on_disk_size_bytes(&state);
     // SLO 可用性：源自 http_metrics 滚动聚合器（真实 5xx 错误率，非伪造）。
-    // 请求 30d 窗口，但聚合器内部按实际可得窗口（HOUR_CAP=7d 上限、且自首条记录起、进程重启清零）
-    // 如实裁剪——故同时透出 effectiveSecs，前端据此动态标注真实窗口（不冒充满 30 天）。
+    // 请求 30d 窗口；hour 层 HOUR_CAP=30d 且经 D3 持久化(availability_rollup)+启动回灌，
+    // 故跨重启可累积达 30d。仍按实际可得窗口(min(window, 自首条记录以来))透出 effectiveSecs，
+    // 前端据此动态标注真实窗口（运行不足 30d 时如实降级，不冒充）。
     // 无任何请求样本时 pct 无意义，省略为 null，前端展示 "—"。
     let availability = {
         let agg = crate::middleware::http_metrics::aggregate(30 * 24 * 3600);

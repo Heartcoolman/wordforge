@@ -153,7 +153,10 @@ impl Store {
 
     /// 按 note 精确定位最近一个版本(返回 parent_version_hash)。
     /// 用于建议回滚:直接据 "approve suggestion#{id}" note 查,避免扫最近 N 条的窗口漏定位。
-    pub fn find_parent_hash_by_note(&self, note: &str) -> Result<Option<Option<String>>, StoreError> {
+    pub fn find_parent_hash_by_note(
+        &self,
+        note: &str,
+    ) -> Result<Option<Option<String>>, StoreError> {
         let conn = self.conn()?;
         let row = conn
             .query_row(

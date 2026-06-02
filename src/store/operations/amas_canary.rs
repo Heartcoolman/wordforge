@@ -62,8 +62,8 @@ impl Store {
             "UPDATE amas_canary_config SET active = 0 WHERE active = 1",
             [],
         )?;
-        let force_json = serde_json::to_string(force_user_ids)
-            .map_err(StoreError::Serialization)?;
+        let force_json =
+            serde_json::to_string(force_user_ids).map_err(StoreError::Serialization)?;
         let filters_json = crowd_filters.map(|v| v.to_string());
         let now = chrono::Utc::now().to_rfc3339();
         tx.execute(
@@ -106,12 +106,12 @@ impl Store {
                 },
             )
             .optional()?;
-        let Some((id, version_hash, percent, force_json, created_at, created_by, filters_raw)) = row
+        let Some((id, version_hash, percent, force_json, created_at, created_by, filters_raw)) =
+            row
         else {
             return Ok(None);
         };
-        let force_user_ids: Vec<String> =
-            serde_json::from_str(&force_json).unwrap_or_default();
+        let force_user_ids: Vec<String> = serde_json::from_str(&force_json).unwrap_or_default();
         let crowd_filters = filters_raw
             .as_deref()
             .and_then(|s| serde_json::from_str(s).ok());
@@ -185,8 +185,14 @@ impl Store {
         filters: &serde_json::Value,
     ) -> Result<bool, StoreError> {
         let min_age = filters.get("minAccountAgeDays").and_then(|v| v.as_u64());
-        let prefer_active = filters.get("preferActive").and_then(|v| v.as_bool()).unwrap_or(false);
-        let web_only = filters.get("webOnly").and_then(|v| v.as_bool()).unwrap_or(false);
+        let prefer_active = filters
+            .get("preferActive")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let web_only = filters
+            .get("webOnly")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         if min_age.is_none() && !prefer_active && !web_only {
             return Ok(true);
         }
@@ -238,8 +244,10 @@ mod tests {
     #[test]
     fn set_overrides_previous_active() {
         let s = store();
-        s.set_amas_canary("hash-a", 10, &[], None, "admin-1").unwrap();
-        s.set_amas_canary("hash-b", 50, &[], None, "admin-2").unwrap();
+        s.set_amas_canary("hash-a", 10, &[], None, "admin-1")
+            .unwrap();
+        s.set_amas_canary("hash-b", 50, &[], None, "admin-2")
+            .unwrap();
         let active = s.get_active_amas_canary().unwrap().unwrap();
         assert_eq!(active.version_hash, "hash-b");
         assert_eq!(active.percent, 50);
@@ -248,7 +256,8 @@ mod tests {
     #[test]
     fn disable_clears_active() {
         let s = store();
-        s.set_amas_canary("hash-a", 10, &[], None, "admin-1").unwrap();
+        s.set_amas_canary("hash-a", 10, &[], None, "admin-1")
+            .unwrap();
         assert!(s.get_active_amas_canary().unwrap().is_some());
         let was = s.disable_active_amas_canary().unwrap();
         assert!(was);

@@ -383,6 +383,18 @@ export default function MonitoringPage() {
                     </span>
                   </div>
                 </div>
+                {/* S2-1:领域事件 outbox 异步消费（默认同步路径时恒 0；RECORDS_OUTBOX_ASYNC=true 后驱动） */}
+                <div class={`svc-row ${(health()?.outbox?.deadLetter ?? 0) > 0 ? 'is-warn' : 'is-up'}`}>
+                  <span class="led" />
+                  <div class="name">事件 outbox <span>records→AMAS 异步消费 · 重试退避 + 死信</span></div>
+                  <div class="row gap-3">
+                    <span class="v">{health()?.outbox ? `${health()!.outbox!.pending} 待处理` : '—'}</span>
+                    <span class="v">{health()?.outbox ? `lag ${health()!.outbox!.lagSecs}s` : '—'}</span>
+                    <span class={`chip ${(health()?.outbox?.deadLetter ?? 0) > 0 ? 'chip-error' : 'chip-success'}`}>
+                      {(health()?.outbox?.deadLetter ?? 0) > 0 ? `${health()!.outbox!.deadLetter} 死信` : '无死信'}
+                    </span>
+                  </div>
+                </div>
                 {/* Probe 探针 */}
                 <div class={`svc-row ${sse()?.healthy === false ? 'is-warn' : 'is-up'}`}>
                   <span class="led" />

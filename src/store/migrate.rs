@@ -40,7 +40,10 @@ fn migrations() -> Vec<(&'static str, MigrationFn)> {
         ("008_admin_analytics_indexes", m008_admin_analytics_indexes),
         ("009_amas_versioning", m009_amas_versioning),
         ("010_amas_suggestions", m010_amas_suggestions),
-        ("011_amas_auto_apply_settings", m011_amas_auto_apply_settings),
+        (
+            "011_amas_auto_apply_settings",
+            m011_amas_auto_apply_settings,
+        ),
         ("012_feedback_items", m012_feedback_items),
         (
             "013_learning_record_self_rating",
@@ -50,7 +53,10 @@ fn migrations() -> Vec<(&'static str, MigrationFn)> {
         ("015_gdpr_export_rate_limit", m015_gdpr_export_rate_limit),
         ("016_llm_cost_ledger", m016_llm_cost_ledger),
         ("017_update_audit_log", m017_update_audit_log),
-        ("018_feedback_priority_status", m018_feedback_priority_status),
+        (
+            "018_feedback_priority_status",
+            m018_feedback_priority_status,
+        ),
         ("019_worker_last_run", m019_worker_last_run),
         ("020_resource_packs", m020_resource_packs),
         ("021_admin_audit_log_v2", m021_admin_audit_log_v2),
@@ -66,14 +72,29 @@ fn migrations() -> Vec<(&'static str, MigrationFn)> {
         ),
         ("029_wordbook_audit_log", m029_wordbook_audit_log),
         ("030_feedback_ticketing", m030_feedback_ticketing),
-        ("031_probe_telemetry_sampling", m031_probe_telemetry_sampling),
+        (
+            "031_probe_telemetry_sampling",
+            m031_probe_telemetry_sampling,
+        ),
         ("032_broadcasts_history", m032_broadcasts_history),
         ("033_settings_config", m033_settings_config),
         ("034_admin_rbac_api_keys", m034_admin_rbac_api_keys),
-        ("035_amas_canary_crowd_filters", m035_amas_canary_crowd_filters),
+        (
+            "035_amas_canary_crowd_filters",
+            m035_amas_canary_crowd_filters,
+        ),
         ("036_feedback_announcements", m036_feedback_announcements),
         ("037_system_alerts", m037_system_alerts),
         ("038_client_devices_model", m038_client_devices_model),
+        ("039_availability_rollup", m039_availability_rollup),
+        ("040_canary_thresholds", m040_canary_thresholds),
+        ("041_system_alerts_inbox", m041_system_alerts_inbox),
+        (
+            "042_scheduled_broadcasts_drafts",
+            m042_scheduled_broadcasts_drafts,
+        ),
+        ("043_min_client_version_gate", m043_min_client_version_gate),
+        ("044_outbox_event_processing", m044_outbox_event_processing),
     ]
 }
 
@@ -88,7 +109,10 @@ fn migrations_down() -> Vec<(&'static str, MigrationFn)> {
         ("005_learning_record_type", m005_learning_record_type_down),
         ("006_session_shown_words", m006_session_shown_words_down),
         ("007_session_perf_indexes", m007_session_perf_indexes_down),
-        ("008_admin_analytics_indexes", m008_admin_analytics_indexes_down),
+        (
+            "008_admin_analytics_indexes",
+            m008_admin_analytics_indexes_down,
+        ),
         ("009_amas_versioning", m009_amas_versioning_down),
         ("010_amas_suggestions", m010_amas_suggestions_down),
         (
@@ -101,7 +125,10 @@ fn migrations_down() -> Vec<(&'static str, MigrationFn)> {
             m013_learning_record_self_rating_down,
         ),
         ("014_probe_executions", m014_probe_executions_down),
-        ("015_gdpr_export_rate_limit", m015_gdpr_export_rate_limit_down),
+        (
+            "015_gdpr_export_rate_limit",
+            m015_gdpr_export_rate_limit_down,
+        ),
         ("016_llm_cost_ledger", m016_llm_cost_ledger_down),
         ("017_update_audit_log", m017_update_audit_log_down),
         (
@@ -134,9 +161,27 @@ fn migrations_down() -> Vec<(&'static str, MigrationFn)> {
             "035_amas_canary_crowd_filters",
             m035_amas_canary_crowd_filters_down,
         ),
-        ("036_feedback_announcements", m036_feedback_announcements_down),
+        (
+            "036_feedback_announcements",
+            m036_feedback_announcements_down,
+        ),
         ("037_system_alerts", m037_system_alerts_down),
         ("038_client_devices_model", m038_client_devices_model_down),
+        ("039_availability_rollup", m039_availability_rollup_down),
+        ("040_canary_thresholds", m040_canary_thresholds_down),
+        ("041_system_alerts_inbox", m041_system_alerts_inbox_down),
+        (
+            "042_scheduled_broadcasts_drafts",
+            m042_scheduled_broadcasts_drafts_down,
+        ),
+        (
+            "043_min_client_version_gate",
+            m043_min_client_version_gate_down,
+        ),
+        (
+            "044_outbox_event_processing",
+            m044_outbox_event_processing_down,
+        ),
     ]
 }
 
@@ -462,7 +507,10 @@ fn m011_amas_auto_apply_settings(store: &Store) -> Result<(), StoreError> {
     for (col, ddl) in [
         ("amas_auto_apply_enabled", "INTEGER NOT NULL DEFAULT 0"),
         ("amas_auto_apply_max_per_day", "INTEGER NOT NULL DEFAULT 1"),
-        ("amas_auto_apply_min_confidence", "REAL NOT NULL DEFAULT 0.8"),
+        (
+            "amas_auto_apply_min_confidence",
+            "REAL NOT NULL DEFAULT 0.8",
+        ),
     ] {
         let has: bool = conn
             .prepare("PRAGMA table_info(system_settings)")?
@@ -470,7 +518,10 @@ fn m011_amas_auto_apply_settings(store: &Store) -> Result<(), StoreError> {
             .filter_map(Result::ok)
             .any(|name| name == col);
         if !has {
-            conn.execute(&format!("ALTER TABLE system_settings ADD COLUMN {col} {ddl}"), [])?;
+            conn.execute(
+                &format!("ALTER TABLE system_settings ADD COLUMN {col} {ddl}"),
+                [],
+            )?;
         }
     }
     Ok(())
@@ -614,7 +665,6 @@ fn m016_llm_cost_ledger(store: &Store) -> Result<(), StoreError> {
     }
     Ok(())
 }
-
 
 fn m018_feedback_priority_status(store: &Store) -> Result<(), StoreError> {
     let conn = store.conn()?;
@@ -881,7 +931,10 @@ fn m011_amas_auto_apply_settings_down(store: &Store) -> Result<(), StoreError> {
         "amas_auto_apply_enabled",
     ] {
         if cols.iter().any(|c| c == col) {
-            conn.execute(&format!("ALTER TABLE system_settings DROP COLUMN {col}"), [])?;
+            conn.execute(
+                &format!("ALTER TABLE system_settings DROP COLUMN {col}"),
+                [],
+            )?;
         }
     }
     Ok(())
@@ -1041,10 +1094,7 @@ fn m022_admin_ui_completeness(store: &Store) -> Result<(), StoreError> {
         ("last_login_at", "TEXT DEFAULT NULL"),
     ] {
         if !user_cols.iter().any(|c| c == col) {
-            conn.execute(
-                &format!("ALTER TABLE users ADD COLUMN {col} {ddl}"),
-                [],
-            )?;
+            conn.execute(&format!("ALTER TABLE users ADD COLUMN {col} {ddl}"), [])?;
         }
     }
 
@@ -1170,10 +1220,7 @@ fn m022_admin_ui_completeness_down(store: &Store) -> Result<(), StoreError> {
         .collect();
     for col in ["answer_snapshot_json", "device_profile_json"] {
         if feedback_cols.iter().any(|c| c == col) {
-            conn.execute(
-                &format!("ALTER TABLE feedback_items DROP COLUMN {col}"),
-                [],
-            )?;
+            conn.execute(&format!("ALTER TABLE feedback_items DROP COLUMN {col}"), [])?;
         }
     }
 
@@ -1289,10 +1336,7 @@ fn m023_user_profile_extras_down(store: &Store) -> Result<(), StoreError> {
         .collect();
     for col in ["daily_goal_minutes", "daily_goal_words"] {
         if habit_cols.iter().any(|c| c == col) {
-            conn.execute(
-                &format!("ALTER TABLE habit_profiles DROP COLUMN {col}"),
-                [],
-            )?;
+            conn.execute(&format!("ALTER TABLE habit_profiles DROP COLUMN {col}"), [])?;
         }
     }
 
@@ -1390,10 +1434,7 @@ fn m024_client_extras_down(store: &Store) -> Result<(), StoreError> {
         .collect();
     for col in ["last_ip", "country"] {
         if cd_cols.iter().any(|c| c == col) {
-            conn.execute(
-                &format!("ALTER TABLE client_devices DROP COLUMN {col}"),
-                [],
-            )?;
+            conn.execute(&format!("ALTER TABLE client_devices DROP COLUMN {col}"), [])?;
         }
     }
 
@@ -1609,10 +1650,7 @@ fn m028_learning_record_question_mode_down(store: &Store) -> Result<(), StoreErr
         .filter_map(Result::ok)
         .any(|name| name == "question_mode");
     if has_column {
-        conn.execute(
-            "ALTER TABLE learning_records DROP COLUMN question_mode",
-            [],
-        )?;
+        conn.execute("ALTER TABLE learning_records DROP COLUMN question_mode", [])?;
     }
     Ok(())
 }
@@ -1738,10 +1776,7 @@ fn m030_feedback_ticketing_down(store: &Store) -> Result<(), StoreError> {
         "read_at",
     ] {
         if cols.iter().any(|c| c == col) {
-            conn.execute(
-                &format!("ALTER TABLE feedback_items DROP COLUMN {col}"),
-                [],
-            )?;
+            conn.execute(&format!("ALTER TABLE feedback_items DROP COLUMN {col}"), [])?;
         }
     }
     Ok(())
@@ -2080,6 +2115,267 @@ fn m038_client_devices_model_down(store: &Store) -> Result<(), StoreError> {
     Ok(())
 }
 
+/// m039:HTTP 可用率小时滚动桶持久化(D3)。让登录页 SLO 30d 跨重启可达——
+/// 内存 RollingStore 重启清零且 HOUR_CAP 原仅 7d,本表按小时落 5xx/total(+延迟桶)
+/// 供启动回灌 + 每 5 分钟 flush。hour_key=unix/3600,buckets 为 JSON 数组。
+fn m039_availability_rollup(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS availability_rollup (
+            hour_key  INTEGER NOT NULL PRIMARY KEY,
+            count     INTEGER NOT NULL DEFAULT 0,
+            err5xx    INTEGER NOT NULL DEFAULT 0,
+            bytes_in  INTEGER NOT NULL DEFAULT 0,
+            buckets   TEXT    NOT NULL DEFAULT '[]'
+        );",
+    )?;
+    Ok(())
+}
+
+/// m039 down:DROP 表。仅 dev/test。
+fn m039_availability_rollup_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch("DROP TABLE IF EXISTS availability_rollup;")?;
+    Ok(())
+}
+
+/// m044:领域事件 outbox + 死信表(S2-1)。outbox 持久化 records→AMAS 领域事件,供
+/// outbox_processor worker 异步消费(指数退避重试 + 死信兜底)。默认 records 仍走同步
+/// 老路(RECORDS_OUTBOX_ASYNC=false),异步路径 opt-in;切默认/删手动 rollback 待跨仓协同。
+fn m044_outbox_event_processing(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS outbox (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_type    TEXT NOT NULL,
+            payload       TEXT NOT NULL,
+            attempts      INTEGER NOT NULL DEFAULT 0,
+            next_retry_at TEXT NOT NULL,
+            last_error    TEXT,
+            created_at    TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_outbox_due ON outbox(next_retry_at);
+
+        CREATE TABLE IF NOT EXISTS events_dead_letter (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_type  TEXT NOT NULL,
+            payload     TEXT NOT NULL,
+            attempts    INTEGER NOT NULL,
+            last_error  TEXT NOT NULL DEFAULT '',
+            created_at  TEXT NOT NULL,
+            dead_at     TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_dead_letter_dead_at ON events_dead_letter(dead_at DESC);",
+    )?;
+    Ok(())
+}
+
+/// m044 down:DROP 两表 + 索引。仅 dev/test。
+fn m044_outbox_event_processing_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS idx_dead_letter_dead_at;
+         DROP TABLE IF EXISTS events_dead_letter;
+         DROP INDEX IF EXISTS idx_outbox_due;
+         DROP TABLE IF EXISTS outbox;",
+    )?;
+    Ok(())
+}
+
+/// m040:system_settings 加 canary 自动回滚两阈值列(E3,收尾 C6)。
+/// 原 canary_monitor 写死常量 0.05,迁到 system_settings 让 admin 在线调参。幂等加列。
+fn m040_canary_thresholds(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    let cols: Vec<String> = conn
+        .prepare("PRAGMA table_info(system_settings)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .collect();
+    if !cols.iter().any(|c| c == "canary_reward_drop_threshold") {
+        conn.execute(
+            "ALTER TABLE system_settings ADD COLUMN canary_reward_drop_threshold REAL NOT NULL DEFAULT 0.05",
+            [],
+        )?;
+    }
+    if !cols.iter().any(|c| c == "canary_anomaly_rise_threshold") {
+        conn.execute(
+            "ALTER TABLE system_settings ADD COLUMN canary_anomaly_rise_threshold REAL NOT NULL DEFAULT 0.05",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+/// m040 down:DROP 两列。仅 dev/test。
+fn m040_canary_thresholds_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    let cols: Vec<String> = conn
+        .prepare("PRAGMA table_info(system_settings)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .collect();
+    if cols.iter().any(|c| c == "canary_reward_drop_threshold") {
+        conn.execute(
+            "ALTER TABLE system_settings DROP COLUMN canary_reward_drop_threshold",
+            [],
+        )?;
+    }
+    if cols.iter().any(|c| c == "canary_anomaly_rise_threshold") {
+        conn.execute(
+            "ALTER TABLE system_settings DROP COLUMN canary_anomaly_rise_threshold",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+/// m041:system_alerts 加 admin 收件箱已读/确认状态列(D1)。
+/// 原表仅作 /admin/monitoring/events 派生轮询载体,无已读态;补 read_at/acked_by
+/// 让 admin 收件箱可标记已读 + 未读计数。**绝不复用 end-user notifications 表
+/// (按 user_id 键控,维度不同)**。幂等加列。
+fn m041_system_alerts_inbox(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    let cols: Vec<String> = conn
+        .prepare("PRAGMA table_info(system_alerts)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .collect();
+    if !cols.iter().any(|c| c == "read_at") {
+        conn.execute(
+            "ALTER TABLE system_alerts ADD COLUMN read_at TEXT DEFAULT NULL",
+            [],
+        )?;
+    }
+    if !cols.iter().any(|c| c == "acked_by") {
+        conn.execute(
+            "ALTER TABLE system_alerts ADD COLUMN acked_by TEXT DEFAULT NULL",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+/// m041 down:DROP 两列。仅 dev/test。
+fn m041_system_alerts_inbox_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    let cols: Vec<String> = conn
+        .prepare("PRAGMA table_info(system_alerts)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .collect();
+    if cols.iter().any(|c| c == "read_at") {
+        conn.execute("ALTER TABLE system_alerts DROP COLUMN read_at", [])?;
+    }
+    if cols.iter().any(|c| c == "acked_by") {
+        conn.execute("ALTER TABLE system_alerts DROP COLUMN acked_by", [])?;
+    }
+    Ok(())
+}
+
+/// m042:设备推送「投递时机调度」+「草稿存储」(D2)。
+/// scheduled_broadcasts —— 延时/指定时间下发的广播队列(受众过滤 platforms/version_min/
+/// last_active_days/user_ids 存 JSON,None 走全员; + scheduled_at RFC3339 + status
+/// pending/sent/failed; 定时 worker 扫到期行 fan-out)。push_drafts —— 推送编辑器「保存草稿」
+/// (仿 m036 feedback_reply_drafts,全局单份 id='default' 单行 upsert)。
+fn m042_scheduled_broadcasts_drafts(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS scheduled_broadcasts (
+            id                TEXT NOT NULL PRIMARY KEY,
+            title             TEXT NOT NULL,
+            message           TEXT NOT NULL,
+            admin_id          TEXT NOT NULL,
+            -- 受众过滤(JSON 文本;NULL = 该维度不过滤,四项全 NULL = 全员)
+            platforms         TEXT,
+            version_min       TEXT,
+            last_active_days  INTEGER,
+            user_ids          TEXT,
+            scheduled_at      TEXT NOT NULL,
+            status            TEXT NOT NULL DEFAULT 'pending'
+                              CHECK (status IN ('pending', 'sent', 'failed')),
+            sent_count        INTEGER,
+            error             TEXT,
+            created_at        TEXT NOT NULL,
+            sent_at           TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_scheduled_broadcasts_due
+            ON scheduled_broadcasts(status, scheduled_at);
+
+        CREATE TABLE IF NOT EXISTS push_drafts (
+            id                TEXT NOT NULL PRIMARY KEY,
+            title             TEXT NOT NULL DEFAULT '',
+            message           TEXT NOT NULL DEFAULT '',
+            platforms         TEXT,
+            version_min       TEXT,
+            last_active_days  INTEGER,
+            author_id         TEXT,
+            updated_at        TEXT NOT NULL
+        );",
+    )?;
+    Ok(())
+}
+
+/// m042 down:DROP 两表 + 索引。仅 dev/test。
+fn m042_scheduled_broadcasts_drafts_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "DROP TABLE IF EXISTS push_drafts;
+         DROP INDEX IF EXISTS idx_scheduled_broadcasts_due;
+         DROP TABLE IF EXISTS scheduled_broadcasts;",
+    )?;
+    Ok(())
+}
+
+/// m043:system_settings 加客户端最低版本门控两列(D4)。
+///   - min_client_version TEXT —— admin 运行时可配的最低客户端 semver,优先级高于
+///     env MIN_CLIENT_VERSION;NULL 表示未设置(回落 env)。
+///   - version_gate_enabled INTEGER —— 版本门控开关。开启后 strict-mode 即使 enabled=false
+///     也对低于阈值的客户端返回 CLIENT_OUTDATED(发布切流场景独立于全量契约校验)。幂等加列。
+fn m043_min_client_version_gate(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    let cols: Vec<String> = conn
+        .prepare("PRAGMA table_info(system_settings)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .collect();
+    if !cols.iter().any(|c| c == "min_client_version") {
+        conn.execute(
+            "ALTER TABLE system_settings ADD COLUMN min_client_version TEXT DEFAULT NULL",
+            [],
+        )?;
+    }
+    if !cols.iter().any(|c| c == "version_gate_enabled") {
+        conn.execute(
+            "ALTER TABLE system_settings ADD COLUMN version_gate_enabled INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+/// m043 down:DROP 两列。仅 dev/test。
+fn m043_min_client_version_gate_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    let cols: Vec<String> = conn
+        .prepare("PRAGMA table_info(system_settings)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .collect();
+    if cols.iter().any(|c| c == "min_client_version") {
+        conn.execute(
+            "ALTER TABLE system_settings DROP COLUMN min_client_version",
+            [],
+        )?;
+    }
+    if cols.iter().any(|c| c == "version_gate_enabled") {
+        conn.execute(
+            "ALTER TABLE system_settings DROP COLUMN version_gate_enabled",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
 /// m035 down:DROP crowd_filters 列。仅 dev/test。
 fn m035_amas_canary_crowd_filters_down(store: &Store) -> Result<(), StoreError> {
     let conn = store.conn()?;
@@ -2330,7 +2626,10 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(has_record_type, 0, "init_schema 不应在已有 schema_version 表时追加新列");
+        assert_eq!(
+            has_record_type, 0,
+            "init_schema 不应在已有 schema_version 表时追加新列"
+        );
         let has_index: i64 = conn
             .query_row(
                 "SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_learning_records_user_type_time'",

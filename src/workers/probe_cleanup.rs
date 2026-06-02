@@ -33,8 +33,7 @@ async fn sweep_once(state: &AppState) -> Result<(), String> {
     if !cfg.enabled {
         return Ok(());
     }
-    let cutoff = chrono::Utc::now()
-        - chrono::Duration::days(cfg.retention_days as i64);
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(cfg.retention_days as i64);
     let cutoff_str = cutoff.to_rfc3339();
     let store = state.store().clone();
     let cutoff_clone = cutoff_str.clone();

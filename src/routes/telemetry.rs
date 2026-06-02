@@ -82,9 +82,7 @@ struct ClientErrorReport {
     component_stack: Option<String>,
 }
 
-async fn report_client_error(
-    JsonBody(body): JsonBody<ClientErrorReport>,
-) -> impl IntoResponse {
+async fn report_client_error(JsonBody(body): JsonBody<ClientErrorReport>) -> impl IntoResponse {
     let stack = body.stack.as_deref().unwrap_or("");
     let url = body.url.as_deref().unwrap_or("");
     let ua = body.user_agent.as_deref().unwrap_or("");
@@ -180,18 +178,18 @@ async fn submit_telemetry(
             .is_some_and(|s| !s.is_empty());
 
         if !language_ok {
-            strict_reject_or_warn(&strict, "MISSING_LANGUAGE", "telemetry payload 缺少 device.language")?;
+            strict_reject_or_warn(
+                &strict,
+                "MISSING_LANGUAGE",
+                "telemetry payload 缺少 device.language",
+            )?;
         }
 
         if body.event_type == "session_start" {
             let fp_ok = device.is_some_and(|d| {
                 ["screenWidth", "screenHeight", "pixelRatio", "cpuCores"]
                     .iter()
-                    .all(|k| {
-                        d.get(*k)
-                            .and_then(|v| v.as_f64())
-                            .is_some_and(|n| n > 0.0)
-                    })
+                    .all(|k| d.get(*k).and_then(|v| v.as_f64()).is_some_and(|n| n > 0.0))
             });
             if !fp_ok {
                 strict_reject_or_warn(
@@ -300,8 +298,7 @@ async fn submit_telemetry(
     // 行恒落库;其余 event_type 按 probe_sampling_config / 全局默认 gate。rate<1.0 时用
     // 确定性哈希 hash(device_id + id) mod 10000 / 10000.0 ∈ [0,1),>=rate 则采样丢弃。
     // 默认全 1.0 → 零行为变化。
-    let always_keep =
-        event_type == "on_demand" || event_type == "session_start";
+    let always_keep = event_type == "on_demand" || event_type == "session_start";
     let sampled_out = if always_keep {
         false
     } else {
@@ -320,7 +317,9 @@ async fn submit_telemetry(
     };
 
     if sampled_out {
-        return Ok(ok(serde_json::json!({ "received": true, "sampledOut": true })));
+        return Ok(ok(
+            serde_json::json!({ "received": true, "sampledOut": true }),
+        ));
     }
 
     state

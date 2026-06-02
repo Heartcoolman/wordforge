@@ -10,9 +10,7 @@ use crate::state::AppState;
 use crate::store::operations::learning_sessions::{SessionStatus, SessionSummary};
 use crate::store::operations::word_states::WordState;
 
-use super::session::{
-    ingest_session_events, SessionEvent, SessionWithEventIngest,
-};
+use super::session::{ingest_session_events, SessionEvent, SessionWithEventIngest};
 use super::{COMPLETE_SESSION_EVENTS_LIMIT, SYNC_PROGRESS_EVENTS_LIMIT};
 
 #[derive(Debug, Deserialize)]

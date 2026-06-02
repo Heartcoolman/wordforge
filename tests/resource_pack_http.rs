@@ -52,9 +52,8 @@ async fn upload_pack_payload(
     use axum::http::Request;
     use tower::util::ServiceExt;
 
-    let mut uri = format!(
-        "/api/admin/resource-packs/{pack_id}/versions?version={version}&channel={channel}"
-    );
+    let mut uri =
+        format!("/api/admin/resource-packs/{pack_id}/versions?version={version}&channel={channel}");
     if let Some(min) = min_app_version {
         uri.push_str(&format!("&minAppVersion={min}"));
     }
@@ -71,7 +70,14 @@ async fn upload_pack_payload(
 #[tokio::test]
 async fn public_key_endpoint_returns_base64() {
     let app = spawn_test_server().await;
-    let resp = request(&app.app, Method::GET, "/api/resource-packs/public-key", None, &[]).await;
+    let resp = request(
+        &app.app,
+        Method::GET,
+        "/api/resource-packs/public-key",
+        None,
+        &[],
+    )
+    .await;
     let (status, _h, body) = response_json(resp).await;
     assert_eq!(status, StatusCode::OK);
     // public-key handler 直接返 Json(json!{...})，无 ok() 包裹
@@ -89,7 +95,14 @@ async fn admin_upload_computes_sha256_and_valid_signature() {
     let admin = setup_admin_and_get_token(&app.app).await;
 
     // 拿公钥（用于 verify 上传后端返回的 signature）
-    let pk_resp = request(&app.app, Method::GET, "/api/resource-packs/public-key", None, &[]).await;
+    let pk_resp = request(
+        &app.app,
+        Method::GET,
+        "/api/resource-packs/public-key",
+        None,
+        &[],
+    )
+    .await;
     let (_s, _h, pk_body) = response_json(pk_resp).await;
     let pk_b64 = pk_body["publicKey"].as_str().unwrap().to_string();
 
@@ -107,13 +120,20 @@ async fn admin_upload_computes_sha256_and_valid_signature() {
     assert_eq!(status, StatusCode::OK, "upload failed: {body}");
 
     let returned_sha = body["data"]["sha256"].as_str().unwrap();
-    assert_eq!(returned_sha, sha256_hex(SAMPLE_PAYLOAD), "sha256 必须与本地计算一致");
+    assert_eq!(
+        returned_sha,
+        sha256_hex(SAMPLE_PAYLOAD),
+        "sha256 必须与本地计算一致"
+    );
 
     let sig_b64 = body["data"]["signature"].as_str().unwrap();
     assert_eq!(sig_b64.len(), 88, "Ed25519 base64 签名长度应为 88");
     verify_base64(SAMPLE_PAYLOAD, sig_b64, &pk_b64).expect("签名必须用同一公钥验证通过");
 
-    assert_eq!(body["data"]["sizeBytes"].as_i64().unwrap(), SAMPLE_PAYLOAD.len() as i64);
+    assert_eq!(
+        body["data"]["sizeBytes"].as_i64().unwrap(),
+        SAMPLE_PAYLOAD.len() as i64
+    );
     assert_eq!(body["data"]["channel"], "stable");
 }
 
@@ -249,7 +269,13 @@ async fn deactivate_removes_from_manifest() {
     let app = spawn_test_server().await;
     let admin = setup_admin_and_get_token(&app.app).await;
     upload_pack_payload(
-        &app.app, &admin, "wordbook-core", "1.0.0", "stable", SAMPLE_PAYLOAD, None,
+        &app.app,
+        &admin,
+        "wordbook-core",
+        "1.0.0",
+        "stable",
+        SAMPLE_PAYLOAD,
+        None,
     )
     .await;
     request(
@@ -302,7 +328,13 @@ async fn telemetry_install_log_aggregates_in_admin_stats() {
     let user = login_and_get_token(&app.app).await;
 
     upload_pack_payload(
-        &app.app, &admin, "wordbook-core", "1.0.0", "stable", SAMPLE_PAYLOAD, None,
+        &app.app,
+        &admin,
+        "wordbook-core",
+        "1.0.0",
+        "stable",
+        SAMPLE_PAYLOAD,
+        None,
     )
     .await;
 
@@ -365,7 +397,9 @@ async fn sse_broadcast_dedup_within_5_minutes() {
     // 不同 channel 互不影响
     assert!(app.state.try_mark_pack_broadcast("wb-core", "beta"));
     // 不同 pack 互不影响
-    assert!(app.state.try_mark_pack_broadcast("homepage-banners", "stable"));
+    assert!(app
+        .state
+        .try_mark_pack_broadcast("homepage-banners", "stable"));
 }
 
 #[tokio::test]
@@ -373,11 +407,23 @@ async fn admin_list_returns_uploaded_packs() {
     let app = spawn_test_server().await;
     let admin = setup_admin_and_get_token(&app.app).await;
     upload_pack_payload(
-        &app.app, &admin, "wordbook-core", "1.0.0", "stable", SAMPLE_PAYLOAD, None,
+        &app.app,
+        &admin,
+        "wordbook-core",
+        "1.0.0",
+        "stable",
+        SAMPLE_PAYLOAD,
+        None,
     )
     .await;
     upload_pack_payload(
-        &app.app, &admin, "homepage-banners", "2.0.0", "beta", SAMPLE_PAYLOAD, None,
+        &app.app,
+        &admin,
+        "homepage-banners",
+        "2.0.0",
+        "beta",
+        SAMPLE_PAYLOAD,
+        None,
     )
     .await;
 
@@ -408,7 +454,13 @@ async fn admin_resource_pack_handlers_write_audit_log() {
 
     // upload → set_active → deactivate
     upload_pack_payload(
-        &app.app, &admin, "wordbook-core", "1.2.3", "stable", SAMPLE_PAYLOAD, None,
+        &app.app,
+        &admin,
+        "wordbook-core",
+        "1.2.3",
+        "stable",
+        SAMPLE_PAYLOAD,
+        None,
     )
     .await;
     let _ = request(

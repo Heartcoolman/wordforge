@@ -24,8 +24,10 @@ use serde_json::json;
 use crate::auth::AdminAuthUser;
 use crate::extractors::JsonBody;
 use crate::response::{ok, AppError};
-use crate::services::updater::{ApplyContext, Channel, ChannelStatus, Updater, UpdaterError, UpdatePhase};
-use crate::state::{ApplyTaskStatus, AppState, SseEvent};
+use crate::services::updater::{
+    ApplyContext, Channel, ChannelStatus, UpdatePhase, Updater, UpdaterError,
+};
+use crate::state::{AppState, ApplyTaskStatus, SseEvent};
 use crate::store::operations::update_audit::UpdateAuditEntry;
 
 /// 备份目录总占用阈值（10 GiB），超过前端做软提示。
@@ -64,7 +66,8 @@ async fn get_status(
     let updater = require_updater(&state).await?;
     let snapshot = updater.snapshot().await;
     // v0.5.2：合并版本视图与后台 apply task 进度，前端单端点轮询即可
-    let mut payload = serde_json::to_value(&snapshot).map_err(|e| AppError::internal(&e.to_string()))?;
+    let mut payload =
+        serde_json::to_value(&snapshot).map_err(|e| AppError::internal(&e.to_string()))?;
     if let Some(map) = payload.as_object_mut() {
         if let Some(task) = state.apply_task_snapshot() {
             map.insert(
@@ -194,10 +197,7 @@ async fn apply(
     let target = req.target_version.clone();
     let channel = req.channel;
     // M0-R3：构造子进程健康自检 URL
-    let health_url = format!(
-        "http://127.0.0.1:{}/health",
-        state.config().port
-    );
+    let health_url = format!("http://127.0.0.1:{}/health", state.config().port);
     tokio::spawn(async move {
         let progress_state = bg_state.clone();
         let sink: crate::services::updater::ProgressSink = Arc::new(move |phase| {
@@ -595,7 +595,11 @@ fn upgrade_backup_version(name: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn entry_from_path(p: &std::path::Path, kind: &'static str, version: Option<String>) -> Option<BackupEntry> {
+fn entry_from_path(
+    p: &std::path::Path,
+    kind: &'static str,
+    version: Option<String>,
+) -> Option<BackupEntry> {
     let meta = std::fs::metadata(p).ok()?;
     let created_at = meta
         .modified()
@@ -769,9 +773,13 @@ async fn create_backup(
 
     prune_backups(&bdir);
 
-    let _ = state
-        .store()
-        .insert_admin_audit(&admin.admin_id, "db_backup.manual", Some("backup"), Some(&name), None);
+    let _ = state.store().insert_admin_audit(
+        &admin.admin_id,
+        "db_backup.manual",
+        Some("backup"),
+        Some(&name),
+        None,
+    );
 
     let size_bytes = std::fs::metadata(&target).map(|m| m.len()).unwrap_or(0);
     Ok(ok(json!({

@@ -373,7 +373,11 @@ async fn login(
     } else {
         state.config().admin_jwt_expires_in_hours
     };
-    let token = sign_jwt_for_admin(&admin.id, &state.config().admin_jwt_secret, expires_in_hours)?;
+    let token = sign_jwt_for_admin(
+        &admin.id,
+        &state.config().admin_jwt_secret,
+        expires_in_hours,
+    )?;
 
     let session = Session {
         token_hash: hash_token(&token),

@@ -124,10 +124,11 @@ export default function BroadcastPage() {
   // 历史分页：offset 驱动，total 取自后端 pagination，不再静默截断 50 条
   const [offset, setOffset] = createSignal(0);
 
-  // 看板数据：近 30 天统计 + 历史（按 offset/limit 翻页）
+  // 看板数据：近 30 天统计 + 历史（按 offset/limit/filter 翻页）。
+  // E2:filter 下推后端跨页生效，资源 source 含 offset+filter，二者任一变即重取。
   const [board, { refetch: refetchBoard }] = createResource(
-    offset,
-    (off) => adminApi.listBroadcasts({ offset: off, limit: PAGE_SIZE }),
+    () => ({ off: offset(), f: filter() }),
+    ({ off, f }) => adminApi.listBroadcasts({ offset: off, limit: PAGE_SIZE, filter: f }),
   );
   // 全员总数（批次预估）
   const [preview, { refetch: refetchPreview }] = createResource(() => adminApi.broadcastPreview({}));
@@ -138,7 +139,7 @@ export default function BroadcastPage() {
   const stats = createMemo(() => board()?.stats ?? { total: 0, totalSent: 0, avgReadRate: 0, online: 0 });
   const broadcasts = createMemo<BroadcastHistoryEntry[]>(() => board()?.broadcasts ?? []);
 
-  // 分页：total 来自后端 pagination；本周/失败筛选仅作用于当前页，故页脚展示「当前页 / 全部历史总数」
+  // E2:分页 total 来自后端 pagination，已是「按 filter 过滤后的计数」，故页脚跨页正确。
   const totalHistory = createMemo(() => board()?.pagination?.total ?? broadcasts().length);
   const pageStart = createMemo(() => (totalHistory() === 0 ? 0 : offset() + 1));
   const pageEnd = createMemo(() => offset() + broadcasts().length);
@@ -152,15 +153,12 @@ export default function BroadcastPage() {
     if (hasNext()) setOffset(offset() + PAGE_SIZE);
   }
 
-  const filtered = createMemo(() => {
-    const list = broadcasts();
-    const f = filter();
-    if (f === 'all') return list;
-    if (f === 'failed') return list.filter((b) => b.sentCount === 0);
-    // week：createdAt 在 7 天内
-    const cutoff = Date.now() - 7 * 24 * 3600 * 1000;
-    return list.filter((b) => new Date(b.createdAt).getTime() >= cutoff);
-  });
+  // E2:切换筛选后端跨页重取，需回到第一页（否则当前 offset 可能越过新结果集）。
+  function changeFilter(f: HistoryFilter) {
+    if (filter() === f) return;
+    setOffset(0);
+    setFilter(f);
+  }
 
   const titleLen = createMemo(() => title().length);
   const msgLen = createMemo(() => message().length);
@@ -195,8 +193,9 @@ export default function BroadcastPage() {
     setProgress({ phase: 'in-flight', sent: 0 });
     try {
       const res = await adminApi.broadcast({ title: title(), message: message() });
-      setProgress({ phase: 'done', sent: res.sent });
-      uiStore.toast.success(`广播已发送 · 写入 ${res.sent.toLocaleString()} 条通知`);
+      const sent = res.sent ?? 0; // BroadcastPage 不排程,sent 必有;?? 0 仅满足类型
+      setProgress({ phase: 'done', sent });
+      uiStore.toast.success(`广播已发送 · 写入 ${sent.toLocaleString()} 条通知`);
       setTitle('');
       setMessage('');
       // 刷新历史与统计
@@ -358,9 +357,9 @@ export default function BroadcastPage() {
               <h3>最近广播</h3>
               <span class="sub">近 30 天 · 后端无定时 / 无撤回</span>
               <div class="filter">
-                <button type="button" classList={{ 'is-active': filter() === 'all' }} onClick={() => setFilter('all')}>全部</button>
-                <button type="button" classList={{ 'is-active': filter() === 'week' }} onClick={() => setFilter('week')}>本周</button>
-                <button type="button" classList={{ 'is-active': filter() === 'failed' }} onClick={() => setFilter('failed')}>失败</button>
+                <button type="button" classList={{ 'is-active': filter() === 'all' }} onClick={() => changeFilter('all')}>全部</button>
+                <button type="button" classList={{ 'is-active': filter() === 'week' }} onClick={() => changeFilter('week')}>本周</button>
+                <button type="button" classList={{ 'is-active': filter() === 'failed' }} onClick={() => changeFilter('failed')}>失败</button>
               </div>
             </div>
             <div>
@@ -369,8 +368,8 @@ export default function BroadcastPage() {
                 fallback={<div class="bc-empty">加载中…</div>}
               >
                 <Show when={!board.error} fallback={<div class="bc-empty">加载失败，请点右上角刷新重试</div>}>
-                  <Show when={filtered().length > 0} fallback={<div class="bc-empty">暂无广播记录</div>}>
-                    <For each={filtered()}>
+                  <Show when={broadcasts().length > 0} fallback={<div class="bc-empty">暂无广播记录</div>}>
+                    <For each={broadcasts()}>
                       {(b) => {
                         const pct = Math.round((b.readRate || 0) * 100);
                         return (

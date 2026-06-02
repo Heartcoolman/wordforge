@@ -43,10 +43,7 @@ pub fn router() -> Router<AppState> {
         .route("/summary", get(pack_summary))
         .route("/:pack_id/versions", post(upload_version))
         .route("/:pack_id/versions/:version", delete(deactivate_version))
-        .route(
-            "/:pack_id/channel/:channel/active",
-            put(set_active),
-        )
+        .route("/:pack_id/channel/:channel/active", put(set_active))
         .route("/:pack_id/stats", get(pack_stats))
         // 单独覆盖 body 上限（默认 2 MiB；本路由组 4 MiB）
         .layer(DefaultBodyLimit::max(MAX_PACK_UPLOAD_SIZE))
@@ -175,15 +172,12 @@ async fn upload_version(
         )));
     }
 
-    let signer = state
-        .resource_pack_signer()
-        .await
-        .ok_or_else(|| {
-            AppError::service_unavailable(
-                "RESOURCE_PACK_SIGNER_UNAVAILABLE",
-                "资源包签名器未初始化，无法签名",
-            )
-        })?;
+    let signer = state.resource_pack_signer().await.ok_or_else(|| {
+        AppError::service_unavailable(
+            "RESOURCE_PACK_SIGNER_UNAVAILABLE",
+            "资源包签名器未初始化，无法签名",
+        )
+    })?;
 
     // SHA256
     let sha256_hex = {
@@ -523,9 +517,9 @@ fn validate_version(v: &str) -> Result<(), AppError> {
         || v.contains('\\')
         || v.contains('\0')
         || v.starts_with('.')
-        || !v.chars().all(|c| {
-            c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '+'
-        })
+        || !v
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '+')
     {
         return Err(AppError::bad_request(
             "VALIDATION_ERROR",
@@ -562,12 +556,16 @@ mod tests {
 
     #[test]
     fn validate_pack_id_rejects_path_chars() {
-        for bad in &["", "../etc", "with/slash", "with\\back", "Upper", "dot.case", "with space"] {
-            assert!(
-                validate_pack_id(bad).is_err(),
-                "packId {:?} 应被拒绝",
-                bad
-            );
+        for bad in &[
+            "",
+            "../etc",
+            "with/slash",
+            "with\\back",
+            "Upper",
+            "dot.case",
+            "with space",
+        ] {
+            assert!(validate_pack_id(bad).is_err(), "packId {:?} 应被拒绝", bad);
         }
     }
 
@@ -581,11 +579,7 @@ mod tests {
     #[test]
     fn validate_version_rejects_traversal() {
         for bad in &["", "../1.0.0", "1.0/0", "..", ".hidden", "1 0 0"] {
-            assert!(
-                validate_version(bad).is_err(),
-                "version {:?} 应被拒绝",
-                bad
-            );
+            assert!(validate_version(bad).is_err(), "version {:?} 应被拒绝", bad);
         }
     }
 
@@ -596,6 +590,9 @@ mod tests {
         hasher.update(input);
         let hex = hex_lower(&hasher.finalize());
         assert_eq!(hex.len(), 64);
-        assert_eq!(hex, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+        assert_eq!(
+            hex,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
     }
 }

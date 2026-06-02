@@ -51,13 +51,9 @@ async fn list_packs(State(state): State<AppState>) -> Result<impl IntoResponse, 
 /// `GET /api/resource-packs/public-key` — 返回 Ed25519 公钥 base64（44 字符含 padding）。
 /// 客户端发版时把公钥硬编码进 binary 是正式分发路径；本端点便于客户端 verify SDK 自检。
 async fn public_key(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
-    let signer = state
-        .resource_pack_signer()
-        .await
-        .ok_or_else(|| AppError::service_unavailable(
-            "RESOURCE_PACK_SIGNER_UNAVAILABLE",
-            "资源包签名器未初始化",
-        ))?;
+    let signer = state.resource_pack_signer().await.ok_or_else(|| {
+        AppError::service_unavailable("RESOURCE_PACK_SIGNER_UNAVAILABLE", "资源包签名器未初始化")
+    })?;
     Ok((
         StatusCode::OK,
         [(header::CACHE_CONTROL, "public, max-age=300")],
@@ -110,12 +106,18 @@ async fn fetch_manifest(
     }
 
     // If-None-Match 304：客户端命中即不回传 body
-    if let Some(etag) = headers.get(header::IF_NONE_MATCH).and_then(|h| h.to_str().ok()) {
+    if let Some(etag) = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|h| h.to_str().ok())
+    {
         if etag.trim_matches('"') == active.version {
-            return Ok((StatusCode::NOT_MODIFIED, [
-                (header::ETAG, format!("\"{}\"", active.version)),
-                (header::CACHE_CONTROL, "public, max-age=60".to_string()),
-            ])
+            return Ok((
+                StatusCode::NOT_MODIFIED,
+                [
+                    (header::ETAG, format!("\"{}\"", active.version)),
+                    (header::CACHE_CONTROL, "public, max-age=60".to_string()),
+                ],
+            )
                 .into_response());
         }
     }
@@ -193,7 +195,10 @@ mod tests {
         assert_eq!(compare_semver_numeric("1.0.0", "1.0.0"), Ordering::Equal);
         assert_eq!(compare_semver_numeric("1.10.0", "1.9.0"), Ordering::Greater);
         assert_eq!(compare_semver_numeric("1.9.0", "1.10.0"), Ordering::Less);
-        assert_eq!(compare_semver_numeric("2.0.0", "1.99.99"), Ordering::Greater);
+        assert_eq!(
+            compare_semver_numeric("2.0.0", "1.99.99"),
+            Ordering::Greater
+        );
         // 长度不等：1.1 == 1.1.0
         assert_eq!(compare_semver_numeric("1.1", "1.1.0"), Ordering::Equal);
         // 非数字段当 0 处理
@@ -216,7 +221,10 @@ mod tests {
 
         // env 优先级高于一切，且会 strip 末尾 /
         std::env::set_var("RESOURCE_PACK_BASE_URL", "https://override.example.com/");
-        assert_eq!(resolve_public_base_url(&headers), "https://override.example.com");
+        assert_eq!(
+            resolve_public_base_url(&headers),
+            "https://override.example.com"
+        );
         std::env::remove_var("RESOURCE_PACK_BASE_URL");
     }
 }

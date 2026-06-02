@@ -19,6 +19,9 @@ EnvironmentFile={{INSTALL_DIR}}/.env
 Environment=ENABLE_SELF_WATCHDOG=true
 Environment=SELF_WATCHDOG_INTERVAL_SECS=15
 Environment=SELF_WATCHDOG_FAILURE_THRESHOLD=3
+# v1.1.3-N4：收敛 glibc 多线程每线程 arena 数，抑制内存碎片（次因兜底；
+# 内存主因是 SQLite page cache，已由 cache_size + pool 主修复收口）。
+Environment=MALLOC_ARENA_MAX=2
 Restart=always
 RestartSec=5
 TimeoutStopSec=15

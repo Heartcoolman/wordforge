@@ -46,7 +46,6 @@ impl WordState {
             Self::Forgotten => "FORGOTTEN",
         }
     }
-
 }
 
 impl std::str::FromStr for WordState {

@@ -232,14 +232,37 @@ X-Device-Id: <设备唯一 ID>
 X-Device-Platform: ios | android | web | macos | windows | linux
 ```
 
-> 注：`session_start` 不是独立端点，而是 `/api/telemetry` 的 `eventType` 取值。telemetry 路由本身豁免上述中间件，其 payload 级校验（`MISSING_TIMEZONE` / `MISSING_LANGUAGE` / `MISSING_DEVICE_FINGERPRINT`）由 `routes/telemetry.rs` 在 body 解析后单独完成。
+> 注：`session_start` 不是独立端点，而是 `/api/telemetry` 的 `eventType` 取值。telemetry 路由本身豁免上述全局中间件，校验由 `routes/telemetry.rs` 在 body 解析后单独完成，分两层（见下）。
 
-payload 必须含：
+### 5.1 ⚠️ 遥测四要素硬校验（m038，无灰度开关、上线即生效）
+
+自 v1.1.2-beta.4 起，`/api/telemetry` 的**四要素硬校验不受 strict-mode 开关控制**——任一缺失立即 `4xx`，与 `hard_block` 无关。四要素载体：
+
+| 要素 | 载体 | 缺失返回 |
+|---|---|---|
+| 平台 | `X-Device-Platform` 头（不能为空或 `unknown`） | `400 MISSING_OS` |
+| 版本 | `X-App-Version` 头（不能为空） | `400 MISSING_APP_VERSION` |
+| 时区 | `payload.device.timezone` | `400 MISSING_TIMEZONE` |
+| 型号 | `payload.device.model`（**v1.1.2-beta.4 新增必填**） | `400 MISSING_DEVICE_MODEL` |
+
+四要素通过后做**三态归属核验**（设备须已注册且归属一致）：
+
+| 设备状态 | 行为 |
+|---|---|
+| 未注册（`client_devices` 无此 `device_id`） | `403 DEVICE_NOT_REGISTERED`——须先正常登录使用后再上报 |
+| 已注册、归属他人（`user_id` ≠ 当前 token 用户） | `403 DEVICE_OWNERSHIP_MISMATCH` |
+| 已注册、归属未认领（`user_id` 为 `NULL`） | 由首个带 token 的用户 **claim 放行**（老匿名设备不误伤） |
+| 已注册、归属一致 | 放行 |
+
+**客户端要求**：所有遥测上报必须带 `X-Device-Platform` + `X-App-Version` 头，且 `payload.device` 至少含 `timezone` + `model`。Web 端无可靠真型号时落 `browserName+osName` 派生标识或 `web-admin` 占位。`403` 场景客户端应停止重试该设备的遥测并降级（不阻断学习主功能）。
+
+### 5.2 strict-mode payload 软校验（受 `hard_block` 开关控制）
+
+四要素之外的字段仍走 strict-mode 软门控，`hard_block=true` 时缺失 `400`、否则仅 `warn` log：
 
 ```json
 {
   "device": {
-    "timezone": "Asia/Shanghai",
     "language": "zh-CN",
     // session_start 还要：
     "screenWidth": 390,
@@ -250,17 +273,19 @@ payload 必须含：
 }
 ```
 
-缺失返回 `400` + 错误码：
+| code | 含义 | 受 `hard_block` 控制 |
+|---|---|---|
+| `MISSING_DEVICE_ID` | 缺 `X-Device-Id` 头 | 否（始终 400） |
+| `MISSING_OS` | 缺 `X-Device-Platform` 头 | 否（四要素硬校验，始终 400） |
+| `MISSING_APP_VERSION` | 缺 `X-App-Version` 头 | 否（四要素硬校验，始终 400） |
+| `MISSING_TIMEZONE` | payload 缺 `device.timezone` | 否（四要素硬校验，始终 400） |
+| `MISSING_DEVICE_MODEL` | payload 缺 `device.model` | 否（四要素硬校验，始终 400） |
+| `DEVICE_NOT_REGISTERED` | 设备未注册 | 否（始终 403） |
+| `DEVICE_OWNERSHIP_MISMATCH` | 设备归属与当前账号不符 | 否（始终 403） |
+| `MISSING_LANGUAGE` | payload 缺 `device.language` | 是 |
+| `MISSING_DEVICE_FINGERPRINT` | `session_start` 缺指纹四件套 | 是 |
 
-| code | 含义 |
-|---|---|
-| `MISSING_DEVICE_ID` | 缺 `X-Device-Id` 头 |
-| `MISSING_OS` | 缺 `X-Device-Platform` 头 |
-| `MISSING_TIMEZONE` | payload 缺 `device.timezone` |
-| `MISSING_LANGUAGE` | payload 缺 `device.language` |
-| `MISSING_DEVICE_FINGERPRINT` | `session_start` 缺指纹四件套 |
-
-**生产环境（8.135.57.148）**：strict-mode 已启用 `hard_block=true`，缺失立即 `400`。本地开发可关 `hard_block`，缺失只 `warn` log。
+**生产环境（8.135.57.148）**：strict-mode 已启用 `hard_block=true`，软校验缺失也立即 `400`；四要素与归属核验则无视该开关始终硬拦截。
 
 ---
 

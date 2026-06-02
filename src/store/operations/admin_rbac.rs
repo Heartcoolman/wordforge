@@ -204,8 +204,14 @@ impl Store {
                                    created_by, expires_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
-                key.id, key.name, key.scope, key.prefix, key.hash,
-                key.created_at, key.created_by, key.expires_at,
+                key.id,
+                key.name,
+                key.scope,
+                key.prefix,
+                key.hash,
+                key.created_at,
+                key.created_by,
+                key.expires_at,
             ],
         )?;
         Ok(ApiKeyView {
@@ -345,6 +351,9 @@ mod tests {
 
         assert!(s.delete_api_key("k1").unwrap());
         assert!(s.list_api_keys().unwrap().is_empty());
-        assert!(s.rotate_api_key("k1", "p", "h", "t", None).unwrap().is_none());
+        assert!(s
+            .rotate_api_key("k1", "p", "h", "t", None)
+            .unwrap()
+            .is_none());
     }
 }

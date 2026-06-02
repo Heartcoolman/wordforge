@@ -513,9 +513,10 @@ fn write_wb_audit_from_result(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    if let Err(e) = state
-        .store()
-        .insert_wordbook_audit(wordbook_id, action, &detail, Some(admin_id))
+    if let Err(e) =
+        state
+            .store()
+            .insert_wordbook_audit(wordbook_id, action, &detail, Some(admin_id))
     {
         tracing::warn!(error=%e, action=%action, "写 wordbook 远端导入审计失败(不影响主流程)");
     }
@@ -844,10 +845,11 @@ async fn admin_upload(
             .to_string();
         let store2 = state.store().clone();
         let local_id_for_log = local_id.clone();
-        let tag_write = crate::blocking::run_blocking("wordbook_center.admin_upload.tags", move || {
-            store2.set_wordbook_local_tags(&local_id, &initial_tags, Some("admin-upload"))
-        })
-        .await;
+        let tag_write =
+            crate::blocking::run_blocking("wordbook_center.admin_upload.tags", move || {
+                store2.set_wordbook_local_tags(&local_id, &initial_tags, Some("admin-upload"))
+            })
+            .await;
         // 失败仅 warn 不阻断:词书已入库,本地标签缺失可后续 PATCH 补写
         match tag_write {
             Ok(Ok(())) => {}

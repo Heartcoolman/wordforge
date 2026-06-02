@@ -53,7 +53,10 @@ async fn health_recovers_200_when_on_maintenance_callback_fires_false() {
 
     // 先激活 maintenance 模式
     app.state.set_maintenance(true);
-    assert!(app.state.is_maintenance(), "set_maintenance(true) 后应为 true");
+    assert!(
+        app.state.is_maintenance(),
+        "set_maintenance(true) 后应为 true"
+    );
 
     // 模拟 apply 完成 → on_maintenance(false)
     app.state.set_maintenance(false);
@@ -116,9 +119,5 @@ async fn maintenance_flag_toggles_correctly_across_multiple_switches() {
     // 最终 /health 应为 200
     let resp = request(&app.app, Method::GET, "/health", None, &[]).await;
     let (status, _, _) = response_json(resp).await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "多次切换后 /health 最终应为 200"
-    );
+    assert_eq!(status, StatusCode::OK, "多次切换后 /health 最终应为 200");
 }

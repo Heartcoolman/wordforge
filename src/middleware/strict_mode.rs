@@ -5,6 +5,12 @@
 //! - `x-device-platform` header 必须存在且非 `unknown` → `MISSING_OS`
 //! - 若配置 `min_client_version`，UA 中 semver 低于阈值 → `CLIENT_OUTDATED`
 //!
+//! D4：「最低版本门控」（CLIENT_OUTDATED）是独立于全量契约校验的**发布切流**开关，
+//! 可在 strict-mode 整体关闭（`enabled=false`）时单独启用。配置来源为 `system_settings`
+//! （admin 运行时可改，优先）回落 env `MIN_CLIENT_VERSION`，由 `AppState::get_version_gate`
+//! 按 60s TTL 缓存、admin 写端点 `refresh_version_gate` 即时刷新。门控命中始终硬拒绝
+//! （不走 soft-block，否则切流无效）；UA/平台两项契约校验仍仅在 `enabled=true` 时生效。
+//!
 //! 豁免机制（M1-A6）：豁免路由（admin / status / realtime / telemetry / v1）不加此中间件层，
 //! 因此中间件无需内部路径匹配，硬编码路径列表已彻底消除。
 //!
@@ -29,7 +35,12 @@ pub async fn strict_mode_middleware(
     next: Next,
 ) -> Response {
     let cfg = state.config().strict_mode.clone();
-    if !cfg.enabled {
+    // D4：版本门控是「发布切流」开关，可独立于全量契约校验（cfg.enabled）启用。
+    // 运行时配置（admin 可改）优先于 env，由 AppState 缓存按 60s TTL 维护 + 写端点即时刷新。
+    let gate = state.get_version_gate();
+
+    // 两者皆关：直接放行（默认）。
+    if !cfg.enabled && !gate.enabled {
         return next.run(req).await;
     }
 
@@ -39,48 +50,67 @@ pub async fn strict_mode_middleware(
         .headers()
         .get(header::USER_AGENT)
         .and_then(|v| v.to_str().ok());
-    let platform = req
-        .headers()
-        .get("x-device-platform")
-        .and_then(|v| v.to_str().ok());
 
-    // 1) User-Agent 校验
     let ua_parsed = user_agent.and_then(parse_wordforge_ua);
-    if ua_parsed.is_none() {
-        if let Some(resp) = enforce(&cfg, path, "MISSING_USER_AGENT", "缺少或非法的 User-Agent") {
-            return resp;
+
+    // 1)+2) 全量契约校验（User-Agent / 平台）仅在 strict-mode 启用时执行。
+    if cfg.enabled {
+        let platform = req
+            .headers()
+            .get("x-device-platform")
+            .and_then(|v| v.to_str().ok());
+
+        if ua_parsed.is_none() {
+            if let Some(resp) = enforce(&cfg, path, "MISSING_USER_AGENT", "缺少或非法的 User-Agent")
+            {
+                return resp;
+            }
+        }
+
+        let platform_ok = platform.is_some_and(|p| !p.is_empty() && p != "unknown");
+        if !platform_ok {
+            if let Some(resp) = enforce(&cfg, path, "MISSING_OS", "缺少 x-device-platform 头") {
+                return resp;
+            }
         }
     }
 
-    // 2) 平台校验
-    let platform_ok = platform.is_some_and(|p| !p.is_empty() && p != "unknown");
-    if !platform_ok {
-        if let Some(resp) = enforce(&cfg, path, "MISSING_OS", "缺少 x-device-platform 头") {
-            return resp;
-        }
-    }
-
-    // 3) 最低版本门控（仅当 UA 解析成功）
-    if let (Some((_plat, client_ver)), Some(min_ver)) = (ua_parsed.as_ref(), &cfg.min_client_version)
+    // 3) 最低版本门控（仅当 UA 解析成功且门控启用/配置）。
+    //    门控独立于 cfg.hard_block：发布切流场景下「拒绝」必须是硬拒绝（否则切流无效）。
+    if let (Some((_plat, client_ver)), Some(min_ver)) =
+        (ua_parsed.as_ref(), gate.min_client_version.as_ref())
     {
-        if let (Ok(c), Ok(m)) = (
-            semver::Version::parse(client_ver),
-            semver::Version::parse(min_ver),
-        ) {
-            if c < m {
-                if let Some(resp) = enforce(
-                    &cfg,
-                    path,
-                    "CLIENT_OUTDATED",
-                    "客户端版本过低，请升级到最新版本",
-                ) {
-                    return resp;
+        if gate.enabled || cfg.enabled {
+            if let (Ok(c), Ok(m)) = (
+                semver::Version::parse(client_ver),
+                semver::Version::parse(min_ver),
+            ) {
+                if c < m {
+                    return client_outdated_response(client_ver, min_ver);
                 }
             }
         }
     }
 
     next.run(req).await
+}
+
+/// D4：版本门控命中——始终硬拒绝（发布切流不走 soft-block）。
+fn client_outdated_response(client_ver: &str, min_ver: &str) -> Response {
+    tracing::info!(
+        client_ver,
+        min_ver,
+        "version-gate 拒绝旧客户端 CLIENT_OUTDATED"
+    );
+    (
+        StatusCode::BAD_REQUEST,
+        axum::Json(serde_json::json!({
+            "success": false,
+            "code": "CLIENT_OUTDATED",
+            "message": "客户端版本过低，请升级到最新版本",
+        })),
+    )
+        .into_response()
 }
 
 /// 根据 hard_block 配置决定拦截或放行
@@ -129,7 +159,11 @@ pub(crate) fn parse_wordforge_ua(ua: &str) -> Option<(String, String)> {
     }
     // 至少要 `\d+\.\d+\.\d+` 三段
     let mut parts = ver.split('.');
-    let valid = (0..3).all(|_| parts.next().is_some_and(|s| s.chars().all(|c| c.is_ascii_digit())));
+    let valid = (0..3).all(|_| {
+        parts
+            .next()
+            .is_some_and(|s| s.chars().all(|c| c.is_ascii_digit()))
+    });
     if !valid {
         return None;
     }

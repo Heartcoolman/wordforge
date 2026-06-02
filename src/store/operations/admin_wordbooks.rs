@@ -121,7 +121,10 @@ pub struct WordEntryFilter {
 
 fn esc_like(s: &str) -> String {
     // SQLite LIKE 默认大小写不敏感(仅 ASCII)。转义 % _ \ 防注入通配符。
-    let escaped = s.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+    let escaped = s
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
     format!("%{escaped}%")
 }
 
@@ -160,7 +163,8 @@ impl Store {
             _ => {}
         }
         if let Some(q) = filter.search.as_deref().filter(|s| !s.is_empty()) {
-            where_clauses.push("(wb.name LIKE ? ESCAPE '\\' OR wb.description LIKE ? ESCAPE '\\')".into());
+            where_clauses
+                .push("(wb.name LIKE ? ESCAPE '\\' OR wb.description LIKE ? ESCAPE '\\')".into());
             let pat = esc_like(q);
             binds.push(Box::new(pat.clone()));
             binds.push(Box::new(pat));
@@ -302,7 +306,8 @@ impl Store {
         let mut where_clauses: Vec<String> = vec!["ww.wordbook_id = ?".into()];
         let mut binds: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(wordbook_id.to_string())];
         if let Some(q) = filter.search.as_deref().filter(|s| !s.is_empty()) {
-            where_clauses.push("(w.text LIKE ? ESCAPE '\\' OR w.meaning LIKE ? ESCAPE '\\')".into());
+            where_clauses
+                .push("(w.text LIKE ? ESCAPE '\\' OR w.meaning LIKE ? ESCAPE '\\')".into());
             let pat = esc_like(q);
             binds.push(Box::new(pat.clone()));
             binds.push(Box::new(pat));
@@ -418,13 +423,7 @@ impl Store {
 
         let total_users = avgs.len() as i64;
         // 桶定义:[0,0.2) [0.2,0.4) [0.4,0.6) [0.6,0.8) [0.8,1.0]
-        let edges: [(f64, f64); 5] = [
-            (0.0, 0.2),
-            (0.2, 0.4),
-            (0.4, 0.6),
-            (0.6, 0.8),
-            (0.8, 1.0),
-        ];
+        let edges: [(f64, f64); 5] = [(0.0, 0.2), (0.2, 0.4), (0.4, 0.6), (0.6, 0.8), (0.8, 1.0)];
         let labels = ["0-20%", "20-40%", "40-60%", "60-80%", "80-100%"];
         let mut counts = [0i64; 5];
         for m in &avgs {

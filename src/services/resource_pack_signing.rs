@@ -14,7 +14,9 @@
 //! 签名格式：`base64::STANDARD.encode(signature_bytes)`，长度 88 字符（含 padding）。
 
 use base64::Engine as _;
-use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey, SECRET_KEY_LENGTH, SIGNATURE_LENGTH};
+use ed25519_dalek::{
+    Signer, SigningKey, Verifier, VerifyingKey, SECRET_KEY_LENGTH, SIGNATURE_LENGTH,
+};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, thiserror::Error)]
@@ -65,8 +67,8 @@ impl ResourcePackSigner {
             write_public(&pub_path, &signing_key.verifying_key().to_bytes())?;
         }
 
-        let public_key_b64 =
-            base64::engine::general_purpose::STANDARD.encode(signing_key.verifying_key().to_bytes());
+        let public_key_b64 = base64::engine::general_purpose::STANDARD
+            .encode(signing_key.verifying_key().to_bytes());
 
         Ok(Self {
             signing_key,
@@ -93,18 +95,16 @@ pub fn verify_base64(
     public_key_b64: &str,
 ) -> Result<(), ResourcePackSigningError> {
     let pk_bytes = base64::engine::general_purpose::STANDARD.decode(public_key_b64)?;
-    let pk_array: [u8; 32] = pk_bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| ResourcePackSigningError::InvalidPublicKey(format!("len={}", pk_bytes.len())))?;
+    let pk_array: [u8; 32] = pk_bytes.as_slice().try_into().map_err(|_| {
+        ResourcePackSigningError::InvalidPublicKey(format!("len={}", pk_bytes.len()))
+    })?;
     let verifying_key = VerifyingKey::from_bytes(&pk_array)
         .map_err(|e| ResourcePackSigningError::InvalidPublicKey(e.to_string()))?;
 
     let sig_bytes = base64::engine::general_purpose::STANDARD.decode(signature_b64)?;
-    let sig_array: [u8; SIGNATURE_LENGTH] = sig_bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| ResourcePackSigningError::InvalidSignature(format!("len={}", sig_bytes.len())))?;
+    let sig_array: [u8; SIGNATURE_LENGTH] = sig_bytes.as_slice().try_into().map_err(|_| {
+        ResourcePackSigningError::InvalidSignature(format!("len={}", sig_bytes.len()))
+    })?;
     let signature = ed25519_dalek::Signature::from_bytes(&sig_array);
 
     verifying_key

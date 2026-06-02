@@ -16,8 +16,7 @@ fn export_openapi_yaml() {
     let out_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("docs")
         .join("openapi.yaml");
-    std::fs::write(&out_path, &yaml)
-        .unwrap_or_else(|e| panic!("写入 {out_path:?} 失败：{e}"));
+    std::fs::write(&out_path, &yaml).unwrap_or_else(|e| panic!("写入 {out_path:?} 失败：{e}"));
 
     // 基本内容断言，防止导出空文档
     assert!(yaml.contains("WordForge API"), "info.title 缺失");
@@ -30,7 +29,10 @@ fn export_openapi_yaml() {
     assert!(yaml.contains("/realtime/events"), "SSE 端点缺失");
     assert!(yaml.contains("/health"), "health 端点缺失");
     assert!(yaml.contains("bearerAuth"), "安全方案缺失");
-    assert!(yaml.contains("new/learning/reviewing"), "WordState lowercase 枚举缺失");
+    assert!(
+        yaml.contains("new/learning/reviewing"),
+        "WordState lowercase 枚举缺失"
+    );
     assert!(yaml.contains("data.data"), "favorites paginated 说明缺失");
 
     println!("openapi.yaml 已导出至 {out_path:?}（{} bytes）", yaml.len());

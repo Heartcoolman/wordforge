@@ -16,6 +16,9 @@ export function AdvisorConfigPanel() {
   const [minConf, setMinConf] = createSignal(0);
   const [steps, setSteps] = createSignal('20,60,100');
   const [enabled, setEnabled] = createSignal(false);
+  // E3:canary 自动回滚两阈值（存于 SystemSettings，走独立 settings 端点）。
+  const [canaryReward, setCanaryReward] = createSignal(0.05);
+  const [canaryAnomaly, setCanaryAnomaly] = createSignal(0.05);
 
   createEffect(() => {
     const c = cfg();
@@ -28,8 +31,24 @@ export function AdvisorConfigPanel() {
     setEnabled(c.advisorEnabled);
   });
 
+  // canary 阈值不在 advisor config 端点，单独从 SystemSettings 读取。
+  // 用 ?.() 守卫：fetcher 在 getSettings 缺失（如部分 mock 的测试）时返回 null 而非同步抛错，
+  // 避免 unhandledRejection 污染共享渲染根、外溢拖垮无关测试（生产 getSettings 恒存在，行为不变）。
+  const [sys] = createResource(() => adminApi.getSettings?.() ?? null);
+  createEffect(() => {
+    const s = sys();
+    if (!s) return;
+    setCanaryReward(s.canaryRewardDropThreshold);
+    setCanaryAnomaly(s.canaryAnomalyRiseThreshold);
+  });
+
   async function save() {
     const parsedSteps = steps().split(',').map((s) => parseInt(s.trim(), 10)).filter((n) => Number.isFinite(n));
+    // 前端 0~1 范围校验（后端同步校验，双保险）
+    if (canaryReward() < 0 || canaryReward() > 1 || canaryAnomaly() < 0 || canaryAnomaly() > 1) {
+      uiStore.toast.error('保存失败', 'canary 阈值必须在 0~1 之间');
+      return;
+    }
     setSaving(true);
     try {
       await adminApi.amasUpdateAdvisorConfig({
@@ -39,6 +58,10 @@ export function AdvisorConfigPanel() {
         autoApplyMinConfidence: minConf(),
         grayscaleSteps: parsedSteps.length === 3 ? (parsedSteps as [number, number, number]) : undefined,
         advisorEnabled: enabled(),
+      });
+      await adminApi.updateSettings({
+        canaryRewardDropThreshold: canaryReward(),
+        canaryAnomalyRiseThreshold: canaryAnomaly(),
       });
       uiStore.toast.success('顾问配置已保存');
       void refetch();
@@ -91,6 +114,14 @@ export function AdvisorConfigPanel() {
                 <label class="block">
                   <span class="text-xs text-content-secondary">灰度档位（逗号分隔，3 档）</span>
                   <input type="text" aria-label="灰度档位" value={steps()} onInput={(e) => setSteps(e.currentTarget.value)} class={inputCls} />
+                </label>
+                <label class="block">
+                  <span class="text-xs text-content-secondary">canary 回报降幅阈值（0~1，自动回滚）</span>
+                  <input type="number" step="0.01" min="0" max="1" aria-label="canary 回报降幅阈值" value={canaryReward()} onInput={(e) => setCanaryReward(parseFloat(e.currentTarget.value) || 0)} class={inputCls} />
+                </label>
+                <label class="block">
+                  <span class="text-xs text-content-secondary">canary 异常升幅阈值（0~1，自动回滚）</span>
+                  <input type="number" step="0.01" min="0" max="1" aria-label="canary 异常升幅阈值" value={canaryAnomaly()} onInput={(e) => setCanaryAnomaly(parseFloat(e.currentTarget.value) || 0)} class={inputCls} />
                 </label>
                 <div class="flex justify-end">
                   <Button size="sm" loading={saving()} onClick={save}>保存配置</Button>

@@ -23,8 +23,7 @@ use super::single::{
 };
 
 pub fn router() -> Router<AppState> {
-    Router::new()
-        .route("/batch", post(batch_create_records))
+    Router::new().route("/batch", post(batch_create_records))
 }
 
 // B33: Batch submit records
@@ -94,7 +93,11 @@ async fn batch_create_records(
             "batch_process_failed",
             severity,
             "学习数据上报处理失败".to_string(),
-            format!("批量上报 {} 条中 {} 条处理失败", req.records.len(), errors.len()),
+            format!(
+                "批量上报 {} 条中 {} 条处理失败",
+                req.records.len(),
+                errors.len()
+            ),
             Some(user_id.clone()),
         )
         .await;

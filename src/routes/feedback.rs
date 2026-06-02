@@ -68,7 +68,10 @@ async fn create_feedback(
 
     if let Some(score) = req.csat_score {
         if !(1..=5).contains(&score) {
-            return Err(AppError::bad_request("INVALID_FEEDBACK", "CSAT 评分须在 1-5 之间"));
+            return Err(AppError::bad_request(
+                "INVALID_FEEDBACK",
+                "CSAT 评分须在 1-5 之间",
+            ));
         }
     }
 

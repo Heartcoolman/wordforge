@@ -6,6 +6,33 @@
 
 ---
 
+## [v1.1.3-beta.1] — 2026-06-02 · Pre-release · 遥测契约协同 + 性能运维加固 + 事件 outbox + 功能补全
+
+收纳 v1.1.3 backlog 全 19 项（W1–W5）。
+
+### ✨ 新增与变更
+
+- **遥测契约协同（W1）**：admin-ui 自身遥测补 `device.model`（修 beta.4 硬识别引入的本仓自伤 400）；`tests/telemetry_http.rs` 补五拒绝码负路径断言；对齐 `docs/api-spec.md` / `docs/v1-client-migration.md` 过期契约。**顺带修复生产回归**：`device.rs` 遥测路径匹配 `/api/telemetry`→`/telemetry`（axum nest 剥前缀，beta.4 起遥测三态归属核验被旁路，本版修复后生效）。
+- **性能运维加固（W2）**：SQLite 连接池默认 16→8（配合 beta.3 cache_size 收紧峰值内存上界）；nginx 两份样例补 named upstream + `keepalive 64` + `map $http_upgrade`；新增 `deploy/sysctl.d` 抗突发参数 + runbook「内核 / nginx」段；systemd `MALLOC_ARENA_MAX=2`。
+- **DB 备份外迁（W2 · B1）**：每日备份按 `BackupTarget.uri` scheme 分发上传 file / rsync / S3（`object_store`），失败告警入 `system_alerts`，runbook 补离站章节。
+- **领域事件 outbox 基建（W3 · S2-1）**：新增 `outbox` + `events_dead_letter` 表 + 异步消费 worker（指数退避重试 + 死信兜底）+ admin 监控 outbox lag / 死信展示 + 开关 `RECORDS_OUTBOX_ASYNC`。**默认 false 走同步老路（amas_result 同步返回、行为不变）**，异步路径 opt-in。⚠️ 异步模式响应不含 amas_result，且崩溃窗口下事件可能被 AMAS 重复应用（RFC R06，「重启不丢」≠「重启不重复」）；切默认 / 删手动 rollback 待与学习端跨仓协同。
+- **功能补全（W4）**：admin 应用内通知 / 告警收件箱（`system_alerts` 加 read/ack + 收件箱组件 + 未读角标）；设备推送投递时机调度（延时 / 指定时间）+ 草稿存储；登录页 SLO 30d 经 `availability_rollup` 持久化跨重启可达；`min_client_version` 版本门控 admin 运行时可配（即时生效）。
+- **前端配套 + 代码债（W5）**：广播受众 400 码（`INVALID_VERSION_MIN` / `EMPTY_AUDIENCE`）前端提示 + semver 预校验；广播历史 week/failed 筛选下推后端跨页；canary 自动回滚阈值迁 `system_settings` 可配；vite manualChunks 拆 `vendor-echarts` / `vendor-codemirror`；v1 弃用文档 URL 改真实地址 + 稳定锚点；移除登录页 i18n 占位控件；删除失效的 `build-changelog.sh`。
+
+### 🗄️ 迁移
+
+- `m039` availability_rollup · `m040` canary 阈值 · `m041` system_alerts 收件箱列 · `m042` scheduled_broadcasts + push_drafts · `m043` min_client_version 门控 · `m044` outbox + events_dead_letter
+
+### 📌 勘误
+
+- 修正 rc.2 条目对「领域事件总线」的夸大表述（彼时仅落基础设施 + 计数旁路 consumer，非 AMAS 异步消费）。
+
+### 🧪 质量
+
+- 后端 `cargo test` 全过（含 outbox 重启不丢 / 死信、遥测五拒绝码、迁移幂等）；admin-ui `tsc` / `build` 通过、vitest 137 文件全过；24-agent 对抗式交叉验证 0 blocker，确认问题已修复或文档化。
+
+---
+
 ## [v1.1.2-beta.4] — 2026-06-02 · Pre-release · 遥测硬识别 + AMAS 数据软拦截告警
 
 在 v1.1.2-beta.3 基础上叠加遥测身份强制与 AMAS 数据失败告警，其余一致。
@@ -356,10 +383,11 @@ rc.1（资源包热更）落地后，本 RC 交付 P1 + P2 主体工作。
 
 ### 新功能（事件总线）
 
-- 🚀 **领域事件总线**（P1-S2，commit 568f294）：records 写入旁路 emit `DomainEvent::LearningRecorded` →
-  AMAS engine 异步消费，事件总线（`src/services/event_bus.rs`）单向广播 + per-receiver
-  缓冲，避免 records→AMAS 紧耦合直接调用。新增 `tests/event_bus.rs` 单测覆盖 emit/recv
-  与背压 drop 行为。
+- 🚀 **领域事件总线基础设施**（P1-S2，commit 568f294）：records 写库成功后旁路 emit
+  `DomainEvent::RecordCreated`，事件总线（`src/services/event_bus.rs`）内存单向广播 +
+  per-receiver 缓冲。**此 RC 仅落基础设施 + 计数旁路 consumer，AMAS 仍走 handler 内同步通路
+  （非异步消费）**；outbox 持久化 + AMAS 真异步消费（opt-in）见 v1.1.3 S2-1。新增
+  `tests/event_bus.rs` 单测覆盖 emit/recv 与背压 drop 行为。
 
 ### 改进（rate_limit）
 

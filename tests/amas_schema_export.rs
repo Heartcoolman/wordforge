@@ -30,7 +30,11 @@ async fn schema_endpoint_returns_full_amas_config_shape() {
     )
     .await;
     let (status, _, body) = response_json(response).await;
-    assert_eq!(status, StatusCode::OK, "schema endpoint must be 200: {body}");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "schema endpoint must be 200: {body}"
+    );
 
     // 响应包装：{ data: <schema> }
     let schema = &body["data"];

@@ -127,9 +127,16 @@ fn user_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<User> {
         updated_at: parse_dt(row.get(6)?)?,
         failed_login_count: row.get::<_, i64>(7)? as u32,
         locked_until: row.get::<_, Option<String>>(8)?.map(parse_dt).transpose()?,
-        role: row.get::<_, Option<String>>(9)?.unwrap_or_else(default_role),
-        status: row.get::<_, Option<String>>(10)?.unwrap_or_else(default_status),
-        last_login_at: row.get::<_, Option<String>>(11)?.map(parse_dt).transpose()?,
+        role: row
+            .get::<_, Option<String>>(9)?
+            .unwrap_or_else(default_role),
+        status: row
+            .get::<_, Option<String>>(10)?
+            .unwrap_or_else(default_status),
+        last_login_at: row
+            .get::<_, Option<String>>(11)?
+            .map(parse_dt)
+            .transpose()?,
         referrer_source: row.get::<_, Option<String>>(12)?,
     })
 }
@@ -398,9 +405,7 @@ impl Store {
         update_params.push(&now);
         update_params.extend_from_slice(exist_bind.as_slice());
         tx.execute(
-            &format!(
-                "UPDATE users SET is_banned=?1, updated_at=?2 WHERE id IN ({exist_ph})"
-            ),
+            &format!("UPDATE users SET is_banned=?1, updated_at=?2 WHERE id IN ({exist_ph})"),
             update_params.as_slice(),
         )?;
 
@@ -480,7 +485,8 @@ impl Store {
                     .replace('%', r"\%")
                     .replace('_', r"\_")
             );
-            where_parts.push("(LOWER(username) LIKE ? ESCAPE '\\' OR LOWER(email) LIKE ? ESCAPE '\\')");
+            where_parts
+                .push("(LOWER(username) LIKE ? ESCAPE '\\' OR LOWER(email) LIKE ? ESCAPE '\\')");
             binds.push(Value::Text(pat.clone()));
             binds.push(Value::Text(pat));
         }
@@ -498,9 +504,8 @@ impl Store {
         }
         if let Some(d) = filter.inactive_days.filter(|d| *d > 0) {
             // 含从未登录(NULL)
-            where_parts.push(
-                "(last_login_at IS NULL OR datetime(last_login_at) < datetime('now', ?))",
-            );
+            where_parts
+                .push("(last_login_at IS NULL OR datetime(last_login_at) < datetime('now', ?))");
             binds.push(Value::Text(format!("-{d} days")));
         }
         let where_sql = if where_parts.is_empty() {
@@ -511,11 +516,10 @@ impl Store {
 
         // total
         let count_sql = format!("SELECT COUNT(*) FROM users{where_sql}");
-        let total: i64 = conn.query_row(
-            &count_sql,
-            rusqlite::params_from_iter(binds.iter()),
-            |r| r.get(0),
-        )?;
+        let total: i64 =
+            conn.query_row(&count_sql, rusqlite::params_from_iter(binds.iter()), |r| {
+                r.get(0)
+            })?;
 
         // page
         let mut list_binds = binds.clone();
@@ -568,7 +572,11 @@ impl Store {
         );
         let mut stmt = conn.prepare(&agg_sql)?;
         let rows = stmt.query_map(rusqlite::params_from_iter(user_ids.iter()), |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
         })?;
         for row in rows {
             let (uid, n, c) = row?;
@@ -701,9 +709,8 @@ impl Store {
         let tx = conn.transaction()?;
         // 用户自建词书：先收集 id，删 wordbook_words，再删 wordbooks（主键非 user_id）
         let user_wordbook_ids: Vec<String> = {
-            let mut stmt = tx.prepare(
-                "SELECT id FROM wordbooks WHERE book_type='user' AND user_id=?1",
-            )?;
+            let mut stmt =
+                tx.prepare("SELECT id FROM wordbooks WHERE book_type='user' AND user_id=?1")?;
             let rows = stmt.query_map(params![user_id], |r| r.get::<_, String>(0))?;
             rows.collect::<Result<_, _>>()?
         };
@@ -787,11 +794,9 @@ impl Store {
             )
             .optional()?;
         match row {
-            Some(s) => Ok(Some(
-                s.parse::<DateTime<Utc>>().map_err(|e| {
-                    StoreError::Validation(format!("gdpr_export_log invalid date: {e}"))
-                })?,
-            )),
+            Some(s) => Ok(Some(s.parse::<DateTime<Utc>>().map_err(|e| {
+                StoreError::Validation(format!("gdpr_export_log invalid date: {e}"))
+            })?)),
             None => Ok(None),
         }
     }
@@ -1139,7 +1144,10 @@ mod tests {
 
         let conn = store.connection().unwrap();
         let cnt = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
-        assert_eq!(cnt("SELECT COUNT(*) FROM word_favorites WHERE user_id='u1'"), 0);
+        assert_eq!(
+            cnt("SELECT COUNT(*) FROM word_favorites WHERE user_id='u1'"),
+            0
+        );
         assert_eq!(cnt("SELECT COUNT(*) FROM word_notes WHERE user_id='u1'"), 0);
         assert_eq!(
             cnt("SELECT COUNT(*) FROM wordbook_import_history WHERE user_id='u1'"),

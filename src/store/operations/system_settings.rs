@@ -28,6 +28,20 @@ pub struct SystemSettings {
     /// C3:灰度策略三档(20→60→100),存为逗号分隔字符串列,序列化为 [u32;3]。
     #[serde(default = "default_grayscale_steps")]
     pub amas_grayscale_steps: [u32; 3],
+    /// E3:canary 自动回滚——reward 平均值降幅阈值(live 比 baseline 低超此绝对值 → 回滚)。
+    #[serde(default = "default_canary_threshold")]
+    pub canary_reward_drop_threshold: f64,
+    /// E3:canary 自动回滚——anomaly 率升幅阈值(live 比 baseline 高超此绝对值 → 回滚)。
+    #[serde(default = "default_canary_threshold")]
+    pub canary_anomaly_rise_threshold: f64,
+    /// D4:客户端最低版本门控——admin 运行时可配的最低 semver,优先于 env MIN_CLIENT_VERSION;
+    /// None 表示未设置(回落 env)。
+    #[serde(default)]
+    pub min_client_version: Option<String>,
+    /// D4:版本门控开关。开启后 strict-mode 即使 enabled=false 也按 min_client_version
+    /// 对低于阈值客户端返回 CLIENT_OUTDATED(发布切流场景)。
+    #[serde(default)]
+    pub version_gate_enabled: bool,
 }
 
 fn default_grayscale_steps() -> [u32; 3] {
@@ -44,6 +58,10 @@ fn default_auto_apply_min_confidence() -> f64 {
 
 fn default_llm_max_cost_per_month_yuan() -> f64 {
     100.0
+}
+
+fn default_canary_threshold() -> f64 {
+    0.05
 }
 
 /// 解析逗号分隔的灰度档位字符串("20,60,100")为 [u32;3],缺项回落默认。
@@ -71,6 +89,10 @@ impl Default for SystemSettings {
             llm_advisor_max_cost_per_month_yuan: 100.0,
             llm_advisor_enabled: false,
             amas_grayscale_steps: [20, 60, 100],
+            canary_reward_drop_threshold: 0.05,
+            canary_anomaly_rise_threshold: 0.05,
+            min_client_version: None,
+            version_gate_enabled: false,
         }
     }
 }
@@ -82,7 +104,9 @@ impl Store {
             .query_row(
                 "SELECT max_users, registration_enabled, maintenance_mode, default_daily_words, wordbook_center_url,
                         amas_auto_apply_enabled, amas_auto_apply_max_per_day, amas_auto_apply_min_confidence,
-                        llm_advisor_max_cost_per_month_yuan, llm_advisor_enabled, amas_grayscale_steps
+                        llm_advisor_max_cost_per_month_yuan, llm_advisor_enabled, amas_grayscale_steps,
+                        canary_reward_drop_threshold, canary_anomaly_rise_threshold,
+                        min_client_version, version_gate_enabled
                  FROM system_settings WHERE singleton_id=1",
                 [],
                 |r| {
@@ -100,6 +124,14 @@ impl Store {
                         amas_grayscale_steps: parse_steps(
                             &r.get::<_, Option<String>>(10).ok().flatten().unwrap_or_default(),
                         ),
+                        canary_reward_drop_threshold: r.get::<_, f64>(11).unwrap_or(0.05),
+                        canary_anomaly_rise_threshold: r.get::<_, f64>(12).unwrap_or(0.05),
+                        min_client_version: r
+                            .get::<_, Option<String>>(13)
+                            .ok()
+                            .flatten()
+                            .filter(|s| !s.is_empty()),
+                        version_gate_enabled: r.get::<_, i64>(14).unwrap_or(0) != 0,
                     })
                 },
             )
@@ -118,12 +150,16 @@ impl Store {
             "INSERT INTO system_settings
                 (singleton_id, max_users, registration_enabled, maintenance_mode, default_daily_words, wordbook_center_url,
                  amas_auto_apply_enabled, amas_auto_apply_max_per_day, amas_auto_apply_min_confidence,
-                 llm_advisor_max_cost_per_month_yuan, llm_advisor_enabled, amas_grayscale_steps)
-             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                 llm_advisor_max_cost_per_month_yuan, llm_advisor_enabled, amas_grayscale_steps,
+                 canary_reward_drop_threshold, canary_anomaly_rise_threshold,
+                 min_client_version, version_gate_enabled)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
              ON CONFLICT(singleton_id) DO UPDATE SET
                 max_users=?1, registration_enabled=?2, maintenance_mode=?3, default_daily_words=?4, wordbook_center_url=?5,
                 amas_auto_apply_enabled=?6, amas_auto_apply_max_per_day=?7, amas_auto_apply_min_confidence=?8,
-                llm_advisor_max_cost_per_month_yuan=?9, llm_advisor_enabled=?10, amas_grayscale_steps=?11",
+                llm_advisor_max_cost_per_month_yuan=?9, llm_advisor_enabled=?10, amas_grayscale_steps=?11,
+                canary_reward_drop_threshold=?12, canary_anomaly_rise_threshold=?13,
+                min_client_version=?14, version_gate_enabled=?15",
             params![
                 settings.max_users as i64,
                 settings.registration_enabled as i64,
@@ -141,6 +177,10 @@ impl Store {
                     settings.amas_grayscale_steps[1],
                     settings.amas_grayscale_steps[2]
                 ),
+                settings.canary_reward_drop_threshold,
+                settings.canary_anomaly_rise_threshold,
+                settings.min_client_version.as_deref().filter(|s| !s.is_empty()),
+                settings.version_gate_enabled as i64,
             ],
         )?;
         Ok(())
@@ -193,6 +233,10 @@ mod tests {
             llm_advisor_max_cost_per_month_yuan: 200.0,
             llm_advisor_enabled: true,
             amas_grayscale_steps: [10, 50, 100],
+            canary_reward_drop_threshold: 0.07,
+            canary_anomaly_rise_threshold: 0.09,
+            min_client_version: Some("1.2.0".into()),
+            version_gate_enabled: true,
         };
         store.save_system_settings(&new).unwrap();
         let got = store.get_system_settings().unwrap();
@@ -210,6 +254,36 @@ mod tests {
         assert!((got.llm_advisor_max_cost_per_month_yuan - 200.0).abs() < 1e-9);
         assert!(got.llm_advisor_enabled);
         assert_eq!(got.amas_grayscale_steps, [10, 50, 100]);
+        assert!((got.canary_reward_drop_threshold - 0.07).abs() < 1e-9);
+        assert!((got.canary_anomaly_rise_threshold - 0.09).abs() < 1e-9);
+        assert_eq!(got.min_client_version.as_deref(), Some("1.2.0"));
+        assert!(got.version_gate_enabled);
+    }
+
+    #[test]
+    fn version_gate_default_and_roundtrip() {
+        let store = test_store();
+        // 默认未设置门控
+        let s = store.get_system_settings().unwrap();
+        assert!(s.min_client_version.is_none());
+        assert!(!s.version_gate_enabled);
+        // 写入后回读
+        let mut s = store.get_system_settings().unwrap();
+        s.min_client_version = Some("2.0.0".into());
+        s.version_gate_enabled = true;
+        store.save_system_settings(&s).unwrap();
+        let got = store.get_system_settings().unwrap();
+        assert_eq!(got.min_client_version.as_deref(), Some("2.0.0"));
+        assert!(got.version_gate_enabled);
+        // 清空 min_client_version(空串归一为 None)
+        let mut s = store.get_system_settings().unwrap();
+        s.min_client_version = Some(String::new());
+        store.save_system_settings(&s).unwrap();
+        assert!(store
+            .get_system_settings()
+            .unwrap()
+            .min_client_version
+            .is_none());
     }
 
     #[test]

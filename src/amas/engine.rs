@@ -219,17 +219,19 @@ impl AMASEngine {
         stable: &Arc<AMASConfig>,
     ) -> Arc<AMASConfig> {
         match self.store.get_amas_config_version(version_hash) {
-            Ok(Some(version)) => match serde_json::from_value::<AMASConfig>(version.snapshot_json) {
-                Ok(cfg) => Arc::new(cfg),
-                Err(e) => {
-                    tracing::warn!(
-                        version_hash = %version_hash,
-                        error = %e,
-                        "effective_config_for_user: 反序列化 canary snapshot 失败,回退 stable"
-                    );
-                    Arc::clone(stable)
+            Ok(Some(version)) => {
+                match serde_json::from_value::<AMASConfig>(version.snapshot_json) {
+                    Ok(cfg) => Arc::new(cfg),
+                    Err(e) => {
+                        tracing::warn!(
+                            version_hash = %version_hash,
+                            error = %e,
+                            "effective_config_for_user: 反序列化 canary snapshot 失败,回退 stable"
+                        );
+                        Arc::clone(stable)
+                    }
                 }
-            },
+            }
             Ok(None) => {
                 tracing::warn!(
                     version_hash = %version_hash,

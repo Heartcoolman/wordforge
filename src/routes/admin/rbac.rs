@@ -139,25 +139,28 @@ async fn patch_admin_role(
     let role_for_task = new_role.clone();
 
     let view = state
-        .run_store_task("admin.rbac.update_role", move |store| -> Result<_, AppError> {
-            let current = store
-                .get_admin_role(&target_id)?
-                .ok_or_else(|| AppError::not_found("管理员不存在"))?;
-            // 守卫:降级最后一个 super-admin 会导致无人能管角色。
-            if current == "super_admin" && role_for_task != "super_admin" {
-                let supers = store.count_admins_with_role("super_admin")?;
-                if supers <= 1 {
-                    return Err(AppError::conflict(
-                        "LAST_SUPER_ADMIN",
-                        "不能降级最后一个超级管理员",
-                    ));
+        .run_store_task(
+            "admin.rbac.update_role",
+            move |store| -> Result<_, AppError> {
+                let current = store
+                    .get_admin_role(&target_id)?
+                    .ok_or_else(|| AppError::not_found("管理员不存在"))?;
+                // 守卫:降级最后一个 super-admin 会导致无人能管角色。
+                if current == "super_admin" && role_for_task != "super_admin" {
+                    let supers = store.count_admins_with_role("super_admin")?;
+                    if supers <= 1 {
+                        return Err(AppError::conflict(
+                            "LAST_SUPER_ADMIN",
+                            "不能降级最后一个超级管理员",
+                        ));
+                    }
                 }
-            }
-            let view = store
-                .update_admin_role(&target_id, &role_for_task, &now)?
-                .ok_or_else(|| AppError::not_found("管理员不存在"))?;
-            Ok(view)
-        })
+                let view = store
+                    .update_admin_role(&target_id, &role_for_task, &now)?
+                    .ok_or_else(|| AppError::not_found("管理员不存在"))?;
+                Ok(view)
+            },
+        )
         .await??;
 
     tracing::info!(
@@ -184,25 +187,28 @@ async fn delete_admin(
     }
     let target_id = id.clone();
     state
-        .run_store_task("admin.rbac.delete_admin", move |store| -> Result<(), AppError> {
-            let current = store
-                .get_admin_role(&target_id)?
-                .ok_or_else(|| AppError::not_found("管理员不存在"))?;
-            // 守卫:删除最后一个 super-admin 会锁死 RBAC 管理。
-            if current == "super_admin" {
-                let supers = store.count_admins_with_role("super_admin")?;
-                if supers <= 1 {
-                    return Err(AppError::conflict(
-                        "LAST_SUPER_ADMIN",
-                        "不能删除最后一个超级管理员",
-                    ));
+        .run_store_task(
+            "admin.rbac.delete_admin",
+            move |store| -> Result<(), AppError> {
+                let current = store
+                    .get_admin_role(&target_id)?
+                    .ok_or_else(|| AppError::not_found("管理员不存在"))?;
+                // 守卫:删除最后一个 super-admin 会锁死 RBAC 管理。
+                if current == "super_admin" {
+                    let supers = store.count_admins_with_role("super_admin")?;
+                    if supers <= 1 {
+                        return Err(AppError::conflict(
+                            "LAST_SUPER_ADMIN",
+                            "不能删除最后一个超级管理员",
+                        ));
+                    }
                 }
-            }
-            if !store.delete_admin(&target_id)? {
-                return Err(AppError::not_found("管理员不存在"));
-            }
-            Ok(())
-        })
+                if !store.delete_admin(&target_id)? {
+                    return Err(AppError::not_found("管理员不存在"));
+                }
+                Ok(())
+            },
+        )
         .await??;
 
     tracing::info!(
@@ -290,7 +296,9 @@ fn validate_expires_at(raw: Option<&str>) -> Result<Option<String>, AppError> {
         None => Ok(None),
         Some(s) => chrono::DateTime::parse_from_rfc3339(s)
             .map(|_| Some(s.to_string()))
-            .map_err(|_| AppError::bad_request("INVALID_EXPIRES_AT", "过期时间必须是 RFC3339 格式")),
+            .map_err(|_| {
+                AppError::bad_request("INVALID_EXPIRES_AT", "过期时间必须是 RFC3339 格式")
+            }),
     }
 }
 

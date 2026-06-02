@@ -134,13 +134,12 @@ async fn submit_result(
 
     // ── 4. confirm_required 路径：写 ticket，等待 admin 确认 ──
     if body.status == "confirm_required" {
-        let token = body
-            .confirm_token
-            .clone()
-            .ok_or_else(|| AppError::bad_request(
+        let token = body.confirm_token.clone().ok_or_else(|| {
+            AppError::bad_request(
                 "PROBE_CONFIRM_TOKEN_MISSING",
                 "confirm_required 状态必须携带 confirmToken",
-            ))?;
+            )
+        })?;
         state.probe_service().issue_confirm(
             &body.request_id,
             ConfirmTicket {

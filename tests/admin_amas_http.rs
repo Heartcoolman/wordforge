@@ -662,7 +662,9 @@ async fn it_advisor_run_and_approve_all() {
     .await;
     let (aa_status, _, aa_body) = response_json(approve_all).await;
     assert_eq!(aa_status, StatusCode::OK);
-    let results = aa_body["data"]["results"].as_array().expect("results array");
+    let results = aa_body["data"]["results"]
+        .as_array()
+        .expect("results array");
     assert_eq!(results.len(), 1);
     assert_eq!(results[0]["ok"], true);
 
@@ -760,7 +762,10 @@ async fn setup_amas_admin_token(app: &common::app::TestApp) -> String {
     .await;
     let (status, _, body) = response_json(setup).await;
     assert_eq!(status, StatusCode::CREATED);
-    body["data"]["token"].as_str().expect("admin token").to_string()
+    body["data"]["token"]
+        .as_str()
+        .expect("admin token")
+        .to_string()
 }
 
 #[tokio::test]
@@ -853,7 +858,10 @@ async fn it_amas_suggestions_offset_and_q() {
 
     // 直接经 store 落 3 条 pending
     for (r, p) in [
-        ("提升留存目标", r#"{"memoryModel.baseDesiredRetention":0.85}"#),
+        (
+            "提升留存目标",
+            r#"{"memoryModel.baseDesiredRetention":0.85}"#,
+        ),
         ("降低疲劳阈值", r#"{"memoryModel.w[2]":3.0}"#),
         ("调整初始稳定性", r#"{"memoryModel.w[0]":1.0}"#),
     ] {
@@ -947,7 +955,9 @@ async fn it_amas_suggestions_export_csv() {
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let text = String::from_utf8(bytes.to_vec()).unwrap();
 
     assert_eq!(status, StatusCode::OK);
@@ -1264,7 +1274,11 @@ async fn it_advisor_canary_parallel_cohorts_non_overlap() {
     )
     .await;
     let (status, _, body) = response_json(resp).await;
-    assert_eq!(status, StatusCode::OK, "第二条并行 canary 应成功而非 overlap 被拒");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "第二条并行 canary 应成功而非 overlap 被拒"
+    );
     assert_eq!(body["data"]["cohortLo"], 20);
     assert_eq!(body["data"]["cohortHi"], 50);
 

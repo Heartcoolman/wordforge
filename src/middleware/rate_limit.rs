@@ -83,7 +83,8 @@ impl RateLimiter {
     /// 兼容旧调用：按 IP 限流，使用构造时的默认 max_requests。
     pub async fn check(&self, ip: IpAddr, max_entries: usize) -> RateLimitResult {
         let key = ip_key(ip);
-        self.check_with_max(&key, max_entries, self.max_requests).await
+        self.check_with_max(&key, max_entries, self.max_requests)
+            .await
     }
 
     /// v1.1-P2.3：泛化 key + 显式 max_requests，支持匿名 IP / 已登录 user_id 双轨。
@@ -505,12 +506,7 @@ mod tests {
         cfg.auth_rate_limit.max_requests = api_max;
         let tmp = tempfile::tempdir().expect("tempdir");
         let store = StdArc::new(
-            Store::open(
-                tmp.path().join("rate_mw.db").to_str().unwrap(),
-                5000,
-                4,
-            )
-            .unwrap(),
+            Store::open(tmp.path().join("rate_mw.db").to_str().unwrap(), 5000, 4).unwrap(),
         );
         store.run_migrations().unwrap();
         let amas = StdArc::new(AMASEngine::new(AMASConfig::default(), store.clone()));
@@ -594,9 +590,7 @@ mod tests {
         let mut new_ip = None;
         for o in 0..=255_u16 {
             let candidate = IpAddr::V4(Ipv4Addr::new(10, 0, 0, o as u8));
-            if shard_index(&candidate) == target_shard
-                && !fills.contains(&candidate)
-            {
+            if shard_index(&candidate) == target_shard && !fills.contains(&candidate) {
                 new_ip = Some(candidate);
                 break;
             }

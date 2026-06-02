@@ -202,7 +202,9 @@ async fn overview(
         },
         collect_error_rate: KpiRate {
             value: error_rate,
-            note: Some(format!("SUM(error_count) / {win_label} telemetry_events 总数")),
+            note: Some(format!(
+                "SUM(error_count) / {win_label} telemetry_events 总数"
+            )),
         },
     }))
 }
@@ -434,17 +436,13 @@ async fn patch_sampling(
 
     let rule = match result {
         Ok(r) => r,
-        Err(crate::store::StoreError::Validation(code))
-            if code == "SAMPLING_RULE_LOCKED" =>
-        {
+        Err(crate::store::StoreError::Validation(code)) if code == "SAMPLING_RULE_LOCKED" => {
             return Err(AppError::conflict(
                 "SAMPLING_RULE_LOCKED",
                 "该事件采样率被锁定(核心数据强制 100%),不可修改",
             ));
         }
-        Err(crate::store::StoreError::Validation(code))
-            if code == "SAMPLING_RATE_OUT_OF_RANGE" =>
-        {
+        Err(crate::store::StoreError::Validation(code)) if code == "SAMPLING_RATE_OUT_OF_RANGE" => {
             return Err(AppError::bad_request(
                 "SAMPLING_RATE_OUT_OF_RANGE",
                 "sampleRate 必须在 [0, 1] 区间",

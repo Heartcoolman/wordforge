@@ -1031,7 +1031,11 @@ async fn kpi_summary(
                 prev_value: p,
                 // 上一窗口无 d7-eligible 用户 → 无可比基准,置 null
                 // (与其它 pct 指标零分母语义一致;前端按 null 渲染占位符)
-                delta_pt: if prev.d7_eligible > 0 { Some(c - p) } else { None },
+                delta_pt: if prev.d7_eligible > 0 {
+                    Some(c - p)
+                } else {
+                    None
+                },
             }
         },
         study_duration_secs: KpiMetricPct {
@@ -1111,7 +1115,11 @@ fn build_funnel_steps(cur: &AdminFunnelRow, prev: &AdminFunnelRow) -> Vec<Funnel
         .iter()
         .enumerate()
         .map(|(i, (key, label, sublabel, tone))| {
-            let pct = if base > 0.0 { cur_c[i] as f64 / base } else { 0.0 };
+            let pct = if base > 0.0 {
+                cur_c[i] as f64 / base
+            } else {
+                0.0
+            };
             let prev_pct = if prev_base > 0.0 {
                 Some(prev_c[i] as f64 / prev_base)
             } else {
@@ -1322,10 +1330,17 @@ async fn question_distribution(
     };
 
     let total = dist.total;
-    let pct = |c: i64| if total > 0 { c as f64 / total as f64 } else { 0.0 };
+    let pct = |c: i64| {
+        if total > 0 {
+            c as f64 / total as f64
+        } else {
+            0.0
+        }
+    };
 
     // 合并同 label(unknown 折叠"未标注")并按 count 降序。
-    let mut by_key: std::collections::BTreeMap<&str, (&str, i64)> = std::collections::BTreeMap::new();
+    let mut by_key: std::collections::BTreeMap<&str, (&str, i64)> =
+        std::collections::BTreeMap::new();
     for (raw, count) in &dist.question_modes {
         let (key, label) = question_type_label(raw);
         let e = by_key.entry(key).or_insert((label, 0));

@@ -1,4 +1,5 @@
 pub mod algorithm_optimization;
+pub mod backup_offsite;
 pub mod cache_cleanup;
 pub mod canary_monitor;
 pub mod config_watcher;
@@ -14,11 +15,13 @@ pub mod llm_advisor;
 pub mod log_export;
 pub mod metrics_flush;
 pub mod monitoring_retention;
+pub mod outbox_processor;
 pub mod password_reset_cleanup;
 pub mod probe_cleanup;
 pub mod probe_confirm_sweeper;
-pub mod session_cleanup;
+pub mod scheduled_broadcast;
 pub mod scheduler_health_watchdog;
+pub mod session_cleanup;
 pub mod update_checker;
 pub mod weekly_report;
 
@@ -334,126 +337,217 @@ impl WorkerManager {
             match spec.name {
                 WorkerName::MetricsFlush => {
                     let registry = engine.metrics_registry().clone();
-                    add_job(scheduler, spec.cron, name_str, job_store, health_state, move || {
-                        let store = store.clone();
-                        let registry = registry.clone();
-                        async move {
-                            metrics_flush::run(&registry, &store).await;
-                        }
-                    })
+                    add_job(
+                        scheduler,
+                        spec.cron,
+                        name_str,
+                        job_store,
+                        health_state,
+                        move || {
+                            let store = store.clone();
+                            let registry = registry.clone();
+                            async move {
+                                metrics_flush::run(&registry, &store).await;
+                            }
+                        },
+                    )
                     .await;
                 }
                 WorkerName::SessionCleanup => {
-                    add_job(scheduler, spec.cron, name_str, job_store, health_state, move || {
-                        let store = store.clone();
-                        async move {
-                            session_cleanup::run(&store).await;
-                        }
-                    })
+                    add_job(
+                        scheduler,
+                        spec.cron,
+                        name_str,
+                        job_store,
+                        health_state,
+                        move || {
+                            let store = store.clone();
+                            async move {
+                                session_cleanup::run(&store).await;
+                            }
+                        },
+                    )
                     .await;
                 }
                 WorkerName::PasswordResetCleanup => {
-                    add_job(scheduler, spec.cron, name_str, job_store, health_state, move || {
-                        let store = store.clone();
-                        async move {
-                            password_reset_cleanup::run(&store).await;
-                        }
-                    })
+                    add_job(
+                        scheduler,
+                        spec.cron,
+                        name_str,
+                        job_store,
+                        health_state,
+                        move || {
+                            let store = store.clone();
+                            async move {
+                                password_reset_cleanup::run(&store).await;
+                            }
+                        },
+                    )
                     .await;
                 }
                 WorkerName::LlmAdvisor => {
                     let llm = self.llm_config.clone();
                     let engine_cloned = engine.clone();
-                    add_job(scheduler, spec.cron, name_str, job_store, health_state, move || {
-                        let store = store.clone();
-                        let llm = llm.clone();
-                        let engine = engine_cloned.clone();
-                        async move {
-                            llm_advisor::run(&store, llm.as_ref(), &engine, None).await;
-                        }
-                    })
+                    add_job(
+                        scheduler,
+                        spec.cron,
+                        name_str,
+                        job_store,
+                        health_state,
+                        move || {
+                            let store = store.clone();
+                            let llm = llm.clone();
+                            let engine = engine_cloned.clone();
+                            async move {
+                                llm_advisor::run(&store, llm.as_ref(), &engine, None).await;
+                            }
+                        },
+                    )
                     .await;
                 }
                 WorkerName::DelayedReward => {
-                    add_job(scheduler, spec.cron, name_str, job_store, health_state, move || {
-                        let store = store.clone();
-                        async move {
-                            delayed_reward::run(&store).await;
-                        }
-                    })
+                    add_job(
+                        scheduler,
+                        spec.cron,
+                        name_str,
+                        job_store,
+                        health_state,
+                        move || {
+                            let store = store.clone();
+                            async move {
+                                delayed_reward::run(&store).await;
+                            }
+                        },
+                    )
                     .await;
                 }
                 WorkerName::ForgettingAlert => {
-                    add_job(scheduler, spec.cron, name_str, job_store, health_state, move || {
-                        let store = store.clone();
-                        async move {
-                            forgetting_alert::run(&store).await;
-                        }
-                    })
+                    add_job(
+                        scheduler,
+                        spec.cron,
+                        name_str,
+                        job_store,
+                        health_state,
+                        move || {
+                            let store = store.clone();
+                            async move {
+                                forgetting_alert::run(&store).await;
+                            }
+                        },
+                    )
                     .await;
                 }
                 WorkerName::AlgorithmOptimization => {
-                    add_job(scheduler, spec.cron, name_str, job_store, health_state, move || {
-                        let store = store.clone();
-                        let engine = engine.clone();
-                        async move {
-                            algorithm_optimization::run(&store, &engine).await;
-                        }
-                    })
+                    add_job(
+                        scheduler,
+                        spec.cron,
+                        name_str,
+                        job_store,
+                        health_state,
+                        move || {
+                            let store = store.clone();
+                            let engine = engine.clone();
+                            async move {
+                                algorithm_optimization::run(&store, &engine).await;
+                            }
+                        },
+                    )
                     .await;
                 }
                 WorkerName::CacheCleanup => {
-                    add_job(scheduler, spec.cron, name_str, job_store, health_state, move || {
-                        let store = store.clone();
-                        async move {
-                            cache_cleanup::run(&store).await;
-                        }
-                    })
+                    add_job(
+                        scheduler,
+                        spec.cron,
+                        name_str,
+                        job_store,
+                        health_state,
+                        move || {
+                            let store = store.clone();
+                            async move {
+                                cache_cleanup::run(&store).await;
+                            }
+                        },
+                    )
                     .await;
                 }
                 WorkerName::DailyAggregation => {
-                    add_job(scheduler, spec.cron, name_str, job_store, health_state, move || {
-                        let store = store.clone();
-                        async move {
-                            daily_aggregation::run(&store).await;
-                        }
-                    })
+                    add_job(
+                        scheduler,
+                        spec.cron,
+                        name_str,
+                        job_store,
+                        health_state,
+                        move || {
+                            let store = store.clone();
+                            async move {
+                                daily_aggregation::run(&store).await;
+                            }
+                        },
+                    )
                     .await;
                 }
                 WorkerName::HealthAnalysis => {
-                    add_job(scheduler, spec.cron, name_str, job_store, health_state, move || {
-                        let store = store.clone();
-                        async move {
-                            health_analysis::run(&store).await;
-                        }
-                    })
+                    add_job(
+                        scheduler,
+                        spec.cron,
+                        name_str,
+                        job_store,
+                        health_state,
+                        move || {
+                            let store = store.clone();
+                            async move {
+                                health_analysis::run(&store).await;
+                            }
+                        },
+                    )
                     .await;
                 }
                 WorkerName::ConfusionPairCache => {
-                    add_job(scheduler, spec.cron, name_str, job_store, health_state, move || {
-                        let store = store.clone();
-                        async move {
-                            confusion_pair_cache::run(&store).await;
-                        }
-                    })
+                    add_job(
+                        scheduler,
+                        spec.cron,
+                        name_str,
+                        job_store,
+                        health_state,
+                        move || {
+                            let store = store.clone();
+                            async move {
+                                confusion_pair_cache::run(&store).await;
+                            }
+                        },
+                    )
                     .await;
                 }
                 WorkerName::WeeklyReport => {
-                    add_job(scheduler, spec.cron, name_str, job_store, health_state, move || {
-                        let store = store.clone();
-                        async move {
-                            weekly_report::run(&store).await;
-                        }
-                    })
+                    add_job(
+                        scheduler,
+                        spec.cron,
+                        name_str,
+                        job_store,
+                        health_state,
+                        move || {
+                            let store = store.clone();
+                            async move {
+                                weekly_report::run(&store).await;
+                            }
+                        },
+                    )
                     .await;
                 }
                 WorkerName::LogExport => {
-                    add_job(scheduler, spec.cron, name_str, job_store, health_state, move || {
-                        let store = store.clone();
-                        async move {
-                            log_export::run(&store).await;
-                        }
-                    })
+                    add_job(
+                        scheduler,
+                        spec.cron,
+                        name_str,
+                        job_store,
+                        health_state,
+                        move || {
+                            let store = store.clone();
+                            async move {
+                                log_export::run(&store).await;
+                            }
+                        },
+                    )
                     .await;
                 }
                 WorkerName::UpdateChecker => {
@@ -461,23 +555,37 @@ impl WorkerManager {
                         Some(ctx) => ctx,
                         None => continue,
                     };
-                    add_job(scheduler, spec.cron, name_str, job_store, health_state, move || {
-                        let updater = ctx.updater.clone();
-                        let state = ctx.state.clone();
-                        async move {
-                            update_checker::run(updater, state).await;
-                        }
-                    })
+                    add_job(
+                        scheduler,
+                        spec.cron,
+                        name_str,
+                        job_store,
+                        health_state,
+                        move || {
+                            let updater = ctx.updater.clone();
+                            let state = ctx.state.clone();
+                            async move {
+                                update_checker::run(updater, state).await;
+                            }
+                        },
+                    )
                     .await;
                 }
                 // M0-P3：monitoring_events retention + 月度 VACUUM
                 WorkerName::MonitoringRetention => {
-                    add_job(scheduler, spec.cron, name_str, job_store, health_state, move || {
-                        let store = store.clone();
-                        async move {
-                            monitoring_retention::run(&store).await;
-                        }
-                    })
+                    add_job(
+                        scheduler,
+                        spec.cron,
+                        name_str,
+                        job_store,
+                        health_state,
+                        move || {
+                            let store = store.clone();
+                            async move {
+                                monitoring_retention::run(&store).await;
+                            }
+                        },
+                    )
                     .await;
                 }
                 // M0-P4：5xx 错误率 watchdog
@@ -486,12 +594,19 @@ impl WorkerManager {
                         Some(s) => s,
                         None => continue,
                     };
-                    add_job(scheduler, spec.cron, name_str, job_store, health_state, move || {
-                        let state = watchdog_state.clone();
-                        async move {
-                            error_rate_watchdog::run(&state).await;
-                        }
-                    })
+                    add_job(
+                        scheduler,
+                        spec.cron,
+                        name_str,
+                        job_store,
+                        health_state,
+                        move || {
+                            let state = watchdog_state.clone();
+                            async move {
+                                error_rate_watchdog::run(&state).await;
+                            }
+                        },
+                    )
                     .await;
                 }
                 // M1-A5：调度器健康 watchdog（time-based，补充 add_job 内置 skip-based 告警）
@@ -501,13 +616,20 @@ impl WorkerManager {
                         None => continue,
                     };
                     let hw_store = store.clone();
-                    add_job(scheduler, spec.cron, name_str, job_store, health_state, move || {
-                        let state = hw_state.clone();
-                        let s = hw_store.clone();
-                        async move {
-                            scheduler_health_watchdog::run(&s, &state).await;
-                        }
-                    })
+                    add_job(
+                        scheduler,
+                        spec.cron,
+                        name_str,
+                        job_store,
+                        health_state,
+                        move || {
+                            let state = hw_state.clone();
+                            let s = hw_store.clone();
+                            async move {
+                                scheduler_health_watchdog::run(&s, &state).await;
+                            }
+                        },
+                    )
                     .await;
                 }
                 // C6:canary_monitor —— 需 AppState 做 SSE 通知（复用 llm_advisor_state）
@@ -516,12 +638,19 @@ impl WorkerManager {
                         Some(s) => s,
                         None => continue,
                     };
-                    add_job(scheduler, spec.cron, name_str, job_store, health_state, move || {
-                        let state = cm_state.clone();
-                        async move {
-                            canary_monitor::run(&state).await;
-                        }
-                    })
+                    add_job(
+                        scheduler,
+                        spec.cron,
+                        name_str,
+                        job_store,
+                        health_state,
+                        move || {
+                            let state = cm_state.clone();
+                            async move {
+                                canary_monitor::run(&state).await;
+                            }
+                        },
+                    )
                     .await;
                 }
             }
@@ -544,8 +673,7 @@ async fn add_job<Fut, F>(
     store: Arc<Store>,
     health_state: Option<crate::state::AppState>,
     mut run: F,
-)
-where
+) where
     F: FnMut() -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = ()> + Send + 'static,
 {
@@ -663,7 +791,8 @@ mod tests {
 
     #[tokio::test]
     async fn leader_switch_controls_job_registration() {
-        ensure_safe_secrets_in_env(); let cfg = Config::from_env();
+        ensure_safe_secrets_in_env();
+        let cfg = Config::from_env();
         let tmp = tempfile::tempdir().expect("tempdir");
         let store = Arc::new(
             Store::open(tmp.path().join("worker_test.db").to_str().unwrap(), 5000, 1).unwrap(),
@@ -680,7 +809,8 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_path_is_non_panicking() {
-        ensure_safe_secrets_in_env(); let cfg = Config::from_env();
+        ensure_safe_secrets_in_env();
+        let cfg = Config::from_env();
         let tmp = tempfile::tempdir().expect("tempdir");
         let store = Arc::new(
             Store::open(
@@ -708,7 +838,8 @@ mod tests {
     #[tokio::test]
     async fn stub_workers_disabled_by_default() {
         // M1-A3：4 个 stub worker 已删除；验证 LlmAdvisor 条件禁用
-        ensure_safe_secrets_in_env(); let cfg = Config::from_env();
+        ensure_safe_secrets_in_env();
+        let cfg = Config::from_env();
         let tmp = tempfile::tempdir().expect("tempdir");
         let store = Arc::new(
             Store::open(
@@ -763,15 +894,11 @@ mod tests {
     async fn all_planned_jobs_have_parseable_cron() {
         use tokio_cron_scheduler::Job;
 
-        ensure_safe_secrets_in_env(); let cfg = Config::from_env();
+        ensure_safe_secrets_in_env();
+        let cfg = Config::from_env();
         let tmp = tempfile::tempdir().expect("tempdir");
         let store = Arc::new(
-            Store::open(
-                tmp.path().join("cron_test.db").to_str().unwrap(),
-                5000,
-                1,
-            )
-            .unwrap(),
+            Store::open(tmp.path().join("cron_test.db").to_str().unwrap(), 5000, 1).unwrap(),
         );
         let amas = Arc::new(AMASEngine::new(AMASConfig::default(), store.clone()));
         let (tx, _) = broadcast::channel(2);
@@ -824,15 +951,11 @@ mod tests {
 
     #[tokio::test]
     async fn with_llm_config_sets_field() {
-        ensure_safe_secrets_in_env(); let cfg = Config::from_env();
+        ensure_safe_secrets_in_env();
+        let cfg = Config::from_env();
         let tmp = tempfile::tempdir().expect("tempdir");
         let store = Arc::new(
-            Store::open(
-                tmp.path().join("with_llm.db").to_str().unwrap(),
-                5000,
-                1,
-            )
-            .unwrap(),
+            Store::open(tmp.path().join("with_llm.db").to_str().unwrap(), 5000, 1).unwrap(),
         );
         let amas = Arc::new(AMASEngine::new(AMASConfig::default(), store.clone()));
         let (tx, _) = broadcast::channel(2);
@@ -856,7 +979,8 @@ mod tests {
     async fn with_update_checker_enables_update_job() {
         use crate::config::UpdateCheckConfig;
 
-        ensure_safe_secrets_in_env(); let cfg = Config::from_env();
+        ensure_safe_secrets_in_env();
+        let cfg = Config::from_env();
         let tmp = tempfile::tempdir().expect("tempdir");
         let store = Arc::new(
             Store::open(
@@ -887,7 +1011,8 @@ mod tests {
             "v0.0.0",
         )
         .expect("updater");
-        let state = crate::state::AppState::new(store.clone(), amas.clone(), &cfg, tx.clone(), false);
+        let state =
+            crate::state::AppState::new(store.clone(), amas.clone(), &cfg, tx.clone(), false);
 
         let manager = WorkerManager::new(store, amas, tx.subscribe(), &worker_cfg)
             .with_update_checker(updater, state, true);
@@ -903,7 +1028,8 @@ mod tests {
     async fn with_update_checker_disabled_keeps_job_disabled() {
         use crate::config::UpdateCheckConfig;
 
-        ensure_safe_secrets_in_env(); let cfg = Config::from_env();
+        ensure_safe_secrets_in_env();
+        let cfg = Config::from_env();
         let tmp = tempfile::tempdir().expect("tempdir");
         let store = Arc::new(
             Store::open(
@@ -934,7 +1060,8 @@ mod tests {
             "v0.0.0",
         )
         .expect("updater");
-        let state = crate::state::AppState::new(store.clone(), amas.clone(), &cfg, tx.clone(), false);
+        let state =
+            crate::state::AppState::new(store.clone(), amas.clone(), &cfg, tx.clone(), false);
 
         let manager = WorkerManager::new(store, amas, tx.subscribe(), &worker_cfg)
             .with_update_checker(updater, state, false);
@@ -948,7 +1075,8 @@ mod tests {
 
     #[tokio::test]
     async fn leader_start_and_shutdown_full_path() {
-        ensure_safe_secrets_in_env(); let cfg = Config::from_env();
+        ensure_safe_secrets_in_env();
+        let cfg = Config::from_env();
         let tmp = tempfile::tempdir().expect("tempdir");
         let store = Arc::new(
             Store::open(
@@ -982,15 +1110,11 @@ mod tests {
     async fn leader_start_with_update_checker() {
         use crate::config::UpdateCheckConfig;
 
-        ensure_safe_secrets_in_env(); let cfg = Config::from_env();
+        ensure_safe_secrets_in_env();
+        let cfg = Config::from_env();
         let tmp = tempfile::tempdir().expect("tempdir");
         let store = Arc::new(
-            Store::open(
-                tmp.path().join("leader_uc.db").to_str().unwrap(),
-                5000,
-                1,
-            )
-            .unwrap(),
+            Store::open(tmp.path().join("leader_uc.db").to_str().unwrap(), 5000, 1).unwrap(),
         );
         let amas = Arc::new(AMASEngine::new(AMASConfig::default(), store.clone()));
         let (tx, _) = broadcast::channel(2);
@@ -1037,12 +1161,19 @@ mod tests {
         let counter_clone = counter.clone();
 
         let mut scheduler = JobScheduler::new().await.expect("scheduler");
-        add_job(&scheduler, "* * * * * *", "test_worker", Arc::new(crate::store::Store::open(":memory:", 5000, 1).unwrap()), None, move || {
-            let c = counter_clone.clone();
-            async move {
-                c.fetch_add(1, Ordering::SeqCst);
-            }
-        })
+        add_job(
+            &scheduler,
+            "* * * * * *",
+            "test_worker",
+            Arc::new(crate::store::Store::open(":memory:", 5000, 1).unwrap()),
+            None,
+            move || {
+                let c = counter_clone.clone();
+                async move {
+                    c.fetch_add(1, Ordering::SeqCst);
+                }
+            },
+        )
         .await;
 
         scheduler.start().await.expect("start");
@@ -1065,15 +1196,22 @@ mod tests {
         let f_clone = finished.clone();
 
         let mut scheduler = JobScheduler::new().await.expect("scheduler");
-        add_job(&scheduler, "* * * * * *", "slow_worker", Arc::new(crate::store::Store::open(":memory:", 5000, 1).unwrap()), None, move || {
-            let s = s_clone.clone();
-            let f = f_clone.clone();
-            async move {
-                s.fetch_add(1, Ordering::SeqCst);
-                tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
-                f.fetch_add(1, Ordering::SeqCst);
-            }
-        })
+        add_job(
+            &scheduler,
+            "* * * * * *",
+            "slow_worker",
+            Arc::new(crate::store::Store::open(":memory:", 5000, 1).unwrap()),
+            None,
+            move || {
+                let s = s_clone.clone();
+                let f = f_clone.clone();
+                async move {
+                    s.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+                    f.fetch_add(1, Ordering::SeqCst);
+                }
+            },
+        )
         .await;
 
         scheduler.start().await.expect("start");
@@ -1083,29 +1221,36 @@ mod tests {
         let s = started.load(Ordering::SeqCst);
         let f = finished.load(Ordering::SeqCst);
         assert!(s >= 1, "expected >=1 start, got {s}");
-        assert!(s <= 2, "expected <=2 starts due to reentrancy guard, got {s}");
+        assert!(
+            s <= 2,
+            "expected <=2 starts due to reentrancy guard, got {s}"
+        );
         assert!(f <= s);
     }
 
     #[tokio::test]
     async fn add_job_handles_invalid_cron_gracefully() {
         let mut scheduler = JobScheduler::new().await.expect("scheduler");
-        add_job(&scheduler, "not a cron", "bad_cron_worker", Arc::new(crate::store::Store::open(":memory:", 5000, 1).unwrap()), None, || async {}).await;
+        add_job(
+            &scheduler,
+            "not a cron",
+            "bad_cron_worker",
+            Arc::new(crate::store::Store::open(":memory:", 5000, 1).unwrap()),
+            None,
+            || async {},
+        )
+        .await;
         scheduler.start().await.expect("start");
         let _ = scheduler.shutdown().await;
     }
 
     #[tokio::test]
     async fn register_jobs_covers_all_enabled_branches() {
-        ensure_safe_secrets_in_env(); let cfg = Config::from_env();
+        ensure_safe_secrets_in_env();
+        let cfg = Config::from_env();
         let tmp = tempfile::tempdir().expect("tempdir");
         let store = Arc::new(
-            Store::open(
-                tmp.path().join("regjobs.db").to_str().unwrap(),
-                5000,
-                1,
-            )
-            .unwrap(),
+            Store::open(tmp.path().join("regjobs.db").to_str().unwrap(), 5000, 1).unwrap(),
         );
         let amas = Arc::new(AMASEngine::new(AMASConfig::default(), store.clone()));
         let (tx, _) = broadcast::channel(2);
@@ -1126,15 +1271,11 @@ mod tests {
 
     #[tokio::test]
     async fn register_jobs_no_update_checker_ctx_is_safe() {
-        ensure_safe_secrets_in_env(); let cfg = Config::from_env();
+        ensure_safe_secrets_in_env();
+        let cfg = Config::from_env();
         let tmp = tempfile::tempdir().expect("tempdir");
         let store = Arc::new(
-            Store::open(
-                tmp.path().join("regnoupd.db").to_str().unwrap(),
-                5000,
-                1,
-            )
-            .unwrap(),
+            Store::open(tmp.path().join("regnoupd.db").to_str().unwrap(), 5000, 1).unwrap(),
         );
         let amas = Arc::new(AMASEngine::new(AMASConfig::default(), store.clone()));
         let (tx, _) = broadcast::channel(2);

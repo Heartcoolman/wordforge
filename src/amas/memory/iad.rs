@@ -117,8 +117,16 @@ mod tests {
         };
         record_confusion(&mut state, "a", "b", 0.5, &cfg);
         // 旧 0.5 * 0.5 = 0.25，然后被增量 +0.2 = 0.45（clamped 1.0）
-        let a = state.confusion_pairs.iter().find(|(id, _)| id == "a").unwrap();
-        let b = state.confusion_pairs.iter().find(|(id, _)| id == "b").unwrap();
+        let a = state
+            .confusion_pairs
+            .iter()
+            .find(|(id, _)| id == "a")
+            .unwrap();
+        let b = state
+            .confusion_pairs
+            .iter()
+            .find(|(id, _)| id == "b")
+            .unwrap();
         assert!((a.1 - 0.45).abs() < 1e-9);
         assert!((b.1 - 0.45).abs() < 1e-9);
     }
@@ -131,7 +139,11 @@ mod tests {
             confusion_pairs: vec![("a".into(), 0.5)],
         };
         record_confusion(&mut state, "a", "b", 0.0, &cfg);
-        let a = state.confusion_pairs.iter().find(|(id, _)| id == "a").unwrap();
+        let a = state
+            .confusion_pairs
+            .iter()
+            .find(|(id, _)| id == "a")
+            .unwrap();
         assert!((a.1 - 1.0).abs() < 1e-9);
     }
 
@@ -140,11 +152,7 @@ mod tests {
         let mut cfg = cfg();
         cfg.max_confusion_pairs = 2;
         let mut state = IadState {
-            confusion_pairs: vec![
-                ("x".into(), 0.9),
-                ("y".into(), 0.8),
-                ("z".into(), 0.7),
-            ],
+            confusion_pairs: vec![("x".into(), 0.9), ("y".into(), 0.8), ("z".into(), 0.7)],
         };
         record_confusion(&mut state, "a", "b", 0.0, &cfg);
         assert_eq!(state.confusion_pairs.len(), 2);

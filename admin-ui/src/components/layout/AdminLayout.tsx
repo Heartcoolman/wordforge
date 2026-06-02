@@ -12,6 +12,7 @@ import { OnboardingTour } from '@/components/onboarding/OnboardingTour';
 import { useOnboarding } from '@/components/onboarding/useOnboarding';
 import { useIndicatorTrack } from '@/lib/motion';
 import { ClockDriftWarning } from '@/components/admin/ClockDriftWarning';
+import { NotificationBell } from '@/components/layout/NotificationBell';
 
 // Sidebar 宽度对齐 brand-spec：240 expanded / 64 collapsed
 const SIDEBAR_W_OPEN = 'md:w-60'; // 240px
@@ -289,6 +290,9 @@ export function AdminLayout(props: ParentProps) {
               <span>跳转</span>
               <Kbd size="sm">⌘K</Kbd>
             </button>
+
+            {/* 通知/告警收件箱（D1）—— 铃铛 + 未读角标 + 下拉面板 */}
+            <NotificationBell />
 
             {/* 新功能导览入口（随时重看） */}
             <button

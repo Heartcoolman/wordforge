@@ -54,9 +54,7 @@ impl LlmProvider {
     /// real LLM 实现已落地，启用 + 非 mock 时要求 api_key 非空。
     pub fn validate_config(config: &LLMConfig) {
         if config.enabled && !config.mock && config.api_key.is_empty() {
-            tracing::warn!(
-                "LLM enabled=true mock=false 但 LLM_API_KEY 为空；请求将失败"
-            );
+            tracing::warn!("LLM enabled=true mock=false 但 LLM_API_KEY 为空；请求将失败");
         }
     }
 
@@ -95,7 +93,10 @@ impl LlmProvider {
             };
             return Ok(ChatResponse {
                 content: body.to_string(),
-                usage: ChatUsage { total_tokens: usage.prompt_tokens + usage.completion_tokens, ..usage },
+                usage: ChatUsage {
+                    total_tokens: usage.prompt_tokens + usage.completion_tokens,
+                    ..usage
+                },
                 model: format!("{}-mock", self.config.model),
             });
         }
@@ -107,7 +108,10 @@ impl LlmProvider {
             });
         }
 
-        let url = format!("{}/v1/chat/completions", self.config.api_url.trim_end_matches('/'));
+        let url = format!(
+            "{}/v1/chat/completions",
+            self.config.api_url.trim_end_matches('/')
+        );
         let body = serde_json::json!({
             "model": self.config.model,
             "messages": req.messages,
@@ -131,7 +135,10 @@ impl LlmProvider {
             })?;
 
         let status = resp.status();
-        let text = resp.text().await.map_err(|e| LlmError::Network(e.to_string()))?;
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| LlmError::Network(e.to_string()))?;
         if !status.is_success() {
             return Err(LlmError::ApiError {
                 status: status.as_u16(),
@@ -140,8 +147,12 @@ impl LlmProvider {
         }
 
         // OpenAI 兼容响应：choices[0].message.content + usage
-        let parsed: serde_json::Value =
-            serde_json::from_str(&text).map_err(|e| LlmError::Network(format!("parse: {e}; body: {}", &text[..text.len().min(200)])))?;
+        let parsed: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
+            LlmError::Network(format!(
+                "parse: {e}; body: {}",
+                &text[..text.len().min(200)]
+            ))
+        })?;
         let content = parsed
             .get("choices")
             .and_then(|c| c.get(0))
@@ -222,7 +233,10 @@ mod tests {
         let provider = LlmProvider::new(&cfg(true, true));
         let r = provider
             .chat(ChatRequest {
-                messages: vec![ChatMessage { role: "user".into(), content: "hi".into() }],
+                messages: vec![ChatMessage {
+                    role: "user".into(),
+                    content: "hi".into(),
+                }],
                 json_object: false,
                 temperature: 0.0,
             })

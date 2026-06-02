@@ -518,6 +518,13 @@ CREATE TABLE IF NOT EXISTS system_settings (
     amas_grayscale_steps TEXT NOT NULL DEFAULT '20,60,100',
     -- m031:数据探针看板全局默认采样率([0,1]),作用于 telemetry_events 落库决策
     telemetry_sample_rate REAL NOT NULL DEFAULT 1.0,
+    -- m040:canary 自动回滚两阈值(E3),运行时可配,默认 0.05
+    canary_reward_drop_threshold REAL NOT NULL DEFAULT 0.05,
+    canary_anomaly_rise_threshold REAL NOT NULL DEFAULT 0.05,
+    -- m043:客户端最低版本门控(D4)。min_client_version 优先于 env MIN_CLIENT_VERSION;
+    -- version_gate_enabled=1 时 strict-mode 即便整体关闭也按版本拒绝旧客户端(发布切流)
+    min_client_version TEXT DEFAULT NULL,
+    version_gate_enabled INTEGER NOT NULL DEFAULT 0 CHECK (version_gate_enabled IN (0, 1)),
     PRIMARY KEY (singleton_id)
 );
 
@@ -603,6 +610,9 @@ CREATE TABLE IF NOT EXISTS system_alerts (
     count INTEGER NOT NULL DEFAULT 1,
     first_seen_at TEXT NOT NULL,
     last_seen_at TEXT NOT NULL,
+    -- m041:admin 收件箱已读/确认态(D1)。基线 DDL 镜像 ALTER 列，与 m038/m040/m043 同约定。
+    read_at TEXT DEFAULT NULL,
+    acked_by TEXT DEFAULT NULL,
     PRIMARY KEY (id),
     UNIQUE (source, kind)
 );

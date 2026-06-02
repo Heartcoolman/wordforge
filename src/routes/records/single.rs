@@ -18,8 +18,7 @@ use crate::store::operations::records::{LearningRecord, RecordType};
 use crate::store::operations::word_states::{WordLearningState, WordState};
 
 pub fn router() -> Router<AppState> {
-    Router::new()
-        .route("/", get(list_records).post(create_record))
+    Router::new().route("/", get(list_records).post(create_record))
 }
 
 #[derive(Debug, Deserialize)]
@@ -60,7 +59,7 @@ async fn list_records(
     Ok(paginated(records, total, page, per_page))
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CreateRecordRequest {
     pub(crate) client_record_id: Option<String>,
@@ -237,7 +236,17 @@ pub(crate) fn restore_engine_algo_state(
     }
 }
 
-async fn process_single_record(
+/// S2-1：outbox 异步路径的事件载荷。异步模式下 handler 把整条创建请求持久化到 outbox，
+/// outbox_processor worker 反序列化后调用 [`process_single_record`] 走与同步路径完全一致的
+/// 处理逻辑（含 best-effort rollback），零逻辑分叉。`created_at` 固化客户端提交时刻。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub(crate) struct OutboxRecordPayload {
+    pub(crate) user_id: String,
+    pub(crate) created_at: DateTime<Utc>,
+    pub(crate) request: CreateRecordRequest,
+}
+
+pub(crate) async fn process_single_record(
     user_id: &str,
     req: &CreateRecordRequest,
     state: &AppState,
@@ -435,6 +444,47 @@ async fn create_record(
     State(state): State<AppState>,
     JsonBody(req): JsonBody<CreateRecordRequest>,
 ) -> Result<axum::response::Response, AppError> {
+    // S2-1：opt-in 异步路径（RECORDS_OUTBOX_ASYNC=true）。把创建请求持久化到 outbox 并立即
+    // 202 返回，AMAS 处理交 outbox_processor 异步消费；默认 false 走下方同步老路不变。
+    // 注意：异步模式响应不含 amas_result（客户端拿不到即时 mastery/复习结果），切换前须与学习端协同。
+    // 范围：当前异步路径仅覆盖单条上报；批量 /records/batch 仍恒走同步路径（异步化待后续）。
+    // 已知限制(RFC R06)：进程在 AMAS 已持久化、记录未落库之间崩溃时，重启重放会二次累加 AMAS 状态
+    //（outbox 保证不丢事件，但未保证不重复）；单事务原子化属后续 cutover，启用本开关前须评估。
+    if state.config().records_outbox_async {
+        let mut req = req.clone();
+        // 确保 client_record_id 存在：worker 重试时凭它幂等去重，避免重复落库。
+        if req
+            .client_record_id
+            .as_deref()
+            .map(|s| s.trim().is_empty())
+            .unwrap_or(true)
+        {
+            req.client_record_id = Some(uuid::Uuid::new_v4().to_string());
+        }
+        let client_record_id = req.client_record_id.clone();
+        let payload = OutboxRecordPayload {
+            user_id: auth.user_id.clone(),
+            created_at: Utc::now(),
+            request: req,
+        };
+        let json =
+            serde_json::to_string(&payload).map_err(|e| AppError::internal(&e.to_string()))?;
+        state
+            .run_store_task("records.outbox.enqueue", move |store| {
+                store.enqueue_outbox_event("record_created", &json)
+            })
+            .await??;
+        return Ok((
+            axum::http::StatusCode::ACCEPTED,
+            axum::Json(serde_json::json!({
+                "accepted": true,
+                "async": true,
+                "clientRecordId": client_record_id,
+            })),
+        )
+            .into_response());
+    }
+
     // m037 软拦截:处理失败时告警 admin(单条失败客户端已收错误响应,不重复发 user 通知),
     // 仍返回原错误不吞。
     let result = match process_single_record(&auth.user_id, &req, &state).await {

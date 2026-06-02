@@ -20,6 +20,10 @@ pub struct SystemAlert {
     pub count: i64,
     pub first_seen_at: String,
     pub last_seen_at: String,
+    /// m041:admin 收件箱已读时间(NULL=未读)。
+    pub read_at: Option<String>,
+    /// m041:确认该告警的 admin id。
+    pub acked_by: Option<String>,
 }
 
 impl Store {
@@ -46,7 +50,10 @@ impl Store {
                 severity = ?4,
                 title = ?5,
                 message = ?6,
-                last_seen_at = ?7",
+                last_seen_at = ?7,
+                -- m041:同源同类告警再次发生 → 重置已读态,重新进入未读收件箱
+                read_at = NULL,
+                acked_by = NULL",
             params![id, source, kind, severity, title, message, now],
         )?;
         Ok(())
@@ -59,28 +66,87 @@ impl Store {
     ) -> Result<Vec<SystemAlert>, StoreError> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT id, source, kind, severity, title, message, count, first_seen_at, last_seen_at
+            "SELECT id, source, kind, severity, title, message, count,
+                    first_seen_at, last_seen_at, read_at, acked_by
              FROM system_alerts
              WHERE last_seen_at >= ?1
              ORDER BY last_seen_at DESC",
         )?;
         let rows = stmt
-            .query_map(params![since_rfc3339], |r| {
-                Ok(SystemAlert {
-                    id: r.get(0)?,
-                    source: r.get(1)?,
-                    kind: r.get(2)?,
-                    severity: r.get(3)?,
-                    title: r.get(4)?,
-                    message: r.get(5)?,
-                    count: r.get(6)?,
-                    first_seen_at: r.get(7)?,
-                    last_seen_at: r.get(8)?,
-                })
-            })?
+            .query_map(params![since_rfc3339], row_to_alert)?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
+
+    /// m041:admin 收件箱列表(最新在前)。`unread_only` 时仅返回 read_at IS NULL。
+    /// `limit` 限制条数(收件箱无需分页,取最近 N 条)。
+    pub fn list_admin_alerts(
+        &self,
+        unread_only: bool,
+        limit: i64,
+    ) -> Result<Vec<SystemAlert>, StoreError> {
+        let conn = self.conn()?;
+        let sql = if unread_only {
+            "SELECT id, source, kind, severity, title, message, count,
+                    first_seen_at, last_seen_at, read_at, acked_by
+             FROM system_alerts
+             WHERE read_at IS NULL
+             ORDER BY last_seen_at DESC
+             LIMIT ?1"
+        } else {
+            "SELECT id, source, kind, severity, title, message, count,
+                    first_seen_at, last_seen_at, read_at, acked_by
+             FROM system_alerts
+             ORDER BY last_seen_at DESC
+             LIMIT ?1"
+        };
+        let mut stmt = conn.prepare(sql)?;
+        let rows = stmt
+            .query_map(params![limit], row_to_alert)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// m041:admin 收件箱未读计数(read_at IS NULL)。
+    pub fn count_unread_system_alerts(&self) -> Result<i64, StoreError> {
+        let conn = self.conn()?;
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM system_alerts WHERE read_at IS NULL",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(n)
+    }
+
+    /// m041:标记单条告警已读(幂等,首次置 read_at + acked_by)。返回是否命中存量行。
+    pub fn mark_system_alert_read(&self, id: &str, admin_id: &str) -> Result<bool, StoreError> {
+        let conn = self.conn()?;
+        let now = chrono::Utc::now().to_rfc3339();
+        let n = conn.execute(
+            "UPDATE system_alerts
+             SET read_at = COALESCE(read_at, ?2), acked_by = COALESCE(acked_by, ?3)
+             WHERE id = ?1",
+            params![id, now, admin_id],
+        )?;
+        Ok(n > 0)
+    }
+}
+
+/// 行 → SystemAlert 映射(供 list_recent / list_admin 复用,列序须一致)。
+fn row_to_alert(r: &rusqlite::Row) -> rusqlite::Result<SystemAlert> {
+    Ok(SystemAlert {
+        id: r.get(0)?,
+        source: r.get(1)?,
+        kind: r.get(2)?,
+        severity: r.get(3)?,
+        title: r.get(4)?,
+        message: r.get(5)?,
+        count: r.get(6)?,
+        first_seen_at: r.get(7)?,
+        last_seen_at: r.get(8)?,
+        read_at: r.get(9)?,
+        acked_by: r.get(10)?,
+    })
 }
 
 #[cfg(test)]
@@ -97,17 +163,37 @@ mod tests {
     fn record_dedups_by_source_kind_and_counts() {
         let store = test_store();
         store
-            .record_system_alert("amas.metrics_flush", "persist_failed", "error", "落库失败", "msg1")
+            .record_system_alert(
+                "amas.metrics_flush",
+                "persist_failed",
+                "error",
+                "落库失败",
+                "msg1",
+            )
             .unwrap();
         store
-            .record_system_alert("amas.metrics_flush", "persist_failed", "error", "落库失败", "msg2")
+            .record_system_alert(
+                "amas.metrics_flush",
+                "persist_failed",
+                "error",
+                "落库失败",
+                "msg2",
+            )
             .unwrap();
         // 不同 kind 不合并
         store
-            .record_system_alert("amas.metrics_flush", "other_failed", "warning", "其他", "msg3")
+            .record_system_alert(
+                "amas.metrics_flush",
+                "other_failed",
+                "warning",
+                "其他",
+                "msg3",
+            )
             .unwrap();
 
-        let all = store.list_recent_system_alerts("2000-01-01T00:00:00+00:00").unwrap();
+        let all = store
+            .list_recent_system_alerts("2000-01-01T00:00:00+00:00")
+            .unwrap();
         assert_eq!(all.len(), 2);
         let persist = all
             .iter()
@@ -124,7 +210,60 @@ mod tests {
             .record_system_alert("s", "k", "error", "t", "m")
             .unwrap();
         // since 在未来 → 无结果
-        let future = store.list_recent_system_alerts("2999-01-01T00:00:00+00:00").unwrap();
+        let future = store
+            .list_recent_system_alerts("2999-01-01T00:00:00+00:00")
+            .unwrap();
         assert!(future.is_empty());
+    }
+
+    #[test]
+    fn admin_inbox_read_and_unread_count() {
+        let store = test_store();
+        store
+            .record_system_alert("s1", "k1", "error", "t1", "m1")
+            .unwrap();
+        store
+            .record_system_alert("s2", "k2", "warning", "t2", "m2")
+            .unwrap();
+
+        // 初始两条全未读
+        assert_eq!(store.count_unread_system_alerts().unwrap(), 2);
+        let unread = store.list_admin_alerts(true, 50).unwrap();
+        assert_eq!(unread.len(), 2);
+
+        // 标记其一已读
+        let id = unread[0].id.clone();
+        assert!(store.mark_system_alert_read(&id, "admin-x").unwrap());
+        assert_eq!(store.count_unread_system_alerts().unwrap(), 1);
+        // unread 过滤后只剩一条
+        assert_eq!(store.list_admin_alerts(true, 50).unwrap().len(), 1);
+        // 全量仍两条,且已读条带 read_at/acked_by
+        let all = store.list_admin_alerts(false, 50).unwrap();
+        assert_eq!(all.len(), 2);
+        let read_row = all.iter().find(|a| a.id == id).unwrap();
+        assert!(read_row.read_at.is_some());
+        assert_eq!(read_row.acked_by.as_deref(), Some("admin-x"));
+    }
+
+    #[test]
+    fn recurring_alert_resets_read_state() {
+        let store = test_store();
+        store
+            .record_system_alert("s", "k", "error", "t", "m1")
+            .unwrap();
+        let id = store.list_admin_alerts(false, 1).unwrap()[0].id.clone();
+        store.mark_system_alert_read(&id, "admin-x").unwrap();
+        assert_eq!(store.count_unread_system_alerts().unwrap(), 0);
+        // 同源同类再次发生 → 重置为未读
+        store
+            .record_system_alert("s", "k", "error", "t", "m2")
+            .unwrap();
+        assert_eq!(store.count_unread_system_alerts().unwrap(), 1);
+    }
+
+    #[test]
+    fn mark_read_missing_id_returns_false() {
+        let store = test_store();
+        assert!(!store.mark_system_alert_read("nope", "admin-x").unwrap());
     }
 }

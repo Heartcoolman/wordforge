@@ -47,10 +47,7 @@ pub fn admin_router() -> Router<AppState> {
         // 修改摘要"影响"列:逐字段计算的估算影响(替代静态敏感度文案)
         .route("/config/diff-impact", post(diff_impact))
         .route("/config/canary", get(get_canary).put(set_canary))
-        .route(
-            "/config/canary/disable",
-            post(disable_canary),
-        )
+        .route("/config/canary/disable", post(disable_canary))
         .route("/metrics", get(get_metrics))
         .route("/metrics/timeseries", get(metrics_timeseries))
         .route("/metrics/kpi", get(metrics_kpi))
@@ -90,10 +87,7 @@ pub fn admin_router() -> Router<AppState> {
         .route("/suggestions/:id/approve", post(approve_suggestion))
         .route("/suggestions/:id/reject", post(reject_suggestion))
         // 沙箱试运行：基于 telemetry baseline 回放预估 patch 影响（不落库、不改 live config）
-        .route(
-            "/advisor/suggestions/:id/sandbox",
-            post(sandbox_suggestion),
-        )
+        .route("/advisor/suggestions/:id/sandbox", post(sandbox_suggestion))
         // C5: 建议回滚（版本链 restore parent）
         .route("/suggestions/:id/rollback", post(rollback_suggestion))
         // C1: advisor 成本/统计
@@ -108,7 +102,10 @@ pub fn admin_router() -> Router<AppState> {
             get(get_advisor_config).put(update_advisor_config),
         )
         // C4: 调参白名单 CRUD
-        .route("/advisor/whitelist", get(list_whitelist).post(add_whitelist))
+        .route(
+            "/advisor/whitelist",
+            get(list_whitelist).post(add_whitelist),
+        )
         .route(
             "/advisor/whitelist/:path",
             axum::routing::delete(delete_whitelist),
@@ -134,11 +131,9 @@ async fn parse_toml(
     _admin: AdminAuthUser,
     JsonBody(req): JsonBody<ParseTomlRequest>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let cfg: crate::amas::config::AMASConfig = toml::from_str(&req.toml).map_err(|e| {
-        AppError::bad_request("TOML_PARSE_ERROR", &format!("TOML 解析失败:{e}"))
-    })?;
-    let value =
-        serde_json::to_value(&cfg).map_err(|e| AppError::internal(&e.to_string()))?;
+    let cfg: crate::amas::config::AMASConfig = toml::from_str(&req.toml)
+        .map_err(|e| AppError::bad_request("TOML_PARSE_ERROR", &format!("TOML 解析失败:{e}")))?;
+    let value = serde_json::to_value(&cfg).map_err(|e| AppError::internal(&e.to_string()))?;
     Ok(ok(value))
 }
 
@@ -276,7 +271,9 @@ async fn get_canary(
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     let current = state
-        .run_store_task("admin.amas.canary.get", |store| store.get_active_amas_canary())
+        .run_store_task("admin.amas.canary.get", |store| {
+            store.get_active_amas_canary()
+        })
         .await??;
     Ok(ok(serde_json::json!({ "canary": current })))
 }
@@ -598,11 +595,7 @@ async fn metrics_kpi(
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     let days = q.days.unwrap_or(7).clamp(1, 90);
     // 疲劳触发阈值取实际生效配置（与 apply_constraints 同源），store 层无配置访问故在此读出传入。
-    let fatigue_threshold = state
-        .amas()
-        .get_config()
-        .constraints
-        .high_fatigue_threshold;
+    let fatigue_threshold = state.amas().get_config().constraints.high_fatigue_threshold;
     let kpi = state
         .run_store_task("admin.amas.metrics_kpi", move |store| {
             store.aggregate_amas_metrics_kpi(days, fatigue_threshold)
@@ -746,11 +739,7 @@ async fn metrics_fatigue_timeseries(
     Query(q): Query<DaysQuery>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     let days = q.days.unwrap_or(7).clamp(1, 90);
-    let threshold = state
-        .amas()
-        .get_config()
-        .constraints
-        .high_fatigue_threshold;
+    let threshold = state.amas().get_config().constraints.high_fatigue_threshold;
     let ts = state
         .run_store_task("admin.amas.fatigue_timeseries", move |store| {
             store.aggregate_amas_fatigue_timeseries(days, threshold)
@@ -837,11 +826,7 @@ async fn compare_versions_ext(
     State(state): State<AppState>,
     Query(q): Query<CompareQuery>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let fatigue_threshold = state
-        .amas()
-        .get_config()
-        .constraints
-        .high_fatigue_threshold;
+    let fatigue_threshold = state.amas().get_config().constraints.high_fatigue_threshold;
     // live config 的 epsilon 仅作版本无快照时的回退；config_epsilon 由 store 层按各版本 snapshot 解析。
     let fallback_epsilon = state
         .amas()
@@ -854,8 +839,16 @@ async fn compare_versions_ext(
         .run_store_task(
             "admin.amas.compare_ext",
             move |store| -> Result<_, crate::store::StoreError> {
-                let a = store.aggregate_amas_version_slice_ext(&va, fatigue_threshold, fallback_epsilon)?;
-                let b = store.aggregate_amas_version_slice_ext(&vb, fatigue_threshold, fallback_epsilon)?;
+                let a = store.aggregate_amas_version_slice_ext(
+                    &va,
+                    fatigue_threshold,
+                    fallback_epsilon,
+                )?;
+                let b = store.aggregate_amas_version_slice_ext(
+                    &vb,
+                    fatigue_threshold,
+                    fallback_epsilon,
+                )?;
                 Ok((a, b))
             },
         )
@@ -942,8 +935,9 @@ async fn export_suggestions_csv(
         })
         .await??;
 
-    let mut out =
-        String::from("id,created_at,based_on_version_hash,patch,rationale,cost_usd,status,decided_by\n");
+    let mut out = String::from(
+        "id,created_at,based_on_version_hash,patch,rationale,cost_usd,status,decided_by\n",
+    );
     for r in &rows {
         let patch = serde_json::to_string(&r.patch_json).unwrap_or_default();
         let cost = r.cost_usd.map(|c| c.to_string()).unwrap_or_default();
@@ -1012,7 +1006,10 @@ pub(crate) async fn approve_one(
         .ok_or_else(|| AppError::not_found("建议不存在"))?;
 
     if !matches!(suggestion.status, SuggestionStatus::Pending) {
-        return Err(AppError::bad_request("BAD_STATUS", "仅 pending 建议可被批准"));
+        return Err(AppError::bad_request(
+            "BAD_STATUS",
+            "仅 pending 建议可被批准",
+        ));
     }
 
     // 校验 patch（防止数据库篡改）—— 白名单从 store 读
@@ -2087,7 +2084,12 @@ async fn diff_impact(
         .await??;
     let sample = diff_impact_kpi_f64(
         &kpi,
-        &["decisionTotal", "decision_total", "sampleSize", "totalEvents"],
+        &[
+            "decisionTotal",
+            "decision_total",
+            "sampleSize",
+            "totalEvents",
+        ],
     )
     .map(|v| v as i64)
     .unwrap_or(0);
@@ -2103,7 +2105,8 @@ async fn diff_impact(
     let mut fields = Vec::with_capacity(req.patch.len());
     let mut in_wl_count = 0usize;
     for (path, to_val) in &req.patch {
-        let from_val = diff_impact_read_path(&current_value, path).unwrap_or(serde_json::Value::Null);
+        let from_val =
+            diff_impact_read_path(&current_value, path).unwrap_or(serde_json::Value::Null);
         let rel_change = match (from_val.as_f64(), to_val.as_f64()) {
             (Some(f), Some(t)) if f.abs() > 1e-9 => Some((t - f) / f.abs()),
             _ => None,
@@ -2254,9 +2257,10 @@ async fn sandbox_suggestion(
     let patch_for_validate = patch_obj.clone();
     let whitelist_errors = state
         .run_store_task("admin.amas.sandbox_whitelist", move |store| {
-            Ok::<_, crate::store::StoreError>(
-                crate::amas::tuning_whitelist::validate_patch(&store, &patch_for_validate),
-            )
+            Ok::<_, crate::store::StoreError>(crate::amas::tuning_whitelist::validate_patch(
+                &store,
+                &patch_for_validate,
+            ))
         })
         .await??;
     let whitelist_ok = whitelist_errors.is_empty();
@@ -2426,7 +2430,10 @@ async fn create_canary(
         .await??
         .ok_or_else(|| AppError::not_found("建议不存在"))?;
     if !matches!(suggestion.status, SuggestionStatus::Pending) {
-        return Err(AppError::bad_request("BAD_STATUS", "仅 pending 建议可进灰度"));
+        return Err(AppError::bad_request(
+            "BAD_STATUS",
+            "仅 pending 建议可进灰度",
+        ));
     }
 
     // baseline:当前 stable version 的切片(灰度起点)
@@ -2465,7 +2472,9 @@ async fn create_canary(
 
     // 分配下一个空闲 cohort 槽，支持多条并行 canary 占不重叠区间（[0,a)、[a,a+b)…）。
     let active = state
-        .run_store_task("admin.amas.canary.active", |store| store.get_active_patch_canaries())
+        .run_store_task("admin.amas.canary.active", |store| {
+            store.get_active_patch_canaries()
+        })
         .await??;
     let cohort_lo: u32 = active.iter().map(|c| c.cohort_hi).max().unwrap_or(0);
     let cohort_hi = cohort_lo + percent;
@@ -2485,7 +2494,14 @@ async fn create_canary(
                 Some(&format!("canary suggestion#{sid}")),
                 Some(&parent_hash),
             )?;
-            let id = store.insert_patch_canary(sid, &vhash, percent, cohort_lo, cohort_hi, &baseline_json)?;
+            let id = store.insert_patch_canary(
+                sid,
+                &vhash,
+                percent,
+                cohort_lo,
+                cohort_hi,
+                &baseline_json,
+            )?;
             store.get_patch_canary(id)
         })
         .await??
@@ -2596,7 +2612,10 @@ async fn promote_canary(
         .await??
         .ok_or_else(|| AppError::not_found("canary 不存在"))?;
     if canary.status != "active" {
-        return Err(AppError::bad_request("BAD_STATUS", "仅 active canary 可提升"));
+        return Err(AppError::bad_request(
+            "BAD_STATUS",
+            "仅 active canary 可提升",
+        ));
     }
     if canary.percent != 100 {
         return Err(AppError::bad_request(
@@ -2628,5 +2647,7 @@ async fn promote_canary(
             store.set_patch_canary_status(id, "effective")
         })
         .await??;
-    Ok(ok(serde_json::json!({ "promoted": true, "versionHash": vhash })))
+    Ok(ok(
+        serde_json::json!({ "promoted": true, "versionHash": vhash }),
+    ))
 }

@@ -86,6 +86,19 @@ v1.1 采用 **beta 单通道**滚动发布：原计划的 rc.1/rc.2/rc.3 工作�
 
 **后端 API 兼容要求**：wordforge-web 依赖 `/api/*` v1 stable 端点，升级后端前请确认 release notes 无 Breaking 变更。
 
+#### ⚠️ 待协同：遥测 `device.model` 上报（v1.1.3 · T1）
+
+> 登记日期：2026-06-02
+
+后端自 **v1.1.2-beta.4（迁移 m038）** 起，`POST /api/telemetry` 对设备四要素（平台 / 版本 header + `device.timezone` / `device.model` payload）做**上线即生效、不受 strict-mode 开关控制**的硬校验，缺任一即返回 4xx；其中 **`device.model` 为新增必填**，缺失直接 `400 MISSING_DEVICE_MODEL`。生产环境已是 beta.4，**wordforge-web 若未上报 `device.model` 其遥测会被静默拦截（断流）**。
+
+协同项：
+
+- **wordforge-web 需在遥测上报体 `payload.device` 中补 `model` 字段**（Web 端无真型号，可落 `browser on OS` 派生标识或 `web-admin` 占位，确保非空）；同时确认已携带 `x-device-platform` / `x-app-version` header 及 `device.timezone`。
+- **约定最低后端版本**：含 m038 硬校验的最低后端版本为 **v1.1.2-beta.4**（及其后 GA v1.1.2 / v1.1.3）。wordforge-web 补齐上报后即可兼容该区间；旧后端（< beta.4）对这些字段宽容，向后兼容无碍。
+- 契约细节见 `docs/api-spec.md` §11「遥测载体契约」。
+- 本仓 admin-ui 自身遥测已于 v1.1.3 修复（`admin-ui/src/lib/device.ts` 补 `model`），跨仓侧待 wordforge-web 维护者排期落地后再标记完成。
+
 ---
 
 ## iOS 客户端
@@ -113,4 +126,4 @@ v1.1 采用 **beta 单通道**滚动发布：原计划的 rc.1/rc.2/rc.3 工作�
 
 ---
 
-_本页最后更新：2026-05-23_
+_本页最后更新：2026-06-02_

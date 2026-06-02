@@ -157,9 +157,7 @@ async fn it_admin_auth_status_then_setup_then_login() {
 #[tokio::test]
 async fn it_admin_auth_unauthorized_paths() {
     let app = spawn_test_server().await;
-    for path in [
-        "/api/admin/auth/verify",
-    ] {
+    for path in ["/api/admin/auth/verify"] {
         let resp = request(&app.app, Method::GET, path, None, &[]).await;
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "path {path}");
     }
@@ -304,7 +302,10 @@ async fn it_admin_clients_list_empty() {
     let (status, _, body) = response_json(resp).await;
     assert_eq!(status, StatusCode::OK);
     assert!(body["data"]["sseLive"].as_array().unwrap().is_empty());
-    assert!(body["data"]["recentlyActive"].as_array().unwrap().is_empty());
+    assert!(body["data"]["recentlyActive"]
+        .as_array()
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]
@@ -556,6 +557,82 @@ async fn it_admin_settings_validation_paths() {
     assert_eq!(body["data"]["maxUsers"], 5000);
 }
 
+// D4:客户端最低版本门控运行时端点
+#[tokio::test]
+async fn it_admin_version_gate_read_write() {
+    let app = spawn_test_server().await;
+    let admin_token = setup_admin_and_get_token(&app.app).await;
+
+    // 初始:门控关闭、无阈值
+    let resp = request(
+        &app.app,
+        Method::GET,
+        "/api/admin/settings/version-gate",
+        None,
+        &[("authorization", auth_header(&admin_token))],
+    )
+    .await;
+    let (status, _, body) = response_json(resp).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["enabled"], false);
+
+    // 非法 semver -> 400
+    let resp = request(
+        &app.app,
+        Method::PUT,
+        "/api/admin/settings/version-gate",
+        Some(serde_json::json!({"enabled": true, "minClientVersion": "1.2"})),
+        &[("authorization", auth_header(&admin_token))],
+    )
+    .await;
+    let (status, _, body) = response_json(resp).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["code"], "INVALID_MIN_CLIENT_VERSION");
+
+    // happy:开门控 + 设阈值
+    let resp = request(
+        &app.app,
+        Method::PUT,
+        "/api/admin/settings/version-gate",
+        Some(serde_json::json!({"enabled": true, "minClientVersion": "2.0.0"})),
+        &[("authorization", auth_header(&admin_token))],
+    )
+    .await;
+    let (status, _, body) = response_json(resp).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["enabled"], true);
+    assert_eq!(body["data"]["minClientVersion"], "2.0.0");
+    assert_eq!(body["data"]["effectiveMinClientVersion"], "2.0.0");
+
+    // readback via GET
+    let resp = request(
+        &app.app,
+        Method::GET,
+        "/api/admin/settings/version-gate",
+        None,
+        &[("authorization", auth_header(&admin_token))],
+    )
+    .await;
+    let (status, _, body) = response_json(resp).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["enabled"], true);
+    assert_eq!(body["data"]["minClientVersion"], "2.0.0");
+
+    // 清空阈值(空串归一为 null)+ 关门控
+    let resp = request(
+        &app.app,
+        Method::PUT,
+        "/api/admin/settings/version-gate",
+        Some(serde_json::json!({"enabled": false, "minClientVersion": ""})),
+        &[("authorization", auth_header(&admin_token))],
+    )
+    .await;
+    let (status, _, body) = response_json(resp).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["enabled"], false);
+    assert!(body["data"]["minClientVersion"].is_null());
+}
+
 #[tokio::test]
 async fn it_admin_settings_reload_amas_with_invalid_config() {
     let app = spawn_test_server().await;
@@ -634,7 +711,14 @@ async fn it_admin_updates_disabled_returns_503() {
 #[tokio::test]
 async fn it_admin_updates_unauthorized() {
     let app = spawn_test_server().await;
-    let resp = request(&app.app, Method::GET, "/api/admin/updates/status", None, &[]).await;
+    let resp = request(
+        &app.app,
+        Method::GET,
+        "/api/admin/updates/status",
+        None,
+        &[],
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
@@ -648,18 +732,39 @@ async fn it_admin_analytics_engagement_and_metrics() {
     for (path, code) in [
         ("/api/admin/analytics/engagement", StatusCode::OK),
         ("/api/admin/analytics/learning", StatusCode::OK),
-        ("/api/admin/analytics/daily-active-users?days=7", StatusCode::OK),
+        (
+            "/api/admin/analytics/daily-active-users?days=7",
+            StatusCode::OK,
+        ),
         ("/api/admin/analytics/daily-records?days=7", StatusCode::OK),
         ("/api/admin/analytics/study-overview?days=7", StatusCode::OK),
-        ("/api/admin/analytics/study-overview?days=14&category=learning", StatusCode::OK),
-        ("/api/admin/analytics/study-overview?days=14&category=review", StatusCode::OK),
+        (
+            "/api/admin/analytics/study-overview?days=14&category=learning",
+            StatusCode::OK,
+        ),
+        (
+            "/api/admin/analytics/study-overview?days=14&category=review",
+            StatusCode::OK,
+        ),
         ("/api/admin/analytics/record-types?days=7", StatusCode::OK),
         ("/api/admin/analytics/word-states", StatusCode::OK),
-        ("/api/admin/analytics/word-states?category=all", StatusCode::OK),
-        ("/api/admin/analytics/word-states?category=learning", StatusCode::OK),
-        ("/api/admin/analytics/word-states?category=review", StatusCode::OK),
+        (
+            "/api/admin/analytics/word-states?category=all",
+            StatusCode::OK,
+        ),
+        (
+            "/api/admin/analytics/word-states?category=learning",
+            StatusCode::OK,
+        ),
+        (
+            "/api/admin/analytics/word-states?category=review",
+            StatusCode::OK,
+        ),
         ("/api/admin/analytics/retention-curve", StatusCode::OK),
-        ("/api/admin/analytics/retention-curve?category=learning", StatusCode::OK),
+        (
+            "/api/admin/analytics/retention-curve?category=learning",
+            StatusCode::OK,
+        ),
     ] {
         let resp = request(
             &app.app,
@@ -1002,10 +1107,7 @@ async fn it_admin_sensitive_actions_write_audit_log() {
 #[tokio::test]
 async fn it_admin_top_level_unauthorized() {
     let app = spawn_test_server().await;
-    for path in [
-        "/api/admin/stats",
-        "/api/admin/users",
-    ] {
+    for path in ["/api/admin/stats", "/api/admin/users"] {
         let resp = request(&app.app, Method::GET, path, None, &[]).await;
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "path {path}");
     }
@@ -1081,7 +1183,10 @@ async fn it_admin_feedback_patch_status_switch() {
     assert_eq!(status, axum::http::StatusCode::OK, "PATCH resolve: {body}");
     assert_eq!(body["status"], "resolved");
     assert_eq!(body["resolution"], "Fixed in v1.1");
-    assert!(body["resolvedAt"].is_string(), "resolvedAt 应在 resolved 时被写入");
+    assert!(
+        body["resolvedAt"].is_string(),
+        "resolvedAt 应在 resolved 时被写入"
+    );
 
     // 状态过滤：resolved 应可查到
     let resp = request(
@@ -1522,7 +1627,10 @@ async fn it_admin_feedback_github_issue_not_configured_409() {
 
     // 测试环境未配置 GITHUB_TOKEN / FEEDBACK_GITHUB_REPO → 409
     // 注：仅当 env 未设置时成立；CI/本地若设了相应 env 本断言不适用。
-    if std::env::var("GITHUB_TOKEN").ok().filter(|s| !s.is_empty()).is_some()
+    if std::env::var("GITHUB_TOKEN")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .is_some()
         && std::env::var("FEEDBACK_GITHUB_REPO")
             .ok()
             .filter(|s| !s.is_empty())
