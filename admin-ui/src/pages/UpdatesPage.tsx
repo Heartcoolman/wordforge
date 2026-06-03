@@ -677,39 +677,41 @@ export default function UpdatesPage() {
                     </Show>
                   </div>
                   <div class="upd-panel-body">
+                    {/* 完整更新日志：优先展示 release notes 富文本（覆盖全部变更，如 19 项 backlog），
+                        compare commits 派生列表仅在无 release notes 时作回退（如 stable→stable 同 body 缺失场景） */}
                     <Show
-                      when={changelog()?.available}
+                      when={upgradeTarget()?.releaseNotes}
                       fallback={
                         <Show
-                          when={upgradeTarget()?.releaseNotes}
+                          when={changelog()?.available}
                           fallback={<p class="text-small text-tertiary">暂无可比对的 CHANGELOG。</p>}
                         >
-                          <ReleaseNotesMarkdown content={upgradeTarget()!.releaseNotes} />
+                          <div class="changelog">
+                            <For each={CHANGELOG_GROUPS}>
+                              {(g) => {
+                                const items = () => (changelog()!.commits ?? []).filter((c) => c.category === g.key);
+                                return (
+                                  <Show when={items().length > 0}>
+                                    <h4>{g.title}</h4>
+                                    <ul>
+                                      <For each={items()}>
+                                        {(c) => (
+                                          <li class={g.key}>
+                                            <Show when={c.scope}><span class="scope">{c.scope}</span></Show>
+                                            {c.subject} <code>{c.sha}</code>
+                                          </li>
+                                        )}
+                                      </For>
+                                    </ul>
+                                  </Show>
+                                );
+                              }}
+                            </For>
+                          </div>
                         </Show>
                       }
                     >
-                      <div class="changelog">
-                        <For each={CHANGELOG_GROUPS}>
-                          {(g) => {
-                            const items = () => (changelog()!.commits ?? []).filter((c) => c.category === g.key);
-                            return (
-                              <Show when={items().length > 0}>
-                                <h4>{g.title}</h4>
-                                <ul>
-                                  <For each={items()}>
-                                    {(c) => (
-                                      <li class={g.key}>
-                                        <Show when={c.scope}><span class="scope">{c.scope}</span></Show>
-                                        {c.subject} <code>{c.sha}</code>
-                                      </li>
-                                    )}
-                                  </For>
-                                </ul>
-                              </Show>
-                            );
-                          }}
-                        </For>
-                      </div>
+                      <ReleaseNotesMarkdown content={upgradeTarget()!.releaseNotes} />
                     </Show>
                     <div class="upd-divider" />
                     <div class="upd-row-spread">

@@ -3,16 +3,18 @@ import { createSignal } from 'solid-js';
 const STORAGE_KEY = 'wf_admin_onboarding_wave';
 
 /**
- * 把 app 版本号映射为「大版本波次」标识。
- * 本波大版本(1.1.x ~ 1.2.x 的 admin 运维面重构)视为同一波 'v1.1-1.2'：
- * 同波内重复升级(含各 beta / patch)不重弹；升入 1.3+ 视为新波(按 major.minor)，重新弹一次。
- * 拿不到版本时返回 null，整套机制静默(不弹)。
+ * 把 app 版本号映射为「新功能导览波次」标识。
+ * - v1.1.3 起为独立波次 'v1.1.3'（本次运维闭环新功能：告警收件箱 / 设备推送调度 / 版本门控 / 事件 outbox）。
+ * - 1.1.0–1.1.2 + 1.2.x 仍属旧「admin 运维面重构」波 'v1.1-1.2'。
+ * 同波内重复升级(含各 beta / patch)不重弹；跨入下一波重新弹一次。拿不到版本返回 null(静默不弹)。
+ * 注：开新功能波时须同步改 waveOf + OnboardingTour STEPS + 本组件单测预置值。
  */
 export function waveOf(version: string | null | undefined): string | null {
   if (!version) return null;
-  const m = /^(\d+)\.(\d+)/.exec(version);
+  const m = /^(\d+)\.(\d+)\.(\d+)/.exec(version);
   if (!m) return null;
-  const major = +m[1], minor = +m[2];
+  const major = +m[1], minor = +m[2], patch = +m[3];
+  if (major === 1 && minor === 1 && patch >= 3) return 'v1.1.3';
   if (major === 1 && minor >= 1 && minor <= 2) return 'v1.1-1.2';
   return `${major}.${minor}`;
 }
