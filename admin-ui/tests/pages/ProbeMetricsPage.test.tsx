@@ -197,6 +197,33 @@ describe('ProbeMetricsPage', () => {
     await waitFor(() => expect(stream).toHaveBeenCalledTimes(2));
   });
 
+  it('刷新复用未变行 DOM 节点（不重建/不重放动画/不归零滚动）', async () => {
+    const { container } = await renderPage();
+    await waitFor(() => expect(stream).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(container.querySelector('[data-eid="e1"]')).not.toBeNull());
+
+    const e1Before = container.querySelector('[data-eid="e1"]');
+    const e2Before = container.querySelector('[data-eid="e2"]');
+    expect(e1Before).not.toBeNull();
+
+    // 下一帧：新事件 e0 入顶，e1/e2 仍在但都是全新对象引用（模拟真实 refetch）。
+    stream.mockResolvedValue({
+      events: [
+        { id: 'e0', ts: '2026-05-29T12:00:00Z', type: 'periodic', deviceId: 'dev_new0001', payloadPreview: '{"n":0}' },
+        { id: 'e1', ts: '2026-05-29T11:59:50Z', type: 'periodic', deviceId: 'dev_abcdef1234', payloadPreview: '{"x":1}' },
+        { id: 'e2', ts: '2026-05-29T11:59:40Z', type: 'word_answer', deviceId: 'dev_zzz', payloadPreview: '{"correct":true}' },
+      ],
+    });
+
+    vi.advanceTimersByTime(5000);
+    await waitFor(() => expect(stream).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(container.querySelector('[data-eid="e0"]')).not.toBeNull());
+
+    // 关键：按 id 复用引用 → <For> 保留同一 DOM 节点，刷新既不重建也不重放 ev-in、滚动不归零。
+    expect(container.querySelector('[data-eid="e1"]')).toBe(e1Before);
+    expect(container.querySelector('[data-eid="e2"]')).toBe(e2Before);
+  });
+
   it('schema empty state shows Empty when payload null', async () => {
     schema.mockResolvedValue({ eventType: 'periodic', sampledAt: null, payload: null });
     await renderPage();

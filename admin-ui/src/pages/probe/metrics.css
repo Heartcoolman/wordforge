@@ -238,6 +238,8 @@
   flex: 1;
   padding: 6px 0;
   font: 500 11.5px/1.4 var(--font-mono);
+  /* 锚定滚动由 JS 手动补偿（先量后改 scrollTop），关掉浏览器原生 anchoring 防 Chrome 双重补偿。 */
+  overflow-anchor: none;
 }
 .pb-event {
   padding: 6px 14px;
