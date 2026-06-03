@@ -30,7 +30,9 @@ pub fn router() -> Router<AppState> {
 }
 
 pub fn telemetry_router() -> Router<AppState> {
-    Router::new().route("/:device_id", get(get_telemetry))
+    Router::new()
+        .route("/:device_id", get(get_telemetry))
+        .route("/:device_id/summary", get(get_telemetry_summary))
 }
 
 #[derive(Serialize)]
@@ -653,6 +655,8 @@ async fn broadcast_upgrade_handler(
 struct TelemetryQuery {
     limit: Option<u32>,
     offset: Option<u32>,
+    /// 按 event_type 过滤(分类 chip 选中时传);缺省/空 = 全部。
+    event_type: Option<String>,
 }
 
 async fn get_telemetry(
@@ -663,6 +667,7 @@ async fn get_telemetry(
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     let limit = q.limit.unwrap_or(50).min(200);
     let offset = q.offset.unwrap_or(0);
+    let event_type = q.event_type.unwrap_or_default();
     let (records, total) = state
         .run_store_task(
             "admin.clients.get_telemetry",
@@ -671,7 +676,7 @@ async fn get_telemetry(
                     return Err(AppError::not_found("设备不存在"));
                 }
 
-                Ok(store.get_telemetry_summaries_by_device(&device_id, limit, offset)?)
+                Ok(store.get_telemetry_summaries_by_device(&device_id, &event_type, limit, offset)?)
             },
         )
         .await??;
@@ -679,6 +684,28 @@ async fn get_telemetry(
     Ok(ok(
         serde_json::json!({ "records": records, "total": total }),
     ))
+}
+
+/// 设备遥测分类总览:全量按 event_type 分组聚合 + 时间范围 + 设备画像。
+/// 计数走全量(不受分页影响),给"遥测记录"面板的分类 chip 与每类聚合行。
+async fn get_telemetry_summary(
+    _admin: AdminAuthUser,
+    Path(device_id): Path<String>,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let summary = state
+        .run_store_task(
+            "admin.clients.get_telemetry_summary",
+            move |store| -> Result<_, AppError> {
+                if !store.client_device_exists(&device_id)? {
+                    return Err(AppError::not_found("设备不存在"));
+                }
+                Ok(store.get_telemetry_device_summary(&device_id)?)
+            },
+        )
+        .await??;
+
+    Ok(ok(summary))
 }
 
 /// 单设备详情视图。脱敏:不暴露 last_ip / banned_by(审计字段),其余 client_devices
@@ -739,7 +766,7 @@ async fn get_client_detail(
                     .find(|d| d.device_id == device_id)
                     .ok_or_else(|| AppError::not_found("设备不存在"))?;
                 // telemetry 摘要:近 1 条 + 总数(复用 get_telemetry_summaries_by_device)。
-                let (records, total) = store.get_telemetry_summaries_by_device(&device_id, 1, 0)?;
+                let (records, total) = store.get_telemetry_summaries_by_device(&device_id, "", 1, 0)?;
                 let latest = serde_json::to_value(records)
                     .ok()
                     .and_then(|v| v.as_array().and_then(|a| a.first().cloned()));

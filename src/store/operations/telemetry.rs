@@ -67,6 +67,61 @@ pub struct TelemetrySummary {
     pub feature_usage: serde_json::Value,
 }
 
+/// 单个 event_type 的全量聚合(设备管理"遥测记录"面板分类 chip + 每类聚合行)。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TelemetryEventTypeStat {
+    pub event_type: String,
+    pub count: i64,
+    pub avg_duration_secs: f64,
+    pub total_errors: i64,
+    pub avg_actions_per_min: f64,
+    pub avg_response_ms: f64,
+}
+
+/// 名称→次数的聚合项(功能使用 / 访问页面 / 点击热点排行)。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NameCount {
+    pub name: String,
+    pub count: i64,
+}
+
+/// 设备遥测分类总览:全量计数 + 时间范围 + 按 event_type 分组聚合 + 恒定设备画像
+/// + "这台设备做了什么"操作概览(功能/页面/点击/累计,全量聚合)。
+/// 计数走全量(不受分页 limit 影响),保证面板概览与分类 chip 准确反映全部记录。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TelemetryDeviceSummary {
+    pub total: i64,
+    pub first_ts: Option<String>,
+    pub last_ts: Option<String>,
+    pub by_event_type: Vec<TelemetryEventTypeStat>,
+    /// 最近一条记录的设备画像(同设备恒定,面板顶部只显示一次)。
+    pub device_profile: Option<DeviceProfile>,
+    /// featureUsage 全量累加排行(用了哪些功能)。
+    pub feature_usage: Vec<NameCount>,
+    /// currentRoute 分组(去过哪些页面)。
+    pub routes: Vec<NameCount>,
+    /// clickTargets 按 label 聚合(点了什么的热点)。
+    pub click_targets: Vec<NameCount>,
+    pub total_clicks: i64,
+    pub total_errors: i64,
+    pub total_duration_secs: i64,
+    pub session_count: i64,
+}
+
+/// HashMap 聚合 → 按次数降序(同次数按名升序稳定)取 top N。
+fn top_name_counts(map: std::collections::HashMap<String, i64>, limit: usize) -> Vec<NameCount> {
+    let mut v: Vec<NameCount> = map
+        .into_iter()
+        .map(|(name, count)| NameCount { name, count })
+        .collect();
+    v.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.name.cmp(&b.name)));
+    v.truncate(limit);
+    v
+}
+
 pub struct TelemetrySummaryInput {
     pub cpu_cores: Option<i64>,
     pub memory_gb: Option<f64>,
@@ -185,17 +240,20 @@ impl Store {
         Ok(())
     }
 
+    /// `event_type` 传空串 = 不过滤(全部);非空则只取该类型。
     pub fn get_telemetry_summaries_by_device(
         &self,
         device_id: &str,
+        event_type: &str,
         limit: u32,
         offset: u32,
     ) -> Result<(Vec<TelemetrySummary>, u64), StoreError> {
         let conn = self.conn()?;
 
         let total: u64 = conn.query_row(
-            "SELECT COUNT(*) FROM telemetry_summaries WHERE device_id = ?1",
-            params![device_id],
+            "SELECT COUNT(*) FROM telemetry_summaries
+             WHERE device_id = ?1 AND (?2 = '' OR event_type = ?2)",
+            params![device_id, event_type],
             |r| r.get::<_, i64>(0).map(|v| v as u64),
         )?;
 
@@ -208,12 +266,12 @@ impl Store {
                     current_route, click_count, click_targets_json, scroll_depth_pct,
                     visibility_changes, route_changes, feature_usage_json
              FROM telemetry_summaries
-             WHERE device_id = ?1
+             WHERE device_id = ?1 AND (?2 = '' OR event_type = ?2)
              ORDER BY server_ts DESC
-             LIMIT ?2 OFFSET ?3",
+             LIMIT ?3 OFFSET ?4",
         )?;
 
-        let rows = stmt.query_map(params![device_id, limit, offset], |r| {
+        let rows = stmt.query_map(params![device_id, event_type, limit, offset], |r| {
             let click_targets: Option<serde_json::Value> = r
                 .get::<_, Option<String>>(23)?
                 .and_then(|s| serde_json::from_str(&s).ok());
@@ -266,6 +324,151 @@ impl Store {
             records.push(row?);
         }
         Ok((records, total))
+    }
+
+    /// 设备遥测分类总览:全量按 event_type 分组聚合 + 时间范围 + 最近一条设备画像。
+    pub fn get_telemetry_device_summary(
+        &self,
+        device_id: &str,
+    ) -> Result<TelemetryDeviceSummary, StoreError> {
+        let conn = self.conn()?;
+
+        let (total, first_ts, last_ts): (i64, Option<String>, Option<String>) = conn.query_row(
+            "SELECT COUNT(*), MIN(server_ts), MAX(server_ts)
+             FROM telemetry_summaries WHERE device_id = ?1",
+            params![device_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
+
+        let mut stmt = conn.prepare(
+            "SELECT event_type, COUNT(*),
+                    AVG(session_duration_secs), SUM(error_count),
+                    AVG(actions_per_min), AVG(avg_response_time_ms)
+             FROM telemetry_summaries
+             WHERE device_id = ?1
+             GROUP BY event_type
+             ORDER BY COUNT(*) DESC, event_type ASC",
+        )?;
+        let by_event_type = stmt
+            .query_map(params![device_id], |r| {
+                Ok(TelemetryEventTypeStat {
+                    event_type: r.get(0)?,
+                    count: r.get(1)?,
+                    avg_duration_secs: r.get::<_, Option<f64>>(2)?.unwrap_or(0.0),
+                    total_errors: r.get::<_, Option<i64>>(3)?.unwrap_or(0),
+                    avg_actions_per_min: r.get::<_, Option<f64>>(4)?.unwrap_or(0.0),
+                    avg_response_ms: r.get::<_, Option<f64>>(5)?.unwrap_or(0.0),
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // 最近一条记录的设备画像(同设备恒定,面板顶部只显示一次)。
+        let device_profile = conn
+            .query_row(
+                "SELECT cpu_cores, memory_gb, screen_width, screen_height, pixel_ratio,
+                        os_name, browser_name, browser_version, timezone, language,
+                        touch_support, online_status
+                 FROM telemetry_summaries WHERE device_id = ?1
+                 ORDER BY server_ts DESC LIMIT 1",
+                params![device_id],
+                |r| {
+                    Ok(DeviceProfile {
+                        cpu_cores: r.get(0)?,
+                        memory_gb: r.get(1)?,
+                        screen_width: r.get(2)?,
+                        screen_height: r.get(3)?,
+                        pixel_ratio: r.get(4)?,
+                        os_name: r.get(5)?,
+                        browser_name: r.get(6)?,
+                        browser_version: r.get(7)?,
+                        timezone: r.get(8)?,
+                        language: r.get(9)?,
+                        touch_support: r.get::<_, Option<i64>>(10)?.map(|v| v != 0),
+                        online_status: r.get::<_, Option<i64>>(11)?.map(|v| v != 0),
+                    })
+                },
+            )
+            .ok();
+
+        // 累计标量 + 会话数(增量口径:click/error/duration 按心跳累加;会话=session_start 条数)。
+        let (total_clicks, total_errors, total_duration_secs, session_count): (i64, i64, i64, i64) =
+            conn.query_row(
+                "SELECT COALESCE(SUM(click_count),0), COALESCE(SUM(error_count),0),
+                        COALESCE(SUM(session_duration_secs),0),
+                        COALESCE(SUM(CASE WHEN event_type='session_start' THEN 1 ELSE 0 END),0)
+                 FROM telemetry_summaries WHERE device_id = ?1",
+                params![device_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )?;
+
+        // 访问页面:current_route 分组计数(去过哪些页面)。
+        let mut route_stmt = conn.prepare(
+            "SELECT current_route, COUNT(*) FROM telemetry_summaries
+             WHERE device_id = ?1 AND current_route IS NOT NULL AND current_route <> ''
+             GROUP BY current_route ORDER BY COUNT(*) DESC, current_route ASC LIMIT 12",
+        )?;
+        let routes = route_stmt
+            .query_map(params![device_id], |r| {
+                Ok(NameCount { name: r.get(0)?, count: r.get(1)? })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // featureUsage(map)+ clickTargets(array)需在 Rust 侧逐行合并。
+        let mut agg_stmt = conn.prepare(
+            "SELECT feature_usage_json, click_targets_json
+             FROM telemetry_summaries WHERE device_id = ?1",
+        )?;
+        let mut feature_map: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+        let mut click_map: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+        let agg_rows = agg_stmt.query_map(params![device_id], |r| {
+            Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?))
+        })?;
+        for row in agg_rows {
+            let (fu, ct) = row?;
+            if let Some(s) = fu {
+                if let Ok(serde_json::Value::Object(map)) =
+                    serde_json::from_str::<serde_json::Value>(&s)
+                {
+                    for (k, v) in map {
+                        if let Some(n) = v.as_i64() {
+                            *feature_map.entry(k).or_insert(0) += n;
+                        }
+                    }
+                }
+            }
+            if let Some(s) = ct {
+                if let Ok(serde_json::Value::Array(arr)) =
+                    serde_json::from_str::<serde_json::Value>(&s)
+                {
+                    for item in arr {
+                        let label = item
+                            .get("label")
+                            .and_then(|v| v.as_str())
+                            .or_else(|| item.get("tag").and_then(|v| v.as_str()))
+                            .unwrap_or("")
+                            .trim();
+                        if !label.is_empty() {
+                            *click_map.entry(label.to_string()).or_insert(0) += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(TelemetryDeviceSummary {
+            total,
+            first_ts,
+            last_ts,
+            by_event_type,
+            device_profile,
+            feature_usage: top_name_counts(feature_map, 12),
+            routes,
+            click_targets: top_name_counts(click_map, 8),
+            total_clicks,
+            total_errors,
+            total_duration_secs,
+            session_count,
+        })
     }
 
     pub fn get_telemetry_by_device(
@@ -353,6 +556,76 @@ mod tests {
     }
 
     #[test]
+    fn device_summary_aggregates_operations() {
+        let (_t, store) = test_store();
+        let mut s1 = full_summary_input();
+        s1.current_route = Some("/learning".into());
+        s1.feature_usage_json = r#"{"search":3,"edit":1}"#.into();
+        s1.click_targets_json = Some(r#"[{"label":"开始","tag":"button"}]"#.into());
+        s1.click_count = Some(5);
+        s1.error_count = 0;
+        s1.session_duration_secs = 60;
+        store
+            .insert_telemetry_and_summary("a1", "devX", "u", "periodic", None, "{}", "2026-05-01T12:00:00Z", &s1)
+            .unwrap();
+
+        let mut s2 = full_summary_input();
+        s2.current_route = Some("/learning".into());
+        s2.feature_usage_json = r#"{"search":2}"#.into();
+        s2.click_targets_json = Some(r#"[{"label":"开始"},{"label":"设置"}]"#.into());
+        s2.click_count = Some(4);
+        s2.error_count = 2;
+        s2.session_duration_secs = 60;
+        store
+            .insert_telemetry_and_summary("a2", "devX", "u", "periodic", None, "{}", "2026-05-01T12:01:00Z", &s2)
+            .unwrap();
+
+        let mut s3 = full_summary_input();
+        s3.current_route = Some("/review".into());
+        s3.feature_usage_json = r#"{"review":1}"#.into();
+        s3.click_targets_json = Some("[]".into());
+        s3.click_count = Some(0);
+        s3.error_count = 0;
+        s3.session_duration_secs = 30;
+        store
+            .insert_telemetry_and_summary("a3", "devX", "u", "session_start", None, "{}", "2026-05-01T12:02:00Z", &s3)
+            .unwrap();
+
+        let sum = store.get_telemetry_device_summary("devX").unwrap();
+        assert_eq!(sum.total, 3);
+        assert_eq!(sum.total_clicks, 9);
+        assert_eq!(sum.total_errors, 2);
+        assert_eq!(sum.total_duration_secs, 150);
+        assert_eq!(sum.session_count, 1);
+        // byEventType:periodic(2) 在前,session_start(1)
+        assert_eq!(sum.by_event_type[0].event_type, "periodic");
+        assert_eq!(sum.by_event_type[0].count, 2);
+        // featureUsage 累加:search=3+2=5 居首
+        assert_eq!(sum.feature_usage[0].name, "search");
+        assert_eq!(sum.feature_usage[0].count, 5);
+        // routes:/learning(2) 在前
+        assert_eq!(sum.routes[0].name, "/learning");
+        assert_eq!(sum.routes[0].count, 2);
+        // clickTargets:开始 出现 2 次居首(对象 label 聚合)
+        assert_eq!(sum.click_targets[0].name, "开始");
+        assert_eq!(sum.click_targets[0].count, 2);
+        assert!(sum.device_profile.is_some());
+    }
+
+    #[test]
+    fn device_summary_empty_device_is_all_zero() {
+        let (_t, store) = test_store();
+        let sum = store.get_telemetry_device_summary("ghost").unwrap();
+        assert_eq!(sum.total, 0);
+        assert_eq!(sum.total_clicks, 0);
+        assert_eq!(sum.session_count, 0);
+        assert!(sum.first_ts.is_none());
+        assert!(sum.by_event_type.is_empty());
+        assert!(sum.feature_usage.is_empty());
+        assert!(sum.device_profile.is_none());
+    }
+
+    #[test]
     fn insert_telemetry_creates_event_row() {
         let (_t, store) = test_store();
         store
@@ -397,7 +670,7 @@ mod tests {
         assert_eq!(evt[0].triggered_by_request_id, None);
 
         let (sums, total) = store
-            .get_telemetry_summaries_by_device("dev2", 10, 0)
+            .get_telemetry_summaries_by_device("dev2", "", 10, 0)
             .unwrap();
         assert_eq!(total, 1);
         assert_eq!(sums.len(), 1);
@@ -443,7 +716,7 @@ mod tests {
         assert!(rows.is_empty());
         assert_eq!(total, 0);
         let (sums, total_s) = store
-            .get_telemetry_summaries_by_device("nope", 10, 0)
+            .get_telemetry_summaries_by_device("nope", "", 10, 0)
             .unwrap();
         assert!(sums.is_empty());
         assert_eq!(total_s, 0);
@@ -468,7 +741,7 @@ mod tests {
             )
             .unwrap();
         let (sums, _) = store
-            .get_telemetry_summaries_by_device("dev3", 10, 0)
+            .get_telemetry_summaries_by_device("dev3", "", 10, 0)
             .unwrap();
         let s = &sums[0];
         assert!(s.behavior_summary.click_targets.is_none());

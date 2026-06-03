@@ -8,7 +8,7 @@ import { Spinner } from '@/components/ui/Spinner';
 import { Empty } from '@/components/ui/Empty';
 import { Tabs } from '@/components/ui/Tabs';
 import { Table } from '@/components/ui/Table';
-import { adminApi, type SseLiveEntry, type RecentlyActiveEntry, type TelemetrySummary, type DataChannelValue } from '@/api/admin';
+import { adminApi, type SseLiveEntry, type RecentlyActiveEntry, type TelemetrySummary, type TelemetryDeviceSummary, type DataChannelValue } from '@/api/admin';
 import { ApiError } from '@/api/http';
 import type { ClientPlatformAgg, ClientVersionAgg, ClientUpgradePolicy, ListedDevice, VersionGate, ScheduledBroadcast } from '@/types/admin';
 import { uiStore } from '@/stores/ui';
@@ -39,6 +39,33 @@ const formatTimestamp = (s: string | null | undefined): string => {
   const iso = s.includes('T') ? s : s.replace(' ', 'T') + 'Z';
   const d = new Date(iso);
   return isNaN(d.getTime()) ? s : d.toLocaleString();
+};
+
+// 秒 → 人类可读时长(总活跃时长展示)
+const fmtDuration = (secs: number): string => {
+  if (!secs || secs < 60) return `${Math.round(secs || 0)}s`;
+  const h = Math.floor(secs / 3600);
+  const m = Math.round((secs % 3600) / 60);
+  return h > 0 ? `${h}h ${m}m` : `${m}m`;
+};
+
+// 事件 type → 系统分类(与探针看板口径一致):learn/perf/err/behavior
+type EvtCategory = 'learn' | 'perf' | 'err' | 'behavior';
+function evtCategory(type: string): EvtCategory {
+  const t = type.toLowerCase();
+  if (t.includes('error') || t.includes('err')) return 'err';
+  if (t.includes('lesson') || t.includes('word') || t.includes('answer') || t.includes('session') || t.includes('review')) return 'learn';
+  if (t.includes('perf') || t.includes('resource') || t.includes('nav')) return 'perf';
+  return 'behavior';
+}
+const CAT_VARIANT: Record<EvtCategory, 'success' | 'info' | 'error' | 'accent'> = {
+  learn: 'success', perf: 'info', err: 'error', behavior: 'accent',
+};
+const CAT_DOT: Record<EvtCategory, string> = {
+  learn: 'bg-success', perf: 'bg-info', err: 'bg-error', behavior: 'bg-accent',
+};
+const CAT_LABEL: Record<EvtCategory, string> = {
+  learn: '学习', perf: '性能', err: '错误', behavior: '行为',
 };
 
 function DataChannelBadge(props: { channel: string; status: DataChannelValue }) {
@@ -113,9 +140,21 @@ export default function DevicesPage() {
   const [telemetryRecords, setTelemetryRecords] = createSignal<TelemetrySummary[]>([]);
   const [telemetryTotal, setTelemetryTotal] = createSignal(0);
   const [telemetryLoading, setTelemetryLoading] = createSignal(false);
+  // 分类总览(全量计数 + 每类聚合 + 设备画像);分类 chip 选中态('' = 全部);展开的记录 id 集合
+  const [telemetrySummary, setTelemetrySummary] = createSignal<TelemetryDeviceSummary | null>(null);
+  const [telemetryFilter, setTelemetryFilter] = createSignal('');
+  const [expandedTel, setExpandedTel] = createSignal<Set<string>>(new Set());
+  // 原始明细(分类 chips + 记录列表)默认折叠;概览在上,要翻记录才展开
+  const [showDetail, setShowDetail] = createSignal(false);
   // 正在请求遥测的 deviceId，避免重复点击"拉取遥测"
   const [requestingTelemetry, setRequestingTelemetry] = createSignal<string | null>(null);
   let telemetryRequestId = 0;
+
+  // 当前选中分类对应的聚合行('' 时为 null,头部聚合改走全量派生)
+  const selectedStat = createMemo(() => {
+    const f = telemetryFilter();
+    return f ? telemetrySummary()?.byEventType.find((s) => s.eventType === f) ?? null : null;
+  });
 
   const loadDevices = async () => {
     try {
@@ -306,16 +345,25 @@ export default function DevicesPage() {
   const loadTelemetry = async (deviceId: string) => {
     const requestId = ++telemetryRequestId;
     try {
-      // 一次性切换设备 + 清空旧数据 + 进入加载态，避免三段渲染闪烁
+      // 一次性切换设备 + 清空旧数据 + 重置分类/展开 + 进入加载态，避免分段渲染闪烁
       batch(() => {
         setTelemetryDevice(deviceId);
         setTelemetryRecords([]);
         setTelemetryTotal(0);
+        setTelemetrySummary(null);
+        setTelemetryFilter('');
+        setExpandedTel(new Set<string>());
+        setShowDetail(false);
         setTelemetryLoading(true);
       });
-      const data = await adminApi.getTelemetry(deviceId);
+      // 并行:分类总览(全量计数,系统分类)+ 首屏记录(最近 50 条)
+      const [summary, data] = await Promise.all([
+        adminApi.getTelemetrySummary(deviceId),
+        adminApi.getTelemetry(deviceId),
+      ]);
       if (requestId !== telemetryRequestId) return;
       batch(() => {
+        setTelemetrySummary(summary);
         setTelemetryRecords(data.records);
         setTelemetryTotal(data.total);
       });
@@ -327,6 +375,40 @@ export default function DevicesPage() {
         setTelemetryLoading(false);
       }
     }
+  };
+
+  // 分类 chip 选中:按 event_type 重新拉记录列表(全量计数仍来自 summary,不变)
+  const selectTelemetryFilter = async (eventType: string) => {
+    const deviceId = telemetryDevice();
+    if (!deviceId || telemetryFilter() === eventType) return;
+    const requestId = ++telemetryRequestId;
+    batch(() => {
+      setTelemetryFilter(eventType);
+      setExpandedTel(new Set<string>());
+      setTelemetryLoading(true);
+    });
+    try {
+      const data = await adminApi.getTelemetry(deviceId, eventType ? { eventType } : undefined);
+      if (requestId !== telemetryRequestId) return;
+      batch(() => {
+        setTelemetryRecords(data.records);
+        setTelemetryTotal(data.total);
+      });
+    } catch (e: any) {
+      if (requestId !== telemetryRequestId) return;
+      uiStore.toast.error('加载分类遥测失败', e.message);
+    } finally {
+      if (requestId === telemetryRequestId) setTelemetryLoading(false);
+    }
+  };
+
+  const toggleTelExpand = (id: string) => {
+    setExpandedTel((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
   };
 
   onMount(loadDevices);
@@ -1674,116 +1756,273 @@ export default function DevicesPage() {
         </Show>
       </Show>
 
-      {/* Telemetry Panel — 不被刷新 loading 卸载，避免已展开的遥测面板因主列表刷新而消失 */}
+      {/* Telemetry Panel — 不被刷新 loading 卸载，避免已展开的遥测面板因主列表刷新而消失。
+          重构:设备画像提顶只显一次 + 系统按 event_type 分类(全量计数) + 每类聚合 + 紧凑行点开展开 */}
       <Show when={telemetryDevice()}>
         <Card class="mt-4">
           <div class="flex items-center justify-between mb-3">
-            <h3 class="text-sm font-semibold">遥测记录 — <span class="font-mono">{truncateId(telemetryDevice()!)}</span> (共 {telemetryTotal()} 条)</h3>
+            <h3 class="text-sm font-semibold">
+              遥测记录 — <span class="font-mono">{truncateId(telemetryDevice()!)}</span>
+              <Show when={telemetrySummary()}>
+                <span class="text-content-tertiary font-normal"> (共 {telemetrySummary()!.total} 条)</span>
+              </Show>
+            </h3>
             <Button size="xs" variant="ghost" onClick={() => setTelemetryDevice(null)}>关闭</Button>
           </div>
+
+          {/* 首屏加载(总览未到):整体 spinner,避免面板体空白 */}
+          <Show when={telemetryLoading() && !telemetrySummary()}>
+            <div class="flex justify-center py-6"><Spinner /></div>
+          </Show>
+
+          {/* 设备画像 + 时间范围:同设备恒定,提到顶部只显示一次(不再每条重复) */}
+          <Show when={telemetrySummary()?.deviceProfile}>
+            {(dp) => (
+              <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-content-secondary bg-surface-secondary rounded px-2.5 py-1.5 mb-3">
+                <span class="text-content-tertiary">设备画像</span>
+                <Show when={dp().osName}><span class="font-medium text-content-primary">{dp().osName}</span></Show>
+                <Show when={dp().browserName}><span>{dp().browserName} {dp().browserVersion}</span></Show>
+                <Show when={dp().cpuCores !== null}><span>{dp().cpuCores} 核{dp().memoryGb ? ` / ${dp().memoryGb}GB` : ''}</span></Show>
+                <Show when={dp().screenWidth !== null}><span>{dp().screenWidth}×{dp().screenHeight} @{dp().pixelRatio}x</span></Show>
+                <Show when={dp().timezone}><span>{dp().timezone} / {dp().language}</span></Show>
+                <Show when={telemetrySummary()?.firstTs}>
+                  <span class="text-content-tertiary tabular-nums">· {formatTimestamp(telemetrySummary()!.firstTs)} – {formatTimestamp(telemetrySummary()!.lastTs)}</span>
+                </Show>
+              </div>
+            )}
+          </Show>
+
+          {/* 操作概览:这台设备做了什么(全量聚合,系统已分好类,无需翻记录) */}
+          <Show when={telemetrySummary()}>
+            {(s) => (
+              <Show when={s().total > 0} fallback={<Empty title="暂无遥测数据" description="该设备尚未上传遥测" />}>
+                <div class="rounded-lg border border-border bg-surface-secondary/40 p-3 mb-3 space-y-1.5">
+                  <div class="text-xs font-semibold text-content-secondary mb-1">这台设备做了什么</div>
+                  {/* 🛠 功能使用(featureUsage 累加) */}
+                  <Show when={s().featureUsage.length > 0}>
+                    <div class="flex gap-2 text-xs">
+                      <span class="text-content-tertiary shrink-0 w-16">🛠 功能</span>
+                      <div class="flex flex-wrap gap-1.5">
+                        <For each={s().featureUsage}>
+                          {(f) => <Badge variant="info" size="sm">{f.name} ×{f.count}</Badge>}
+                        </For>
+                      </div>
+                    </div>
+                  </Show>
+                  {/* 🧭 访问页面(currentRoute 分组) */}
+                  <Show when={s().routes.length > 0}>
+                    <div class="flex gap-2 text-xs">
+                      <span class="text-content-tertiary shrink-0 w-16">🧭 页面</span>
+                      <div class="flex flex-wrap gap-x-3 gap-y-1 text-content-secondary">
+                        <For each={s().routes}>
+                          {(r) => <span><span class="font-mono">{r.name}</span> <span class="text-content-tertiary">×{r.count}</span></span>}
+                        </For>
+                      </div>
+                    </div>
+                  </Show>
+                  {/* 🖱 点击(总数 + clickTargets 热点) */}
+                  <Show when={s().totalClicks > 0 || s().clickTargets.length > 0}>
+                    <div class="flex gap-2 text-xs">
+                      <span class="text-content-tertiary shrink-0 w-16">🖱 点击</span>
+                      <div class="flex flex-wrap gap-x-3 gap-y-1 text-content-secondary">
+                        <span>共 {s().totalClicks} 次</span>
+                        <For each={s().clickTargets}>
+                          {(c) => <span class="text-content-tertiary">{c.name} ×{c.count}</span>}
+                        </For>
+                      </div>
+                    </div>
+                  </Show>
+                  {/* ⚠ 异常(错误总数 + 事件类型分布) */}
+                  <div class="flex gap-2 text-xs">
+                    <span class="text-content-tertiary shrink-0 w-16">⚠ 异常</span>
+                    <div class="flex flex-wrap gap-x-3 gap-y-1 text-content-secondary">
+                      <span><span class="text-content-tertiary">错误 </span><span class={s().totalErrors > 0 ? 'text-error font-medium' : ''}>{s().totalErrors}</span></span>
+                      <For each={s().byEventType}>
+                        {(e) => <span class="text-content-tertiary"><span class="font-mono">{e.eventType}</span>×{e.count}</span>}
+                      </For>
+                    </div>
+                  </div>
+                  {/* ⏱ 活跃(总时长 + 会话数) */}
+                  <div class="flex gap-2 text-xs">
+                    <span class="text-content-tertiary shrink-0 w-16">⏱ 活跃</span>
+                    <div class="flex flex-wrap gap-x-3 gap-y-1 text-content-secondary">
+                      <span><span class="text-content-tertiary">总时长 </span>{fmtDuration(s().totalDurationSecs)}</span>
+                      <span><span class="text-content-tertiary">会话 </span>{s().sessionCount}</span>
+                    </div>
+                  </div>
+                </div>
+              </Show>
+            )}
+          </Show>
+
+          {/* 原始明细折叠:分类 chips + 记录列表默认收起,要逐条翻才展开 */}
+          <Show when={telemetrySummary() && telemetrySummary()!.total > 0}>
+            <button
+              type="button"
+              class="text-xs text-content-secondary hover:text-content-primary inline-flex items-center gap-1.5 mb-2"
+              aria-expanded={showDetail()}
+              onClick={() => setShowDetail((v) => !v)}
+            >
+              <svg class={`w-3.5 h-3.5 transition-transform ${showDetail() ? 'rotate-90' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7" />
+              </svg>
+              原始明细（{telemetrySummary()!.total} 条）
+            </button>
+          </Show>
+
+          <Show when={showDetail()}>
+          {/* 系统分类 chips:按 event_type 全量计数,带类别色点 */}
+          <Show when={telemetrySummary() && telemetrySummary()!.byEventType.length > 0}>
+            <div class="flex flex-wrap gap-1.5 mb-2">
+              <button
+                type="button"
+                class={`px-2.5 py-0.5 rounded-full text-xs border transition-colors ${telemetryFilter() === '' ? 'bg-accent text-white border-accent' : 'border-border text-content-secondary hover:bg-surface-secondary'}`}
+                onClick={() => selectTelemetryFilter('')}
+              >
+                全部 {telemetrySummary()!.total}
+              </button>
+              <For each={telemetrySummary()!.byEventType}>
+                {(st) => {
+                  const cat = evtCategory(st.eventType);
+                  return (
+                    <button
+                      type="button"
+                      title={`系统分类:${CAT_LABEL[cat]}`}
+                      class={`px-2.5 py-0.5 rounded-full text-xs border inline-flex items-center gap-1.5 transition-colors ${telemetryFilter() === st.eventType ? 'bg-accent text-white border-accent' : 'border-border text-content-secondary hover:bg-surface-secondary'}`}
+                      onClick={() => selectTelemetryFilter(st.eventType)}
+                    >
+                      <span class={`w-1.5 h-1.5 rounded-full ${telemetryFilter() === st.eventType ? 'bg-white' : CAT_DOT[cat]}`} />
+                      <span class="font-mono">{st.eventType}</span> {st.count}
+                    </button>
+                  );
+                }}
+              </For>
+            </div>
+          </Show>
+
+          {/* 每类聚合行:选中具体类型显该类指标;全部时显类型数 + 总错误 */}
+          <Show when={telemetrySummary()}>
+            <div class="text-xs text-content-secondary mb-3 flex flex-wrap gap-x-4 gap-y-1">
+              <Show
+                when={selectedStat()}
+                fallback={
+                  <>
+                    <span><span class="text-content-tertiary">类型 </span>{telemetrySummary()!.byEventType.length} 种</span>
+                    <span><span class="text-content-tertiary">总错误 </span><span class={telemetrySummary()!.byEventType.reduce((a, s) => a + s.totalErrors, 0) > 0 ? 'text-error font-medium' : ''}>{telemetrySummary()!.byEventType.reduce((a, s) => a + s.totalErrors, 0)}</span></span>
+                  </>
+                }
+              >
+                {(st) => (
+                  <>
+                    <span><span class="text-content-tertiary">平均时长 </span>{st().avgDurationSecs.toFixed(0)}s</span>
+                    <span><span class="text-content-tertiary">总错误 </span><span class={st().totalErrors > 0 ? 'text-error font-medium' : ''}>{st().totalErrors}</span></span>
+                    <span><span class="text-content-tertiary">操作/分 </span>{st().avgActionsPerMin.toFixed(1)}</span>
+                    <span><span class="text-content-tertiary">响应 </span>{st().avgResponseMs.toFixed(0)}ms</span>
+                  </>
+                )}
+              </Show>
+            </div>
+          </Show>
+
+          {/* 记录列表:紧凑行 + 点开展开。loading 只罩列表,分类 chips/画像不闪 */}
           <Show when={!telemetryLoading()} fallback={<div class="flex justify-center py-4"><Spinner /></div>}>
-            <Show when={telemetryRecords().length > 0} fallback={<Empty title="暂无遥测记录" description="该设备尚未上传遥测数据" />}>
-              <div class="space-y-2 max-h-80 overflow-y-auto">
+            <Show when={telemetryRecords().length > 0} fallback={<Empty title="暂无遥测记录" description="该设备尚未上传遥测数据或无匹配分类" />}>
+              <div class="space-y-1 max-h-96 overflow-y-auto">
                 <For each={telemetryRecords()}>
-                    {(record) => (
-                      <Card variant="outlined" padding="sm" class="text-xs space-y-2">
-                        <div class="flex justify-between items-center text-content-secondary gap-2 min-w-0">
-                          <Badge variant="default" size="sm">{record.eventType}</Badge>
-                          <span class="tabular-nums whitespace-nowrap">{formatTimestamp(record.serverTs)}</span>
-                        </div>
-                        {/* 设备信息 */}
-                        <Show when={record.deviceProfile.osName || record.deviceProfile.browserName}>
-                          <div class="bg-surface-secondary rounded p-1.5 space-y-0.5">
-                            <div class="font-semibold text-info mb-1 flex items-center gap-1.5">
-                              <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-                                <path stroke-linecap="round" stroke-linejoin="round" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
-                              </svg>
-                              设备信息
-                            </div>
-                            <Show when={record.deviceProfile.osName}>
-                              <div class="flex gap-2"><span class="text-content-tertiary w-12">系统</span><span>{record.deviceProfile.osName}</span></div>
-                            </Show>
-                            <Show when={record.deviceProfile.browserName}>
-                              <div class="flex gap-2"><span class="text-content-tertiary w-12">浏览器</span><span>{record.deviceProfile.browserName} {record.deviceProfile.browserVersion}</span></div>
-                            </Show>
-                            <Show when={record.deviceProfile.cpuCores !== null}>
-                              <div class="flex gap-2"><span class="text-content-tertiary w-12">CPU</span><span>{record.deviceProfile.cpuCores} 核{record.deviceProfile.memoryGb ? ` / ${record.deviceProfile.memoryGb}GB` : ''}</span></div>
-                            </Show>
-                            <Show when={record.deviceProfile.screenWidth !== null}>
-                              <div class="flex gap-2"><span class="text-content-tertiary w-12">分辨率</span><span>{record.deviceProfile.screenWidth}×{record.deviceProfile.screenHeight} @{record.deviceProfile.pixelRatio}x</span></div>
-                            </Show>
-                            <Show when={record.deviceProfile.timezone}>
-                              <div class="flex gap-2"><span class="text-content-tertiary w-12">时区</span><span>{record.deviceProfile.timezone} / {record.deviceProfile.language}</span></div>
-                            </Show>
-                          </div>
-                        </Show>
-                        {/* 会话统计 */}
-                        <div class="bg-surface-secondary rounded p-1.5 space-y-0.5">
-                          <div class="font-semibold text-accent mb-1 flex items-center gap-1.5">
-                            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-                              <path stroke-linecap="round" stroke-linejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-                            </svg>
-                            会话统计
-                          </div>
-                          <div class="flex gap-4 flex-wrap">
+                  {(record) => {
+                    const cat = evtCategory(record.eventType);
+                    const expanded = () => expandedTel().has(record.id);
+                    return (
+                      <Card variant="outlined" padding="sm" class="text-xs">
+                        {/* 紧凑行:点击整行展开 */}
+                        <button
+                          type="button"
+                          class="w-full flex items-center gap-2 min-w-0 text-left"
+                          aria-expanded={expanded()}
+                          onClick={() => toggleTelExpand(record.id)}
+                        >
+                          <span class={`w-1.5 h-1.5 rounded-full shrink-0 ${CAT_DOT[cat]}`} />
+                          <Badge variant={CAT_VARIANT[cat]} size="sm"><span class="font-mono">{record.eventType}</span></Badge>
+                          <span class="flex items-center gap-x-3 flex-wrap text-content-secondary min-w-0">
                             <span><span class="text-content-tertiary">时长 </span>{record.sessionStats.sessionDurationSecs}s</span>
-                            <span><span class="text-content-tertiary">操作/分 </span>{record.sessionStats.actionsPerMin.toFixed(1)}</span>
-                            <span><span class="text-content-tertiary">错误 </span>{record.sessionStats.errorCount}</span>
-                            <span><span class="text-content-tertiary">响应 </span>{record.sessionStats.avgResponseTimeMs.toFixed(0)}ms</span>
-                          </div>
-                        </div>
-                        {/* 行为摘要 */}
-                        <Show when={record.behaviorSummary.currentRoute !== null}>
-                          <div class="bg-surface-secondary rounded p-1.5 space-y-0.5">
-                            <div class="font-semibold text-success mb-1 flex items-center gap-1.5">
-                              <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-                                <path stroke-linecap="round" stroke-linejoin="round" d="M15 15l-2 5L9 9l11 4-5 2zm0 0l5 5M7.188 2.239l.777 2.897M5.136 7.965l-2.898-.777M13.95 4.05l-2.122 2.122m-5.657 5.656l-2.12 2.122" />
-                              </svg>
-                              行为摘要
-                            </div>
-                            <Show when={record.behaviorSummary.currentRoute}>
-                              <div class="flex gap-2"><span class="text-content-tertiary w-12">路由</span><span class="font-mono">{record.behaviorSummary.currentRoute}</span></div>
+                            <span><span class="text-content-tertiary">错误 </span><span class={record.sessionStats.errorCount > 0 ? 'text-error font-medium' : ''}>{record.sessionStats.errorCount}</span></span>
+                            <Show when={record.sessionStats.actionsPerMin > 0}>
+                              <span><span class="text-content-tertiary">操作/分 </span>{record.sessionStats.actionsPerMin.toFixed(1)}</span>
                             </Show>
-                            <div class="flex gap-4 flex-wrap">
-                              <Show when={record.behaviorSummary.clickCount !== null}>
-                                <span><span class="text-content-tertiary">点击 </span>{record.behaviorSummary.clickCount}</span>
-                              </Show>
-                              <Show when={record.behaviorSummary.scrollDepthPct !== null}>
-                                <span><span class="text-content-tertiary">滚动 </span>{record.behaviorSummary.scrollDepthPct!.toFixed(0)}%</span>
-                              </Show>
-                              <Show when={record.behaviorSummary.routeChanges !== null}>
-                                <span><span class="text-content-tertiary">跳转 </span>{record.behaviorSummary.routeChanges}</span>
-                              </Show>
-                              <Show when={record.behaviorSummary.visibilityChanges !== null}>
-                                <span><span class="text-content-tertiary">焦点变更 </span>{record.behaviorSummary.visibilityChanges}</span>
-                              </Show>
+                            <Show when={record.behaviorSummary.currentRoute}>
+                              <span class="font-mono text-content-tertiary truncate max-w-[10rem]">{record.behaviorSummary.currentRoute}</span>
+                            </Show>
+                          </span>
+                          <span class="ml-auto flex items-center gap-1.5 shrink-0">
+                            <span class="tabular-nums whitespace-nowrap text-content-tertiary">{formatTimestamp(record.serverTs)}</span>
+                            <svg class={`w-3.5 h-3.5 transition-transform ${expanded() ? 'rotate-90' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
+                              <path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7" />
+                            </svg>
+                          </span>
+                        </button>
+
+                        {/* 展开:完整会话统计 + 行为摘要 + 功能使用(设备信息已提顶,不再重复) */}
+                        <Show when={expanded()}>
+                          <div class="mt-2 space-y-2">
+                            <div class="bg-surface-secondary rounded p-1.5 space-y-0.5">
+                              <div class="font-semibold text-accent mb-1">会话统计</div>
+                              <div class="flex gap-4 flex-wrap">
+                                <span><span class="text-content-tertiary">时长 </span>{record.sessionStats.sessionDurationSecs}s</span>
+                                <span><span class="text-content-tertiary">操作/分 </span>{record.sessionStats.actionsPerMin.toFixed(1)}</span>
+                                <span><span class="text-content-tertiary">错误 </span>{record.sessionStats.errorCount}</span>
+                                <span><span class="text-content-tertiary">响应 </span>{record.sessionStats.avgResponseTimeMs.toFixed(0)}ms</span>
+                              </div>
                             </div>
-                          </div>
-                        </Show>
-                        {/* 功能使用 */}
-                        <Show when={Object.keys(record.featureUsage).length > 0}>
-                          <div class="bg-surface-secondary rounded p-1.5">
-                            <div class="font-semibold text-warning mb-1 flex items-center gap-1.5">
-                              <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-                                <path stroke-linecap="round" stroke-linejoin="round" d="M11 4a2 2 0 114 0v1a1 1 0 001 1h3a1 1 0 011 1v3a1 1 0 01-1 1h-1a2 2 0 100 4h1a1 1 0 011 1v3a1 1 0 01-1 1h-3a1 1 0 01-1-1v-1a2 2 0 10-4 0v1a1 1 0 01-1 1H7a1 1 0 01-1-1v-3a1 1 0 00-1-1H4a2 2 0 110-4h1a1 1 0 001-1V7a1 1 0 011-1h3a1 1 0 001-1V4z" />
-                              </svg>
-                              功能使用
-                            </div>
-                            <div class="flex gap-3 flex-wrap">
-                              <For each={Object.entries(record.featureUsage)}>
-                                {([k, v]) => <span class="tabular-nums"><span class="text-content-tertiary">{k} </span>{v}</span>}
-                              </For>
-                            </div>
+                            <Show when={record.behaviorSummary.currentRoute !== null}>
+                              <div class="bg-surface-secondary rounded p-1.5 space-y-0.5">
+                                <div class="font-semibold text-success mb-1">行为摘要</div>
+                                <Show when={record.behaviorSummary.currentRoute}>
+                                  <div class="flex gap-2"><span class="text-content-tertiary w-12">路由</span><span class="font-mono">{record.behaviorSummary.currentRoute}</span></div>
+                                </Show>
+                                <div class="flex gap-4 flex-wrap">
+                                  <Show when={record.behaviorSummary.clickCount !== null}>
+                                    <span><span class="text-content-tertiary">点击 </span>{record.behaviorSummary.clickCount}</span>
+                                  </Show>
+                                  <Show when={record.behaviorSummary.scrollDepthPct !== null}>
+                                    <span><span class="text-content-tertiary">滚动 </span>{record.behaviorSummary.scrollDepthPct!.toFixed(0)}%</span>
+                                  </Show>
+                                  <Show when={record.behaviorSummary.routeChanges !== null}>
+                                    <span><span class="text-content-tertiary">跳转 </span>{record.behaviorSummary.routeChanges}</span>
+                                  </Show>
+                                  <Show when={record.behaviorSummary.visibilityChanges !== null}>
+                                    <span><span class="text-content-tertiary">焦点变更 </span>{record.behaviorSummary.visibilityChanges}</span>
+                                  </Show>
+                                </div>
+                              </div>
+                            </Show>
+                            <Show when={Object.keys(record.featureUsage).length > 0}>
+                              <div class="bg-surface-secondary rounded p-1.5">
+                                <div class="font-semibold text-warning mb-1">功能使用</div>
+                                <div class="flex gap-3 flex-wrap">
+                                  <For each={Object.entries(record.featureUsage)}>
+                                    {([k, v]) => <span class="tabular-nums"><span class="text-content-tertiary">{k} </span>{v}</span>}
+                                  </For>
+                                </div>
+                              </div>
+                            </Show>
                           </div>
                         </Show>
                       </Card>
-                    )}
-                  </For>
-                </div>
-              </Show>
+                    );
+                  }}
+                </For>
+                {/* 50 条分页上限的诚实提示:当前(过滤后)总数 > 已加载条数时标注 */}
+                <Show when={telemetryTotal() > telemetryRecords().length}>
+                  <div class="text-center text-content-tertiary py-1">
+                    显示最近 {telemetryRecords().length} 条 · 共 {telemetryTotal()} 条
+                  </div>
+                </Show>
+              </div>
             </Show>
-          </Card>
-        </Show>
+          </Show>
+          </Show>
+        </Card>
+      </Show>
 
       {/* Ban Confirm Dialog */}
       <Show when={banTarget()}>

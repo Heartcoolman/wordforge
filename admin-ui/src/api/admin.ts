@@ -91,6 +91,38 @@ export interface TelemetrySummary {
   featureUsage: Record<string, number>;
 }
 
+/** 单 event_type 的全量聚合(遥测记录面板分类 chip + 每类聚合行) */
+export interface TelemetryEventTypeStat {
+  eventType: string;
+  count: number;
+  avgDurationSecs: number;
+  totalErrors: number;
+  avgActionsPerMin: number;
+  avgResponseMs: number;
+}
+
+/** 名称→次数聚合项(功能使用 / 访问页面 / 点击热点) */
+export interface NameCount {
+  name: string;
+  count: number;
+}
+
+/** GET /api/admin/telemetry/:device_id/summary 设备遥测分类总览 + 操作概览(全量聚合) */
+export interface TelemetryDeviceSummary {
+  total: number;
+  firstTs: string | null;
+  lastTs: string | null;
+  byEventType: TelemetryEventTypeStat[];
+  deviceProfile: TelemetrySummary['deviceProfile'] | null;
+  featureUsage: NameCount[];
+  routes: NameCount[];
+  clickTargets: NameCount[];
+  totalClicks: number;
+  totalErrors: number;
+  totalDurationSecs: number;
+  sessionCount: number;
+}
+
 /** GET /api/admin/clients/:id 返回的单设备详情(脱敏:不含 last_ip / banned_by) */
 export interface ClientDetail {
   deviceId: string;
@@ -302,8 +334,11 @@ export const adminApi = {
     api.post<{ banned: boolean; deviceId: string }>(`/api/admin/clients/${id}/unban`, undefined, { useAdminToken: true }),
   requestTelemetry: (id: string) =>
     api.post<{ requestId: string }>(`/api/admin/clients/${id}/request-telemetry`, undefined, { useAdminToken: true }),
-  getTelemetry: (deviceId: string, params?: { limit?: number; offset?: number }) =>
+  getTelemetry: (deviceId: string, params?: { limit?: number; offset?: number; eventType?: string }) =>
     api.get<{ records: TelemetrySummary[]; total: number }>(`/api/admin/telemetry/${deviceId}`, params as Record<string, string | number | boolean | undefined>, { useAdminToken: true }),
+  // 设备遥测分类总览(全量计数 + 每类聚合 + 设备画像),供"遥测记录"面板分类 chip
+  getTelemetrySummary: (deviceId: string) =>
+    api.get<TelemetryDeviceSummary>(`/api/admin/telemetry/${deviceId}/summary`, undefined, { useAdminToken: true }),
   // be:client-detail:单设备详情抽屉数据源(country/online/firstSeenAt/ban 元数据 + 遥测摘要)
   getClientDetail: (id: string) =>
     api.get<ClientDetail>(`/api/admin/clients/${id}`, undefined, { useAdminToken: true }),
