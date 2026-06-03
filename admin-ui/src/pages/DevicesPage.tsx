@@ -10,7 +10,7 @@ import { Tabs } from '@/components/ui/Tabs';
 import { Table } from '@/components/ui/Table';
 import { adminApi, type SseLiveEntry, type RecentlyActiveEntry, type TelemetrySummary, type DataChannelValue } from '@/api/admin';
 import { ApiError } from '@/api/http';
-import type { ClientPlatformAgg, ClientVersionAgg, ClientUpgradePolicy, ListedDevice, VersionGate } from '@/types/admin';
+import type { ClientPlatformAgg, ClientVersionAgg, ClientUpgradePolicy, ListedDevice, VersionGate, ScheduledBroadcast } from '@/types/admin';
 import { uiStore } from '@/stores/ui';
 import { Switch } from '@/components/ui/Switch';
 import { DeviceDetailDrawer, type DeviceDetailSeed } from './devices/DeviceDetailDrawer';
@@ -578,6 +578,50 @@ export default function DevicesPage() {
   const [bcSchedule, setBcSchedule] = createSignal<'now' | 'at'>('now');
   const [bcScheduledAt, setBcScheduledAt] = createSignal('');
   const [bcSavingDraft, setBcSavingDraft] = createSignal(false);
+  // W2-2:待发定时广播队列 + 取消态
+  const [scheduledList, setScheduledList] = createSignal<ScheduledBroadcast[]>([]);
+  const [scheduledLoading, setScheduledLoading] = createSignal(false);
+  const [cancelTarget, setCancelTarget] = createSignal<ScheduledBroadcast | null>(null);
+  const [canceling, setCanceling] = createSignal(false);
+
+  const loadScheduled = async () => {
+    setScheduledLoading(true);
+    try {
+      setScheduledList((await adminApi.listScheduledBroadcasts()).items);
+    } catch { /* 队列拿不到不打扰 composer */ } finally {
+      setScheduledLoading(false);
+    }
+  };
+  const audienceSummary = (s: ScheduledBroadcast): string => {
+    const parts: string[] = [];
+    if (s.platforms.length) parts.push(s.platforms.join('/'));
+    if (s.versionMin) parts.push(`≥${s.versionMin}`);
+    if (s.lastActiveDays != null) parts.push(`${s.lastActiveDays}天活跃`);
+    if (s.userIds.length) parts.push(`${s.userIds.length}个指定用户`);
+    return parts.length ? parts.join(' · ') : '全员';
+  };
+  const confirmCancelScheduled = async () => {
+    const t = cancelTarget();
+    if (!t) return;
+    setCanceling(true);
+    try {
+      await adminApi.cancelScheduledBroadcast(t.id);
+      uiStore.toast.success('已取消该排程');
+      setCancelTarget(null);
+      await loadScheduled();
+    } catch (e: any) {
+      // 409 = 已被 worker 到点下发,无法取消
+      if (e instanceof ApiError && e.code === 'ALREADY_DISPATCHED') {
+        uiStore.toast.error('无法取消', '该排程已到点下发');
+        setCancelTarget(null);
+        await loadScheduled();
+      } else {
+        uiStore.toast.error('取消失败', e?.message);
+      }
+    } finally {
+      setCanceling(false);
+    }
+  };
 
   // E1:前端 semver 预校验,与后端 `semver::Version::parse(v.trim_start_matches('v'))` 行为对齐——
   // 去前导 v 后须为合法语义化版本(major.minor.patch + 可选 -prerelease / +build)。把 INVALID_VERSION_MIN 拦在请求前。
@@ -691,6 +735,7 @@ export default function DevicesPage() {
         });
         if (result.scheduled) {
           uiStore.toast.success(`已排程,将于 ${new Date(result.scheduledAt!).toLocaleString()} 自动下发`);
+          void loadScheduled(); // W2-2:刷新待发队列
         } else {
           uiStore.toast.success(`已发送给 ${result.sent} 位用户`);
         }
@@ -754,6 +799,7 @@ export default function DevicesPage() {
     }
   };
   onMount(loadDraft);
+  onMount(loadScheduled);
 
   const audienceChips = createMemo(() => {
     const chips: { label: string; remove: () => void }[] = [];
@@ -1417,6 +1463,38 @@ export default function DevicesPage() {
               </div>
             </div>
           </div>
+
+          {/* W2-2:待发定时广播队列——可查看 + 取消（闭合 D2 投递调度，避免误排无法撤销） */}
+          <Show when={scheduledList().length > 0 || scheduledLoading()}>
+            <div class="mt-5 pt-4 border-t border-border-hairline">
+              <div class="flex items-center justify-between mb-2">
+                <h3 class="text-sm font-semibold">
+                  待发排程 <span class="text-xs text-content-tertiary font-normal">（{scheduledList().length}）</span>
+                </h3>
+                <button type="button" class="text-xs text-accent hover:underline cursor-pointer" onClick={() => void loadScheduled()}>刷新</button>
+              </div>
+              <Show
+                when={scheduledList().length > 0}
+                fallback={<div class="text-xs text-content-tertiary py-2">加载中…</div>}
+              >
+                <div class="space-y-2">
+                  <For each={scheduledList()}>
+                    {(s) => (
+                      <div class="flex items-center justify-between gap-3 rounded-md border border-border-hairline bg-surface px-3 py-2">
+                        <div class="min-w-0">
+                          <div class="text-sm font-medium truncate">{s.title}</div>
+                          <div class="text-[11px] text-content-tertiary mt-0.5">
+                            计划 {new Date(s.scheduledAt).toLocaleString()} · 受众 {audienceSummary(s)}
+                          </div>
+                        </div>
+                        <Button size="sm" variant="ghost" onClick={() => setCancelTarget(s)}>取消</Button>
+                      </div>
+                    )}
+                  </For>
+                </div>
+              </Show>
+            </div>
+          </Show>
         </Card>
       </div>
 
@@ -1757,6 +1835,28 @@ export default function DevicesPage() {
               maxlength={300}
             />
           </ConfirmDialog>
+        )}
+      </Show>
+
+      {/* W2-2:取消定时广播 Confirm Dialog */}
+      <Show when={cancelTarget()}>
+        {(t) => (
+          <ConfirmDialog
+            open={true}
+            title="取消该定时广播？"
+            message={
+              <span>
+                「<strong>{t().title}</strong>」计划于 <span class="font-mono">{new Date(t().scheduledAt).toLocaleString()}</span> 下发，
+                取消后将不再发出。
+              </span>
+            }
+            confirmText={canceling() ? '取消中…' : '确认取消'}
+            cancelText="返回"
+            variant="danger"
+            loading={canceling()}
+            onConfirm={confirmCancelScheduled}
+            onCancel={() => setCancelTarget(null)}
+          />
         )}
       </Show>
     </div>

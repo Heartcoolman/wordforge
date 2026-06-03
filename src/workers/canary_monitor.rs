@@ -90,6 +90,27 @@ pub async fn run(state: &AppState) {
             live_anomaly = live.anomaly_rate,
             "canary_monitor: patch canary 自动回滚"
         );
+        // W2-1:自动回滚是最高优先级运营事件 → 写 admin 告警收件箱(持久可追溯,补 D1 覆盖盲区)。
+        // kind 拼 version_hash:system_alerts 按 (source,kind) dedup,静态 kind 会让同周期多 patch
+        // 回滚合并成一行丢明细;version_hash 入 kind 保证每个被回滚 patch 独立成行。SSE 并存不互替
+        //（Incident 瞬态刷新即丢,收件箱才持久）。本 worker 已在 async 上下文直调阻塞 store 方法,
+        // 此处直调即与既有惯例一致,无需 spawn_blocking。
+        if let Err(e) = store.record_system_alert(
+            "canary_monitor",
+            &format!("auto_rollback:{}", c.version_hash),
+            "warning",
+            "AMAS patch canary 自动回滚",
+            &format!(
+                "patch {} 触发自动回滚:baseline reward {:.4}→live {:.4}, baseline anomaly {:.4}→live {:.4}",
+                c.version_hash,
+                baseline.mean_reward,
+                live.mean_reward,
+                baseline.anomaly_rate,
+                live.anomaly_rate
+            ),
+        ) {
+            tracing::warn!(id = c.id, error = %e, "canary_monitor: 写告警收件箱失败");
+        }
         state.broadcast_to_all_sse(SseEvent::Incident {
             error_rate: live.anomaly_rate,
             window_secs: 0,

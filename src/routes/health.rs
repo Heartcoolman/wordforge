@@ -209,7 +209,10 @@ pub async fn database_health(
     Json(serde_json::json!({
         "healthy": healthy,
         "latencyUs": latency_us,
-        // TODO: real error tracking not yet implemented
+        // W5-1：本字段是「本次单次探活」的布尔投影（0=本次成功 / 1=本次失败），**不是**真实的
+        // 连续失败计数——真实连续计数需 AppState 加共享计数器，价值与成本不匹配。原前端消费方
+        // （admin-ui/src/api/health.ts）已是死代码并删除，对运维不可见。字段保守保留：本端点
+        // /health/database 公开可达，删字段前须跨仓确认 wordforge-web / 监控脚本未直接读它。
         "consecutiveFailures": if healthy { 0 } else { 1 },
     }))
 }

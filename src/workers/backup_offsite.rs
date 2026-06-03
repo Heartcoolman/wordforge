@@ -28,9 +28,10 @@ enum Scheme<'a> {
 /// 把本地备份文件推送到所有配置的离站目标。无 backup-policy / 无 targets 时静默跳过。
 /// 单 target 失败仅告警，不影响其余 target 与本地备份。
 pub async fn run(store: &Store, local_backup: &Path) {
+    let started = std::time::Instant::now();
     let targets = match load_targets(store) {
         Some(t) if !t.is_empty() => t,
-        _ => return, // 未配置离站策略，跳过
+        _ => return, // 未配置离站策略，跳过（无事可做，不发心跳）
     };
 
     let file_name = match local_backup.file_name().and_then(|n| n.to_str()) {
@@ -45,18 +46,45 @@ pub async fn run(store: &Store, local_backup: &Path) {
         }
     };
 
+    // 备份文件大小，成功上传时记入每 target 状态。
+    let bytes = std::fs::metadata(local_backup)
+        .map(|m| m.len() as i64)
+        .unwrap_or(0);
+
+    let mut failures = 0u32;
+    let mut first_error: Option<String> = None;
     for target in &targets {
         if let Err(e) = upload_one(target, local_backup, &file_name).await {
+            failures += 1;
+            if first_error.is_none() {
+                first_error = Some(format!("{}: {e}", target.name));
+            }
             tracing::warn!(target = %target.name, uri = %target.uri, error = %e, "离站备份上传失败");
             alert(
                 store,
                 &format!("离站备份目标 `{}` 上传失败", target.name),
                 &format!("uri={} error={e}", target.uri),
             );
+            // W2-4:记 target 失败状态(保留上次成功痕迹)。
+            let _ = store.mark_backup_target_failed(&target.name, &target.uri, &e);
         } else {
             tracing::info!(target = %target.name, uri = %target.uri, "离站备份上传成功");
+            // W2-4:记 target 成功状态(last_ok_at + bytes)，灾备可验证。
+            let _ = store.mark_backup_target_ok(&target.name, &target.uri, bytes);
         }
     }
+
+    // W2-4:心跳。离站备份在 main.rs 独立 interval loop 内运行（非 WorkerManager），故必须在
+    // run 内部直接 upsert_worker_last_run，否则 admin worker 列表 / Prometheus gauge 看不见它。
+    // 注意：worker_last_run.last_outcome 有 CHECK('success','failure','skipped')，用 "failure"。
+    let outcome = if failures == 0 { "success" } else { "failure" };
+    let _ = store.upsert_worker_last_run(
+        "backup_offsite",
+        chrono::Utc::now().timestamp(),
+        started.elapsed().as_millis() as i64,
+        outcome,
+        first_error.as_deref(),
+    );
 }
 
 /// 从 settings_config 的 `backup-policy` section 解析 targets。

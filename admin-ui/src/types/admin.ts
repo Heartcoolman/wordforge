@@ -235,6 +235,17 @@ export interface SystemHealth {
   outbox?: { pending: number; lagSecs: number; deadLetter: number };
 }
 
+/** W1-2:outbox 死信明细行。user 由后端 best-effort 从 payload 解析。 */
+export interface DeadLetterEntry {
+  id: number;
+  eventType: string;
+  userId: string | null;
+  attempts: number;
+  lastError: string;
+  createdAt: string;
+  deadAt: string;
+}
+
 export interface SystemResources {
   /** 进程 CPU 占用百分比(0–100)。多核累加,可能 >100。null 表示采样失败。 */
   cpuPct: number | null;
@@ -465,6 +476,34 @@ export interface BroadcastStats {
   /** 平均阅读率 0..1 */
   avgReadRate: number;
   online: number;
+}
+
+/** W2-4:离站备份单 target 运行时状态（只读，与 backup-policy 配置解耦）。 */
+export interface BackupTargetStatus {
+  name: string;
+  uri: string;
+  /** 上次成功上传时间（RFC3339）；从未成功为 null。 */
+  lastOkAt: string | null;
+  /** 上次成功上传字节数。 */
+  lastBytes: number | null;
+  /** 上次失败原因；上次成功为 null。 */
+  lastError: string | null;
+  /** 上次尝试时间（成功或失败均更新）。 */
+  lastAttemptAt: string;
+}
+
+/** W2-2:一条待发定时广播（队列视图，含受众回显）。 */
+export interface ScheduledBroadcast {
+  id: string;
+  title: string;
+  message: string;
+  platforms: string[];
+  versionMin: string | null;
+  lastActiveDays: number | null;
+  userIds: string[];
+  /** 计划下发时间（RFC3339） */
+  scheduledAt: string;
+  createdAt: string;
 }
 
 /** 单条广播历史（近 30 天，按 createdAt 倒序） */

@@ -44,7 +44,10 @@ pub async fn run(registry: &MetricsRegistry, store: &Store) {
 }
 
 /// D3：导出内存 hour 槽 → 升序 upsert 到 availability_rollup + 裁剪超 30d 旧桶。失败仅告警。
-fn flush_availability_rollup(store: &Store) {
+/// W3-2：提升为 pub 供 main.rs 在 graceful shutdown（server_future.await 之后，不再有新请求
+/// 写内存桶）补调一次，补落最近 ≤5min 增量，消除重启后登录 SLO 当前小时桶缺口。
+/// export_hour_rollup 是只读 snapshot 非 drain，整桶覆盖式 upsert 幂等，与 cron tick 重复无害。
+pub fn flush_availability_rollup(store: &Store) {
     let exported = crate::middleware::http_metrics::export_hour_rollup();
     if exported.is_empty() {
         return;

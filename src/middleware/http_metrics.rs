@@ -19,8 +19,10 @@ use once_cell::sync::Lazy;
 use serde::Serialize;
 use tokio::sync::RwLock;
 
-/// Histogram bucket 边界（秒），必须升序
-const BUCKET_BOUNDS: &[f64] = &[0.01, 0.05, 0.1, 0.5, 2.0];
+/// Histogram bucket 边界（秒），必须升序。
+/// W3-3：细化 0.1→0.5→2.0 之间的塌陷区间（原仅 2 桶覆盖 100ms~2s，p95/p99 线性插值严重失真——
+/// 而慢请求恰是 SLO 关注点）。改动桶数=直方图 series 断层，见 docs/runbook/metrics-buckets.md。
+const BUCKET_BOUNDS: &[f64] = &[0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5];
 
 /// 单个 (method, route, status_class) 的累积数据
 #[derive(Default, Clone)]
@@ -310,11 +312,19 @@ pub fn import_hour_rollup(rows: Vec<(i64, u64, u64, u64, Vec<u64>)>) {
         Ok(g) => g,
         Err(p) => p.into_inner(),
     };
-    for (key, count, err5xx, bytes_in, mut buckets) in rows {
+    for (key, count, err5xx, bytes_in, buckets) in rows {
         if store.hour.iter().any(|s| s.key == key) {
             continue;
         }
-        buckets.resize(want, 0);
+        // W3-3：桶数变更（直方图边界细化）时，旧持久化行的桶向量与新 schema 长度不符——
+        // 简单 resize 会把旧 +Inf 计数滞留在错误 index、污染历史小时桶 p99。检测到长度不符即
+        // 丢弃该行直方图（置零），但保留 count/err5xx（可用率比率不依赖桶，不受影响），不伪造历史。
+        // （未来若出现「桶数不变但边界变」的改动，需改用显式桶版本标记。）
+        let buckets = if buckets.len() == want {
+            buckets
+        } else {
+            vec![0u64; want]
+        };
         let mut slot = Slot::new(key);
         slot.count = count;
         slot.err5xx = err5xx;
@@ -515,32 +525,35 @@ mod tests {
 
     #[test]
     fn histogram_data_observe_increments_buckets() {
+        // W3-3 细化后桶边界 [0.01,0.025,0.05,0.1,0.25,0.5,1.0,2.5]+Inf
         let mut h = HistogramData::new();
-        // 0.03 秒：落在 le=0.05 及以上所有 bucket
+        // 0.03 秒：> 0.025，故 le=0.025 未命中，落在 le=0.05 及以上所有 bucket
         h.observe(0.03);
         assert_eq!(h.count, 1);
         assert!((h.sum - 0.03).abs() < 1e-10);
-        // 0.01 bucket 未命中（0.03 > 0.01）
+        // le=0.01 (idx0) 未命中
         assert_eq!(h.buckets[0], 0);
-        // 0.05 bucket 命中
-        assert_eq!(h.buckets[1], 1);
+        // le=0.025 (idx1) 未命中（0.03 > 0.025）
+        assert_eq!(h.buckets[1], 0);
+        // le=0.05 (idx2) 命中
+        assert_eq!(h.buckets[2], 1);
         // +Inf
         assert_eq!(*h.buckets.last().unwrap(), 1);
     }
 
     #[test]
     fn percentile_ms_interpolates_within_bucket() {
-        // 100 个观测，桶边界 [0.01,0.05,0.1,0.5,2.0]+Inf
-        // 累积桶：50 个 ≤0.01，全部 ≤0.05
-        let buckets = vec![50, 100, 100, 100, 100, 100];
-        // P50 落在第 0 桶上界附近（target=50，cum[0]=50 命中）→ ≤10ms
+        // 100 个观测，W3-3 桶边界 [0.01,0.025,0.05,0.1,0.25,0.5,1.0,2.5]+Inf（9 桶）。
+        // 累积桶：50 个 ≤0.01，全部 ≤0.025。
+        let buckets = vec![50, 100, 100, 100, 100, 100, 100, 100, 100];
+        // P50 落在第 0 桶上界（target=50，cum[0]=50 命中）→ ≤10ms
         let p50 = percentile_ms(&buckets, 100, 0.50);
         assert!(p50 > 0.0 && p50 <= 10.0, "p50={p50}");
-        // P99 落在 (0.01,0.05] 桶内 → 10..=50ms
+        // P99 落在 (0.01,0.025] 桶内 → 10..=25ms
         let p99 = percentile_ms(&buckets, 100, 0.99);
-        assert!(p99 > 10.0 && p99 <= 50.0, "p99={p99}");
+        assert!(p99 > 10.0 && p99 <= 25.0, "p99={p99}");
         // 空数据返回 0
-        assert_eq!(percentile_ms(&[0, 0, 0, 0, 0, 0], 0, 0.99), 0.0);
+        assert_eq!(percentile_ms(&[0; 9], 0, 0.99), 0.0);
     }
 
     #[test]
@@ -555,6 +568,30 @@ mod tests {
         assert!(agg.total_5xx >= 1);
         assert!(agg.availability_pct < 100.0);
         assert!(!agg.series.is_empty());
+    }
+
+    #[test]
+    fn import_resets_mismatched_length_buckets() {
+        // W3-3：旧 schema（6 桶）持久化行在桶数变更后 import，应被重置为 want 长度全零，
+        // 而非 resize 错位污染 p99；count/err5xx 保留（可用率不受影响）。
+        let want = BUCKET_BOUNDS.len() + 1;
+        // 用远未来 unique hour key 避免与其它测试的全局 ROLLING 状态碰撞。
+        let key = 9_000_000_i64 + (want as i64);
+        // 旧 6 桶：+Inf 在 index 5 = 100（全部观测）。
+        let old_buckets = vec![10u64, 20, 30, 40, 50, 100];
+        import_hour_rollup(vec![(key, 100, 3, 4096, old_buckets)]);
+        let exported = export_hour_rollup();
+        let row = exported
+            .into_iter()
+            .find(|(k, ..)| *k == key)
+            .expect("imported row present");
+        assert_eq!(row.1, 100, "count 应保留");
+        assert_eq!(row.2, 3, "err5xx 应保留(可用率不受桶变更影响)");
+        assert_eq!(row.4.len(), want, "桶向量应为新 schema 长度");
+        assert!(
+            row.4.iter().all(|&b| b == 0),
+            "桶数不符的旧行直方图应被重置为零，而非 resize 错位"
+        );
     }
 
     #[tokio::test]

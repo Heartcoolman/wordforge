@@ -253,6 +253,23 @@ async fn submit_telemetry(
         })
         .await??;
 
+    // W3-1：遥测专项 per-user 限频（独立于通用 API 双轨预算的更紧配额）。device 活跃度
+    // (last_seen)已由上方 upsert 刷新；超额则软丢弃（received:true, throttled:true 不落库），
+    // 与 sampledOut 早返回同位，防单个噪声客户端打满全局 SQLite 写信号量挤占学习数据写入。
+    let throttle_key = format!("u:{}", auth.user_id);
+    let max_entries = state.config().limits.rate_limit_max_entries;
+    let telemetry_max = state.config().telemetry_rate_limit.max_requests;
+    let throttle = state
+        .telemetry_rate_limit()
+        .limiter
+        .check_with_max(&throttle_key, max_entries, telemetry_max)
+        .await;
+    if !throttle.allowed {
+        return Ok(ok(
+            serde_json::json!({ "received": true, "throttled": true }),
+        ));
+    }
+
     if let Some(obj) = body.payload.as_object() {
         for key in ["sessionDurationSecs", "errorCount"] {
             if let Some(v) = obj.get(key).and_then(|v| v.as_i64()) {

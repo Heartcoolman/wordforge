@@ -292,7 +292,26 @@ impl AMASEngine {
         let engine = self.clone();
         let user_id = user_id.to_string();
         crate::blocking::run_blocking("amas.process_event", move || {
-            engine.process_event_blocking(&user_id, raw_event)
+            engine.process_event_blocking(&user_id, raw_event, None)
+        })
+        .await?
+    }
+
+    /// W1-1：幂等版 process_event。把 `client_record_id` 作为幂等键，在 AMAS 状态落库的
+    /// 同一 tx 内原子写入 `processed_events` 标记。配合路由侧 `is_event_processed` 前置预检
+    /// （命中即不调本方法），保证 outbox 重放 / 客户端重试不二次累加 AMAS 状态。
+    /// 与 [`Self::process_event`] 唯一差别是落库时附带幂等标记；处理逻辑零分叉。
+    pub async fn process_event_idempotent(
+        &self,
+        user_id: &str,
+        raw_event: RawEvent,
+        client_record_id: &str,
+    ) -> Result<ProcessResult, AppError> {
+        let engine = self.clone();
+        let user_id = user_id.to_string();
+        let key = client_record_id.to_string();
+        crate::blocking::run_blocking("amas.process_event", move || {
+            engine.process_event_blocking(&user_id, raw_event, Some(&key))
         })
         .await?
     }
@@ -301,6 +320,7 @@ impl AMASEngine {
         &self,
         user_id: &str,
         raw_event: RawEvent,
+        idempotency_key: Option<&str>,
     ) -> Result<ProcessResult, AppError> {
         let start = std::time::Instant::now();
 
@@ -325,7 +345,12 @@ impl AMASEngine {
         );
 
         Self::update_session_counters(&mut context.user_state, &raw_event, now);
-        self.persist_state(user_id, &mut context.user_state, &context.algo_states)?;
+        self.persist_state(
+            user_id,
+            &mut context.user_state,
+            &context.algo_states,
+            idempotency_key,
+        )?;
 
         let explanation = self.build_explanation(
             &strategy.constrained_strategy,
@@ -1372,6 +1397,7 @@ impl AMASEngine {
         user_id: &str,
         user_state: &mut UserState,
         algo_states: &AlgoStates,
+        idempotency_key: Option<&str>,
     ) -> Result<(), AppError> {
         // 在保存前清理浮点字段，防止 NaN 传播
         user_state.attention = sanitize_float(user_state.attention, 0.5).clamp(0.0, 1.0);
@@ -1407,7 +1433,7 @@ impl AMASEngine {
         ];
 
         self.store
-            .persist_engine_state_atomic(user_id, &user_state_json, &algo_entries)
+            .persist_engine_state_atomic(user_id, &user_state_json, &algo_entries, idempotency_key)
             .map_err(|e| AppError::internal(&e.to_string()))
     }
 

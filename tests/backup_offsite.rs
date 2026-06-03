@@ -78,6 +78,23 @@ async fn file_target_copies_backup_and_prunes_old() {
         alerts.iter().all(|a| a.source != "backup_offsite"),
         "成功路径不应产生告警"
     );
+
+    // W2-4:心跳落 worker_last_run（admin 列表 / Prometheus 可见）
+    let workers = store.list_worker_last_run().unwrap();
+    assert!(
+        workers
+            .iter()
+            .any(|w| w.worker_name == "backup_offsite" && w.last_outcome == "success"),
+        "应有 backup_offsite 成功心跳"
+    );
+    // W2-4:target 成功状态可观测（last_ok_at + bytes，无 error）
+    let st = store
+        .get_backup_target_status("cold")
+        .unwrap()
+        .expect("应记 target 状态");
+    assert!(st.last_ok_at.is_some());
+    assert!(st.last_error.is_none());
+    assert_eq!(st.last_bytes, Some(b"fake-sqlite-backup".len() as i64));
 }
 
 #[tokio::test]
@@ -156,6 +173,21 @@ async fn failed_target_records_system_alert() {
     assert_eq!(alert.kind, "upload_failed");
     assert_eq!(alert.severity, "error");
     assert!(alert.title.contains("glacier-cold"));
+
+    // W2-4:失败 target 状态记 last_error；心跳 outcome=failed
+    let st = store
+        .get_backup_target_status("glacier-cold")
+        .unwrap()
+        .expect("失败 target 应记状态");
+    assert!(st.last_error.is_some());
+    assert!(st.last_ok_at.is_none(), "从未成功，last_ok_at 应为 None");
+    let workers = store.list_worker_last_run().unwrap();
+    assert!(
+        workers
+            .iter()
+            .any(|w| w.worker_name == "backup_offsite" && w.last_outcome == "failure"),
+        "失败应记 failure 心跳"
+    );
 }
 
 #[tokio::test]

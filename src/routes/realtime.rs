@@ -252,6 +252,7 @@ mod tests {
                 authenticated_max_requests: 0,
             },
             auth_rate_limit: AuthRateLimitConfig::default(),
+            telemetry_rate_limit: AuthRateLimitConfig::default(),
             worker: WorkerConfig {
                 is_leader: false,
                 enable_llm_advisor: false,

@@ -130,6 +130,22 @@ impl Store {
         )?;
         Ok(n > 0)
     }
+
+    /// W2-3:一键全部已读。仅置原本未读(read_at IS NULL)的行,用 COALESCE 不覆盖已有 read_at,
+    /// 保持幂等且不改既读行的首次已读时间。返回本次标记的条数。
+    /// 注意:record_system_alert 在同源同类再次发生时会重置 read_at=NULL(设计如此),故本操作
+    /// 非"永久清空"——新告警仍会回到未读。
+    pub fn mark_all_system_alerts_read(&self, admin_id: &str) -> Result<u64, StoreError> {
+        let conn = self.conn()?;
+        let now = chrono::Utc::now().to_rfc3339();
+        let n = conn.execute(
+            "UPDATE system_alerts
+             SET read_at = COALESCE(read_at, ?1), acked_by = COALESCE(acked_by, ?2)
+             WHERE read_at IS NULL",
+            params![now, admin_id],
+        )?;
+        Ok(n as u64)
+    }
 }
 
 /// 行 → SystemAlert 映射(供 list_recent / list_admin 复用,列序须一致)。
@@ -243,6 +259,43 @@ mod tests {
         let read_row = all.iter().find(|a| a.id == id).unwrap();
         assert!(read_row.read_at.is_some());
         assert_eq!(read_row.acked_by.as_deref(), Some("admin-x"));
+    }
+
+    /// W2-3:一键全部已读——仅标记未读行,幂等不覆盖已读时间。
+    #[test]
+    fn mark_all_alerts_read_clears_unread() {
+        let store = test_store();
+        store.record_system_alert("s1", "k1", "error", "t1", "m1").unwrap();
+        store.record_system_alert("s2", "k2", "warning", "t2", "m2").unwrap();
+        store.record_system_alert("s3", "k3", "info", "t3", "m3").unwrap();
+        // 先单条已读一条,记录其 read_at 不应被全部已读覆盖。
+        let one = store.list_admin_alerts(true, 50).unwrap()[0].id.clone();
+        store.mark_system_alert_read(&one, "admin-a").unwrap();
+        let read_at_before = store
+            .list_admin_alerts(false, 50)
+            .unwrap()
+            .into_iter()
+            .find(|a| a.id == one)
+            .unwrap()
+            .read_at;
+
+        // 全部已读:标记剩余 2 条,返回标记条数。
+        let marked = store.mark_all_system_alerts_read("admin-b").unwrap();
+        assert_eq!(marked, 2, "应只标记原本未读的 2 条");
+        assert_eq!(store.count_unread_system_alerts().unwrap(), 0);
+
+        // 既读行的 read_at/acked_by 未被覆盖(COALESCE 保首次)。
+        let after = store
+            .list_admin_alerts(false, 50)
+            .unwrap()
+            .into_iter()
+            .find(|a| a.id == one)
+            .unwrap();
+        assert_eq!(after.read_at, read_at_before);
+        assert_eq!(after.acked_by.as_deref(), Some("admin-a"));
+
+        // 幂等:再次全部已读标记 0 条。
+        assert_eq!(store.mark_all_system_alerts_read("admin-c").unwrap(), 0);
     }
 
     #[test]

@@ -173,6 +173,9 @@ pub struct AppState {
     runtime: Arc<RuntimeConfig>,
     rate_limit: Arc<RateLimitState>,
     auth_rate_limit: Arc<AuthRateLimitState>,
+    /// W3-1：遥测专用 per-user 限频器。独立实例（非复用 rate_limit），避免与业务流量
+    /// 串味、cleanup 周期互相污染。
+    telemetry_rate_limit: Arc<RateLimitState>,
     config: Arc<Config>,
     shutdown_tx: broadcast::Sender<()>,
     started_at: Instant,
@@ -255,6 +258,10 @@ impl AppState {
             config.auth_rate_limit.window_secs,
             config.auth_rate_limit.max_requests,
         ));
+        let telemetry_rate_limit = Arc::new(RateLimitState::new(
+            config.telemetry_rate_limit.window_secs,
+            config.telemetry_rate_limit.max_requests,
+        ));
         let (maintenance_tx, _) = broadcast::channel(16);
         let (update_tx, _) = broadcast::channel(16);
 
@@ -264,6 +271,7 @@ impl AppState {
             runtime,
             rate_limit,
             auth_rate_limit,
+            telemetry_rate_limit,
             config: Arc::new(config.clone()),
             shutdown_tx,
             started_at: Instant::now(),
@@ -498,6 +506,11 @@ impl AppState {
 
     pub fn auth_rate_limit(&self) -> &Arc<AuthRateLimitState> {
         &self.auth_rate_limit
+    }
+
+    /// W3-1：遥测专用 per-user 限频器。
+    pub fn telemetry_rate_limit(&self) -> &Arc<RateLimitState> {
+        &self.telemetry_rate_limit
     }
 
     pub fn config(&self) -> &Config {

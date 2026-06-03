@@ -1,5 +1,5 @@
-use axum::extract::{Query, State};
-use axum::routing::{get, post};
+use axum::extract::{Path, Query, State};
+use axum::routing::{delete, get, post};
 use axum::Router;
 
 use crate::extractors::JsonBody;
@@ -25,6 +25,44 @@ pub fn router() -> Router<AppState> {
                 .post(save_push_draft)
                 .delete(delete_push_draft),
         )
+        // W2-2:定时广播队列——列出待发 + 按 id 取消（闭合 D2 投递调度）
+        .route("/scheduled", get(list_scheduled))
+        .route("/scheduled/:id", delete(cancel_scheduled))
+}
+
+/// GET /api/admin/broadcast/scheduled —— 列出全部待发（pending）定时广播，按计划时间升序。
+async fn list_scheduled(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let items = state
+        .run_store_task("admin.broadcast.list_scheduled", |store| {
+            store.list_scheduled_broadcasts(200)
+        })
+        .await??;
+    Ok(ok(serde_json::json!({ "items": items })))
+}
+
+/// DELETE /api/admin/broadcast/scheduled/:id —— 取消一条待发定时广播。
+/// 原子抢占：已被 worker fan-out（或不存在）返回 409，避免误标已发出的为取消。
+async fn cancel_scheduled(
+    _admin: AdminAuthUser,
+    Path(id): Path<String>,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let canceled = state
+        .run_store_task("admin.broadcast.cancel_scheduled", move |store| {
+            store.cancel_scheduled_broadcast(&id)
+        })
+        .await??;
+    if canceled {
+        Ok(ok(serde_json::json!({ "canceled": true })))
+    } else {
+        Err(AppError::conflict(
+            "ALREADY_DISPATCHED",
+            "排程已发出或不存在，无法取消",
+        ))
+    }
 }
 
 /// 历史列表分页参数。E2:新增 filter（all/week/failed）下推后端跨页生效。

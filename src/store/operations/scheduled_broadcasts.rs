@@ -26,6 +26,21 @@ pub struct ScheduledBroadcastRow {
     pub scheduled_at: String,
 }
 
+/// 一条待发定时广播的完整明细（admin 队列视图用，含受众回显 + 时间）。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingScheduledBroadcast {
+    pub id: String,
+    pub title: String,
+    pub message: String,
+    pub platforms: Vec<String>,
+    pub version_min: Option<String>,
+    pub last_active_days: Option<i64>,
+    pub user_ids: Vec<String>,
+    pub scheduled_at: String,
+    pub created_at: String,
+}
+
 /// 新建定时广播入参。
 pub struct NewScheduledBroadcast<'a> {
     pub id: &'a str,
@@ -138,6 +153,52 @@ impl Store {
             params![id, error],
         )?;
         Ok(())
+    }
+
+    /// W2-2:列出全部待发（status='pending'）定时广播，按计划时间升序。受众维度回显
+    /// 沿用 decode_str_list 的 NULL=不过滤语义。复用 idx_scheduled_broadcasts_due。
+    pub fn list_scheduled_broadcasts(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<PendingScheduledBroadcast>, StoreError> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, title, message, platforms, version_min, last_active_days,
+                    user_ids, scheduled_at, created_at
+             FROM scheduled_broadcasts
+             WHERE status = 'pending'
+             ORDER BY scheduled_at ASC
+             LIMIT ?1",
+        )?;
+        let rows = stmt
+            .query_map(params![limit], |r| {
+                Ok(PendingScheduledBroadcast {
+                    id: r.get(0)?,
+                    title: r.get(1)?,
+                    message: r.get(2)?,
+                    platforms: decode_str_list(r.get::<_, Option<String>>(3)?),
+                    version_min: r.get(4)?,
+                    last_active_days: r.get(5)?,
+                    user_ids: decode_str_list(r.get::<_, Option<String>>(6)?),
+                    scheduled_at: r.get(7)?,
+                    created_at: r.get(8)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// W2-2:取消一条待发定时广播。`UPDATE...WHERE id=? AND status='pending'` 原子抢占——
+    /// 受影响行数=0 表示该条已被 60s 扫描 worker fan-out（或不存在），返回 false 让路由回 409，
+    /// 避免把已发出的误标取消。
+    pub fn cancel_scheduled_broadcast(&self, id: &str) -> Result<bool, StoreError> {
+        let conn = self.conn()?;
+        let n = conn.execute(
+            "UPDATE scheduled_broadcasts SET status = 'canceled'
+             WHERE id = ?1 AND status = 'pending'",
+            params![id],
+        )?;
+        Ok(n > 0)
     }
 
     /// upsert 推送草稿（全局单份，覆盖旧草稿）。
@@ -344,6 +405,48 @@ mod tests {
             .list_due_scheduled_broadcasts(&now.to_rfc3339(), 100)
             .unwrap();
         assert!(due.is_empty(), "failed 后不应再到期");
+    }
+
+    #[test]
+    fn list_pending_and_cancel_atomic_preemption() {
+        let store = store();
+        let now = Utc::now();
+        let future = (now + chrono::Duration::hours(2)).to_rfc3339();
+        let created = now.to_rfc3339();
+        for (id, sa) in [("p1", &future), ("p2", &future)] {
+            store
+                .insert_scheduled_broadcast(&NewScheduledBroadcast {
+                    id,
+                    title: "T",
+                    message: "M",
+                    admin_id: "adm",
+                    platforms: &["ios".into()],
+                    version_min: Some("1.0.0"),
+                    last_active_days: None,
+                    user_ids: &[],
+                    scheduled_at: sa,
+                    created_at: &created,
+                })
+                .unwrap();
+        }
+        // 列出两条 pending，受众回显正确。
+        let pending = store.list_scheduled_broadcasts(100).unwrap();
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending[0].platforms, vec!["ios".to_string()]);
+        assert_eq!(pending[0].version_min.as_deref(), Some("1.0.0"));
+
+        // 取消 p1：成功；列表只剩 p2。
+        assert!(store.cancel_scheduled_broadcast("p1").unwrap());
+        let after = store.list_scheduled_broadcasts(100).unwrap();
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].id, "p2");
+        // 取消已 canceled 的 p1 → false（非 pending，原子抢占失败）。
+        assert!(!store.cancel_scheduled_broadcast("p1").unwrap());
+
+        // 取消已 sent 的不生效（模拟被 worker fan-out）。
+        store.mark_scheduled_broadcast_sent("p2", 3, &created).unwrap();
+        assert!(!store.cancel_scheduled_broadcast("p2").unwrap());
+        assert!(store.list_scheduled_broadcasts(100).unwrap().is_empty());
     }
 
     #[test]

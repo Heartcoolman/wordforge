@@ -20,7 +20,11 @@ fn export_openapi_yaml() {
 
     // 基本内容断言，防止导出空文档
     assert!(yaml.contains("WordForge API"), "info.title 缺失");
-    assert!(yaml.contains("0.6.0-beta.4"), "info.version 缺失");
+    // W4-1：version 跟随 CARGO_PKG_VERSION（与 Cargo.toml 一致），勿写死旧版本。
+    assert!(
+        yaml.contains(env!("CARGO_PKG_VERSION")),
+        "info.version 应为 CARGO_PKG_VERSION"
+    );
     assert!(yaml.contains("/auth/login"), "auth/login 端点缺失");
     assert!(yaml.contains("/auth/register"), "auth/register 端点缺失");
     assert!(yaml.contains("/records"), "records 端点缺失");

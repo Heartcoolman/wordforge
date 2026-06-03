@@ -24,6 +24,8 @@ pub fn router() -> Router<AppState> {
         // m033:可扩展设置配置存储 —— settings.html 的 11 个面板各自持久化
         .route("/config", get(get_settings_config))
         .route("/config/:section", put(put_settings_config))
+        // W2-4:离站备份各 target 运行时状态（只读，与 backup-policy 配置解耦）
+        .route("/backup-status", get(get_backup_status))
         .route(
             "/snapshots",
             get(list_settings_snapshots).post(create_settings_snapshot),
@@ -55,6 +57,21 @@ const KNOWN_SECTIONS: &[&str] = &[
 const EXPORT_DENY_SECTIONS: &[&str] = &["keys", "secrets"];
 
 const MAX_SNAPSHOT_LABEL_LEN: usize = 200;
+
+/// GET /api/admin/settings/backup-status —— 离站备份各 target 运行时状态（W2-4）。
+/// 与 backup-policy 配置 section 解耦的只读视图，供 settings BackupRenderer 显示每 target
+/// 上次成功/失败，使灾备可验证。
+async fn get_backup_status(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let statuses = state
+        .run_store_task("admin.settings.backup_status", |store| {
+            store.list_backup_target_status()
+        })
+        .await??;
+    Ok(ok(serde_json::json!({ "targets": statuses })))
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -176,11 +193,17 @@ async fn update_settings(
     let maintenance_mode_changed = req.maintenance_mode.is_some();
     let req_touched_version_gate =
         req.min_client_version.is_some() || req.version_gate_enabled.is_some();
+    let admin_id = admin.admin_id.clone();
     let settings = state
         .run_store_task(
             "admin.settings.update_settings",
             move |store| -> Result<_, AppError> {
                 let mut settings = store.get_system_settings()?;
+                // W4-4:门控是高危生产控制,本入口同样可改它 → 留痕。先取旧值（settings 层原始值）。
+                let gate_touched =
+                    req.min_client_version.is_some() || req.version_gate_enabled.is_some();
+                let old_gate_enabled = settings.version_gate_enabled;
+                let old_gate_min = settings.min_client_version.clone();
 
                 if let Some(v) = req.max_users {
                     settings.max_users = v;
@@ -229,6 +252,24 @@ async fn update_settings(
                 }
 
                 store.save_system_settings(&settings)?;
+                // W4-4:仅当本次确实改动门控字段时留痕，避免无关 settings 更新刷审计噪声。
+                if gate_touched {
+                    let metadata = serde_json::json!({
+                        "oldEnabled": old_gate_enabled,
+                        "newEnabled": settings.version_gate_enabled,
+                        "oldMinClientVersion": old_gate_min,
+                        "newMinClientVersion": settings.min_client_version,
+                    });
+                    if let Err(e) = store.insert_admin_audit(
+                        &admin_id,
+                        "set_version_gate",
+                        Some("settings"),
+                        Some("version_gate"),
+                        Some(&metadata),
+                    ) {
+                        tracing::warn!(error = %e, "写门控审计失败");
+                    }
+                }
                 Ok(settings)
             },
         )
@@ -333,11 +374,16 @@ async fn set_version_gate(
     if let Some(ref v) = req.min_client_version {
         validate_min_client_version(v)?;
     }
+    let admin_id = admin.admin_id.clone();
     let settings = state
         .run_store_task(
             "admin.settings.set_version_gate",
             move |store| -> Result<_, AppError> {
                 let mut settings = store.get_system_settings()?;
+                // W4-4:先取旧值（settings 层原始值，含 None；非 effective——effective 会把 env
+                // 兜底误记成人为改动）。这是「一键锁死全体低版本客户端」的高危生产控制，必须留痕。
+                let old_enabled = settings.version_gate_enabled;
+                let old_min = settings.min_client_version.clone();
                 if let Some(v) = req.enabled {
                     settings.version_gate_enabled = v;
                 }
@@ -350,6 +396,22 @@ async fn set_version_gate(
                     };
                 }
                 store.save_system_settings(&settings)?;
+                // 与 save 同一 store task 写审计。容错：Err 仅 warn 不阻塞业务。
+                let metadata = serde_json::json!({
+                    "oldEnabled": old_enabled,
+                    "newEnabled": settings.version_gate_enabled,
+                    "oldMinClientVersion": old_min,
+                    "newMinClientVersion": settings.min_client_version,
+                });
+                if let Err(e) = store.insert_admin_audit(
+                    &admin_id,
+                    "set_version_gate",
+                    Some("settings"),
+                    Some("version_gate"),
+                    Some(&metadata),
+                ) {
+                    tracing::warn!(error = %e, "写门控审计失败");
+                }
                 Ok(settings)
             },
         )

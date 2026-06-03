@@ -74,6 +74,8 @@ check RATE_LIMIT_WINDOW_SECS        "900"
 check RATE_LIMIT_MAX                "500"
 check AUTH_RATE_LIMIT_WINDOW_SECS   "60"
 check AUTH_RATE_LIMIT_MAX           "10"
+check RATE_LIMIT_TELEMETRY_WINDOW_SECS "60"
+check RATE_LIMIT_TELEMETRY_MAX      "120"
 
 # --- Worker ---
 check WORKER_LEADER                 "true"

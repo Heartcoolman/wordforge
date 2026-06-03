@@ -31,28 +31,48 @@ fn build_state(store: Arc<Store>) -> AppState {
 }
 
 #[tokio::test]
-async fn worker_reschedules_unknown_event_then_keeps_pending() {
+async fn worker_dead_letters_unknown_event_immediately() {
     let tmp = tempfile::tempdir().unwrap();
     let store =
         Arc::new(Store::open(tmp.path().join("outbox_wf.db").to_str().unwrap(), 5000, 2).unwrap());
     store.run_migrations().unwrap();
-    // 未知类型事件 → process_one 必然 Err → reschedule（attempts=1，仍 pending，未死信）。
+    // W1-2：未知类型事件 = 永久错误（毒丸）→ 跳过退避直接进死信，不空跑 5 次。
     store.enqueue_outbox_event("bogus_type", "{}").unwrap();
     let state = build_state(store.clone());
 
     outbox_processor::run(&state).await;
 
     let stats = store.outbox_stats().unwrap();
-    assert_eq!(stats.pending, 1, "未知事件应被退避重排而非删除");
-    assert_eq!(stats.dead_letter, 0, "首次失败不应进死信");
-    // 退避后 next_retry_at 在未来，当前时刻不可再领取
-    let now = chrono::Utc::now().to_rfc3339();
-    assert!(store.claim_due_outbox_events(&now, 10).unwrap().is_empty());
-    // 用远未来时间领取，验证 attempts 已 bump
+    assert_eq!(stats.pending, 0, "永久错误应立即移出 outbox");
+    assert_eq!(stats.dead_letter, 1, "永久错误应立即进死信");
+    // 未来时间也领不到（已不在 outbox，未空跑退避）。
     let future = (chrono::Utc::now() + chrono::Duration::seconds(7200)).to_rfc3339();
-    let due = store.claim_due_outbox_events(&future, 10).unwrap();
-    assert_eq!(due.len(), 1);
-    assert_eq!(due[0].attempts, 1);
+    assert!(store.claim_due_outbox_events(&future, 10).unwrap().is_empty());
+    // 死信明细可列出，记录 attempts=1（首次失败即进死信，非耗尽 5 次）。
+    let dl = store.list_dead_letter(10).unwrap();
+    assert_eq!(dl.len(), 1);
+    assert_eq!(dl[0].attempts, 1, "毒丸首次失败即进死信，attempts=1");
+    assert_eq!(dl[0].event_type, "bogus_type");
+}
+
+#[tokio::test]
+async fn worker_dead_letters_unparseable_payload_immediately() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Arc::new(
+        Store::open(tmp.path().join("outbox_bad.db").to_str().unwrap(), 5000, 2).unwrap(),
+    );
+    store.run_migrations().unwrap();
+    // record_created 但 payload 无法反序列化 → 永久错误 → 立即死信。
+    store
+        .enqueue_outbox_event("record_created", "{not valid json")
+        .unwrap();
+    let state = build_state(store.clone());
+
+    outbox_processor::run(&state).await;
+
+    let stats = store.outbox_stats().unwrap();
+    assert_eq!(stats.pending, 0);
+    assert_eq!(stats.dead_letter, 1);
 }
 
 #[tokio::test]

@@ -6,6 +6,38 @@
 
 ---
 
+## [v1.1.4-beta.1] — 2026-06-03 · Pre-release · 收尾型 minor：事件总线深化 · 运营闭环 · 性能加固 · 契约对齐
+
+把 v1.1.3 埋下的四块「基建已建、闭环未做」半成品（outbox / 告警收件箱 / 定时广播 / 离站备份）收口，并对 v1.1.x 累积的契约文档漂移止血。**全程无 P0**，生产硬校验正确生效、无线上断流。新增迁移 m045–m047。
+
+### ✨ 新增与闭环
+
+- **领域事件幂等账本（W1-1）**：新增 `processed_events` 表（m045），把幂等标记与 AMAS 状态在同一事务原子写入，single/batch 入口在应用 AMAS 前预检命中即短路，把「重启不丢」补成 AMAS「精确一次」——为后续删手动 rollback / 切默认异步铺第一块基石。**`RECORDS_OUTBOX_ASYNC` 默认仍 false（同步老路），手动 rollback 保留**，生产零暴露。
+- **outbox 死信运维闭环（W1-2）**：admin 监控页死信 chip 可点开抽屉，列出明细（用户 / 事件类型 / 失败原因 / 进死信时间），支持人工重投（回 outbox、attempts 归零）与丢弃（均带二次确认）；毒丸消息（payload 解析失败 / 未知事件类型）判为永久错误，跳过指数退避直接进死信，不再空跑 5 次。
+- **canary 自动回滚进告警收件箱（W2-1）**：AMAS patch canary 触发自动回滚时写入 admin 告警收件箱（持久可追溯，含被回滚 patch 的 reward/anomaly 对比），补齐此前只发瞬态 SSE 的覆盖盲区。
+- **定时广播队列查看 / 取消（W2-2）**：DevicesPage 新增「待发排程」队列视图，可查看与取消待发的定时广播（原子抢占：已被到点下发则返回 409 不误取消）；迁移 m046 重建 `scheduled_broadcasts` 表加入 `canceled` 状态。
+- **告警收件箱「全部已读」（W2-3）**：NotificationBell 面板头一键清空未读角标。
+- **离站备份可观测（W2-4）**：`backup_offsite` worker 落 worker 心跳（admin worker 列表 + Prometheus 可见）；新增 `backup_target_status` 表（m047）记录每 target 上次成功 / 失败 / 字节数，settings 备份面板按 target 显示状态，灾备从「配了不知有没有用」变为可验证。
+- **遥测专项限频（W3-1）**：`/api/telemetry` 增加独立于通用 API 预算的 per-user 频率配额（`RATE_LIMIT_TELEMETRY_MAX`，默认 120/60s），超额软丢弃（不落库、仍刷新设备活跃度），防单个噪声客户端打满 SQLite 写路径挤占学习数据写入。
+- **门控变更审计留痕（W4-4）**：客户端最低版本门控（高危生产控制）变更时写入 `update_audit_log`，记录 old→new 与开关翻转。
+
+### 🐛 修复与加固
+
+- **关停最终落盘（W3-2）**：graceful shutdown 在服务停止后补一次可用率落盘，消除重启丢失登录 SLO 当前小时桶（≤5min）的缺口。
+- **延迟直方图桶细化（W3-3）**：`http_request_duration_seconds` 桶边界细化为 `[0.01,0.025,0.05,0.1,0.25,0.5,1.0,2.5]`，提升 100ms~2s 区间 p95/p99 精度；启动回灌对桶数变更的旧持久化行做安全重置（防 resize 错位污染历史 SLO，详见 `docs/runbook/metrics-buckets.md`）。
+
+### 📝 文档与契约
+
+- `docs/openapi.yaml` `info.version` 改由 `CARGO_PKG_VERSION` 派生，跨 v1.1.x 不再漂移（W4-1）。
+- `api-endpoints.md` 遥测段补齐 m038 四要素硬校验（平台 / 版本 header + `device.timezone` / `device.model`）+ 两个 403 三态归属表（W4-2）；用户段补齐 GDPR 注销（`DELETE /api/users/me`）与数据导出（`GET /api/users/me/export`，NDJSON / 24h 冷却 / 429）两端点（W4-3）。
+- `release-calendar.md` / `RFC.md`：撤销 `check-update` 端点「v1.1 删除」承诺，明确保留为内部 admin 端点（W4-5）；新增按 403 码差异化的客户端降级处置矩阵（W4-6）。
+
+### 🧹 代码债
+
+- 删除 admin-ui 死模块 `api/health.ts`（全站零引用）及其测试；后端占位字段注释澄清语义（W5-1）。
+
+> 质量：后端 `cargo test` 全绿、`clippy` 零新增告警；admin-ui `tsc` / `build` / `vitest`（1008 通过）全绿。11-agent 对抗式交叉验证捕获并修复 1 个 W1-1 原子性 blocker（回滚 AMAS 状态与清除幂等标记收敛为单事务，守住「标记存在 ⟺ AMAS 已应用」不变式）。
+
 ## [v1.1.3-beta.2] — 2026-06-03 · Pre-release · 引导导览与更新页 CHANGELOG 修正
 
 > 在 v1.1.3-beta.1（19 项 backlog 全集，见下方条目）之上仅叠加两项 admin UI 修正，其余一致。

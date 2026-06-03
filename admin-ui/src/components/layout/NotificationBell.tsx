@@ -68,6 +68,22 @@ export function NotificationBell() {
     }
   };
 
+  const [markingAll, setMarkingAll] = createSignal(false);
+  const markAll = async () => {
+    if (markingAll() || unread() === 0) return;
+    setMarkingAll(true);
+    try {
+      const res = await notificationsApi.markAllRead();
+      setUnread(res.unreadCount);
+      const now = new Date().toISOString();
+      setItems((prev) => prev.map((a) => (a.readAt ? a : { ...a, readAt: now })));
+    } catch {
+      uiStore.toast.error('全部已读失败');
+    } finally {
+      setMarkingAll(false);
+    }
+  };
+
   const onDocClick = (e: MouseEvent) => {
     if (open() && rootRef && !rootRef.contains(e.target as Node)) setOpen(false);
   };
@@ -117,7 +133,17 @@ export function NotificationBell() {
           <div class="flex items-center justify-between px-4 py-2.5 border-b border-border-hairline">
             <span class="text-[13px] font-semibold text-content">通知</span>
             <Show when={unread() > 0}>
-              <span class="text-[11px] text-content-tertiary">{unread()} 条未读</span>
+              <div class="flex items-center gap-2">
+                <span class="text-[11px] text-content-tertiary">{unread()} 条未读</span>
+                <button
+                  type="button"
+                  onClick={markAll}
+                  disabled={markingAll()}
+                  class="text-[11px] text-accent hover:underline disabled:opacity-50 cursor-pointer"
+                >
+                  {markingAll() ? '处理中…' : '全部已读'}
+                </button>
+              </div>
             </Show>
           </div>
 

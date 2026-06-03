@@ -300,6 +300,7 @@ impl Store {
         user_id: &str,
         user_state: &serde_json::Value,
         algo_states: &[(String, serde_json::Value)],
+        idempotency: Option<&str>,
     ) -> Result<(), StoreError> {
         keys::validate_id(user_id)?;
         let mut conn = self.conn()?;
@@ -321,9 +322,105 @@ impl Store {
                 params![user_id, algo_id, json],
             )?;
         }
+        // W1-1：幂等标记与 AMAS 状态同 tx 原子提交,保证"标记存在 ⟺ AMAS 已应用"。
+        if let Some(client_record_id) = idempotency {
+            tx.execute(
+                "INSERT OR IGNORE INTO processed_events (user_id, client_record_id, processed_at)
+                 VALUES (?1, ?2, ?3)",
+                params![user_id, client_record_id, created_at],
+            )?;
+        }
         tx.commit()?;
         Ok(())
     }
+
+    /// W1-1：一次性**原子**回滚引擎状态 + 清除幂等标记。
+    ///
+    /// 写侧 [`Self::persist_engine_state_atomic`] 把 AMAS 状态 + 标记同 tx 原子写入；回滚侧也必须
+    /// 把「恢复 AMAS 状态」与「删除标记」放进同一 tx，否则进程在两者之间崩溃会留下「标记在、AMAS
+    /// 已回滚」的悬置态——重放命中标记走裸记录路径跳过 AMAS，永久丢该事件 AMAS 贡献，破坏
+    /// 「标记存在 ⟺ AMAS 已应用」不变式。本方法把 user_state / algo_states / ELO / 标记清除全部
+    /// 收进一个 tx，崩溃要么全回滚（标记已清），要么全不动（标记在、AMAS 仍在），两种结局均守不变式。
+    pub fn restore_engine_state_atomic(&self, r: &EngineStateRestore) -> Result<(), StoreError> {
+        keys::validate_id(r.user_id)?;
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+        // user_state：Some(inner) 按 inner set/delete；外层 None 不动（batch 路径不碰 user_state）。
+        if let Some(state_opt) = r.user_state {
+            match state_opt {
+                Some(v) => {
+                    let json = Self::serialize_json(v)?;
+                    let created_at = chrono::Utc::now().to_rfc3339();
+                    tx.execute(
+                        "INSERT INTO engine_user_states (user_id, state_json, created_at)
+                         VALUES (?1, ?2, ?3)
+                         ON CONFLICT(user_id) DO UPDATE SET state_json=?2",
+                        params![r.user_id, json, created_at],
+                    )?;
+                }
+                None => {
+                    tx.execute(
+                        "DELETE FROM engine_user_states WHERE user_id=?1",
+                        params![r.user_id],
+                    )?;
+                }
+            }
+        }
+        for (algo_id, val) in r.algo_states {
+            match val {
+                Some(v) => {
+                    let json = Self::serialize_json(v)?;
+                    tx.execute(
+                        "INSERT INTO engine_algo_states (user_id, algo_id, state_json)
+                         VALUES (?1, ?2, ?3)
+                         ON CONFLICT(user_id, algo_id) DO UPDATE SET state_json=?3",
+                        params![r.user_id, algo_id, json],
+                    )?;
+                }
+                None => {
+                    tx.execute(
+                        "DELETE FROM engine_algo_states WHERE user_id=?1 AND algo_id=?2",
+                        params![r.user_id, algo_id],
+                    )?;
+                }
+            }
+        }
+        if let Some(elo) = r.user_elo {
+            tx.execute(
+                "INSERT INTO user_elo (user_id, rating, games) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(user_id) DO UPDATE SET rating=?2, games=?3",
+                params![r.user_id, elo.rating, elo.games],
+            )?;
+        }
+        if let Some((word_id, elo)) = r.word_elo {
+            tx.execute(
+                "INSERT INTO word_elo (word_id, rating, games) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(word_id) DO UPDATE SET rating=?2, games=?3",
+                params![word_id, elo.rating, elo.games],
+            )?;
+        }
+        if let Some(rec_id) = r.clear_marker_record_id {
+            tx.execute(
+                "DELETE FROM processed_events WHERE user_id=?1 AND client_record_id=?2",
+                params![r.user_id, rec_id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+}
+
+/// W1-1：[`Store::restore_engine_state_atomic`] 的入参。各字段语义见该方法文档。
+pub struct EngineStateRestore<'a> {
+    pub user_id: &'a str,
+    /// 外层 None=不动 user_state；Some(&Some(v))=恢复为 v；Some(&None)=删除该行。
+    pub user_state: Option<&'a Option<serde_json::Value>>,
+    /// 每项 (algo_id, Some=恢复 / None=删除)。
+    pub algo_states: &'a [(&'a str, &'a Option<serde_json::Value>)],
+    pub user_elo: Option<&'a crate::amas::elo::EloRating>,
+    pub word_elo: Option<(&'a str, &'a crate::amas::elo::EloRating)>,
+    /// Some(client_record_id)=同 tx 删除 processed_events 标记。
+    pub clear_marker_record_id: Option<&'a str>,
 }
 
 #[cfg(test)]
@@ -547,7 +644,7 @@ mod tests {
             ("a2".to_string(), serde_json::json!({"l":2})),
         ];
         store
-            .persist_engine_state_atomic("u1", &user_state, &algo)
+            .persist_engine_state_atomic("u1", &user_state, &algo, None)
             .unwrap();
         let us = store.get_engine_user_state("u1").unwrap().unwrap();
         assert_eq!(us["attention"], 0.5);
@@ -559,7 +656,7 @@ mod tests {
         // 二次 atomic upsert 替换
         let algo2 = vec![("a1".into(), serde_json::json!({"l":99}))];
         store
-            .persist_engine_state_atomic("u1", &serde_json::json!({"attention":0.9}), &algo2)
+            .persist_engine_state_atomic("u1", &serde_json::json!({"attention":0.9}), &algo2, None)
             .unwrap();
         assert_eq!(
             store.get_engine_algo_state("u1", "a1").unwrap().unwrap()["l"],
@@ -569,9 +666,58 @@ mod tests {
         // 错误 ID
         assert!(matches!(
             store
-                .persist_engine_state_atomic("", &user_state, &[])
+                .persist_engine_state_atomic("", &user_state, &[], None)
                 .unwrap_err(),
             crate::store::StoreError::Validation(_)
         ));
+    }
+
+    /// W1-1：原子回滚 + 清标记守不变式。验证 restore_engine_state_atomic 在一个 tx 内
+    /// 同时恢复 AMAS 状态（含删除）与清除 processed_events 标记。
+    #[test]
+    fn restore_engine_state_atomic_rolls_back_and_clears_marker() {
+        use crate::store::operations::engine::EngineStateRestore;
+        // 需 processed_events 表（m045），故跑全量迁移而非裸 tempfile_store。
+        let _t = tempfile::tempdir().unwrap();
+        let store = Store::open(_t.path().join("t.db").to_str().unwrap(), 5000, 2).unwrap();
+        store.run_migrations().unwrap();
+
+        // 写侧：AMAS 状态 + 标记原子写入（模拟 process_event_idempotent）。
+        let algo = vec![("mastery:w1".to_string(), serde_json::json!({"m": 0.9}))];
+        store
+            .persist_engine_state_atomic(
+                "u1",
+                &serde_json::json!({"attention": 0.9}),
+                &algo,
+                Some("rec-1"),
+            )
+            .unwrap();
+        assert!(store.is_event_processed("u1", "rec-1").unwrap());
+        assert!(store.get_engine_user_state("u1").unwrap().is_some());
+
+        // 回滚侧：user_state 删除（pre-event 为无）、mastery 删除、清标记——全在一个 tx。
+        let elo = crate::amas::elo::EloRating::default();
+        let none_val: Option<serde_json::Value> = None;
+        store
+            .restore_engine_state_atomic(&EngineStateRestore {
+                user_id: "u1",
+                user_state: Some(&none_val),
+                algo_states: &[("mastery:w1", &none_val)],
+                user_elo: Some(&elo),
+                word_elo: Some(("w1", &elo)),
+                clear_marker_record_id: Some("rec-1"),
+            })
+            .unwrap();
+
+        // 不变式：标记已清 ⟺ AMAS 已回滚（user_state 与 mastery 均删除）。
+        assert!(
+            !store.is_event_processed("u1", "rec-1").unwrap(),
+            "回滚后标记应被同 tx 清除"
+        );
+        assert!(store.get_engine_user_state("u1").unwrap().is_none());
+        assert!(store
+            .get_engine_algo_state("u1", "mastery:w1")
+            .unwrap()
+            .is_none());
     }
 }

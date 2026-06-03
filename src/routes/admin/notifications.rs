@@ -20,6 +20,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(list_notifications))
         .route("/:id/read", post(mark_read))
+        .route("/read-all", post(mark_all_read))
 }
 
 #[derive(Debug, Deserialize)]
@@ -70,4 +71,20 @@ async fn mark_read(
         })
         .await??;
     Ok(ok(json!({ "read": true, "unreadCount": unread_count })))
+}
+
+/// POST /api/admin/notifications/read-all —— 一键全部已读，返回重算后的未读计数。
+async fn mark_all_read(
+    admin: AdminAuthUser,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let admin_id = admin.admin_id.clone();
+    let (marked, unread_count) = state
+        .run_store_task("admin.notifications.read_all", move |store| {
+            let marked = store.mark_all_system_alerts_read(&admin_id)?;
+            let unread_count = store.count_unread_system_alerts()?;
+            Ok::<_, crate::store::StoreError>((marked, unread_count))
+        })
+        .await??;
+    Ok(ok(json!({ "marked": marked, "unreadCount": unread_count })))
 }

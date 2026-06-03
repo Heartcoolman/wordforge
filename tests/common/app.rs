@@ -64,8 +64,15 @@ pub async fn spawn_test_server_with_dual_limits(api_limit: u64, anon: u64, authe
         Default::default(),
         anon,
         authed,
+        120,
     )
     .await
+}
+
+/// W3-1：spawn TestApp 并显式注入遥测专项配额上限，便于测试软丢弃。
+pub async fn spawn_test_app_with_telemetry_limit(telemetry_max: u64) -> TestApp {
+    spawn_with_full_config_dual(100, 10, Default::default(), Default::default(), 0, 0, telemetry_max)
+        .await
 }
 
 async fn spawn_with_full_config(
@@ -74,7 +81,7 @@ async fn spawn_with_full_config(
     strict_mode: learning_backend::config::StrictModeConfig,
     probe: learning_backend::config::ProbeConfig,
 ) -> TestApp {
-    spawn_with_full_config_dual(api_limit, auth_limit, strict_mode, probe, 0, 0).await
+    spawn_with_full_config_dual(api_limit, auth_limit, strict_mode, probe, 0, 0, 120).await
 }
 
 async fn spawn_with_full_config_dual(
@@ -84,6 +91,7 @@ async fn spawn_with_full_config_dual(
     probe: learning_backend::config::ProbeConfig,
     anon_max: u64,
     authed_max: u64,
+    telemetry_max: u64,
 ) -> TestApp {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     // 直接构造 Config，避免使用 set_var 造成多线程测试环境变量竞态
@@ -128,6 +136,10 @@ async fn spawn_with_full_config_dual(
         auth_rate_limit: learning_backend::config::AuthRateLimitConfig {
             window_secs: 60,
             max_requests: auth_limit,
+        },
+        telemetry_rate_limit: learning_backend::config::AuthRateLimitConfig {
+            window_secs: 60,
+            max_requests: telemetry_max,
         },
         worker: learning_backend::config::WorkerConfig {
             is_leader: false,

@@ -160,36 +160,32 @@ fn capture_engine_state_snapshot(
     })
 }
 
+/// 回滚单条记录处理对引擎状态的全部改动。W1-1：改为**单 tx 原子**回滚（user_state + algo +
+/// ELO），并可选在同一 tx 内清除幂等标记（`clear_marker`）——保证回滚后「标记存在 ⟺ AMAS 已应用」
+/// 不变式在崩溃窗口仍成立（详见 `Store::restore_engine_state_atomic`）。手动 rollback 机制保留，
+/// 仅由多次独立 store 调用收敛为一次原子调用。
 fn restore_engine_state_snapshot(
     store: &crate::store::Store,
     user_id: &str,
     word_id: &str,
     snapshot: &EngineStateSnapshot,
+    clear_marker: Option<&str>,
 ) {
-    match &snapshot.user_state {
-        Some(previous) => {
-            if let Err(error) = store.set_engine_user_state(user_id, previous) {
-                tracing::warn!(user_id, error = %error, "Failed to rollback AMAS user state");
-            }
-        }
-        None => {
-            if let Err(error) = store.delete_engine_user_state(user_id) {
-                tracing::warn!(user_id, error = %error, "Failed to delete AMAS user state during rollback");
-            }
-        }
-    }
-
-    restore_engine_algo_state(store, user_id, "ige", &snapshot.ige);
-    restore_engine_algo_state(store, user_id, "swd", &snapshot.swd);
-    restore_engine_algo_state(store, user_id, "trust", &snapshot.trust);
-    restore_engine_algo_state(store, user_id, &snapshot.mastery_key, &snapshot.mastery);
-
-    // 回滚 ELO 评分
-    if let Err(error) = store.set_user_elo(user_id, &snapshot.user_elo) {
-        tracing::warn!(user_id, error = %error, "Failed to rollback user ELO");
-    }
-    if let Err(error) = store.set_word_elo(word_id, &snapshot.word_elo) {
-        tracing::warn!(word_id, error = %error, "Failed to rollback word ELO");
+    let restore = crate::store::operations::engine::EngineStateRestore {
+        user_id,
+        user_state: Some(&snapshot.user_state),
+        algo_states: &[
+            ("ige", &snapshot.ige),
+            ("swd", &snapshot.swd),
+            ("trust", &snapshot.trust),
+            (snapshot.mastery_key.as_str(), &snapshot.mastery),
+        ],
+        user_elo: Some(&snapshot.user_elo),
+        word_elo: Some((word_id, &snapshot.word_elo)),
+        clear_marker_record_id: clear_marker,
+    };
+    if let Err(error) = store.restore_engine_state_atomic(&restore) {
+        tracing::warn!(user_id, word_id, error = %error, "原子回滚 AMAS 状态+清标记失败");
     }
 }
 
@@ -291,6 +287,33 @@ pub(crate) async fn process_single_record(
     let record_for_store = record.clone();
     let req_for_store = req.clone();
 
+    // W1-1：幂等账本预检。check_duplicate 只挡记录行重复;此处专挡"AMAS 状态已在先前(崩溃)
+    // 尝试中应用、但记录行未落库"的窗口——命中则跳过 process_event(避免二次累加
+    // ELO/mastery/trust),仅补落裸记录行(不带 AMAS 派生的 word_state/session 增量,那些已在
+    // 原尝试中处理或随该次崩溃丢失,属单事件有界损失,优于无界的 AMAS 状态漂移)。
+    let already_processed = state
+        .run_store_task("records.single.check_processed", {
+            let user_id = user_id_owned.clone();
+            let record_id = record.id.clone();
+            move |store| store.is_event_processed(&user_id, &record_id)
+        })
+        .await??;
+    if already_processed {
+        let record_for_replay = record.clone();
+        state
+            .run_store_task("records.single.persist_replayed", move |store| {
+                store
+                    .create_record_with_updates(&record_for_replay, None, None)
+                    .map_err(|e| AppError::internal(&e.to_string()))
+            })
+            .await??;
+        return Ok(CreateRecordResponse {
+            record,
+            amas_result: None,
+            duplicate: true,
+        });
+    }
+
     let engine_snapshot = state
         .run_store_task("records.single.snapshot", {
             let user_id = user_id_owned.clone();
@@ -301,7 +324,7 @@ pub(crate) async fn process_single_record(
 
     let amas_result = state
         .amas()
-        .process_event(
+        .process_event_idempotent(
             user_id,
             RawEvent {
                 word_id: req.word_id.clone(),
@@ -319,6 +342,7 @@ pub(crate) async fn process_single_record(
                 hint_used: req.hint_used.unwrap_or(false),
                 confused_with: req.confused_with.clone(),
             },
+            &record.id,
         )
         .await?;
     let amas_config = state.amas().get_config();
@@ -405,11 +429,16 @@ pub(crate) async fn process_single_record(
                         next_session.as_ref(),
                     )
                     .map_err(|error| {
+                        // W1-1：原子回滚 AMAS 状态 + 清幂等标记（同一 tx）。崩溃要么全回滚（标记
+                        // 已清，重试重新应用 AMAS），要么全不动（标记在、AMAS 仍在，重试走裸记录
+                        // 路径），两种结局都守「标记存在 ⟺ AMAS 已应用」不变式，消除原两步非原子
+                        // 写之间的崩溃窗口（重试丢 AMAS）。
                         restore_engine_state_snapshot(
                             &store,
                             &user_id_owned,
                             &word_id,
                             &engine_snapshot,
+                            Some(&record_for_store.id),
                         );
                         AppError::internal(&error.to_string())
                     })?;

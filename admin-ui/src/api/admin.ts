@@ -5,7 +5,7 @@ import type {
   AdminUser, AdminUsersPage, AdminUsersQuery, AdminCreateUserPayload,
   ClientDeviceRow, AdminAuditEntry, UserActivityEntry, UserExtras,
   EngagementAnalytics, LearningAnalytics,
-  SystemHealth, DatabaseInfo, SystemSettings, VersionGate, WorkerStatusRow,
+  SystemHealth, DatabaseInfo, SystemSettings, VersionGate, WorkerStatusRow, DeadLetterEntry,
   RequestMetrics, LogLine, AlertEvent,
   UpdateCheck, AdminUpdateStatus, ApplyAccepted, UpdateAuditEntry, DailyActiveUsersEntry, DailyRecordsEntry,
   ChangelogSummary, BackupList, BackupEntry,
@@ -13,7 +13,7 @@ import type {
   FeedbackItem, FeedbackReply, FeedbackStats, FeedbackDetail,
   // m027:设备页对齐 clients.html 设计新增
   ListedDevice, ClientPlatformAgg, ClientVersionAgg, ClientUpgradePolicy,
-  BroadcastStats, BroadcastHistoryEntry,
+  BroadcastStats, BroadcastHistoryEntry, ScheduledBroadcast, BackupTargetStatus,
 } from '@/types/admin';
 import type { AmasConfig } from '@/types/amas';
 import type { BrowseItem, WordbookPreview, ImportResult, UpdateInfo, SyncResult } from '@/types/wordbookCenter';
@@ -178,6 +178,13 @@ export const adminApi = {
     api.get<{ logs: LogLine[] }>('/api/admin/monitoring/logs', { limit, level }, { useAdminToken: true }),
   monitoringEvents: (hours = 6) =>
     api.get<{ events: AlertEvent[] }>('/api/admin/monitoring/events', { hours }, { useAdminToken: true }),
+  // W1-2:outbox 死信运维——明细列表 + 人工重投 / 丢弃
+  monitoringDeadLetter: (limit = 100) =>
+    api.get<{ entries: DeadLetterEntry[] }>('/api/admin/monitoring/dead-letter', { limit }, { useAdminToken: true }),
+  monitoringDeadLetterRequeue: (id: number) =>
+    api.post<{ requeued: boolean; id: number }>(`/api/admin/monitoring/dead-letter/${id}/requeue`, undefined, { useAdminToken: true }),
+  monitoringDeadLetterPurge: (id: number) =>
+    api.delete<{ purged: boolean; id: number }>(`/api/admin/monitoring/dead-letter/${id}`, { useAdminToken: true }),
 
   // 一键自更新（PR-auto-update）
   updatesStatus: () => api.get<AdminUpdateStatus>('/api/admin/updates/status', undefined, { useAdminToken: true }),
@@ -267,6 +274,14 @@ export const adminApi = {
   }) => api.post<{ draft: PushDraft }>('/api/admin/broadcast/draft', data, { useAdminToken: true }),
   deletePushDraft: () =>
     api.delete<{ deleted: boolean }>('/api/admin/broadcast/draft', { useAdminToken: true }),
+  // W2-2:定时广播队列——列出待发 + 按 id 取消
+  listScheduledBroadcasts: () =>
+    api.get<{ items: ScheduledBroadcast[] }>('/api/admin/broadcast/scheduled', undefined, { useAdminToken: true }),
+  cancelScheduledBroadcast: (id: string) =>
+    api.delete<{ canceled: boolean }>(`/api/admin/broadcast/scheduled/${encodeURIComponent(id)}`, { useAdminToken: true }),
+  // W2-4:离站备份各 target 运行时状态（只读）
+  getBackupStatus: () =>
+    api.get<{ targets: BackupTargetStatus[] }>('/api/admin/settings/backup-status', undefined, { useAdminToken: true }),
   getSettings: () => api.get<SystemSettings>('/api/admin/settings', undefined, { useAdminToken: true }),
   updateSettings: (data: Partial<SystemSettings>) => api.put<SystemSettings>('/api/admin/settings', data, { useAdminToken: true }),
   setMaintenance: (active: boolean) => api.post<{ active: boolean }>('/api/admin/settings/maintenance', { active }, { useAdminToken: true }),

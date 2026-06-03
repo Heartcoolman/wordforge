@@ -61,9 +61,12 @@ pub async fn run(state: &AppState) {
                     tracing::warn!(error = %e, id, "outbox 完成事件删除任务失败");
                 }
             }
-            Err(err) => {
+            Err(perr) => {
+                let permanent = perr.permanent;
+                let err = perr.message;
                 let attempts = ev.attempts + 1;
-                if attempts >= MAX_ATTEMPTS {
+                // 永久错误（毒丸）跳过退避直接进死信；暂时性错误重试到上限才进死信。
+                if permanent || attempts >= MAX_ATTEMPTS {
                     let ev2 = ev.clone();
                     let err2 = err.clone();
                     let _ = state
@@ -71,14 +74,25 @@ pub async fn run(state: &AppState) {
                             store.move_outbox_to_dead_letter(&ev2, attempts, &err2)
                         })
                         .await;
-                    tracing::error!(id = ev.id, attempts, error = %err, "outbox 事件进入死信");
+                    let reason = if permanent {
+                        "永久错误,跳过退避"
+                    } else {
+                        "重试耗尽"
+                    };
+                    tracing::error!(id = ev.id, attempts, permanent, error = %err, "outbox 事件进入死信({reason})");
                     crate::services::alerting::raise_data_alert(
                         state,
                         "amas.outbox",
                         "dead_letter",
                         "error",
                         "领域事件进入死信".to_string(),
-                        format!("event#{} 重试 {} 次仍失败：{}", ev.id, attempts, err),
+                        format!(
+                            "event#{} {}（{}）：{}",
+                            ev.id,
+                            if permanent { "永久失败" } else { "重试耗尽" },
+                            attempts,
+                            err
+                        ),
                         None,
                     )
                     .await;
@@ -99,20 +113,37 @@ pub async fn run(state: &AppState) {
     }
 }
 
-/// 按 event_type 分发处理一条事件。错误转 String 供死信 / last_error 记录。
-async fn process_one(ev: &OutboxEvent, state: &AppState) -> Result<(), String> {
+/// process_one 的失败分类。`permanent=true` 表示重试无意义——payload 反序列化失败 / 未知
+/// event_type 这类毒丸消息，直接进死信，不空跑 5 次指数退避（上限 300s）。`permanent=false`
+/// 为暂时性失败（DB 锁 / AMAS 临时失败），仍按退避重试。
+struct ProcessError {
+    message: String,
+    permanent: bool,
+}
+
+/// 按 event_type 分发处理一条事件。错误带永久/暂时分类供 run 决定是否退避。
+async fn process_one(ev: &OutboxEvent, state: &AppState) -> Result<(), ProcessError> {
     match ev.event_type.as_str() {
         "record_created" => {
             let payload: OutboxRecordPayload =
-                serde_json::from_str(&ev.payload).map_err(|e| format!("payload 解析失败: {e}"))?;
+                serde_json::from_str(&ev.payload).map_err(|e| ProcessError {
+                    message: format!("payload 解析失败: {e}"),
+                    permanent: true,
+                })?;
             let mut req = payload.request;
             // 固化客户端提交时刻，避免落库时间漂移到 worker 处理时刻。
             req.created_at_override = Some(payload.created_at);
             process_single_record(&payload.user_id, &req, state)
                 .await
                 .map(|_| ())
-                .map_err(|e| format!("{}: {}", e.code, e.message))
+                .map_err(|e| ProcessError {
+                    message: format!("{}: {}", e.code, e.message),
+                    permanent: false,
+                })
         }
-        other => Err(format!("未知事件类型: {other}")),
+        other => Err(ProcessError {
+            message: format!("未知事件类型: {other}"),
+            permanent: true,
+        }),
     }
 }

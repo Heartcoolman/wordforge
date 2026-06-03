@@ -12,10 +12,13 @@
  * 诚实降级(不杜撰数据):
  *   - JWT secret / 轮换:后端 JWT 密钥来自启动期 config(env),settings 存储里没有该
  *     字段、也无运行期轮换端点,故不渲染假的 secret 输入框 / 轮换按钮。
- *   - 备份「最近备份」历史:后端无该数据源,不渲染杜撰的历史表格。
+ *   - 备份「最近备份」完整历史表:后端无该数据源,不渲染杜撰的历史表格。
+ *     （W2-4 起每 target 的「上次成功/失败」由 backup_target_status 真实下发,见下。）
  */
-import { For, Show } from 'solid-js';
+import { For, Show, createResource } from 'solid-js';
 import { Row, Field, Seg } from './SectionCard';
+import { adminApi } from '@/api/admin';
+import type { BackupTargetStatus } from '@/types/admin';
 
 type Obj = Record<string, unknown>;
 
@@ -388,6 +391,19 @@ export function BackupRenderer(props: SectionEditor) {
     next.targets = arr;
     props.onPatch(next);
   };
+  // W2-4:每 target 运行时状态（只读，与配置解耦）。fetcher 守卫,拿不到不阻断编辑。
+  const [statuses] = createResource<BackupTargetStatus[]>(() =>
+    adminApi.getBackupStatus?.().then((r) => r.targets).catch(() => []) ?? Promise.resolve([]),
+  );
+  const statusOf = (name: unknown): BackupTargetStatus | undefined =>
+    (statuses() ?? []).find((s) => s.name === name);
+  const fmtBytes = (n: number | null): string => {
+    if (n == null) return '—';
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+    if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+    return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
+  };
   return (
     <>
       <Row label="调度" hint="cron 表达式 · 失败自动重试 · 告警至 oncall。">
@@ -401,12 +417,27 @@ export function BackupRenderer(props: SectionEditor) {
         <div class="field-group">
           <For each={targets()}>
             {(t, i) => (
-              <div class="row">
-                <Field value={t.name} mono size="wide" width="90px" placeholder="primary" onChange={(val) => patchTarget(i(), 'name', val)} />
-                <Field value={t.uri} mono size="wide" placeholder="s3://…" onChange={(val) => patchTarget(i(), 'uri', val)} />
-                <Field value={t.retentionDays} type="number" size="compact" onChange={(val) => patchTarget(i(), 'retentionDays', val === '' ? '' : Number(val))} />
-                <span class="helper">天</span>
-              </div>
+              <>
+                <div class="row">
+                  <Field value={t.name} mono size="wide" width="90px" placeholder="primary" onChange={(val) => patchTarget(i(), 'name', val)} />
+                  <Field value={t.uri} mono size="wide" placeholder="s3://…" onChange={(val) => patchTarget(i(), 'uri', val)} />
+                  <Field value={t.retentionDays} type="number" size="compact" onChange={(val) => patchTarget(i(), 'retentionDays', val === '' ? '' : Number(val))} />
+                  <span class="helper">天</span>
+                </div>
+                {/* W2-4:该 target 上次成功/失败状态 */}
+                <Show when={statusOf(t.name)} fallback={<div class="helper" style={{ 'padding-left': '4px' }}>· 尚无离站记录（配置后下次每日备份生效）</div>}>
+                  {(st) => (
+                    <div class="helper" style={{ 'padding-left': '4px' }}>
+                      <Show
+                        when={st().lastError}
+                        fallback={<span>· ✓ 上次成功 {st().lastOkAt ? new Date(st().lastOkAt!).toLocaleString() : '—'} · {fmtBytes(st().lastBytes)}</span>}
+                      >
+                        <span style={{ color: 'var(--color-danger, #f87171)' }}>· ✗ 上次失败 {new Date(st().lastAttemptAt).toLocaleString()}：{st().lastError}</span>
+                      </Show>
+                    </div>
+                  )}
+                </Show>
+              </>
             )}
           </For>
           <Show when={targets().length === 0}>

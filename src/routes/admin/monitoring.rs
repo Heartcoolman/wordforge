@@ -2,8 +2,8 @@ use std::sync::atomic::Ordering;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use axum::extract::{Query, State};
-use axum::routing::get;
+use axum::extract::{Path, Query, State};
+use axum::routing::{delete, get, post};
 use axum::Router;
 use chrono::{Duration as ChronoDuration, Utc};
 use once_cell::sync::Lazy;
@@ -38,6 +38,10 @@ pub fn router() -> Router<AppState> {
         .route("/requests", get(request_metrics))
         .route("/logs", get(recent_logs))
         .route("/events", get(alert_events))
+        // W1-2：outbox 死信运维——明细列表 + 人工重投 / 丢弃
+        .route("/dead-letter", get(dead_letter_list))
+        .route("/dead-letter/:id/requeue", post(dead_letter_requeue))
+        .route("/dead-letter/:id", delete(dead_letter_purge))
 }
 
 // B62: System health monitoring
@@ -632,6 +636,66 @@ async fn alert_events(
     events.truncate(50);
 
     Ok(ok(json!({ "events": events })))
+}
+
+// ─────────────── W1-2：outbox 死信运维端点 ───────────────
+
+#[derive(Debug, Deserialize)]
+struct DeadLetterQuery {
+    limit: Option<i64>,
+}
+
+/// GET /api/admin/monitoring/dead-letter?limit=100 —— 死信明细列表（含 user/事件类型/失败原因/
+/// 进死信时间），按进死信时间倒序。死信价值随 opt-in async 启用兑现，默认同步老路恒空。
+async fn dead_letter_list(
+    _admin: AdminAuthUser,
+    Query(q): Query<DeadLetterQuery>,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let limit = q.limit.unwrap_or(100).clamp(1, 500);
+    let entries = state
+        .run_store_task("admin.monitoring.dead_letter_list", move |store| {
+            store.list_dead_letter(limit)
+        })
+        .await??;
+    Ok(ok(json!({ "entries": entries })))
+}
+
+/// POST /api/admin/monitoring/dead-letter/:id/requeue —— 人工重投：死信原子回 outbox
+/// （attempts 归零、立即可领取）。id 已不存在返回 404（并发已被他处处理）。
+async fn dead_letter_requeue(
+    _admin: AdminAuthUser,
+    Path(id): Path<i64>,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let requeued = state
+        .run_store_task("admin.monitoring.dead_letter_requeue", move |store| {
+            store.requeue_dead_letter(id)
+        })
+        .await??;
+    if requeued {
+        Ok(ok(json!({ "requeued": true, "id": id })))
+    } else {
+        Err(AppError::not_found("死信不存在或已被处理"))
+    }
+}
+
+/// DELETE /api/admin/monitoring/dead-letter/:id —— 人工丢弃一条死信。
+async fn dead_letter_purge(
+    _admin: AdminAuthUser,
+    Path(id): Path<i64>,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let purged = state
+        .run_store_task("admin.monitoring.dead_letter_purge", move |store| {
+            store.purge_dead_letter(id)
+        })
+        .await??;
+    if purged {
+        Ok(ok(json!({ "purged": true, "id": id })))
+    } else {
+        Err(AppError::not_found("死信不存在或已被处理"))
+    }
 }
 
 #[cfg(test)]

@@ -29,6 +29,9 @@ pub struct Config {
     pub self_watchdog: SelfWatchdogConfig,
     pub rate_limit: RateLimitConfig,
     pub auth_rate_limit: AuthRateLimitConfig,
+    /// W3-1：遥测专用 per-user 限频（独立于通用 API 双轨预算），更紧配额防噪声客户端
+    /// 打满 SQLite 写路径挤占学习数据写入。
+    pub telemetry_rate_limit: AuthRateLimitConfig,
     pub worker: WorkerConfig,
     pub amas: AMASEnvConfig,
     pub amas_config_file: Option<String>,
@@ -271,6 +274,7 @@ impl fmt::Debug for Config {
             .field("self_watchdog", &self.self_watchdog)
             .field("rate_limit", &self.rate_limit)
             .field("auth_rate_limit", &self.auth_rate_limit)
+            .field("telemetry_rate_limit", &self.telemetry_rate_limit)
             .field("worker", &self.worker)
             .field("amas", &self.amas)
             .field("llm", &self.llm)
@@ -356,6 +360,11 @@ impl Config {
             auth_rate_limit: AuthRateLimitConfig {
                 window_secs: env_or_parse("AUTH_RATE_LIMIT_WINDOW_SECS", 60_u64),
                 max_requests: env_or_parse("AUTH_RATE_LIMIT_MAX", 10_u64),
+            },
+            // W3-1：遥测专项 per-user 配额，默认 120 / 60s（显式 window，非「每分钟」口径巧合）。
+            telemetry_rate_limit: AuthRateLimitConfig {
+                window_secs: env_or_parse("RATE_LIMIT_TELEMETRY_WINDOW_SECS", 60_u64),
+                max_requests: env_or_parse("RATE_LIMIT_TELEMETRY_MAX", 120_u64),
             },
             worker: WorkerConfig {
                 is_leader: env_or_bool("WORKER_LEADER", true),
@@ -859,6 +868,7 @@ mod tests {
                 authenticated_max_requests: 0,
             },
             auth_rate_limit: AuthRateLimitConfig::default(),
+            telemetry_rate_limit: AuthRateLimitConfig::default(),
             worker: WorkerConfig {
                 is_leader: false,
                 enable_llm_advisor: false,

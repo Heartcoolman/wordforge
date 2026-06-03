@@ -975,7 +975,9 @@ pub fn build() -> utoipa::openapi::OpenApi {
         .info(
             InfoBuilder::new()
                 .title("WordForge API")
-                .version("0.6.0-beta.4")
+                // W4-1：从 CARGO_PKG_VERSION 取值（确定性、无 v 前缀），避免跨 v1.1.x 漂移。
+                // 勿用 GIT_VERSION——CI shallow checkout 无 tag 会 fallback 导致 drift 守卫 flaky。
+                .version(env!("CARGO_PKG_VERSION"))
                 .description(Some(
                     "WordForge 后端 API — v1-stable 端点。\n\n\
                      路径基础路径 `/api`（见 servers[0].url）。\n\

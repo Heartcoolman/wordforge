@@ -3,9 +3,12 @@ import type { EChartsOption } from 'echarts';
 import { EChart } from '@/components/ui/EChart';
 import { Empty } from '@/components/ui/Empty';
 import { Spinner } from '@/components/ui/Spinner';
+import { Modal } from '@/components/ui/Modal';
+import { Button } from '@/components/ui/Button';
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
 import { adminApi, type AdvisorCostStats } from '@/api/admin';
 import { amasApi } from '@/api/amas';
-import type { RequestMetrics, LogLine, AlertEvent, SystemHealth, UpdateCheck } from '@/types/admin';
+import type { RequestMetrics, LogLine, AlertEvent, SystemHealth, UpdateCheck, DeadLetterEntry } from '@/types/admin';
 import type { AmasMetrics } from '@/types/amas';
 import { formatBytes } from '@/utils/formatters';
 import './monitoring.css';
@@ -76,6 +79,41 @@ export default function MonitoringPage() {
   const [logPaused, setLogPaused] = createSignal(false);
   const [loading, setLoading] = createSignal(true);
   const [clock, setClock] = createSignal(new Date().toLocaleTimeString('zh-CN', { hour12: false }));
+
+  // W1-2:outbox 死信运维抽屉
+  const [dlOpen, setDlOpen] = createSignal(false);
+  const [dlRows, setDlRows] = createSignal<DeadLetterEntry[]>([]);
+  const [dlLoading, setDlLoading] = createSignal(false);
+  // 待确认的破坏性操作（重投 / 丢弃）
+  const [dlPending, setDlPending] = createSignal<{ action: 'requeue' | 'purge'; id: number } | null>(null);
+  const [dlBusy, setDlBusy] = createSignal(false);
+
+  async function loadDeadLetter() {
+    setDlLoading(true);
+    try {
+      setDlRows((await adminApi.monitoringDeadLetter(200)).entries);
+    } catch { /* keep last */ } finally {
+      setDlLoading(false);
+    }
+  }
+  function openDeadLetter() {
+    setDlOpen(true);
+    void loadDeadLetter();
+  }
+  async function confirmDlAction() {
+    const p = dlPending();
+    if (!p) return;
+    setDlBusy(true);
+    try {
+      if (p.action === 'requeue') await adminApi.monitoringDeadLetterRequeue(p.id);
+      else await adminApi.monitoringDeadLetterPurge(p.id);
+      setDlPending(null);
+      await loadDeadLetter();
+      try { setHealth(await adminApi.getHealth()); } catch { /* 角标刷新失败不阻断 */ }
+    } catch { /* 失败保留弹窗,允许重试 */ } finally {
+      setDlBusy(false);
+    }
+  }
 
   let logStreamRef: HTMLDivElement | undefined;
 
@@ -390,9 +428,15 @@ export default function MonitoringPage() {
                   <div class="row gap-3">
                     <span class="v">{health()?.outbox ? `${health()!.outbox!.pending} 待处理` : '—'}</span>
                     <span class="v">{health()?.outbox ? `lag ${health()!.outbox!.lagSecs}s` : '—'}</span>
-                    <span class={`chip ${(health()?.outbox?.deadLetter ?? 0) > 0 ? 'chip-error' : 'chip-success'}`}>
+                    <button
+                      type="button"
+                      class={`chip ${(health()?.outbox?.deadLetter ?? 0) > 0 ? 'chip-error' : 'chip-success'}`}
+                      style={{ cursor: 'pointer', border: 'none' }}
+                      title="查看死信明细 / 人工重投 / 丢弃"
+                      onClick={openDeadLetter}
+                    >
                       {(health()?.outbox?.deadLetter ?? 0) > 0 ? `${health()!.outbox!.deadLetter} 死信` : '无死信'}
-                    </span>
+                    </button>
                   </div>
                 </div>
                 {/* Probe 探针 */}
@@ -618,6 +662,57 @@ export default function MonitoringPage() {
           </div>
         </div>
       </Show>
+
+      {/* W1-2:outbox 死信运维抽屉 —— 明细 + 人工重投 / 丢弃 */}
+      <Modal open={dlOpen()} onClose={() => setDlOpen(false)} title="领域事件死信" size="xl">
+        <div class="text-sm text-content-secondary mb-4">
+          records→AMAS 异步消费重试耗尽 / 永久错误（毒丸）进入死信。可人工重投回 outbox（attempts 归零、立即重新消费）或永久丢弃。
+          默认同步路径（RECORDS_OUTBOX_ASYNC=false）下死信恒空。
+        </div>
+        <Show when={!dlLoading()} fallback={<div style={{ padding: '24px', 'text-align': 'center' }}><Spinner /></div>}>
+          <Show when={dlRows().length > 0} fallback={<Empty title="无死信" description="所有领域事件均已成功消费" />}>
+            <For each={dlRows()}>
+              {(r) => (
+                <div style={{
+                  display: 'flex', 'align-items': 'center', 'justify-content': 'space-between',
+                  gap: '12px', padding: '10px 0', 'border-bottom': '1px solid rgba(255,255,255,0.08)',
+                }}>
+                  <div style={{ 'min-width': '0', flex: '1' }}>
+                    <div class="row gap-3">
+                      <span class="chip chip-error">#{r.id}</span>
+                      <strong>{r.eventType}</strong>
+                      <span class="text-secondary">{r.userId ? `用户 ${r.userId}` : '用户未知'}</span>
+                      <span class="text-secondary">· 重试 {r.attempts} 次</span>
+                    </div>
+                    <div class="text-secondary" style={{ 'font-size': '12px', 'margin-top': '4px' }}>进死信 {r.deadAt}</div>
+                    <div style={{
+                      'font-size': '12px', 'margin-top': '4px', 'font-family': 'monospace',
+                      color: 'var(--color-danger, #f87171)', 'word-break': 'break-all',
+                    }}>{r.lastError}</div>
+                  </div>
+                  <div class="row gap-2" style={{ 'flex-shrink': '0' }}>
+                    <Button size="sm" variant="ghost" onClick={() => setDlPending({ action: 'requeue', id: r.id })}>重投</Button>
+                    <Button size="sm" variant="danger" onClick={() => setDlPending({ action: 'purge', id: r.id })}>丢弃</Button>
+                  </div>
+                </div>
+              )}
+            </For>
+          </Show>
+        </Show>
+      </Modal>
+
+      <ConfirmDialog
+        open={dlPending() !== null}
+        title={dlPending()?.action === 'requeue' ? '重投死信？' : '丢弃死信？'}
+        message={dlPending()?.action === 'requeue'
+          ? `事件 #${dlPending()?.id} 将写回 outbox（attempts 归零、立即重新消费）。`
+          : `事件 #${dlPending()?.id} 将被永久删除，无法恢复。`}
+        variant={dlPending()?.action === 'requeue' ? 'warning' : 'danger'}
+        confirmText={dlPending()?.action === 'requeue' ? '重投' : '丢弃'}
+        loading={dlBusy()}
+        onConfirm={confirmDlAction}
+        onCancel={() => setDlPending(null)}
+      />
     </div>
   );
 }

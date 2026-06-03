@@ -31,6 +31,21 @@ pub struct OutboxStats {
     pub dead_letter: i64,
 }
 
+/// 死信明细行（admin 运维用）。`user_id` 由 payload best-effort 解析，便于定位是哪个用户
+/// 的哪条记录丢了 AMAS 处理。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeadLetterEntry {
+    pub id: i64,
+    pub event_type: String,
+    /// best-effort 从 payload 提取的 user_id（record_created 事件含）；解析失败为 None。
+    pub user_id: Option<String>,
+    pub attempts: i64,
+    pub last_error: String,
+    pub created_at: String,
+    pub dead_at: String,
+}
+
 impl Store {
     /// 入队一条 outbox 事件（next_retry_at=now，立即可领取）。返回行 id。
     pub fn enqueue_outbox_event(&self, event_type: &str, payload: &str) -> Result<i64, StoreError> {
@@ -151,6 +166,80 @@ impl Store {
             dead_letter,
         })
     }
+
+    /// 列出死信明细（按进死信时间倒序），最多 limit 条。user_id best-effort 解析。
+    pub fn list_dead_letter(&self, limit: i64) -> Result<Vec<DeadLetterEntry>, StoreError> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, event_type, payload, attempts, last_error, created_at, dead_at
+             FROM events_dead_letter ORDER BY dead_at DESC, id DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit], |r| {
+            let payload: String = r.get(2)?;
+            let user_id = serde_json::from_str::<serde_json::Value>(&payload)
+                .ok()
+                .and_then(|v| {
+                    v.get("user_id")
+                        .and_then(|u| u.as_str())
+                        .map(ToOwned::to_owned)
+                });
+            Ok(DeadLetterEntry {
+                id: r.get(0)?,
+                event_type: r.get(1)?,
+                user_id,
+                attempts: r.get(3)?,
+                last_error: r.get(4)?,
+                created_at: r.get(5)?,
+                dead_at: r.get(6)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// 人工重投：原子地把死信行写回 outbox（attempts 归零、next_retry_at=now 立即可领取）
+    /// 并删除该死信行。死信表无唯一约束，双投即双消费，故 INSERT + DELETE 必须同 tx。
+    /// 返回 true 表示命中并重投；false 表示该 id 已不存在（并发已被他处处理）。
+    pub fn requeue_dead_letter(&self, id: i64) -> Result<bool, StoreError> {
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+        let row: Option<(String, String)> = tx
+            .query_row(
+                "SELECT event_type, payload FROM events_dead_letter WHERE id = ?1",
+                params![id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((event_type, payload)) = row else {
+            tx.commit()?;
+            return Ok(false);
+        };
+        let now = chrono::Utc::now().to_rfc3339();
+        tx.execute(
+            "INSERT INTO outbox (event_type, payload, attempts, next_retry_at, created_at)
+             VALUES (?1, ?2, 0, ?3, ?3)",
+            params![event_type, payload, now],
+        )?;
+        tx.execute(
+            "DELETE FROM events_dead_letter WHERE id = ?1",
+            params![id],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// 人工丢弃一条死信。返回是否命中。
+    pub fn purge_dead_letter(&self, id: i64) -> Result<bool, StoreError> {
+        let conn = self.conn()?;
+        let affected = conn.execute(
+            "DELETE FROM events_dead_letter WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(affected > 0)
+    }
 }
 
 #[cfg(test)]
@@ -252,5 +341,54 @@ mod tests {
         let stats = s.outbox_stats().unwrap();
         assert_eq!(stats.pending, 1);
         assert!(stats.lag_secs >= 0);
+    }
+
+    /// 死信明细列出 + user_id best-effort 解析。
+    #[test]
+    fn list_dead_letter_parses_user_id() {
+        let s = store();
+        s.enqueue_outbox_event("record_created", "{\"user_id\":\"u-42\",\"k\":1}")
+            .unwrap();
+        let ev = s.claim_due_outbox_events(&now(), 1).unwrap().remove(0);
+        s.move_outbox_to_dead_letter(&ev, 5, "boom").unwrap();
+        let list = s.list_dead_letter(10).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].user_id.as_deref(), Some("u-42"));
+        assert_eq!(list[0].last_error, "boom");
+        assert_eq!(list[0].attempts, 5);
+    }
+
+    /// requeue：死信原子回 outbox（attempts=0、立即可领取），死信行删除。
+    #[test]
+    fn requeue_dead_letter_resets_attempts_and_removes_dead_row() {
+        let s = store();
+        s.enqueue_outbox_event("record_created", "{\"user_id\":\"u1\"}")
+            .unwrap();
+        let ev = s.claim_due_outbox_events(&now(), 1).unwrap().remove(0);
+        let dead_id = {
+            s.move_outbox_to_dead_letter(&ev, 5, "exhausted").unwrap();
+            s.list_dead_letter(1).unwrap()[0].id
+        };
+        assert!(s.requeue_dead_letter(dead_id).unwrap(), "应命中并重投");
+        // 死信清空，outbox 出现一条 attempts=0 立即可领取。
+        assert_eq!(s.outbox_stats().unwrap().dead_letter, 0);
+        let due = s.claim_due_outbox_events(&now(), 10).unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].attempts, 0, "重投后 attempts 应归零");
+        // 重投不存在的 id 返回 false。
+        assert!(!s.requeue_dead_letter(99999).unwrap());
+    }
+
+    /// purge：丢弃一条死信。
+    #[test]
+    fn purge_dead_letter_removes_row() {
+        let s = store();
+        s.enqueue_outbox_event("record_created", "{}").unwrap();
+        let ev = s.claim_due_outbox_events(&now(), 1).unwrap().remove(0);
+        s.move_outbox_to_dead_letter(&ev, 5, "boom").unwrap();
+        let dead_id = s.list_dead_letter(1).unwrap()[0].id;
+        assert!(s.purge_dead_letter(dead_id).unwrap());
+        assert_eq!(s.outbox_stats().unwrap().dead_letter, 0);
+        assert!(!s.purge_dead_letter(dead_id).unwrap(), "再次丢弃应 false");
     }
 }

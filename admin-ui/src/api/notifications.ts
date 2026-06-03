@@ -41,4 +41,11 @@ export const notificationsApi = {
       undefined,
       { useAdminToken: true },
     ),
+  /** W2-3:一键全部已读,返回标记条数 + 重算后的未读计数。 */
+  markAllRead: () =>
+    api.post<{ marked: number; unreadCount: number }>(
+      '/api/admin/notifications/read-all',
+      undefined,
+      { useAdminToken: true },
+    ),
 };

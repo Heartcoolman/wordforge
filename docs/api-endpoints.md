@@ -335,6 +335,50 @@
 
 ---
 
+### DELETE /api/users/me
+
+GDPR 账号注销。**级联清除该用户的全部数据（26 张用户域表 + 用户自建词书），不可逆。**
+
+> ⚠️ 此操作不可恢复。导出（见下）仅覆盖 7 张可移植表，与本接口的级联删除**范围不对称**——
+> 删除清的远多于导出能拿回的，注销前若需留存数据请先调用 `GET /api/users/me/export`。
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": { "deleted": true }
+}
+```
+
+---
+
+### GET /api/users/me/export
+
+GDPR 数据导出（Article 20 可移植性）。**流式 NDJSON**，每行一个 `{ "table": "<name>", "data": <value> }`
+对象；HTTP/1.1 自动 `Transfer-Encoding: chunked`，客户端可边读边写盘。
+
+**响应头：** `Content-Type: application/x-ndjson`、`Content-Disposition: attachment; filename="wordforge-export.ndjson"`
+
+**导出范围（7 张可移植表，按此顺序逐行流出）：** `profile`、`study_config`、`word_states`、
+`favorites`、`notes`、`sessions`、`records`（records 分页多行）。**这是可移植子集，非全量导出**——
+账号下的其它数据（如学习引擎内部状态）不在导出范围。
+
+**冷却：** 每用户 **24 小时**只能导出一次。冷却期内返回 `429`：
+
+```json
+{
+  "success": false,
+  "code": "GDPR_EXPORT_RATE_LIMITED",
+  "message": "每 24 小时只能导出一次数据"
+}
+```
+并带 `Retry-After: <剩余秒数>` 响应头。
+
+> 流式约束：HTTP 状态码在第一个 chunk flush 时即定；导出途中某表读取失败会追加一行
+> `{"table":"_error","data":"<原因>"}` 后关闭流，**而非**回退为 5xx。客户端应检查末行是否为 `_error`。
+
+---
+
 ## 3. 用户档案
 
 **路径前缀：** `/api/user-profile`
@@ -2398,7 +2442,17 @@ Server-Sent Events（SSE）持久连接，用于接收服务端实时推送。
 
 提交客户端遥测数据。
 
-**必须包含的请求头：** `x-device-id`
+> ⚠️ 自 **v1.1.2-beta.4（迁移 m038）** 起，遥测端点对设备四要素做**上线即生效、不受
+> `strict_mode` 开关控制**的硬校验，缺任一即返回 `400`。客户端按本文档上报前务必补齐，否则
+> 上报全部被拦。详见 `api-spec.md §11`、`v1-client-migration.md §5.1`。
+
+**必填请求头（四要素之二）：**
+
+| Header | 校验 | 缺失/非法时 |
+|---|---|---|
+| `x-device-id` | 设备 UUID（用于归属核验） | 归属态判定见下方「设备归属三态核验」 |
+| `x-device-platform` | 非空且 ≠ `unknown`（`web` / `ios` / `android`） | `400 MISSING_OS` |
+| `x-app-version` | 非空（客户端版本号） | `400 MISSING_APP_VERSION` |
 
 **请求体：**
 ```json
@@ -2408,6 +2462,7 @@ Server-Sent Events（SSE）持久连接，用于接收服务端实时推送。
   "clientTs": "2024-01-15T08:00:00Z",
   "payload": {
     "device": {
+      "model": "Chrome on macOS",
       "cpuCores": 8,
       "memoryGb": 16.0,
       "screenWidth": 1920,
@@ -2450,7 +2505,29 @@ Server-Sent Events（SSE）持久连接，用于接收服务端实时推送。
 | `eventType` | string | ✓ | `"session_start"` / `"periodic"` / `"on_demand"` |
 | `requestId` | string | 条件必填 | `eventType="on_demand"` 时必须提供 |
 | `clientTs` | string | ✓ | 客户端时间（ISO 8601） |
-| `payload` | object | ✓ | 见上方结构；`eventType="session_start"` 时通常携带 `payload.device` |
+| `payload` | object | ✓ | 见上方结构 |
+
+**`payload.device` 必填字段（四要素之二，m038 硬校验）：**
+
+| 字段 | 类型 | 校验 | 缺失/为空时 |
+|---|---|---|---|
+| `device.timezone` | string | 非空（IANA 时区，如 `Asia/Shanghai`） | `400 MISSING_TIMEZONE` |
+| `device.model` | string | 非空（设备型号；Web 端无真型号可落 `browser on OS` 派生标识或 `web-admin` 占位） | `400 MISSING_DEVICE_MODEL` |
+
+> `device.model` 为 m038 **新增必填**字段。`device.timezone` 已由四要素硬校验接管，**不再**仅受
+> strict-mode 软门控（旧文档表述已过期）。`device.language` 及 `screenWidth/screenHeight/pixelRatio/cpuCores`
+> 在 `session_start` 时仍受 strict-mode 软门控（开启时分别返回 `MISSING_LANGUAGE` / `MISSING_DEVICE_FINGERPRINT`）。
+
+**设备归属三态核验（四要素通过后，按 `x-device-id` 的 `owner` 判定）：**
+
+| owner 态 | 处理 |
+|---|---|
+| 设备未注册（无记录） | `403 DEVICE_NOT_REGISTERED` |
+| 已注册但归属为其他账号 | `403 DEVICE_OWNERSHIP_MISMATCH` |
+| 已注册且归属当前账号 | 放行 |
+| 已注册但未认领（owner 为 NULL） | claim 放行（不误伤老匿名设备） |
+
+> 两个 403 的客户端差异化降级处置见 `release-calendar.md` T1 段「403 处置矩阵」。
 
 `payload.behavior` 可选字段：
 

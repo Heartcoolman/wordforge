@@ -95,6 +95,12 @@ fn migrations() -> Vec<(&'static str, MigrationFn)> {
         ),
         ("043_min_client_version_gate", m043_min_client_version_gate),
         ("044_outbox_event_processing", m044_outbox_event_processing),
+        ("045_processed_events", m045_processed_events),
+        (
+            "046_scheduled_broadcasts_canceled",
+            m046_scheduled_broadcasts_canceled,
+        ),
+        ("047_backup_target_status", m047_backup_target_status),
     ]
 }
 
@@ -181,6 +187,15 @@ fn migrations_down() -> Vec<(&'static str, MigrationFn)> {
         (
             "044_outbox_event_processing",
             m044_outbox_event_processing_down,
+        ),
+        ("045_processed_events", m045_processed_events_down),
+        (
+            "046_scheduled_broadcasts_canceled",
+            m046_scheduled_broadcasts_canceled_down,
+        ),
+        (
+            "047_backup_target_status",
+            m047_backup_target_status_down,
         ),
     ]
 }
@@ -2178,6 +2193,129 @@ fn m044_outbox_event_processing_down(store: &Store) -> Result<(), StoreError> {
          DROP TABLE IF EXISTS events_dead_letter;
          DROP INDEX IF EXISTS idx_outbox_due;
          DROP TABLE IF EXISTS outbox;",
+    )?;
+    Ok(())
+}
+
+/// m045:records→AMAS 领域事件幂等账本(W1-1)。以 (user_id, client_record_id) 为主键标记
+/// "此事件的 AMAS 状态已应用"。标记与 AMAS 状态在 persist_engine_state_atomic 同 tx 原子提交,
+/// 路由在 process_event 前预检命中即短路跳过 AMAS,把"重启不丢"补成 AMAS"精确一次"——
+/// 为后续删手动 rollback + 切默认 async 铺第一块基石。默认同步老路下本表仍随每条记录写入。
+fn m045_processed_events(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS processed_events (
+            user_id          TEXT NOT NULL,
+            client_record_id TEXT NOT NULL,
+            processed_at     TEXT NOT NULL,
+            PRIMARY KEY (user_id, client_record_id)
+        );",
+    )?;
+    Ok(())
+}
+
+/// m045 down:DROP 幂等账本表。仅 dev/test。
+fn m045_processed_events_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch("DROP TABLE IF EXISTS processed_events;")?;
+    Ok(())
+}
+
+/// m046:scheduled_broadcasts 的 status CHECK 加 'canceled' 枚举(W2-2 定时广播取消)。
+/// SQLite 无法 ALTER CHECK 约束,须重建表(CREATE new + INSERT SELECT + DROP + RENAME)。
+/// 列定义与 m042 一致,仅 CHECK 增 'canceled';索引重建。一次性迁移,版本门控保证只跑一次。
+fn m046_scheduled_broadcasts_canceled(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "CREATE TABLE scheduled_broadcasts_new (
+            id                TEXT NOT NULL PRIMARY KEY,
+            title             TEXT NOT NULL,
+            message           TEXT NOT NULL,
+            admin_id          TEXT NOT NULL,
+            platforms         TEXT,
+            version_min       TEXT,
+            last_active_days  INTEGER,
+            user_ids          TEXT,
+            scheduled_at      TEXT NOT NULL,
+            status            TEXT NOT NULL DEFAULT 'pending'
+                              CHECK (status IN ('pending', 'sent', 'failed', 'canceled')),
+            sent_count        INTEGER,
+            error             TEXT,
+            created_at        TEXT NOT NULL,
+            sent_at           TEXT
+        );
+        INSERT INTO scheduled_broadcasts_new
+            (id, title, message, admin_id, platforms, version_min, last_active_days,
+             user_ids, scheduled_at, status, sent_count, error, created_at, sent_at)
+        SELECT id, title, message, admin_id, platforms, version_min, last_active_days,
+               user_ids, scheduled_at, status, sent_count, error, created_at, sent_at
+          FROM scheduled_broadcasts;
+        DROP TABLE scheduled_broadcasts;
+        ALTER TABLE scheduled_broadcasts_new RENAME TO scheduled_broadcasts;
+        CREATE INDEX IF NOT EXISTS idx_scheduled_broadcasts_due
+            ON scheduled_broadcasts(status, scheduled_at);",
+    )?;
+    Ok(())
+}
+
+/// m047:离站备份各 target 运行时状态(W2-4 可观测)。与 backup-policy 配置 section 解耦——
+/// 后者是 admin 可编辑配置,运行时状态混入会与 PATCH 覆写冲突,故独立轻量状态表。
+/// 每 target 记 last_ok_at/last_bytes(成功)与 last_error/last_attempt_at,admin settings
+/// BackupRenderer 据此把灾备从「配了不知有没有用」变为可验证。
+fn m047_backup_target_status(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS backup_target_status (
+            name             TEXT NOT NULL PRIMARY KEY,
+            uri              TEXT NOT NULL,
+            last_ok_at       TEXT,
+            last_bytes       INTEGER,
+            last_error       TEXT,
+            last_attempt_at  TEXT NOT NULL
+        );",
+    )?;
+    Ok(())
+}
+
+/// m047 down:DROP 状态表。仅 dev/test。
+fn m047_backup_target_status_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch("DROP TABLE IF EXISTS backup_target_status;")?;
+    Ok(())
+}
+
+/// m046 down:重建回不含 'canceled' 的 CHECK。仅 dev/test;已 canceled 的行会被丢弃
+///（否则触发旧 CHECK 违反）。
+fn m046_scheduled_broadcasts_canceled_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "CREATE TABLE scheduled_broadcasts_old (
+            id                TEXT NOT NULL PRIMARY KEY,
+            title             TEXT NOT NULL,
+            message           TEXT NOT NULL,
+            admin_id          TEXT NOT NULL,
+            platforms         TEXT,
+            version_min       TEXT,
+            last_active_days  INTEGER,
+            user_ids          TEXT,
+            scheduled_at      TEXT NOT NULL,
+            status            TEXT NOT NULL DEFAULT 'pending'
+                              CHECK (status IN ('pending', 'sent', 'failed')),
+            sent_count        INTEGER,
+            error             TEXT,
+            created_at        TEXT NOT NULL,
+            sent_at           TEXT
+        );
+        INSERT INTO scheduled_broadcasts_old
+            (id, title, message, admin_id, platforms, version_min, last_active_days,
+             user_ids, scheduled_at, status, sent_count, error, created_at, sent_at)
+        SELECT id, title, message, admin_id, platforms, version_min, last_active_days,
+               user_ids, scheduled_at, status, sent_count, error, created_at, sent_at
+          FROM scheduled_broadcasts WHERE status != 'canceled';
+        DROP TABLE scheduled_broadcasts;
+        ALTER TABLE scheduled_broadcasts_old RENAME TO scheduled_broadcasts;
+        CREATE INDEX IF NOT EXISTS idx_scheduled_broadcasts_due
+            ON scheduled_broadcasts(status, scheduled_at);",
     )?;
     Ok(())
 }
