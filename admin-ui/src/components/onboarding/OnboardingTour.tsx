@@ -28,9 +28,10 @@ const STEPS: Step[] = [
   {
     key: 'welcome',
     title: 'WordForge Admin v1.1.4',
-    tagline: '本次更新把 v1.1.3 埋下的几块运营闭环收口 —— 用一分钟看看新增了什么',
+    tagline: '设备遥测「操作概览」+ v1.1.3 埋下的运营闭环收口 —— 用一分钟看看新增了什么',
     iconPath: 'M5 3l1.5 4.5L11 9l-4.5 1.5L5 15l-1.5-4.5L-1 9\nM18 9l1 3 3 1-3 1-1 3-1-3-3-1 3-1z\nM12 14l.9 2.7L15.6 18l-2.7.9L12 21.6l-.9-2.7L8.4 18l2.7-.9z',
     highlights: [
+      '设备遥测「操作概览」· 点设备历史一眼看懂它做了什么',
       '事件 outbox 死信运维 · 人工重投 / 丢弃',
       '定时广播队列 · 可查看与取消待发',
       '离站备份可观测 · 每 target 上次成功 / 失败',
@@ -38,6 +39,20 @@ const STEPS: Step[] = [
     ],
     accent: 'accent',
     bullet: '▸',
+  },
+  {
+    key: 'device-telemetry-digest',
+    route: '/admin/clients',
+    title: '设备遥测「操作概览」',
+    tagline: '点设备「历史」不用再逐条翻 —— 顶部直接看它做了什么',
+    iconPath: 'M3 3v18h18\nM7 14l3-4 4 3 5-7',
+    highlights: [
+      '面板顶部「这台设备做了什么」全量聚合，一眼看懂',
+      '功能使用排行 / 访问页面 / 点击热点 / 错误与事件分布 / 总时长会话',
+      '设备画像提顶只显一次，原始记录折叠为明细',
+      '展开明细按 event_type 分类筛选，点行看完整会话 / 行为 / 功能',
+    ],
+    accent: 'accent',
   },
   {
     key: 'dead-letter',

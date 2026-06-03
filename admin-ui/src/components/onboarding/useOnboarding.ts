@@ -4,18 +4,19 @@ const STORAGE_KEY = 'wf_admin_onboarding_wave';
 
 /**
  * 把 app 版本号映射为「新功能导览波次」标识。
- * - v1.1.4 起为独立波次 'v1.1.4'（本次运营闭环收口：死信运维 / 定时广播队列 / 离站备份可观测 / 收件箱增强）。
+ * - v1.1.4 起为独立波次 'v1.1.4r2'（运营闭环收口 + beta.3 新增「设备遥测操作概览」；
+ *   r2 = 在 beta.3 把 digest 新功能屏并入后翻新波次标识，强制已看过 beta.2 导览的人再弹一次）。
  * - v1.1.3 为独立波次 'v1.1.3'（告警收件箱 / 设备推送调度 / 版本门控 / 事件 outbox）。
  * - 1.1.0–1.1.2 + 1.2.x 仍属旧「admin 运维面重构」波 'v1.1-1.2'。
- * 同波内重复升级(含各 beta / patch)不重弹；跨入下一波重新弹一次。拿不到版本返回 null(静默不弹)。
- * 注：开新功能波时须同步改 waveOf + OnboardingTour STEPS + e2e 预置值（admin-real-flows.spec.ts loginAsAdmin）。
+ * 同波内重复升级(含各 beta / patch)不重弹；跨入下一波(或波次标识翻新)重新弹一次。拿不到版本返回 null(静默不弹)。
+ * 注：开新功能波 / 翻新波次标识时须同步改 waveOf + OnboardingTour STEPS + e2e 预置值（admin-real-flows.spec.ts loginAsAdmin）。
  */
 export function waveOf(version: string | null | undefined): string | null {
   if (!version) return null;
   const m = /^(\d+)\.(\d+)\.(\d+)/.exec(version);
   if (!m) return null;
   const major = +m[1], minor = +m[2], patch = +m[3];
-  if (major === 1 && minor === 1 && patch >= 4) return 'v1.1.4';
+  if (major === 1 && minor === 1 && patch >= 4) return 'v1.1.4r2';
   if (major === 1 && minor === 1 && patch === 3) return 'v1.1.3';
   if (major === 1 && minor >= 1 && minor <= 2) return 'v1.1-1.2';
   return `${major}.${minor}`;
