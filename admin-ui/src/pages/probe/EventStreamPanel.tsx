@@ -4,46 +4,49 @@ import { Empty } from '@/components/ui/Empty';
 import { probeTelemetryApi } from '@/api/probeTelemetry';
 import type { StreamEvent } from '@/types/probeTelemetry';
 import { hms } from './util';
+import { eventTypeLabel, metricLabel, metricUnit } from './readable';
 
 const STREAM_LIMIT = 30;
 const POLL_MS = 5000;
 
-/** 事件 type → 过滤分类（与设计稿 chip 对齐，剔除虚构 biz）。 */
+/** 事件 type → 过滤分类（决定颜色 + 中文标签筛选）。 */
 function category(type: string): 'learn' | 'perf' | 'err' | 'behavior' {
   const t = type.toLowerCase();
   if (t.includes('error') || t.includes('err')) return 'err';
-  if (t.includes('lesson') || t.includes('word') || t.includes('answer') || t.includes('session') || t.includes('review')) return 'learn';
+  // session_start 是会话/行为遥测(非学习记录),归 behavior;真正的学习数据走 learning_* 不进本流。
+  if (t.includes('lesson') || t.includes('word') || t.includes('answer') || t.includes('review')) return 'learn';
   if (t.includes('perf') || t.includes('resource') || t.includes('nav')) return 'perf';
   return 'behavior';
 }
 
 const CHIPS: Array<{ id: string; label: string }> = [
-  { id: 'all', label: 'All' },
-  { id: 'behavior', label: 'behavior' },
-  { id: 'learn', label: 'learn' },
-  { id: 'perf', label: 'perf' },
-  { id: 'err', label: 'err' },
+  { id: 'all', label: '全部' },
+  { id: 'behavior', label: '行为' },
+  { id: 'learn', label: '学习' },
+  { id: 'perf', label: '性能' },
+  { id: 'err', label: '错误' },
 ];
 
-/** 右栏：实时事件流。每 5 秒轮询 /stream（非真实 SSE，头部文案诚实标注）。
- *  filter chip 按事件类型分类筛选；新事件 ev-in 动画。
- *
- *  刷新不跳/不闪的关键：
- *   1. Spinner 仅首帧（view 为空）显示，refetch 期间不再闪回 loading；
- *   2. 渲染快照 view 与 resource 解耦，按 id 复用未变行的对象引用 → <For> 不重建其 DOM、不重放动画；
- *   3. 提交新数据的同步窗口内（尚未绘制）量"首个可见行"位移并用 scrollTop 补偿，
- *      停在顶部贴顶看最新、滚下去看历史则锚点不动。 */
+/** 右栏：实时事件流。后端已把每条 payload 解析成人话（设备 / 系统 / 在线 / 关键指标），
+ *  客服可直接读懂；点"原始"展开完整 JSON。每 5 秒轮询；新事件 ev-in 动画。
+ *  刷新不跳/不闪：Spinner 仅首帧；按 id 复用未变行引用；提交瞬间锚定滚动。 */
 export function EventStreamPanel() {
   const [data, { refetch }] = createResource(() => probeTelemetryApi.stream(STREAM_LIMIT));
   const [filter, setFilter] = createSignal('all');
   const [paused, setPaused] = createSignal(false);
-  // 已提交渲染的事件快照。与 resource 解耦，以便在数据切换瞬间夹住滚动位置。
   const [view, setView] = createSignal<StreamEvent[]>([]);
+  const [expanded, setExpanded] = createSignal<Set<string>>(new Set());
 
   let bodyRef: HTMLDivElement | undefined;
 
-  // 轮询定时器在 onMount 内创建、onCleanup 内清除，保证每实例仅一个且卸载即回收。
-  // 暂停时跳过 refetch（真实暂停轮询，非假按钮）；恢复时立即拉一次再继续节奏。
+  const toggleRaw = (id: string) =>
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
   onMount(() => {
     const timer = setInterval(() => { if (!paused()) void refetch(); }, POLL_MS);
     onCleanup(() => clearInterval(timer));
@@ -56,7 +59,6 @@ export function EventStreamPanel() {
 
   const incoming = createMemo<StreamEvent[]>(() => data()?.events ?? []);
 
-  // 锚点测量：用视口坐标（getBoundingClientRect）规避 offsetParent 歧义。
   const firstVisibleId = (el: HTMLElement): string | null => {
     const top = el.getBoundingClientRect().top;
     for (const r of el.querySelectorAll<HTMLElement>('[data-eid]')) {
@@ -69,8 +71,6 @@ export function EventStreamPanel() {
     return r ? r.getBoundingClientRect().top : null;
   };
 
-  // incoming 变化即提交：复用未变行引用，再锚定滚动。on() 的回调在 untrack 内执行，
-  // 故读/写 view 不会自激成环；仅 incoming（resource 解析出新数组）才触发。
   createEffect(on(incoming, (next) => {
     const prev = view();
     const merged = prev.length
@@ -78,19 +78,19 @@ export function EventStreamPanel() {
       : next;
 
     const el = bodyRef;
-    if (!el || !prev.length) { setView(merged); return; } // 首次填充无需锚定
+    if (!el || !prev.length) { setView(merged); return; }
 
     const atTop = el.scrollTop <= 8;
     const anchorId = atTop ? null : firstVisibleId(el);
     const top0 = anchorId ? rowTop(el, anchorId) : null;
 
-    setView(merged); // 同步重渲染，此刻 DOM 已更新但尚未绘制
+    setView(merged);
 
     if (atTop) {
-      el.scrollTop = 0; // 贴顶：始终展示最新
+      el.scrollTop = 0;
     } else if (anchorId && top0 != null) {
       const top1 = rowTop(el, anchorId);
-      if (top1 != null) el.scrollTop += top1 - top0; // 把锚点行拉回原视口位置
+      if (top1 != null) el.scrollTop += top1 - top0;
     }
   }));
 
@@ -116,6 +116,7 @@ export function EventStreamPanel() {
               class={`filter-chip${filter() === chip.id ? ' is-on' : ''}`}
               role="button"
               tabindex="0"
+              aria-pressed={filter() === chip.id}
               onClick={() => setFilter(chip.id)}
               onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setFilter(chip.id); }}
             >
@@ -126,9 +127,9 @@ export function EventStreamPanel() {
         <button type="button" class="pause" aria-pressed={paused()} onClick={togglePause}>
           <Show
             when={paused()}
-            fallback={<><svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16" /><rect x="14" y="4" width="4" height="16" /></svg> Pause</>}
+            fallback={<><svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16" /><rect x="14" y="4" width="4" height="16" /></svg> 暂停</>}
           >
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z" /></svg> Resume
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z" /></svg> 继续
           </Show>
         </button>
       </div>
@@ -139,26 +140,84 @@ export function EventStreamPanel() {
         >
           <Show
             when={rendered().length > 0}
-            fallback={<Empty title="暂无遥测事件" description="telemetry_events 表当前为空或无匹配筛选" />}
+            fallback={<Empty title="暂无遥测事件" description="当前没有设备上报，或无匹配筛选" />}
           >
             <For each={rendered()}>
-              {(ev) => {
-                const cat = category(ev.type);
-                const evCls = cat === 'learn' ? ' is-learn' : cat === 'perf' ? ' is-perf' : cat === 'err' ? ' is-err' : '';
-                return (
-                  <div class={`pb-event${evCls}`} data-eid={ev.id}>
-                    <span class="ts">{hms(ev.ts)}</span>
-                    <span class="type">{ev.type}</span>
-                    <span class="payload">
-                      <span class="dev">{ev.deviceId.slice(0, 10)}…</span> {ev.payloadPreview}
-                    </span>
-                  </div>
-                );
-              }}
+              {(ev) => <EventCard ev={ev} expanded={expanded().has(ev.id)} onToggle={() => toggleRaw(ev.id)} />}
             </For>
           </Show>
         </Show>
       </div>
     </aside>
   );
+}
+
+/** 单条事件人话卡片：时间 + 中文类型 + 设备摘要 + 关键指标 + 原始 JSON 折叠。 */
+function EventCard(props: { ev: StreamEvent; expanded: boolean; onToggle: () => void }) {
+  const ev = () => props.ev;
+  const cat = () => category(ev().type);
+  const evCls = () => {
+    const c = cat();
+    return c === 'learn' ? ' is-learn' : c === 'perf' ? ' is-perf' : c === 'err' ? ' is-err' : '';
+  };
+  const dev = () => ev().device;
+  const hasBody = () => !!dev() || ev().metrics.length > 0;
+
+  return (
+    <div class={`pb-event${evCls()}`} data-eid={ev().id}>
+      <div class="pb-ev-head">
+        <span class="ts">{hms(ev().ts)}</span>
+        <span class="type">{eventTypeLabel(ev().type)}</span>
+        <span class="dev">设备 {ev().deviceId.slice(0, 8)}…</span>
+        <button type="button" class={`pb-ev-raw${props.expanded ? ' is-on' : ''}`} onClick={props.onToggle}>
+          {props.expanded ? '收起' : '原始'}
+        </button>
+      </div>
+
+      <Show when={dev()}>
+        {(d) => (
+          <div class="pb-ev-device">
+            <span class="ic">📱</span>
+            <span class="txt">
+              {[d().os, d().model].filter(Boolean).join(' · ') || '未知设备'}
+              <Show when={d().language}>{(l) => <span class="muted"> · {l()}</span>}</Show>
+            </span>
+            <Show when={d().online != null}>
+              <span class={`pb-ev-online${d().online ? ' is-on' : ' is-off'}`}>{d().online ? '在线' : '离线'}</span>
+            </Show>
+          </div>
+        )}
+      </Show>
+
+      <Show when={ev().metrics.length > 0}>
+        <div class="pb-ev-metrics">
+          <For each={ev().metrics}>
+            {(m) => (
+              <span class="m">
+                <span class="mk">{metricLabel(m.key)}</span>
+                <span class="mv">{m.value}{metricUnit(m.key)}</span>
+              </span>
+            )}
+          </For>
+        </div>
+      </Show>
+
+      <Show when={!hasBody()}>
+        <div class="pb-ev-empty">无可解析的结构化字段</div>
+      </Show>
+
+      <Show when={props.expanded}>
+        <pre class="pb-ev-rawjson">{prettyJson(ev().payloadRaw)}</pre>
+      </Show>
+    </div>
+  );
+}
+
+/** 原始 payload 美化输出：能 parse 就缩进两格，否则原样返回。 */
+function prettyJson(raw: string): string {
+  try {
+    return JSON.stringify(JSON.parse(raw), null, 2);
+  } catch {
+    return raw;
+  }
 }

@@ -44,7 +44,7 @@ pub struct SinkStatus {
     pub lag_secs: i64,
 }
 
-/// stream 端点单条事件预览。
+/// stream 端点单条事件(已 humanize:设备摘要 + 关键指标 + 原始 payload)。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StreamEvent {
@@ -53,7 +53,36 @@ pub struct StreamEvent {
     #[serde(rename = "type")]
     pub event_type: String,
     pub device_id: String,
-    pub payload_preview: String,
+    /// 从 payload.device 解析出的设备摘要(无 device 字段 → None)。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device: Option<StreamDevice>,
+    /// 顶层 + behavior.* 的标量字段(最多 8 条),供前端贴中文标签。
+    pub metrics: Vec<StreamMetric>,
+    /// 完整原始 payload(供"原始 JSON"展开;超长截断到 4000 字符)。
+    pub payload_raw: String,
+}
+
+/// payload.device 的人话摘要(字段缺失即 None,前端跳过不渲染)。
+/// 兼容两种 payload:端侧 osName/osVersion 分离、admin 端 osName 已含版本。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamDevice {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub os: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub online: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+}
+
+/// payload 里的一个标量指标(key 原样保留,前端映射中文标签)。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamMetric {
+    pub key: String,
+    pub value: String,
 }
 
 /// audit 端点单行。
@@ -541,27 +570,148 @@ impl Store {
         Ok(row)
     }
 
-    /// stream:telemetry_events 最近 N 条。
+    /// stream:telemetry_events 最近 N 条(取完整 payload_json,解析为人话字段)。
     pub fn recent_telemetry_events(&self, limit: u32) -> Result<Vec<StreamEvent>, StoreError> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT id, server_ts, event_type, device_id, substr(payload_json, 1, 200)
+            "SELECT id, server_ts, event_type, device_id, payload_json
              FROM telemetry_events
              ORDER BY server_ts DESC, id DESC LIMIT ?1",
         )?;
         let rows = stmt
             .query_map(params![limit], |r| {
+                let payload_json: String = r.get::<_, Option<String>>(4)?.unwrap_or_default();
+                let (device, metrics) = humanize_payload(&payload_json);
+                let payload_raw = if payload_json.chars().count() > 4000 {
+                    payload_json.chars().take(4000).collect::<String>() + "…"
+                } else {
+                    payload_json
+                };
                 Ok(StreamEvent {
                     id: r.get::<_, String>(0)?,
                     ts: r.get::<_, String>(1)?,
                     event_type: r.get::<_, String>(2)?,
                     device_id: r.get::<_, String>(3)?,
-                    payload_preview: r.get::<_, String>(4)?,
+                    device,
+                    metrics,
+                    payload_raw,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
+}
+
+/// 解析 payload_json → (设备摘要, 标量指标列表)。解析失败 / 非 JSON 对象 → (None, 空)。
+fn humanize_payload(payload_json: &str) -> (Option<StreamDevice>, Vec<StreamMetric>) {
+    let value: serde_json::Value = match serde_json::from_str(payload_json) {
+        Ok(v) => v,
+        Err(_) => return (None, Vec::new()),
+    };
+    let Some(obj) = value.as_object() else {
+        return (None, Vec::new());
+    };
+
+    // 空 device 对象或无任何可读字段 → 整体省略,前端不渲染空白设备行。
+    let device = obj
+        .get("device")
+        .and_then(|d| d.as_object())
+        .map(parse_device)
+        .filter(|d| d.os.is_some() || d.model.is_some() || d.online.is_some() || d.language.is_some());
+
+    // 顶层标量 + 下钻一层 behavior.*(admin 端行为缓冲),合计最多 8 条。
+    let mut metrics = Vec::new();
+    collect_scalar_metrics(obj, &mut metrics);
+    if let Some(behavior) = obj.get("behavior").and_then(|b| b.as_object()) {
+        collect_scalar_metrics(behavior, &mut metrics);
+    }
+    metrics.truncate(8);
+
+    (device, metrics)
+}
+
+/// 从 device 对象抽取关心字段(缺失即 None)。osName 端侧不含版本(另有 osVersion),
+/// admin 端 osName 已含版本 → 仅当存在非空 osVersion 时拼接。
+fn parse_device(d: &serde_json::Map<String, serde_json::Value>) -> StreamDevice {
+    let os = d
+        .get("osName")
+        .and_then(|v| v.as_str())
+        .map(|name| match d.get("osVersion").and_then(|v| v.as_str()) {
+            Some(ver) if !ver.is_empty() => format!("{name} {ver}"),
+            _ => name.to_string(),
+        })
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    StreamDevice {
+        os,
+        model: d
+            .get("model")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+        online: parse_online(d.get("onlineStatus")),
+        language: d
+            .get("language")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+    }
+}
+
+/// onlineStatus 兼容 bool 与 "online"/"offline" 字符串两种形态。
+fn parse_online(v: Option<&serde_json::Value>) -> Option<bool> {
+    match v {
+        Some(serde_json::Value::Bool(b)) => Some(*b),
+        Some(serde_json::Value::String(s)) => match s.to_lowercase().as_str() {
+            "online" | "true" | "1" => Some(true),
+            "offline" | "false" | "0" => Some(false),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// 收集对象里的标量字段(数字/布尔/非空字符串)为指标;跳过 device/behavior 与嵌套对象/数组。
+fn collect_scalar_metrics(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    out: &mut Vec<StreamMetric>,
+) {
+    for (key, val) in obj {
+        if key == "device" || key == "behavior" {
+            continue;
+        }
+        let value = match val {
+            serde_json::Value::Number(n) => format_number(n),
+            serde_json::Value::Bool(b) => b.to_string(),
+            serde_json::Value::String(s) if !s.is_empty() => s.clone(),
+            _ => continue,
+        };
+        out.push(StreamMetric {
+            key: key.clone(),
+            value,
+        });
+    }
+}
+
+/// 数字格式:整数原样;小数最多两位并去尾零。
+/// 先 i64 / u64 原样输出,避免超 i64 的大整数被 `as i64` 饱和钳值失真。
+fn format_number(n: &serde_json::Number) -> String {
+    if let Some(i) = n.as_i64() {
+        return i.to_string();
+    }
+    if let Some(u) = n.as_u64() {
+        return u.to_string();
+    }
+    if let Some(f) = n.as_f64() {
+        if f.fract() == 0.0 {
+            return format!("{f:.0}");
+        }
+        return format!("{f:.2}")
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_string();
+    }
+    n.to_string()
 }
 
 /// 生成 SQLite datetime 修饰符 `-N day`(N>=1;非法值兜底 1 天)。

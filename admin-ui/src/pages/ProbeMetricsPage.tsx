@@ -7,6 +7,7 @@ import { SamplingRulesPanel } from './probe/SamplingRulesPanel';
 import { SinksPanel } from './probe/SinksPanel';
 import { SchemaPreview } from './probe/SchemaPreview';
 import { AuditTrail } from './probe/AuditTrail';
+import { TechTip } from '@/components/ui/TechTip';
 import './probe/metrics.css';
 
 // 时间窗：KPI / 探针聚合按 days 联动，后端 overview/probes 接 ?days 真实生效。
@@ -28,10 +29,13 @@ export default function ProbeMetricsPage() {
         <div>
           <h1 class="page-title">数据探针</h1>
           <p class="page-desc">
-            采样治理 · 实时事件流 · 写入目标 · Schema 预览。所有指标来自{' '}
-            <code>/admin/probe-telemetry</code>，4 个派生探针对真实源（
-            <code>telemetry_summaries</code> / <code>learning_sessions</code> /{' '}
-            <code>learning_records</code>）聚合，采样改动写入审计。
+            给运维 / 客服看的数据健康大盘：四类数据源（点击、学习、答题、错误）实时汇总，一眼看出系统活不活跃、数据质量好不好、采集有没有出错。
+            <TechTip label="技术说明" placement="bottom" width="330px">
+              <b>技术说明</b>
+              <span class="tip-mono">
+                指标来自 /admin/probe-telemetry；4 个派生探针对真实源 telemetry_summaries / learning_sessions / learning_records 聚合，采样改动写入审计。
+              </span>
+            </TechTip>
           </p>
         </div>
         <div class="head-actions">
@@ -65,8 +69,8 @@ export default function ProbeMetricsPage() {
 
       {/* 采样策略：规则 + sinks + schema */}
       <div class="pb-section-title">
-        <h2>采样策略</h2>
-        <span class="hint">基于 telemetry event_type 的多级规则，按优先级从上到下匹配</span>
+        <h2>采样和写入管理</h2>
+        <span class="hint">控制每类数据按多大比例留存、最终存到哪里，以及一条数据长什么样</span>
       </div>
       <div class="pb-strategy-grid">
         <PanelBoundary><SamplingRulesPanel /></PanelBoundary>
@@ -77,7 +81,7 @@ export default function ProbeMetricsPage() {
       {/* 审计 */}
       <div class="pb-section-title">
         <h2>最近改动</h2>
-        <span class="hint">采样规则改动全部写入 probe_sampling_audit</span>
+        <span class="hint">谁改过采样设置的历史记录，便于回溯排查</span>
       </div>
       <div class="card-surface" style={{ background: 'var(--surface-elevated)', 'border-radius': 'var(--radius-lg)', 'box-shadow': 'var(--elevation-1)' }}>
         <PanelBoundary><AuditTrail /></PanelBoundary>

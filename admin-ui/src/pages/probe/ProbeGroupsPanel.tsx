@@ -7,6 +7,7 @@ import type { ProbeGroup, ProbeRow } from '@/types/probeTelemetry';
 import { SamplingSlider } from './SamplingSlider';
 import { ProbeDetailDrawer } from './ProbeDetailDrawer';
 import { GROUP_META, LockIcon, KebabIcon, fmtEps, ago, ratePct } from './util';
+import { GROUP_PLAIN, PROBE_PLAIN } from './readable';
 
 /** 左栏：behavior / learn / perf 三组真实探针。每组 head（图标 + 标题 + 24h/采样/EPS 统计），
  *  每行 状态点 + 名称/desc + 采样滑杆 + EPS + lastTs + 锁标记。 */
@@ -39,6 +40,7 @@ export function ProbeGroupsPanel(props: { days: () => number }) {
 
 function GroupCard(props: { group: ProbeGroup; delay: number; onSaved: () => void; winLabel: () => string }) {
   const meta = () => GROUP_META[props.group.group] ?? { title: props.group.group, sub: props.group.group, cls: '', icon: null };
+  const plain = () => GROUP_PLAIN[props.group.group] ?? { sub: meta().sub, meaning: '' };
   const total24h = () => props.group.probes.reduce((s, p) => s + p.count24h, 0);
   const online = () => props.group.probes.filter((p) => p.count24h > 0).length;
   // 组采样率：取组内最低非锁探针的采样率代表；全锁组显示 100%
@@ -74,7 +76,11 @@ function GroupCard(props: { group: ProbeGroup; delay: number; onSaved: () => voi
         <div class="ic">{meta().icon}</div>
         <div>
           <div class="title">{meta().title}</div>
-          <div class="sub">{meta().sub} · {online()} / {props.group.probes.length} 有数据</div>
+          <div class="sub">
+            {plain().sub} · {online()}/{props.group.probes.length} 有数据
+            <span class="pb-info" tabindex="0" role="img" aria-label="技术来源" title={`技术来源：${meta().sub}`}>ⓘ</span>
+          </div>
+          <Show when={plain().meaning}><div class="pb-group-meaning">{plain().meaning}</div></Show>
         </div>
         <div class="stats">
           <span>{props.winLabel()} <b>{total24h().toLocaleString()}</b></span>
@@ -105,6 +111,7 @@ function GroupCard(props: { group: ProbeGroup; delay: number; onSaved: () => voi
 
 function ProbeRowView(props: { probe: ProbeRow; onSaved: () => void }) {
   const p = () => props.probe;
+  const plain = () => PROBE_PLAIN[p().key] ?? { desc: p().desc, meaning: '' };
   const isError = () => p().key === 'error_js' && p().count24h > 0;
   const isOff = () => p().count24h === 0;
   const rowCls = () => `pb-probe-row${isOff() ? ' is-off' : ''}${isError() ? ' is-error' : ''}`;
@@ -114,8 +121,17 @@ function ProbeRowView(props: { probe: ProbeRow; onSaved: () => void }) {
     <div class={rowCls()}>
       <span class="state-dot" />
       <div class="name">
-        <strong>{p().key}</strong>
-        <div class="desc">{p().desc}</div>
+        <strong>{p().label}</strong>
+        <div class="desc">
+          {plain().desc}
+          <span
+            class="pb-info"
+            tabindex="0"
+            role="img"
+            aria-label="探针来源"
+            title={`技术来源：${p().key} · ${p().desc}${plain().meaning ? `\n${plain().meaning}` : ''}`}
+          >ⓘ</span>
+        </div>
       </div>
       <SamplingSlider probe={p()} onSaved={props.onSaved} />
       <div class="rate-pill">
@@ -124,7 +140,7 @@ function ProbeRowView(props: { probe: ProbeRow; onSaved: () => void }) {
         </Show>
       </div>
       <div class="sched">
-        <span>{p().label}</span>
+        <span>最近</span>
         <span class="ago">{ago(p().lastTs)}</span>
       </div>
       <div class="actions">

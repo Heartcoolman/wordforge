@@ -15,13 +15,14 @@ export function SchemaPreview() {
   return (
     <Card variant="elevated" padding="md">
       <div class="pb-card-header">
-        <h3>样本 Schema · {SCHEMA_EVENT_TYPE}</h3>
+        <h3>数据样本 · {SCHEMA_EVENT_TYPE}</h3>
         <span class="meta">
           <Show when={data()?.sampledAt} fallback="无样本">
             {(ts) => `采样于 ${ts().slice(0, 19).replace('T', ' ')}`}
           </Show>
         </span>
       </div>
+      <p class="pb-panel-hint">下面是最新一条上报的真实样貌——能看出系统具体记了哪些信息。没有就表示这类事件暂时没人上报。</p>
       <Show
         when={!data.loading}
         fallback={<div class="min-h-[120px] grid place-items-center"><Spinner /></div>}

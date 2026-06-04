@@ -15,9 +15,10 @@ export function SinksPanel() {
       <div class="pb-card-header">
         <h3>写入目标（SQLite 表）</h3>
         <span class="meta">
-          <Show when={data()} fallback="加载中">{(d) => `${d().sinks.length} sinks`}</Show>
+          <Show when={data()} fallback="加载中">{(d) => `${d().sinks.length} 个存储位置`}</Show>
         </span>
       </div>
+      <p class="pb-panel-hint">写入目标 = 数据最终存到哪张表，是数据的"永久住所"，供后续分析与 AI 训练。延迟越小说明写得越及时；超过 5 分钟会标黄。</p>
       <Show
         when={!data.loading}
         fallback={<div class="min-h-[120px] grid place-items-center"><Spinner /></div>}
@@ -35,9 +36,9 @@ export function SinksPanel() {
                   <div class={`pb-sink${late ? ' is-late' : ''}`}>
                     <div class="logo">{initials}</div>
                     <div class="body">
-                      <strong>{sink.label} · {sink.id}</strong>
+                      <strong title={`技术表名：${sink.id}`}>{sink.label}</strong>
                       <div class="meta">
-                        {compact(sink.rowCount)} 行 · retention={sink.retentionDays == null ? '永久/不限' : `${sink.retentionDays}d`}
+                        {sink.id} · {compact(sink.rowCount)} 行 · 保留 {sink.retentionDays == null ? '永久/不限' : `${sink.retentionDays}d`}
                       </div>
                     </div>
                     <span class="lag">

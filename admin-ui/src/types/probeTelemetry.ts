@@ -118,13 +118,32 @@ export interface AuditResponse {
   rows: AuditRow[];
 }
 
-/** 实时事件流单条（payloadPreview = payload_json 前 200 字符）。 */
+/** 设备摘要（后端从 payload.device 解析；字段缺失即省略）。 */
+export interface StreamDevice {
+  os?: string;
+  model?: string;
+  online?: boolean;
+  language?: string;
+}
+
+/** payload 标量指标（key 原样，前端贴中文标签）。 */
+export interface StreamMetric {
+  key: string;
+  value: string;
+}
+
+/** 实时事件流单条（后端已 humanize：设备摘要 + 关键指标 + 原始 payload）。 */
 export interface StreamEvent {
   id: string;
   ts: string;
   type: string;
   deviceId: string;
-  payloadPreview: string;
+  /** 无 device 字段时省略。 */
+  device?: StreamDevice;
+  /** 顶层 + behavior.* 标量字段（最多 8 条）。 */
+  metrics: StreamMetric[];
+  /** 完整原始 payload（"原始 JSON"展开用）。 */
+  payloadRaw: string;
 }
 
 export interface StreamResponse {

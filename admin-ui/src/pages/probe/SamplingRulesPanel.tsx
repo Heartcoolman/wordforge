@@ -7,6 +7,7 @@ import { probeTelemetryApi } from '@/api/probeTelemetry';
 import type { SamplingRule } from '@/types/probeTelemetry';
 import { uiStore } from '@/stores/ui';
 import { LockIcon, ratePct } from './util';
+import { eventTypeLabel } from './readable';
 
 /** 采样规则卡：真实 telemetry event_type 规则，按 priority 升序。
  *  per-row 行内编辑：可调行改采样率(0~100%)、所有行可暂停/启用，写 PATCH /sampling/:event_type。
@@ -65,6 +66,7 @@ export function SamplingRulesPanel() {
           + 新增规则
         </button>
       </div>
+      <p class="pb-panel-hint">采样 = 按比例留存数据：100% 全部记录、50% 每两条留一条、0% 全部不记。既能看趋势，又能省存储和流量。</p>
       <Show
         when={!data.loading}
         fallback={<div class="min-h-[120px] grid place-items-center"><Spinner /></div>}
@@ -80,7 +82,7 @@ export function SamplingRulesPanel() {
                 const isEditing = () => editing() === rule.eventType;
                 return (
                   <div class={`pb-rule${off() ? ' is-off' : ''}`}>
-                    <div><code>{rule.eventType}</code></div>
+                    <div><code title={rule.eventType}>{eventTypeLabel(rule.eventType)}</code></div>
                     <div class="target">
                       {rule.target ? `绑定探针 ${rule.target}` : '—'}
                       {rule.locked ? ' · 核心数据强制' : ''}

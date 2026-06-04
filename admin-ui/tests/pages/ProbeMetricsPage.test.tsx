@@ -94,8 +94,13 @@ const AUDIT = {
 
 const STREAM = {
   events: [
-    { id: 'e1', ts: '2026-05-29T11:59:50Z', type: 'periodic', deviceId: 'dev_abcdef1234', payloadPreview: '{"x":1}' },
-    { id: 'e2', ts: '2026-05-29T11:59:40Z', type: 'word_answer', deviceId: 'dev_zzz', payloadPreview: '{"correct":true}' },
+    {
+      id: 'e1', ts: '2026-05-29T11:59:50Z', type: 'periodic', deviceId: 'dev_abcdef1234',
+      device: { os: 'Android 15', model: 'Pixel 6', online: true, language: 'zh-CN' },
+      metrics: [{ key: 'actionsPerMin', value: '2' }],
+      payloadRaw: '{"actionsPerMin":2}',
+    },
+    { id: 'e2', ts: '2026-05-29T11:59:40Z', type: 'word_answer', deviceId: 'dev_zzz', metrics: [], payloadRaw: '{"correct":true}' },
   ],
 };
 
@@ -151,9 +156,9 @@ describe('ProbeMetricsPage', () => {
     await waitFor(() => expect(screen.getByText('用户行为')).toBeInTheDocument());
     expect(screen.getByText('学习事件')).toBeInTheDocument();
     expect(screen.getByText('性能与错误')).toBeInTheDocument();
-    // 探针行名称（探针组内 strong；word_answer 在 stream type 也出现，用 getAllByText 容忍）
-    expect(screen.getByText('click')).toBeInTheDocument();
-    expect(screen.getAllByText('word_answer').length).toBeGreaterThan(0);
+    // 探针行名称：可读化后 strong 显示中文 label（原 key 降级进 ⓘ title）
+    expect(screen.getAllByText('点击行为').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('单词作答').length).toBeGreaterThan(0);
   });
 
   it('locked probe slider is disabled, adjustable slider is enabled', async () => {
@@ -182,16 +187,19 @@ describe('ProbeMetricsPage', () => {
     await waitFor(() => expect(screen.getByRole('heading', { name: '采样级联规则' })).toBeInTheDocument());
     // sink 显示永久/不限 retention
     expect(screen.getAllByText(/永久\/不限/).length).toBeGreaterThan(0);
-    // 审计行 eventType
-    await waitFor(() => expect(screen.getByText('MODIFY')).toBeInTheDocument());
+    // 审计行动作（badge + 行内动词均中文"修改"）
+    await waitFor(() => expect(screen.getAllByText('修改').length).toBeGreaterThan(0));
   });
 
   it('renders stream events and polls every 5s', async () => {
     await renderPage();
     await waitFor(() => expect(screen.getByText('实时事件流')).toBeInTheDocument());
     await waitFor(() => expect(stream).toHaveBeenCalledTimes(1));
-    // payloadPreview 渲染
-    await waitFor(() => expect(screen.getByText('{"correct":true}')).toBeInTheDocument());
+    // humanize 后渲染人话卡片：中文事件类型 + 设备在线 + 指标中文标签
+    // （'周期上报' 在事件流与采样规则面板都会出现，用 getAllByText）
+    await waitFor(() => expect(screen.getAllByText('周期上报').length).toBeGreaterThan(0));
+    expect(screen.getByText('在线')).toBeInTheDocument();
+    expect(screen.getByText('每分钟操作')).toBeInTheDocument();
     // 轮询
     vi.advanceTimersByTime(5000);
     await waitFor(() => expect(stream).toHaveBeenCalledTimes(2));
@@ -209,9 +217,9 @@ describe('ProbeMetricsPage', () => {
     // 下一帧：新事件 e0 入顶，e1/e2 仍在但都是全新对象引用（模拟真实 refetch）。
     stream.mockResolvedValue({
       events: [
-        { id: 'e0', ts: '2026-05-29T12:00:00Z', type: 'periodic', deviceId: 'dev_new0001', payloadPreview: '{"n":0}' },
-        { id: 'e1', ts: '2026-05-29T11:59:50Z', type: 'periodic', deviceId: 'dev_abcdef1234', payloadPreview: '{"x":1}' },
-        { id: 'e2', ts: '2026-05-29T11:59:40Z', type: 'word_answer', deviceId: 'dev_zzz', payloadPreview: '{"correct":true}' },
+        { id: 'e0', ts: '2026-05-29T12:00:00Z', type: 'periodic', deviceId: 'dev_new0001', metrics: [], payloadRaw: '{"n":0}' },
+        { id: 'e1', ts: '2026-05-29T11:59:50Z', type: 'periodic', deviceId: 'dev_abcdef1234', metrics: [], payloadRaw: '{"x":1}' },
+        { id: 'e2', ts: '2026-05-29T11:59:40Z', type: 'word_answer', deviceId: 'dev_zzz', metrics: [], payloadRaw: '{"correct":true}' },
       ],
     });
 
@@ -233,12 +241,12 @@ describe('ProbeMetricsPage', () => {
   it('stream Pause button stops polling, Resume resumes (真实暂停轮询)', async () => {
     await renderPage();
     await waitFor(() => expect(stream).toHaveBeenCalledTimes(1));
-    fireEvent.click(screen.getByRole('button', { name: /Pause/ }));
+    fireEvent.click(screen.getByRole('button', { name: /暂停/ }));
     vi.advanceTimersByTime(6000);
     // 暂停后轮询不再触发
     expect(stream).toHaveBeenCalledTimes(1);
     // 恢复立即拉一次
-    fireEvent.click(screen.getByRole('button', { name: /Resume/ }));
+    fireEvent.click(screen.getByRole('button', { name: /继续/ }));
     await waitFor(() => expect(stream).toHaveBeenCalledTimes(2));
   });
 
