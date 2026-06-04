@@ -84,6 +84,37 @@ pub async fn sse_handler(
         .unwrap_or("unknown")
         .to_string();
 
+    // 归属核验:device_id 取自客户端可控 x-device-id 头,登记进 active_sse 后会收到
+    // admin 定向事件(探针脚本 / 封禁令牌等)。仅当设备未被他人认领(owner 为 NULL 或
+    // 等于当前 user,或设备尚未注册)才登记,否则丢弃 device_id —— 不登记、不 500 整条流,
+    // 通用事件(amas_state / maintenance / update)仍正常下发。
+    let device_id = match device_id {
+        Some(did) => {
+            let did_for_task = did.clone();
+            let owner = state
+                .run_store_task("realtime.sse.check_owner", move |store| {
+                    store.get_client_device_owner(&did_for_task)
+                })
+                .await;
+            match owner {
+                // 已注册且归属他人 → 拒绝登记(不暴露定向通道)
+                Ok(Ok(Some(Some(uid)))) if uid != auth.user_id => None,
+                // 未注册 / 未认领 / 归属本人 → 允许登记
+                Ok(Ok(_)) => Some(did),
+                // 查询失败:保守起见不登记定向通道,但保留流
+                Ok(Err(e)) => {
+                    tracing::error!(error = %e, device_id = %did, "SSE 设备归属核验失败");
+                    None
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, device_id = %did, "SSE 设备归属核验任务失败");
+                    None
+                }
+            }
+        }
+        None => None,
+    };
+
     let conn_id = uuid::Uuid::new_v4().to_string();
     let (per_conn_tx, mut per_conn_rx) = tokio::sync::mpsc::unbounded_channel();
 

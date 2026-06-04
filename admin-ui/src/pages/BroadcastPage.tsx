@@ -133,14 +133,17 @@ export default function BroadcastPage() {
   // 全员总数（批次预估）
   const [preview, { refetch: refetchPreview }] = createResource(() => adminApi.broadcastPreview({}));
 
-  const total = createMemo(() => preview()?.total ?? 0);
+  // errored resource accessor 被读取时会同步重抛，?. 兜不住，故所有读 preview()/board() 的 memo 先判 .error 降级，避免 best-effort 端点抖动放大为整站白屏。
+  const total = createMemo(() => (preview.error ? 0 : preview()?.total ?? 0));
   const batches = createMemo(() => Math.max(1, Math.ceil(total() / BATCH_SIZE)));
 
-  const stats = createMemo(() => board()?.stats ?? { total: 0, totalSent: 0, avgReadRate: 0, online: 0 });
-  const broadcasts = createMemo<BroadcastHistoryEntry[]>(() => board()?.broadcasts ?? []);
+  const stats = createMemo(() =>
+    board.error ? { total: 0, totalSent: 0, avgReadRate: 0, online: 0 } : board()?.stats ?? { total: 0, totalSent: 0, avgReadRate: 0, online: 0 },
+  );
+  const broadcasts = createMemo<BroadcastHistoryEntry[]>(() => (board.error ? [] : board()?.broadcasts ?? []));
 
   // E2:分页 total 来自后端 pagination，已是「按 filter 过滤后的计数」，故页脚跨页正确。
-  const totalHistory = createMemo(() => board()?.pagination?.total ?? broadcasts().length);
+  const totalHistory = createMemo(() => (board.error ? 0 : board()?.pagination?.total ?? broadcasts().length));
   const pageStart = createMemo(() => (totalHistory() === 0 ? 0 : offset() + 1));
   const pageEnd = createMemo(() => offset() + broadcasts().length);
   const hasPrev = createMemo(() => offset() > 0);

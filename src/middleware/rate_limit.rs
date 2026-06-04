@@ -213,7 +213,8 @@ pub async fn rate_limit_middleware(
         return Ok(next.run(req).await);
     }
 
-    // 管理员后台不受频率限制
+    // 管理员后台不走全局限流；其认证子树（/api/admin/auth/*）由
+    // auth_rate_limit_middleware 单独按 IP 限流（见 routes/mod.rs）。
     if path.starts_with("/api/admin/") {
         return Ok(next.run(req).await);
     }
@@ -304,16 +305,19 @@ pub fn extract_client_ip(
     connect_ip: Option<IpAddr>,
 ) -> IpAddr {
     if trust_proxy {
-        if let Some(forwarded) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-            if let Some(first) = forwarded.split(',').next() {
-                if let Ok(ip) = first.trim().parse() {
-                    return ip;
-                }
-            }
-        }
+        // 优先取 nginx 设置的 X-Real-IP（=$remote_addr，客户端不可伪造）。
         if let Some(real_ip) = headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
             if let Ok(ip) = real_ip.parse::<IpAddr>() {
                 return ip;
+            }
+        }
+        // 回退到 XFF：已知 1 层可信代理下取最右(最后)段，即代理追加的真实
+        // remote_addr；取最左段会被客户端注入的伪造首值绕过。
+        if let Some(forwarded) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+            if let Some(last) = forwarded.split(',').next_back() {
+                if let Ok(ip) = last.trim().parse() {
+                    return ip;
+                }
             }
         }
     }
@@ -623,11 +627,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn extract_client_ip_prefers_xff_when_trusted() {
+    async fn extract_client_ip_xff_takes_rightmost_hop_when_trusted() {
+        // 1 层可信代理：取最右段（代理追加的真实 remote_addr），
+        // 防客户端注入伪造首值绕过限流。
         let mut h = HeaderMap::new();
         h.insert("x-forwarded-for", "5.5.5.5, 9.9.9.9".parse().unwrap());
         let ip = extract_client_ip(&h, true, None);
-        assert_eq!(ip, "5.5.5.5".parse::<IpAddr>().unwrap());
+        assert_eq!(ip, "9.9.9.9".parse::<IpAddr>().unwrap());
     }
 
     #[tokio::test]

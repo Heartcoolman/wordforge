@@ -36,6 +36,22 @@ pub async fn run(state: AppState, mut shutdown_rx: broadcast::Receiver<()>) {
 /// 扫一批到期记录并逐条 fan-out。单条失败不影响其余（容错沿用 worker 惯例）。
 /// pub 供集成测试单 tick 驱动（避免等 60s interval）。
 pub async fn scan_once(state: &AppState) {
+    // 步骤0:复活上次扫描崩溃/重启遗留的 'sending' 行（抢占后未及 mark）→ 重置 pending 重发。
+    // worker 严格顺序 + leader 单实例,扫描起点的 'sending' 必为陈旧,重置安全(at-least-once)。
+    match state
+        .run_store_task("scheduled_broadcast.reset_stale", move |store| {
+            store.reset_stale_sending_broadcasts()
+        })
+        .await
+    {
+        Ok(Ok(n)) if n > 0 => {
+            tracing::warn!(reset = n, "scheduled_broadcast: 复活陈旧 sending 行重新下发")
+        }
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => tracing::warn!(error = %e, "scheduled_broadcast: 重置陈旧 sending 失败"),
+        Err(e) => tracing::warn!(error = %e, "scheduled_broadcast: 重置陈旧 sending 任务失败"),
+    }
+
     let now = chrono::Utc::now().to_rfc3339();
     let due = match state
         .run_store_task("scheduled_broadcast.list_due", move |store| {
@@ -70,6 +86,30 @@ pub async fn scan_once(state: &AppState) {
                 row.user_ids.clone(),
             ))
         };
+
+        // fan-out 前原子抢占 pending → sending：抢占失败（已被 cancel 或不存在）则跳过、不下发，
+        // 闭合「cancel 返回成功但已群发、最终被覆盖回 sent」的 TOCTOU。
+        let claim_id = row.id.clone();
+        let claimed = match state
+            .run_store_task("scheduled_broadcast.claim", move |store| {
+                store.claim_scheduled_broadcast_for_send(&claim_id)
+            })
+            .await
+        {
+            Ok(Ok(c)) => c,
+            Ok(Err(e)) => {
+                tracing::warn!(broadcast_id = %row.id, error = %e, "scheduled_broadcast: 抢占失败");
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!(broadcast_id = %row.id, error = %e, "scheduled_broadcast: 抢占任务失败");
+                continue;
+            }
+        };
+        if !claimed {
+            tracing::info!(broadcast_id = %row.id, "scheduled_broadcast: 已被取消，跳过下发");
+            continue;
+        }
 
         match fan_out_broadcast(state, &row.id, &row.title, &row.message, audience).await {
             Ok(sent) => {

@@ -2470,21 +2470,8 @@ async fn create_canary(
     let percent = req.percent;
     let admin_id = admin.admin_id.clone();
 
-    // 分配下一个空闲 cohort 槽，支持多条并行 canary 占不重叠区间（[0,a)、[a,a+b)…）。
-    let active = state
-        .run_store_task("admin.amas.canary.active", |store| {
-            store.get_active_patch_canaries()
-        })
-        .await??;
-    let cohort_lo: u32 = active.iter().map(|c| c.cohort_hi).max().unwrap_or(0);
-    let cohort_hi = cohort_lo + percent;
-    if cohort_hi > 100 {
-        return Err(AppError::bad_request(
-            "CANARY_QUOTA_FULL",
-            &format!("灰度配额已满：已占用 {cohort_lo}%，再加 {percent}% 超过 100%"),
-        ));
-    }
-
+    // 槽分配（读 active 算 cohort_lo）+ 配额校验 + INSERT 收进单事务（store.create_active_patch_canary），
+    // 消除跨 task 的 TOCTOU 窗口；version snapshot 按 hash 幂等，留作前置步可安全单取连接。
     let inserted = state
         .run_store_task("admin.amas.canary.create", move |store| {
             let (_vid, vhash) = store.insert_amas_config_version(
@@ -2494,18 +2481,15 @@ async fn create_canary(
                 Some(&format!("canary suggestion#{sid}")),
                 Some(&parent_hash),
             )?;
-            let id = store.insert_patch_canary(
-                sid,
-                &vhash,
-                percent,
-                cohort_lo,
-                cohort_hi,
-                &baseline_json,
-            )?;
-            store.get_patch_canary(id)
+            store.create_active_patch_canary(sid, &vhash, percent, &baseline_json)
         })
-        .await??
-        .ok_or_else(|| AppError::internal("canary 落库后读取失败"))?;
+        .await?
+        .map_err(|e| match e {
+            crate::store::StoreError::Validation(msg) => {
+                AppError::bad_request("CANARY_QUOTA_FULL", &msg)
+            }
+            other => AppError::internal(&other.to_string()),
+        })?;
 
     state.amas().mark_canary_active();
     Ok(ok(serde_json::to_value(&inserted).unwrap()))
@@ -2563,23 +2547,14 @@ async fn scale_canary(
         ));
     }
     let percent = req.percent;
-    state
+    // 读 cohort_lo + 排重叠校验 + UPDATE 收进单事务（store.scale_active_patch_canary），
+    // 消除「读 cohort_lo」与「update」拆两次 run_store_task 的 TOCTOU 窗口。
+    let updated = state
         .run_store_task("admin.amas.canary.scale", move |store| {
-            // 保持 cohort_lo 不变，按目标 percent 扩展 hi；store 层校验与其它 active canary 不重叠。
-            let cur = store
-                .get_patch_canary(id)?
-                .ok_or_else(|| crate::store::StoreError::Validation("canary 不存在".into()))?;
-            let hi = cur.cohort_lo + percent;
-            store.update_patch_canary_scale(id, percent, cur.cohort_lo, hi)
+            store.scale_active_patch_canary(id, percent)
         })
         .await?
         .map_err(|e| AppError::bad_request("SCALE_FAILED", &e.to_string()))?;
-    let updated = state
-        .run_store_task("admin.amas.canary.scale_read", move |store| {
-            store.get_patch_canary(id)
-        })
-        .await??
-        .ok_or_else(|| AppError::not_found("canary 不存在"))?;
     state.amas().mark_canary_active();
     Ok(ok(serde_json::to_value(&updated).unwrap()))
 }

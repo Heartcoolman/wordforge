@@ -156,6 +156,7 @@ pub async fn run(
         Ok(v) => v,
         Err(e) => {
             tracing::warn!(error = %e, raw = %resp.content, "llm_advisor: 响应非 JSON");
+            record_billing_only(store, engine, &evidence, cost, &resp.usage, "响应非 JSON,仅计费留痕");
             return;
         }
     };
@@ -164,6 +165,7 @@ pub async fn run(
         Some(o) => o,
         None => {
             tracing::warn!(raw = %resp.content, "llm_advisor: 缺少 patch 字段");
+            record_billing_only(store, engine, &evidence, cost, &resp.usage, "缺少 patch 字段,仅计费留痕");
             return;
         }
     };
@@ -179,6 +181,7 @@ pub async fn run(
 
     if patch_obj.is_empty() {
         tracing::info!(rationale = %rationale, "llm_advisor: LLM 不建议改动，跳过");
+        record_billing_only(store, engine, &evidence, cost, &resp.usage, "空 patch（LLM 不建议改动），仅计费留痕");
         return;
     }
 
@@ -252,6 +255,32 @@ pub async fn run(
         }
     }
     tracing::debug!("llm_advisor: done");
+}
+
+/// 空 patch / 解析失败但已产生 usage 的调用,落一条 Rejected 留痕携带 cost_usd/tokens,
+/// 使日成本守卫(`aggregate_amas_suggestion_spend_today` 按表 SUM)与月账同源,避免双台账分叉。
+fn record_billing_only(
+    store: &Store,
+    engine: &AMASEngine,
+    evidence: &serde_json::Value,
+    cost: f64,
+    usage: &crate::services::llm_provider::ChatUsage,
+    note: &str,
+) {
+    let _ = store.insert_amas_suggestion(&InsertSuggestion {
+        based_on_version_hash: current_version_hash(engine),
+        patch_json: "{}".into(),
+        rationale: String::new(),
+        evidence_json: serde_json::to_string(evidence).unwrap_or_default(),
+        cost_usd: Some(cost),
+        tokens_input: Some(usage.prompt_tokens),
+        tokens_output: Some(usage.completion_tokens),
+        confidence: None,
+        initial_status: SuggestionStatus::Rejected,
+        decided_by: Some("worker:llm_advisor".into()),
+        decision_note: Some(note.into()),
+        base_values_json: None,
+    });
 }
 
 enum AutoDecision {

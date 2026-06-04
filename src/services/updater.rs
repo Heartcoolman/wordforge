@@ -836,6 +836,10 @@ impl Updater {
             flag_path,
             health_url: health_url.to_string(),
             audit_db_path: self.install_dir.join("data").join("learning.db"),
+            #[cfg(unix)]
+            parent_pid: unsafe { libc::getpid() },
+            #[cfg(not(unix))]
+            parent_pid: 0,
         };
         // 标 audit outcome='applied_pending_watcher' 让 admin UI 在 watcher 接管期间显示中间态。
         // watcher 60s 后会把 outcome update 为 success / rolled_back 终态。
@@ -1524,6 +1528,9 @@ struct WatcherArgs {
     flag_path: PathBuf,
     health_url: String,
     audit_db_path: PathBuf,
+    /// 当前主进程 PID（fork 前捕获）。watcher 回滚时直接 kill 它让 systemd 拉起回滚后的 binary，
+    /// 避免按命令行子串 pgrep 与 install_dir 隐式耦合。
+    parent_pid: i32,
 }
 
 /// fork watcher 子进程后 parent 立即 exit 让 systemd 接管的工具方法。
@@ -1641,23 +1648,11 @@ fn watcher_rollback(args: &WatcherArgs) {
     // 3. 清 maintenance flag（M0-R4：新进程启动时也会清，双保险）
     let _ = std::fs::remove_file(&args.flag_path);
 
-    // 4. kill 当前 wordforge 主进程（不 kill 自己），让 systemd Restart=always 起 rolled-back
+    // 4. kill fork 前捕获的主进程 PID，让 systemd Restart=always 起 rolled-back
     #[cfg(unix)]
-    {
-        let my_pid = unsafe { libc::getpid() };
-        if let Ok(output) = std::process::Command::new("pgrep")
-            .args(["-f", "/opt/wordforge/wordforge"])
-            .output()
-        {
-            for line in String::from_utf8_lossy(&output.stdout).lines() {
-                if let Ok(pid) = line.trim().parse::<i32>() {
-                    if pid != my_pid {
-                        unsafe {
-                            libc::kill(pid, libc::SIGTERM);
-                        }
-                    }
-                }
-            }
+    if args.parent_pid > 0 {
+        unsafe {
+            libc::kill(args.parent_pid, libc::SIGTERM);
         }
     }
 }

@@ -17,7 +17,7 @@ pub struct AlgoTimeseriesPoint {
 
 impl Store {
     /// 从 algorithm_metrics_daily 拉过去 N 天的每日每算法聚合。
-    /// metrics_json 形如 {"call_count": u64, "total_latency_us": u64, "error_count": u64}
+    /// metrics_json 形如 {"callCount": u64, "totalLatencyUs": u64, "errorCount": u64}（MetricsSnapshot camelCase 序列化）
     pub fn list_amas_metrics_timeseries(
         &self,
         days: u32,
@@ -46,15 +46,15 @@ impl Store {
             let parsed: serde_json::Value =
                 serde_json::from_str(&json).map_err(StoreError::Serialization)?;
             let calls = parsed
-                .get("call_count")
+                .get("callCount")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
             let total_us = parsed
-                .get("total_latency_us")
+                .get("totalLatencyUs")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
             let errors = parsed
-                .get("error_count")
+                .get("errorCount")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
             let avg = if calls > 0 {
@@ -621,7 +621,7 @@ mod tests {
             let conn = store.conn().unwrap();
             conn.execute(
                 "INSERT INTO algorithm_metrics_daily (metric_date, algorithm_id, metrics_json)
-                 VALUES (?1, 'Heuristic', '{\"call_count\":100,\"total_latency_us\":200000,\"error_count\":2}')",
+                 VALUES (?1, 'Heuristic', '{\"callCount\":100,\"totalLatencyUs\":200000,\"errorCount\":2}')",
                 params![today],
             ).unwrap();
         }

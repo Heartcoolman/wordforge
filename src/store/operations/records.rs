@@ -207,7 +207,7 @@ impl Store {
                     summary_mastered_word_ids_json=?8, summary_error_prone_word_ids_json=?9,
                     summary_duration_secs=?10, summary_hour_of_day=?11, summary_final_difficulty=?12,
                     correct_count=?13, total_count=?14
-                 WHERE id=?15",
+                 WHERE id=?15 AND user_id=?16",
                 params![
                     session.status.as_str(), session.total_questions as i64,
                     session.actual_mastery_count as i64, session.context_shifts as i64,
@@ -219,7 +219,7 @@ impl Store {
                     summary.map(|s| s.hour_of_day as i64),
                     summary.map(|s| s.final_difficulty),
                     session.correct_count as i64, session.total_count as i64,
-                    &session.id,
+                    &session.id, &session.user_id,
                 ],
             )?;
         }

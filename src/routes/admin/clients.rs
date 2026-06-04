@@ -740,8 +740,7 @@ struct TelemetrySummaryView {
 }
 
 /// GET /api/admin/clients/:id —— 单设备详情(设计图设备列表"详情"按钮)。
-/// 复用 get_recently_active_clients(取全量后按 device_id 命中)避免新增 store 方法,
-/// telemetry 摘要复用 get_telemetry_summaries_by_device。
+/// 按 device_id 直查单设备(get_client_device),telemetry 摘要复用 get_telemetry_summaries_by_device。
 async fn get_client_detail(
     _admin: AdminAuthUser,
     Path(id): Path<String>,
@@ -755,15 +754,9 @@ async fn get_client_detail(
         .run_store_task(
             "admin.clients.detail",
             move |store| -> Result<_, AppError> {
-                if !store.client_device_exists(&device_id)? {
-                    return Err(AppError::not_found("设备不存在"));
-                }
-                // 复用既有查询:get_recently_active_clients(全表 + banned)按 id 命中。
-                // 历史(非近期且非 banned)设备用极大窗口兜底,确保任何存在的设备都能取到。
+                // 按 device_id 直查单设备,不存在即 404。
                 let device = store
-                    .get_recently_active_clients(i64::MAX / 2)?
-                    .into_iter()
-                    .find(|d| d.device_id == device_id)
+                    .get_client_device(&device_id)?
                     .ok_or_else(|| AppError::not_found("设备不存在"))?;
                 // telemetry 摘要:近 1 条 + 总数(复用 get_telemetry_summaries_by_device)。
                 let (records, total) = store.get_telemetry_summaries_by_device(&device_id, "", 1, 0)?;

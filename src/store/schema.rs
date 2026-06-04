@@ -217,11 +217,16 @@ CREATE TABLE IF NOT EXISTS wb_center_imports (
     remote_id TEXT NOT NULL,
     local_wordbook_id TEXT NOT NULL,
     version TEXT NOT NULL,
-    user_id TEXT DEFAULT NULL,
+    -- 归属用户。end-user 导入存其 user_id;admin/system 导入存空串 ''(而非 NULL):
+    -- NULL 在多列主键中被 SQLite 视为彼此不等,会让 admin 重复导入产生重复行而非 upsert,
+    -- 故归一为 '' 使其参与主键去重。Rust 层 WordbookCenterImport.user_id 仍用 None 表示 '' 系统态。
+    user_id TEXT NOT NULL DEFAULT '',
     imported_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     word_count INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (source_url_hash_prefix, remote_id)
+    -- 主键含 user_id:多个 end-user 各自维护对同一 center URL+remote_id 的独立导入记录,
+    -- 互不覆盖、互不阻断(此前缺 user_id 致第二个用户被 409 永久挡住且归属被覆盖)。
+    PRIMARY KEY (source_url_hash_prefix, remote_id, user_id)
 );
 CREATE INDEX IF NOT EXISTS idx_wb_center_imports_source_url ON wb_center_imports(source_url);
 CREATE INDEX IF NOT EXISTS idx_wb_center_imports_user ON wb_center_imports(user_id, updated_at DESC);

@@ -345,11 +345,13 @@ impl Store {
     ) -> Result<(), StoreError> {
         keys::validate_id(&item.id)?;
         keys::validate_id(&item.user_id)?;
-        let conn = self.conn()?;
+        let mut conn = self.conn()?;
         let device_profile_json = item.device_profile.as_ref().map(|v| v.to_string());
         let answer_snapshot_json = item.answer_snapshot.as_ref().map(|v| v.to_string());
         let created_at = item.created_at.to_rfc3339();
-        conn.execute(
+        // item + 附件 + 'submitted' 事件包进单事务，避免中途出错留半成品。
+        let tx = conn.transaction()?;
+        tx.execute(
             "INSERT INTO feedback_items
                 (id, user_id, category, body, route, created_at, priority, status,
                  device_profile_json, answer_snapshot_json, csat_score, csat_comment)
@@ -370,7 +372,7 @@ impl Store {
             ],
         )?;
         for att in attachments {
-            conn.execute(
+            tx.execute(
                 "INSERT INTO feedback_attachments (id, feedback_id, name, url, kind, created_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
@@ -383,7 +385,7 @@ impl Store {
                 ],
             )?;
         }
-        conn.execute(
+        tx.execute(
             "INSERT INTO feedback_events (id, feedback_id, kind, actor, summary, ref_id, created_at)
              VALUES (?1, ?2, 'submitted', ?3, '用户提交反馈', NULL, ?4)",
             params![
@@ -393,6 +395,7 @@ impl Store {
                 &created_at,
             ],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -929,7 +932,7 @@ impl Store {
         author_id: Option<&str>,
     ) -> Result<Option<FeedbackReply>, StoreError> {
         keys::validate_id(id)?;
-        let conn = self.conn()?;
+        let mut conn = self.conn()?;
         let exists: bool = conn
             .query_row(
                 "SELECT 1 FROM feedback_items WHERE id = ?1",
@@ -944,7 +947,9 @@ impl Store {
         let now = Utc::now();
         let now_str = now.to_rfc3339();
         let reply_id = uuid::Uuid::new_v4().to_string();
-        conn.execute(
+        // reply + 'reply' 事件 + 首响时间戳包进单事务，避免中途出错留半成品。
+        let tx = conn.transaction()?;
+        tx.execute(
             "INSERT INTO feedback_replies
                 (id, feedback_id, author_kind, author_id, body, push_inapp, cc_email, created_at)
              VALUES (?1, ?2, 'admin', ?3, ?4, ?5, ?6, ?7)",
@@ -958,7 +963,7 @@ impl Store {
                 &now_str,
             ],
         )?;
-        conn.execute(
+        tx.execute(
             "INSERT INTO feedback_events (id, feedback_id, kind, actor, summary, ref_id, created_at)
              VALUES (?1, ?2, 'reply', ?3, ?4, ?5, ?6)",
             params![
@@ -970,11 +975,12 @@ impl Store {
                 &now_str,
             ],
         )?;
-        conn.execute(
+        tx.execute(
             "UPDATE feedback_items SET first_response_at = ?2
              WHERE id = ?1 AND first_response_at IS NULL",
             params![id, &now_str],
         )?;
+        tx.commit()?;
         Ok(Some(FeedbackReply {
             id: reply_id,
             feedback_id: id.to_string(),

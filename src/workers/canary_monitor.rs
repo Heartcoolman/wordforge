@@ -19,6 +19,10 @@ const MIN_SAMPLE: u64 = 50;
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Baseline {
+    /// baseline 切片自身样本量。退化 baseline(解析失败 default / 零样本 stable 切片)下
+    /// event_count 不足,reward 轴对照不可信,须跳过以免漏报回滚。
+    #[serde(default)]
+    event_count: u64,
     #[serde(default)]
     mean_reward: f64,
     #[serde(default)]
@@ -35,9 +39,21 @@ fn should_rollback(
     if live.event_count < MIN_SAMPLE {
         return false;
     }
-    let reward_drop = baseline.mean_reward - live.mean_reward;
+    // anomaly 轴:不依赖 baseline 样本量。baseline.anomaly_rate 退化为 0 时 anomaly_rise=live,
+    // 仍能正确捕获异常率飙升,故始终生效(也是退化 baseline 下的兜底回滚轴)。
     let anomaly_rise = live.anomaly_rate - baseline.anomaly_rate;
-    reward_drop > reward_drop_threshold || anomaly_rise > anomaly_rise_threshold
+    if anomaly_rise > anomaly_rise_threshold {
+        return true;
+    }
+    // reward 轴:reward_drop = baseline - live,仅在 baseline 样本充足时可信。退化 baseline
+    //（解析失败 default 或零样本 stable 切片,event_count < MIN_SAMPLE 且 mean_reward 记 0）下,
+    // reward_drop 对任意正 live reward 恒为负 → reward 轴漏报回滚。故 baseline 样本不足时跳过
+    // reward 轴,避免把"应回滚"误判为"通过"。
+    if baseline.event_count < MIN_SAMPLE {
+        return false;
+    }
+    let reward_drop = baseline.mean_reward - live.mean_reward;
+    reward_drop > reward_drop_threshold
 }
 
 pub async fn run(state: &AppState) {
@@ -61,7 +77,19 @@ pub async fn run(state: &AppState) {
         }
     };
     for c in canaries {
-        let baseline: Baseline = serde_json::from_str(&c.baseline_metrics_json).unwrap_or_default();
+        // 解析失败不再静默 default:warn 使"reward 轴本周期失效"可观测,且 default 的
+        // event_count=0 会让 should_rollback 自动跳过 reward 轴(anomaly 轴仍兜底)。
+        let baseline: Baseline = match serde_json::from_str(&c.baseline_metrics_json) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(
+                    id = c.id,
+                    error = %e,
+                    "canary_monitor: baseline_metrics_json 解析失败,reward 轴本周期跳过(仅 anomaly 轴生效)"
+                );
+                Baseline::default()
+            }
+        };
         let live = match store.aggregate_amas_version_slice(&c.version_hash) {
             Ok(s) => s,
             Err(e) => {
@@ -132,44 +160,57 @@ mod tests {
         }
     }
 
+    fn baseline(reward: f64, anomaly: f64) -> Baseline {
+        Baseline {
+            event_count: 100, // 样本充足:reward 轴生效
+            mean_reward: reward,
+            anomaly_rate: anomaly,
+        }
+    }
+
     #[test]
     fn rolls_back_on_reward_drop() {
-        let baseline = Baseline {
-            mean_reward: 0.80,
-            anomaly_rate: 0.01,
-        };
+        let baseline = baseline(0.80, 0.01);
         let live = slice(100, 0.70, 0.01); // 降 0.10 > 0.05
         assert!(should_rollback(&baseline, &live, 0.05, 0.05));
     }
 
     #[test]
     fn rolls_back_on_anomaly_rise() {
-        let baseline = Baseline {
-            mean_reward: 0.80,
-            anomaly_rate: 0.01,
-        };
+        let baseline = baseline(0.80, 0.01);
         let live = slice(100, 0.80, 0.10); // 升 0.09 > 0.05
         assert!(should_rollback(&baseline, &live, 0.05, 0.05));
     }
 
     #[test]
     fn keeps_when_within_thresholds() {
-        let baseline = Baseline {
-            mean_reward: 0.80,
-            anomaly_rate: 0.05,
-        };
+        let baseline = baseline(0.80, 0.05);
         let live = slice(100, 0.78, 0.06); // 降 0.02、升 0.01 均 < 0.05
         assert!(!should_rollback(&baseline, &live, 0.05, 0.05));
     }
 
     #[test]
     fn skips_when_sample_too_small() {
-        let baseline = Baseline {
-            mean_reward: 0.80,
-            anomaly_rate: 0.01,
-        };
-        let live = slice(10, 0.0, 1.0); // 即便极端退化,样本 < 50 不判定
+        let baseline = baseline(0.80, 0.01);
+        let live = slice(10, 0.0, 1.0); // live 样本 < 50 不判定
         assert!(!should_rollback(&baseline, &live, 0.05, 0.05));
+    }
+
+    #[test]
+    fn skips_reward_axis_on_degraded_baseline() {
+        // 退化 baseline(event_count=0,如解析失败 default 或零样本 stable 切片):reward 轴跳过,
+        // 不因 baseline.mean_reward=0 把"应回滚"漏判。live reward 偏低但 anomaly 正常 → 不回滚。
+        let baseline = Baseline::default(); // event_count=0, mean_reward=0, anomaly_rate=0
+        let live = slice(100, 0.70, 0.02);
+        assert!(!should_rollback(&baseline, &live, 0.05, 0.05));
+    }
+
+    #[test]
+    fn degraded_baseline_still_rolls_back_on_anomaly() {
+        // 退化 baseline 下 anomaly 轴仍兜底:live 异常率飙升仍触发回滚。
+        let baseline = Baseline::default();
+        let live = slice(100, 0.70, 0.20); // anomaly 0.20 - 0 = 0.20 > 0.05
+        assert!(should_rollback(&baseline, &live, 0.05, 0.05));
     }
 
     #[test]
@@ -178,6 +219,7 @@ mod tests {
         let slice = slice(100, 0.77, 0.03);
         let json = serde_json::to_string(&slice).unwrap();
         let baseline: Baseline = serde_json::from_str(&json).unwrap();
+        assert_eq!(baseline.event_count, 100); // eventCount 随切片一并解析,供 reward 轴守卫用
         assert!((baseline.mean_reward - 0.77).abs() < 1e-9);
         assert!((baseline.anomaly_rate - 0.03).abs() < 1e-9);
     }

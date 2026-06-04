@@ -14,17 +14,20 @@ const HINT_NONE: &str = "none";
 /// m027:从 headers 提取 client IP。同 routes/auth.rs 实现,本仓库目前仅两处用,
 /// 不抽公共模块避免跨 mod 引用扩散。
 fn extract_client_ip(headers: &axum::http::HeaderMap) -> Option<String> {
-    if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-        if let Some(first) = xff.split(',').next() {
-            let s = first.trim();
-            if !s.is_empty() {
-                return Some(s.to_string());
-            }
-        }
-    }
-    headers
+    // 优先取不可伪造的 x-real-ip(nginx $remote_addr);回退 XFF 取最右段(最近可信跳),
+    // 避免客户端注入 XFF 首值伪造审计 IP。与 middleware/rate_limit.rs 限流取值口径一致。
+    if let Some(real) = headers
         .get("x-real-ip")
         .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        return Some(real);
+    }
+    headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|xff| xff.split(',').next_back())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
 }
@@ -76,7 +79,8 @@ pub async fn device_middleware(
     // 该中间件 layer 挂在 `/api` nest 之内,axum 已剥掉 `/api` 前缀,故此处看到的是
     // `/telemetry`(及带尾斜杠的 `/telemetry/`);两种形态都路由到 submit,均需跳过。
     let tele_path = req.uri().path();
-    let skip_telemetry_upsert = tele_path == "/telemetry" || tele_path == "/telemetry/";
+    let skip_telemetry_upsert =
+        tele_path == "/telemetry" || tele_path.starts_with("/telemetry/");
 
     let device_id = req
         .headers()

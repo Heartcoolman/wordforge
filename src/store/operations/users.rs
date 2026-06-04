@@ -36,6 +36,12 @@ const USER_SCOPED_TABLES: &[&str] = &[
     "wb_center_imports",
     // m025:用户自有活动日志,delete_user 时级联清理避免孤儿
     "user_activity_log",
+    // GDPR Art.17:含 user_id 的剩余 PII 表(client_devices 含 last_ip/country、
+    // user_elo_history 评分快照、监控事件、密码重置令牌),注销时一并清理
+    "client_devices",
+    "user_elo_history",
+    "engine_monitoring_events",
+    "password_reset_tokens",
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

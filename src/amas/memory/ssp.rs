@@ -114,6 +114,9 @@ pub struct PrecomputeResult {
     pub dual_grid: bool,
 }
 
+/// stability bins / R 网格规模硬上界，兜底防御非法配置（step ≤ 0 / 极小 r_step）导致的失控分配。
+const MAX_GRID_BINS: usize = 100_000;
+
 fn build_dual_grid_stability_list(config: &SspConfig) -> Vec<f64> {
     let s_min = config.base.powi(config.min_index);
     let s_max = config.base.powi(config.max_index);
@@ -123,14 +126,14 @@ fn build_dual_grid_stability_list(config: &SspConfig) -> Vec<f64> {
     let mut list = Vec::new();
     // log 间距区间
     let mut s = s_min;
-    while s < threshold && s < s_max {
+    while s < threshold && s < s_max && list.len() < MAX_GRID_BINS {
         list.push(s);
         s *= config.base;
     }
     // 线性间距区间
     let last_log = list.last().copied().unwrap_or(s_min);
     s = last_log + step;
-    while s <= s_max {
+    while s <= s_max && list.len() < MAX_GRID_BINS {
         list.push(s);
         s += step;
     }
@@ -191,8 +194,10 @@ pub fn precompute(
         }
     };
 
-    // R 离散化
-    let r_count = ((config.r_max - config.r_min) / config.r_step).round() as usize + 1;
+    // R 离散化（as usize 饱和转换 + MAX_GRID_BINS 兜底，防极小 r_step 撑爆分配）
+    let r_count = ((((config.r_max - config.r_min) / config.r_step).round() as usize)
+        .saturating_add(1))
+    .min(MAX_GRID_BINS);
     let r_values: Vec<f64> = (0..r_count)
         .map(|i| (config.r_min + i as f64 * config.r_step).min(config.r_max))
         .collect();

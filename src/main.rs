@@ -262,10 +262,14 @@ async fn main() {
         ));
     }
 
-    tokio::spawn(learning_backend::workers::heartbeat_watchdog::run(
-        state.clone(),
-        shutdown_tx.subscribe(),
-    ));
+    // 心跳看门狗下发 DataCorrupted SSE + 推进 miss 计数，非幂等，仅 leader 跑，
+    // 避免多实例对同一设备重复告警。
+    if config.worker.is_leader {
+        tokio::spawn(learning_backend::workers::heartbeat_watchdog::run(
+            state.clone(),
+            shutdown_tx.subscribe(),
+        ));
+    }
 
     // v1.1-P1 S2：领域事件总线 consumer。`event-bus` feature 关闭时 subscribe()
     // 返回 None，consumer 自动早退。AMAS 同步通路保留为主路径不变；这里只是
@@ -282,7 +286,8 @@ async fn main() {
     // S2-1：outbox 异步消费 worker（领域事件持久化处理 + 指数退避重试 + 死信兜底）。
     // 默认 records 走同步老路时 outbox 为空，本 loop 每 10s 一次空查询、零影响；opt-in
     // (RECORDS_OUTBOX_ASYNC=true) 后驱动异步消费，关闭后仍排空残留事件。需 AppState 故走 interval loop。
-    {
+    // claim 非原子，多实例会重复处理同一事件致 AMAS 状态双累加，仅 leader 跑。
+    if config.worker.is_leader {
         let outbox_state = state.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
         tokio::spawn(async move {
@@ -310,11 +315,14 @@ async fn main() {
         shutdown_tx.subscribe(),
     ));
 
-    // m042/D2:定时广播下发 worker（每 60s 扫到期 scheduled_broadcasts 并 fan-out）
-    tokio::spawn(learning_backend::workers::scheduled_broadcast::run(
-        state.clone(),
-        shutdown_tx.subscribe(),
-    ));
+    // m042/D2:定时广播下发 worker（每 60s 扫到期 scheduled_broadcasts 并 fan-out）。
+    // fan-out 非幂等，多实例会重复下发，仅 leader 跑。
+    if config.worker.is_leader {
+        tokio::spawn(learning_backend::workers::scheduled_broadcast::run(
+            state.clone(),
+            shutdown_tx.subscribe(),
+        ));
+    }
 
     // 时钟健康探测：启动时打一次（detached，不阻塞 listen），之后每小时再打。
     // 漂移超阈会 ERROR 日志告警 + `/health` 状态降级，详见 clock_health 模块文档。
@@ -343,8 +351,9 @@ async fn main() {
         shutdown_tx.subscribe(),
     ));
 
-    // 每日 DB 备份（独立 interval 循环，与 cron worker 解耦）
-    {
+    // 每日 DB 备份（独立 interval 循环，与 cron worker 解耦）。
+    // 备份 + 离站上传/prune 非幂等，多实例会并发上传/互删备份，仅 leader 跑。
+    if config.worker.is_leader {
         let store = store.clone();
         let backups_dir = std::path::Path::new(&config.database_url)
             .parent()

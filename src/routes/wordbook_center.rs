@@ -283,31 +283,6 @@ fn map_remote_word(rw: &RemoteWord, remote_id: &str) -> Word {
     }
 }
 
-fn import_words_to_store(
-    store: &crate::store::Store,
-    wordbook_id: &str,
-    remote_id: &str,
-    words: &[RemoteWord],
-) -> Result<(u64, u64), AppError> {
-    let mut imported = 0u64;
-    let mut skipped = 0u64;
-    for rw in words {
-        if rw.spelling.trim().is_empty() {
-            skipped += 1;
-            continue;
-        }
-        let word = map_remote_word(rw, remote_id);
-        let word_id = word.id.clone();
-        if store.upsert_word(&word).is_ok() {
-            let _ = store.add_word_to_wordbook(wordbook_id, &word_id);
-            imported += 1;
-        } else {
-            skipped += 1;
-        }
-    }
-    Ok((imported, skipped))
-}
-
 fn persist_remote_wordbook_import(
     store: &crate::store::Store,
     source_url: &str,
@@ -315,8 +290,10 @@ fn persist_remote_wordbook_import(
     book_type: WordbookType,
     user_id: Option<String>,
 ) -> Result<serde_json::Value, AppError> {
+    // 409 预检按导入者 user_id 收口:多个 end-user 可各自导入同一 center 词书,互不阻断
+    //（此前缺 user_id 致第二用户被永久 409 挡住)。admin/system(user_id=None)沿用空串命名空间。
     if store
-        .get_wb_center_import(source_url, &remote.id)?
+        .get_wb_center_import(source_url, &remote.id, user_id.as_deref())?
         .is_some()
     {
         return Err(AppError::conflict(
@@ -326,25 +303,26 @@ fn persist_remote_wordbook_import(
     }
 
     let wordbook_id = uuid::Uuid::new_v4().to_string();
+    let mut words = Vec::with_capacity(remote.words.len());
+    let mut skipped = 0u64;
+    for rw in &remote.words {
+        if rw.spelling.trim().is_empty() {
+            skipped += 1;
+            continue;
+        }
+        words.push(map_remote_word(rw, &remote.id));
+    }
+    let imported = words.len() as u64;
+
     let book = Wordbook {
         id: wordbook_id.clone(),
         name: remote.name.clone(),
         description: remote.description.clone(),
         book_type,
         user_id: user_id.clone(),
-        word_count: 0,
+        word_count: imported,
         created_at: Utc::now(),
     };
-    store.upsert_wordbook(&book)?;
-
-    let (imported, skipped) =
-        import_words_to_store(store, &wordbook_id, &remote.id, &remote.words)?;
-
-    if let Some(mut wb) = store.get_wordbook(&wordbook_id)? {
-        wb.word_count = imported;
-        store.upsert_wordbook(&wb)?;
-    }
-
     let import_record = WordbookCenterImport {
         remote_id: remote.id.clone(),
         local_wordbook_id: wordbook_id.clone(),
@@ -355,7 +333,8 @@ fn persist_remote_wordbook_import(
         updated_at: Utc::now(),
         word_count: imported,
     };
-    store.upsert_wb_center_import(&import_record)?;
+    // 单事务原子写:建词书 + 批量词条/挂接 + 导入记录,任一步失败整笔回滚不留孤儿。
+    store.import_remote_wordbook_atomic(&book, &words, &import_record)?;
 
     let wb = store.get_wordbook(&wordbook_id)?;
     Ok(serde_json::json!({
@@ -379,6 +358,9 @@ fn sync_remote_wordbook_import(
         text_to_word.insert(w.text.to_lowercase(), w.clone());
     }
 
+    // 收集本次写入,交由 sync_remote_wordbook_atomic 单事务落库(消除多写无事务孤儿)。
+    let mut upserts: Vec<Word> = Vec::new();
+    let mut add_word_ids: Vec<String> = Vec::new();
     let mut words_added = 0u64;
     let mut words_updated = 0u64;
     let mut remote_texts = std::collections::HashSet::new();
@@ -398,37 +380,38 @@ fn sync_remote_wordbook_import(
                 let mut w = existing.clone();
                 w.meaning = new_meaning;
                 w.pronunciation = rw.phonetic.clone();
-                let _ = store.upsert_word(&w);
+                upserts.push(w);
                 words_updated += 1;
             }
         } else {
             let word = map_remote_word(rw, &import_record.remote_id);
-            let word_id = word.id.clone();
-            if store.upsert_word(&word).is_ok() {
-                let _ = store.add_word_to_wordbook(&wb_id, &word_id);
-                words_added += 1;
-            }
+            add_word_ids.push(word.id.clone());
+            upserts.push(word);
+            words_added += 1;
         }
     }
 
-    let mut words_removed = 0u64;
+    // 仅移除"本远程来源"且已从远程消失的词:按 map_remote_word 写入的 wb-center + remote_id tag
+    // 判定来源,绝不删用户手动加入的词(此前无差别删除会静默销毁用户自加词条)。
+    let remote_id = &import_record.remote_id;
+    let mut remove_word_ids: Vec<String> = Vec::new();
     for (text_lower, word) in &text_to_word {
-        if !remote_texts.contains(text_lower) {
-            let _ = store.remove_word_from_wordbook(&wb_id, &word.id);
-            words_removed += 1;
+        if remote_texts.contains(text_lower) {
+            continue;
+        }
+        let from_this_remote = word.tags.iter().any(|t| t == "wb-center")
+            && word.tags.iter().any(|t| t == remote_id);
+        if from_this_remote {
+            remove_word_ids.push(word.id.clone());
         }
     }
+    let words_removed = remove_word_ids.len() as u64;
 
     let mut updated_import = import_record.clone();
     updated_import.version = remote.version;
     updated_import.updated_at = Utc::now();
-    updated_import.word_count = store.count_wordbook_words(&wb_id)?;
-    store.upsert_wb_center_import(&updated_import)?;
-
-    if let Some(mut wb) = store.get_wordbook(&wb_id)? {
-        wb.word_count = updated_import.word_count;
-        store.upsert_wordbook(&wb)?;
-    }
+    // word_count 由 sync_remote_wordbook_atomic 在事务内按实际挂接数权威回写。
+    store.sync_remote_wordbook_atomic(&wb_id, &upserts, &add_word_ids, &remove_word_ids, &updated_import)?;
 
     let wb = store.get_wordbook(&wb_id)?;
     Ok(serde_json::json!({
@@ -923,7 +906,8 @@ async fn admin_sync(
         .run_store_task("wordbook_center.admin_sync.import_record", {
             let base_url = base_url.clone();
             let id = id.clone();
-            move |store| store.get_wb_center_import(&base_url, &id)
+            // admin 同步走 admin/system 命名空间(user_id=None → 空串)。
+            move |store| store.get_wb_center_import(&base_url, &id, None)
         })
         .await??
         .ok_or_else(|| AppError::not_found("导入记录不存在"))?;
@@ -1314,7 +1298,9 @@ async fn user_sync(
         .run_store_task("wordbook_center.user_sync.import_record", {
             let base_url = base_url.clone();
             let id = id.clone();
-            move |store| store.get_wb_center_import(&base_url, &id)
+            let uid = auth.user_id.clone();
+            // 按本人命名空间取记录:他人对同一 center 词书的导入记录不可见(主键已含 user_id)。
+            move |store| store.get_wb_center_import(&base_url, &id, Some(&uid))
         })
         .await??
         .ok_or_else(|| AppError::not_found("导入记录不存在"))?;

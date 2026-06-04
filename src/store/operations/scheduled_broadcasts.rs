@@ -128,7 +128,34 @@ impl Store {
         Ok(rows)
     }
 
-    /// 标记定时广播已发送（status='sent' + sent_count + sent_at）。
+    /// fan-out 前原子抢占（status: 'pending' → 'sending'）。返回 true 表示本 worker 独占了
+    /// 该行可下发；false 表示该行已被取消（cancel 抢先把 pending 改 canceled）或不存在，
+    /// worker 应跳过、绝不下发。与 cancel 的 `WHERE status='pending'` 互斥：单条 UPDATE 在
+    /// SQLite 中原子，二者只有一个能命中 pending 行。闭合「cancel 返回成功但已群发」的 TOCTOU。
+    pub fn claim_scheduled_broadcast_for_send(&self, id: &str) -> Result<bool, StoreError> {
+        let conn = self.conn()?;
+        let n = conn.execute(
+            "UPDATE scheduled_broadcasts SET status = 'sending'
+             WHERE id = ?1 AND status = 'pending'",
+            params![id],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// 复活上次扫描崩溃/进程重启遗留的 'sending' 行（抢占后未及 mark_sent/mark_failed）。
+    /// worker 扫描严格顺序且 leader 单实例，故扫描起点的 'sending' 必为陈旧，重置回 'pending'
+    /// 以便重新下发（at-least-once，宁可重发不可永久搁置）。返回重置行数。
+    pub fn reset_stale_sending_broadcasts(&self) -> Result<u64, StoreError> {
+        let conn = self.conn()?;
+        let n = conn.execute(
+            "UPDATE scheduled_broadcasts SET status = 'pending' WHERE status = 'sending'",
+            [],
+        )?;
+        Ok(n as u64)
+    }
+
+    /// 标记定时广播已发送（status='sent' + sent_count + sent_at）。仅在 'sending'（已被本
+    /// worker 抢占）时生效，防止抢占失败/被取消的行被误覆盖回 sent。
     pub fn mark_scheduled_broadcast_sent(
         &self,
         id: &str,
@@ -139,17 +166,19 @@ impl Store {
         conn.execute(
             "UPDATE scheduled_broadcasts
              SET status = 'sent', sent_count = ?2, sent_at = ?3, error = NULL
-             WHERE id = ?1",
+             WHERE id = ?1 AND status = 'sending'",
             params![id, sent_count, sent_at],
         )?;
         Ok(())
     }
 
     /// 标记定时广播失败（status='failed' + error）。受众过滤后零命中也记 failed。
+    /// 同样仅在 'sending' 时生效，与抢占语义一致。
     pub fn mark_scheduled_broadcast_failed(&self, id: &str, error: &str) -> Result<(), StoreError> {
         let conn = self.conn()?;
         conn.execute(
-            "UPDATE scheduled_broadcasts SET status = 'failed', error = ?2 WHERE id = ?1",
+            "UPDATE scheduled_broadcasts SET status = 'failed', error = ?2
+             WHERE id = ?1 AND status = 'sending'",
             params![id, error],
         )?;
         Ok(())
@@ -370,6 +399,8 @@ mod tests {
                 created_at: &now.to_rfc3339(),
             })
             .unwrap();
+        // 须先抢占（pending→sending）mark_sent 才生效。
+        assert!(store.claim_scheduled_broadcast_for_send("x").unwrap());
         store
             .mark_scheduled_broadcast_sent("x", 42, &now.to_rfc3339())
             .unwrap();
@@ -398,6 +429,8 @@ mod tests {
                 created_at: &now.to_rfc3339(),
             })
             .unwrap();
+        // 须先抢占（pending→sending）mark_failed 才生效。
+        assert!(store.claim_scheduled_broadcast_for_send("y").unwrap());
         store
             .mark_scheduled_broadcast_failed("y", "EMPTY_AUDIENCE")
             .unwrap();
@@ -443,10 +476,32 @@ mod tests {
         // 取消已 canceled 的 p1 → false（非 pending，原子抢占失败）。
         assert!(!store.cancel_scheduled_broadcast("p1").unwrap());
 
-        // 取消已 sent 的不生效（模拟被 worker fan-out）。
-        store.mark_scheduled_broadcast_sent("p2", 3, &created).unwrap();
+        // 抢占 p2（worker fan-out 前 pending→sending）后，cancel 命中 0 行返回 false：
+        // 闭合「cancel 返回成功但已群发」的 TOCTOU。
+        assert!(store.claim_scheduled_broadcast_for_send("p2").unwrap());
         assert!(!store.cancel_scheduled_broadcast("p2").unwrap());
+        // 已抢占的行不再在 pending 列表。
         assert!(store.list_scheduled_broadcasts(100).unwrap().is_empty());
+        // mark_sent 在 'sending' 上生效。
+        store.mark_scheduled_broadcast_sent("p2", 3, &created).unwrap();
+
+        // 反向：先 cancel 抢先，worker 抢占必失败 → 不下发。
+        store
+            .insert_scheduled_broadcast(&NewScheduledBroadcast {
+                id: "p3",
+                title: "T",
+                message: "M",
+                admin_id: "adm",
+                platforms: &[],
+                version_min: None,
+                last_active_days: None,
+                user_ids: &[],
+                scheduled_at: &future,
+                created_at: &created,
+            })
+            .unwrap();
+        assert!(store.cancel_scheduled_broadcast("p3").unwrap());
+        assert!(!store.claim_scheduled_broadcast_for_send("p3").unwrap());
     }
 
     #[test]

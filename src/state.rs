@@ -455,6 +455,20 @@ impl AppState {
         }
     }
 
+    /// 单次持锁的 compare-and-set：仅当当前无进行中任务时写入 `initial` 并返回 true，
+    /// 否则返回 false（调用方应返回 409）。消除 apply/rollback/restore 的 check-then-act 竞态。
+    pub fn try_begin_apply_task(&self, initial: ApplyTaskStatus) -> bool {
+        let mut guard = match self.apply_task.lock() {
+            Ok(g) => g,
+            Err(_) => return false,
+        };
+        if guard.as_ref().is_some_and(|t| t.is_running()) {
+            return false;
+        }
+        *guard = Some(initial);
+        true
+    }
+
     /// 原地更新当前 apply task 状态，仅当存在时执行 mutator。
     pub fn update_apply_task<F: FnOnce(&mut ApplyTaskStatus)>(&self, f: F) {
         if let Ok(mut guard) = self.apply_task.lock() {

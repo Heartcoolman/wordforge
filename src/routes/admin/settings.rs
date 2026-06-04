@@ -517,16 +517,14 @@ async fn put_settings_config(
                 let existing = store.get_settings_config(&section_for_task)?;
                 preserve_secrets(&section_for_task, &mut to_store, existing.as_ref());
 
-                let mut saved = store.upsert_settings_config(&section_for_task, &to_store)?;
                 // 向后兼容:auth 注册策略同步到 system_settings.registration_enabled,
-                // 让既有注册门控(routes/auth.rs)无需改动即可生效。
-                if let Some(open) = registration_open {
-                    let mut sys = store.get_system_settings()?;
-                    if sys.registration_enabled != open {
-                        sys.registration_enabled = open;
-                        store.save_system_settings(&sys)?;
-                    }
-                }
+                // 让既有注册门控(routes/auth.rs)无需改动即可生效。两表写收进同一事务,
+                // 避免 settings_config 已写而注册同步失败致两表语义不一致。
+                let mut saved = store.upsert_settings_config_with_registration(
+                    &section_for_task,
+                    &to_store,
+                    registration_open,
+                )?;
                 // m035:响应体同样遮蔽密钥,绝不回写明文。
                 saved.json = mask_secrets(&section_for_task, &saved.json);
                 Ok(saved)
@@ -609,9 +607,28 @@ async fn restore_settings_snapshot(
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     let id_for_task = id.clone();
     let sections = state
-        .run_store_task("admin.settings.restore_snapshot", move |store| {
-            store.restore_settings_snapshot(&id_for_task)
-        })
+        .run_store_task(
+            "admin.settings.restore_snapshot",
+            move |store| -> Result<_, AppError> {
+                let sections = match store.restore_settings_snapshot(&id_for_task)? {
+                    Some(s) => s,
+                    None => return Ok(None),
+                };
+                // 回滚后回流派生项:从恢复出的 auth section 重新推导 registration_enabled
+                // 并写回 system_settings,与 PUT /config/:section 路径一致——注册门控运行时
+                // 只读 system_settings,不回流则快照回滚对注册策略静默失效。
+                if let Some(auth) = sections.iter().find(|s| s.section == "auth") {
+                    if let Ok((_, Some(open))) = parse_typed_section("auth", &auth.json) {
+                        let mut sys = store.get_system_settings()?;
+                        if sys.registration_enabled != open {
+                            sys.registration_enabled = open;
+                            store.save_system_settings(&sys)?;
+                        }
+                    }
+                }
+                Ok(Some(sections))
+            },
+        )
         .await??
         .ok_or_else(|| AppError::not_found("快照不存在"))?;
 

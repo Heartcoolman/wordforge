@@ -140,18 +140,19 @@ export default function AnalyticsPage() {
   const [sqlOpen, setSqlOpen] = createSignal(false);
   const [leaversOpen, setLeaversOpen] = createSignal(false);
 
-  // —— resources ——
-  const [kpi] = createResource(winParams, (p) => adminApi.analyticsKpiSummary(p));
-  const [funnel] = createResource(winParams, (p) => adminApi.analyticsFunnel(p));
-  const [matrix] = createResource(() => adminApi.analyticsRetentionMatrix(7));
-  const [dist] = createResource(winParams, (p) => adminApi.analyticsQuestionDistribution(p));
+  // —— resources（fetcher 内 .catch(() => null) 兜底：任一聚合端点 5xx/超时不外抛，
+  // 下游 Show when={…} 各自兜空态，避免单接口抖动经全局 ErrorBoundary 放大为整站白屏）——
+  const [kpi] = createResource(winParams, (p) => adminApi.analyticsKpiSummary(p).catch(() => null));
+  const [funnel] = createResource(winParams, (p) => adminApi.analyticsFunnel(p).catch(() => null));
+  const [matrix] = createResource(() => adminApi.analyticsRetentionMatrix(7).catch(() => null));
+  const [dist] = createResource(winParams, (p) => adminApi.analyticsQuestionDistribution(p).catch(() => null));
   // 热图固定近 7 天(对齐设计图"7d × 24h"标题),不随窗口/区间变化
-  const [hourly] = createResource(() => adminApi.analyticsHourly(7));
+  const [hourly] = createResource(() => adminApi.analyticsHourly(7).catch(() => null));
   const [words] = createResource(
     () => ({ ...winParams(), sort: wordSort() }),
-    (p) => adminApi.analyticsWordFrequency({ ...p, limit: 10 }),
+    (p) => adminApi.analyticsWordFrequency({ ...p, limit: 10 }).catch(() => null),
   );
-  const [insights] = createResource(winParams, (p) => adminApi.analyticsInsights(p));
+  const [insights] = createResource(winParams, (p) => adminApi.analyticsInsights(p).catch(() => null));
 
   const windowLabel = createMemo(() =>
     usingRange() ? `${from()} ~ ${to()}` : `${days()} 天`,

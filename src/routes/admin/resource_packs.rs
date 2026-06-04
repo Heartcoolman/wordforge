@@ -172,6 +172,25 @@ async fn upload_version(
         )));
     }
 
+    // 先验去重：(pack_id, version) 已存在则 409 提前拒绝，绝不覆盖磁盘 payload.json。
+    // 否则重传同版本号会用新字节覆盖旧 payload，而 DB 内旧 sha256/签名若仍激活，
+    // 全量在线客户端验签必败 → 该资源包「变砖」。
+    {
+        let pack_id_check = pack_id.clone();
+        let version_check = q.version.clone();
+        let exists = state
+            .run_store_task("admin.resource_packs.version_exists", move |store| {
+                store.pack_version_exists(&pack_id_check, &version_check)
+            })
+            .await??;
+        if exists {
+            return Err(AppError::conflict(
+                "PACK_VERSION_EXISTS",
+                &format!("版本 {} 已存在，不可重传覆盖；请改用新版本号", q.version),
+            ));
+        }
+    }
+
     let signer = state.resource_pack_signer().await.ok_or_else(|| {
         AppError::service_unavailable(
             "RESOURCE_PACK_SIGNER_UNAVAILABLE",

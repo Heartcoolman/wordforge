@@ -66,7 +66,10 @@ export default function WordbookCenterPage() {
 
   const [listRes, { refetch: refetchList }] = createResource(
     () => ({ search: search().trim(), type: typeFilter(), sort: sort() }),
-    (q) => adminApi.adminWordbooksList({ ...q, perPage: 200 }),
+    (q) => adminApi.adminWordbooksList({ ...q, perPage: 200 }).catch(() => ({
+      items: [], total: 0, page: 1, perPage: 200, totalPages: 1,
+      counts: { all: 0, system: 0, user: 0, totalEntries: 0 },
+    })),
   );
 
   const items = () => listRes()?.items ?? [];
@@ -82,7 +85,7 @@ export default function WordbookCenterPage() {
   });
 
   // ── 右侧详情数据源(随 selectedId 变化拉取) ──
-  const [statsRes] = createResource(selectedId, (id) => adminApi.adminWordbookStats(id));
+  const [statsRes] = createResource(selectedId, (id) => adminApi.adminWordbookStats(id).catch(() => null));
 
   const [detailTab, setDetailTab] = createSignal<DetailTab>('words');
 
@@ -101,20 +104,20 @@ export default function WordbookCenterPage() {
     (q) => adminApi.adminWordbookWords(q.id, {
       search: q.search || undefined, sort: q.sort, pos: q.pos || undefined,
       page: q.page, perPage: PER_PAGE_WORDS,
-    }),
+    }).catch(() => null),
   );
 
   const [heatmapRes] = createResource(
     () => (detailTab() === 'heatmap' ? selectedId() : null),
-    (id) => adminApi.adminWordbookHeatmap(id),
+    (id) => adminApi.adminWordbookHeatmap(id).catch(() => null),
   );
   const [distRes] = createResource(
     () => (detailTab() === 'distribution' ? selectedId() : null),
-    (id) => adminApi.adminWordbookDistribution(id),
+    (id) => adminApi.adminWordbookDistribution(id).catch(() => null),
   );
   const [historyRes] = createResource(
     () => (detailTab() === 'history' ? selectedId() : null),
-    (id) => adminApi.adminWordbookHistory(id, { perPage: 100 }),
+    (id) => adminApi.adminWordbookHistory(id, { perPage: 100 }).catch(() => null),
   );
 
   // 选中切换 → 重置词条 tab 状态
@@ -820,6 +823,38 @@ const CSV_TEMPLATE = `word,pos,ipa,gloss_zh,example
 tenacious,adj.,/tɪˈneɪʃəs/,坚韧的,She was tenacious…
 ephemeral,adj.,/ɪˈfɛmərəl/,短暂的,Fame can be…`;
 
+// 解析单行 CSV,处理双引号包裹与 "" 转义;返回去引号后的字段数组
+function parseCsvLine(line: string): string[] {
+  const out: string[] = [];
+  let cur = '';
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (line[i + 1] === '"') { cur += '"'; i++; } else { inQuotes = false; }
+      } else { cur += ch; }
+    } else if (ch === '"') {
+      inQuotes = true;
+    } else if (ch === ',') {
+      out.push(cur); cur = '';
+    } else { cur += ch; }
+  }
+  out.push(cur);
+  return out.map((s) => s.trim());
+}
+
+// 按表头列名(大小写不敏感)定位列下标,兼容模板 5 列(word/pos/ipa/gloss_zh/example)与旧 3 列(spelling/phonetic/meaning)
+function csvColumnMap(header: string[]): { spelling: number; phonetic: number; meaning: number; example: number } {
+  const idx = (...names: string[]) => header.findIndex((h) => names.includes(h.trim().toLowerCase()));
+  return {
+    spelling: idx('word', 'spelling'),
+    phonetic: idx('ipa', 'phonetic'),
+    meaning: idx('gloss_zh', 'meaning', 'meanings'),
+    example: idx('example', 'examples'),
+  };
+}
+
 function ImportSection(props: { onImported: () => void }) {
   const [configured, setConfigured] = createSignal(false);
   const [remoteItems, setRemoteItems] = createSignal<BrowseItem[]>([]);
@@ -931,12 +966,22 @@ function ImportSection(props: { onImported: () => void }) {
       const baseId = file.name.replace(/\.(csv|json)$/i, '');
       if (file.name.toLowerCase().endsWith('.csv')) {
         const lines = txt.split(/\r?\n/).filter((l) => l.trim());
+        const col = csvColumnMap(parseCsvLine(lines[0] ?? ''));
+        // 表头识别到 word/spelling 列则按列名取值;否则回退按位置 spelling,phonetic,meaning
+        const byName = col.spelling >= 0;
+        const sp = byName ? col.spelling : 0;
+        const ph = byName ? col.phonetic : 1;
+        const me = byName ? col.meaning : 2;
+        const ex = byName ? col.example : -1;
         const words = lines.slice(1).map((line) => {
-          const [spelling, phonetic, meaning] = line.split(',');
+          const f = parseCsvLine(line);
+          const meaning = me >= 0 ? (f[me] ?? '') : '';
+          const example = ex >= 0 ? (f[ex] ?? '') : '';
           return {
-            spelling: spelling?.trim() ?? '',
-            phonetic: phonetic?.trim() || undefined,
-            meanings: meaning ? [meaning.trim()] : [],
+            spelling: sp >= 0 ? (f[sp] ?? '') : '',
+            phonetic: ph >= 0 && f[ph] ? f[ph] : undefined,
+            meanings: meaning ? [meaning] : [],
+            examples: example ? [example] : undefined,
           };
         }).filter((w) => w.spelling);
         setUploadDraft({ ...uploadDraft(), id: uploadDraft().id || baseId, name: uploadDraft().name || baseId, wordsJson: JSON.stringify(words, null, 2) });
@@ -1220,7 +1265,7 @@ function ImportSection(props: { onImported: () => void }) {
               placeholder={'[{"spelling": "apple", "phonetic": "/ˈæpəl/", "meanings": ["苹果"]}]'}
               class="w-full px-3 py-2 rounded-md border border-border-hairline bg-surface text-[12px] font-mono focus:outline-none focus:border-accent"
             />
-            <p class="text-[10.5px] text-content-tertiary mt-1">CSV 格式：<code class="font-mono">spelling,phonetic,meaning</code>(首行表头),客户端会自动转 JSON</p>
+            <p class="text-[10.5px] text-content-tertiary mt-1">CSV 格式：<code class="font-mono">word,pos,ipa,gloss_zh,example</code>(首行表头),按列名解析、客户端自动转 JSON</p>
           </div>
           <div class="flex justify-end gap-2 pt-1">
             <button class="btn btn-ghost" onClick={() => setUploadOpen(false)}>取消</button>

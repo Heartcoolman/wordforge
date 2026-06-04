@@ -229,6 +229,20 @@ impl Store {
         Ok(())
     }
 
+    /// 判定某 `(pack_id, version)` 是否已存在（含软删除版本）。
+    /// 上传入口用此做先验去重，避免重传同版本号覆盖磁盘 payload.json 致激活版本验签失败。
+    pub fn pack_version_exists(&self, pack_id: &str, version: &str) -> Result<bool, StoreError> {
+        let conn = self.conn()?;
+        let exists: Option<i64> = conn
+            .query_row(
+                "SELECT 1 FROM resource_pack_versions WHERE pack_id = ?1 AND version = ?2 LIMIT 1",
+                params![pack_id, version],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(exists.is_some())
+    }
+
     /// 写入一个新版本。pack_id 必须先 upsert 过（外键约束）。
     pub fn insert_pack_version(&self, v: &ResourcePackVersion) -> Result<(), StoreError> {
         let conn = self.conn()?;

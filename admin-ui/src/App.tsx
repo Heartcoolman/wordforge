@@ -1,10 +1,13 @@
 import { Router, Route, useLocation, type RouteSectionProps } from '@solidjs/router';
-import { lazy, Suspense, Show, onMount, onCleanup } from 'solid-js';
+import { lazy, Suspense, Show, ErrorBoundary, onMount, onCleanup, type JSX, type Component } from 'solid-js';
 import { Toaster } from '@/components/ui/Toast';
 import { AppErrorBoundary } from '@/components/ErrorBoundary';
 import { AdminLayout } from '@/components/layout/AdminLayout';
 import { AdminProtectedRoute } from '@/components/auth/ProtectedRoute';
 import { Spinner } from '@/components/ui/Spinner';
+import { Card } from '@/components/ui/Card';
+import { Empty } from '@/components/ui/Empty';
+import { Button } from '@/components/ui/Button';
 import { api, maintenanceActive, setMaintenanceActive, setUpdateInfo } from '@/api/http';
 import MaintenancePage from '@/pages/MaintenancePage';
 import { UpdateBanner } from '@/components/ui/UpdateBanner';
@@ -43,6 +46,38 @@ function PageSpinner() {
     </div>
   );
 }
+
+// 路由级错误边界：单页资源请求失败时只降级该页内容区，不冒泡到全局 AppErrorBoundary
+// 把整个 admin 壳（侧栏/导航）替换掉。参照 pages/amas/PanelBoundary.tsx，用通用样式。
+function RouteBoundary(props: { children: JSX.Element }) {
+  return (
+    <ErrorBoundary
+      fallback={(err, reset) => (
+        <div class="flex items-center justify-center min-h-[60vh] p-4">
+          <Card variant="elevated" class="max-w-md w-full">
+            <Empty
+              title="该页面加载失败"
+              description={err?.message ? String(err.message) : String(err)}
+              action={<Button onClick={reset}>重试</Button>}
+            />
+          </Card>
+        </div>
+      )}
+    >
+      {props.children}
+    </ErrorBoundary>
+  );
+}
+
+// 公开页（login/setup/legacy/notfound）：边界 → Suspense → 页面
+const pub_ = (Page: Component) => () => (
+  <RouteBoundary><Suspense fallback={<PageSpinner />}><Page /></Suspense></RouteBoundary>
+);
+
+// 受保护 admin 页：边界 → 鉴权守卫 → Suspense → 页面
+const guarded = (Page: Component) => () => (
+  <RouteBoundary><AdminProtectedRoute><Suspense fallback={<PageSpinner />}><Page /></Suspense></AdminProtectedRoute></RouteBoundary>
+);
 
 function MaintenanceProvider(props: RouteSectionProps) {
   let pollTimer: ReturnType<typeof setInterval> | undefined;
@@ -95,41 +130,41 @@ export default function App() {
     <AppErrorBoundary>
       <Router root={MaintenanceProvider}>
         <Route path="/" component={() => { window.location.replace('/admin/login'); return null; }} />
-        <Route path="/login" component={() => (<Suspense fallback={<PageSpinner />}><LegacyUserFrontendPage /></Suspense>)} />
-        <Route path="/register" component={() => (<Suspense fallback={<PageSpinner />}><LegacyUserFrontendPage /></Suspense>)} />
-        <Route path="/learning" component={() => (<Suspense fallback={<PageSpinner />}><LegacyUserFrontendPage /></Suspense>)} />
-        <Route path="/flashcard" component={() => (<Suspense fallback={<PageSpinner />}><LegacyUserFrontendPage /></Suspense>)} />
-        <Route path="/vocabulary" component={() => (<Suspense fallback={<PageSpinner />}><LegacyUserFrontendPage /></Suspense>)} />
-        <Route path="/wordbooks" component={() => (<Suspense fallback={<PageSpinner />}><LegacyUserFrontendPage /></Suspense>)} />
-        <Route path="/wordbook-center" component={() => (<Suspense fallback={<PageSpinner />}><LegacyUserFrontendPage /></Suspense>)} />
-        <Route path="/statistics" component={() => (<Suspense fallback={<PageSpinner />}><LegacyUserFrontendPage /></Suspense>)} />
-        <Route path="/history" component={() => (<Suspense fallback={<PageSpinner />}><LegacyUserFrontendPage /></Suspense>)} />
-        <Route path="/profile" component={() => (<Suspense fallback={<PageSpinner />}><LegacyUserFrontendPage /></Suspense>)} />
-        <Route path="/notifications" component={() => (<Suspense fallback={<PageSpinner />}><LegacyUserFrontendPage /></Suspense>)} />
+        <Route path="/login" component={pub_(LegacyUserFrontendPage)} />
+        <Route path="/register" component={pub_(LegacyUserFrontendPage)} />
+        <Route path="/learning" component={pub_(LegacyUserFrontendPage)} />
+        <Route path="/flashcard" component={pub_(LegacyUserFrontendPage)} />
+        <Route path="/vocabulary" component={pub_(LegacyUserFrontendPage)} />
+        <Route path="/wordbooks" component={pub_(LegacyUserFrontendPage)} />
+        <Route path="/wordbook-center" component={pub_(LegacyUserFrontendPage)} />
+        <Route path="/statistics" component={pub_(LegacyUserFrontendPage)} />
+        <Route path="/history" component={pub_(LegacyUserFrontendPage)} />
+        <Route path="/profile" component={pub_(LegacyUserFrontendPage)} />
+        <Route path="/notifications" component={pub_(LegacyUserFrontendPage)} />
         <Route path="/admin">
-          <Route path="/login" component={() => (<Suspense fallback={<PageSpinner />}><LoginPage /></Suspense>)} />
-          <Route path="/setup" component={() => (<Suspense fallback={<PageSpinner />}><SetupPage /></Suspense>)} />
+          <Route path="/login" component={pub_(LoginPage)} />
+          <Route path="/setup" component={pub_(SetupPage)} />
           <Route path="/" component={AdminLayout}>
-            <Route path="/" component={() => (<AdminProtectedRoute><Suspense fallback={<PageSpinner />}><DashboardPage /></Suspense></AdminProtectedRoute>)} />
-            <Route path="/users" component={() => (<AdminProtectedRoute><Suspense fallback={<PageSpinner />}><UserManagementPage /></Suspense></AdminProtectedRoute>)} />
-            <Route path="/clients" component={() => (<AdminProtectedRoute><Suspense fallback={<PageSpinner />}><DevicesPage /></Suspense></AdminProtectedRoute>)} />
-            <Route path="/amas-config" component={() => (<AdminProtectedRoute><Suspense fallback={<PageSpinner />}><AmasConfigPage /></Suspense></AdminProtectedRoute>)} />
-            <Route path="/amas-metrics" component={() => (<AdminProtectedRoute><Suspense fallback={<PageSpinner />}><AmasMetricsPage /></Suspense></AdminProtectedRoute>)} />
-            <Route path="/amas-advisor" component={() => (<AdminProtectedRoute><Suspense fallback={<PageSpinner />}><AmasAdvisorPage /></Suspense></AdminProtectedRoute>)} />
-            <Route path="/monitoring" component={() => (<AdminProtectedRoute><Suspense fallback={<PageSpinner />}><MonitoringPage /></Suspense></AdminProtectedRoute>)} />
-            <Route path="/analytics" component={() => (<AdminProtectedRoute><Suspense fallback={<PageSpinner />}><AnalyticsPage /></Suspense></AdminProtectedRoute>)} />
-            <Route path="/settings" component={() => (<AdminProtectedRoute><Suspense fallback={<PageSpinner />}><SettingsPage /></Suspense></AdminProtectedRoute>)} />
-            <Route path="/updates" component={() => (<AdminProtectedRoute><Suspense fallback={<PageSpinner />}><UpdatesPage /></Suspense></AdminProtectedRoute>)} />
-            <Route path="/wordbook-center" component={() => (<AdminProtectedRoute><Suspense fallback={<PageSpinner />}><WordbookCenterPage /></Suspense></AdminProtectedRoute>)} />
-            <Route path="/feedback" component={() => (<AdminProtectedRoute><Suspense fallback={<PageSpinner />}><FeedbackPage /></Suspense></AdminProtectedRoute>)} />
-            <Route path="/probe" component={() => (<AdminProtectedRoute><Suspense fallback={<PageSpinner />}><ProbeMetricsPage /></Suspense></AdminProtectedRoute>)} />
-            <Route path="/remote-probe" component={() => (<AdminProtectedRoute><Suspense fallback={<PageSpinner />}><ProbePage /></Suspense></AdminProtectedRoute>)} />
-            <Route path="/broadcast" component={() => (<AdminProtectedRoute><Suspense fallback={<PageSpinner />}><BroadcastPage /></Suspense></AdminProtectedRoute>)} />
-            <Route path="/resource-packs" component={() => (<AdminProtectedRoute><Suspense fallback={<PageSpinner />}><ResourcePacksPage /></Suspense></AdminProtectedRoute>)} />
+            <Route path="/" component={guarded(DashboardPage)} />
+            <Route path="/users" component={guarded(UserManagementPage)} />
+            <Route path="/clients" component={guarded(DevicesPage)} />
+            <Route path="/amas-config" component={guarded(AmasConfigPage)} />
+            <Route path="/amas-metrics" component={guarded(AmasMetricsPage)} />
+            <Route path="/amas-advisor" component={guarded(AmasAdvisorPage)} />
+            <Route path="/monitoring" component={guarded(MonitoringPage)} />
+            <Route path="/analytics" component={guarded(AnalyticsPage)} />
+            <Route path="/settings" component={guarded(SettingsPage)} />
+            <Route path="/updates" component={guarded(UpdatesPage)} />
+            <Route path="/wordbook-center" component={guarded(WordbookCenterPage)} />
+            <Route path="/feedback" component={guarded(FeedbackPage)} />
+            <Route path="/probe" component={guarded(ProbeMetricsPage)} />
+            <Route path="/remote-probe" component={guarded(ProbePage)} />
+            <Route path="/broadcast" component={guarded(BroadcastPage)} />
+            <Route path="/resource-packs" component={guarded(ResourcePacksPage)} />
           </Route>
-          <Route path="*" component={() => (<Suspense fallback={<PageSpinner />}><NotFoundPage /></Suspense>)} />
+          <Route path="*" component={pub_(NotFoundPage)} />
         </Route>
-        <Route path="*" component={() => (<Suspense fallback={<PageSpinner />}><NotFoundPage /></Suspense>)} />
+        <Route path="*" component={pub_(NotFoundPage)} />
       </Router>
       <Toaster />
     </AppErrorBoundary>

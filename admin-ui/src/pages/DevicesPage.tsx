@@ -656,6 +656,8 @@ export default function DevicesPage() {
   // E1:preview 失败原因——'invalid_version'(版本号非法,可操作) / 'network'(真实网络失败) / null(正常)
   const [bcPreviewError, setBcPreviewError] = createSignal<'invalid_version' | 'network' | null>(null);
   const [bcSending, setBcSending] = createSignal(false);
+  // 预演二次确认:后端无 self-target 通道,预演实际带 [预演] 前缀群发全员,发送前必须明示确认
+  const [confirmPreviewOpen, setConfirmPreviewOpen] = createSignal(false);
   // m042/D2:投递时机(now=立即 / at=指定时间) + 指定时间值(datetime-local) + 草稿保存态
   const [bcSchedule, setBcSchedule] = createSignal<'now' | 'at'>('now');
   const [bcScheduledAt, setBcScheduledAt] = createSignal('');
@@ -1471,8 +1473,8 @@ export default function DevicesPage() {
                 <Button size="sm" variant="outline" disabled={bcSavingDraft()} onClick={saveDraft}>
                   {bcSavingDraft() ? '保存中…' : '保存草稿'}
                 </Button>
-                <Button size="sm" variant="outline" disabled={bcSending() || !bcTitle().trim() || !bcMessage().trim()} onClick={() => sendBc(true)}>
-                  先发给我(预演)
+                <Button size="sm" variant="outline" disabled={bcSending() || !bcTitle().trim() || !bcMessage().trim()} onClick={() => setConfirmPreviewOpen(true)}>
+                  以[预演]前缀发全员
                 </Button>
                 <Button
                   size="sm"
@@ -2098,6 +2100,23 @@ export default function DevicesPage() {
           />
         )}
       </Show>
+
+      {/* 预演确认:后端无 self-target 通道,预演=带 [预演] 前缀向全员群发并写历史,发送前明示 */}
+      <ConfirmDialog
+        open={confirmPreviewOpen()}
+        title="预演将向全员发送"
+        message={
+          <span>
+            后端暂无「仅发给自己」通道。点击确认会以标题前缀 <span class="font-mono">[预演]</span> 向<strong>全体终端用户</strong>立即推送一条通知,并写入广播历史,无法撤销。
+          </span>
+        }
+        confirmText={bcSending() ? '发送中…' : '确认群发预演'}
+        cancelText="取消"
+        variant="warning"
+        loading={bcSending()}
+        onConfirm={async () => { await sendBc(true); setConfirmPreviewOpen(false); }}
+        onCancel={() => setConfirmPreviewOpen(false)}
+      />
     </div>
   );
 }

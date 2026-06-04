@@ -295,13 +295,22 @@ impl Store {
         }
     }
 
+    /// 原子写入 AMAS 状态（user_state + algo_states），可选附幂等标记。
+    ///
+    /// 返回值（仅在 `idempotency` 为 `Some` 时有意义）：`true`=标记本次新插入、AMAS 状态已提交；
+    /// `false`=标记已存在（并发竞态下另一请求先行处理），**整笔 tx 回滚**、本次 AMAS 增量被丢弃。
+    /// `idempotency` 为 `None` 时恒返回 `true`（无标记可竞争）。
+    ///
+    /// W1-1 并发收口：`INSERT OR IGNORE` 标记的 affected rows 是权威仲裁——锁外预检 + 持锁应用之间
+    /// 仍可能两个同 `client_record_id` 请求各自通过预检，此处以"谁先写进标记谁生效、后者整笔回滚"
+    /// 消除二次累加 ELO/mastery/trust 的窗口。
     pub fn persist_engine_state_atomic(
         &self,
         user_id: &str,
         user_state: &serde_json::Value,
         algo_states: &[(String, serde_json::Value)],
         idempotency: Option<&str>,
-    ) -> Result<(), StoreError> {
+    ) -> Result<bool, StoreError> {
         keys::validate_id(user_id)?;
         let mut conn = self.conn()?;
         let tx = conn.transaction()?;
@@ -323,15 +332,20 @@ impl Store {
             )?;
         }
         // W1-1：幂等标记与 AMAS 状态同 tx 原子提交,保证"标记存在 ⟺ AMAS 已应用"。
+        // affected rows==0 即标记已被并发请求抢先写入 → 回滚本次重复增量。
         if let Some(client_record_id) = idempotency {
-            tx.execute(
+            let inserted = tx.execute(
                 "INSERT OR IGNORE INTO processed_events (user_id, client_record_id, processed_at)
                  VALUES (?1, ?2, ?3)",
                 params![user_id, client_record_id, created_at],
             )?;
+            if inserted == 0 {
+                tx.rollback()?;
+                return Ok(false);
+            }
         }
         tx.commit()?;
-        Ok(())
+        Ok(true)
     }
 
     /// W1-1：一次性**原子**回滚引擎状态 + 清除幂等标记。

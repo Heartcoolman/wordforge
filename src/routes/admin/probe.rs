@@ -479,8 +479,15 @@ async fn batch_stream(
                     if payload.batch_id != batch_id {
                         continue;
                     }
+                    let is_terminal = payload.status != "confirm_required";
                     if let Ok(json) = serde_json::to_string(&payload) {
                         yield Ok(Event::default().event("result").data(json));
+                    }
+                    // confirm_required 非终态：不计入 received，否则流会在 admin 确认、
+                    // 客户端重跑的终态结果（ok/error/timeout/unsupported）到达前就关闭，
+                    // 导致 admin 永远看不到受控写动作的成败。
+                    if !is_terminal {
+                        continue;
                     }
                     received += 1;
                     if received >= expected {

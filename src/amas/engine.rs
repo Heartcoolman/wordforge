@@ -71,6 +71,9 @@ struct MemoryScoring {
     word_mastery: Option<MemoryFeedback>,
     reward: Reward,
     objective: ObjectiveEvaluation,
+    /// W1-1：update_memory 期间累积的 per-word 状态（mastery/IAD/MTP/EVM），延后由
+    /// persist_state 与幂等标记同一 tx 原子写入，消除崩溃重试二次累加记忆模型的窗口。
+    pending_algo: Vec<(String, serde_json::Value)>,
 }
 
 impl AMASEngine {
@@ -291,22 +294,26 @@ impl AMASEngine {
     ) -> Result<ProcessResult, AppError> {
         let engine = self.clone();
         let user_id = user_id.to_string();
-        crate::blocking::run_blocking("amas.process_event", move || {
+        let result = crate::blocking::run_blocking("amas.process_event", move || {
             engine.process_event_blocking(&user_id, raw_event, None)
         })
-        .await?
+        .await??;
+        // 非幂等路径不传幂等键，persist_state 恒返回 true（无标记可竞争），故必为 Some。
+        result.ok_or_else(|| AppError::internal("process_event returned None without idempotency key"))
     }
 
     /// W1-1：幂等版 process_event。把 `client_record_id` 作为幂等键，在 AMAS 状态落库的
     /// 同一 tx 内原子写入 `processed_events` 标记。配合路由侧 `is_event_processed` 前置预检
     /// （命中即不调本方法），保证 outbox 重放 / 客户端重试不二次累加 AMAS 状态。
     /// 与 [`Self::process_event`] 唯一差别是落库时附带幂等标记；处理逻辑零分叉。
+    /// 返回 `Ok(None)` 表示幂等标记已被并发同 `client_record_id` 请求抢先写入、本次 AMAS 增量已
+    /// 整笔回滚未生效——调用方应据此走"裸记录回放"而非二次累加 ELO/mastery/trust。
     pub async fn process_event_idempotent(
         &self,
         user_id: &str,
         raw_event: RawEvent,
         client_record_id: &str,
-    ) -> Result<ProcessResult, AppError> {
+    ) -> Result<Option<ProcessResult>, AppError> {
         let engine = self.clone();
         let user_id = user_id.to_string();
         let key = client_record_id.to_string();
@@ -316,12 +323,14 @@ impl AMASEngine {
         .await?
     }
 
+    /// 返回 `Ok(None)` 仅当传入幂等键且其标记已被并发请求抢先写入——本次 AMAS 增量已整笔回滚、
+    /// 未生效，调用方应据此走"裸记录回放"而非二次累加。`idempotency_key` 为 `None` 时恒 `Some`。
     fn process_event_blocking(
         &self,
         user_id: &str,
         raw_event: RawEvent,
         idempotency_key: Option<&str>,
-    ) -> Result<ProcessResult, AppError> {
+    ) -> Result<Option<ProcessResult>, AppError> {
         let start = std::time::Instant::now();
 
         let user_lock = self.acquire_user_lock_blocking(user_id);
@@ -332,7 +341,9 @@ impl AMASEngine {
         let now = chrono::Utc::now();
         let mut context = self.prepare_processing_context(user_id, &raw_event, config, now)?;
         let strategy = self.select_strategy(&mut context);
-        let scoring = self.apply_memory_and_score(user_id, &raw_event, &context, &strategy)?;
+        let mut scoring = self.apply_memory_and_score(user_id, &raw_event, &context, &strategy)?;
+        // W1-1：取出 per-word 待写状态，交由 persist_state 与幂等标记同 tx 原子提交。
+        let pending_algo = std::mem::take(&mut scoring.pending_algo);
 
         self.update_trust_scores(
             &mut context.algo_states,
@@ -345,12 +356,16 @@ impl AMASEngine {
         );
 
         Self::update_session_counters(&mut context.user_state, &raw_event, now);
-        self.persist_state(
+        // W1-1 并发收口：标记已被并发请求抢先写入则整笔回滚，返回 None 让调用方走裸记录回放。
+        if !self.persist_state(
             user_id,
             &mut context.user_state,
             &context.algo_states,
+            pending_algo,
             idempotency_key,
-        )?;
+        )? {
+            return Ok(None);
+        }
 
         let explanation = self.build_explanation(
             &strategy.constrained_strategy,
@@ -385,7 +400,7 @@ impl AMASEngine {
             raw_event.is_correct,
         );
 
-        Ok(result)
+        Ok(Some(result))
     }
 
     fn prepare_processing_context(
@@ -442,6 +457,7 @@ impl AMASEngine {
         strategy: &StrategySelection,
     ) -> Result<MemoryScoring, AppError> {
         let ssp_arc = self.ssp_policy.read().clone();
+        let mut pending_algo: Vec<(String, serde_json::Value)> = Vec::new();
         let word_mastery = self.update_memory(
             user_id,
             raw_event,
@@ -450,6 +466,7 @@ impl AMASEngine {
             &context.user_state,
             &context.config,
             ssp_arc.as_deref(),
+            &mut pending_algo,
         )?;
         let retention_signal = word_mastery
             .as_ref()
@@ -467,6 +484,7 @@ impl AMASEngine {
             word_mastery,
             reward,
             objective,
+            pending_algo,
         })
     }
 
@@ -1141,6 +1159,7 @@ impl AMASEngine {
         user_state: &UserState,
         config: &AMASConfig,
         ssp_policy: Option<&ssp::SspPolicy>,
+        pending_algo: &mut Vec<(String, serde_json::Value)>,
     ) -> Result<Option<MemoryFeedback>, AppError> {
         if raw_event.word_id.is_empty() {
             return Ok(None);
@@ -1188,9 +1207,7 @@ impl AMASEngine {
                         &config.iad,
                     );
                     if let Ok(val) = serde_json::to_value(&iad_state) {
-                        if let Err(e) = self.store.set_engine_algo_state(user_id, iad_key, &val) {
-                            tracing::warn!(user_id, key = iad_key, error = %e, "failed to persist algo state");
-                        }
+                        pending_algo.push((iad_key.to_string(), val));
                     }
                 }
             }
@@ -1243,9 +1260,7 @@ impl AMASEngine {
                         &config.mtp,
                     );
                     if let Ok(val) = serde_json::to_value(&mtp_state) {
-                        if let Err(e) = self.store.set_engine_algo_state(user_id, mtp_key, &val) {
-                            tracing::warn!(user_id, key = mtp_key, error = %e, "failed to persist algo state");
-                        }
+                        pending_algo.push((mtp_key.to_string(), val));
                     }
                 }
             }
@@ -1269,9 +1284,7 @@ impl AMASEngine {
             adjusted_interval_scale *= evm::interval_modifier(&evm_state, &config.evm);
 
             if let Ok(val) = serde_json::to_value(&evm_state) {
-                if let Err(e) = self.store.set_engine_algo_state(user_id, &evm_key, &val) {
-                    tracing::warn!(user_id, key = %evm_key, error = %e, "failed to persist algo state");
-                }
+                pending_algo.push((evm_key.clone(), val));
             }
         }
 
@@ -1300,13 +1313,10 @@ impl AMASEngine {
         let scheduled_recall =
             mdm::recall_probability(&state.mdm, scheduled_at, &config.memory_model);
 
-        self.store
-            .set_engine_algo_state(
-                user_id,
-                &key,
-                &serde_json::to_value(&state).map_err(|e| AppError::internal(&e.to_string()))?,
-            )
-            .map_err(|e| AppError::internal(&e.to_string()))?;
+        pending_algo.push((
+            key.clone(),
+            serde_json::to_value(&state).map_err(|e| AppError::internal(&e.to_string()))?,
+        ));
 
         Ok(Some(MemoryFeedback {
             decision,
@@ -1392,13 +1402,16 @@ impl AMASEngine {
         }
     }
 
+    /// 返回 `true`=本次状态已提交；`false`=幂等标记已被并发请求抢先写入、整笔回滚（详见
+    /// [`Store::persist_engine_state_atomic`]）。`idempotency_key` 为 `None` 时恒 `true`。
     fn persist_state(
         &self,
         user_id: &str,
         user_state: &mut UserState,
         algo_states: &AlgoStates,
+        pending_algo: Vec<(String, serde_json::Value)>,
         idempotency_key: Option<&str>,
-    ) -> Result<(), AppError> {
+    ) -> Result<bool, AppError> {
         // 在保存前清理浮点字段，防止 NaN 传播
         user_state.attention = sanitize_float(user_state.attention, 0.5).clamp(0.0, 1.0);
         user_state.fatigue = sanitize_float(user_state.fatigue, 0.0).clamp(0.0, 1.0);
@@ -1414,7 +1427,10 @@ impl AMASEngine {
         let user_state_json =
             serde_json::to_value(&*user_state).map_err(|e| AppError::internal(&e.to_string()))?;
 
-        let algo_entries: Vec<(String, serde_json::Value)> = vec![
+        // W1-1：ige/swd/trust 与 update_memory 累积的 per-word 状态（mastery/IAD/MTP/EVM）合并，
+        // 连同幂等标记由 persist_engine_state_atomic 同一 tx 原子提交——保证"标记存在 ⟺ 全部 AMAS
+        // 状态已应用"，崩溃重试不会对记忆模型二次累加。
+        let mut algo_entries: Vec<(String, serde_json::Value)> = vec![
             (
                 "ige".to_string(),
                 serde_json::to_value(&algo_states.ige)
@@ -1431,6 +1447,7 @@ impl AMASEngine {
                     .map_err(|e| AppError::internal(&e.to_string()))?,
             ),
         ];
+        algo_entries.extend(pending_algo);
 
         self.store
             .persist_engine_state_atomic(user_id, &user_state_json, &algo_entries, idempotency_key)
@@ -1619,6 +1636,7 @@ mod tests {
                 &user_state,
                 &config,
                 None,
+                &mut Vec::new(),
             )
             .unwrap()
             .expect("short feedback");
@@ -1631,6 +1649,7 @@ mod tests {
                 &user_state,
                 &config,
                 None,
+                &mut Vec::new(),
             )
             .unwrap()
             .expect("long feedback");

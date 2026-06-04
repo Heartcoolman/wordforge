@@ -84,6 +84,40 @@ impl Store {
         })
     }
 
+    /// 原子 upsert section + 可选同步 system_settings.registration_enabled。
+    /// 两表写收进同一事务,避免 settings_config 已写而注册同步失败致两表语义不一致。
+    /// `registration_open` 仅 auth section 为 Some;Some 且与现值不同才改 registration_enabled。
+    pub fn upsert_settings_config_with_registration(
+        &self,
+        section: &str,
+        json: &serde_json::Value,
+        registration_open: Option<bool>,
+    ) -> Result<SettingsSection, StoreError> {
+        let conn = self.conn()?;
+        let tx = conn.unchecked_transaction()?;
+        let now = chrono::Utc::now().to_rfc3339();
+        let raw = serde_json::to_string(json)?;
+        tx.execute(
+            "INSERT INTO settings_config (section, json, updated_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(section) DO UPDATE SET json=?2, updated_at=?3",
+            params![section, raw, now],
+        )?;
+        if let Some(open) = registration_open {
+            let mut sys = self.get_system_settings_tx(&tx)?;
+            if sys.registration_enabled != open {
+                sys.registration_enabled = open;
+                self.save_system_settings_tx(&tx, &sys)?;
+            }
+        }
+        tx.commit()?;
+        Ok(SettingsSection {
+            section: section.to_string(),
+            json: json.clone(),
+            updated_at: now,
+        })
+    }
+
     /// 创建一个快照:把当前全部 section 聚合为 {section: json} 落库。返回快照 id。
     pub fn create_settings_snapshot(
         &self,

@@ -9,6 +9,7 @@ import {
   type PackStatsEntry,
   type ResourcePackVersion,
 } from '@/api/packs';
+import { ApiError } from '@/api/http';
 import './resourcePacks.css';
 
 /**
@@ -145,7 +146,11 @@ export default function ResourcePacksPage() {
       closeDrawer();
       await refresh();
     } catch (err) {
-      uiStore.toast.error('上传失败', err instanceof Error ? err.message : '');
+      if (err instanceof ApiError && err.code === 'PACK_VERSION_EXISTS') {
+        uiStore.toast.error('该版本号已存在', '请改用新版本号；同版本号不可覆盖，避免线上验签失败');
+      } else {
+        uiStore.toast.error('上传失败', err instanceof Error ? err.message : '');
+      }
     } finally {
       setUploading(false);
     }

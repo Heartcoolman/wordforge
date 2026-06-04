@@ -33,20 +33,29 @@ export default function AmasAdvisorPage() {
   const [approved] = createResource(() => adminApi.amasListSuggestions('approved', 50));
   const [autoApplied] = createResource(() => adminApi.amasListSuggestions('auto_applied', 50));
   const [rejected] = createResource(() => adminApi.amasListSuggestions('rejected', 50));
-  const effectiveList = createMemo(() =>
-    [...(approved() ?? []), ...(autoApplied() ?? [])].sort((a, b) => b.createdAt.localeCompare(a.createdAt)));
 
-  // cost 处于 error 态时直接 cost() 会 throw，统一走安全读取避免整页崩
+  // 任一资源处于 error 态时直接读 xxx() 会 throw，统一走安全读取避免整页崩（同 costSafe）
   const costSafe = createMemo(() => (cost.error ? undefined : cost()));
+  const costDailySafe = createMemo(() => (costDaily.error ? [] : costDaily() ?? []));
+  const configSafe = createMemo(() => (config.error ? undefined : config()));
+  const pendingSafe = createMemo(() => (pending.error ? [] : pending() ?? []));
+  const canariesSafe = createMemo(() => (canaries.error ? [] : canaries() ?? []));
+  const whitelistSafe = createMemo(() => (whitelist.error ? [] : whitelist() ?? []));
+  const approvedSafe = createMemo(() => (approved.error ? [] : approved() ?? []));
+  const autoAppliedSafe = createMemo(() => (autoApplied.error ? [] : autoApplied() ?? []));
+  const rejectedSafe = createMemo(() => (rejected.error ? [] : rejected() ?? []));
+
+  const effectiveList = createMemo(() =>
+    [...approvedSafe(), ...autoAppliedSafe()].sort((a, b) => b.createdAt.localeCompare(a.createdAt)));
 
   const counts = createMemo(() => ({
-    pending: (pending() ?? []).length,
-    canary: (canaries() ?? []).length,
+    pending: pendingSafe().length,
+    canary: canariesSafe().length,
     effective: costSafe()?.acceptedCount ?? 0,
     rejected: costSafe()?.rejectedCount ?? 0,
   }));
 
-  const steps = createMemo<[number, number, number]>(() => config()?.grayscaleSteps ?? [20, 60, 100]);
+  const steps = createMemo<[number, number, number]>(() => configSafe()?.grayscaleSteps ?? [20, 60, 100]);
 
   async function onRunNow() {
     setRunning(true);
@@ -190,7 +199,7 @@ export default function AmasAdvisorPage() {
           <h1 class="page-title">LLM 调参顾问</h1>
           <p class="page-desc">每 20 分钟跑一次 DeepSeek，对照 7 日运营指标输出参数 patch。白名单内自动灰度，超出白名单待人工审核。所有 patch 可一键回滚，写入审计日志。</p>
         </div>
-        <Show when={config()}>
+        <Show when={configSafe()}>
           {(c) => (
             <PageHeaderOps
               advisorEnabled={c().advisorEnabled}
@@ -220,12 +229,12 @@ export default function AmasAdvisorPage() {
       <div class="grid grid-cols-1 lg:grid-cols-12 gap-4">
         <div class="lg:col-span-8 space-y-3">
           <Show when={tab() === 'pending'}>
-            <Show when={(pending() ?? []).length > 0} fallback={<Card variant="elevated"><Empty title="暂无待审批建议" description="LLM advisor worker 每 20 分钟产出一次" /></Card>}>
-              <For each={pending() ?? []}>
+            <Show when={pendingSafe().length > 0} fallback={<Card variant="elevated"><Empty title="暂无待审批建议" description="LLM advisor worker 每 20 分钟产出一次" /></Card>}>
+              <For each={pendingSafe()}>
                 {(s) => (
                   <SuggestionCard
                     s={s}
-                    whitelist={whitelist() ?? []}
+                    whitelist={whitelistSafe()}
                     busy={decidingId() === s.id}
                     onApprove={() => void approveSuggestion(s)}
                     onReject={() => void rejectSuggestion(s)}
@@ -237,8 +246,8 @@ export default function AmasAdvisorPage() {
             </Show>
           </Show>
           <Show when={tab() === 'canary'}>
-            <Show when={(canaries() ?? []).length > 0} fallback={<Card variant="elevated"><Empty title="暂无灰度中 patch" description="批准建议时选择「进灰度」即在此监测" /></Card>}>
-              <For each={canaries() ?? []}>
+            <Show when={canariesSafe().length > 0} fallback={<Card variant="elevated"><Empty title="暂无灰度中 patch" description="批准建议时选择「进灰度」即在此监测" /></Card>}>
+              <For each={canariesSafe()}>
                 {(c) => (
                   <PatchCanaryCard
                     c={c}
@@ -258,7 +267,7 @@ export default function AmasAdvisorPage() {
                 {(s) => (
                   <SuggestionCard
                     s={s}
-                    whitelist={whitelist() ?? []}
+                    whitelist={whitelistSafe()}
                     busy={false}
                     usdToCny={costSafe()?.usdToCny}
                     onApprove={() => {}}
@@ -270,12 +279,12 @@ export default function AmasAdvisorPage() {
             </Show>
           </Show>
           <Show when={tab() === 'rejected'}>
-            <Show when={(rejected() ?? []).length > 0} fallback={<Card variant="elevated"><Empty title="暂无已拒绝 patch" description="被拒绝的建议会在此列出；完整审计见下方历史表" /></Card>}>
-              <For each={rejected() ?? []}>
+            <Show when={rejectedSafe().length > 0} fallback={<Card variant="elevated"><Empty title="暂无已拒绝 patch" description="被拒绝的建议会在此列出；完整审计见下方历史表" /></Card>}>
+              <For each={rejectedSafe()}>
                 {(s) => (
                   <SuggestionCard
                     s={s}
-                    whitelist={whitelist() ?? []}
+                    whitelist={whitelistSafe()}
                     busy={false}
                     usdToCny={costSafe()?.usdToCny}
                     onApprove={() => {}}
@@ -288,7 +297,7 @@ export default function AmasAdvisorPage() {
           </Show>
         </div>
         <div class="lg:col-span-4 space-y-3">
-          <Show when={costDaily()}>
+          <Show when={costDailySafe()}>
             {(d) => <CostChart data={d()} avg7dYuan={costSafe()?.avg7dCostYuan ?? 0} capYuan={costSafe()?.monthCapYuan ?? 0} refLineYuan={0.3} />}
           </Show>
           <AdvisorConfigPanel />

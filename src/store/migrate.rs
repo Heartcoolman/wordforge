@@ -101,6 +101,14 @@ fn migrations() -> Vec<(&'static str, MigrationFn)> {
             m046_scheduled_broadcasts_canceled,
         ),
         ("047_backup_target_status", m047_backup_target_status),
+        (
+            "048_scheduled_broadcasts_sending",
+            m048_scheduled_broadcasts_sending,
+        ),
+        (
+            "049_wb_center_imports_user_pk",
+            m049_wb_center_imports_user_pk,
+        ),
     ]
 }
 
@@ -196,6 +204,14 @@ fn migrations_down() -> Vec<(&'static str, MigrationFn)> {
         (
             "047_backup_target_status",
             m047_backup_target_status_down,
+        ),
+        (
+            "048_scheduled_broadcasts_sending",
+            m048_scheduled_broadcasts_sending_down,
+        ),
+        (
+            "049_wb_center_imports_user_pk",
+            m049_wb_center_imports_user_pk_down,
         ),
     ]
 }
@@ -2225,9 +2241,14 @@ fn m045_processed_events_down(store: &Store) -> Result<(), StoreError> {
 /// SQLite 无法 ALTER CHECK 约束,须重建表(CREATE new + INSERT SELECT + DROP + RENAME)。
 /// 列定义与 m042 一致,仅 CHECK 增 'canceled';索引重建。一次性迁移,版本门控保证只跑一次。
 fn m046_scheduled_broadcasts_canceled(store: &Store) -> Result<(), StoreError> {
-    let conn = store.conn()?;
-    conn.execute_batch(
-        "CREATE TABLE scheduled_broadcasts_new (
+    // 原子表重建:整批 DDL 包在单事务内,迁移中途硬崩溃(OOM/SIGKILL)时 SQLite 回滚不留半成品,
+    // 重启重跑可干净恢复。开头 DROP IF EXISTS _new 清除"修复前的旧版本"可能遗留的残留临时表,
+    // 双保险闭合"CREATE TABLE _new 因表已存在而失败 → 启动 boot loop"的 brick 窗口。
+    let mut conn = store.conn()?;
+    let tx = conn.transaction()?;
+    tx.execute_batch(
+        "DROP TABLE IF EXISTS scheduled_broadcasts_new;
+        CREATE TABLE scheduled_broadcasts_new (
             id                TEXT NOT NULL PRIMARY KEY,
             title             TEXT NOT NULL,
             message           TEXT NOT NULL,
@@ -2255,6 +2276,7 @@ fn m046_scheduled_broadcasts_canceled(store: &Store) -> Result<(), StoreError> {
         CREATE INDEX IF NOT EXISTS idx_scheduled_broadcasts_due
             ON scheduled_broadcasts(status, scheduled_at);",
     )?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -2317,6 +2339,157 @@ fn m046_scheduled_broadcasts_canceled_down(store: &Store) -> Result<(), StoreErr
         CREATE INDEX IF NOT EXISTS idx_scheduled_broadcasts_due
             ON scheduled_broadcasts(status, scheduled_at);",
     )?;
+    Ok(())
+}
+
+/// m048:scheduled_broadcasts 的 status CHECK 加 'sending' 中间态(W2-2 取消/下发原子抢占)。
+/// worker fan-out 前先把行从 'pending' 原子抢占为 'sending',与 cancel 的 WHERE status='pending'
+/// 互斥,闭合「取消返回成功但已群发」TOCTOU。SQLite 无法 ALTER CHECK,须重建表。
+fn m048_scheduled_broadcasts_sending(store: &Store) -> Result<(), StoreError> {
+    // 原子表重建,理由同 m046:单事务 + 开头 DROP IF EXISTS _new,闭合迁移中途崩溃 brick 窗口。
+    let mut conn = store.conn()?;
+    let tx = conn.transaction()?;
+    tx.execute_batch(
+        "DROP TABLE IF EXISTS scheduled_broadcasts_new;
+        CREATE TABLE scheduled_broadcasts_new (
+            id                TEXT NOT NULL PRIMARY KEY,
+            title             TEXT NOT NULL,
+            message           TEXT NOT NULL,
+            admin_id          TEXT NOT NULL,
+            platforms         TEXT,
+            version_min       TEXT,
+            last_active_days  INTEGER,
+            user_ids          TEXT,
+            scheduled_at      TEXT NOT NULL,
+            status            TEXT NOT NULL DEFAULT 'pending'
+                              CHECK (status IN ('pending', 'sending', 'sent', 'failed', 'canceled')),
+            sent_count        INTEGER,
+            error             TEXT,
+            created_at        TEXT NOT NULL,
+            sent_at           TEXT
+        );
+        INSERT INTO scheduled_broadcasts_new
+            (id, title, message, admin_id, platforms, version_min, last_active_days,
+             user_ids, scheduled_at, status, sent_count, error, created_at, sent_at)
+        SELECT id, title, message, admin_id, platforms, version_min, last_active_days,
+               user_ids, scheduled_at, status, sent_count, error, created_at, sent_at
+          FROM scheduled_broadcasts;
+        DROP TABLE scheduled_broadcasts;
+        ALTER TABLE scheduled_broadcasts_new RENAME TO scheduled_broadcasts;
+        CREATE INDEX IF NOT EXISTS idx_scheduled_broadcasts_due
+            ON scheduled_broadcasts(status, scheduled_at);",
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// m048 down:重建回不含 'sending' 的 CHECK;残留 'sending' 行重置为 'pending' 以免丢失。仅 dev/test。
+fn m048_scheduled_broadcasts_sending_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "CREATE TABLE scheduled_broadcasts_old (
+            id                TEXT NOT NULL PRIMARY KEY,
+            title             TEXT NOT NULL,
+            message           TEXT NOT NULL,
+            admin_id          TEXT NOT NULL,
+            platforms         TEXT,
+            version_min       TEXT,
+            last_active_days  INTEGER,
+            user_ids          TEXT,
+            scheduled_at      TEXT NOT NULL,
+            status            TEXT NOT NULL DEFAULT 'pending'
+                              CHECK (status IN ('pending', 'sent', 'failed', 'canceled')),
+            sent_count        INTEGER,
+            error             TEXT,
+            created_at        TEXT NOT NULL,
+            sent_at           TEXT
+        );
+        INSERT INTO scheduled_broadcasts_old
+            (id, title, message, admin_id, platforms, version_min, last_active_days,
+             user_ids, scheduled_at, status, sent_count, error, created_at, sent_at)
+        SELECT id, title, message, admin_id, platforms, version_min, last_active_days,
+               user_ids, scheduled_at,
+               CASE WHEN status = 'sending' THEN 'pending' ELSE status END,
+               sent_count, error, created_at, sent_at
+          FROM scheduled_broadcasts;
+        DROP TABLE scheduled_broadcasts;
+        ALTER TABLE scheduled_broadcasts_old RENAME TO scheduled_broadcasts;
+        CREATE INDEX IF NOT EXISTS idx_scheduled_broadcasts_due
+            ON scheduled_broadcasts(status, scheduled_at);",
+    )?;
+    Ok(())
+}
+
+/// m049:wb_center_imports 主键 (prefix, remote_id) → (prefix, remote_id, user_id)。
+/// 此前多个 end-user 导入同一 center URL+remote_id 时第二人被 409 永久挡住、且 upsert 用
+/// excluded.user_id 覆盖前主归属。改为按用户分行各自独立。user_id 的 NULL 归一为 ''
+///(SQLite 多列主键视 NULL 互不等,会破坏 admin/system(原 NULL)重复导入的 upsert 去重)。
+/// 原子表重建,理由同 m046:单事务 + 开头 DROP IF EXISTS _new,闭合迁移中途崩溃 brick 窗口。
+fn m049_wb_center_imports_user_pk(store: &Store) -> Result<(), StoreError> {
+    let mut conn = store.conn()?;
+    let tx = conn.transaction()?;
+    tx.execute_batch(
+        "DROP TABLE IF EXISTS wb_center_imports_new;
+        CREATE TABLE wb_center_imports_new (
+            source_url_hash_prefix TEXT NOT NULL,
+            source_url TEXT NOT NULL,
+            remote_id TEXT NOT NULL,
+            local_wordbook_id TEXT NOT NULL,
+            version TEXT NOT NULL,
+            user_id TEXT NOT NULL DEFAULT '',
+            imported_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            word_count INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (source_url_hash_prefix, remote_id, user_id)
+        );
+        INSERT INTO wb_center_imports_new
+            (source_url_hash_prefix, source_url, remote_id, local_wordbook_id, version,
+             user_id, imported_at, updated_at, word_count)
+        SELECT source_url_hash_prefix, source_url, remote_id, local_wordbook_id, version,
+               COALESCE(user_id, ''), imported_at, updated_at, word_count
+          FROM wb_center_imports;
+        DROP TABLE wb_center_imports;
+        ALTER TABLE wb_center_imports_new RENAME TO wb_center_imports;
+        CREATE INDEX IF NOT EXISTS idx_wb_center_imports_source_url ON wb_center_imports(source_url);
+        CREATE INDEX IF NOT EXISTS idx_wb_center_imports_user ON wb_center_imports(user_id, updated_at DESC);",
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// m049 down:回退到不含 user_id 的主键 (prefix, remote_id)。仅 dev/test。
+/// 新表若已有多用户同 (prefix, remote_id) 行,旧主键容不下,按 (prefix, remote_id) 去重保留任一行;
+/// '' 归还 NULL。
+fn m049_wb_center_imports_user_pk_down(store: &Store) -> Result<(), StoreError> {
+    let mut conn = store.conn()?;
+    let tx = conn.transaction()?;
+    tx.execute_batch(
+        "DROP TABLE IF EXISTS wb_center_imports_old;
+        CREATE TABLE wb_center_imports_old (
+            source_url_hash_prefix TEXT NOT NULL,
+            source_url TEXT NOT NULL,
+            remote_id TEXT NOT NULL,
+            local_wordbook_id TEXT NOT NULL,
+            version TEXT NOT NULL,
+            user_id TEXT DEFAULT NULL,
+            imported_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            word_count INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (source_url_hash_prefix, remote_id)
+        );
+        INSERT INTO wb_center_imports_old
+            (source_url_hash_prefix, source_url, remote_id, local_wordbook_id, version,
+             user_id, imported_at, updated_at, word_count)
+        SELECT source_url_hash_prefix, source_url, remote_id, local_wordbook_id, version,
+               NULLIF(user_id, ''), imported_at, updated_at, word_count
+          FROM wb_center_imports
+         GROUP BY source_url_hash_prefix, remote_id;
+        DROP TABLE wb_center_imports;
+        ALTER TABLE wb_center_imports_old RENAME TO wb_center_imports;
+        CREATE INDEX IF NOT EXISTS idx_wb_center_imports_source_url ON wb_center_imports(source_url);
+        CREATE INDEX IF NOT EXISTS idx_wb_center_imports_user ON wb_center_imports(user_id, updated_at DESC);",
+    )?;
+    tx.commit()?;
     Ok(())
 }
 

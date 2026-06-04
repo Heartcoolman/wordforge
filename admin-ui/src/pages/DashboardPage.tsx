@@ -141,7 +141,7 @@ export default function DashboardPage() {
   const recordsTrend = createMemo<TrendField | null>(() => {
     const pct = overview()?.summary.recordCountDeltaPct;
     if (pct == null) return null;
-    return { value: pct, label: '比上周期' };
+    return { value: pct * 100, label: '比上周期' };
   });
   const accuracyTrend = createMemo<TrendField | null>(() => {
     const s = overview()?.summary;
@@ -149,7 +149,7 @@ export default function DashboardPage() {
     const prev = s.prevAccuracy != null ? `${(s.prevAccuracy * 100).toFixed(1)}%` : '上周期';
     const up = s.accuracyDeltaPt >= 0;
     // 正确率用百分点(pt)语义,trend.value 复用为 pt 值,文案点明高/低于上周基线
-    return { value: s.accuracyDeltaPt, label: `${up ? '高于' : '低于'}上周 ${prev}` };
+    return { value: s.accuracyDeltaPt * 100, label: `${up ? '高于' : '低于'}上周 ${prev}` };
   });
 
   // sparkline 序列

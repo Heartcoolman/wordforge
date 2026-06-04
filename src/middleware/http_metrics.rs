@@ -3,8 +3,9 @@
 //! 在每个请求完成后记录延迟，按 (method, route, status_class) 分组。
 //! 无外部依赖，手写 OpenMetrics histogram exposition。
 //!
-//! - route：取 URI path 的第一段（如 `/api/words/123` → `/api/words`），防止
-//!   高基数标签爆炸。/metrics 端点本身排除，避免自引用。
+//! - route：取 axum `MatchedPath` 已匹配的路由模板（如 `/api/words/:id`），未匹配
+//!   （404 fallback）统一归 `<other>`，从根上封死高基数标签爆炸（请求方无法注入任意
+//!   route 段）。叠加 REGISTRY 条目上限作二次兜底。/metrics 端点本身排除，避免自引用。
 //! - status_class：`2xx` / `3xx` / `4xx` / `5xx`（其余归 `other`）。
 //! - bucket 边界：0.01 / 0.05 / 0.1 / 0.5 / 2.0 / +Inf（秒）。
 
@@ -12,7 +13,7 @@ use std::collections::VecDeque;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use axum::extract::Request;
+use axum::extract::{MatchedPath, Request};
 use axum::middleware::Next;
 use axum::response::Response;
 use once_cell::sync::Lazy;
@@ -57,27 +58,21 @@ impl HistogramData {
     }
 }
 
-/// Key: (HTTP method, route_prefix, status_class)
+/// Key: (HTTP method, matched route template, status_class)
 type HistogramKey = (String, String, String);
 type HistogramRegistry = RwLock<std::collections::HashMap<HistogramKey, HistogramData>>;
 
 static REGISTRY: OnceLock<HistogramRegistry> = OnceLock::new();
 
+/// route 标签由 `MatchedPath` 取，未匹配路由统一归此值，封死高基数爆炸。
+const OTHER_ROUTE: &str = "<other>";
+
+/// REGISTRY 条目上限（二次兜底）。route 已被 `MatchedPath` 限定为有限路由表，
+/// 此上限防御未来路由注册异常等意外把 key 撑爆；超阈值仅更新已有 key、停止新增。
+const REGISTRY_MAX_ENTRIES: usize = 4096;
+
 fn registry() -> &'static HistogramRegistry {
     REGISTRY.get_or_init(|| RwLock::new(std::collections::HashMap::new()))
-}
-
-/// 取 URI path 第二段（/api/words/123 → "/api/words"）作为 route label。
-/// 直接用完整路径会导致标签基数爆炸（每个 ID 都是新标签），
-/// 用前两段可以覆盖绝大多数有意义的路由分组。
-fn route_prefix(path: &str) -> String {
-    let parts: Vec<&str> = path.splitn(4, '/').collect();
-    // parts[0] = ""（leading slash 前）, parts[1] = "api", parts[2] = "words", ...
-    match parts.len() {
-        0 | 1 => "/".to_string(),
-        2 => format!("/{}", parts[1]),
-        _ => format!("/{}/{}", parts[1], parts[2]),
-    }
 }
 
 fn status_class(status: u16) -> &'static str {
@@ -87,6 +82,22 @@ fn status_class(status: u16) -> &'static str {
         400..=499 => "4xx",
         500..=599 => "5xx",
         _ => "other",
+    }
+}
+
+/// 记录一次观测到 registry，满容量时仅更新已有 key、拒绝新增（防 OOM 兜底）。
+fn observe_capped(
+    map: &mut std::collections::HashMap<HistogramKey, HistogramData>,
+    key: HistogramKey,
+    latency_secs: f64,
+    cap: usize,
+) {
+    if let Some(hist) = map.get_mut(&key) {
+        hist.observe(latency_secs);
+    } else if map.len() < cap {
+        map.entry(key)
+            .or_insert_with(HistogramData::new)
+            .observe(latency_secs);
     }
 }
 
@@ -107,21 +118,26 @@ pub async fn record_http_metrics(req: Request, next: Next) -> Response {
     // 排除 /metrics 避免自引用（admin 频繁 scrape 会影响自身 histogram）
     let is_metrics = path == "/metrics";
 
+    // route 标签取已匹配的路由模板（请求方不可控），未匹配（404 fallback）归 <other>，
+    // 从根上封死高基数爆炸。须在 next.run 消费 req 前读取。
+    let route = req
+        .extensions()
+        .get::<MatchedPath>()
+        .map(|m| m.as_str().to_string())
+        .unwrap_or_else(|| OTHER_ROUTE.to_string());
+
     let start = Instant::now();
     let response = next.run(req).await;
     let elapsed = start.elapsed().as_secs_f64();
 
     if !is_metrics {
         let status_code = response.status().as_u16();
-        let route = route_prefix(&path);
         let status = status_class(status_code).to_string();
         let key = (method, route, status);
 
         {
             let mut map = registry().write().await;
-            map.entry(key)
-                .or_insert_with(HistogramData::new)
-                .observe(elapsed);
+            observe_capped(&mut map, key, elapsed, REGISTRY_MAX_ENTRIES);
         }
 
         // M0-P5：滚动窗口聚合（SLO 卡 / 请求延迟图 / axum 服务行 rps 的数据源）
@@ -504,12 +520,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn route_prefix_extracts_two_segments() {
-        assert_eq!(route_prefix("/api/words/123"), "/api/words");
-        assert_eq!(route_prefix("/api/users"), "/api/users");
-        assert_eq!(route_prefix("/health"), "/health");
-        assert_eq!(route_prefix("/"), "/");
-        assert_eq!(route_prefix("/metrics"), "/metrics");
+    fn observe_capped_rejects_new_keys_at_capacity_but_updates_existing() {
+        let mut map: std::collections::HashMap<HistogramKey, HistogramData> =
+            std::collections::HashMap::new();
+        let existing = ("GET".into(), "/api/words/:id".into(), "2xx".into());
+        observe_capped(&mut map, existing.clone(), 0.01, 2);
+        observe_capped(
+            &mut map,
+            ("GET".into(), OTHER_ROUTE.into(), "4xx".into()),
+            0.01,
+            2,
+        );
+        assert_eq!(map.len(), 2, "未达上限应正常新增");
+        // 已满（cap=2）：新 key 被拒，map 不增长
+        observe_capped(
+            &mut map,
+            ("POST".into(), "/api/records".into(), "2xx".into()),
+            0.01,
+            2,
+        );
+        assert_eq!(map.len(), 2, "满容量后新 key 应被拒绝，防 OOM");
+        // 已存在 key 仍可累加
+        observe_capped(&mut map, existing.clone(), 0.02, 2);
+        assert_eq!(map.get(&existing).unwrap().count, 2, "已有 key 应继续累加");
     }
 
     #[test]

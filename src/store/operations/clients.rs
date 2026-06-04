@@ -121,6 +121,8 @@ impl Store {
 
     /// m027:同上,再加 `country` 和 `last_ip`(GeoIP 反查产物)。m038:再加 `model`(设备型号)。
     /// 所有 Option 字段都用 COALESCE 保留 DB 已有值。
+    /// 归属(user_id)为 claim-only:仅当 DB 现有 owner 为 NULL 或等于 `user_id` 才写入,
+    /// 已被他人(不同非空 owner)认领时保留原值,防止带 x-device-id 头越权改写归属。
     pub fn upsert_client_device_with_extras(
         &self,
         device_id: &str,
@@ -140,7 +142,7 @@ impl Store {
              ON CONFLICT(device_id) DO UPDATE SET
                 last_seen_at = datetime('now'),
                 platform = ?2,
-                user_id = ?3,
+                user_id = CASE WHEN user_id IS NULL OR user_id = ?3 THEN ?3 ELSE user_id END,
                 app_version = COALESCE(?4, app_version),
                 country = COALESCE(?5, country),
                 last_ip = COALESCE(?6, last_ip),
@@ -190,6 +192,26 @@ impl Store {
             result.push(row?);
         }
         Ok(result)
+    }
+
+    /// 按 device_id 直查单设备(全字段)。供 admin 设备详情,避免全表扫描后内存 find。
+    pub fn get_client_device(
+        &self,
+        device_id: &str,
+    ) -> Result<Option<ClientDevice>, StoreError> {
+        let conn = self.conn()?;
+        let row = conn
+            .query_row(
+                "SELECT device_id, platform, user_id, first_seen_at, last_seen_at,
+                        is_banned, banned_at, banned_by, ban_reason, app_version,
+                        country, last_ip, model
+                 FROM client_devices
+                 WHERE device_id = ?1",
+                params![device_id],
+                row_to_client_device,
+            )
+            .optional()?;
+        Ok(row)
     }
 
     /// 查给定 device_id 列表的 app_version。用于 SSE live entry 透出版本号
@@ -741,7 +763,8 @@ mod tests {
     fn upsert_inserts_then_updates_last_seen() {
         let store = test_store();
         store.upsert_client_device("dev-1", "ios", "u-1").unwrap();
-        // 重复 upsert 不应失败，且 platform/user_id 被覆盖
+        // 重复 upsert 不应失败，platform 被覆盖;但 user_id 是 claim-only:
+        // 已被 u-1 认领,后续不同 user 不得改写归属(防越权劫持)。
         store
             .upsert_client_device("dev-1", "android", "u-2")
             .unwrap();
@@ -750,8 +773,33 @@ mod tests {
         let d = &active[0];
         assert_eq!(d.device_id, "dev-1");
         assert_eq!(d.platform, "android");
-        assert_eq!(d.user_id.as_deref(), Some("u-2"));
+        assert_eq!(d.user_id.as_deref(), Some("u-1"));
         assert!(!d.is_banned);
+    }
+
+    #[test]
+    fn upsert_claims_null_owner_but_not_others() {
+        let store = test_store();
+        // 用 with_extras 传同一 device,先以 NULL owner 注册(走 telemetry handler 路径前态)
+        store
+            .upsert_client_device_with_extras("dev-c", "ios", "owner-a", None, None, None, None)
+            .unwrap();
+        // 同 owner 再 upsert:保持归属
+        store
+            .upsert_client_device_with_extras("dev-c", "ios", "owner-a", None, None, None, None)
+            .unwrap();
+        assert_eq!(
+            store.get_client_device_owner("dev-c").unwrap(),
+            Some(Some("owner-a".to_string()))
+        );
+        // 他人尝试改写:归属保留 owner-a
+        store
+            .upsert_client_device_with_extras("dev-c", "ios", "attacker", None, None, None, None)
+            .unwrap();
+        assert_eq!(
+            store.get_client_device_owner("dev-c").unwrap(),
+            Some(Some("owner-a".to_string()))
+        );
     }
 
     #[test]

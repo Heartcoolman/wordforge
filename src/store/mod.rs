@@ -195,22 +195,19 @@ impl Store {
 
     /// Execute a function within a database transaction.
     /// On success, the transaction is committed; on failure, it is rolled back.
+    ///
+    /// 用 rusqlite RAII 事务（`unchecked_transaction`）：commit 前任何早退（含 COMMIT
+    /// 失败、闭包返回 Err、panic）都由 `Transaction` 的 Drop 自动 ROLLBACK，连接归还池前
+    /// 不会残留未提交事务，避免污染后续使用者。
     pub fn with_transaction<T>(
         &self,
         f: impl FnOnce(&rusqlite::Connection) -> Result<T, StoreError>,
     ) -> Result<T, StoreError> {
         let conn = self.conn()?;
-        conn.execute_batch("BEGIN")?;
-        match f(&conn) {
-            Ok(result) => {
-                conn.execute_batch("COMMIT")?;
-                Ok(result)
-            }
-            Err(e) => {
-                conn.execute_batch("ROLLBACK").ok();
-                Err(e)
-            }
-        }
+        let tx = conn.unchecked_transaction()?;
+        let result = f(&tx)?;
+        tx.commit()?;
+        Ok(result)
     }
 
     pub(crate) fn serialize_json<T: Serialize>(value: &T) -> Result<String, StoreError> {

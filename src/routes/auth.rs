@@ -242,19 +242,21 @@ async fn register(
 }
 
 // m025:从代理 / 直连请求里 best-effort 取 client IP,无则返回 None。
-// 优先 x-forwarded-for(首个 IP),次 x-real-ip,均无 → None。
+// 优先不可伪造的 x-real-ip(nginx $remote_addr),次 XFF 最右段(最近可信跳),均无 → None。
+// 取最右段而非首段以防客户端注入 XFF 首值伪造审计 IP,与 rate_limit 限流口径一致。
 fn extract_client_ip(headers: &axum::http::HeaderMap) -> Option<String> {
-    if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-        if let Some(first) = xff.split(',').next() {
-            let s = first.trim();
-            if !s.is_empty() {
-                return Some(s.to_string());
-            }
-        }
-    }
-    headers
+    if let Some(real) = headers
         .get("x-real-ip")
         .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        return Some(real);
+    }
+    headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|xff| xff.split(',').next_back())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
 }

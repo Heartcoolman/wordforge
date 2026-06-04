@@ -123,9 +123,13 @@ impl ProbeService {
             self.pending_confirm.remove(request_id);
             return Err(ConfirmError::Expired);
         }
-        // 后 5 位匹配（device_id 长度不足 5 时取全部）
-        let suffix_len = ticket.device_id.len().min(5);
-        let expected = &ticket.device_id[ticket.device_id.len() - suffix_len..];
+        // 后 5 位匹配（device_id 长度不足 5 时取全部）。按字符计数取后缀，
+        // 避免 device_id 以多字节字符结尾时字节切片越过 char boundary 而 panic。
+        let expected: String = {
+            let chars: Vec<char> = ticket.device_id.chars().collect();
+            let start = chars.len().saturating_sub(5);
+            chars[start..].iter().collect()
+        };
         if !expected.eq_ignore_ascii_case(provided_device_suffix) {
             return Err(ConfirmError::SuffixMismatch);
         }

@@ -282,7 +282,8 @@ export default function FeedbackPage() {
 
   // 分类 tab 计数
   function catCount(value: string): number {
-    const s = stats();
+    // stats 处于 error 态时读取 accessor 会重抛,先判 .error 再取值,避免整站崩
+    const s = stats.error ? undefined : stats();
     if (!s) return 0;
     if (value === '') return s.total;
     // complaint / complain 两种 key 兜底
@@ -528,6 +529,16 @@ export default function FeedbackPage() {
       />
 
       {/* ── KPI 条 ── */}
+      {/* stats 进 error 态时整段降级为提示,避免卡内裸读 stats() 重抛冒泡到全局 ErrorBoundary */}
+      <Show
+        when={!stats.error}
+        fallback={
+          <div class="flex items-center gap-3 py-3 text-sm text-content-tertiary">
+            统计加载失败,请稍后
+            <Button variant="ghost" size="sm" onClick={() => refetchStats()}>重试</Button>
+          </div>
+        }
+      >
       <div class="fb-summary animate-fade-in-up">
         {/* 未处理 + 分类构成 */}
         <div class="fb-inbox-card">
@@ -632,6 +643,7 @@ export default function FeedbackPage() {
           </Show>
         </div>
       </div>
+      </Show>
 
       {/* ── 分类 tab + 筛选 ── */}
       <div class="flex flex-wrap items-center justify-between gap-3">
@@ -664,10 +676,10 @@ export default function FeedbackPage() {
         >
           <For
             each={[
-              { k: 'unread' as FilterKey, label: '未读', n: () => stats()?.unreadCount },
-              { k: 'assigned' as FilterKey, label: '已分派', n: () => stats()?.assignedCount },
-              { k: 'resolved' as FilterKey, label: '已解决', n: () => stats()?.resolvedCount },
-              { k: 'all' as FilterKey, label: '全部', n: () => stats()?.total },
+              { k: 'unread' as FilterKey, label: '未读', n: () => (stats.error ? undefined : stats()?.unreadCount) },
+              { k: 'assigned' as FilterKey, label: '已分派', n: () => (stats.error ? undefined : stats()?.assignedCount) },
+              { k: 'resolved' as FilterKey, label: '已解决', n: () => (stats.error ? undefined : stats()?.resolvedCount) },
+              { k: 'all' as FilterKey, label: '全部', n: () => (stats.error ? undefined : stats()?.total) },
             ]}
           >
             {(b) => (
@@ -784,11 +796,21 @@ export default function FeedbackPage() {
 
           <div class="fb-list-rows">
             <Show
-              when={!listResp.loading}
+              when={!listResp.loading && !listResp.error}
               fallback={
-                <div class="py-12 flex justify-center">
-                  <Spinner size="lg" />
-                </div>
+                <Show
+                  when={listResp.error}
+                  fallback={
+                    <div class="py-12 flex justify-center">
+                      <Spinner size="lg" />
+                    </div>
+                  }
+                >
+                  <div class="py-12 flex flex-col items-center gap-3">
+                    <Empty title="列表加载失败" description="后端接口暂时不可用,请重试" />
+                    <Button variant="secondary" size="sm" onClick={() => refetchList()}>重试</Button>
+                  </div>
+                </Show>
               }
             >
               <Show
@@ -867,11 +889,23 @@ export default function FeedbackPage() {
             }
           >
             <Show
-              when={!detail.loading && detail()}
+              when={!detail.loading && !detail.error && detail()}
               fallback={
-                <div class="flex-1 grid place-items-center p-10">
-                  <Spinner size="lg" />
-                </div>
+                <Show
+                  when={detail.error}
+                  fallback={
+                    <div class="flex-1 grid place-items-center p-10">
+                      <Spinner size="lg" />
+                    </div>
+                  }
+                >
+                  <div class="flex-1 grid place-items-center p-10">
+                    <div class="flex flex-col items-center gap-3">
+                      <Empty title="详情加载失败" description="该工单详情接口暂时不可用,请重试" />
+                      <Button variant="secondary" size="sm" onClick={() => refetchDetail()}>重试</Button>
+                    </div>
+                  </div>
+                </Show>
               }
             >
               {(d) => {

@@ -100,6 +100,15 @@ impl Default for SystemSettings {
 impl Store {
     pub fn get_system_settings(&self) -> Result<SystemSettings, StoreError> {
         let conn = self.conn()?;
+        self.get_system_settings_tx(&conn)
+    }
+
+    /// `get_system_settings` 的事务内变体:在调用方提供的连接/事务上读取,
+    /// 供「同 tx 多表写」复用,避免从 size=1 连接池二次借用导致死锁。
+    pub(crate) fn get_system_settings_tx(
+        &self,
+        conn: &rusqlite::Connection,
+    ) -> Result<SystemSettings, StoreError> {
         let result = conn
             .query_row(
                 "SELECT max_users, registration_enabled, maintenance_mode, default_daily_words, wordbook_center_url,
@@ -146,6 +155,16 @@ impl Store {
 
     pub fn save_system_settings(&self, settings: &SystemSettings) -> Result<(), StoreError> {
         let conn = self.conn()?;
+        self.save_system_settings_tx(&conn, settings)
+    }
+
+    /// `save_system_settings` 的事务内变体:在调用方提供的连接/事务上写入,
+    /// 供「同 tx 多表写」复用。
+    pub(crate) fn save_system_settings_tx(
+        &self,
+        conn: &rusqlite::Connection,
+        settings: &SystemSettings,
+    ) -> Result<(), StoreError> {
         conn.execute(
             "INSERT INTO system_settings
                 (singleton_id, max_users, registration_enabled, maintenance_mode, default_daily_words, wordbook_center_url,

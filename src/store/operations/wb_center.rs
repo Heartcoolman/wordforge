@@ -3,6 +3,8 @@ use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use crate::store::keys;
+use crate::store::operations::wordbooks::{Wordbook, WordbookType};
+use crate::store::operations::words::Word;
 use crate::store::{Store, StoreError};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,12 +46,14 @@ fn parse_dt(s: String) -> rusqlite::Result<DateTime<Utc>> {
 }
 
 fn import_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WordbookCenterImport> {
+    // user_id 列已改 NOT NULL DEFAULT '';空串是 admin/system 态,在 Rust 层还原为 None。
+    let user_id: String = row.get(4)?;
     Ok(WordbookCenterImport {
         remote_id: row.get(0)?,
         local_wordbook_id: row.get(1)?,
         source_url: row.get(2)?,
         version: row.get(3)?,
-        user_id: row.get(4)?,
+        user_id: (!user_id.is_empty()).then_some(user_id),
         imported_at: parse_dt(row.get(5)?)?,
         updated_at: parse_dt(row.get(6)?)?,
         word_count: row.get::<_, i64>(7)? as u64,
@@ -86,11 +90,10 @@ impl Store {
             "INSERT INTO wb_center_imports
                 (source_url_hash_prefix, remote_id, local_wordbook_id, source_url, version, user_id, imported_at, updated_at, word_count)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-             ON CONFLICT(source_url_hash_prefix, remote_id) DO UPDATE SET
+             ON CONFLICT(source_url_hash_prefix, remote_id, user_id) DO UPDATE SET
                local_wordbook_id = excluded.local_wordbook_id,
                source_url = excluded.source_url,
                version = excluded.version,
-               user_id = excluded.user_id,
                updated_at = excluded.updated_at,
                word_count = excluded.word_count",
             params![
@@ -99,7 +102,7 @@ impl Store {
                 &import.local_wordbook_id,
                 &import.source_url,
                 &import.version,
-                import.user_id.as_deref(),
+                import.user_id.as_deref().unwrap_or(""),
                 import.imported_at.to_rfc3339(),
                 import.updated_at.to_rfc3339(),
                 import.word_count as i64,
@@ -108,17 +111,207 @@ impl Store {
         Ok(())
     }
 
+    /// 原子导入远程词书:单事务内建词书 + 批量 upsert 词条与挂接 + 写导入记录,任一步失败整笔
+    /// 回滚,杜绝"有词书无导入记录"或半量词条孤儿(多写无事务根因)。SQL 与 upsert_wordbook /
+    /// upsert_word / add_word_to_wordbook / upsert_wb_center_import 同口径,改其一须同步此处。
+    /// `book.word_count` 应由调用方按实际导入数预置。
+    pub fn import_remote_wordbook_atomic(
+        &self,
+        book: &Wordbook,
+        words: &[Word],
+        import: &WordbookCenterImport,
+    ) -> Result<(), StoreError> {
+        keys::validate_id(&book.id)?;
+        let prefix = keys::source_url_hash_prefix(&import.source_url);
+        let now = Utc::now().to_rfc3339();
+        let book_type = match book.book_type {
+            WordbookType::System => "system",
+            WordbookType::User => "user",
+        };
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+
+        tx.execute(
+            "INSERT INTO wordbooks (id, name, description, book_type, user_id, word_count, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(id) DO UPDATE SET
+               name = excluded.name,
+               description = excluded.description,
+               book_type = excluded.book_type,
+               user_id = excluded.user_id,
+               word_count = excluded.word_count",
+            params![
+                &book.id,
+                &book.name,
+                &book.description,
+                book_type,
+                book.user_id.as_deref(),
+                book.word_count as i64,
+                book.created_at.to_rfc3339(),
+            ],
+        )?;
+
+        for word in words {
+            keys::validate_id(&word.id)?;
+            tx.execute(
+                "INSERT OR REPLACE INTO words (id, text, meaning, pronunciation, part_of_speech, difficulty, examples_json, tags_json, embedding_json, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    word.id,
+                    word.text,
+                    word.meaning,
+                    word.pronunciation,
+                    word.part_of_speech,
+                    word.difficulty,
+                    Store::serialize_json(&word.examples)?,
+                    Store::serialize_json(&word.tags)?,
+                    word.embedding.as_ref().map(Store::serialize_json).transpose()?,
+                    word.created_at.to_rfc3339(),
+                ],
+            )?;
+            tx.execute(
+                "INSERT OR IGNORE INTO wordbook_words (wordbook_id, word_id, added_at)
+                 VALUES (?1, ?2, ?3)",
+                params![book.id, word.id, now],
+            )?;
+        }
+
+        tx.execute(
+            "INSERT INTO wb_center_imports
+                (source_url_hash_prefix, remote_id, local_wordbook_id, source_url, version, user_id, imported_at, updated_at, word_count)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(source_url_hash_prefix, remote_id, user_id) DO UPDATE SET
+               local_wordbook_id = excluded.local_wordbook_id,
+               source_url = excluded.source_url,
+               version = excluded.version,
+               updated_at = excluded.updated_at,
+               word_count = excluded.word_count",
+            params![
+                &prefix,
+                &import.remote_id,
+                &import.local_wordbook_id,
+                &import.source_url,
+                &import.version,
+                import.user_id.as_deref().unwrap_or(""),
+                import.imported_at.to_rfc3339(),
+                import.updated_at.to_rfc3339(),
+                import.word_count as i64,
+            ],
+        )?;
+
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// 原子同步远程词书:单事务内 upsert 变更词条 + 挂接新词 + 移除"已从远程消失的本来源词" +
+    /// 回写词书计数与导入记录,任一步失败整笔回滚(对齐 import_remote_wordbook_atomic,消除 SYNC
+    /// 多写无事务的孤儿/半量问题)。`remove_word_ids` 须由调用方限定为本远程来源词(按 wb-center +
+    /// remote_id tag),不波及用户手动加入的词。返回同步后该词书实际词条数。SQL 与 upsert_word /
+    /// add_word_to_wordbook / remove_word_from_wordbook / upsert_wb_center_import 同口径,改其一须同步此处。
+    pub fn sync_remote_wordbook_atomic(
+        &self,
+        wb_id: &str,
+        upserts: &[Word],
+        add_word_ids: &[String],
+        remove_word_ids: &[String],
+        import: &WordbookCenterImport,
+    ) -> Result<u64, StoreError> {
+        keys::validate_id(wb_id)?;
+        let prefix = keys::source_url_hash_prefix(&import.source_url);
+        let now = Utc::now().to_rfc3339();
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+
+        for word in upserts {
+            keys::validate_id(&word.id)?;
+            tx.execute(
+                "INSERT OR REPLACE INTO words (id, text, meaning, pronunciation, part_of_speech, difficulty, examples_json, tags_json, embedding_json, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    word.id,
+                    word.text,
+                    word.meaning,
+                    word.pronunciation,
+                    word.part_of_speech,
+                    word.difficulty,
+                    Store::serialize_json(&word.examples)?,
+                    Store::serialize_json(&word.tags)?,
+                    word.embedding.as_ref().map(Store::serialize_json).transpose()?,
+                    word.created_at.to_rfc3339(),
+                ],
+            )?;
+        }
+
+        for word_id in add_word_ids {
+            keys::validate_id(word_id)?;
+            tx.execute(
+                "INSERT OR IGNORE INTO wordbook_words (wordbook_id, word_id, added_at)
+                 VALUES (?1, ?2, ?3)",
+                params![wb_id, word_id, now],
+            )?;
+        }
+
+        for word_id in remove_word_ids {
+            tx.execute(
+                "DELETE FROM wordbook_words WHERE wordbook_id = ?1 AND word_id = ?2",
+                params![wb_id, word_id],
+            )?;
+        }
+
+        // 计数在所有挂接/移除之后,作为词书与导入记录的权威 word_count(单事务内自洽)。
+        let word_count: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM wordbook_words WHERE wordbook_id = ?1",
+            params![wb_id],
+            |r| r.get(0),
+        )?;
+
+        tx.execute(
+            "UPDATE wordbooks SET word_count = ?2 WHERE id = ?1",
+            params![wb_id, word_count],
+        )?;
+
+        tx.execute(
+            "INSERT INTO wb_center_imports
+                (source_url_hash_prefix, remote_id, local_wordbook_id, source_url, version, user_id, imported_at, updated_at, word_count)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(source_url_hash_prefix, remote_id, user_id) DO UPDATE SET
+               local_wordbook_id = excluded.local_wordbook_id,
+               source_url = excluded.source_url,
+               version = excluded.version,
+               updated_at = excluded.updated_at,
+               word_count = excluded.word_count",
+            params![
+                &prefix,
+                &import.remote_id,
+                &import.local_wordbook_id,
+                &import.source_url,
+                &import.version,
+                import.user_id.as_deref().unwrap_or(""),
+                import.imported_at.to_rfc3339(),
+                import.updated_at.to_rfc3339(),
+                word_count,
+            ],
+        )?;
+
+        tx.commit()?;
+        Ok(word_count as u64)
+    }
+
+    /// 按 (source_url, remote_id, user_id) 三元组取导入记录。user_id=None 表示 admin/system
+    /// 态(存空串)。主键已含 user_id,故各用户的同一 center 词书记录互相隔离——查询/409 预检/同步
+    /// 都必须带 user_id,否则会命中他人记录(此前缺 user_id 致第二用户被永久 409 挡住)。
     pub fn get_wb_center_import(
         &self,
         source_url: &str,
         remote_id: &str,
+        user_id: Option<&str>,
     ) -> Result<Option<WordbookCenterImport>, StoreError> {
         let prefix = keys::source_url_hash_prefix(source_url);
         let conn = self.conn()?;
         Ok(conn
             .query_row(
-                &format!("SELECT {COLS} FROM wb_center_imports WHERE source_url_hash_prefix = ?1 AND remote_id = ?2"),
-                params![&prefix, remote_id],
+                &format!("SELECT {COLS} FROM wb_center_imports WHERE source_url_hash_prefix = ?1 AND remote_id = ?2 AND user_id = ?3"),
+                params![&prefix, remote_id, user_id.unwrap_or("")],
                 import_from_row,
             )
             .optional()?)
@@ -142,19 +335,13 @@ impl Store {
         &self,
         user_id: Option<&str>,
     ) -> Result<Vec<WordbookCenterImport>, StoreError> {
+        // user_id 列已归一为 NOT NULL DEFAULT '':admin/system 态存空串,故 None 查 = '' 而非 IS NULL。
+        let key = user_id.unwrap_or("");
         let conn = self.conn()?;
-        let mut stmt = match user_id {
-            Some(_) => conn.prepare(
-                &format!("SELECT {COLS} FROM wb_center_imports WHERE user_id = ?1 ORDER BY updated_at DESC"),
-            )?,
-            None => conn.prepare(
-                &format!("SELECT {COLS} FROM wb_center_imports WHERE user_id IS NULL ORDER BY updated_at DESC"),
-            )?,
-        };
-        let imports = match user_id {
-            Some(uid) => stmt.query_map(params![uid], import_from_row)?,
-            None => stmt.query_map([], import_from_row)?,
-        };
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {COLS} FROM wb_center_imports WHERE user_id = ?1 ORDER BY updated_at DESC"
+        ))?;
+        let imports = stmt.query_map(params![key], import_from_row)?;
         Ok(imports.collect::<Result<Vec<_>, _>>()?)
     }
 
@@ -162,12 +349,13 @@ impl Store {
         &self,
         source_url: &str,
         remote_id: &str,
+        user_id: Option<&str>,
     ) -> Result<bool, StoreError> {
         let prefix = keys::source_url_hash_prefix(source_url);
         let conn = self.conn()?;
         let deleted = conn.execute(
-            "DELETE FROM wb_center_imports WHERE source_url_hash_prefix = ?1 AND remote_id = ?2",
-            params![&prefix, remote_id],
+            "DELETE FROM wb_center_imports WHERE source_url_hash_prefix = ?1 AND remote_id = ?2 AND user_id = ?3",
+            params![&prefix, remote_id, user_id.unwrap_or("")],
         )?;
         Ok(deleted > 0)
     }
@@ -281,7 +469,7 @@ mod tests {
         let imp = sample_import("r1", "https://example.com", None);
         store.upsert_wb_center_import(&imp).unwrap();
         let got = store
-            .get_wb_center_import("https://example.com", "r1")
+            .get_wb_center_import("https://example.com", "r1", None)
             .unwrap()
             .unwrap();
         assert_eq!(got.local_wordbook_id, "local_r1");
@@ -291,9 +479,31 @@ mod tests {
     fn get_nonexistent_returns_none() {
         let store = test_store();
         assert!(store
-            .get_wb_center_import("https://x.com", "nope")
+            .get_wb_center_import("https://x.com", "nope", None)
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn multi_user_same_remote_are_isolated() {
+        // 主键含 user_id:两个 end-user 导入同一 (source_url, remote_id) 各自独立,互不覆盖、互不阻断。
+        let store = test_store();
+        let url = "https://shared.example.com";
+        store
+            .upsert_wb_center_import(&sample_import("r1", url, Some("u1")))
+            .unwrap();
+        store
+            .upsert_wb_center_import(&sample_import("r1", url, Some("u2")))
+            .unwrap();
+        // 各自命名空间都能取到自己的记录
+        assert!(store.get_wb_center_import(url, "r1", Some("u1")).unwrap().is_some());
+        assert!(store.get_wb_center_import(url, "r1", Some("u2")).unwrap().is_some());
+        // admin/system(None)命名空间没有(未导入)
+        assert!(store.get_wb_center_import(url, "r1", None).unwrap().is_none());
+        // 删除 u1 不影响 u2
+        assert!(store.delete_wb_center_import(url, "r1", Some("u1")).unwrap());
+        assert!(store.get_wb_center_import(url, "r1", Some("u1")).unwrap().is_none());
+        assert!(store.get_wb_center_import(url, "r1", Some("u2")).unwrap().is_some());
     }
 
     #[test]
@@ -347,9 +557,9 @@ mod tests {
         store
             .upsert_wb_center_import(&sample_import("r1", url, None))
             .unwrap();
-        assert!(store.delete_wb_center_import(url, "r1").unwrap());
-        assert!(!store.delete_wb_center_import(url, "r1").unwrap());
-        assert!(store.get_wb_center_import(url, "r1").unwrap().is_none());
+        assert!(store.delete_wb_center_import(url, "r1", None).unwrap());
+        assert!(!store.delete_wb_center_import(url, "r1", None).unwrap());
+        assert!(store.get_wb_center_import(url, "r1", None).unwrap().is_none());
     }
 
     #[test]
@@ -361,7 +571,7 @@ mod tests {
         imp.version = "2.0".into();
         imp.word_count = 20;
         store.upsert_wb_center_import(&imp).unwrap();
-        let got = store.get_wb_center_import(url, "r1").unwrap().unwrap();
+        let got = store.get_wb_center_import(url, "r1", None).unwrap().unwrap();
         assert_eq!(got.version, "2.0");
         assert_eq!(got.word_count, 20);
     }

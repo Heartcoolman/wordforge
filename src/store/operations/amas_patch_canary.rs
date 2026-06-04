@@ -4,7 +4,7 @@
 //! 每条占据 cohort 区间 [cohort_lo, cohort_hi) ⊂ 0..100,active 行之间互不重叠(落库前校验)。
 //! engine.effective_config_for_user 遍历 active 行,按 hash(user_id)%100 命中其一。
 
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use crate::store::{Store, StoreError};
@@ -72,6 +72,8 @@ impl Store {
     }
 
     /// 新建一条 active patch canary。cohort 区间需 ⊂ 0..100 且与现存 active 行不重叠,否则 Validation。
+    /// 「读 active+重叠校验+INSERT」收进单事务同一连接,消除并发 TOCTOU(WAL 下写事务串行提交,
+    /// 后者必然看到前者已落库的 active 行)。
     pub fn insert_patch_canary(
         &self,
         suggestion_id: i64,
@@ -81,28 +83,59 @@ impl Store {
         cohort_hi: u32,
         baseline_metrics_json: &str,
     ) -> Result<i64, StoreError> {
-        self.validate_cohort(cohort_lo, cohort_hi, None)?;
-        let conn = self.conn()?;
-        let now = chrono::Utc::now().to_rfc3339();
-        conn.execute(
-            "INSERT INTO amas_patch_canary
-                (suggestion_id, version_hash, percent, cohort_lo, cohort_hi, status,
-                 baseline_metrics_json, started_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, 'active', ?6, ?7, ?7)",
-            params![
+        self.with_transaction(|conn| {
+            validate_cohort_in_conn(conn, cohort_lo, cohort_hi, None)?;
+            insert_patch_canary_in_conn(
+                conn,
                 suggestion_id,
                 version_hash,
-                percent as i64,
-                cohort_lo as i64,
-                cohort_hi as i64,
+                percent,
+                cohort_lo,
+                cohort_hi,
                 baseline_metrics_json,
-                now,
-            ],
-        )?;
-        Ok(conn.last_insert_rowid())
+            )
+        })
+    }
+
+    /// 原子新建:在同一事务内读 active 行算出下一空闲 cohort 槽([0,a)、[a,a+b)…)、校验、再 INSERT。
+    /// 替代路由层「算 cohort_lo」与「落库」拆两次 run_store_task 的窗口。落地后返回完整行。
+    pub fn create_active_patch_canary(
+        &self,
+        suggestion_id: i64,
+        version_hash: &str,
+        percent: u32,
+        baseline_metrics_json: &str,
+    ) -> Result<PatchCanary, StoreError> {
+        self.with_transaction(|conn| {
+            let cohort_lo = active_canaries_in_conn(conn, None)?
+                .iter()
+                .map(|c| c.cohort_hi)
+                .max()
+                .unwrap_or(0);
+            let cohort_hi = cohort_lo + percent;
+            if cohort_hi > 100 {
+                return Err(StoreError::Validation(format!(
+                    "灰度配额已满：已占用 {cohort_lo}%，再加 {percent}% 超过 100%"
+                )));
+            }
+            let id = insert_patch_canary_in_conn(
+                conn,
+                suggestion_id,
+                version_hash,
+                percent,
+                cohort_lo,
+                cohort_hi,
+                baseline_metrics_json,
+            )?;
+            get_patch_canary_in_conn(conn, id)?.ok_or_else(|| StoreError::NotFound {
+                entity: "amas_patch_canary".into(),
+                key: id.to_string(),
+            })
+        })
     }
 
     /// 扩量:更新 percent + cohort 区间;校验不与其它 active 行重叠(排除自身)。
+    /// 同上,「读 active+排重叠校验+UPDATE」收进单事务同一连接。
     pub fn update_patch_canary_scale(
         &self,
         id: i64,
@@ -110,22 +143,46 @@ impl Store {
         cohort_lo: u32,
         cohort_hi: u32,
     ) -> Result<(), StoreError> {
-        self.validate_cohort(cohort_lo, cohort_hi, Some(id))?;
-        let conn = self.conn()?;
-        let now = chrono::Utc::now().to_rfc3339();
-        let affected = conn.execute(
-            "UPDATE amas_patch_canary
-             SET percent = ?1, cohort_lo = ?2, cohort_hi = ?3, updated_at = ?4
-             WHERE id = ?5",
-            params![percent as i64, cohort_lo as i64, cohort_hi as i64, now, id],
-        )?;
-        if affected == 0 {
-            return Err(StoreError::NotFound {
+        self.with_transaction(|conn| {
+            validate_cohort_in_conn(conn, cohort_lo, cohort_hi, Some(id))?;
+            let now = chrono::Utc::now().to_rfc3339();
+            let affected = conn.execute(
+                "UPDATE amas_patch_canary
+                 SET percent = ?1, cohort_lo = ?2, cohort_hi = ?3, updated_at = ?4
+                 WHERE id = ?5",
+                params![percent as i64, cohort_lo as i64, cohort_hi as i64, now, id],
+            )?;
+            if affected == 0 {
+                return Err(StoreError::NotFound {
+                    entity: "amas_patch_canary".into(),
+                    key: id.to_string(),
+                });
+            }
+            Ok(())
+        })
+    }
+
+    /// 原子扩量:同一事务内读当前行取 cohort_lo、按目标 percent 扩 hi、排重叠校验、再 UPDATE。
+    /// 替代路由层「读 cohort_lo」与「update」拆两次 run_store_task 的窗口。
+    pub fn scale_active_patch_canary(&self, id: i64, percent: u32) -> Result<PatchCanary, StoreError> {
+        self.with_transaction(|conn| {
+            let cur = get_patch_canary_in_conn(conn, id)?
+                .ok_or_else(|| StoreError::Validation("canary 不存在".into()))?;
+            let cohort_lo = cur.cohort_lo;
+            let cohort_hi = cohort_lo + percent;
+            validate_cohort_in_conn(conn, cohort_lo, cohort_hi, Some(id))?;
+            let now = chrono::Utc::now().to_rfc3339();
+            conn.execute(
+                "UPDATE amas_patch_canary
+                 SET percent = ?1, cohort_lo = ?2, cohort_hi = ?3, updated_at = ?4
+                 WHERE id = ?5",
+                params![percent as i64, cohort_lo as i64, cohort_hi as i64, now, id],
+            )?;
+            get_patch_canary_in_conn(conn, id)?.ok_or_else(|| StoreError::NotFound {
                 entity: "amas_patch_canary".into(),
                 key: id.to_string(),
-            });
-        }
-        Ok(())
+            })
+        })
     }
 
     /// 置状态(active/effective/rolled_back)。
@@ -150,38 +207,91 @@ impl Store {
         Ok(())
     }
 
-    /// cohort 校验:[lo,hi) ⊂ 0..100 且 lo<hi,且不与现存 active 行(可排除 exclude_id)重叠。
-    fn validate_cohort(&self, lo: u32, hi: u32, exclude_id: Option<i64>) -> Result<(), StoreError> {
-        if lo >= hi || hi > 100 {
-            return Err(StoreError::Validation(format!(
-                "cohort range invalid: [{lo}, {hi}) must satisfy 0<=lo<hi<=100"
-            )));
-        }
-        for c in self.get_active_patch_canaries()? {
-            if Some(c.id) == exclude_id {
-                continue;
-            }
-            if overlaps(lo, hi, c.cohort_lo, c.cohort_hi) {
-                return Err(StoreError::Validation(format!(
-                    "cohort [{lo}, {hi}) overlaps active canary #{} [{}, {})",
-                    c.id, c.cohort_lo, c.cohort_hi
-                )));
-            }
-        }
-        Ok(())
-    }
-
     /// 取单条 canary;不存在返 None。
     pub fn get_patch_canary(&self, id: i64) -> Result<Option<PatchCanary>, StoreError> {
         let conn = self.conn()?;
-        Ok(conn
-            .query_row(
-                &format!("SELECT {COLS} FROM amas_patch_canary WHERE id = ?1"),
-                params![id],
-                row_to_canary,
-            )
-            .optional()?)
+        get_patch_canary_in_conn(&conn, id)
     }
+}
+
+/// 事务内读全部 active canary(可排除 exclude_id),供 cohort 校验/槽分配在同一连接内 SELECT。
+fn active_canaries_in_conn(
+    conn: &Connection,
+    exclude_id: Option<i64>,
+) -> Result<Vec<PatchCanary>, StoreError> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {COLS} FROM amas_patch_canary WHERE status = 'active'"
+    ))?;
+    let rows: Result<Vec<PatchCanary>, rusqlite::Error> =
+        stmt.query_map([], row_to_canary)?.collect();
+    Ok(rows?
+        .into_iter()
+        .filter(|c| Some(c.id) != exclude_id)
+        .collect())
+}
+
+/// cohort 校验:[lo,hi) ⊂ 0..100 且 lo<hi,且不与现存 active 行(可排除 exclude_id)重叠。
+/// 接收事务连接在同事务内 SELECT,确保校验与后续写为单一原子操作。
+fn validate_cohort_in_conn(
+    conn: &Connection,
+    lo: u32,
+    hi: u32,
+    exclude_id: Option<i64>,
+) -> Result<(), StoreError> {
+    if lo >= hi || hi > 100 {
+        return Err(StoreError::Validation(format!(
+            "cohort range invalid: [{lo}, {hi}) must satisfy 0<=lo<hi<=100"
+        )));
+    }
+    for c in active_canaries_in_conn(conn, exclude_id)? {
+        if overlaps(lo, hi, c.cohort_lo, c.cohort_hi) {
+            return Err(StoreError::Validation(format!(
+                "cohort [{lo}, {hi}) overlaps active canary #{} [{}, {})",
+                c.id, c.cohort_lo, c.cohort_hi
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// 事务内 INSERT 一条 active canary,返回 rowid。调用方负责先做 cohort 校验。
+fn insert_patch_canary_in_conn(
+    conn: &Connection,
+    suggestion_id: i64,
+    version_hash: &str,
+    percent: u32,
+    cohort_lo: u32,
+    cohort_hi: u32,
+    baseline_metrics_json: &str,
+) -> Result<i64, StoreError> {
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO amas_patch_canary
+            (suggestion_id, version_hash, percent, cohort_lo, cohort_hi, status,
+             baseline_metrics_json, started_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'active', ?6, ?7, ?7)",
+        params![
+            suggestion_id,
+            version_hash,
+            percent as i64,
+            cohort_lo as i64,
+            cohort_hi as i64,
+            baseline_metrics_json,
+            now,
+        ],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// 事务内取单条 canary;不存在返 None。
+fn get_patch_canary_in_conn(conn: &Connection, id: i64) -> Result<Option<PatchCanary>, StoreError> {
+    Ok(conn
+        .query_row(
+            &format!("SELECT {COLS} FROM amas_patch_canary WHERE id = ?1"),
+            params![id],
+            row_to_canary,
+        )
+        .optional()?)
 }
 
 #[cfg(test)]

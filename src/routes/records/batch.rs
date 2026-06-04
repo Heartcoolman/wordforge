@@ -228,6 +228,23 @@ pub(crate) async fn process_batch_record(
             &record.id,
         )
         .await?;
+    // W1-1 并发收口：None 表示并发同 client_record_id 请求抢先写入幂等标记、本次 AMAS 已整笔回滚，
+    // 走与 already_processed 一致的裸记录回放（不重复累加 ELO/mastery/trust）。
+    let Some(amas_result) = amas_result else {
+        let record_for_replay = record.clone();
+        state
+            .run_store_task("records.batch.persist_replayed", move |store| {
+                store
+                    .create_record_with_updates(&record_for_replay, None, None)
+                    .map_err(|e| AppError::internal(&e.to_string()))
+            })
+            .await??;
+        return Ok(CreateRecordResponse {
+            record,
+            amas_result: None,
+            duplicate: true,
+        });
+    };
     let amas_config = state.amas().get_config();
     let amas_result_for_store = amas_result.clone();
 
@@ -289,7 +306,11 @@ pub(crate) async fn process_batch_record(
 
                 let mut next_session: Option<LearningSession> = None;
                 if let Some(ref sid) = req_for_store.session_id {
-                    if let Some(mut session) = store.get_learning_session(sid)? {
+                    // 归属校验：仅累加调用者本人的会话，防止跨用户篡改他人会话统计 (IDOR)。
+                    if let Some(mut session) = store
+                        .get_learning_session(sid)?
+                        .filter(|s| s.user_id == user_id_owned)
+                    {
                         session.total_questions += 1;
                         session.total_count += 1;
                         if req_for_store.is_correct {

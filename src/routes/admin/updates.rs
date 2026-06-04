@@ -144,18 +144,6 @@ async fn apply(
         ));
     }
 
-    // 已有进行中的 task 直接拒绝，避免并发触发底层文件锁
-    if let Some(existing) = state.apply_task_snapshot() {
-        if existing.is_running() {
-            return Err(AppError {
-                status: StatusCode::CONFLICT,
-                code: "UPDATE_IN_PROGRESS".into(),
-                message: format!("已有升级任务在跑：{}", existing.target_version),
-                is_operational: true,
-            });
-        }
-    }
-
     let task_id = uuid::Uuid::new_v4().to_string();
     let started_at = chrono::Utc::now();
     let initial = ApplyTaskStatus {
@@ -167,7 +155,13 @@ async fn apply(
         completed_at: None,
         error: None,
     };
-    state.set_apply_task(Some(initial.clone()));
+    // 单次持锁占位，已有进行中 task 直接拒绝，避免并发触发底层文件锁
+    if !state.try_begin_apply_task(initial.clone()) {
+        return Err(AppError::conflict(
+            "UPDATE_IN_PROGRESS",
+            "已有升级任务在跑",
+        ));
+    }
 
     tracing::warn!(
         admin_id = %admin.admin_id,
@@ -373,17 +367,6 @@ async fn rollback(
         ));
     }
 
-    if let Some(existing) = state.apply_task_snapshot() {
-        if existing.is_running() {
-            return Err(AppError {
-                status: StatusCode::CONFLICT,
-                code: "UPDATE_IN_PROGRESS".into(),
-                message: format!("已有升级任务在跑：{}", existing.target_version),
-                is_operational: true,
-            });
-        }
-    }
-
     // 关键一步:把 target_version 的 release 元数据从 GitHub 拉到 cache,
     // 否则 apply 会在 "channel latest != target_tag" 校验失败。
     updater
@@ -402,7 +385,13 @@ async fn rollback(
         completed_at: None,
         error: None,
     };
-    state.set_apply_task(Some(initial.clone()));
+    // 单次持锁占位，已有进行中 task 直接拒绝
+    if !state.try_begin_apply_task(initial.clone()) {
+        return Err(AppError::conflict(
+            "UPDATE_IN_PROGRESS",
+            "已有升级任务在跑",
+        ));
+    }
 
     tracing::warn!(
         admin_id = %admin.admin_id,
@@ -802,6 +791,17 @@ impl Drop for MaintenanceGuard<'_> {
     }
 }
 
+/// apply task 槽 RAII 守卫：restore 同步占用槽以阻断并发 apply/rollback，
+/// drop 时清空（成功/错误/panic 均复位），避免遗留「进行中」task 永久锁死后续升级。
+struct ApplyTaskGuard<'a> {
+    state: &'a AppState,
+}
+impl Drop for ApplyTaskGuard<'_> {
+    fn drop(&mut self) {
+        self.state.set_apply_task(None);
+    }
+}
+
 /// POST /api/admin/updates/backups/:name/restore
 async fn restore_backup(
     admin: AdminAuthUser,
@@ -811,15 +811,20 @@ async fn restore_backup(
     let path = resolve_backup(&state, &name)
         .ok_or_else(|| AppError::bad_request("BACKUP_NOT_FOUND", "备份文件不存在或文件名非法"))?;
 
-    // 升级任务进行中拒绝并发恢复
-    if let Some(existing) = state.apply_task_snapshot() {
-        if existing.is_running() {
-            return Err(AppError::conflict(
-                "UPDATE_IN_PROGRESS",
-                &format!("已有升级任务在跑：{}", existing.target_version),
-            ));
-        }
+    // 单次持锁占用 apply 槽：升级任务进行中则拒绝，否则原子占位阻断整个 restore 窗口内的并发 apply/rollback。
+    let restore_task = ApplyTaskStatus {
+        task_id: uuid::Uuid::new_v4().to_string(),
+        phase: "restoring".into(),
+        percent: 0,
+        target_version: format!("restore:{name}"),
+        started_at: chrono::Utc::now(),
+        completed_at: None,
+        error: None,
+    };
+    if !state.try_begin_apply_task(restore_task) {
+        return Err(AppError::conflict("UPDATE_IN_PROGRESS", "已有升级任务在跑"));
     }
+    let _apply_slot = ApplyTaskGuard { state: &state };
 
     let bdir = backups_dir(&state)
         .ok_or_else(|| AppError::bad_request("NO_DATA_DIR", "当前数据库无落盘目录，无法恢复"))?;
