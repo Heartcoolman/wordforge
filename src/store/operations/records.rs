@@ -165,9 +165,16 @@ impl Store {
         let mut conn = self.conn()?;
         let tx = conn.transaction()?;
 
-        tx.execute(
+        // 幂等插入:仅吞主键 (user_id,id) 冲突。并发同 client_record_id 请求中,其一走"裸记录回放"
+        // 抢先插入同一行时,本次全量持久化不再因主键冲突报错——否则调用方会把这当成持久化失败而
+        // 误触发 AMAS 原子回滚+清幂等标记,导致本次正确应用的 AMAS 永久丢失(PR #61 审查 P1)。
+        // FK/CHECK/NOT NULL 等真实约束冲突仍照常报错,交由调用方回滚。inserted==0 表示行已被并发方
+        // 落库(并已计入其 user_stats),本次须跳过 user_stats 计数避免对同一事件双计;word_state/
+        // session 仍无条件应用,以落本次 AMAS 派生的真实增量(裸回放方未写)。
+        let inserted = tx.execute(
             "INSERT INTO learning_records (user_id, id, word_id, is_correct, response_time_ms, session_id, created_at, record_type, self_rating, question_mode)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(user_id, id) DO NOTHING",
             params![
                 &record.user_id, &record.id, &record.word_id,
                 record.is_correct as i64, record.response_time_ms,
@@ -224,44 +231,46 @@ impl Store {
             )?;
         }
 
-        // Update user_stats
-        let mut stats = {
-            let result: Option<(i64, i64, String, String)> = tx
-                .query_row(
-                    "SELECT total_records, correct_records, word_ids_json, session_ids_json FROM user_stats WHERE user_id=?1",
-                    params![&record.user_id],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-                )
-                .optional()?;
-            match result {
-                Some((total, correct, words_json, sessions_json)) => UserStatsAgg {
-                    total_records: total as u64,
-                    correct_records: correct as u64,
-                    word_ids: serde_json::from_str(&words_json).unwrap_or_default(),
-                    session_ids: serde_json::from_str(&sessions_json).unwrap_or_default(),
-                },
-                None => UserStatsAgg::default(),
+        // Update user_stats —— 仅在记录行确实新插入时累加,避免并发裸回放与全量持久化对同一事件双计。
+        if inserted > 0 {
+            let mut stats = {
+                let result: Option<(i64, i64, String, String)> = tx
+                    .query_row(
+                        "SELECT total_records, correct_records, word_ids_json, session_ids_json FROM user_stats WHERE user_id=?1",
+                        params![&record.user_id],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                    )
+                    .optional()?;
+                match result {
+                    Some((total, correct, words_json, sessions_json)) => UserStatsAgg {
+                        total_records: total as u64,
+                        correct_records: correct as u64,
+                        word_ids: serde_json::from_str(&words_json).unwrap_or_default(),
+                        session_ids: serde_json::from_str(&sessions_json).unwrap_or_default(),
+                    },
+                    None => UserStatsAgg::default(),
+                }
+            };
+            stats.total_records += 1;
+            if record.is_correct {
+                stats.correct_records += 1;
             }
-        };
-        stats.total_records += 1;
-        if record.is_correct {
-            stats.correct_records += 1;
+            stats.word_ids.insert(record.word_id.clone());
+            if let Some(ref sid) = record.session_id {
+                stats.session_ids.insert(sid.clone());
+            }
+            tx.execute(
+                "INSERT INTO user_stats (user_id, total_records, correct_records, word_ids_json, session_ids_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(user_id) DO UPDATE SET
+                    total_records=?2, correct_records=?3, word_ids_json=?4, session_ids_json=?5",
+                params![
+                    &record.user_id, stats.total_records as i64, stats.correct_records as i64,
+                    serde_json::to_string(&stats.word_ids).unwrap_or_default(),
+                    serde_json::to_string(&stats.session_ids).unwrap_or_default(),
+                ],
+            )?;
         }
-        stats.word_ids.insert(record.word_id.clone());
-        if let Some(ref sid) = record.session_id {
-            stats.session_ids.insert(sid.clone());
-        }
-        tx.execute(
-            "INSERT INTO user_stats (user_id, total_records, correct_records, word_ids_json, session_ids_json)
-             VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(user_id) DO UPDATE SET
-                total_records=?2, correct_records=?3, word_ids_json=?4, session_ids_json=?5",
-            params![
-                &record.user_id, stats.total_records as i64, stats.correct_records as i64,
-                serde_json::to_string(&stats.word_ids).unwrap_or_default(),
-                serde_json::to_string(&stats.session_ids).unwrap_or_default(),
-            ],
-        )?;
 
         tx.commit()?;
         Ok(())
@@ -779,6 +788,78 @@ mod tests {
         assert_eq!(stats2.total_records, 2);
         assert_eq!(stats2.correct_records, 1);
         assert!(stats2.word_ids.contains("w2"));
+    }
+
+    /// PR #61 审查 P1 回归:并发同 client_record_id 下,"裸记录回放"先落库后,在途"全量持久化"
+    /// 到达时记录行已存在——必须幂等(不报错、user_stats 不双计),且仍落 AMAS 派生的 word_state/
+    /// session(否则全量方此前会因主键冲突误回滚 AMAS、永久丢失本次处理结果)。
+    #[test]
+    fn create_record_with_updates_idempotent_when_row_already_exists() {
+        use crate::store::operations::learning_sessions::{LearningSession, SessionStatus};
+        use crate::store::operations::word_states::{WordLearningState, WordState};
+        let (_tmp, store) = tempfile_store();
+        store
+            .create_user(&super::super::users::User {
+                id: "u1".into(),
+                email: "a@b.com".into(),
+                username: "a".into(),
+                password_hash: "h".into(),
+                is_banned: false,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                failed_login_count: 0,
+                locked_until: None,
+                role: "user".into(),
+                status: "active".into(),
+                last_login_at: None,
+                referrer_source: None,
+            })
+            .unwrap();
+        let now = Utc::now();
+        let session = LearningSession {
+            id: "s1".into(),
+            user_id: "u1".into(),
+            status: SessionStatus::Active,
+            target_mastery_count: 5,
+            total_questions: 0,
+            actual_mastery_count: 0,
+            context_shifts: 0,
+            created_at: now,
+            updated_at: now,
+            summary: None,
+            correct_count: 0,
+            total_count: 0,
+        };
+        store.create_learning_session(&session).unwrap();
+        let word_state = WordLearningState {
+            user_id: "u1".into(),
+            word_id: "w1".into(),
+            state: WordState::Reviewing,
+            mastery_level: 0.7,
+            next_review_date: None,
+            half_life: 24.0,
+            correct_streak: 2,
+            total_attempts: 5,
+            updated_at: now,
+        };
+        let record = sample_record("r1", "u1", "w1", now); // is_correct=true
+
+        // 模拟并发:裸记录回放先落库(无 word_state/session)。
+        store.create_record_with_updates(&record, None, None).unwrap();
+        // 随后在途全量持久化到达,记录行已存在:不得报错、不得双计 user_stats、须落 word_state。
+        store
+            .create_record_with_updates(&record, Some(&word_state), Some(&session))
+            .unwrap();
+
+        let stats = store.get_user_stats_agg("u1").unwrap();
+        assert_eq!(stats.total_records, 1, "同一事件只计一次,不因二次持久化双计");
+        assert_eq!(stats.correct_records, 1);
+        // 记录行唯一
+        assert!(store.get_user_record_by_id("u1", "r1").unwrap().is_some());
+        // 全量持久化的 AMAS 派生 word_state 已落库(裸回放未写,证明二次调用确实应用了增量)
+        let wls = store.get_word_learning_state("u1", "w1").unwrap().unwrap();
+        assert!((wls.mastery_level - 0.7).abs() < 1e-9);
+        assert_eq!(wls.total_attempts, 5);
     }
 
     #[test]

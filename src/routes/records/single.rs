@@ -291,6 +291,10 @@ pub(crate) async fn process_single_record(
     // 尝试中应用、但记录行未落库"的窗口——命中则跳过 process_event(避免二次累加
     // ELO/mastery/trust),仅补落裸记录行(不带 AMAS 派生的 word_state/session 增量,那些已在
     // 原尝试中处理或随该次崩溃丢失,属单事件有界损失,优于无界的 AMAS 状态漂移)。
+    // 注:marker 在 AMAS tx 内提交、记录行在其后单独提交,二者之间存在"标记在、记录行未落"窗口。
+    // 并发同 client_record_id 请求可能在该窗口走到这里抢先裸插入,但 create_record_with_updates
+    // 的记录行 INSERT 已是幂等(ON CONFLICT DO NOTHING)且 user_stats 仅按真实插入计数,故裸回放与
+    // 在途全量持久化互不破坏——全量方不会因裸行主键冲突而误回滚 AMAS(PR #61 审查 P1)。
     let already_processed = state
         .run_store_task("records.single.check_processed", {
             let user_id = user_id_owned.clone();

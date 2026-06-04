@@ -50,7 +50,11 @@ fn create_completed_session(store: &Store, user_id: &str, mastered_word_id: &str
         total_questions: 2,
         actual_mastery_count: 1,
         context_shifts: 0,
-        created_at: now - Duration::minutes(30),
+        // created_at 锚定到 now（与本测试的 record 数据同源），而非 now-30min：后者在服务端时区
+        // （Asia/Shanghai）午夜后 0–30 分钟窗口会跨到“昨天”，被 range=day 聚合排除导致
+        // studyDurationSecs/sessionCount/daily 偏 0（每日 UTC 16:00–16:30 必现的边界 flaky）。
+        // 会话时长由 summary.duration_secs 提供，不依赖 created_at/updated_at，故对齐 now 不影响断言。
+        created_at: now,
         updated_at: now,
         summary: Some(SessionSummary {
             accuracy: 0.5,
