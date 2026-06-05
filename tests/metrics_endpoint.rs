@@ -47,11 +47,7 @@ async fn metrics_endpoint_rejects_user_token() {
     )
     .await;
     let (status, _, _) = response_json(resp).await;
-    assert_eq!(
-        status,
-        StatusCode::UNAUTHORIZED,
-        "普通用户 token 应被拒绝"
-    );
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "普通用户 token 应被拒绝");
 }
 
 #[tokio::test]
@@ -120,10 +116,7 @@ async fn metrics_endpoint_returns_prometheus_text_with_at_least_10_metrics() {
     for algo in &amas_algos {
         for kind in &amas_kinds {
             let line = format!("{kind}_total{{algorithm=\"{algo}\"}}");
-            assert!(
-                body.contains(&line),
-                "缺少行：{line}\n实际响应：\n{body}"
-            );
+            assert!(body.contains(&line), "缺少行：{line}\n实际响应：\n{body}");
         }
     }
 

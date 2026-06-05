@@ -36,124 +36,170 @@
   src: url("/fonts/inter-700.woff2") format("woff2");
 }
 
+/* JetBrains Mono v2 webfont(OFL,GitHub release),
+   ~92KB/weight × 3 = 282KB 总增量,font-display: swap 不阻塞首屏。 */
+@font-face { font-family: "JetBrains Mono"; font-weight: 400; src: url("/fonts/jetbrains-mono-400.woff2") format("woff2"); font-display: swap; }
+@font-face { font-family: "JetBrains Mono"; font-weight: 500; src: url("/fonts/jetbrains-mono-500.woff2") format("woff2"); font-display: swap; }
+@font-face { font-family: "JetBrains Mono"; font-weight: 600; src: url("/fonts/jetbrains-mono-600.woff2") format("woff2"); font-display: swap; }
+
 /* ═══════════════════════════════════════════
    Theme CSS Variables (Light / Dark)
+   color space: oklch（按 admin后端/brand-spec.md §1）
+   主题切换：保留 `.dark` class selector（stores/theme.ts 用）
    ═══════════════════════════════════════════ */
 
 :root {
-  /* Surface — backgrounds */
-  --surface: #ffffff;
-  --surface-secondary: #f8fafc;
-  --surface-tertiary: #f1f5f9;
-  --surface-elevated: #ffffff;
+  /* Surface — 4 层 + sunken */
+  --surface: oklch(99.4% 0.004 250);
+  --surface-secondary: oklch(97.8% 0.006 250);
+  --surface-tertiary: oklch(95.4% 0.008 250);
+  --surface-elevated: oklch(100% 0 0);
+  --surface-sunken: oklch(96% 0.006 250);
 
-  /* Content — text (4 级对比) */
-  --content: #0f172a;
-  --content-secondary: #475569;
-  --content-tertiary: #94a3b8;
-  --content-quaternary: #cbd5e1;
-  --content-inverse: #ffffff;
+  /* Content — text 4 级 + inverse */
+  --content: oklch(20% 0.024 264);
+  --content-secondary: oklch(44% 0.022 258);
+  --content-tertiary: oklch(62% 0.016 258);
+  --content-quaternary: oklch(78% 0.010 258);
+  --content-inverse: oklch(100% 0 0);
 
-  /* Accent — primary action */
-  --accent: #6366f1;
-  --accent-hover: #4f46e5;
-  --accent-light: #eef2ff;
+  /* Accent — primary action（indigo on oklch） */
+  --accent: oklch(58% 0.20 269);
+  --accent-hover: oklch(52% 0.22 269);
+  --accent-active: oklch(46% 0.22 269);
+  --accent-light: oklch(96% 0.04 269);
   --accent-content: #ffffff;
+  --accent-ring: color-mix(in oklab, oklch(58% 0.20 269) 35%, transparent);
 
-  /* Status */
-  --success: #10b981;
-  --success-light: #ecfdf5;
-  --warning: #f59e0b;
-  --warning-light: #fffbeb;
-  --error: #ef4444;
-  --error-light: #fef2f2;
-  --info: #3b82f6;
-  --info-light: #eff6ff;
+  /* Status — emerald / amber / red / sky；soft + strong 双轨 */
+  --success: oklch(63% 0.16 162);
+  --success-strong: oklch(54% 0.18 162);
+  --success-light: oklch(96% 0.05 162);
+  --warning: oklch(72% 0.16 75);
+  --warning-strong: oklch(60% 0.18 60);
+  --warning-light: oklch(97% 0.05 80);
+  --error: oklch(61% 0.22 27);
+  --error-strong: oklch(54% 0.22 27);
+  --error-light: oklch(97% 0.04 25);
+  --info: oklch(64% 0.16 245);
+  --info-strong: oklch(54% 0.18 245);
+  --info-light: oklch(97% 0.04 240);
 
-  /* Border (含 hairline) */
-  --border: #e2e8f0;
-  --border-hover: #cbd5e1;
-  --border-hairline: rgba(15, 23, 42, 0.08);
+  /* Border — hairline / 标准 / hover / strong */
+  --border: oklch(91% 0.008 250);
+  --border-hover: oklch(84% 0.010 250);
+  --border-strong: oklch(75% 0.012 250);
+  --border-hairline: color-mix(in oklab, oklch(20% 0.024 264) 8%, transparent);
 
-  /* Shadows — legacy 单层 */
-  --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
-  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.1);
-  --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -4px rgba(0, 0, 0, 0.1);
-  --shadow-xl: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.1);
+  /* Shadows — legacy 单层（保留兼容） */
+  --shadow-sm: 0 1px 2px 0 rgba(15, 23, 42, 0.04);
+  --shadow-md: 0 4px 6px -1px rgba(15, 23, 42, 0.06), 0 2px 4px -2px rgba(15, 23, 42, 0.04);
+  --shadow-lg: 0 10px 15px -3px rgba(15, 23, 42, 0.08), 0 4px 6px -4px rgba(15, 23, 42, 0.05);
+  --shadow-xl: 0 20px 30px -10px rgba(15, 23, 42, 0.10);
 
-  /* Shadows — layered elevation (Linear / Vercel 风) */
-  --shadow-elevation-1: 0 0 0 1px rgba(15, 23, 42, 0.04), 0 1px 2px rgba(15, 23, 42, 0.04);
-  --shadow-elevation-2: 0 0 0 1px rgba(15, 23, 42, 0.05), 0 2px 4px rgba(15, 23, 42, 0.04), 0 4px 8px rgba(15, 23, 42, 0.04);
-  --shadow-elevation-3: 0 0 0 1px rgba(15, 23, 42, 0.06), 0 4px 8px rgba(15, 23, 42, 0.05), 0 12px 20px rgba(15, 23, 42, 0.06);
-  --shadow-elevation-4: 0 0 0 1px rgba(15, 23, 42, 0.06), 0 8px 16px rgba(15, 23, 42, 0.06), 0 24px 40px rgba(15, 23, 42, 0.08);
+  /* Elevation — Linear / Vercel 风 1px ring + 多层 drop（新名 --elevation-N） */
+  --elevation-1: 0 0 0 1px rgba(15, 23, 42, 0.04), 0 1px 2px rgba(15, 23, 42, 0.04);
+  --elevation-2: 0 0 0 1px rgba(15, 23, 42, 0.05), 0 2px 4px rgba(15, 23, 42, 0.04), 0 4px 8px rgba(15, 23, 42, 0.04);
+  --elevation-3: 0 0 0 1px rgba(15, 23, 42, 0.06), 0 4px 8px rgba(15, 23, 42, 0.05), 0 12px 20px rgba(15, 23, 42, 0.06);
+  --elevation-4: 0 0 0 1px rgba(15, 23, 42, 0.06), 0 8px 16px rgba(15, 23, 42, 0.06), 0 24px 40px rgba(15, 23, 42, 0.08);
+
+  /* Legacy alias — 60 天兼容期，旧组件仍可用 --shadow-elevation-N */
+  --shadow-elevation-1: var(--elevation-1);
+  --shadow-elevation-2: var(--elevation-2);
+  --shadow-elevation-3: var(--elevation-3);
+  --shadow-elevation-4: var(--elevation-4);
 
   /* Subtle gradients */
   --gradient-surface-subtle: linear-gradient(180deg, var(--surface) 0%, var(--surface-secondary) 100%);
   --gradient-accent-soft: linear-gradient(135deg, color-mix(in oklab, var(--accent) 10%, transparent) 0%, transparent 100%);
   --gradient-accent-strong: linear-gradient(180deg, var(--accent) 0%, var(--accent-hover) 100%);
+  --gradient-brand-mark: linear-gradient(140deg, var(--accent) 0%, oklch(46% 0.22 290) 100%);
 
-  /* Radius */
-  --radius-sm: 0.375rem;
-  --radius-md: 0.5rem;
-  --radius-lg: 0.75rem;
-  --radius-xl: 1rem;
-  --radius-2xl: 1.5rem;
-  --radius-full: 9999px;
+  /* Radius — px（与 brand-spec 对齐） */
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-2xl: 20px;
+  --radius-pill: 9999px;
+  --radius-full: 9999px; /* alias for --radius-pill, 不破坏现有 rounded-full 使用 */
 
   /* Motion — duration */
-  --duration-fast: 150ms;
+  --duration-fast: 140ms;
   --duration-base: 220ms;
-  --duration-slow: 320ms;
+  --duration-slow: 360ms;
 
   /* Motion — easing */
   --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
   --ease-spring: cubic-bezier(0.5, 1.4, 0.5, 1);
   --ease-in-out-quart: cubic-bezier(0.76, 0, 0.24, 1);
+
+  /* Typography stacks */
+  --font-display: "Inter", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-body: "Inter", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, monospace;
+
+  /* Layout geometry — admin shell 用 */
+  --sidebar-w-open: 240px;
+  --sidebar-w-collapsed: 64px;
+  --topbar-h: 64px;
+  --content-max: 1440px;
+  --space-pane: 24px;
 }
 
 .dark {
-  --surface: #0f172a;
-  --surface-secondary: #1e293b;
-  --surface-tertiary: #334155;
-  --surface-elevated: #1e293b;
+  --surface: oklch(15% 0.012 258);
+  --surface-secondary: oklch(19% 0.014 258);
+  --surface-tertiary: oklch(24% 0.014 258);
+  --surface-elevated: oklch(21% 0.014 258);
+  --surface-sunken: oklch(13% 0.012 258);
 
-  --content: #f1f5f9;
-  --content-secondary: #94a3b8;
-  --content-tertiary: #64748b;
-  --content-quaternary: #475569;
-  --content-inverse: #0f172a;
+  --content: oklch(96% 0.006 250);
+  --content-secondary: oklch(74% 0.014 250);
+  --content-tertiary: oklch(58% 0.014 250);
+  --content-quaternary: oklch(42% 0.014 250);
+  --content-inverse: oklch(20% 0.024 264);
 
-  --accent: #818cf8;
-  --accent-hover: #a5b4fc;
-  --accent-light: #1e1b4b;
+  --accent: oklch(72% 0.16 269);
+  --accent-hover: oklch(78% 0.13 269);
+  --accent-active: oklch(82% 0.10 269);
+  --accent-light: oklch(28% 0.10 269);
   --accent-content: #ffffff;
+  --accent-ring: color-mix(in oklab, oklch(72% 0.16 269) 40%, transparent);
 
-  --success: #34d399;
-  --success-light: #064e3b;
-  --warning: #fbbf24;
-  --warning-light: #78350f;
-  --error: #f87171;
-  --error-light: #7f1d1d;
-  --info: #60a5fa;
-  --info-light: #1e3a5f;
+  --success-light: oklch(28% 0.08 162);
+  --warning-light: oklch(28% 0.10 75);
+  --error-light: oklch(28% 0.10 27);
+  --info-light: oklch(28% 0.08 245);
 
-  --border: #334155;
-  --border-hover: #475569;
+  --border: oklch(30% 0.012 258);
+  --border-hover: oklch(38% 0.014 258);
+  --border-strong: oklch(46% 0.014 258);
   --border-hairline: rgba(255, 255, 255, 0.08);
 
   --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.3);
   --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.4), 0 2px 4px -2px rgba(0, 0, 0, 0.3);
-  --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.4), 0 4px 6px -4px rgba(0, 0, 0, 0.3);
-  --shadow-xl: 0 20px 25px -5px rgba(0, 0, 0, 0.4), 0 8px 10px -6px rgba(0, 0, 0, 0.3);
+  --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.45);
+  --shadow-xl: 0 20px 30px -10px rgba(0, 0, 0, 0.55);
 
-  /* Dark elevation: 顶层用 inner glow ring，底层加深 */
-  --shadow-elevation-1: 0 0 0 1px rgba(255, 255, 255, 0.06), 0 1px 2px rgba(0, 0, 0, 0.4);
-  --shadow-elevation-2: 0 0 0 1px rgba(255, 255, 255, 0.06), 0 2px 4px rgba(0, 0, 0, 0.4), 0 4px 8px rgba(0, 0, 0, 0.4);
-  --shadow-elevation-3: 0 0 0 1px rgba(255, 255, 255, 0.07), 0 4px 8px rgba(0, 0, 0, 0.5), 0 12px 20px rgba(0, 0, 0, 0.5);
-  --shadow-elevation-4: 0 0 0 1px rgba(255, 255, 255, 0.08), 0 8px 16px rgba(0, 0, 0, 0.5), 0 24px 40px rgba(0, 0, 0, 0.6);
+  --elevation-1: 0 0 0 1px rgba(255, 255, 255, 0.06), 0 1px 2px rgba(0, 0, 0, 0.4);
+  --elevation-2: 0 0 0 1px rgba(255, 255, 255, 0.06), 0 2px 4px rgba(0, 0, 0, 0.4), 0 4px 8px rgba(0, 0, 0, 0.4);
+  --elevation-3: 0 0 0 1px rgba(255, 255, 255, 0.07), 0 4px 8px rgba(0, 0, 0, 0.5), 0 12px 20px rgba(0, 0, 0, 0.5);
+  --elevation-4: 0 0 0 1px rgba(255, 255, 255, 0.08), 0 8px 16px rgba(0, 0, 0, 0.5), 0 24px 40px rgba(0, 0, 0, 0.6);
+
+  --shadow-elevation-1: var(--elevation-1);
+  --shadow-elevation-2: var(--elevation-2);
+  --shadow-elevation-3: var(--elevation-3);
+  --shadow-elevation-4: var(--elevation-4);
 
   --gradient-accent-soft: linear-gradient(135deg, color-mix(in oklab, var(--accent) 20%, transparent) 0%, transparent 100%);
   --gradient-accent-strong: linear-gradient(180deg, var(--accent) 0%, var(--accent-hover) 100%);
+}
+
+/* data-theme='dark' 作为可选 alias — 与设计交付 admin.js / public/theme-init.js 兼容 */
+[data-theme="dark"] {
+  color-scheme: dark;
 }
 
 /* ═══════════════════════════════════════════
@@ -162,14 +208,16 @@
 
 @theme {
   --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, monospace;
 
   /* Surface */
   --color-surface: var(--surface);
   --color-surface-secondary: var(--surface-secondary);
   --color-surface-tertiary: var(--surface-tertiary);
   --color-surface-elevated: var(--surface-elevated);
+  --color-surface-sunken: var(--surface-sunken);
 
-  /* Content (4 级) */
+  /* Content */
   --color-content: var(--content);
   --color-content-secondary: var(--content-secondary);
   --color-content-tertiary: var(--content-tertiary);
@@ -179,22 +227,28 @@
   /* Accent */
   --color-accent: var(--accent);
   --color-accent-hover: var(--accent-hover);
+  --color-accent-active: var(--accent-active);
   --color-accent-light: var(--accent-light);
   --color-accent-content: var(--accent-content);
 
-  /* Status */
+  /* Status — soft + strong */
   --color-success: var(--success);
+  --color-success-strong: var(--success-strong);
   --color-success-light: var(--success-light);
   --color-warning: var(--warning);
+  --color-warning-strong: var(--warning-strong);
   --color-warning-light: var(--warning-light);
   --color-error: var(--error);
+  --color-error-strong: var(--error-strong);
   --color-error-light: var(--error-light);
   --color-info: var(--info);
+  --color-info-strong: var(--info-strong);
   --color-info-light: var(--info-light);
 
   /* Border */
   --color-border: var(--border);
   --color-border-hover: var(--border-hover);
+  --color-border-strong: var(--border-strong);
   --color-border-hairline: var(--border-hairline);
 
   /* Shadows */
@@ -202,17 +256,19 @@
   --shadow-md: var(--shadow-md);
   --shadow-lg: var(--shadow-lg);
   --shadow-xl: var(--shadow-xl);
-  --shadow-elevation-1: var(--shadow-elevation-1);
-  --shadow-elevation-2: var(--shadow-elevation-2);
-  --shadow-elevation-3: var(--shadow-elevation-3);
-  --shadow-elevation-4: var(--shadow-elevation-4);
+  --shadow-elevation-1: var(--elevation-1);
+  --shadow-elevation-2: var(--elevation-2);
+  --shadow-elevation-3: var(--elevation-3);
+  --shadow-elevation-4: var(--elevation-4);
 
   /* Radius */
+  --radius-xs: var(--radius-xs);
   --radius-sm: var(--radius-sm);
   --radius-md: var(--radius-md);
   --radius-lg: var(--radius-lg);
   --radius-xl: var(--radius-xl);
   --radius-2xl: var(--radius-2xl);
+  --radius-pill: var(--radius-pill);
   --radius-full: var(--radius-full);
 }
 
@@ -236,6 +292,8 @@ body {
   font-family: var(--font-sans);
   background-color: var(--surface);
   color: var(--content);
+  /* tabular-nums 默认开启 —— 表格数值更新不再左右抖动 */
+  font-variant-numeric: tabular-nums;
   transition: background-color 200ms ease, color 200ms ease;
   min-height: 100dvh;
 }
@@ -249,7 +307,7 @@ body {
 
 /* Focus ring soft — 给次级元素 / hover-only 元素用 */
 .focus-ring-soft:focus-visible {
-  outline: 2px solid color-mix(in oklab, var(--accent) 55%, transparent);
+  outline: 2px solid var(--accent-ring);
   outline-offset: 2px;
 }
 
@@ -262,14 +320,20 @@ body {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: var(--content-tertiary);
-  border-radius: var(--radius-full);
+  background: color-mix(in oklab, var(--content) 22%, transparent);
+  border-radius: var(--radius-pill);
   border: 2px solid transparent;
   background-clip: padding-box;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--content-secondary);
+  background: color-mix(in oklab, var(--content) 35%, transparent);
   background-clip: padding-box;
+}
+
+/* Selection — 用 accent ring 而非默认蓝色 */
+::selection {
+  background: var(--accent-ring);
+  color: var(--content);
 }
 
 /* ═══════════════════════════════════════════
@@ -303,33 +367,73 @@ body {
    ═══════════════════════════════════════════ */
 
 .text-display {
-  font-size: 2rem;
-  line-height: 1.2;
+  font-size: 28px;
+  line-height: 1.18;
   font-weight: 700;
-  letter-spacing: -0.02em;
+  letter-spacing: -0.022em;
 }
 .text-title {
-  font-size: 1.5rem;
-  line-height: 1.3;
+  font-size: 22px;
+  line-height: 1.25;
   font-weight: 600;
-  letter-spacing: -0.015em;
+  letter-spacing: -0.018em;
 }
 .text-headline {
-  font-size: 1.125rem;
+  font-size: 17px;
   line-height: 1.4;
   font-weight: 600;
   letter-spacing: -0.01em;
 }
+.text-subtitle {
+  font-size: 14px;
+  line-height: 1.45;
+  font-weight: 500;
+  color: var(--content-secondary);
+}
 .text-body {
-  font-size: 0.875rem;
-  line-height: 1.5;
+  font-size: 13.5px;
+  line-height: 1.55;
   font-weight: 400;
 }
+.text-small {
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--content-secondary);
+}
 .text-caption {
-  font-size: 0.75rem;
+  font-size: 11.5px;
   line-height: 1.4;
-  font-weight: 400;
   color: var(--content-tertiary);
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  font-weight: 500;
+}
+.text-mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Semantic color shortcuts —— 与 admin.css 对齐，方便页面里临时复用 */
+.text-accent {
+  color: var(--accent);
+}
+.text-secondary {
+  color: var(--content-secondary);
+}
+.text-tertiary {
+  color: var(--content-tertiary);
+}
+.text-success-strong {
+  color: var(--success-strong);
+}
+.text-warning-strong {
+  color: var(--warning-strong);
+}
+.text-error-strong {
+  color: var(--error-strong);
+}
+.text-info-strong {
+  color: var(--info-strong);
 }
 
 /* ═══════════════════════════════════════════
@@ -346,6 +450,9 @@ body {
 .bg-gradient-accent-strong {
   background-image: var(--gradient-accent-strong);
 }
+.bg-gradient-brand-mark {
+  background-image: var(--gradient-brand-mark);
+}
 
 /* ═══════════════════════════════════════════
    Animations — Keyframes (legacy 8 + new 8)
@@ -353,103 +460,234 @@ body {
 
 /* Legacy — 保持兼容 */
 @keyframes fade-in {
-  from { opacity: 0; }
-  to { opacity: 1; }
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
 }
 
 @keyframes fade-in-up {
-  from { opacity: 0; transform: translateY(8px); }
-  to { opacity: 1; transform: translateY(0); }
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 @keyframes slide-in-right {
-  from { opacity: 0; transform: translateX(16px); }
-  to { opacity: 1; transform: translateX(0); }
+  from {
+    opacity: 0;
+    transform: translateX(16px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes drawer-slide-in {
+  from {
+    transform: translateX(100%);
+  }
+  to {
+    transform: translateX(0);
+  }
 }
 
 @keyframes scale-in {
-  from { opacity: 0; transform: scale(0.95); }
-  to { opacity: 1; transform: scale(1); }
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
 }
 
 @keyframes spin {
-  to { transform: rotate(360deg); }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 @keyframes shake {
-  0%, 100% { transform: translateX(0); }
-  10%, 30%, 50%, 70%, 90% { transform: translateX(-4px); }
-  20%, 40%, 60%, 80% { transform: translateX(4px); }
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  10%,
+  30%,
+  50%,
+  70%,
+  90% {
+    transform: translateX(-4px);
+  }
+  20%,
+  40%,
+  60%,
+  80% {
+    transform: translateX(4px);
+  }
 }
 
 @keyframes pulse-success {
-  0% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.4); }
-  70% { box-shadow: 0 0 0 10px rgba(16, 185, 129, 0); }
-  100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
+  0% {
+    box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.4);
+  }
+  70% {
+    box-shadow: 0 0 0 10px rgba(16, 185, 129, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(16, 185, 129, 0);
+  }
 }
 
 @keyframes pulse-error {
-  0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4); }
-  70% { box-shadow: 0 0 0 10px rgba(239, 68, 68, 0); }
-  100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+  0% {
+    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4);
+  }
+  70% {
+    box-shadow: 0 0 0 10px rgba(239, 68, 68, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0);
+  }
 }
 
 /* New — 列表 / Tab / 反馈 */
 @keyframes list-item-enter {
-  from { opacity: 0; transform: translateY(12px); }
-  to { opacity: 1; transform: translateY(0); }
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 @keyframes list-item-leave {
-  from { opacity: 1; transform: translateY(0); }
-  to { opacity: 0; transform: translateY(-8px); }
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
 }
 
 @keyframes tab-content-slide {
-  from { opacity: 0; transform: translateX(8px); }
-  to { opacity: 1; transform: translateX(0); }
+  from {
+    opacity: 0;
+    transform: translateX(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
 }
 
 @keyframes slide-down {
-  from { opacity: 0; transform: translateY(-12px); }
-  to { opacity: 1; transform: translateY(0); }
+  from {
+    opacity: 0;
+    transform: translateY(-12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 @keyframes shimmer {
-  0% { background-position: -200% 0; }
-  100% { background-position: 200% 0; }
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
 }
 
 @keyframes ripple {
-  to { transform: scale(2.4); opacity: 0; }
+  to {
+    transform: scale(2.4);
+    opacity: 0;
+  }
 }
 
 @keyframes progress-stripe {
-  from { background-position: 0 0; }
-  to { background-position: 40px 0; }
+  from {
+    background-position: 0 0;
+  }
+  to {
+    background-position: 40px 0;
+  }
 }
 
 @keyframes ring-pulse {
-  0% { box-shadow: 0 0 0 0 currentColor; opacity: 0.6; }
-  70% { box-shadow: 0 0 0 8px transparent; opacity: 0; }
-  100% { box-shadow: 0 0 0 0 transparent; opacity: 0; }
+  0% {
+    box-shadow: 0 0 0 0 currentColor;
+    opacity: 0.6;
+  }
+  70% {
+    box-shadow: 0 0 0 8px transparent;
+    opacity: 0;
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+    opacity: 0;
+  }
 }
 
 /* Animation utilities — legacy */
-.animate-fade-in { animation: fade-in 200ms ease-out; }
-.animate-fade-in-up { animation: fade-in-up 300ms ease-out; }
-.animate-slide-in-right { animation: slide-in-right 300ms ease-out; }
-.animate-scale-in { animation: scale-in 200ms ease-out; }
-.animate-spin { animation: spin 1s linear infinite; }
-.animate-shake { animation: shake 500ms ease-in-out; }
-.animate-pulse-success { animation: pulse-success 1s ease-out; }
-.animate-pulse-error { animation: pulse-error 1s ease-out; }
+.animate-fade-in {
+  animation: fade-in 200ms ease-out;
+}
+.animate-fade-in-up {
+  animation: fade-in-up 300ms ease-out;
+}
+.animate-drawer-slide-in {
+  animation: drawer-slide-in 320ms var(--ease-out-expo);
+}
+
+.animate-slide-in-right {
+  animation: slide-in-right 300ms ease-out;
+}
+.animate-scale-in {
+  animation: scale-in 200ms ease-out;
+}
+.animate-spin {
+  animation: spin 1s linear infinite;
+}
+.animate-shake {
+  animation: shake 500ms ease-in-out;
+}
+.animate-pulse-success {
+  animation: pulse-success 1s ease-out;
+}
+.animate-pulse-error {
+  animation: pulse-error 1s ease-out;
+}
 
 /* Animation utilities — new */
-.animate-list-item-enter { animation: list-item-enter var(--duration-base) var(--ease-out-expo); }
-.animate-list-item-leave { animation: list-item-leave var(--duration-fast) var(--ease-out-expo) forwards; }
-.animate-tab-content-slide { animation: tab-content-slide var(--duration-base) var(--ease-out-expo); }
-.animate-slide-down { animation: slide-down var(--duration-base) var(--ease-out-expo); }
+.animate-list-item-enter {
+  animation: list-item-enter var(--duration-base) var(--ease-out-expo);
+}
+.animate-list-item-leave {
+  animation: list-item-leave var(--duration-fast) var(--ease-out-expo) forwards;
+}
+.animate-tab-content-slide {
+  animation: tab-content-slide var(--duration-base) var(--ease-out-expo);
+}
+.animate-slide-down {
+  animation: slide-down var(--duration-base) var(--ease-out-expo);
+}
 
 .animate-shimmer {
   background: linear-gradient(
@@ -500,7 +738,15 @@ body {
    Flashcard 3D Flip (学习端专用，不动)
    ═══════════════════════════════════════════ */
 
-.perspective { perspective: 1000px; }
-.preserve-3d { transform-style: preserve-3d; }
-.backface-hidden { backface-visibility: hidden; }
-.rotate-y-180 { transform: rotateY(180deg); }
+.perspective {
+  perspective: 1000px;
+}
+.preserve-3d {
+  transform-style: preserve-3d;
+}
+.backface-hidden {
+  backface-visibility: hidden;
+}
+.rotate-y-180 {
+  transform: rotateY(180deg);
+}

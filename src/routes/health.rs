@@ -18,6 +18,22 @@ fn startup_instant() -> &'static Instant {
     INSTANCE.get_or_init(Instant::now)
 }
 
+/// sqlite 主库 + -wal + -shm 三个文件的磁盘占用之和（字节）。
+/// 读取失败（路径缺失/`:memory:`/权限）返回 None，调用方应诚实展示为空，不伪造。
+fn db_on_disk_size_bytes(state: &AppState) -> Option<u64> {
+    let main = std::path::Path::new(&state.config().database_url);
+    let mut total = std::fs::metadata(main).ok()?.len();
+    // sqlite WAL 模式下旁路文件 -wal / -shm 也计入实际占用
+    let file_name = main.file_name().and_then(|n| n.to_str())?;
+    for ext in ["-wal", "-shm"] {
+        let sidecar = main.with_file_name(format!("{file_name}{ext}"));
+        if let Ok(meta) = std::fs::metadata(&sidecar) {
+            total += meta.len();
+        }
+    }
+    Some(total)
+}
+
 async fn store_probe_ok(state: &AppState) -> bool {
     match state
         .run_store_task("health.db_ping", |store| store.db_ping())
@@ -97,6 +113,26 @@ pub async fn health_check(State(state): State<AppState>) -> impl axum::response:
     }
 
     let store_healthy = store_probe_ok(&state).await;
+    // 数据库磁盘占用：直接读 sqlite 主库文件大小（含 -wal/-shm 旁路文件）。
+    // 失败（文件缺失/权限）时返回 None，前端展示 "—"，不伪造数据。
+    let db_size_bytes = db_on_disk_size_bytes(&state);
+    // SLO 可用性：源自 http_metrics 滚动聚合器（真实 5xx 错误率，非伪造）。
+    // 请求 30d 窗口；hour 层 HOUR_CAP=30d 且经 D3 持久化(availability_rollup)+启动回灌，
+    // 故跨重启可累积达 30d。仍按实际可得窗口(min(window, 自首条记录以来))透出 effectiveSecs，
+    // 前端据此动态标注真实窗口（运行不足 30d 时如实降级，不冒充）。
+    // 无任何请求样本时 pct 无意义，省略为 null，前端展示 "—"。
+    let availability = {
+        let agg = crate::middleware::http_metrics::aggregate(30 * 24 * 3600);
+        if agg.total_requests > 0 {
+            Some(serde_json::json!({
+                "pct": agg.availability_pct,
+                "effectiveSecs": agg.effective_secs,
+                "totalRequests": agg.total_requests,
+            }))
+        } else {
+            None
+        }
+    };
     let amas_healthy = state.amas().is_healthy();
     let sse_healthy = sse_probe_ok(&state);
     let (wbc_healthy, wbc_probe_skipped) = wordbook_center_probe(&state).await;
@@ -117,8 +153,13 @@ pub async fn health_check(State(state): State<AppState>) -> impl axum::response:
         StatusCode::OK,
         Json(serde_json::json!({
             "status": status,
+            "version": env!("CARGO_PKG_VERSION"),
             "uptimeSecs": startup_instant().elapsed().as_secs(),
             "serverTime": chrono::Utc::now().timestamp(),
+            // 数据库磁盘占用字节数；无法读取时为 null。
+            "dbSizeBytes": db_size_bytes,
+            // 可用性：真实 5xx 错误率聚合；含实际测量窗口 effectiveSecs（≤30d）。无样本时为 null。
+            "availability": availability,
             "services": {
                 "store": { "healthy": store_healthy },
                 "amas": { "healthy": amas_healthy },
@@ -168,7 +209,10 @@ pub async fn database_health(
     Json(serde_json::json!({
         "healthy": healthy,
         "latencyUs": latency_us,
-        // TODO: real error tracking not yet implemented
+        // W5-1：本字段是「本次单次探活」的布尔投影（0=本次成功 / 1=本次失败），**不是**真实的
+        // 连续失败计数——真实连续计数需 AppState 加共享计数器，价值与成本不匹配。原前端消费方
+        // （admin-ui/src/api/health.ts）已是死代码并删除，对运维不可见。字段保守保留：本端点
+        // /health/database 公开可达，删字段前须跨仓确认 wordforge-web / 监控脚本未直接读它。
         "consecutiveFailures": if healthy { 0 } else { 1 },
     }))
 }

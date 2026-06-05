@@ -33,27 +33,27 @@ fn now_secs() -> u64 {
 fn expected_max_silence_secs() -> HashMap<&'static str, u64> {
     [
         // 间隔 1 小时的 worker：3 × 3600 = 10800 秒
-        ("session_cleanup",          3 * 3600),
-        ("password_reset_cleanup",   3 * 3600),
-        ("log_export",               3 * 3600),
+        ("session_cleanup", 3 * 3600),
+        ("password_reset_cleanup", 3 * 3600),
+        ("log_export", 3 * 3600),
         // 间隔 5 分钟
-        ("delayed_reward",           3 * 300),
-        ("cache_cleanup",            3 * 600),  // 10 min
-        ("metrics_flush",            3 * 300),
-        ("llm_advisor",              3 * 1200), // 20 min
+        ("delayed_reward", 3 * 300),
+        ("cache_cleanup", 3 * 600), // 10 min
+        ("metrics_flush", 3 * 300),
+        ("llm_advisor", 3 * 1200), // 20 min
         // 间隔 1 小时（update checker）
-        ("update_checker",           3 * 3600),
+        ("update_checker", 3 * 3600),
         // 间隔 1 分钟（watchdog 系列）
-        ("error_rate_watchdog",      3 * 60),
+        ("error_rate_watchdog", 3 * 60),
         // 每日 / 每周 worker：宽限期 3 × 周期，周期按天计
-        ("algorithm_optimization",   3 * 86400),
-        ("daily_aggregation",        3 * 86400),
-        ("forgetting_alert",         3 * 86400),
-        ("health_analysis",          3 * 7 * 86400),  // 每周
-        ("confusion_pair_cache",     3 * 7 * 86400),
-        ("weekly_report",            3 * 7 * 86400),
+        ("algorithm_optimization", 3 * 86400),
+        ("daily_aggregation", 3 * 86400),
+        ("forgetting_alert", 3 * 86400),
+        ("health_analysis", 3 * 7 * 86400), // 每周
+        ("confusion_pair_cache", 3 * 7 * 86400),
+        ("weekly_report", 3 * 7 * 86400),
         // 每月
-        ("monitoring_retention",     3 * 30 * 86400),
+        ("monitoring_retention", 3 * 30 * 86400),
     ]
     .into_iter()
     .collect()
@@ -129,12 +129,12 @@ mod tests {
 
     use tokio::sync::broadcast;
 
+    use super::run;
     use crate::amas::config::AMASConfig;
     use crate::amas::engine::AMASEngine;
     use crate::config::Config;
     use crate::state::AppState;
     use crate::store::Store;
-    use super::run;
 
     fn ensure_safe_secrets() {
         let secret = "test_secret_that_is_at_least_32_characters_long_ok";
@@ -169,15 +169,17 @@ mod tests {
         let (store, _tmp) = make_store();
         let state = make_state(Arc::new(store.clone()));
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        state.active_sse().entry("d1".into()).or_default().push(
-            crate::state::SseClientInfo {
+        state
+            .active_sse()
+            .entry("d1".into())
+            .or_default()
+            .push(crate::state::SseClientInfo {
                 conn_id: "c1".into(),
                 user_id: "u1".into(),
                 platform: "test".into(),
                 connected_at: std::time::Instant::now(),
                 tx,
-            },
-        );
+            });
         // 清理去重状态
         *super::LAST_ALERT.lock().unwrap() = None;
         // 插入一条刚运行的记录（now - 10s）
@@ -195,15 +197,17 @@ mod tests {
         let (store, _tmp) = make_store();
         let state = make_state(Arc::new(store.clone()));
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::state::SseEvent>();
-        state.active_sse().entry("d2".into()).or_default().push(
-            crate::state::SseClientInfo {
+        state
+            .active_sse()
+            .entry("d2".into())
+            .or_default()
+            .push(crate::state::SseClientInfo {
                 conn_id: "c2".into(),
                 user_id: "u2".into(),
                 platform: "test".into(),
                 connected_at: std::time::Instant::now(),
                 tx,
-            },
-        );
+            });
         *super::LAST_ALERT.lock().unwrap() = None;
         // error_rate_watchdog 阈值 3 × 60 = 180s；写一条 400s 前的记录
         let now = super::now_secs();
@@ -219,7 +223,10 @@ mod tests {
         run(&store, &state).await;
         let event = rx.try_recv().expect("应收到 WorkerMissed 事件");
         match event {
-            crate::state::SseEvent::WorkerMissed { worker_name, miss_count } => {
+            crate::state::SseEvent::WorkerMissed {
+                worker_name,
+                miss_count,
+            } => {
                 assert_eq!(worker_name, "error_rate_watchdog");
                 assert!(miss_count >= 3, "miss_count={miss_count}");
             }

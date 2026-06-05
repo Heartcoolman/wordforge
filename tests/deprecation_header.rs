@@ -7,9 +7,7 @@ use axum::http::{Method, StatusCode};
 use common::app::spawn_test_server;
 use common::auth::{auth_header, login_and_get_token};
 use common::http::request;
-use learning_backend::middleware::deprecation::{
-    V1_DEPRECATION_DATE, V1_LINK_URL, V1_SUNSET_DATE,
-};
+use learning_backend::middleware::deprecation::{V1_DEPRECATION_DATE, V1_LINK_URL, V1_SUNSET_DATE};
 
 #[tokio::test]
 async fn v1_words_response_has_deprecation_and_sunset_headers() {
@@ -51,7 +49,10 @@ async fn v1_words_response_has_deprecation_and_sunset_headers() {
         link.contains(V1_LINK_URL),
         "Link header 应包含迁移文档 URL，实际：{link}"
     );
-    assert!(link.contains("rel=\"sunset\""), "Link header 应含 rel=sunset");
+    assert!(
+        link.contains("rel=\"sunset\""),
+        "Link header 应含 rel=sunset"
+    );
 }
 
 #[tokio::test]

@@ -16,12 +16,15 @@ fn export_openapi_yaml() {
     let out_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("docs")
         .join("openapi.yaml");
-    std::fs::write(&out_path, &yaml)
-        .unwrap_or_else(|e| panic!("写入 {out_path:?} 失败：{e}"));
+    std::fs::write(&out_path, &yaml).unwrap_or_else(|e| panic!("写入 {out_path:?} 失败：{e}"));
 
     // 基本内容断言，防止导出空文档
     assert!(yaml.contains("WordForge API"), "info.title 缺失");
-    assert!(yaml.contains("0.6.0-beta.4"), "info.version 缺失");
+    // W4-1：version 跟随 CARGO_PKG_VERSION（与 Cargo.toml 一致），勿写死旧版本。
+    assert!(
+        yaml.contains(env!("CARGO_PKG_VERSION")),
+        "info.version 应为 CARGO_PKG_VERSION"
+    );
     assert!(yaml.contains("/auth/login"), "auth/login 端点缺失");
     assert!(yaml.contains("/auth/register"), "auth/register 端点缺失");
     assert!(yaml.contains("/records"), "records 端点缺失");
@@ -30,7 +33,10 @@ fn export_openapi_yaml() {
     assert!(yaml.contains("/realtime/events"), "SSE 端点缺失");
     assert!(yaml.contains("/health"), "health 端点缺失");
     assert!(yaml.contains("bearerAuth"), "安全方案缺失");
-    assert!(yaml.contains("new/learning/reviewing"), "WordState lowercase 枚举缺失");
+    assert!(
+        yaml.contains("new/learning/reviewing"),
+        "WordState lowercase 枚举缺失"
+    );
     assert!(yaml.contains("data.data"), "favorites paginated 说明缺失");
 
     println!("openapi.yaml 已导出至 {out_path:?}（{} bytes）", yaml.len());

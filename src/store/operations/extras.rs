@@ -172,6 +172,23 @@ impl Store {
         Ok(mode.eq_ignore_ascii_case("wal"))
     }
 
+    /// 当前 SQLite WAL 文件大小（字节）。取主库路径后 stat `<path>-wal`；
+    /// 内存库 / 无 WAL 文件 / stat 失败一律返回 0（资源条降级，不阻断 health）。
+    pub fn db_wal_size_bytes(&self) -> Result<i64, StoreError> {
+        let conn = self.conn()?;
+        // PRAGMA database_list 列：seq | name | file（main 库 file 为绝对路径，内存库为空）
+        let path: Option<String> = conn
+            .query_row("PRAGMA database_list", [], |r| r.get::<_, String>(2))
+            .optional()?;
+        match path {
+            Some(p) if !p.is_empty() => {
+                let wal = format!("{p}-wal");
+                Ok(std::fs::metadata(&wal).map(|m| m.len() as i64).unwrap_or(0))
+            }
+            _ => Ok(0),
+        }
+    }
+
     pub fn db_table_list(&self) -> Result<Vec<String>, StoreError> {
         let conn = self.conn()?;
         let mut stmt =

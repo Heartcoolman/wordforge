@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use parking_lot::{Mutex, RwLock};
@@ -29,6 +30,11 @@ pub struct AMASEngine {
     user_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     metrics_registry: Arc<metrics::MetricsRegistry>,
     ssp_policy: Arc<RwLock<Option<Arc<ssp::SspPolicy>>>>,
+    /// 热路径快路:无任何 active canary 时跳过 effective_config_for_user 的 1-2 次 SQLite 查询。
+    /// 安全不变式:**永不会错误地为 false**——仅在一次查询确认零 active canary 后置 false;
+    /// 任何激活 canary 的写路径(set_canary / create_canary / scale_canary)必须调
+    /// mark_canary_active() 置 true。stale-true 只是多查一次(无害),stale-false 才会漏路由。
+    canary_active: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -65,6 +71,9 @@ struct MemoryScoring {
     word_mastery: Option<MemoryFeedback>,
     reward: Reward,
     objective: ObjectiveEvaluation,
+    /// W1-1：update_memory 期间累积的 per-word 状态（mastery/IAD/MTP/EVM），延后由
+    /// persist_state 与幂等标记同一 tx 原子写入，消除崩溃重试二次累加记忆模型的窗口。
+    pending_algo: Vec<(String, serde_json::Value)>,
 }
 
 impl AMASEngine {
@@ -87,7 +96,14 @@ impl AMASEngine {
             user_locks: Arc::new(Mutex::new(HashMap::new())),
             metrics_registry: Arc::new(metrics::MetricsRegistry::new()),
             ssp_policy: Arc::new(RwLock::new(ssp_policy)),
+            // 初值 true:首个事件会真查一次并自校正为 false(若无 canary),不漏判。
+            canary_active: Arc::new(AtomicBool::new(true)),
         }
+    }
+
+    /// 标记"可能存在 active canary",激活 canary 的写路径调用后保证热路径不再跳过查询。
+    pub fn mark_canary_active(&self) {
+        self.canary_active.store(true, Ordering::Release);
     }
 
     pub fn reload_config(&self, new_config: AMASConfig) -> Result<(), String> {
@@ -116,6 +132,121 @@ impl AMASEngine {
 
     pub fn get_config(&self) -> AMASConfig {
         self.config.read().as_ref().clone()
+    }
+
+    /// C6:按 user_id 解析"有效配置"(per-patch canary 子系统)。
+    ///   1. 先遍历 get_active_patch_canaries(),按 hash(user_id)%100 ∈ [cohort_lo,cohort_hi)
+    ///      命中其一 → 从 amas_config_versions 加载该 version snapshot。
+    ///   2. 未命中任何 active patch canary → 回退到既有单 active `amas_canary_config` 路由
+    ///      (m022 逻辑,保持兼容)。
+    ///   3. 任一环节反序列化失败 / version 缺失 / 查表失败 → 回退 stable(打 warn log 不抛错)。
+    ///
+    /// process_event_blocking 在入口调一次此方法,后续整个 request 内的 ProcessingContext.config
+    /// 都用同一份 Arc,保证一次请求内 config 一致。
+    pub fn effective_config_for_user(&self, user_id: &str) -> Arc<AMASConfig> {
+        let stable: Arc<AMASConfig> = Arc::clone(&self.config.read());
+        // 快路:确认无 active canary 时跳过下面 1-2 次 SQLite 查询(常态)。
+        if !self.canary_active.load(Ordering::Acquire) {
+            return stable;
+        }
+        // hash(user_id) % 100 桶号,patch canary 与 m022 单 active 共用同一散列算法
+        let bucket = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            user_id.hash(&mut h);
+            (h.finish() % 100) as u32
+        };
+
+        // any_active:本轮是否观测到任一 active canary。仅当确认零 active 时才把快路标志置 false。
+        // 查询出错时保守视为 true(不清标志),避免错误跳过。
+        let mut any_active = false;
+
+        // ① per-patch canary:多条并行 active,cohort 区间命中其一
+        match self.store.get_active_patch_canaries() {
+            Ok(canaries) => {
+                any_active |= !canaries.is_empty();
+                if let Some(hit) = canaries
+                    .iter()
+                    .find(|c| bucket >= c.cohort_lo && bucket < c.cohort_hi)
+                {
+                    return self.load_canary_snapshot(&hit.version_hash, &stable);
+                }
+            }
+            Err(e) => {
+                any_active = true;
+                tracing::warn!(error=%e, "effective_config_for_user: 查 patch canary 失败,回退既有路由");
+            }
+        }
+
+        // ② 兼容既有单 active amas_canary_config(m022)
+        let canary = match self.store.get_active_amas_canary() {
+            Ok(Some(c)) => c,
+            Ok(None) => {
+                // 两类 canary 均无 active → 清快路标志,后续事件直接走快路。
+                if !any_active {
+                    self.canary_active.store(false, Ordering::Release);
+                }
+                return stable;
+            }
+            Err(e) => {
+                tracing::warn!(error=%e, "effective_config_for_user: 查 canary 失败,回退 stable");
+                return stable;
+            }
+        };
+        let is_forced = canary.force_user_ids.iter().any(|id| id == user_id);
+        let in_bucket = (bucket as u64) < canary.percent as u64;
+        if !is_forced && !in_bucket {
+            return stable;
+        }
+        // m035 crowd_filters 接线:非强制命中的用户,还须落入人群过滤(平台/账龄/活跃)。
+        // force_user_ids 优先,无条件命中。查询出错保守回退 stable(不误推 canary)。
+        if !is_forced {
+            if let Some(filters) = &canary.crowd_filters {
+                match self.store.user_matches_crowd_filters(user_id, filters) {
+                    Ok(true) => {}
+                    Ok(false) => return stable,
+                    Err(e) => {
+                        tracing::warn!(error=%e, "effective_config_for_user: 查 crowd_filters 失败,回退 stable");
+                        return stable;
+                    }
+                }
+            }
+        }
+        self.load_canary_snapshot(&canary.version_hash, &stable)
+    }
+
+    /// 从 amas_config_versions 拉 version snapshot,失败/缺失回退 stable + warn。
+    fn load_canary_snapshot(
+        &self,
+        version_hash: &str,
+        stable: &Arc<AMASConfig>,
+    ) -> Arc<AMASConfig> {
+        match self.store.get_amas_config_version(version_hash) {
+            Ok(Some(version)) => {
+                match serde_json::from_value::<AMASConfig>(version.snapshot_json) {
+                    Ok(cfg) => Arc::new(cfg),
+                    Err(e) => {
+                        tracing::warn!(
+                            version_hash = %version_hash,
+                            error = %e,
+                            "effective_config_for_user: 反序列化 canary snapshot 失败,回退 stable"
+                        );
+                        Arc::clone(stable)
+                    }
+                }
+            }
+            Ok(None) => {
+                tracing::warn!(
+                    version_hash = %version_hash,
+                    "effective_config_for_user: canary version_hash 在 amas_config_versions 中不存在,回退 stable"
+                );
+                Arc::clone(stable)
+            }
+            Err(e) => {
+                tracing::warn!(error=%e, "effective_config_for_user: 加载 canary version 失败,回退 stable");
+                Arc::clone(stable)
+            }
+        }
     }
 
     pub fn metrics_registry(&self) -> &Arc<metrics::MetricsRegistry> {
@@ -163,30 +294,56 @@ impl AMASEngine {
     ) -> Result<ProcessResult, AppError> {
         let engine = self.clone();
         let user_id = user_id.to_string();
+        let result = crate::blocking::run_blocking("amas.process_event", move || {
+            engine.process_event_blocking(&user_id, raw_event, None)
+        })
+        .await??;
+        // 非幂等路径不传幂等键，persist_state 恒返回 true（无标记可竞争），故必为 Some。
+        result.ok_or_else(|| AppError::internal("process_event returned None without idempotency key"))
+    }
+
+    /// W1-1：幂等版 process_event。把 `client_record_id` 作为幂等键，在 AMAS 状态落库的
+    /// 同一 tx 内原子写入 `processed_events` 标记。配合路由侧 `is_event_processed` 前置预检
+    /// （命中即不调本方法），保证 outbox 重放 / 客户端重试不二次累加 AMAS 状态。
+    /// 与 [`Self::process_event`] 唯一差别是落库时附带幂等标记；处理逻辑零分叉。
+    /// 返回 `Ok(None)` 表示幂等标记已被并发同 `client_record_id` 请求抢先写入、本次 AMAS 增量已
+    /// 整笔回滚未生效——调用方应据此走"裸记录回放"而非二次累加 ELO/mastery/trust。
+    pub async fn process_event_idempotent(
+        &self,
+        user_id: &str,
+        raw_event: RawEvent,
+        client_record_id: &str,
+    ) -> Result<Option<ProcessResult>, AppError> {
+        let engine = self.clone();
+        let user_id = user_id.to_string();
+        let key = client_record_id.to_string();
         crate::blocking::run_blocking("amas.process_event", move || {
-            engine.process_event_blocking(&user_id, raw_event)
+            engine.process_event_blocking(&user_id, raw_event, Some(&key))
         })
         .await?
     }
 
+    /// 返回 `Ok(None)` 仅当传入幂等键且其标记已被并发请求抢先写入——本次 AMAS 增量已整笔回滚、
+    /// 未生效，调用方应据此走"裸记录回放"而非二次累加。`idempotency_key` 为 `None` 时恒 `Some`。
     fn process_event_blocking(
         &self,
         user_id: &str,
         raw_event: RawEvent,
-    ) -> Result<ProcessResult, AppError> {
+        idempotency_key: Option<&str>,
+    ) -> Result<Option<ProcessResult>, AppError> {
         let start = std::time::Instant::now();
 
         let user_lock = self.acquire_user_lock_blocking(user_id);
         let _guard = user_lock.lock();
 
-        let config = {
-            let guard = self.config.read();
-            Arc::clone(&guard)
-        };
+        // m022:按 user_id 做 canary 抽样,可能返回 canary version 而非全局 stable。
+        let config = self.effective_config_for_user(user_id);
         let now = chrono::Utc::now();
         let mut context = self.prepare_processing_context(user_id, &raw_event, config, now)?;
         let strategy = self.select_strategy(&mut context);
-        let scoring = self.apply_memory_and_score(user_id, &raw_event, &context, &strategy)?;
+        let mut scoring = self.apply_memory_and_score(user_id, &raw_event, &context, &strategy)?;
+        // W1-1：取出 per-word 待写状态，交由 persist_state 与幂等标记同 tx 原子提交。
+        let pending_algo = std::mem::take(&mut scoring.pending_algo);
 
         self.update_trust_scores(
             &mut context.algo_states,
@@ -199,7 +356,16 @@ impl AMASEngine {
         );
 
         Self::update_session_counters(&mut context.user_state, &raw_event, now);
-        self.persist_state(user_id, &mut context.user_state, &context.algo_states)?;
+        // W1-1 并发收口：标记已被并发请求抢先写入则整笔回滚，返回 None 让调用方走裸记录回放。
+        if !self.persist_state(
+            user_id,
+            &mut context.user_state,
+            &context.algo_states,
+            pending_algo,
+            idempotency_key,
+        )? {
+            return Ok(None);
+        }
 
         let explanation = self.build_explanation(
             &strategy.constrained_strategy,
@@ -218,7 +384,10 @@ impl AMASEngine {
         );
 
         let latency_ms = start.elapsed().as_millis() as i64;
-        let config_version = self.config_hash.read().clone();
+        // 用本次请求实际生效的配置算 hash（命中 canary 时即 canary 配置），与 create_canary
+        // 落库的 version_hash 同源，保证 canary 切片可被 aggregate_amas_version_slice 聚合、
+        // 自动回滚/实测指标管线生效；否则恒打 stable hash 会让 canary 切片永远为空。
+        let config_version = monitoring::compute_config_hash(&context.config);
         drop(_guard);
         self.emit_monitoring(
             user_id,
@@ -227,9 +396,11 @@ impl AMASEngine {
             &context.config,
             &strategy.final_strategy,
             &config_version,
+            &strategy.weights,
+            raw_event.is_correct,
         );
 
-        Ok(result)
+        Ok(Some(result))
     }
 
     fn prepare_processing_context(
@@ -286,6 +457,7 @@ impl AMASEngine {
         strategy: &StrategySelection,
     ) -> Result<MemoryScoring, AppError> {
         let ssp_arc = self.ssp_policy.read().clone();
+        let mut pending_algo: Vec<(String, serde_json::Value)> = Vec::new();
         let word_mastery = self.update_memory(
             user_id,
             raw_event,
@@ -294,6 +466,7 @@ impl AMASEngine {
             &context.user_state,
             &context.config,
             ssp_arc.as_deref(),
+            &mut pending_algo,
         )?;
         let retention_signal = word_mastery
             .as_ref()
@@ -311,6 +484,7 @@ impl AMASEngine {
             word_mastery,
             reward,
             objective,
+            pending_algo,
         })
     }
 
@@ -985,6 +1159,7 @@ impl AMASEngine {
         user_state: &UserState,
         config: &AMASConfig,
         ssp_policy: Option<&ssp::SspPolicy>,
+        pending_algo: &mut Vec<(String, serde_json::Value)>,
     ) -> Result<Option<MemoryFeedback>, AppError> {
         if raw_event.word_id.is_empty() {
             return Ok(None);
@@ -1032,9 +1207,7 @@ impl AMASEngine {
                         &config.iad,
                     );
                     if let Ok(val) = serde_json::to_value(&iad_state) {
-                        if let Err(e) = self.store.set_engine_algo_state(user_id, iad_key, &val) {
-                            tracing::warn!(user_id, key = iad_key, error = %e, "failed to persist algo state");
-                        }
+                        pending_algo.push((iad_key.to_string(), val));
                     }
                 }
             }
@@ -1087,9 +1260,7 @@ impl AMASEngine {
                         &config.mtp,
                     );
                     if let Ok(val) = serde_json::to_value(&mtp_state) {
-                        if let Err(e) = self.store.set_engine_algo_state(user_id, mtp_key, &val) {
-                            tracing::warn!(user_id, key = mtp_key, error = %e, "failed to persist algo state");
-                        }
+                        pending_algo.push((mtp_key.to_string(), val));
                     }
                 }
             }
@@ -1113,9 +1284,7 @@ impl AMASEngine {
             adjusted_interval_scale *= evm::interval_modifier(&evm_state, &config.evm);
 
             if let Ok(val) = serde_json::to_value(&evm_state) {
-                if let Err(e) = self.store.set_engine_algo_state(user_id, &evm_key, &val) {
-                    tracing::warn!(user_id, key = %evm_key, error = %e, "failed to persist algo state");
-                }
+                pending_algo.push((evm_key.clone(), val));
             }
         }
 
@@ -1144,13 +1313,10 @@ impl AMASEngine {
         let scheduled_recall =
             mdm::recall_probability(&state.mdm, scheduled_at, &config.memory_model);
 
-        self.store
-            .set_engine_algo_state(
-                user_id,
-                &key,
-                &serde_json::to_value(&state).map_err(|e| AppError::internal(&e.to_string()))?,
-            )
-            .map_err(|e| AppError::internal(&e.to_string()))?;
+        pending_algo.push((
+            key.clone(),
+            serde_json::to_value(&state).map_err(|e| AppError::internal(&e.to_string()))?,
+        ));
 
         Ok(Some(MemoryFeedback {
             decision,
@@ -1236,12 +1402,16 @@ impl AMASEngine {
         }
     }
 
+    /// 返回 `true`=本次状态已提交；`false`=幂等标记已被并发请求抢先写入、整笔回滚（详见
+    /// [`Store::persist_engine_state_atomic`]）。`idempotency_key` 为 `None` 时恒 `true`。
     fn persist_state(
         &self,
         user_id: &str,
         user_state: &mut UserState,
         algo_states: &AlgoStates,
-    ) -> Result<(), AppError> {
+        pending_algo: Vec<(String, serde_json::Value)>,
+        idempotency_key: Option<&str>,
+    ) -> Result<bool, AppError> {
         // 在保存前清理浮点字段，防止 NaN 传播
         user_state.attention = sanitize_float(user_state.attention, 0.5).clamp(0.0, 1.0);
         user_state.fatigue = sanitize_float(user_state.fatigue, 0.0).clamp(0.0, 1.0);
@@ -1257,7 +1427,10 @@ impl AMASEngine {
         let user_state_json =
             serde_json::to_value(&*user_state).map_err(|e| AppError::internal(&e.to_string()))?;
 
-        let algo_entries: Vec<(String, serde_json::Value)> = vec![
+        // W1-1：ige/swd/trust 与 update_memory 累积的 per-word 状态（mastery/IAD/MTP/EVM）合并，
+        // 连同幂等标记由 persist_engine_state_atomic 同一 tx 原子提交——保证"标记存在 ⟺ 全部 AMAS
+        // 状态已应用"，崩溃重试不会对记忆模型二次累加。
+        let mut algo_entries: Vec<(String, serde_json::Value)> = vec![
             (
                 "ige".to_string(),
                 serde_json::to_value(&algo_states.ige)
@@ -1274,9 +1447,10 @@ impl AMASEngine {
                     .map_err(|e| AppError::internal(&e.to_string()))?,
             ),
         ];
+        algo_entries.extend(pending_algo);
 
         self.store
-            .persist_engine_state_atomic(user_id, &user_state_json, &algo_entries)
+            .persist_engine_state_atomic(user_id, &user_state_json, &algo_entries, idempotency_key)
             .map_err(|e| AppError::internal(&e.to_string()))
     }
 
@@ -1374,6 +1548,7 @@ impl AMASEngine {
         "综合多维度指标生成个性化学习策略".to_string()
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn emit_monitoring(
         &self,
         user_id: &str,
@@ -1382,6 +1557,8 @@ impl AMASEngine {
         config: &AMASConfig,
         pre_constraint_strategy: &StrategyParams,
         config_version: &str,
+        routing_weights: &HashMap<AlgorithmId, f64>,
+        is_correct: bool,
     ) {
         monitoring::record_event(
             &self.store,
@@ -1392,6 +1569,8 @@ impl AMASEngine {
             config,
             pre_constraint_strategy,
             config_version,
+            routing_weights,
+            is_correct,
         );
     }
 }
@@ -1457,6 +1636,7 @@ mod tests {
                 &user_state,
                 &config,
                 None,
+                &mut Vec::new(),
             )
             .unwrap()
             .expect("short feedback");
@@ -1469,6 +1649,7 @@ mod tests {
                 &user_state,
                 &config,
                 None,
+                &mut Vec::new(),
             )
             .unwrap()
             .expect("long feedback");
@@ -2449,5 +2630,65 @@ mod tests {
             .await
             .unwrap();
         assert!(r.word_mastery.is_none());
+    }
+
+    // ---- D3:per-patch canary 多路由 ----
+
+    #[test]
+    fn effective_config_routes_by_patch_canary_cohort() {
+        use crate::store::operations::amas_versions::ConfigVersionSource;
+        let engine = test_engine(AMASConfig::default());
+        // 落一个 canary version snapshot(改一个可观测字段,与 stable 不同)
+        let mut canary_cfg = engine.get_config();
+        canary_cfg.memory_model.base_desired_retention = 0.99;
+        let snap = serde_json::to_string(&canary_cfg).unwrap();
+        let (_id, vhash) = engine
+            .store
+            .insert_amas_config_version(&snap, "admin", ConfigVersionSource::Manual, None, None)
+            .unwrap();
+        // 灰度 [0,20):宽度=percent=20
+        engine
+            .store
+            .insert_patch_canary(1, &vhash, 20, 0, 20, "{}")
+            .unwrap();
+
+        // 命中桶的用户拿 canary,未命中的拿 stable
+        let mut hit = 0usize;
+        for i in 0..200 {
+            let uid = format!("user-{i}");
+            let cfg = engine.effective_config_for_user(&uid);
+            if (cfg.memory_model.base_desired_retention - 0.99).abs() < 1e-9 {
+                hit += 1;
+            }
+        }
+        // 20% 桶 → 200 用户里命中数应在合理区间(非 0、非全部)
+        assert!(hit > 0 && hit < 200, "hit={hit} 应落在 (0,200)");
+    }
+
+    #[test]
+    fn effective_config_falls_back_stable_on_missing_version() {
+        let engine = test_engine(AMASConfig::default());
+        // canary 指向不存在的 version_hash → 全员回退 stable
+        engine
+            .store
+            .insert_patch_canary(1, "nonexistent-hash", 100, 0, 100, "{}")
+            .unwrap();
+        let stable = engine.get_config();
+        let cfg = engine.effective_config_for_user("any-user");
+        assert_eq!(
+            cfg.memory_model.base_desired_retention,
+            stable.memory_model.base_desired_retention
+        );
+    }
+
+    #[test]
+    fn effective_config_no_active_canary_returns_stable() {
+        let engine = test_engine(AMASConfig::default());
+        let stable = engine.get_config();
+        let cfg = engine.effective_config_for_user("user-x");
+        assert_eq!(
+            cfg.memory_model.base_desired_retention,
+            stable.memory_model.base_desired_retention
+        );
     }
 }

@@ -6,10 +6,10 @@
 
 | 参数 | 值 | 来源 |
 |------|----|------|
-| SQLite 连接池 | 16（`SQLITE_POOL_SIZE=16`） | commit `2b80575`，M0-P2 |
+| SQLite 连接池 | 8（`SQLITE_POOL_SIZE=8`，v1.1.3-N1 自 16 下调以收敛峰值内存） | commit `2b80575`，M0-P2 |
 | WAL 模式并发 | 1 writer + 15 readers | WAL 协议限制 |
 | 写入理论上限 | ≈ 300 写/s（fsync NORMAL 限制） | `docs/v1-research/03-perf-warden.md §4.1` |
-| 读取理论上限 | ≈ 10k+ 读/s | cache 64 MiB + mmap 256 MiB |
+| 读取理论上限 | ≈ 10k+ 读/s（依赖 OS page cache + mmap 命中，工作集偏大或冷启动时余量收窄） | cache ≈15.6 MiB（-16000）+ mmap 128 MiB（每连接，v1.1.2-beta.3 防 OOM 收紧）；内存账 cache ≈15.6 MiB × pool 8 ≈ 125 MiB |
 | SSE 连接上限 | 5000（`max_sse_connections`，v1.1-P2.4 自 1000 上调） | `src/config.rs LimitsConfig` |
 | 单实例稳态 QPS 目标 | ≥ 100 req/s | perf-warden SLA §7.2 |
 | 单实例峰值 QPS 目标 | ≥ 300 req/s | perf-warden SLA §7.2 |
@@ -78,7 +78,7 @@ echo "QPS ≈ $(echo "($T2 - $T1) / 300" | bc -l | xargs printf '%.1f')"
 
 按优先级排序：
 
-1. **提高 `SQLITE_POOL_SIZE`**：当前 16，上限受 WAL 单 writer 约束，提高读连接上限（如 32）可改善读密集场景。写瓶颈不受影响。
+1. **提高 `SQLITE_POOL_SIZE`**：当前默认 8（v1.1.3-N1 自 16 下调以收敛峰值内存 = 每连接 cache × pool）。上限受 WAL 单 writer 约束，读密集场景可上调（如 16/32），但须同步评估峰值内存。写瓶颈不受影响。
 2. **月度 VACUUM**：M0-P3 已实装（每月 1 日 UTC 03:00），确保 `ENABLE_ENGINE_MONITORING_WORKER=true`。
 3. **扩磁盘**：阿里云 ECS 云盘可在线扩容，无需停机（`/opt/wordforge` 挂载点扩容后 `resize2fs`）。
 4. **增加备份频率**：磁盘压力上升时适当提高 `VACUUM INTO` 备份频率，防止碎片累积。
@@ -96,3 +96,29 @@ echo "QPS ≈ $(echo "($T2 - $T1) / 300" | bc -l | xargs printf '%.1f')"
 | 需要流式复制 / 只读副本 | 读写分离需求出现 |
 
 切换 PostgreSQL 不在 M0/M1 范围内，届时参考 RFC §9.2 制定迁移方案。
+
+## 内核 / nginx 抗突发参数（v1.1.3-N3）
+
+2026-06-01 压测在 ~300 req/s 突发下实测两处默认值偏低，且换机重装会回退默认，故固化进部署。两项均**不提升 goodput**（CPU 瓶颈），目的是消除 TIME-WAIT 溢出 / 连接上限导致的稳定性抖动。
+
+### 1. sysctl：TIME-WAIT 桶上限
+
+默认 `tcp_max_tw_buckets=5000` 在突发下被打爆（`netstat -s` 中 `TcpExtTW` 攀至 162797 并持续溢出），表现为连接异常。配合 nginx keepalive（见 `deploy/nginx/*.conf`，减少 TIME-WAIT 产生量）后，本参数兜底突发：
+
+```bash
+sudo cp deploy/sysctl.d/99-wordforge.conf /etc/sysctl.d/
+sudo sysctl --system                      # 立即生效并在重启后持久
+sysctl net.ipv4.tcp_max_tw_buckets        # 校验应为 262144
+```
+
+### 2. nginx：worker_connections
+
+默认 `worker_connections 768` 在高并发 + keepalive 上游池下偏低。该指令位于 nginx **全局 `events{}` 块**（不在 `sites-available` 的 server 块内，故不能写进 `deploy/nginx/*.conf` 样例），需改 `/etc/nginx/nginx.conf`：
+
+```nginx
+events {
+    worker_connections 4096;   # 默认 768；最大并发 ≈ worker_processes × worker_connections
+}
+```
+
+改后执行 `nginx -t && systemctl reload nginx`。

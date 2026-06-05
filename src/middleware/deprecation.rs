@@ -7,7 +7,7 @@
 ///     deprecation::deprecation_headers(
 ///         "Sat, 01 Jan 2026 00:00:00 GMT",
 ///         "Sat, 01 Jul 2026 00:00:00 GMT",
-///         Some("https://docs.wordforge.app/migration/v1-to-v2"),
+///         Some("https://heartcoolman.github.io/wordforge/api-endpoints#v1-deprecation"),
 ///     ),
 /// ))
 /// ```
@@ -61,7 +61,9 @@ pub fn make_deprecation_layer(
 ///
 /// - 弃用日期：v0.6.0-beta.4 发布后即标弃用（2026-05-21）
 /// - Sunset 日期：v2.0.0 计划切换期（2027-01-01，届时 major bump）
-/// - 迁移文档：指向 api-endpoints.md §18 永久链接占位符（待文档站建好后替换为真实 URL）
+/// - 迁移文档：已部署文档站 api-endpoints §18（VitePress base=/wordforge/ + cleanUrls，
+///   §18 标题挂稳定锚点 {#v1-deprecation}）。常量须为可见 ASCII（HeaderValue 约束），故用锚点而非中文标题。
 pub const V1_DEPRECATION_DATE: &str = "Wed, 21 May 2026 00:00:00 GMT";
 pub const V1_SUNSET_DATE: &str = "Fri, 01 Jan 2027 00:00:00 GMT";
-pub const V1_LINK_URL: &str = "https://docs.wordforge.app/api/v1-deprecation";
+pub const V1_LINK_URL: &str =
+    "https://heartcoolman.github.io/wordforge/api-endpoints#v1-deprecation";

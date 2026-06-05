@@ -46,11 +46,16 @@ async fn update_config(
     JsonBody(req): JsonBody<UpdateStudyConfigRequest>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     let user_id = auth.user_id.clone();
-    let config = state
+    let (config, before_snapshot) = state
         .run_store_task(
             "study_config.update_config",
             move |store| -> Result<_, AppError> {
                 let mut config = store.get_study_config(&user_id)?;
+                // m025:保存 before 快照用于活动日志 from/to diff
+                let before = serde_json::json!({
+                    "dailyWordCount": config.daily_word_count,
+                    "dailyMasteryTarget": config.daily_mastery_target,
+                });
 
                 if let Some(ids) = req.selected_wordbook_ids {
                     for id in &ids {
@@ -74,10 +79,31 @@ async fn update_config(
                 }
 
                 store.set_study_config(&config)?;
-                Ok(config)
+                Ok((config, before))
             },
         )
         .await??;
+
+    // m025:用户活动日志 —— goal.update(失败仅 warn)
+    {
+        let store = state.store().clone();
+        let user_id_for_log = auth.user_id.clone();
+        let after = serde_json::json!({
+            "dailyWordCount": config.daily_word_count,
+            "dailyMasteryTarget": config.daily_mastery_target,
+        });
+        tokio::task::spawn_blocking(move || {
+            if let Err(e) = store.insert_user_activity(
+                &user_id_for_log,
+                "goal.update",
+                Some(&serde_json::json!({ "from": before_snapshot, "to": after })),
+                None,
+            ) {
+                tracing::warn!(error = %e, "写 goal.update activity 失败");
+            }
+        });
+    }
+
     Ok(ok(config))
 }
 

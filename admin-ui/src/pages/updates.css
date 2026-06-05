@@ -1,0 +1,233 @@
+/* 版本更新页专属样式 —— 移植自设计稿 admin后端/updates.html (26-234 行)。
+   token 与 index.css 同名同义，直接 var(--*)。 */
+
+.update-hero {
+  position: relative;
+  background: linear-gradient(135deg, var(--accent-light) 0%, var(--surface-elevated) 60%);
+  border-radius: var(--radius-xl);
+  padding: 28px 32px;
+  box-shadow: var(--elevation-2);
+  overflow: hidden;
+}
+.update-hero::before {
+  content: ''; position: absolute; right: -10%; top: -50%;
+  width: 50%; height: 200%;
+  background: radial-gradient(closest-side, color-mix(in oklab, var(--accent) 20%, transparent), transparent);
+  pointer-events: none;
+}
+.update-hero .hero-grid {
+  display: grid;
+  grid-template-columns: 1fr 320px;
+  gap: 24px;
+  align-items: center;
+}
+@media (max-width: 900px) { .update-hero .hero-grid { grid-template-columns: 1fr; } }
+.update-hero .lh1 { font: 700 26px/1.18 var(--font-display); letter-spacing: -0.022em; margin-bottom: 8px; color: var(--content); }
+.update-hero .lh1 em { font-style: normal; color: var(--accent); font-variant-numeric: tabular-nums; letter-spacing: -0.012em; }
+.update-hero .lh-sub { color: var(--content-secondary); font-size: 13.5px; max-width: 56ch; line-height: 1.55; }
+.update-hero .actions { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
+
+.version-card {
+  background: var(--surface-elevated);
+  border-radius: var(--radius-lg);
+  padding: 18px;
+  box-shadow: var(--elevation-2);
+  position: relative;
+  z-index: 1;
+}
+.version-card .row-top { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.version-card .v { font: 700 22px/1.1 var(--font-display); letter-spacing: -0.02em; font-variant-numeric: tabular-nums; color: var(--content); }
+.version-card .delta { font-family: var(--font-mono); font-size: 12px; color: var(--content-tertiary); margin-top: 2px; }
+.version-card .vs { display: flex; align-items: center; gap: 12px; margin-top: 14px; }
+.version-card .vs > div { flex: 1; }
+.version-card .vs .l { font-size: 10.5px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--content-tertiary); }
+.version-card .vs .vv { font: 600 14px/1.2 var(--font-display); font-variant-numeric: tabular-nums; color: var(--content); }
+.version-card .vs .arrow {
+  width: 22px; height: 22px;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  color: #fff;
+  display: grid; place-items: center;
+  flex-shrink: 0;
+  flex: none;
+}
+
+/* 升级流水线 */
+.pipeline {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 8px;
+  padding: 4px 0;
+}
+@media (max-width: 900px) { .pipeline { grid-template-columns: repeat(2, 1fr); } }
+.step {
+  position: relative;
+  background: var(--surface-elevated);
+  border: 1px solid var(--border-hairline);
+  border-radius: var(--radius-md);
+  padding: 12px;
+  transition: background var(--duration-base), border-color var(--duration-base);
+}
+.step::after {
+  content: '';
+  position: absolute; right: -8px; top: 50%;
+  transform: translateY(-50%) rotate(45deg);
+  width: 10px; height: 10px;
+  background: var(--surface-elevated);
+  border-top: 1px solid var(--border-hairline);
+  border-right: 1px solid var(--border-hairline);
+  z-index: 2;
+}
+.step:last-child::after { display: none; }
+.step .head { display: flex; align-items: center; gap: 8px; }
+.step .ic {
+  width: 26px; height: 26px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-secondary);
+  color: var(--content-secondary);
+  display: grid; place-items: center;
+  flex-shrink: 0;
+}
+.step .ic svg { width: 14px; height: 14px; }
+.step .name { font: 600 12.5px/1.2 var(--font-display); color: var(--content); }
+.step .status { font: 500 11px/1 var(--font-mono); color: var(--content-tertiary); margin-top: 4px; letter-spacing: 0.02em; }
+.step .duration { font-size: 10.5px; color: var(--content-quaternary); margin-top: 2px; font-family: var(--font-mono); }
+
+.step.is-done { border-color: color-mix(in oklab, var(--success) 30%, transparent); background: var(--success-light); }
+.step.is-done .ic { background: var(--success); color: #fff; }
+.step.is-done .status { color: var(--success-strong); }
+
+.step.is-running { border-color: color-mix(in oklab, var(--accent) 40%, transparent); background: var(--accent-light); }
+.step.is-running .ic { background: var(--accent); color: #fff; }
+.step.is-running .status { color: var(--accent); }
+.step.is-running::before {
+  content: ''; position: absolute; inset: -1px;
+  border-radius: var(--radius-md);
+  background: linear-gradient(135deg, color-mix(in oklab, var(--accent) 25%, transparent), transparent);
+  animation: update-shimmer 1.5s infinite;
+  pointer-events: none;
+  z-index: -1;
+}
+@keyframes update-shimmer { 0% { opacity: 0.2; } 50% { opacity: 0.6; } 100% { opacity: 0.2; } }
+
+.step.is-pending { opacity: 0.6; }
+
+/* CHANGELOG */
+.changelog {
+  font-family: var(--font-body);
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--content);
+}
+.changelog h4 { font: 600 13px/1.3 var(--font-display); margin: 18px 0 6px; color: var(--content); }
+.changelog h4:first-child { margin-top: 0; }
+.changelog ul { list-style: none; padding-left: 0; margin: 0; }
+.changelog ul li { padding: 4px 0 4px 26px; position: relative; color: var(--content-secondary); font-size: 12.5px; }
+.changelog ul li::before {
+  content: ''; position: absolute; left: 8px; top: 11px;
+  width: 8px; height: 8px; border-radius: 2px;
+  background: var(--content-quaternary);
+}
+.changelog ul li.feat::before { background: var(--success); }
+.changelog ul li.fix::before  { background: var(--warning); }
+.changelog ul li.perf::before { background: var(--accent); }
+.changelog ul li.docs::before { background: var(--content-quaternary); }
+.changelog ul li code { font-family: var(--font-mono); font-size: 11.5px; background: var(--surface-secondary); padding: 1px 6px; border-radius: 4px; }
+.changelog .scope {
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--content-tertiary);
+  background: var(--surface-secondary);
+  padding: 1px 6px;
+  border-radius: 4px;
+  margin-right: 6px;
+}
+
+/* 版本历史时间线 */
+.timeline { padding: 4px 6px 8px; position: relative; }
+.timeline::before {
+  content: ''; position: absolute; left: 11px; top: 18px; bottom: 18px;
+  width: 2px;
+  background: var(--border-hairline);
+}
+.timeline-item { position: relative; padding: 10px 10px 10px 36px; border-radius: var(--radius-md); transition: background var(--duration-fast); }
+.timeline-item:hover { background: var(--surface-secondary); }
+.timeline-item .dot {
+  position: absolute; left: 5px; top: 14px;
+  width: 14px; height: 14px;
+  border-radius: 50%;
+  background: var(--surface-elevated);
+  border: 3px solid var(--content-tertiary);
+}
+.timeline-item.is-current .dot { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-ring); }
+.timeline-item.is-rollback .dot { border-color: var(--warning); background: var(--warning-light); }
+.timeline-item .lv { display: flex; align-items: baseline; gap: 8px; font: 600 13.5px/1.2 var(--font-display); font-variant-numeric: tabular-nums; color: var(--content); }
+.timeline-item .lv .date { font: 500 11px/1 var(--font-mono); color: var(--content-tertiary); }
+.timeline-item .lv .label { display: inline-flex; align-items: center; gap: 4px; }
+.timeline-item .lv .label.feat { color: var(--success-strong); }
+.timeline-item .desc { font-size: 12px; color: var(--content-secondary); margin-top: 3px; }
+.timeline-item .actions { display: flex; gap: 6px; margin-top: 8px; }
+
+.backup-row {
+  display: grid;
+  grid-template-columns: 24px 1fr 100px 110px auto;
+  gap: 10px;
+  align-items: center;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--border-hairline);
+  font-size: 12.5px;
+}
+.backup-row:last-child { border-bottom: 0; }
+.backup-row .ic { width: 24px; height: 24px; border-radius: var(--radius-sm); background: var(--surface-secondary); color: var(--content-tertiary); display: grid; place-items: center; }
+.backup-row .name strong { display: block; font-weight: 500; font-family: var(--font-mono); font-size: 12px; color: var(--content); }
+.backup-row .name span { font-size: 11px; color: var(--content-tertiary); }
+.backup-row .size, .backup-row .date { color: var(--content-tertiary); font-family: var(--font-mono); font-size: 11.5px; }
+.backup-row .actions { display: flex; gap: 4px; justify-content: flex-end; align-items: center; }
+
+.maint-card {
+  background: var(--warning-light);
+  border: 1px solid color-mix(in oklab, var(--warning) 30%, transparent);
+  border-radius: var(--radius-lg);
+  padding: 14px 16px;
+  display: flex; align-items: center; gap: 14px;
+}
+.maint-card .ic {
+  width: 36px; height: 36px;
+  border-radius: 10px;
+  background: var(--warning);
+  color: #fff;
+  display: grid; place-items: center;
+  flex-shrink: 0;
+}
+.maint-card .info { flex: 1; }
+.maint-card .info strong { display: block; font: 600 14px/1.3 var(--font-display); color: var(--content); }
+.maint-card .info span { font-size: 12px; color: var(--warning-strong); margin-top: 2px; display: block; }
+
+/* 通用辅助类（设计稿 admin.css 提供，index.css 未含的最小补充） */
+.upd-panel {
+  background: var(--surface-elevated);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--elevation-1);
+}
+.upd-panel-header {
+  display: flex; align-items: baseline; gap: 12px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border-hairline);
+}
+.upd-panel-header h3 { font: 600 14px/1.3 var(--font-display); color: var(--content); }
+.upd-panel-header .aside { margin-left: auto; display: flex; gap: 6px; align-items: center; }
+.upd-panel-body { padding: 16px 18px; }
+.upd-divider { height: 1px; background: var(--border-hairline); margin: 12px 0; }
+.upd-row-spread { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.upd-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 11px; font-weight: 600;
+  padding: 2px 8px; border-radius: var(--radius-pill);
+  background: var(--surface-secondary); color: var(--content-secondary);
+}
+.upd-chip.is-success { background: var(--success-light); color: var(--success-strong); }
+.upd-chip.is-warning { background: var(--warning-light); color: var(--warning-strong); }
+.upd-chip.is-accent  { background: var(--accent-light); color: var(--accent); }
+.upd-chip .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }

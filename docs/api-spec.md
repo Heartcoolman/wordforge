@@ -97,9 +97,11 @@ accessToken 过期 → POST /api/auth/refresh（携带 refresh_token）
 | Header | 类型 | 说明 |
 |---|---|---|
 | `x-device-id` | string | 设备唯一标识（UUID），用于设备追踪和封禁管理 |
-| `x-device-platform` | string | 设备平台，如 `web` / `ios` / `android`，默认 `unknown` |
+| `x-device-platform` | string | 设备平台，如 `web` / `ios` / `android`。**对 `/api/telemetry` 端点为必填**（缺失或为 `unknown` 即 `400 MISSING_OS`），其余端点缺省按 `unknown` 处理 |
 
 > **注意：** 携带 `x-device-id` 的请求，若对应设备被管理员封禁，将直接返回 403。
+
+> **遥测端点的硬识别要求（自 v1.1.2-beta.4 / m038 起）：** `/api/telemetry` 对四要素做**上线即生效、不受 strict-mode 开关控制**的必填校验——平台 / 版本走 header（`x-device-platform`、`x-app-version`），时区 / 型号走 payload（`device.timezone`、`device.model`）。详见 §11 遥测载体契约。
 
 ### 3.3 服务端响应头
 
@@ -167,6 +169,12 @@ accessToken 过期 → POST /api/auth/refresh（携带 refresh_token）
 |---|---|---|
 | 400 | `INVALID_REQUEST_BODY` | JSON 解析失败或 Content-Type 缺失 |
 | 400 | `VALIDATION_ERROR` | 字段校验失败（来自 Store 层） |
+| 400 | `MISSING_OS` | `/api/telemetry` 缺少 `x-device-platform` 头或其值为 `unknown`（自 m038 起硬校验） |
+| 400 | `MISSING_APP_VERSION` | `/api/telemetry` 缺少 `x-app-version` 头（自 m038 起硬校验） |
+| 400 | `MISSING_TIMEZONE` | `/api/telemetry` payload 缺少 `device.timezone`（自 m038 起硬校验） |
+| 400 | `MISSING_DEVICE_MODEL` | `/api/telemetry` payload 缺少 `device.model`（自 m038 起新增必填） |
+| 403 | `DEVICE_NOT_REGISTERED` | `/api/telemetry` 设备未注册（需先正常登录使用后再上报） |
+| 403 | `DEVICE_OWNERSHIP_MISMATCH` | `/api/telemetry` 设备归属与当前账号不符 |
 | 400 | 业务错误码 | 各模块自定义前缀码，如 `AUTH_*` / `LEARNING_*` / `WORDS_*` / `WORDBOOK_*` / `BATCH_TOO_LARGE` 等 |
 | 401 | `AUTH_UNAUTHORIZED` | 未携带 token 或 token 失效 |
 | 403 | `FORBIDDEN` | 无权限、账号被封禁、注册关闭或用户数量达到上限 |
@@ -278,3 +286,39 @@ accessToken 过期 → POST /api/auth/refresh（携带 refresh_token）
 | 单词本类型枚举 | `"system"` / `"user"`（字段名为 `type`） |
 | 学习记录类型枚举 | `"learning"` / `"review"` / `"all"`（字段名为 `recordType`，写入端可选；缺省落库 `"all"`） |
 | 统计分类查询 | `?category=learning\|review\|all`，缺省或 `all` 等同不过滤；用于 `/api/records/statistics`、`/api/records/statistics/enhanced`、`/api/word-states/stats/overview` |
+
+---
+
+## 11. 遥测载体契约（`POST /api/telemetry`）
+
+> 自 **v1.1.2-beta.4（迁移 m038）** 起，遥测端点对设备四要素做**上线即生效、不受 `strict_mode` 开关控制**的硬校验，缺任一即返回 4xx。客户端发版前务必补齐以下载体，否则上报全部被拦。
+
+### 11.1 请求头（必填）
+
+| Header | 校验 | 缺失/非法时 |
+|---|---|---|
+| `x-device-platform` | 非空且 ≠ `unknown`（`web` / `ios` / `android`） | `400 MISSING_OS` |
+| `x-app-version` | 非空（客户端版本号） | `400 MISSING_APP_VERSION` |
+| `x-device-id` | 设备 UUID（用于归属核验） | 归属态判定见 §11.3 |
+
+### 11.2 请求体 `payload.device`（必填字段）
+
+| 字段 | 类型 | 校验 | 缺失/为空时 |
+|---|---|---|---|
+| `device.timezone` | string | 非空（IANA 时区，如 `Asia/Shanghai`） | `400 MISSING_TIMEZONE` |
+| `device.model` | string | 非空（设备型号；Web 端无真型号可落 `browser on OS` 派生标识或 `web-admin` 占位） | `400 MISSING_DEVICE_MODEL` |
+| `device.language` | string | `session_start` 时受 strict-mode 软门控 | strict 开启时 `MISSING_LANGUAGE` |
+| `device.screenWidth/screenHeight/pixelRatio/cpuCores` | number | `session_start` 时受 strict-mode 软门控（均 > 0） | strict 开启时 `MISSING_DEVICE_FINGERPRINT` |
+
+> `device.model` 为 m038 **新增必填**字段。`device.timezone` 已由四要素硬校验接管，**不再**仅受 strict-mode 软门控（旧文档表述已过期）。
+
+### 11.3 设备归属三态核验
+
+四要素校验通过后，按 `x-device-id` 对应的设备 `owner` 做三态判定：
+
+| owner 态 | 处理 |
+|---|---|
+| 设备未注册（无记录） | `403 DEVICE_NOT_REGISTERED` |
+| 已注册但归属为其他账号 | `403 DEVICE_OWNERSHIP_MISMATCH` |
+| 已注册且归属当前账号 | 放行 |
+| 已注册但未认领（owner 为 NULL） | claim 放行（不误伤老匿名设备） |

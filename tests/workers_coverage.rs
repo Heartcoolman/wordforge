@@ -36,6 +36,10 @@ fn sample_user(id: &str, email: &str) -> User {
         updated_at: Utc::now(),
         failed_login_count: 0,
         locked_until: None,
+        role: "user".to_string(),
+        status: "active".to_string(),
+        last_login_at: None,
+        referrer_source: None,
     }
 }
 
@@ -77,6 +81,7 @@ fn sample_record(
         created_at,
         record_type: RecordType::All,
         self_rating: None,
+        question_mode: None,
     }
 }
 

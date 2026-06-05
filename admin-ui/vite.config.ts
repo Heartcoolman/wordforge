@@ -27,10 +27,25 @@ export default defineConfig({
     sourcemap: 'hidden',
     rollupOptions: {
       output: {
-        manualChunks: {
-          'vendor-solid': ['solid-js', 'solid-js/web', 'solid-js/store'],
-          'vendor-router': ['@solidjs/router'],
-          'vendor-mediapipe': ['@mediapipe/tasks-vision'],
+        // v1.1.3-E4：函数式 manualChunks。echarts/codemirror 用子路径导入
+        // （echarts/core、@codemirror/*），对象式 ['echarts'] 匹配不到子模块，
+        // 改 id.includes 命中整个包目录 + 传递依赖（zrender / @lezer / crelt …），
+        // 确保跨路由去重 + 长期缓存稳定（价值不在减首屏——首屏已被路由级 lazy 隔离）。
+        manualChunks(id) {
+          if (!id.includes('node_modules')) return;
+          if (id.includes('/echarts/') || id.includes('/zrender/')) return 'vendor-echarts';
+          if (
+            id.includes('/@codemirror/') ||
+            id.includes('/@lezer/') ||
+            id.includes('/codemirror/') ||
+            id.includes('/crelt/') ||
+            id.includes('/style-mod/') ||
+            id.includes('/w3c-keyname/')
+          )
+            return 'vendor-codemirror';
+          if (id.includes('/solid-js/')) return 'vendor-solid';
+          if (id.includes('/@solidjs/router/')) return 'vendor-router';
+          if (id.includes('/@mediapipe/')) return 'vendor-mediapipe';
         },
       },
     },

@@ -219,15 +219,21 @@ impl EARCalculator {
             Some((ear, conf))
         };
 
-        let (left_ear, left_conf) = calc(left).unwrap_or((0.0, 0.0));
-        let (right_ear, right_conf) = calc(right).unwrap_or((0.0, 0.0));
-
-        let ear = (left_ear + right_ear) / 2.0;
-        let confidence = (left_conf + right_conf) / 2.0;
-
-        self.push_history(ear);
-
-        EARResult { ear, confidence }
+        // 仅对有效眼求平均，避免单眼无效时与 0.0 平均把 EAR 腰斩
+        let results: Vec<(f64, f64)> = [calc(left), calc(right)].into_iter().flatten().collect();
+        match results.len() {
+            0 => EARResult {
+                ear: 0.0,
+                confidence: 0.0,
+            },
+            n => {
+                let ear = results.iter().map(|r| r.0).sum::<f64>() / n as f64;
+                let confidence = results.iter().map(|r| r.1).sum::<f64>() / n as f64
+                    * if n == 1 { 0.5 } else { 1.0 };
+                self.push_history(ear);
+                EARResult { ear, confidence }
+            }
+        }
     }
 
     /// 重置计算器状态

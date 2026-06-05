@@ -21,7 +21,7 @@ interface TableProps<T> {
   caption?: string;
 }
 
-export function Table<T extends Record<string, unknown>>(props: TableProps<T>) {
+export function Table<T>(props: TableProps<T>) {
   // 行键盘交互：onRowClick 模式下 Enter/Space 触发
   const onRowKeyDown = (row: T) => (e: KeyboardEvent) => {
     if (!props.onRowClick) return;
@@ -97,7 +97,7 @@ export function Table<T extends Record<string, unknown>>(props: TableProps<T>) {
                   <For each={props.columns}>
                     {(col) => (
                       <td class={cn('px-4 py-3 text-content', col.class)}>
-                        {col.render ? col.render(row, index()) : String(row[col.key] ?? '')}
+                        {col.render ? col.render(row, index()) : String((row as Record<string, unknown>)[col.key] ?? '')}
                       </td>
                     )}
                   </For>

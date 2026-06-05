@@ -9,6 +9,9 @@ use tracing::Instrument;
 use crate::response::ErrorBody;
 
 pub async fn request_id_middleware(req: Request, next: Next) -> Response {
+    // 在途请求计数：RAII 守卫覆盖整个处理周期（含 panic / early-return 回收）
+    let _inflight = crate::metrics_counters::InflightGuard::enter();
+
     let request_id = req
         .headers()
         .get("x-request-id")
@@ -207,10 +210,7 @@ mod tests {
                         .into_response()
                 }),
             )
-            .route(
-                "/echo-body",
-                post(|body: String| async move { body }),
-            )
+            .route("/echo-body", post(|body: String| async move { body }))
             .layer(axum::middleware::from_fn(request_id_middleware))
     }
 
@@ -228,7 +228,10 @@ mod tests {
 
     #[test]
     fn error_code_mapping_covers_common_statuses() {
-        assert_eq!(error_code_for_status(StatusCode::BAD_REQUEST), "BAD_REQUEST");
+        assert_eq!(
+            error_code_for_status(StatusCode::BAD_REQUEST),
+            "BAD_REQUEST"
+        );
         assert_eq!(
             error_code_for_status(StatusCode::UNAUTHORIZED),
             "AUTH_UNAUTHORIZED"
@@ -294,7 +297,12 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
-        let rid = resp.headers().get("x-request-id").unwrap().to_str().unwrap();
+        let rid = resp
+            .headers()
+            .get("x-request-id")
+            .unwrap()
+            .to_str()
+            .unwrap();
         assert_ne!(rid, "has space");
         // uuid v4: 36 chars
         assert_eq!(rid.len(), 36);

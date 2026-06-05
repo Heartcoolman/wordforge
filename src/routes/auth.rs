@@ -198,6 +198,11 @@ async fn register(
                     updated_at: now,
                     failed_login_count: 0,
                     locked_until: None,
+                    role: "user".to_string(),
+                    status: "active".to_string(),
+                    last_login_at: None,
+                    // m025:公开注册流暂不记录 referral,未来由前端 req.referrer 传入
+                    referrer_source: None,
                 };
                 store.create_user(&user)?;
                 Ok(user)
@@ -236,10 +241,32 @@ async fn register(
     Ok(response)
 }
 
+// m025:从代理 / 直连请求里 best-effort 取 client IP,无则返回 None。
+// 优先不可伪造的 x-real-ip(nginx $remote_addr),次 XFF 最右段(最近可信跳),均无 → None。
+// 取最右段而非首段以防客户端注入 XFF 首值伪造审计 IP,与 rate_limit 限流口径一致。
+fn extract_client_ip(headers: &axum::http::HeaderMap) -> Option<String> {
+    if let Some(real) = headers
+        .get("x-real-ip")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        return Some(real);
+    }
+    headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|xff| xff.split(',').next_back())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 async fn login(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     JsonBody(req): JsonBody<LoginRequest>,
 ) -> Result<Response, AppError> {
+    let client_ip = extract_client_ip(&headers);
     let email = req.email.trim().to_lowercase();
     let (user, is_locked) = state
         .run_store_task("auth.login.lookup", move |store| -> Result<_, AppError> {
@@ -322,6 +349,27 @@ async fn login(
         email = %mask_email_for_log(&user.email),
         "用户登录成功"
     );
+
+    // m025:用户活动日志(失败仅 warn,不阻塞登录响应)
+    {
+        let store = state.store().clone();
+        let user_id = user.id.clone();
+        let ip = client_ip.clone();
+        let ua = headers
+            .get(axum::http::header::USER_AGENT)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        tokio::task::spawn_blocking(move || {
+            if let Err(e) = store.insert_user_activity(
+                &user_id,
+                "user.login",
+                Some(&serde_json::json!({ "ua": ua })),
+                ip.as_deref(),
+            ) {
+                tracing::warn!(error = %e, "写 user.login activity 失败(不影响登录主流程)");
+            }
+        });
+    }
 
     let payload = AuthResponse {
         access_token: access_token.clone(),

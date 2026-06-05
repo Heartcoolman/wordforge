@@ -7,6 +7,13 @@ vi.mock('@/api/admin', () => ({
     login: vi.fn(),
     getHealth: vi.fn(),
     checkStatus: vi.fn(),
+    // 重设计后登录页右栏挂公共 /health 资源（adminApi.health），无 token 即可调用
+    health: vi.fn(() => Promise.resolve(null)),
+  },
+}));
+vi.mock('@/api/health', () => ({
+  healthApi: {
+    getStatus: vi.fn(() => Promise.resolve(null)),
   },
 }));
 vi.mock('@/lib/token', () => ({
@@ -31,6 +38,8 @@ describe('LoginPage extra branches', () => {
     vi.clearAllMocks();
     mockToken.getAdminToken.mockReturnValue(null);
     mockApi.checkStatus.mockResolvedValue({ initialized: true });
+    // clearAllMocks 清掉默认实现，需重设 health 返回值（createResource 内 .catch 依赖 thenable）
+    mockApi.health.mockResolvedValue(null);
   });
 
   async function renderPage() {
@@ -73,7 +82,7 @@ describe('LoginPage extra branches', () => {
     const inputs = document.querySelectorAll('input');
     fireEvent.input(inputs[0], { target: { value: 'a@b.c' } });
     fireEvent.input(inputs[1], { target: { value: 'pwd123' } });
-    fireEvent.click(screen.getByRole('button', { name: '登录' }));
+    fireEvent.click(screen.getByRole('button', { name: /进入管理后台/ }));
     await waitFor(() => expect(mockToken.setAdminToken).toHaveBeenCalledWith('new-tok'));
   });
 
@@ -83,7 +92,7 @@ describe('LoginPage extra branches', () => {
     const inputs = document.querySelectorAll('input');
     fireEvent.input(inputs[0], { target: { value: 'a@b.c' } });
     fireEvent.input(inputs[1], { target: { value: 'wrong' } });
-    fireEvent.click(screen.getByRole('button', { name: '登录' }));
+    fireEvent.click(screen.getByRole('button', { name: /进入管理后台/ }));
     await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
   });
 
@@ -99,8 +108,8 @@ describe('LoginPage extra branches', () => {
       fireEvent.input(inputs[1], { target: { value: 'x' } });
 
       for (let i = 0; i < 3; i++) {
-        // 按钮可能是"登录"（未锁）或前一轮已清零后的"登录"
-        fireEvent.click(screen.getByRole('button', { name: /^(登录|锁定中)/ }));
+        // 按钮可能是"进入管理后台"（未锁）或前一轮已清零后的同名（不在 lock 窗口内）
+        fireEvent.click(screen.getByRole('button', { name: /^(进入管理后台|锁定中)/ }));
         // 排空微任务：让 handleSubmit 的 catch 分支（Promise rejection）完成
         await Promise.resolve();
         await Promise.resolve();

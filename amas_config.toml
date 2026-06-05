@@ -160,7 +160,7 @@ streakMinGapMs = 1800000
 stabilityBaseDays = 20.0
 forgettingCurveFactor = 0.3
 forgettingCurveDecay = -0.5
-forgettingCurveFloor = 0
+forgettingCurveFloor = 0.0
 w = [
     0.174453,
     0.660618,
@@ -173,10 +173,10 @@ w = [
     1.208657,
     0.273007,
     0.384712,
-    1.2,
-    0.08,
-    0.2,
-    1.3,
+    1.9395,
+    0.11,
+    0.29605,
+    2.2698,
     0.165065,
     4.340478,
     0.51655,

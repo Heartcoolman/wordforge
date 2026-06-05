@@ -14,7 +14,10 @@ use crate::store::Store;
 const RETENTION_DAYS: i64 = 30;
 
 pub async fn run(store: &Store) {
-    tracing::info!(retention_days = RETENTION_DAYS, "monitoring_retention: start");
+    tracing::info!(
+        retention_days = RETENTION_DAYS,
+        "monitoring_retention: start"
+    );
     let store = store.clone();
 
     let result = crate::blocking::run_blocking("worker.monitoring_retention", move || {
@@ -93,11 +96,9 @@ mod tests {
         // 确认两条都在
         let count_before: i64 = {
             let conn = store.connection().expect("conn");
-            conn.query_row(
-                "SELECT COUNT(*) FROM engine_monitoring_events",
-                [],
-                |r| r.get(0),
-            )
+            conn.query_row("SELECT COUNT(*) FROM engine_monitoring_events", [], |r| {
+                r.get(0)
+            })
             .expect("count before")
         };
         assert_eq!(count_before, 2, "应有 2 条记录");
@@ -108,23 +109,17 @@ mod tests {
         // 旧事件被删除，近期事件保留
         let count_after: i64 = {
             let conn = store.connection().expect("conn");
-            conn.query_row(
-                "SELECT COUNT(*) FROM engine_monitoring_events",
-                [],
-                |r| r.get(0),
-            )
+            conn.query_row("SELECT COUNT(*) FROM engine_monitoring_events", [], |r| {
+                r.get(0)
+            })
             .expect("count after")
         };
         assert_eq!(count_after, 1, "旧事件应被删除，仅保留近期记录");
 
         let remaining_id: String = {
             let conn = store.connection().expect("conn");
-            conn.query_row(
-                "SELECT id FROM engine_monitoring_events",
-                [],
-                |r| r.get(0),
-            )
-            .expect("remaining id")
+            conn.query_row("SELECT id FROM engine_monitoring_events", [], |r| r.get(0))
+                .expect("remaining id")
         };
         assert_eq!(remaining_id, "recent-1", "保留的应为近期事件");
     }

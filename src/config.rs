@@ -29,6 +29,9 @@ pub struct Config {
     pub self_watchdog: SelfWatchdogConfig,
     pub rate_limit: RateLimitConfig,
     pub auth_rate_limit: AuthRateLimitConfig,
+    /// W3-1：遥测专用 per-user 限频（独立于通用 API 双轨预算），更紧配额防噪声客户端
+    /// 打满 SQLite 写路径挤占学习数据写入。
+    pub telemetry_rate_limit: AuthRateLimitConfig,
     pub worker: WorkerConfig,
     pub amas: AMASEnvConfig,
     pub amas_config_file: Option<String>,
@@ -38,6 +41,8 @@ pub struct Config {
     pub limits: LimitsConfig,
     pub strict_mode: StrictModeConfig,
     pub probe: ProbeConfig,
+    /// S2-1：records→AMAS 是否走 outbox 异步消费路径（默认 false=同步老路，保留 amas_result 同步返回）。
+    pub records_outbox_async: bool,
 }
 
 /// 远程探针配置：默认 enabled=false，避免未明确开启时被误用。
@@ -269,6 +274,7 @@ impl fmt::Debug for Config {
             .field("self_watchdog", &self.self_watchdog)
             .field("rate_limit", &self.rate_limit)
             .field("auth_rate_limit", &self.auth_rate_limit)
+            .field("telemetry_rate_limit", &self.telemetry_rate_limit)
             .field("worker", &self.worker)
             .field("amas", &self.amas)
             .field("llm", &self.llm)
@@ -327,7 +333,9 @@ impl Config {
             api_only: env_or_bool("API_ONLY", false),
             sqlite_busy_timeout_ms: env_or_parse("SQLITE_BUSY_TIMEOUT_MS", 5000_u64),
             sqlite_connection_timeout_ms: env_or_parse("SQLITE_CONNECTION_TIMEOUT_MS", 250_u64),
-            sqlite_pool_size: env_or_parse("SQLITE_POOL_SIZE", 16_u32),
+            // v1.1.3-N1：峰值内存 = 每连接 SQLite page cache × pool 连接数。beta.3 已收紧
+            // cache_size(-64000→-16000≈15.6MiB/连接)，此处把 pool 默认 16→8 收敛峰值上界。
+            sqlite_pool_size: env_or_parse("SQLITE_POOL_SIZE", 8_u32),
             jwt_secret,
             refresh_jwt_secret,
             jwt_expires_in_hours: env_or_parse("JWT_EXPIRES_IN_HOURS", 24_u64),
@@ -347,14 +355,16 @@ impl Config {
                 max_requests: env_or_parse("RATE_LIMIT_MAX", 500_u64),
                 // v1.1-P2.3：匿名 60 / window，已登录 600 / window（差异化默认值）。
                 anonymous_max_requests: env_or_parse("RATE_LIMIT_ANONYMOUS_MAX", 60_u64),
-                authenticated_max_requests: env_or_parse(
-                    "RATE_LIMIT_AUTHENTICATED_MAX",
-                    600_u64,
-                ),
+                authenticated_max_requests: env_or_parse("RATE_LIMIT_AUTHENTICATED_MAX", 600_u64),
             },
             auth_rate_limit: AuthRateLimitConfig {
                 window_secs: env_or_parse("AUTH_RATE_LIMIT_WINDOW_SECS", 60_u64),
                 max_requests: env_or_parse("AUTH_RATE_LIMIT_MAX", 10_u64),
+            },
+            // W3-1：遥测专项 per-user 配额，默认 120 / 60s（显式 window，非「每分钟」口径巧合）。
+            telemetry_rate_limit: AuthRateLimitConfig {
+                window_secs: env_or_parse("RATE_LIMIT_TELEMETRY_WINDOW_SECS", 60_u64),
+                max_requests: env_or_parse("RATE_LIMIT_TELEMETRY_MAX", 120_u64),
             },
             worker: WorkerConfig {
                 is_leader: env_or_bool("WORKER_LEADER", true),
@@ -390,7 +400,9 @@ impl Config {
                 cache_ttl_secs: env_or_parse("UPDATE_CHECK_CACHE_TTL_SECS", 3600_u64),
                 worker_enabled: env_or_bool("ENABLE_UPDATE_CHECKER_WORKER", true),
                 worker_interval_secs: env_or_parse("UPDATE_CHECKER_INTERVAL_SECS", 3600_u64),
-                github_token: env::var("WORDFORGE_GITHUB_TOKEN").ok().filter(|s| !s.is_empty()),
+                github_token: env::var("WORDFORGE_GITHUB_TOKEN")
+                    .ok()
+                    .filter(|s| !s.is_empty()),
                 allow_downgrade: env_or_bool("UPDATE_ALLOW_DOWNGRADE", false),
                 install_dir: env::var("UPDATE_INSTALL_DIR")
                     .ok()
@@ -412,6 +424,7 @@ impl Config {
                     .ok()
                     .filter(|s| !s.is_empty()),
             },
+            records_outbox_async: env_or_bool("RECORDS_OUTBOX_ASYNC", false),
             probe: ProbeConfig {
                 enabled: env_or_bool("PROBE_ENABLED", false),
                 rate_limit_per_min: env_or_parse("PROBE_RATE_LIMIT_PER_MIN", 10_u32),
@@ -837,6 +850,7 @@ mod tests {
             sqlite_busy_timeout_ms: 5000,
             sqlite_connection_timeout_ms: 250,
             sqlite_pool_size: 2,
+            records_outbox_async: false,
             jwt_secret: good.clone(),
             refresh_jwt_secret: good.clone(),
             jwt_expires_in_hours: 1,
@@ -854,6 +868,7 @@ mod tests {
                 authenticated_max_requests: 0,
             },
             auth_rate_limit: AuthRateLimitConfig::default(),
+            telemetry_rate_limit: AuthRateLimitConfig::default(),
             worker: WorkerConfig {
                 is_leader: false,
                 enable_llm_advisor: false,

@@ -6,6 +6,7 @@ pub mod config;
 pub mod constants;
 pub mod extractors;
 pub mod logging;
+pub mod logging_buffer;
 pub mod metrics_counters;
 pub mod middleware;
 // M0-C2：25 个 v1-stable 端点的 OpenAPI 3.1 集中声明

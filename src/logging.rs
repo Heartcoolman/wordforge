@@ -24,7 +24,12 @@ pub fn init_tracing(config: &LogConfig) {
 
     let stdout_layer = fmt::layer().with_target(true).with_thread_ids(false);
 
-    let registry = Registry::default().with(env_filter).with(stdout_layer);
+    // M0-P5：进程内日志环形缓冲（admin 监控页「实时日志」面板数据源）。
+    // 放在 env_filter 之后，复用同一全局级别过滤，开销受控。
+    let registry = Registry::default()
+        .with(env_filter)
+        .with(crate::logging_buffer::layer())
+        .with(stdout_layer);
 
     if config.enable_file_logs {
         let file_appender = RollingFileAppender::builder()

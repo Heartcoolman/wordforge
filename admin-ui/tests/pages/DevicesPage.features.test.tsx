@@ -9,6 +9,7 @@ vi.mock('@/api/admin', () => ({
     unbanClient: vi.fn(),
     requestTelemetry: vi.fn(),
     getTelemetry: vi.fn(),
+    getTelemetrySummary: vi.fn(),
   },
 }));
 vi.mock('@/stores/ui', () => ({
@@ -55,7 +56,11 @@ async function renderPage() {
 }
 
 describe('DevicesPage — tabs, ban dialog, telemetry edge data', () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // 遥测面板并行拉分类总览;默认返空总览,保证 Promise.all 不抛、getTelemetry 仍被调用
+    mockApi.getTelemetrySummary.mockResolvedValue({ total: 0, firstTs: null, lastTs: null, byEventType: [], deviceProfile: null });
+  });
 
   it('clicking SSE tab button switches back from recent', async () => {
     mockApi.getClients.mockResolvedValue({ sseLive: [sseEntry], recentlyActive: [recentEntry] });
@@ -108,11 +113,22 @@ describe('DevicesPage — tabs, ban dialog, telemetry edge data', () => {
       dataChannels: { amas: 'uploaded' as const, learning: 'uploaded' as const, telemetry: 'uploaded' as const },
       isBanned: false,
     }], recentlyActive: [] });
+    // 概览需 total>0 才出明细 toggle;byEventType 用 periodic 避免与行徽章 session.summary 撞名
+    mockApi.getTelemetrySummary.mockResolvedValue({
+      total: 1, firstTs: '2026-04-15 10:00:00', lastTs: '2026-04-15 10:00:00',
+      byEventType: [{ eventType: 'periodic', count: 1, avgDurationSecs: 300, totalErrors: 0, avgActionsPerMin: 12.5, avgResponseMs: 120 }],
+      deviceProfile: telemetryNullBehavior.deviceProfile,
+      featureUsage: [], routes: [], clickTargets: [], totalClicks: 0, totalErrors: 0, totalDurationSecs: 300, sessionCount: 1,
+    });
     mockApi.getTelemetry.mockResolvedValue({ records: [telemetryNullBehavior], total: 1 });
     await renderPage();
     await waitFor(() => expect(screen.getByText('历史')).toBeInTheDocument());
     fireEvent.click(screen.getByText('历史'));
+    await waitFor(() => expect(screen.getByText('这台设备做了什么')).toBeInTheDocument());
+    // 展开原始明细才出记录行
+    fireEvent.click(screen.getByText(/原始明细/));
     await waitFor(() => expect(screen.getByText('session.summary')).toBeInTheDocument());
+    // currentRoute=null → 行为摘要 区块不渲染(且默认折叠)
     expect(screen.queryByText('行为摘要')).not.toBeInTheDocument();
   });
 });

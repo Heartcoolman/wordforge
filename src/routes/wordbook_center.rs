@@ -92,6 +92,9 @@ struct BrowseItem {
     local_wordbook_id: Option<String>,
     local_version: Option<String>,
     has_update: bool,
+    /// 本地标签(wordbook_local_tags),与远端 meta.tags 区分;未导入则空。
+    /// 标签编辑器用此预填(而非远端 tags),避免 replace 保存污染本地表。
+    local_tags: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -129,6 +132,10 @@ pub fn admin_router() -> Router<AppState> {
         .route("/import/:id", post(admin_import))
         .route("/updates", get(admin_updates))
         .route("/updates/:id/sync", post(admin_sync))
+        // m022:本地 JSON 上传(CSV 在前端用 PapaParse 转 JSON 再 POST 避免后端引 csv crate)
+        .route("/upload", post(admin_upload))
+        // m022:本地标签覆盖层(远端 metadata 不可改,这是 admin 自定义的 wordbook 标签)
+        .route("/:wordbook_id/tags", axum::routing::patch(admin_patch_tags))
 }
 
 // ── User routes ──
@@ -216,6 +223,7 @@ async fn fetch_remote_json<T: serde::de::DeserializeOwned>(
 fn build_browse_items(
     catalog: Vec<RemoteWordbookMeta>,
     imports: &[WordbookCenterImport],
+    local_tags: &HashMap<String, Vec<String>>,
 ) -> Vec<BrowseItem> {
     let import_map: HashMap<&str, &WordbookCenterImport> =
         imports.iter().map(|i| (i.remote_id.as_str(), i)).collect();
@@ -224,6 +232,9 @@ fn build_browse_items(
         .into_iter()
         .map(|meta| {
             let imp = import_map.get(meta.id.as_str());
+            let local_tags = imp
+                .and_then(|i| local_tags.get(&i.local_wordbook_id).cloned())
+                .unwrap_or_default();
             BrowseItem {
                 imported: imp.is_some(),
                 local_wordbook_id: imp.map(|i| i.local_wordbook_id.clone()),
@@ -231,10 +242,26 @@ fn build_browse_items(
                 has_update: imp
                     .map(|i| !meta.version.is_empty() && i.version != meta.version)
                     .unwrap_or(false),
+                local_tags,
                 meta,
             }
         })
         .collect()
+}
+
+/// 批量取若干已导入词书的本地标签,key 为 local_wordbook_id。
+fn local_tags_map(
+    store: &crate::store::Store,
+    imports: &[WordbookCenterImport],
+) -> HashMap<String, Vec<String>> {
+    let mut m = HashMap::new();
+    for imp in imports {
+        let tags = store
+            .list_wordbook_local_tags(&imp.local_wordbook_id)
+            .unwrap_or_default();
+        m.insert(imp.local_wordbook_id.clone(), tags);
+    }
+    m
 }
 
 fn map_remote_word(rw: &RemoteWord, remote_id: &str) -> Word {
@@ -256,31 +283,6 @@ fn map_remote_word(rw: &RemoteWord, remote_id: &str) -> Word {
     }
 }
 
-fn import_words_to_store(
-    store: &crate::store::Store,
-    wordbook_id: &str,
-    remote_id: &str,
-    words: &[RemoteWord],
-) -> Result<(u64, u64), AppError> {
-    let mut imported = 0u64;
-    let mut skipped = 0u64;
-    for rw in words {
-        if rw.spelling.trim().is_empty() {
-            skipped += 1;
-            continue;
-        }
-        let word = map_remote_word(rw, remote_id);
-        let word_id = word.id.clone();
-        if store.upsert_word(&word).is_ok() {
-            let _ = store.add_word_to_wordbook(wordbook_id, &word_id);
-            imported += 1;
-        } else {
-            skipped += 1;
-        }
-    }
-    Ok((imported, skipped))
-}
-
 fn persist_remote_wordbook_import(
     store: &crate::store::Store,
     source_url: &str,
@@ -288,8 +290,10 @@ fn persist_remote_wordbook_import(
     book_type: WordbookType,
     user_id: Option<String>,
 ) -> Result<serde_json::Value, AppError> {
+    // 409 预检按导入者 user_id 收口:多个 end-user 可各自导入同一 center 词书,互不阻断
+    //（此前缺 user_id 致第二用户被永久 409 挡住)。admin/system(user_id=None)沿用空串命名空间。
     if store
-        .get_wb_center_import(source_url, &remote.id)?
+        .get_wb_center_import(source_url, &remote.id, user_id.as_deref())?
         .is_some()
     {
         return Err(AppError::conflict(
@@ -299,25 +303,26 @@ fn persist_remote_wordbook_import(
     }
 
     let wordbook_id = uuid::Uuid::new_v4().to_string();
+    let mut words = Vec::with_capacity(remote.words.len());
+    let mut skipped = 0u64;
+    for rw in &remote.words {
+        if rw.spelling.trim().is_empty() {
+            skipped += 1;
+            continue;
+        }
+        words.push(map_remote_word(rw, &remote.id));
+    }
+    let imported = words.len() as u64;
+
     let book = Wordbook {
         id: wordbook_id.clone(),
         name: remote.name.clone(),
         description: remote.description.clone(),
         book_type,
         user_id: user_id.clone(),
-        word_count: 0,
+        word_count: imported,
         created_at: Utc::now(),
     };
-    store.upsert_wordbook(&book)?;
-
-    let (imported, skipped) =
-        import_words_to_store(store, &wordbook_id, &remote.id, &remote.words)?;
-
-    if let Some(mut wb) = store.get_wordbook(&wordbook_id)? {
-        wb.word_count = imported;
-        store.upsert_wordbook(&wb)?;
-    }
-
     let import_record = WordbookCenterImport {
         remote_id: remote.id.clone(),
         local_wordbook_id: wordbook_id.clone(),
@@ -328,7 +333,8 @@ fn persist_remote_wordbook_import(
         updated_at: Utc::now(),
         word_count: imported,
     };
-    store.upsert_wb_center_import(&import_record)?;
+    // 单事务原子写:建词书 + 批量词条/挂接 + 导入记录,任一步失败整笔回滚不留孤儿。
+    store.import_remote_wordbook_atomic(&book, &words, &import_record)?;
 
     let wb = store.get_wordbook(&wordbook_id)?;
     Ok(serde_json::json!({
@@ -352,6 +358,9 @@ fn sync_remote_wordbook_import(
         text_to_word.insert(w.text.to_lowercase(), w.clone());
     }
 
+    // 收集本次写入,交由 sync_remote_wordbook_atomic 单事务落库(消除多写无事务孤儿)。
+    let mut upserts: Vec<Word> = Vec::new();
+    let mut add_word_ids: Vec<String> = Vec::new();
     let mut words_added = 0u64;
     let mut words_updated = 0u64;
     let mut remote_texts = std::collections::HashSet::new();
@@ -371,37 +380,38 @@ fn sync_remote_wordbook_import(
                 let mut w = existing.clone();
                 w.meaning = new_meaning;
                 w.pronunciation = rw.phonetic.clone();
-                let _ = store.upsert_word(&w);
+                upserts.push(w);
                 words_updated += 1;
             }
         } else {
             let word = map_remote_word(rw, &import_record.remote_id);
-            let word_id = word.id.clone();
-            if store.upsert_word(&word).is_ok() {
-                let _ = store.add_word_to_wordbook(&wb_id, &word_id);
-                words_added += 1;
-            }
+            add_word_ids.push(word.id.clone());
+            upserts.push(word);
+            words_added += 1;
         }
     }
 
-    let mut words_removed = 0u64;
+    // 仅移除"本远程来源"且已从远程消失的词:按 map_remote_word 写入的 wb-center + remote_id tag
+    // 判定来源,绝不删用户手动加入的词(此前无差别删除会静默销毁用户自加词条)。
+    let remote_id = &import_record.remote_id;
+    let mut remove_word_ids: Vec<String> = Vec::new();
     for (text_lower, word) in &text_to_word {
-        if !remote_texts.contains(text_lower) {
-            let _ = store.remove_word_from_wordbook(&wb_id, &word.id);
-            words_removed += 1;
+        if remote_texts.contains(text_lower) {
+            continue;
+        }
+        let from_this_remote = word.tags.iter().any(|t| t == "wb-center")
+            && word.tags.iter().any(|t| t == remote_id);
+        if from_this_remote {
+            remove_word_ids.push(word.id.clone());
         }
     }
+    let words_removed = remove_word_ids.len() as u64;
 
     let mut updated_import = import_record.clone();
     updated_import.version = remote.version;
     updated_import.updated_at = Utc::now();
-    updated_import.word_count = store.count_wordbook_words(&wb_id)?;
-    store.upsert_wb_center_import(&updated_import)?;
-
-    if let Some(mut wb) = store.get_wordbook(&wb_id)? {
-        wb.word_count = updated_import.word_count;
-        store.upsert_wordbook(&wb)?;
-    }
+    // word_count 由 sync_remote_wordbook_atomic 在事务内按实际挂接数权威回写。
+    store.sync_remote_wordbook_atomic(&wb_id, &upserts, &add_word_ids, &remove_word_ids, &updated_import)?;
 
     let wb = store.get_wordbook(&wb_id)?;
     Ok(serde_json::json!({
@@ -463,6 +473,36 @@ async fn do_sync(
         sync_remote_wordbook_import(&store, &import_record, remote)
     })
     .await?
+}
+
+/// best-effort 写词库审计:从 do_import/do_sync/admin_upload 的结果里取
+/// wordbook.id + name,失败仅 tracing::warn 不影响主流程。
+fn write_wb_audit_from_result(
+    state: &AppState,
+    action: &str,
+    admin_id: &str,
+    result: &serde_json::Value,
+) {
+    let wb = result.get("wordbook");
+    let wordbook_id = wb
+        .and_then(|w| w.get("id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if wordbook_id.is_empty() {
+        return;
+    }
+    let detail = wb
+        .and_then(|w| w.get("name"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if let Err(e) =
+        state
+            .store()
+            .insert_wordbook_audit(wordbook_id, action, &detail, Some(admin_id))
+    {
+        tracing::warn!(error=%e, action=%action, "写 wordbook 远端导入审计失败(不影响主流程)");
+    }
 }
 
 fn source_name_from_url(url: &str) -> Option<String> {
@@ -588,13 +628,17 @@ async fn admin_browse(
         .ok_or_else(|| AppError::bad_request("WB_CENTER_NOT_CONFIGURED", "词书中心URL未配置"))?;
 
     let catalog: RemoteCatalog = fetch_remote_json(&base_url, "index.json").await?;
-    let imports = state
+    let (imports, tags_map) = state
         .run_store_task("wordbook_center.admin_browse.imports", {
             let base_url = base_url.clone();
-            move |store| store.list_wb_center_imports_by_source(&base_url)
+            move |store| {
+                let imports = store.list_wb_center_imports_by_source(&base_url)?;
+                let tags = local_tags_map(&store, &imports);
+                Ok::<_, crate::store::StoreError>((imports, tags))
+            }
         })
         .await??;
-    let items = build_browse_items(catalog.data, &imports);
+    let items = build_browse_items(catalog.data, &imports, &tags_map);
     Ok(ok(items))
 }
 
@@ -645,7 +689,7 @@ async fn admin_preview(
 }
 
 async fn admin_import(
-    _admin: AdminAuthUser,
+    admin: AdminAuthUser,
     Path(id): Path<String>,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
@@ -659,6 +703,7 @@ async fn admin_import(
         .ok_or_else(|| AppError::bad_request("WB_CENTER_NOT_CONFIGURED", "词书中心URL未配置"))?;
 
     let result = do_import(&state, &base_url, &id, WordbookType::System, None).await?;
+    write_wb_audit_from_result(&state, "import", &admin.admin_id, &result);
     Ok(created(result))
 }
 
@@ -710,8 +755,141 @@ async fn admin_updates(
     Ok(ok(updates))
 }
 
+/// m022:POST /api/admin/wordbook-center/upload —— 上传本地 JSON 词书,绕过远端 center。
+///
+/// body 与 RemoteWordbook 同 shape:`{id, name, description, version, tags, words: [{spelling, phonetic, meanings, examples}]}`。
+/// `id` 必须由调用方提供(用于去重 + 防止重复导入)。
+/// 默认 book_type=System(admin 上传作为系统词书),user_id=None。
+/// 复用 persist_remote_wordbook_import 走完整 store 写入流程。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UploadWordbookRequest {
+    id: String,
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    version: String,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    words: Vec<RemoteWord>,
+}
+
+async fn admin_upload(
+    admin: AdminAuthUser,
+    State(state): State<AppState>,
+    JsonBody(req): JsonBody<UploadWordbookRequest>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    if req.id.is_empty() || req.name.is_empty() {
+        return Err(AppError::bad_request(
+            "WB_UPLOAD_INVALID",
+            "id 和 name 必填",
+        ));
+    }
+    if req.words.is_empty() {
+        return Err(AppError::bad_request(
+            "WB_UPLOAD_EMPTY",
+            "words 列表为空,拒绝创建空词书",
+        ));
+    }
+    // 用 `local:upload:<timestamp>` 作 source_url,与 wb_center 的远端 source_url 隔离
+    let source_url = format!("local:upload:{}", Utc::now().to_rfc3339());
+    let initial_tags = req.tags.clone();
+    let wordbook_id_for_tags = req.id.clone();
+    let remote = RemoteWordbook {
+        id: req.id,
+        name: req.name,
+        description: req.description,
+        word_count: req.words.len() as u64,
+        cover_image: None,
+        tags: req.tags,
+        version: req.version,
+        author: Some("admin-upload".to_string()),
+        download_count: None,
+        words: req.words,
+    };
+    let store = state.store().clone();
+    let result = crate::blocking::run_blocking("wordbook_center.admin_upload", move || {
+        persist_remote_wordbook_import(&store, &source_url, remote, WordbookType::System, None)
+    })
+    .await??;
+
+    write_wb_audit_from_result(&state, "import", &admin.admin_id, &result);
+
+    // 把 upload 时携带的 tags 直接落 wordbook_local_tags(免去前端再调 PATCH)
+    if !initial_tags.is_empty() {
+        // 从 result 里取 wordbook.id(persist_remote_wordbook_import 返回 wordbook 对象)
+        let local_id = result
+            .get("wordbook")
+            .and_then(|w| w.get("id"))
+            .and_then(|v| v.as_str())
+            .unwrap_or(&wordbook_id_for_tags)
+            .to_string();
+        let store2 = state.store().clone();
+        let local_id_for_log = local_id.clone();
+        let tag_write =
+            crate::blocking::run_blocking("wordbook_center.admin_upload.tags", move || {
+                store2.set_wordbook_local_tags(&local_id, &initial_tags, Some("admin-upload"))
+            })
+            .await;
+        // 失败仅 warn 不阻断:词书已入库,本地标签缺失可后续 PATCH 补写
+        match tag_write {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::warn!(
+                wordbook_id = %local_id_for_log, error = %e,
+                "upload 携带标签落 wordbook_local_tags 失败"
+            ),
+            Err(e) => tracing::warn!(error = %e, "upload 标签写入任务 join 失败"),
+        }
+    }
+
+    Ok(created(result))
+}
+
+/// m022:PATCH /api/admin/wordbook-center/:wordbook_id/tags —— 本地标签覆盖。
+///
+/// body: `{add?: string[], remove?: string[]}` 或 `{replace: string[]}`(三选一,replace 优先)。
+/// 写 wordbook_local_tags 表(m022 新建),不影响远端 metadata 中的 tags。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PatchTagsRequest {
+    #[serde(default)]
+    add: Vec<String>,
+    #[serde(default)]
+    remove: Vec<String>,
+    /// 给定时整体替换为这个列表,忽略 add/remove。前端"标签编辑器"提交全集时使用。
+    #[serde(default)]
+    replace: Option<Vec<String>>,
+}
+
+async fn admin_patch_tags(
+    admin: AdminAuthUser,
+    Path(wordbook_id): Path<String>,
+    State(state): State<AppState>,
+    JsonBody(req): JsonBody<PatchTagsRequest>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let admin_id = admin.admin_id.clone();
+    let tags = state
+        .run_store_task("wordbook_center.admin_patch_tags", move |store| {
+            if let Some(replace) = req.replace {
+                store.set_wordbook_local_tags(&wordbook_id, &replace, Some(&admin_id))?;
+            } else {
+                if !req.add.is_empty() {
+                    store.add_wordbook_local_tags(&wordbook_id, &req.add, Some(&admin_id))?;
+                }
+                if !req.remove.is_empty() {
+                    store.remove_wordbook_local_tags(&wordbook_id, &req.remove)?;
+                }
+            }
+            store.list_wordbook_local_tags(&wordbook_id)
+        })
+        .await??;
+    Ok(ok(serde_json::json!({ "tags": tags })))
+}
+
 async fn admin_sync(
-    _admin: AdminAuthUser,
+    admin: AdminAuthUser,
     Path(id): Path<String>,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
@@ -728,12 +906,14 @@ async fn admin_sync(
         .run_store_task("wordbook_center.admin_sync.import_record", {
             let base_url = base_url.clone();
             let id = id.clone();
-            move |store| store.get_wb_center_import(&base_url, &id)
+            // admin 同步走 admin/system 命名空间(user_id=None → 空串)。
+            move |store| store.get_wb_center_import(&base_url, &id, None)
         })
         .await??
         .ok_or_else(|| AppError::not_found("导入记录不存在"))?;
 
     let result = do_sync(&state, &base_url, &import_record).await?;
+    write_wb_audit_from_result(&state, "sync", &admin.admin_id, &result);
     Ok(ok(result))
 }
 
@@ -849,7 +1029,13 @@ async fn user_browse(
         .into_iter()
         .filter(|i| i.user_id.as_deref() == Some(&auth.user_id))
         .collect();
-    let items = build_browse_items(catalog.data, &user_imports);
+    let tags_map = state
+        .run_store_task("wordbook_center.user_browse.local_tags", {
+            let imports = user_imports.clone();
+            move |store| Ok::<_, crate::store::StoreError>(local_tags_map(&store, &imports))
+        })
+        .await??;
+    let items = build_browse_items(catalog.data, &user_imports, &tags_map);
     Ok(ok(items))
 }
 
@@ -1112,7 +1298,9 @@ async fn user_sync(
         .run_store_task("wordbook_center.user_sync.import_record", {
             let base_url = base_url.clone();
             let id = id.clone();
-            move |store| store.get_wb_center_import(&base_url, &id)
+            let uid = auth.user_id.clone();
+            // 按本人命名空间取记录:他人对同一 center 词书的导入记录不可见(主键已含 user_id)。
+            move |store| store.get_wb_center_import(&base_url, &id, Some(&uid))
         })
         .await??
         .ok_or_else(|| AppError::not_found("导入记录不存在"))?;

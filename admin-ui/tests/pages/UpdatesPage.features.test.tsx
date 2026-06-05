@@ -1,7 +1,7 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { screen, waitFor, fireEvent } from '@solidjs/testing-library';
 import { renderWithProviders } from '../helpers/render';
-import type { AdminUpdateStatus } from '@/types/admin';
+import type { AdminUpdateStatus, ChannelStatus } from '@/types/admin';
 
 let lastSseHandlers: any = null;
 
@@ -10,6 +10,16 @@ vi.mock('@/api/admin', () => ({
     updatesStatus: vi.fn(),
     updatesCheck: vi.fn(),
     updatesApply: vi.fn(),
+    updatesHistory: vi.fn(() => Promise.resolve({ entries: [] })),
+    getSettings: vi.fn(() => Promise.resolve({ maintenanceMode: false })),
+    setMaintenance: vi.fn(),
+    getHealth: vi.fn(() => Promise.resolve({ status: 'healthy' })),
+    updatesBackups: vi.fn(() => Promise.resolve({ backups: [], totalBytes: 0, thresholdBytes: 10_737_418_240 })),
+    updatesChangelog: vi.fn(() => Promise.resolve({ available: false })),
+    updatesCreateBackup: vi.fn(),
+    updatesRestoreBackup: vi.fn(),
+    updatesBackupDownloadUrl: vi.fn(),
+    updatesRollback: vi.fn(),
   },
 }));
 vi.mock('@/api/http', async () => {
@@ -41,13 +51,26 @@ const baseStatus: AdminUpdateStatus = {
     releaseUrl: 'https://github.com/x/y/releases/v1.1.0',
     hasUpdate: true,
     canApply: true,
+    tarballSize: 15523840,
+    sha256: 'a4f2c1d9e8b7a6f5b9c1',
   },
   beta: null,
   autoCheckEnabled: true,
   lastCheckedAt: '2026-04-15T10:00:00Z',
   allowDowngrade: false,
+  installedAt: '2026-04-01T00:00:00Z',
+  uptimeSecs: 7200,
 };
-const upgradedStatus: AdminUpdateStatus = { ...baseStatus, currentVersion: '1.1.0' };
+const betaChannel: ChannelStatus = {
+  latestVersion: 'v0.6.0-beta.3',
+  latestPublishedAt: '2026-05-20T20:17:07Z',
+  releaseNotes: 'beta notes',
+  releaseUrl: 'https://example/r/v0.6.0-beta.3',
+  hasUpdate: true,
+  canApply: true,
+  tarballSize: 14000000,
+  sha256: 'beefcafe1234',
+};
 
 async function renderPage() {
   const { default: Page } = await import('@/pages/UpdatesPage');
@@ -60,18 +83,20 @@ describe('UpdatesPage — status, check, apply', () => {
     lastSseHandlers = null;
   });
 
-  it('renders header and stable card release notes', async () => {
+  it('renders hero version card and stable channel release notes', async () => {
     mockApi.updatesStatus.mockResolvedValue(baseStatus);
     await renderPage();
     await waitFor(() => expect(screen.getByText('当前版本')).toBeInTheDocument());
-    expect(screen.getByText('1.0.0')).toBeInTheDocument();
+    expect(screen.getAllByText('1.0.0').length).toBeGreaterThan(0);
     expect(screen.getByText('Release Notes')).toBeInTheDocument();
-    expect(screen.getByText('修复若干 bug')).toBeInTheDocument();
+    // release notes 在通道详情卡与 CHANGELOG 回退区各渲染一次，断言至少一处
+    expect(screen.getAllByText('修复若干 bug').length).toBeGreaterThan(0);
   });
 
-  it('shows nil values when stable channel is null', async () => {
+  it('shows nil channel state when stable channel is null', async () => {
     mockApi.updatesStatus.mockResolvedValue({ ...baseStatus, stable: null, lastCheckedAt: null });
     await renderPage();
+    // stable=null → 通道详情卡显示「尚未检查」
     await waitFor(() => expect(screen.getByText('尚未检查')).toBeInTheDocument());
   });
 
@@ -88,8 +113,8 @@ describe('UpdatesPage — status, check, apply', () => {
     mockApi.updatesStatus.mockResolvedValue(baseStatus);
     mockApi.updatesCheck.mockResolvedValue(baseStatus);
     await renderPage();
-    await waitFor(() => expect(screen.getByText('立即检查')).toBeInTheDocument());
-    fireEvent.click(screen.getByText('立即检查'));
+    await waitFor(() => expect(screen.getByRole('button', { name: '立即检查' })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: '立即检查' }));
     await waitFor(() => expect(mockToast.success).toHaveBeenCalled());
   });
 
@@ -100,8 +125,8 @@ describe('UpdatesPage — status, check, apply', () => {
       stable: { ...baseStatus.stable!, hasUpdate: false, canApply: false },
     });
     await renderPage();
-    await waitFor(() => expect(screen.getByText('立即检查')).toBeInTheDocument());
-    fireEvent.click(screen.getByText('立即检查'));
+    await waitFor(() => expect(screen.getByRole('button', { name: '立即检查' })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: '立即检查' }));
     await waitFor(() => expect(mockToast.info).toHaveBeenCalled());
   });
 
@@ -109,8 +134,8 @@ describe('UpdatesPage — status, check, apply', () => {
     mockApi.updatesStatus.mockResolvedValue(baseStatus);
     mockApi.updatesCheck.mockRejectedValue(new Error('net'));
     await renderPage();
-    await waitFor(() => expect(screen.getByText('立即检查')).toBeInTheDocument());
-    fireEvent.click(screen.getByText('立即检查'));
+    await waitFor(() => expect(screen.getByRole('button', { name: '立即检查' })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: '立即检查' }));
     await waitFor(() => expect(mockToast.error).toHaveBeenCalled());
   });
 
@@ -118,8 +143,8 @@ describe('UpdatesPage — status, check, apply', () => {
     mockApi.updatesStatus.mockResolvedValue(baseStatus);
     mockApi.updatesApply.mockResolvedValue(undefined);
     await renderPage();
-    await waitFor(() => expect(screen.getByText(/一键升级到/)).toBeInTheDocument());
-    fireEvent.click(screen.getByText(/一键升级到/));
+    await waitFor(() => expect(screen.getByRole('button', { name: /立即升级到 1\.1\.0/ })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: /立即升级到 1\.1\.0/ }));
     await waitFor(() => expect(screen.getByText('确认一键更新')).toBeInTheDocument());
     fireEvent.click(screen.getByText('开始升级'));
     await waitFor(() => expect(mockApi.updatesApply).toHaveBeenCalled());
@@ -128,8 +153,8 @@ describe('UpdatesPage — status, check, apply', () => {
   it('cancels apply confirm dialog', async () => {
     mockApi.updatesStatus.mockResolvedValue(baseStatus);
     await renderPage();
-    await waitFor(() => expect(screen.getByText(/一键升级到/)).toBeInTheDocument());
-    fireEvent.click(screen.getByText(/一键升级到/));
+    await waitFor(() => expect(screen.getByRole('button', { name: /立即升级到 1\.1\.0/ })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: /立即升级到 1\.1\.0/ }));
     await waitFor(() => expect(screen.getByText('确认一键更新')).toBeInTheDocument());
     fireEvent.click(screen.getByText('取消'));
   });
@@ -142,42 +167,19 @@ describe('UpdatesPage — Beta channel folding + cross-channel apply', () => {
   });
 
   it('renders Beta collapsible with badge when beta has update', async () => {
-    const status: AdminUpdateStatus = {
-      ...baseStatus,
-      beta: {
-        latestVersion: 'v0.6.0-beta.3',
-        latestPublishedAt: '2026-05-20T20:17:07Z',
-        releaseNotes: 'beta notes',
-        releaseUrl: 'https://example/r/v0.6.0-beta.3',
-        hasUpdate: true,
-        canApply: true,
-      },
-    };
-    mockApi.updatesStatus.mockResolvedValue(status);
+    mockApi.updatesStatus.mockResolvedValue({ ...baseStatus, beta: betaChannel });
     await renderPage();
     await waitFor(() => expect(screen.getByRole('button', { name: /Beta 通道/ })).toBeInTheDocument());
     // 折叠条上的 badge 显示 beta latestVersion
-    expect(screen.getByText('v0.6.0-beta.3')).toBeInTheDocument();
+    expect(screen.getAllByText('v0.6.0-beta.3').length).toBeGreaterThan(0);
   });
 
   it('expands Beta region on click and shows upgrade button', async () => {
-    const status: AdminUpdateStatus = {
-      ...baseStatus,
-      beta: {
-        latestVersion: 'v0.6.0-beta.3',
-        latestPublishedAt: '2026-05-20T20:17:07Z',
-        releaseNotes: 'beta notes',
-        releaseUrl: 'https://example/r/v0.6.0-beta.3',
-        hasUpdate: true,
-        canApply: true,
-      },
-    };
-    mockApi.updatesStatus.mockResolvedValue(status);
+    mockApi.updatesStatus.mockResolvedValue({ ...baseStatus, beta: betaChannel });
     await renderPage();
     const trigger = await screen.findByRole('button', { name: /Beta 通道/ });
     fireEvent.click(trigger);
     await waitFor(() => {
-      // 展开后 beta 卡片可见 — 找按钮 "一键升级到 v0.6.0-beta.3"
       const buttons = screen.getAllByRole('button', { name: /一键升级到 v0\.6\.0-beta\.3/ });
       expect(buttons.length).toBeGreaterThan(0);
     });
@@ -186,22 +188,16 @@ describe('UpdatesPage — Beta channel folding + cross-channel apply', () => {
   it('passes channel="beta" to updatesApply when applying from Beta card', async () => {
     const status: AdminUpdateStatus = {
       ...baseStatus,
-      // stable 没有更新，仅 beta 有 → 主区域 disabled，beta 折叠区可点
+      // stable 没有更新，仅 beta 有 → hero 走 beta；beta 折叠区也可点
       stable: { ...baseStatus.stable!, hasUpdate: false, canApply: false, latestVersion: '1.0.0' },
-      beta: {
-        latestVersion: 'v0.6.0-beta.3',
-        latestPublishedAt: '2026-05-20T20:17:07Z',
-        releaseNotes: 'beta notes',
-        releaseUrl: 'https://example/r/v0.6.0-beta.3',
-        hasUpdate: true,
-        canApply: true,
-      },
+      beta: betaChannel,
     };
     mockApi.updatesStatus.mockResolvedValue(status);
     mockApi.updatesApply.mockResolvedValue(undefined);
     await renderPage();
     const trigger = await screen.findByRole('button', { name: /Beta 通道/ });
     fireEvent.click(trigger);
+    // 通道卡按钮用「一键升级到」前缀，与 hero 的「立即升级到」区分
     const upgradeBtn = await screen.findByRole('button', {
       name: /一键升级到 v0\.6\.0-beta\.3/,
     });
@@ -214,31 +210,16 @@ describe('UpdatesPage — Beta channel folding + cross-channel apply', () => {
   });
 
   it('hides badge when beta has no update', async () => {
-    const status: AdminUpdateStatus = {
+    mockApi.updatesStatus.mockResolvedValue({
       ...baseStatus,
-      beta: {
-        latestVersion: 'v0.6.0-beta.3',
-        latestPublishedAt: '2026-05-20T20:17:07Z',
-        releaseNotes: '',
-        releaseUrl: '',
-        hasUpdate: false,
-        canApply: false,
-      },
-    };
-    mockApi.updatesStatus.mockResolvedValue(status);
+      beta: { ...betaChannel, releaseNotes: '', releaseUrl: '', hasUpdate: false, canApply: false },
+    });
     await renderPage();
     await waitFor(() => expect(screen.getByRole('button', { name: /Beta 通道/ })).toBeInTheDocument());
-    // beta 区折叠中未展开；hasUpdate=false 时 badge 不显示
-    // 直接 query 折叠条按钮里是否有 'v0.6.0-beta.3' 字样
     const trigger = screen.getByRole('button', { name: /Beta 通道/ });
     expect(trigger.textContent).not.toMatch(/v0\.6\.0-beta\.3/);
   });
 });
-
-// UpdatesPage — apply polling loop（已删除）
-// polling 成功路径与超时路径因 fake-timer + while-loop + setTimeout(reload) 引发 vitest worker OOM。
-// 覆盖：UpdatesPage.test.tsx "shows server-side error toast" 及 4 条 status 测试已间接覆盖。
-// TODO — 改为注入可 mock 的 sleep/clock 参数后独立恢复。
 
 describe('UpdatesPage — SSE handlers', () => {
   beforeEach(() => {

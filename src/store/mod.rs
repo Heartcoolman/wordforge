@@ -19,6 +19,14 @@ pub struct Store {
     pool: Pool<SqliteConnectionManager>,
 }
 
+/// r2d2 池实时占用快照(m023)。
+#[derive(Debug, Clone, Copy)]
+pub struct PoolStatus {
+    pub max: u32,
+    pub connections: u32,
+    pub idle: u32,
+}
+
 #[derive(Debug, Error)]
 pub enum StoreError {
     #[error("sqlite error: {0}")]
@@ -61,14 +69,16 @@ impl Store {
         pool_size: u32,
         connection_timeout_ms: u64,
     ) -> Result<Self, StoreError> {
+        // cache_size/mmap_size 为每连接独占，乘 pool_size：压测实测 -64000(62.5MB)×16≈1GB
+        // 峰值，在 2h2g 机型上是 OOM 风险，故收到 16MB/128MB。勿无依据调高。
         let manager = SqliteConnectionManager::file(db_path).with_init(move |conn| {
             conn.execute_batch(&format!(
                 "PRAGMA journal_mode = WAL;
                  PRAGMA synchronous = NORMAL;
                  PRAGMA foreign_keys = ON;
                  PRAGMA busy_timeout = {};
-                 PRAGMA cache_size = -64000;
-                 PRAGMA mmap_size = 268435456;
+                 PRAGMA cache_size = -16000;
+                 PRAGMA mmap_size = 134217728;
                  PRAGMA temp_store = MEMORY;",
                 busy_timeout_ms
             ))
@@ -129,6 +139,27 @@ impl Store {
         Ok(())
     }
 
+    /// 从备份文件恢复到当前库（SQLite Online Backup API：src→live）。
+    /// 调用前应已开维护模式 + 做好 pre-restore 兜底备份。先 checkpoint(TRUNCATE) 落 WAL。
+    /// 注意：恢复后建议重启进程让池中所有连接重读；本方法仅做在线页拷贝。
+    pub fn restore_from(&self, src: &std::path::Path) -> Result<(), StoreError> {
+        if !src.is_file() {
+            return Err(StoreError::NotFound {
+                entity: "backup".into(),
+                key: src.to_string_lossy().into(),
+            });
+        }
+        let src_conn = rusqlite::Connection::open_with_flags(
+            src,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        let mut dst = self.conn()?;
+        dst.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        let backup = rusqlite::backup::Backup::new(&src_conn, &mut dst)?;
+        backup.run_to_completion(200, std::time::Duration::from_millis(25), None)?;
+        Ok(())
+    }
+
     /// 在线 VACUUM：重建 DB 文件，回收删除后产生的空页，收缩磁盘占用。
     /// 月度 retention cron 在删除大量旧 monitoring 事件后调用。
     /// 注意：VACUUM 会短暂阻塞写入（WAL 模式下其他读可以并发），
@@ -137,6 +168,17 @@ impl Store {
         let conn = self.conn()?;
         conn.execute_batch("VACUUM;")?;
         Ok(())
+    }
+
+    /// m023:r2d2 池占用快照 —— Dashboard 系统资源条用。
+    /// `connections` 是当前已创建的连接数,`idle` 是空闲数,差值即"在用"。
+    pub fn pool_status(&self) -> PoolStatus {
+        let st = self.pool.state();
+        PoolStatus {
+            max: self.pool.max_size(),
+            connections: st.connections,
+            idle: st.idle_connections,
+        }
     }
 
     pub fn connection(
@@ -153,22 +195,19 @@ impl Store {
 
     /// Execute a function within a database transaction.
     /// On success, the transaction is committed; on failure, it is rolled back.
+    ///
+    /// 用 rusqlite RAII 事务（`unchecked_transaction`）：commit 前任何早退（含 COMMIT
+    /// 失败、闭包返回 Err、panic）都由 `Transaction` 的 Drop 自动 ROLLBACK，连接归还池前
+    /// 不会残留未提交事务，避免污染后续使用者。
     pub fn with_transaction<T>(
         &self,
         f: impl FnOnce(&rusqlite::Connection) -> Result<T, StoreError>,
     ) -> Result<T, StoreError> {
         let conn = self.conn()?;
-        conn.execute_batch("BEGIN")?;
-        match f(&conn) {
-            Ok(result) => {
-                conn.execute_batch("COMMIT")?;
-                Ok(result)
-            }
-            Err(e) => {
-                conn.execute_batch("ROLLBACK").ok();
-                Err(e)
-            }
-        }
+        let tx = conn.unchecked_transaction()?;
+        let result = f(&tx)?;
+        tx.commit()?;
+        Ok(result)
     }
 
     pub(crate) fn serialize_json<T: Serialize>(value: &T) -> Result<String, StoreError> {
@@ -204,5 +243,64 @@ mod tests {
             elapsed < Duration::from_millis(500),
             "pool acquisition waited for {elapsed:?}, which suggests it is still tied to busy_timeout"
         );
+    }
+
+    #[test]
+    fn restore_from_recovers_deleted_row() {
+        // 唯一目录：进程 pid + 固定后缀，避免并发测试碰撞（不依赖 rand/Date）。
+        let dir = std::env::temp_dir().join(format!("wf-restore-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let live_path = dir.join("live.db");
+        let backup_path = dir.join("snapshot.db");
+        let _ = std::fs::remove_file(&live_path);
+        let _ = std::fs::remove_file(&backup_path);
+
+        let store = Store::open(live_path.to_str().expect("live path"), 5000, 2).expect("open");
+        store
+            .conn()
+            .expect("conn")
+            .execute_batch("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT); INSERT INTO t (id, v) VALUES (1, 'keep');")
+            .expect("seed row");
+
+        store.backup_to(&backup_path).expect("backup_to");
+
+        store
+            .conn()
+            .expect("conn")
+            .execute_batch("DELETE FROM t WHERE id = 1;")
+            .expect("delete row");
+        let after_delete: i64 = store
+            .conn()
+            .expect("conn")
+            .query_row("SELECT count(*) FROM t", [], |r| r.get(0))
+            .expect("count after delete");
+        assert_eq!(after_delete, 0, "行应已删除");
+
+        store.restore_from(&backup_path).expect("restore_from");
+
+        let after_restore: i64 = store
+            .conn()
+            .expect("conn")
+            .query_row("SELECT count(*) FROM t", [], |r| r.get(0))
+            .expect("count after restore");
+        assert_eq!(after_restore, 1, "恢复后行应回来");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn restore_from_missing_src_returns_not_found() {
+        let dir =
+            std::env::temp_dir().join(format!("wf-restore-test-missing-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let live_path = dir.join("live.db");
+        let _ = std::fs::remove_file(&live_path);
+        let store = Store::open(live_path.to_str().expect("live path"), 5000, 1).expect("open");
+        let missing = dir.join("does-not-exist.db");
+        assert!(matches!(
+            store.restore_from(&missing),
+            Err(StoreError::NotFound { .. })
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

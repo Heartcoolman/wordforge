@@ -418,13 +418,15 @@
 | 子字段 | 类型 | 必填 | 约束 |
 |---|---|---|---|
 | `wordId` | string | ✓ | 必须存在于单词库；若该用户尚无学习状态，服务端会自动以默认值初始化 |
-| `state` | enum | — | `NEW` / `LEARNING` / `REVIEWING` / `MASTERED` / `FORGOTTEN` |
+| `state` | enum | — | `new` / `learning` / `reviewing` / `mastered` / `forgotten` |
 | `masteryLevel` | number | — | 范围 [0.0, 1.0] |
+
+> `WordLearningState.state` 为 lowercase，与 `WordMasteryDecision.masteryLevel` 的 SCREAMING_SNAKE 是不同枚举（与 api-endpoints.md §7、api-spec.md §10 一致）。
 
 ```json
 {
   "updates": [
-    { "wordId": "<id1>", "state": "MASTERED", "masteryLevel": 1.0 },
+    { "wordId": "<id1>", "state": "mastered", "masteryLevel": 1.0 },
     { "wordId": "<id2>", "masteryLevel": 0.6 }
   ]
 }

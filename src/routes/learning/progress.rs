@@ -10,9 +10,7 @@ use crate::state::AppState;
 use crate::store::operations::learning_sessions::{SessionStatus, SessionSummary};
 use crate::store::operations::word_states::WordState;
 
-use super::session::{
-    ingest_session_events, SessionEvent, SessionWithEventIngest,
-};
+use super::session::{ingest_session_events, SessionEvent, SessionWithEventIngest};
 use super::{COMPLETE_SESSION_EVENTS_LIMIT, SYNC_PROGRESS_EVENTS_LIMIT};
 
 #[derive(Debug, Deserialize)]
@@ -279,6 +277,31 @@ pub(super) async fn complete_session(
             mastery_efficiency,
         )
         .await?;
+
+    // m025:用户活动日志 —— session.complete(失败仅 warn)
+    {
+        let store = state.store().clone();
+        let user_id_for_log = user_id.clone();
+        let session_id_for_log = req.session_id.clone();
+        let total = total_in_session;
+        let correct = correct_in_session;
+        let acc = accuracy;
+        tokio::task::spawn_blocking(move || {
+            if let Err(e) = store.insert_user_activity(
+                &user_id_for_log,
+                "session.complete",
+                Some(&serde_json::json!({
+                    "sessionId": session_id_for_log,
+                    "total": total,
+                    "correct": correct,
+                    "accuracy": acc,
+                })),
+                None,
+            ) {
+                tracing::warn!(error = %e, "写 session.complete activity 失败");
+            }
+        });
+    }
 
     Ok(ok(SessionWithEventIngest {
         session,

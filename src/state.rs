@@ -123,6 +123,14 @@ pub enum SseEvent {
         version: String,
         channel: crate::store::operations::resource_packs::ResourcePackChannel,
     },
+    /// m027:admin 对某平台老版本发起强制升级时,精确推送到符合受众的活跃 SSE 连接。
+    /// 老客户端不识别该 type 时静默忽略,不破坏现有协议。
+    #[serde(rename = "upgrade_required")]
+    UpgradeRequired {
+        #[serde(rename = "latestVersion")]
+        latest_version: String,
+        message: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -165,6 +173,9 @@ pub struct AppState {
     runtime: Arc<RuntimeConfig>,
     rate_limit: Arc<RateLimitState>,
     auth_rate_limit: Arc<AuthRateLimitState>,
+    /// W3-1：遥测专用 per-user 限频器。独立实例（非复用 rate_limit），避免与业务流量
+    /// 串味、cleanup 周期互相污染。
+    telemetry_rate_limit: Arc<RateLimitState>,
     config: Arc<Config>,
     shutdown_tx: broadcast::Sender<()>,
     started_at: Instant,
@@ -191,6 +202,38 @@ pub struct AppState {
     /// 时钟健康探测器。启动时与每小时对比公网 HTTP Date header，识别本机时钟漂移。
     /// 漂移超阈时 `/health` 状态降级为 `degraded`，详见 `clock_health` 模块文档。
     clock_health: Arc<crate::clock_health::ClockHealth>,
+    /// m027：GeoIP 反查器（可选）。data/GeoLite2-Country.mmdb 加载成功才有，
+    /// 失败/缺失为 None，客户端 IP→country 写库降级为 NULL，不影响主链路。
+    geoip: Option<Arc<crate::services::geoip::Reader>>,
+    /// m027：强制升级策略 60s 内存缓存。device_middleware 每请求都要读策略比较
+    /// x-app-version，纯 SQLite 查询 ~100µs 但量大时也会成为瓶颈；缓存键 = platform。
+    /// 写入端点(`PUT /admin/clients/upgrade-policy/:platform`)调 invalidate_upgrade_cache。
+    #[allow(clippy::type_complexity)]
+    upgrade_policy_cache: Arc<
+        std::sync::RwLock<
+            Option<(
+                Instant,
+                std::collections::HashMap<
+                    String,
+                    crate::store::operations::clients::ClientUpgradePolicy,
+                >,
+            )>,
+        >,
+    >,
+    /// D4：客户端最低版本门控运行时快照。strict_mode 中间件每请求读此处而非
+    /// 不可变 config 快照，使 admin 写端点改动「即时生效」。60s TTL 兜底（DB 直改时
+    /// 最终一致），写端点调 `refresh_version_gate` 立即刷新。
+    /// 元组 = (enabled, min_client_version)。
+    version_gate: Arc<std::sync::RwLock<VersionGate>>,
+}
+
+/// D4：版本门控运行时状态。`enabled=true` 时按 `min_client_version` 拒绝旧客户端。
+#[derive(Debug, Clone, Default)]
+pub struct VersionGate {
+    pub enabled: bool,
+    pub min_client_version: Option<String>,
+    /// 上次从 DB 刷新的时间；None 表示尚未加载（首请求触发 reload）。
+    refreshed_at: Option<Instant>,
 }
 
 pub struct RuntimeConfig {
@@ -215,6 +258,10 @@ impl AppState {
             config.auth_rate_limit.window_secs,
             config.auth_rate_limit.max_requests,
         ));
+        let telemetry_rate_limit = Arc::new(RateLimitState::new(
+            config.telemetry_rate_limit.window_secs,
+            config.telemetry_rate_limit.max_requests,
+        ));
         let (maintenance_tx, _) = broadcast::channel(16);
         let (update_tx, _) = broadcast::channel(16);
 
@@ -224,6 +271,7 @@ impl AppState {
             runtime,
             rate_limit,
             auth_rate_limit,
+            telemetry_rate_limit,
             config: Arc::new(config.clone()),
             shutdown_tx,
             started_at: Instant::now(),
@@ -241,12 +289,109 @@ impl AppState {
             recently_broadcasted_packs: Arc::new(DashMap::new()),
             event_bus: event_bus::build_default_bus(),
             clock_health: Arc::new(crate::clock_health::ClockHealth::new()),
+            geoip: None,
+            upgrade_policy_cache: Arc::new(std::sync::RwLock::new(None)),
+            version_gate: Arc::new(std::sync::RwLock::new(VersionGate::default())),
+        }
+    }
+
+    /// D4：解析当前版本门控配置（settings 优先，回落 env MIN_CLIENT_VERSION）。
+    /// strict_mode 中间件每请求调用：内存快照 60s TTL 命中即返回，否则从 DB reload。
+    /// reload 失败不阻断请求，沿用上次快照（首次失败则等价于「门控关闭」）。
+    pub fn get_version_gate(&self) -> VersionGate {
+        const TTL_SECS: u64 = 60;
+        if let Ok(guard) = self.version_gate.read() {
+            if let Some(at) = guard.refreshed_at {
+                if at.elapsed().as_secs() < TTL_SECS {
+                    return guard.clone();
+                }
+            }
+        }
+        self.refresh_version_gate()
+    }
+
+    /// D4：从 system_settings 重载版本门控快照并写回缓存。
+    /// admin 写端点改动后调此方法实现「即时生效」；同时供 TTL 过期时 lazy reload。
+    /// settings.min_client_version 优先，回落 env（config.strict_mode.min_client_version）。
+    pub fn refresh_version_gate(&self) -> VersionGate {
+        let gate = match self.store.get_system_settings() {
+            Ok(s) => {
+                let min = s
+                    .min_client_version
+                    .filter(|v| !v.is_empty())
+                    .or_else(|| self.config.strict_mode.min_client_version.clone());
+                VersionGate {
+                    enabled: s.version_gate_enabled,
+                    min_client_version: min,
+                    refreshed_at: Some(Instant::now()),
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "version_gate reload 失败，沿用上次快照");
+                if let Ok(guard) = self.version_gate.read() {
+                    return guard.clone();
+                }
+                VersionGate::default()
+            }
+        };
+        if let Ok(mut guard) = self.version_gate.write() {
+            *guard = gate.clone();
+        }
+        gate
+    }
+
+    /// m027:60s TTL 升级策略缓存读取(读尝试 → 过期 / 缺失 → DB 重载)。
+    /// 失败时返回空 HashMap,middleware 把 X-Upgrade-Hint 退化为不塞。
+    pub fn get_upgrade_policies_cached(
+        &self,
+    ) -> std::collections::HashMap<String, crate::store::operations::clients::ClientUpgradePolicy>
+    {
+        const TTL_SECS: u64 = 60;
+        if let Ok(guard) = self.upgrade_policy_cache.read() {
+            if let Some((at, ref map)) = *guard {
+                if at.elapsed().as_secs() < TTL_SECS {
+                    return map.clone();
+                }
+            }
+        }
+        let rows = match self.store.list_upgrade_policies() {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error = %e, "upgrade_policy cache reload failed; serving empty map");
+                return std::collections::HashMap::new();
+            }
+        };
+        let mut map = std::collections::HashMap::with_capacity(rows.len());
+        for p in rows {
+            map.insert(p.platform.clone(), p);
+        }
+        if let Ok(mut guard) = self.upgrade_policy_cache.write() {
+            *guard = Some((Instant::now(), map.clone()));
+        }
+        map
+    }
+
+    /// m027:`PUT /admin/clients/upgrade-policy/:platform` 写入后调,强制下次请求 reload。
+    pub fn invalidate_upgrade_cache(&self) {
+        if let Ok(mut guard) = self.upgrade_policy_cache.write() {
+            *guard = None;
         }
     }
 
     /// 时钟健康探测器（供 main.rs 启动时启动周期任务、health endpoint 读取状态）。
     pub fn clock_health(&self) -> &Arc<crate::clock_health::ClockHealth> {
         &self.clock_health
+    }
+
+    /// m027：启动期注入 GeoIP reader。data/GeoLite2-Country.mmdb 缺失时不调用即可，
+    /// 链路保持 None；可重复调用以热切换。
+    pub fn set_geoip(&mut self, reader: Option<Arc<crate::services::geoip::Reader>>) {
+        self.geoip = reader;
+    }
+
+    /// m027：GeoIP reader（可选）。client_track middleware 用它把 IP 译成 country。
+    pub fn geoip(&self) -> Option<&Arc<crate::services::geoip::Reader>> {
+        self.geoip.as_ref()
     }
 
     /// 测试 / 自定义场景下注入一个特定的 EventBus（如 NoopEventBus）。
@@ -310,6 +455,20 @@ impl AppState {
         }
     }
 
+    /// 单次持锁的 compare-and-set：仅当当前无进行中任务时写入 `initial` 并返回 true，
+    /// 否则返回 false（调用方应返回 409）。消除 apply/rollback/restore 的 check-then-act 竞态。
+    pub fn try_begin_apply_task(&self, initial: ApplyTaskStatus) -> bool {
+        let mut guard = match self.apply_task.lock() {
+            Ok(g) => g,
+            Err(_) => return false,
+        };
+        if guard.as_ref().is_some_and(|t| t.is_running()) {
+            return false;
+        }
+        *guard = Some(initial);
+        true
+    }
+
     /// 原地更新当前 apply task 状态，仅当存在时执行 mutator。
     pub fn update_apply_task<F: FnOnce(&mut ApplyTaskStatus)>(&self, f: F) {
         if let Ok(mut guard) = self.apply_task.lock() {
@@ -361,6 +520,11 @@ impl AppState {
 
     pub fn auth_rate_limit(&self) -> &Arc<AuthRateLimitState> {
         &self.auth_rate_limit
+    }
+
+    /// W3-1：遥测专用 per-user 限频器。
+    pub fn telemetry_rate_limit(&self) -> &Arc<RateLimitState> {
+        &self.telemetry_rate_limit
     }
 
     pub fn config(&self) -> &Config {

@@ -72,7 +72,14 @@ v1.1 采用 **beta 单通道**滚动发布：原计划的 rc.1/rc.2/rc.3 工作�
 | 端点 | 状态 | Sunset |
 |---|---|---|
 | `GET /api/v1/*` | v1.0 发布起返回 410 Gone；永久冻结至删除 | v1.0 + 12 个月 |
-| `GET /api/admin/monitoring/check-update` | v1.0 deprecated（被 `/admin/updates/*` 取代） | v1.1 删除 |
+| `GET /api/admin/monitoring/check-update` | **保留为内部 admin 端点**（决议见下） | 不删除 |
+
+> **check-update 弃用决议（v1.1.4，路径 A）**：原计划「v1.1 删除、由 `/admin/updates/*` 取代」**已撤销**。
+> 实测两者语义不可无损互替——check-update 是带 TTL 缓存的**轻量只读版本探测**（Dashboard 顶栏更新角标、
+> Monitoring 版本卡的活跃数据源），`/admin/updates/*` 是重型 apply/rollback/backup 自更新机。强删迁移收益
+> 小于风险（删后 Dashboard 仅静默丢版本角标、Monitoring 走 `allSettled` 无感，属软退化，但价值损失实在）。
+> 故**保留为内部 admin 端点**（非公开 v1 契约的一部分，无 sunset）。后续若仍要弃用，须先把 Dashboard
+> 角标迁到 `updatesStatus().stable?.hasUpdate` 再议。
 
 ---
 
@@ -85,6 +92,33 @@ v1.1 采用 **beta 单通道**滚动发布：原计划的 rc.1/rc.2/rc.3 工作�
 | — | — | — | _待填写_ |
 
 **后端 API 兼容要求**：wordforge-web 依赖 `/api/*` v1 stable 端点，升级后端前请确认 release notes 无 Breaking 变更。
+
+#### ⚠️ 待协同：遥测 `device.model` 上报（v1.1.3 · T1）
+
+> 登记日期：2026-06-02
+
+后端自 **v1.1.2-beta.4（迁移 m038）** 起，`POST /api/telemetry` 对设备四要素（平台 / 版本 header + `device.timezone` / `device.model` payload）做**上线即生效、不受 strict-mode 开关控制**的硬校验，缺任一即返回 4xx；其中 **`device.model` 为新增必填**，缺失直接 `400 MISSING_DEVICE_MODEL`。生产环境已是 beta.4，**wordforge-web 若未上报 `device.model` 其遥测会被静默拦截（断流）**。
+
+协同项：
+
+- **wordforge-web 需在遥测上报体 `payload.device` 中补 `model` 字段**（Web 端无真型号，可落 `browser on OS` 派生标识或 `web-admin` 占位，确保非空）；同时确认已携带 `x-device-platform` / `x-app-version` header 及 `device.timezone`。
+- **约定最低后端版本**：含 m038 硬校验的最低后端版本为 **v1.1.2-beta.4**（及其后 GA v1.1.2 / v1.1.3）。wordforge-web 补齐上报后即可兼容该区间；旧后端（< beta.4）对这些字段宽容，向后兼容无碍。
+- 契约细节见 `docs/api-spec.md` §11「遥测载体契约」。
+- 本仓 admin-ui 自身遥测已于 v1.1.3 修复（`admin-ui/src/lib/device.ts` 补 `model`），跨仓侧待 wordforge-web 维护者排期落地后再标记完成。
+
+##### 403 客户端降级处置矩阵（跨仓联调验收清单）
+
+> 两个 403 码语义**不同，不可混为一谈**。`device.model` 等四要素补齐后，归属态仍可能返回 403；
+> 客户端须按码差异化处置。⚠️ 这两个 403 是 m038 **故意硬拦截、无灰度开关**，客户端只能**降级**，
+> **严禁要求后端放宽行为**。
+
+| 403 码 | 含义 | 客户端处置 | 可否自动恢复 |
+|---|---|---|---|
+| `DEVICE_NOT_REGISTERED` | 设备未注册（无 `client_devices` 记录） | 引导用户正常登录使用——首个登录用户会 claim 该设备（owner 由 NULL 置为该用户），之后遥测自动放行。**可保留本地遥测队列**，恢复后重发。 | ✅ 可（首登 claim） |
+| `DEVICE_OWNERSHIP_MISMATCH` | 设备已注册且归属**其他**账号 | **持续 403，须静默丢弃、不重试**（避免无意义重试放大写压力）。不弹错给用户，不入遥测重发队列。 | ❌ 否（须换设备标识或后端运维介入） |
+
+**联调验收**：wordforge-web 补 `device.model` 后，分别构造「未注册设备」与「他人设备」两条上报，验证
+客户端各自走上表处置（前者恢复、后者丢弃），即视为 T1 跨仓协同验收通过。
 
 ---
 
@@ -113,4 +147,4 @@ v1.1 采用 **beta 单通道**滚动发布：原计划的 rc.1/rc.2/rc.3 工作�
 
 ---
 
-_本页最后更新：2026-05-23_
+_本页最后更新：2026-06-02_

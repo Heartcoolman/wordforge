@@ -342,8 +342,26 @@ impl AMASConfig {
         if self.ssp.min_index >= self.ssp.max_index {
             return Err("ssp.min_index must be < ssp.max_index".to_string());
         }
+        if self.ssp.max_index > 200 {
+            return Err("ssp.max_index must be <= 200".to_string());
+        }
         if !(0.0..=1.0).contains(&self.ssp.discount_factor) {
             return Err("ssp.discount_factor must be in [0,1]".to_string());
+        }
+        if !(0.0..1.0).contains(&self.ssp.r_min)
+            || !(0.0..=1.0).contains(&self.ssp.r_max)
+            || self.ssp.r_min >= self.ssp.r_max
+        {
+            return Err("ssp.r_min/r_max must be in [0,1] with r_min < r_max".to_string());
+        }
+        if !(0.0001..=0.5).contains(&self.ssp.r_step) {
+            return Err("ssp.r_step must be in [0.0001,0.5]".to_string());
+        }
+        if self.ssp.dual_grid_enabled && self.ssp.linear_step_days <= 0.0 {
+            return Err("ssp.linear_step_days must be > 0".to_string());
+        }
+        if self.ssp.dual_grid_threshold_days <= 0.0 {
+            return Err("ssp.dual_grid_threshold_days must be > 0".to_string());
         }
 
         Ok(())

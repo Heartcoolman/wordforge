@@ -18,8 +18,7 @@ use crate::store::operations::records::{LearningRecord, RecordType};
 use crate::store::operations::word_states::{WordLearningState, WordState};
 
 pub fn router() -> Router<AppState> {
-    Router::new()
-        .route("/", get(list_records).post(create_record))
+    Router::new().route("/", get(list_records).post(create_record))
 }
 
 #[derive(Debug, Deserialize)]
@@ -60,7 +59,7 @@ async fn list_records(
     Ok(paginated(records, total, page, per_page))
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CreateRecordRequest {
     pub(crate) client_record_id: Option<String>,
@@ -85,6 +84,10 @@ pub(crate) struct CreateRecordRequest {
     /// 客户端选填，落库供 AMAS half-life 模型分级回退使用。
     #[serde(default)]
     pub(crate) self_rating: Option<u8>,
+    /// 出题模式（word-to-meaning / meaning-to-word / audio-to-meaning / meaning-to-spelling）；
+    /// 客户端选填，落库供数据分析"答题分布·题型"使用。非法值原样存，NULL 视为"未标注"。
+    #[serde(default)]
+    pub(crate) question_mode: Option<String>,
     /// 内部派生路径专用：覆盖 created_at（不参与 JSON 反序列化）。
     #[serde(skip)]
     pub(crate) created_at_override: Option<DateTime<Utc>>,
@@ -157,36 +160,32 @@ fn capture_engine_state_snapshot(
     })
 }
 
+/// 回滚单条记录处理对引擎状态的全部改动。W1-1：改为**单 tx 原子**回滚（user_state + algo +
+/// ELO），并可选在同一 tx 内清除幂等标记（`clear_marker`）——保证回滚后「标记存在 ⟺ AMAS 已应用」
+/// 不变式在崩溃窗口仍成立（详见 `Store::restore_engine_state_atomic`）。手动 rollback 机制保留，
+/// 仅由多次独立 store 调用收敛为一次原子调用。
 fn restore_engine_state_snapshot(
     store: &crate::store::Store,
     user_id: &str,
     word_id: &str,
     snapshot: &EngineStateSnapshot,
+    clear_marker: Option<&str>,
 ) {
-    match &snapshot.user_state {
-        Some(previous) => {
-            if let Err(error) = store.set_engine_user_state(user_id, previous) {
-                tracing::warn!(user_id, error = %error, "Failed to rollback AMAS user state");
-            }
-        }
-        None => {
-            if let Err(error) = store.delete_engine_user_state(user_id) {
-                tracing::warn!(user_id, error = %error, "Failed to delete AMAS user state during rollback");
-            }
-        }
-    }
-
-    restore_engine_algo_state(store, user_id, "ige", &snapshot.ige);
-    restore_engine_algo_state(store, user_id, "swd", &snapshot.swd);
-    restore_engine_algo_state(store, user_id, "trust", &snapshot.trust);
-    restore_engine_algo_state(store, user_id, &snapshot.mastery_key, &snapshot.mastery);
-
-    // 回滚 ELO 评分
-    if let Err(error) = store.set_user_elo(user_id, &snapshot.user_elo) {
-        tracing::warn!(user_id, error = %error, "Failed to rollback user ELO");
-    }
-    if let Err(error) = store.set_word_elo(word_id, &snapshot.word_elo) {
-        tracing::warn!(word_id, error = %error, "Failed to rollback word ELO");
+    let restore = crate::store::operations::engine::EngineStateRestore {
+        user_id,
+        user_state: Some(&snapshot.user_state),
+        algo_states: &[
+            ("ige", &snapshot.ige),
+            ("swd", &snapshot.swd),
+            ("trust", &snapshot.trust),
+            (snapshot.mastery_key.as_str(), &snapshot.mastery),
+        ],
+        user_elo: Some(&snapshot.user_elo),
+        word_elo: Some((word_id, &snapshot.word_elo)),
+        clear_marker_record_id: clear_marker,
+    };
+    if let Err(error) = store.restore_engine_state_atomic(&restore) {
+        tracing::warn!(user_id, word_id, error = %error, "原子回滚 AMAS 状态+清标记失败");
     }
 }
 
@@ -233,7 +232,17 @@ pub(crate) fn restore_engine_algo_state(
     }
 }
 
-async fn process_single_record(
+/// S2-1：outbox 异步路径的事件载荷。异步模式下 handler 把整条创建请求持久化到 outbox，
+/// outbox_processor worker 反序列化后调用 [`process_single_record`] 走与同步路径完全一致的
+/// 处理逻辑（含 best-effort rollback），零逻辑分叉。`created_at` 固化客户端提交时刻。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub(crate) struct OutboxRecordPayload {
+    pub(crate) user_id: String,
+    pub(crate) created_at: DateTime<Utc>,
+    pub(crate) request: CreateRecordRequest,
+}
+
+pub(crate) async fn process_single_record(
     user_id: &str,
     req: &CreateRecordRequest,
     state: &AppState,
@@ -272,10 +281,42 @@ async fn process_single_record(
         created_at: req.created_at_override.unwrap_or_else(Utc::now),
         record_type: req.record_type_or_default(),
         self_rating: req.self_rating,
+        question_mode: req.question_mode.clone(),
     };
     let word_id = req.word_id.clone();
     let record_for_store = record.clone();
     let req_for_store = req.clone();
+
+    // W1-1：幂等账本预检。check_duplicate 只挡记录行重复;此处专挡"AMAS 状态已在先前(崩溃)
+    // 尝试中应用、但记录行未落库"的窗口——命中则跳过 process_event(避免二次累加
+    // ELO/mastery/trust),仅补落裸记录行(不带 AMAS 派生的 word_state/session 增量,那些已在
+    // 原尝试中处理或随该次崩溃丢失,属单事件有界损失,优于无界的 AMAS 状态漂移)。
+    // 注:marker 在 AMAS tx 内提交、记录行在其后单独提交,二者之间存在"标记在、记录行未落"窗口。
+    // 并发同 client_record_id 请求可能在该窗口走到这里抢先裸插入,但 create_record_with_updates
+    // 的记录行 INSERT 已是幂等(ON CONFLICT DO NOTHING)且 user_stats 仅按真实插入计数,故裸回放与
+    // 在途全量持久化互不破坏——全量方不会因裸行主键冲突而误回滚 AMAS(PR #61 审查 P1)。
+    let already_processed = state
+        .run_store_task("records.single.check_processed", {
+            let user_id = user_id_owned.clone();
+            let record_id = record.id.clone();
+            move |store| store.is_event_processed(&user_id, &record_id)
+        })
+        .await??;
+    if already_processed {
+        let record_for_replay = record.clone();
+        state
+            .run_store_task("records.single.persist_replayed", move |store| {
+                store
+                    .create_record_with_updates(&record_for_replay, None, None)
+                    .map_err(|e| AppError::internal(&e.to_string()))
+            })
+            .await??;
+        return Ok(CreateRecordResponse {
+            record,
+            amas_result: None,
+            duplicate: true,
+        });
+    }
 
     let engine_snapshot = state
         .run_store_task("records.single.snapshot", {
@@ -287,7 +328,7 @@ async fn process_single_record(
 
     let amas_result = state
         .amas()
-        .process_event(
+        .process_event_idempotent(
             user_id,
             RawEvent {
                 word_id: req.word_id.clone(),
@@ -305,8 +346,26 @@ async fn process_single_record(
                 hint_used: req.hint_used.unwrap_or(false),
                 confused_with: req.confused_with.clone(),
             },
+            &record.id,
         )
         .await?;
+    // W1-1 并发收口：None 表示并发同 client_record_id 请求抢先写入幂等标记、本次 AMAS 已整笔回滚，
+    // 走与 already_processed 一致的裸记录回放（不重复累加 ELO/mastery/trust）。
+    let Some(amas_result) = amas_result else {
+        let record_for_replay = record.clone();
+        state
+            .run_store_task("records.single.persist_replayed", move |store| {
+                store
+                    .create_record_with_updates(&record_for_replay, None, None)
+                    .map_err(|e| AppError::internal(&e.to_string()))
+            })
+            .await??;
+        return Ok(CreateRecordResponse {
+            record,
+            amas_result: None,
+            duplicate: true,
+        });
+    };
     let amas_config = state.amas().get_config();
     let amas_result_for_store = amas_result.clone();
 
@@ -368,7 +427,11 @@ async fn process_single_record(
 
                 let mut next_session: Option<LearningSession> = None;
                 if let Some(ref sid) = req_for_store.session_id {
-                    if let Some(mut session) = store.get_learning_session(sid)? {
+                    // 归属校验：仅累加调用者本人的会话，防止跨用户篡改他人会话统计 (IDOR)。
+                    if let Some(mut session) = store
+                        .get_learning_session(sid)?
+                        .filter(|s| s.user_id == user_id_owned)
+                    {
                         session.total_questions += 1;
                         session.total_count += 1;
                         if req_for_store.is_correct {
@@ -391,11 +454,16 @@ async fn process_single_record(
                         next_session.as_ref(),
                     )
                     .map_err(|error| {
+                        // W1-1：原子回滚 AMAS 状态 + 清幂等标记（同一 tx）。崩溃要么全回滚（标记
+                        // 已清，重试重新应用 AMAS），要么全不动（标记在、AMAS 仍在，重试走裸记录
+                        // 路径），两种结局都守「标记存在 ⟺ AMAS 已应用」不变式，消除原两步非原子
+                        // 写之间的崩溃窗口（重试丢 AMAS）。
                         restore_engine_state_snapshot(
                             &store,
                             &user_id_owned,
                             &word_id,
                             &engine_snapshot,
+                            Some(&record_for_store.id),
                         );
                         AppError::internal(&error.to_string())
                     })?;
@@ -430,7 +498,65 @@ async fn create_record(
     State(state): State<AppState>,
     JsonBody(req): JsonBody<CreateRecordRequest>,
 ) -> Result<axum::response::Response, AppError> {
-    let result = process_single_record(&auth.user_id, &req, &state).await?;
+    // S2-1：opt-in 异步路径（RECORDS_OUTBOX_ASYNC=true）。把创建请求持久化到 outbox 并立即
+    // 202 返回，AMAS 处理交 outbox_processor 异步消费；默认 false 走下方同步老路不变。
+    // 注意：异步模式响应不含 amas_result（客户端拿不到即时 mastery/复习结果），切换前须与学习端协同。
+    // 范围：当前异步路径仅覆盖单条上报；批量 /records/batch 仍恒走同步路径（异步化待后续）。
+    // 已知限制(RFC R06)：进程在 AMAS 已持久化、记录未落库之间崩溃时，重启重放会二次累加 AMAS 状态
+    //（outbox 保证不丢事件，但未保证不重复）；单事务原子化属后续 cutover，启用本开关前须评估。
+    if state.config().records_outbox_async {
+        let mut req = req.clone();
+        // 确保 client_record_id 存在：worker 重试时凭它幂等去重，避免重复落库。
+        if req
+            .client_record_id
+            .as_deref()
+            .map(|s| s.trim().is_empty())
+            .unwrap_or(true)
+        {
+            req.client_record_id = Some(uuid::Uuid::new_v4().to_string());
+        }
+        let client_record_id = req.client_record_id.clone();
+        let payload = OutboxRecordPayload {
+            user_id: auth.user_id.clone(),
+            created_at: Utc::now(),
+            request: req,
+        };
+        let json =
+            serde_json::to_string(&payload).map_err(|e| AppError::internal(&e.to_string()))?;
+        state
+            .run_store_task("records.outbox.enqueue", move |store| {
+                store.enqueue_outbox_event("record_created", &json)
+            })
+            .await??;
+        return Ok((
+            axum::http::StatusCode::ACCEPTED,
+            axum::Json(serde_json::json!({
+                "accepted": true,
+                "async": true,
+                "clientRecordId": client_record_id,
+            })),
+        )
+            .into_response());
+    }
+
+    // m037 软拦截:处理失败时告警 admin(单条失败客户端已收错误响应,不重复发 user 通知),
+    // 仍返回原错误不吞。
+    let result = match process_single_record(&auth.user_id, &req, &state).await {
+        Ok(r) => r,
+        Err(e) => {
+            crate::services::alerting::raise_data_alert(
+                &state,
+                "amas.learning_record",
+                "single_process_failed",
+                "warning",
+                "学习数据上报处理失败".to_string(),
+                format!("单条上报失败: {}", e.code),
+                None,
+            )
+            .await;
+            return Err(e);
+        }
+    };
     if result.duplicate {
         Ok(ok(result).into_response())
     } else {

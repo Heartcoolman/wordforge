@@ -141,7 +141,8 @@ impl Store {
                 created_at: r.get(7)?,
             })
         })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
     }
 
     pub fn export_word_states(&self, user_id: &str) -> Result<Vec<ExportWordState>, StoreError> {
@@ -166,7 +167,8 @@ impl Store {
                 updated_at: r.get(7)?,
             })
         })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
     }
 
     pub fn export_favorites(&self, user_id: &str) -> Result<Vec<ExportFavorite>, StoreError> {
@@ -181,7 +183,8 @@ impl Store {
                 created_at: r.get(1)?,
             })
         })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
     }
 
     pub fn export_notes(&self, user_id: &str) -> Result<Vec<ExportNote>, StoreError> {
@@ -202,7 +205,8 @@ impl Store {
                 updated_at: r.get(4)?,
             })
         })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
     }
 
     pub fn export_study_config(
@@ -265,6 +269,7 @@ impl Store {
                 updated_at: r.get(8)?,
             })
         })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
     }
 }

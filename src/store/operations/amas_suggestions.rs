@@ -19,6 +19,7 @@ type SuggestionRow = (
     Option<i64>,
     Option<i64>,
     Option<f64>,
+    Option<String>, // m022:base_values_json
 );
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,6 +75,10 @@ pub struct TuningSuggestionRow {
     pub tokens_input: Option<u64>,
     pub tokens_output: Option<u64>,
     pub confidence: Option<f64>,
+    /// m022:生成 patch 时同步快照的"旧值"映射,SuggestionCard 渲染 diff 时不再额外打 amasGetConfig。
+    /// 形态等同 patch_json:`{"path.to.field": oldValue, ...}`,与 patch_json 同 key set。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_values_json: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -89,6 +94,8 @@ pub struct InsertSuggestion {
     pub initial_status: SuggestionStatus, // 通常 Pending；auto-apply 直接置 AutoApplied
     pub decided_by: Option<String>,
     pub decision_note: Option<String>,
+    /// m022:与 patch_json 同 key set 的旧值快照,空字串视同 NULL。
+    pub base_values_json: Option<String>,
 }
 
 fn parse_dt(s: String) -> Result<DateTime<Utc>, StoreError> {
@@ -97,9 +104,7 @@ fn parse_dt(s: String) -> Result<DateTime<Utc>, StoreError> {
         .map_err(|e| StoreError::Validation(format!("bad datetime: {e}")))
 }
 
-fn row_to_suggestion(
-    row: &rusqlite::Row<'_>,
-) -> rusqlite::Result<SuggestionRow> {
+fn row_to_suggestion(row: &rusqlite::Row<'_>) -> rusqlite::Result<SuggestionRow> {
     Ok((
         row.get::<_, i64>(0)?,
         row.get::<_, String>(1)?,
@@ -115,6 +120,7 @@ fn row_to_suggestion(
         row.get::<_, Option<i64>>(11)?,
         row.get::<_, Option<i64>>(12)?,
         row.get::<_, Option<f64>>(13)?,
+        row.get::<_, Option<String>>(14)?, // m022:base_values_json
     ))
 }
 
@@ -134,6 +140,7 @@ fn build(
         tin,
         tout,
         conf,
+        base_values,
     ): SuggestionRow,
 ) -> Result<TuningSuggestionRow, StoreError> {
     Ok(TuningSuggestionRow {
@@ -151,10 +158,15 @@ fn build(
         tokens_input: tin.map(|v| v as u64),
         tokens_output: tout.map(|v| v as u64),
         confidence: conf,
+        base_values_json: base_values
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map(|s| serde_json::from_str(s).map_err(StoreError::Serialization))
+            .transpose()?,
     })
 }
 
-const COLS: &str = "id, created_at, based_on_version_hash, patch_json, rationale, evidence_json, status, decided_by, decided_at, decision_note, cost_usd, tokens_input, tokens_output, confidence";
+const COLS: &str = "id, created_at, based_on_version_hash, patch_json, rationale, evidence_json, status, decided_by, decided_at, decision_note, cost_usd, tokens_input, tokens_output, confidence, base_values_json";
 
 impl Store {
     pub fn insert_amas_suggestion(&self, s: &InsertSuggestion) -> Result<i64, StoreError> {
@@ -168,8 +180,9 @@ impl Store {
         conn.execute(
             "INSERT INTO amas_tuning_suggestions
              (created_at, based_on_version_hash, patch_json, rationale, evidence_json,
-              status, decided_by, decided_at, decision_note, cost_usd, tokens_input, tokens_output, confidence)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+              status, decided_by, decided_at, decision_note, cost_usd, tokens_input, tokens_output, confidence,
+              base_values_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 now,
                 &s.based_on_version_hash,
@@ -184,6 +197,7 @@ impl Store {
                 s.tokens_input.map(|v| v as i64),
                 s.tokens_output.map(|v| v as i64),
                 s.confidence,
+                s.base_values_json.as_deref(),
             ],
         )?;
         Ok(conn.last_insert_rowid())
@@ -218,6 +232,52 @@ impl Store {
             }
         };
         raw.into_iter().map(build).collect()
+    }
+
+    /// C5：分页 + 可选状态 + 可选关键字（模糊匹配 rationale / patch_json）。
+    /// 现有 `list_amas_suggestions(status, limit)` 保留不动（offset=0、q=None 的特例）。
+    pub fn list_amas_suggestions_paged(
+        &self,
+        status: Option<SuggestionStatus>,
+        limit: usize,
+        offset: usize,
+        q: Option<&str>,
+    ) -> Result<Vec<TuningSuggestionRow>, StoreError> {
+        let limit = limit.min(500) as i64;
+        let offset = offset as i64;
+        let conn = self.conn()?;
+        let mut where_clauses: Vec<String> = Vec::new();
+        if status.is_some() {
+            where_clauses.push("status = :status".to_string());
+        }
+        if q.is_some() {
+            where_clauses.push("(rationale LIKE :q OR patch_json LIKE :q)".to_string());
+        }
+        let where_sql = if where_clauses.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", where_clauses.join(" AND "))
+        };
+        let sql = format!(
+            "SELECT {COLS} FROM amas_tuning_suggestions {where_sql}
+             ORDER BY created_at DESC LIMIT :limit OFFSET :offset"
+        );
+        let like = q.map(|s| format!("%{s}%"));
+        let mut stmt = conn.prepare(&sql)?;
+        let mut named: Vec<(&str, &dyn rusqlite::ToSql)> = Vec::new();
+        let status_str = status.map(|s| s.as_str());
+        if let Some(ref st) = status_str {
+            named.push((":status", st));
+        }
+        if let Some(ref l) = like {
+            named.push((":q", l));
+        }
+        named.push((":limit", &limit));
+        named.push((":offset", &offset));
+        let raw: Result<Vec<_>, _> = stmt
+            .query_map(named.as_slice(), row_to_suggestion)?
+            .collect();
+        raw?.into_iter().map(build).collect()
     }
 
     pub fn get_amas_suggestion(&self, id: i64) -> Result<Option<TuningSuggestionRow>, StoreError> {
@@ -277,6 +337,56 @@ impl Store {
         )?;
         Ok((cost, tin, tout))
     }
+
+    /// 近 days 天按 date(created_at) 聚合 cost_usd,折算人民币。返回 (date, costYuan) 升序。
+    /// date 为本地零时区 UTC 日期串(YYYY-MM-DD),与 created_at 的 rfc3339 前缀一致。
+    pub fn aggregate_daily_suggestion_cost_yuan(
+        &self,
+        days: i64,
+        usd_to_cny: f64,
+    ) -> Result<Vec<(String, f64)>, StoreError> {
+        let cutoff = (Utc::now() - Duration::days(days.max(0))).to_rfc3339();
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT substr(created_at, 1, 10) AS d, COALESCE(SUM(cost_usd), 0.0) * ?2
+             FROM amas_tuning_suggestions
+             WHERE created_at >= ?1
+             GROUP BY d
+             ORDER BY d ASC",
+        )?;
+        let rows: Result<Vec<_>, _> = stmt
+            .query_map(params![cutoff, usd_to_cny], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?))
+            })?
+            .collect();
+        Ok(rows?)
+    }
+
+    /// 累计接受率分子分母:approved/auto_applied 计 approved,rejected 计 rejected。
+    pub fn aggregate_suggestion_acceptance(&self) -> Result<(i64, i64), StoreError> {
+        let conn = self.conn()?;
+        let (approved, rejected) = conn.query_row(
+            "SELECT
+                COALESCE(SUM(CASE WHEN status IN ('approved','auto_applied') THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END), 0)
+             FROM amas_tuning_suggestions",
+            [],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+        )?;
+        Ok((approved, rejected))
+    }
+
+    /// 各 status 的条数(供 PatchTabs 角标)。返回 (status, count),仅含有记录的 status。
+    pub fn count_suggestions_by_status(&self) -> Result<Vec<(String, i64)>, StoreError> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT status, COUNT(*) FROM amas_tuning_suggestions GROUP BY status ORDER BY status",
+        )?;
+        let rows: Result<Vec<_>, _> = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
+            .collect();
+        Ok(rows?)
+    }
 }
 
 #[cfg(test)]
@@ -302,6 +412,7 @@ mod tests {
             initial_status,
             decided_by: None,
             decision_note: None,
+            base_values_json: None,
         }
     }
 
@@ -376,5 +487,136 @@ mod tests {
         assert!((cost - 0.02).abs() < 1e-9);
         assert_eq!(tin, 200);
         assert_eq!(tout, 100);
+    }
+
+    #[test]
+    fn daily_cost_groups_by_date_and_converts() {
+        let store = fresh_store();
+        // 两条 today,各 cost_usd=0.01 → 合计 0.02 USD;汇率 7.0 → 0.14 元
+        store
+            .insert_amas_suggestion(&ins(SuggestionStatus::Pending))
+            .unwrap();
+        store
+            .insert_amas_suggestion(&ins(SuggestionStatus::AutoApplied))
+            .unwrap();
+        let daily = store.aggregate_daily_suggestion_cost_yuan(30, 7.0).unwrap();
+        assert_eq!(daily.len(), 1, "all rows same day");
+        assert!((daily[0].1 - 0.14).abs() < 1e-6, "got {}", daily[0].1);
+        // date 形如 YYYY-MM-DD
+        assert_eq!(daily[0].0.len(), 10);
+    }
+
+    #[test]
+    fn acceptance_counts_approved_vs_rejected() {
+        let store = fresh_store();
+        store
+            .insert_amas_suggestion(&ins(SuggestionStatus::Approved))
+            .unwrap();
+        store
+            .insert_amas_suggestion(&ins(SuggestionStatus::AutoApplied))
+            .unwrap();
+        store
+            .insert_amas_suggestion(&ins(SuggestionStatus::Rejected))
+            .unwrap();
+        store
+            .insert_amas_suggestion(&ins(SuggestionStatus::Pending))
+            .unwrap();
+        let (approved, rejected) = store.aggregate_suggestion_acceptance().unwrap();
+        // approved + auto_applied 计入 approved
+        assert_eq!(approved, 2);
+        assert_eq!(rejected, 1);
+    }
+
+    #[test]
+    fn count_by_status_buckets() {
+        let store = fresh_store();
+        store
+            .insert_amas_suggestion(&ins(SuggestionStatus::Pending))
+            .unwrap();
+        store
+            .insert_amas_suggestion(&ins(SuggestionStatus::Pending))
+            .unwrap();
+        store
+            .insert_amas_suggestion(&ins(SuggestionStatus::Rejected))
+            .unwrap();
+        let counts = store.count_suggestions_by_status().unwrap();
+        let pending = counts.iter().find(|(s, _)| s == "pending").map(|(_, n)| *n);
+        let rejected = counts
+            .iter()
+            .find(|(s, _)| s == "rejected")
+            .map(|(_, n)| *n);
+        assert_eq!(pending, Some(2));
+        assert_eq!(rejected, Some(1));
+    }
+
+    fn ins_with(rationale: &str, patch_json: &str) -> InsertSuggestion {
+        let mut s = ins(SuggestionStatus::Pending);
+        s.rationale = rationale.to_string();
+        s.patch_json = patch_json.to_string();
+        s
+    }
+
+    #[test]
+    fn list_supports_offset_pagination() {
+        let store = fresh_store();
+        for i in 0..5 {
+            store
+                .insert_amas_suggestion(&ins_with(&format!("r{i}"), r#"{"memoryModel.w[0]":1.0}"#))
+                .unwrap();
+        }
+        // limit=2 offset=0 → 2 条；offset=4 → 1 条；offset=10 → 0 条
+        assert_eq!(
+            store
+                .list_amas_suggestions_paged(None, 2, 0, None)
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            store
+                .list_amas_suggestions_paged(None, 2, 4, None)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            store
+                .list_amas_suggestions_paged(None, 2, 10, None)
+                .unwrap()
+                .len(),
+            0
+        );
+    }
+
+    #[test]
+    fn list_supports_keyword_filter() {
+        let store = fresh_store();
+        store
+            .insert_amas_suggestion(&ins_with(
+                "提升留存",
+                r#"{"memoryModel.baseDesiredRetention":0.85}"#,
+            ))
+            .unwrap();
+        store
+            .insert_amas_suggestion(&ins_with("降低疲劳", r#"{"memoryModel.w[2]":3.0}"#))
+            .unwrap();
+        // q 命中 rationale
+        let by_rationale = store
+            .list_amas_suggestions_paged(None, 50, 0, Some("留存"))
+            .unwrap();
+        assert_eq!(by_rationale.len(), 1);
+        // q 命中 patch_json 中的 path 关键字
+        let by_path = store
+            .list_amas_suggestions_paged(None, 50, 0, Some("baseDesiredRetention"))
+            .unwrap();
+        assert_eq!(by_path.len(), 1);
+        // q 无命中
+        assert_eq!(
+            store
+                .list_amas_suggestions_paged(None, 50, 0, Some("nomatch"))
+                .unwrap()
+                .len(),
+            0
+        );
     }
 }

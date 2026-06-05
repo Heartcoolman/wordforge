@@ -335,6 +335,50 @@
 
 ---
 
+### DELETE /api/users/me
+
+GDPR 账号注销。**级联清除该用户的全部数据（26 张用户域表 + 用户自建词书），不可逆。**
+
+> ⚠️ 此操作不可恢复。导出（见下）仅覆盖 7 张可移植表，与本接口的级联删除**范围不对称**——
+> 删除清的远多于导出能拿回的，注销前若需留存数据请先调用 `GET /api/users/me/export`。
+
+**响应 200：**
+```json
+{
+  "success": true,
+  "data": { "deleted": true }
+}
+```
+
+---
+
+### GET /api/users/me/export
+
+GDPR 数据导出（Article 20 可移植性）。**流式 NDJSON**，每行一个 `{ "table": "<name>", "data": <value> }`
+对象；HTTP/1.1 自动 `Transfer-Encoding: chunked`，客户端可边读边写盘。
+
+**响应头：** `Content-Type: application/x-ndjson`、`Content-Disposition: attachment; filename="wordforge-export.ndjson"`
+
+**导出范围（7 张可移植表，按此顺序逐行流出）：** `profile`、`study_config`、`word_states`、
+`favorites`、`notes`、`sessions`、`records`（records 分页多行）。**这是可移植子集，非全量导出**——
+账号下的其它数据（如学习引擎内部状态）不在导出范围。
+
+**冷却：** 每用户 **24 小时**只能导出一次。冷却期内返回 `429`：
+
+```json
+{
+  "success": false,
+  "code": "GDPR_EXPORT_RATE_LIMITED",
+  "message": "每 24 小时只能导出一次数据"
+}
+```
+并带 `Retry-After: <剩余秒数>` 响应头。
+
+> 流式约束：HTTP 状态码在第一个 chunk flush 时即定；导出途中某表读取失败会追加一行
+> `{"table":"_error","data":"<原因>"}` 后关闭流，**而非**回退为 5xx。客户端应检查末行是否为 `_error`。
+
+---
+
 ## 3. 用户档案
 
 **路径前缀：** `/api/user-profile`
@@ -2367,13 +2411,13 @@ Server-Sent Events（SSE）持久连接，用于接收服务端实时推送。
 |---|---|---|
 | `amas_state` | AMAS 引擎状态变化（服务端每 5 秒轮询，仅当 `totalEventCount` 增长时推送） | `{"type": "state_change", "attention": 0.72, "fatigue": 0.28, "motivation": 0.65, "confidence": 0.54, "sessionEventCount": 12, "totalEventCount": 834}` |
 | `maintenance` | 维护模式变化 | `{"type": "maintenance", "active": true}` |
-| `update_available` | 新版本可用（面向所有用户的刷新提示，由 `broadcast_update` 发出；与管理员专属的 `release_available` 不同） | `{"version": "v0.3.3", "message": "新版本已发布"}` |
+| `update_available` | 新版本可用（面向所有用户的刷新提示，由 `broadcast_update` 发出；与管理员专属的 `release_available` 不同） | `{"version": "v1.1.1", "message": "新版本已发布"}` |
 | `telemetry_request` | 服务器请求遥测上报 | `{"type": "telemetry_request", "requestId": "<uuid>"}` |
 | `banned` | 账号被封禁 | `{"type": "banned"}` |
 | `unbanned` | 账号解封 | `{"type": "unbanned"}` |
 | `data_corrupted` | 数据异常通知 | `{"type": "data_corrupted"}` |
 | `new_llm_suggestion` | 新的 LLM 调参建议到达（管理员专属，advisor 页可立即刷新） | `{"type": "new_llm_suggestion", "suggestionId": 42}` |
-| `release_available` | 自更新 worker 探测到 GitHub Releases 有新二进制；v0.6.0-beta.3 起含 `channel`（管理员专属） | `{"type": "release_available", "latestTag": "v0.5.6", "channel": "stable"}` |
+| `release_available` | 自更新 worker 探测到 GitHub Releases 有新二进制；v0.6.0-beta.3 起含 `channel`（管理员专属） | `{"type": "release_available", "latestTag": "v1.1.1", "channel": "stable"}` |
 | `update_progress` | 一键更新执行阶段进度（管理员专属，0–100） | `{"type": "update_progress", "phase": "downloading", "percent": 35}` |
 | `probe_request` | 远程探针脚本下发：admin 通过 `POST /api/admin/probe` 派发，客户端在 Worker 沙箱 eval 后回传结果 | `{"type": "probe_request", "requestId": "<uuid>", "batchId": "<uuid>", "scriptB64": "...", "timeoutMs": 3000, "ctxVersion": 1}` |
 | `probe_confirm` | 远程探针二次确认：客户端首次返回 `confirm_required` 后，admin 输入设备后 5 位确认，后端推此事件 | `{"type": "probe_confirm", "requestId": "<uuid>", "confirmToken": "<uuid>"}` |
@@ -2398,7 +2442,17 @@ Server-Sent Events（SSE）持久连接，用于接收服务端实时推送。
 
 提交客户端遥测数据。
 
-**必须包含的请求头：** `x-device-id`
+> ⚠️ 自 **v1.1.2-beta.4（迁移 m038）** 起，遥测端点对设备四要素做**上线即生效、不受
+> `strict_mode` 开关控制**的硬校验，缺任一即返回 `400`。客户端按本文档上报前务必补齐，否则
+> 上报全部被拦。详见 `api-spec.md §11`、`v1-client-migration.md §5.1`。
+
+**必填请求头（四要素之二）：**
+
+| Header | 校验 | 缺失/非法时 |
+|---|---|---|
+| `x-device-id` | 设备 UUID（用于归属核验） | 归属态判定见下方「设备归属三态核验」 |
+| `x-device-platform` | 非空且 ≠ `unknown`（`web` / `ios` / `android`） | `400 MISSING_OS` |
+| `x-app-version` | 非空（客户端版本号） | `400 MISSING_APP_VERSION` |
 
 **请求体：**
 ```json
@@ -2408,6 +2462,7 @@ Server-Sent Events（SSE）持久连接，用于接收服务端实时推送。
   "clientTs": "2024-01-15T08:00:00Z",
   "payload": {
     "device": {
+      "model": "Chrome on macOS",
       "cpuCores": 8,
       "memoryGb": 16.0,
       "screenWidth": 1920,
@@ -2450,7 +2505,29 @@ Server-Sent Events（SSE）持久连接，用于接收服务端实时推送。
 | `eventType` | string | ✓ | `"session_start"` / `"periodic"` / `"on_demand"` |
 | `requestId` | string | 条件必填 | `eventType="on_demand"` 时必须提供 |
 | `clientTs` | string | ✓ | 客户端时间（ISO 8601） |
-| `payload` | object | ✓ | 见上方结构；`eventType="session_start"` 时通常携带 `payload.device` |
+| `payload` | object | ✓ | 见上方结构 |
+
+**`payload.device` 必填字段（四要素之二，m038 硬校验）：**
+
+| 字段 | 类型 | 校验 | 缺失/为空时 |
+|---|---|---|---|
+| `device.timezone` | string | 非空（IANA 时区，如 `Asia/Shanghai`） | `400 MISSING_TIMEZONE` |
+| `device.model` | string | 非空（设备型号；Web 端无真型号可落 `browser on OS` 派生标识或 `web-admin` 占位） | `400 MISSING_DEVICE_MODEL` |
+
+> `device.model` 为 m038 **新增必填**字段。`device.timezone` 已由四要素硬校验接管，**不再**仅受
+> strict-mode 软门控（旧文档表述已过期）。`device.language` 及 `screenWidth/screenHeight/pixelRatio/cpuCores`
+> 在 `session_start` 时仍受 strict-mode 软门控（开启时分别返回 `MISSING_LANGUAGE` / `MISSING_DEVICE_FINGERPRINT`）。
+
+**设备归属三态核验（四要素通过后，按 `x-device-id` 的 `owner` 判定）：**
+
+| owner 态 | 处理 |
+|---|---|
+| 设备未注册（无记录） | `403 DEVICE_NOT_REGISTERED` |
+| 已注册但归属为其他账号 | `403 DEVICE_OWNERSHIP_MISMATCH` |
+| 已注册且归属当前账号 | 放行 |
+| 已注册但未认领（owner 为 NULL） | claim 放行（不误伤老匿名设备） |
+
+> 两个 403 的客户端差异化降级处置见 `release-calendar.md` T1 段「403 处置矩阵」。
 
 `payload.behavior` 可选字段：
 
@@ -2490,12 +2567,12 @@ Server-Sent Events（SSE）持久连接，用于接收服务端实时推送。
   "success": true,
   "data": {
     "maintenanceMode": false,
-    "version": "v0.3.2"
+    "version": "v1.1.2-beta.3"
   }
 }
 ```
 
-> `version` 为构建时注入的 git tag 名称（如 `v0.3.2`），非严格 semver。
+> `version` 为构建时注入的 git tag 名称（如 `v1.1.2-beta.3`），非严格 semver。
 
 ---
 
@@ -2583,84 +2660,62 @@ AMAS 算法指标快照（需 Admin Token）。
 
 ---
 
-## 18. V1 兼容层
+## 18. V1 兼容层 {#v1-deprecation}
 
-> **⚠️ 永久冻结 / 已弃用 — 新客户端禁止接入**
+> **⚠️ 已停止维护 — 所有端点返回 410 Gone**
 >
-> `/api/v1/*` 为历史兼容层，于 **v0.6.0-beta.4（2026-05-21）起正式标记弃用**，预计在 **v2.0.0（2027-01-01）随 major bump 一并移除**。
+> `/api/v1/*` 为历史兼容层，于 **v0.6.0-beta.4（2026-05-21）起停止处理业务逻辑**，全部端点统一返回 **410 Gone**，预计在 **v2.0.0（2027-01-01）随 major bump 一并移除路由**。
 >
-> - **不接受任何新功能或破坏性变更**：字段集永久冻结，不会同步 AMAS 算法改进。
-> - **不触发 AMAS 自适应引擎**：`POST /api/v1/records` 仅做 5 秒去重，不更新 ELO / word_state；使用 v1 层意味着**静默退化为非自适应学习**。
+> - **业务逻辑已冻结**：v1 层不再读写任何数据，不触发 AMAS 自适应引擎，调用方无法再获取单词、记录或会话数据。
 > - **运行时弃用信号**：所有 v1 端点响应均携带 `Deprecation` + `Sunset` header（RFC 8594），客户端 logger 应据此告警并引导升级。
 > - **现有调用方**：当前 iOS / Web 客户端**均已迁移至 `/api/*` 主端点**，无任何生产流量经过 v1 层。
->
-> **迁移指引**：将 `/api/v1/words` → `/api/words`，`/api/v1/records` → `/api/records`，`/api/v1/study-config` → `/api/study-config`，`/api/v1/learning/session` → `/api/learning/sessions`。
 
 **路径前缀：** `/api/v1`
-**认证：** Bearer Token（必须）
-**说明：** 历史兼容层，永久冻结，不触发 AMAS 自适应引擎
+**认证：** 无（请求未进入业务逻辑即被 410 拦截）
 
 ---
 
-### GET /api/v1/words
+### 统一 410 Gone 响应
 
-分页获取单词列表。仅支持 `page`、`perPage` 查询参数；v1 兼容层不支持 `search`。
+以下所有端点均返回 410 Gone，不接受任何请求参数，响应体一致：
 
----
+- `GET /api/v1/words`
+- `GET /api/v1/words/:id`
+- `GET /api/v1/records`
+- `POST /api/v1/records`
+- `GET /api/v1/study-config`
+- `POST /api/v1/learning/session`
 
-### GET /api/v1/words/:id
-
-获取单个单词。
-
----
-
-### GET /api/v1/records
-
-分页获取学习记录。
-
----
-
-### POST /api/v1/records
-
-创建学习记录（**不触发 AMAS**，不返回 AMAS 计算结果）。
-
-**请求体：**
+**响应 410：**
 ```json
 {
-  "wordId": "<uuid>",
-  "isCorrect": true,
-  "responseTimeMs": 1200
+  "error": "GONE",
+  "message": "/api/v1/* 端点已停止维护，请迁移至 /api/* 主端点",
+  "sunset": "Fri, 01 Jan 2027 00:00:00 GMT",
+  "migrationDoc": "https://heartcoolman.github.io/wordforge/api-endpoints#v1-deprecation"
 }
 ```
 
-**响应 200：** 直接返回 `LearningRecord` 对象（结构同 §5 头部定义），无 `amasResult` / `duplicate` 封装。
+**响应头（RFC 8594，整个 `/api/v1/*` 路由器统一注入）：**
 
-> **幂等行为**：同一用户对同一 `wordId` 的相同 `isCorrect` 结果，在 **5 秒内**重复提交会被服务端去重返回既有记录（该规则仅存在于 v1，主线 `/api/records` 依赖 `clientRecordId` 持久去重）。
-
----
-
-### GET /api/v1/study-config
-
-获取学习配置（同 `/api/study-config`）。
+| 响应头 | 值 |
+|---|---|
+| `Deprecation` | `Wed, 21 May 2026 00:00:00 GMT` |
+| `Sunset` | `Fri, 01 Jan 2027 00:00:00 GMT` |
+| `Link` | `<https://heartcoolman.github.io/wordforge/api-endpoints#v1-deprecation>; rel="sunset"` |
 
 ---
 
-### POST /api/v1/learning/session
+### 迁移对照表
 
-创建或恢复学习会话（轻量版）。
-
-**请求体：** 空
-
-**响应 200：**
-```json
-{
-  "success": true,
-  "data": {
-    "sessionId": "<uuid>",
-    "resumed": false
-  }
-}
-```
+| v1 路径 | 新路径 |
+|---|---|
+| `GET /api/v1/words` | `GET /api/words` |
+| `GET /api/v1/words/:id` | `GET /api/words/:id` |
+| `GET /api/v1/records` | `GET /api/records` |
+| `POST /api/v1/records` | `POST /api/records` |
+| `GET /api/v1/study-config` | `GET /api/study-config` |
+| `POST /api/v1/learning/session` | `POST /api/learning/session` |
 
 ---
 

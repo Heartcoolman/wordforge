@@ -19,11 +19,7 @@ use common::auth::auth_header;
 use common::http::{request, response_json};
 
 /// 注册并返回 (access_token, user_id)。
-async fn register_user(
-    app: &axum::Router,
-    email: &str,
-    username: &str,
-) -> (String, String) {
+async fn register_user(app: &axum::Router, email: &str, username: &str) -> (String, String) {
     let resp = request(
         app,
         Method::POST,
@@ -38,14 +34,8 @@ async fn register_user(
     .await;
     let (status, _, body) = response_json(resp).await;
     assert_eq!(status, StatusCode::CREATED, "register failed: {body}");
-    let token = body["data"]["accessToken"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    let user_id = body["data"]["user"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let token = body["data"]["accessToken"].as_str().unwrap().to_string();
+    let user_id = body["data"]["user"]["id"].as_str().unwrap().to_string();
     (token, user_id)
 }
 
@@ -104,7 +94,10 @@ async fn it_gdpr_export_returns_ndjson_with_all_data() {
         .get("content-type")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    assert!(ct.contains("ndjson") || ct.contains("application/x"), "unexpected content-type: {ct}");
+    assert!(
+        ct.contains("ndjson") || ct.contains("application/x"),
+        "unexpected content-type: {ct}"
+    );
 
     let lines = parse_ndjson(resp).await;
     assert!(!lines.is_empty(), "export should not be empty");
@@ -119,7 +112,10 @@ async fn it_gdpr_export_returns_ndjson_with_all_data() {
     assert!(fav_line.is_some(), "missing favorites block");
     let fav_data = &fav_line.unwrap()["data"];
     assert!(
-        fav_data.as_array().map(|a| a.iter().any(|e| e["wordId"] == "w1")).unwrap_or(false),
+        fav_data
+            .as_array()
+            .map(|a| a.iter().any(|e| e["wordId"] == "w1"))
+            .unwrap_or(false),
         "favorites should contain w1, got: {fav_data}"
     );
 
@@ -160,7 +156,11 @@ async fn it_gdpr_export_rate_limited_on_second_call() {
         &[("authorization", auth_header(&token))],
     )
     .await;
-    assert_eq!(resp1.status(), StatusCode::OK, "first export should succeed");
+    assert_eq!(
+        resp1.status(),
+        StatusCode::OK,
+        "first export should succeed"
+    );
 
     // 第二次：429
     let resp2 = request(
@@ -177,7 +177,11 @@ async fn it_gdpr_export_rate_limited_on_second_call() {
         .get("retry-after")
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<i64>().ok());
-    assert_eq!(status2, StatusCode::TOO_MANY_REQUESTS, "second export should be rate limited");
+    assert_eq!(
+        status2,
+        StatusCode::TOO_MANY_REQUESTS,
+        "second export should be rate limited"
+    );
     assert!(
         retry_after.map(|s| s > 0).unwrap_or(false),
         "retry-after header should be a positive integer"
@@ -240,5 +244,8 @@ async fn it_gdpr_export_empty_after_delete_and_reregister() {
         .and_then(|l| l["data"].as_array())
         .map(|a| a.len())
         .unwrap_or(0);
-    assert_eq!(fav_data, 0, "new user should have no favorites from deleted account");
+    assert_eq!(
+        fav_data, 0,
+        "new user should have no favorites from deleted account"
+    );
 }

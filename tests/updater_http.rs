@@ -6,7 +6,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use learning_backend::config::UpdateCheckConfig;
-use learning_backend::services::updater::{ApplyContext, Channel, ProgressSink, Updater, UpdaterError};
+use learning_backend::services::updater::{
+    ApplyContext, Channel, ProgressSink, Updater, UpdaterError,
+};
 use sha2::{Digest, Sha256};
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -50,7 +52,8 @@ fn build_tarball() -> Vec<u8> {
 
         // static/index.html
         let mut idx = Header::new_gnu();
-        idx.set_path("wordforge-linux-x86_64/static/index.html").unwrap();
+        idx.set_path("wordforge-linux-x86_64/static/index.html")
+            .unwrap();
         idx.set_mode(0o644);
         let idx_body: &[u8] = b"<html></html>";
         idx.set_size(idx_body.len() as u64);
@@ -120,6 +123,7 @@ fn noop_ctx(channel: Channel, tag: &str) -> ApplyContext {
         on_rollback: Box::new(|_| {}),
         on_maintenance: Box::new(|_| {}),
         task_id: "test-task-id".to_string(),
+        allow_downgrade: false,
     }
 }
 
@@ -146,18 +150,27 @@ async fn check_latest_caches_and_returns_status() {
         .await;
 
     let tmp = tempfile::tempdir().unwrap();
-    let cfg = build_cfg(tmp.path(), &format!("{}/repos/o/r/releases/latest", server.uri()));
+    let cfg = build_cfg(
+        tmp.path(),
+        &format!("{}/repos/o/r/releases/latest", server.uri()),
+    );
     let updater = Updater::new(&cfg, "v0.4.2").unwrap();
 
     let status = updater.check_latest().await.expect("check ok");
     assert_eq!(status.current_version, "v0.4.2");
-    assert_eq!(status.beta.as_ref().map(|c| c.latest_version.as_str()), Some("v9.9.9"));
+    assert_eq!(
+        status.beta.as_ref().map(|c| c.latest_version.as_str()),
+        Some("v9.9.9")
+    );
     assert!(status.beta.as_ref().map(|c| c.has_update).unwrap_or(false));
     assert!(status.beta.as_ref().map(|c| c.can_apply).unwrap_or(false));
 
     // Snapshot 返回相同视图
     let snap = updater.snapshot().await;
-    assert_eq!(snap.beta.as_ref().map(|c| c.latest_version.as_str()), Some("v9.9.9"));
+    assert_eq!(
+        snap.beta.as_ref().map(|c| c.latest_version.as_str()),
+        Some("v9.9.9")
+    );
 }
 
 #[tokio::test]
@@ -189,13 +202,19 @@ async fn etag_304_short_circuits_without_overwriting_cache() {
         .await;
 
     let tmp = tempfile::tempdir().unwrap();
-    let cfg = build_cfg(tmp.path(), &format!("{}/repos/o/r/releases/latest", server.uri()));
+    let cfg = build_cfg(
+        tmp.path(),
+        &format!("{}/repos/o/r/releases/latest", server.uri()),
+    );
     let updater = Updater::new(&cfg, "v0.4.2").unwrap();
 
     let _ = updater.check_latest().await.unwrap();
     let second = updater.check_latest().await.unwrap();
     // 304 路径仍保留 latest
-    assert_eq!(second.beta.as_ref().map(|c| c.latest_version.as_str()), Some("v9.9.9"));
+    assert_eq!(
+        second.beta.as_ref().map(|c| c.latest_version.as_str()),
+        Some("v9.9.9")
+    );
 }
 
 #[tokio::test]
@@ -214,8 +233,7 @@ async fn apply_rejects_sha256_mismatch() {
     Mock::given(method("GET"))
         .and(path("/dl/wordforge-linux-x86_64.tar.gz.sha256"))
         .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_string("deadbeef".repeat(8)), // 64 hex chars but won't match
+            ResponseTemplate::new(200).set_body_string("deadbeef".repeat(8)), // 64 hex chars but won't match
         )
         .mount(&server)
         .await;
@@ -226,7 +244,10 @@ async fn apply_rejects_sha256_mismatch() {
         .await;
 
     let tmp = tempfile::tempdir().unwrap();
-    let cfg = build_cfg(tmp.path(), &format!("{}/repos/o/r/releases/latest", server.uri()));
+    let cfg = build_cfg(
+        tmp.path(),
+        &format!("{}/repos/o/r/releases/latest", server.uri()),
+    );
     let updater = Updater::new(&cfg, "v0.4.2").unwrap();
     let _ = updater.check_latest().await.unwrap();
     let backup = |_dst: &Path| Ok(());
@@ -234,7 +255,10 @@ async fn apply_rejects_sha256_mismatch() {
         .apply(noop_ctx(Channel::Beta, "v9.9.9"), backup, noop_sink())
         .await
         .unwrap_err();
-    assert!(matches!(err, UpdaterError::Sha256Mismatch { .. }), "got {err:?}");
+    assert!(
+        matches!(err, UpdaterError::Sha256Mismatch { .. }),
+        "got {err:?}"
+    );
 }
 
 #[tokio::test]
@@ -252,7 +276,10 @@ async fn apply_rejects_downgrade_by_default() {
         .await;
 
     let tmp = tempfile::tempdir().unwrap();
-    let cfg = build_cfg(tmp.path(), &format!("{}/repos/o/r/releases/latest", server.uri()));
+    let cfg = build_cfg(
+        tmp.path(),
+        &format!("{}/repos/o/r/releases/latest", server.uri()),
+    );
     let updater = Updater::new(&cfg, "v9.9.9").unwrap();
     let _ = updater.check_latest().await.unwrap();
     let backup = |_dst: &Path| Ok(());
@@ -260,7 +287,10 @@ async fn apply_rejects_downgrade_by_default() {
         .apply(noop_ctx(Channel::Beta, "v0.1.0"), backup, noop_sink())
         .await
         .unwrap_err();
-    assert!(matches!(err, UpdaterError::DowngradeRefused { .. }), "got {err:?}");
+    assert!(
+        matches!(err, UpdaterError::DowngradeRefused { .. }),
+        "got {err:?}"
+    );
 }
 
 #[tokio::test]
@@ -277,7 +307,10 @@ async fn apply_rejects_invalid_target_tag() {
         .await;
 
     let tmp = tempfile::tempdir().unwrap();
-    let cfg = build_cfg(tmp.path(), &format!("{}/repos/o/r/releases/latest", server.uri()));
+    let cfg = build_cfg(
+        tmp.path(),
+        &format!("{}/repos/o/r/releases/latest", server.uri()),
+    );
     let updater = Updater::new(&cfg, "v0.4.2").unwrap();
     let _ = updater.check_latest().await.unwrap();
     let backup = |_dst: &Path| Ok(());
@@ -314,7 +347,10 @@ async fn apply_runs_until_backup_callback_when_sha_matches() {
         .await;
 
     let tmp = tempfile::tempdir().unwrap();
-    let cfg = build_cfg(tmp.path(), &format!("{}/repos/o/r/releases/latest", server.uri()));
+    let cfg = build_cfg(
+        tmp.path(),
+        &format!("{}/repos/o/r/releases/latest", server.uri()),
+    );
     let updater = Updater::new(&cfg, "v0.4.2").unwrap();
     let _ = updater.check_latest().await.unwrap();
 
@@ -400,7 +436,10 @@ async fn apply_rejects_tarball_with_symlink_entries() {
         .await;
 
     let tmp = tempfile::tempdir().unwrap();
-    let cfg = build_cfg(tmp.path(), &format!("{}/repos/o/r/releases/latest", server.uri()));
+    let cfg = build_cfg(
+        tmp.path(),
+        &format!("{}/repos/o/r/releases/latest", server.uri()),
+    );
     let updater = Updater::new(&cfg, "v0.4.2").unwrap();
     let _ = updater.check_latest().await.unwrap();
     let backup = |_dst: &Path| Ok(());
@@ -440,20 +479,32 @@ async fn force_check_bypasses_ttl_cache() {
 
     let tmp = tempfile::tempdir().unwrap();
     // 用一个很长的 TTL 保证非 force 会命中缓存
-    let mut cfg = build_cfg(tmp.path(), &format!("{}/repos/o/r/releases/latest", server.uri()));
+    let mut cfg = build_cfg(
+        tmp.path(),
+        &format!("{}/repos/o/r/releases/latest", server.uri()),
+    );
     cfg.cache_ttl_secs = 3600;
     let updater = Updater::new(&cfg, "v0.4.2").unwrap();
 
     let first = updater.check_latest().await.unwrap();
-    assert_eq!(first.beta.as_ref().map(|c| c.latest_version.as_str()), Some("v1.0.0"));
+    assert_eq!(
+        first.beta.as_ref().map(|c| c.latest_version.as_str()),
+        Some("v1.0.0")
+    );
 
     // 普通 check_latest 仍命中 TTL，返回 v1
     let cached = updater.check_latest().await.unwrap();
-    assert_eq!(cached.beta.as_ref().map(|c| c.latest_version.as_str()), Some("v1.0.0"));
+    assert_eq!(
+        cached.beta.as_ref().map(|c| c.latest_version.as_str()),
+        Some("v1.0.0")
+    );
 
     // force_check_latest 必须真去打，拿到 v2
     let fresh = updater.force_check_latest().await.unwrap();
-    assert_eq!(fresh.beta.as_ref().map(|c| c.latest_version.as_str()), Some("v2.0.0"));
+    assert_eq!(
+        fresh.beta.as_ref().map(|c| c.latest_version.as_str()),
+        Some("v2.0.0")
+    );
 }
 
 /// Codex P3: tar.gz / sha256 资产任一缺失，apply 必须早抛 NoAsset。
@@ -484,12 +535,21 @@ async fn apply_rejects_release_missing_assets() {
         .await;
 
     let tmp = tempfile::tempdir().unwrap();
-    let cfg = build_cfg(tmp.path(), &format!("{}/repos/o/r/releases/latest", server.uri()));
+    let cfg = build_cfg(
+        tmp.path(),
+        &format!("{}/repos/o/r/releases/latest", server.uri()),
+    );
     let updater = Updater::new(&cfg, "v0.4.2").unwrap();
 
     let status = updater.check_latest().await.unwrap();
-    assert!(!status.beta.as_ref().map(|c| c.can_apply).unwrap_or(false), "缓存了 release 但 canApply 应为 false");
-    assert_eq!(status.beta.as_ref().map(|c| c.latest_version.as_str()), Some("v9.9.9"));
+    assert!(
+        !status.beta.as_ref().map(|c| c.can_apply).unwrap_or(false),
+        "缓存了 release 但 canApply 应为 false"
+    );
+    assert_eq!(
+        status.beta.as_ref().map(|c| c.latest_version.as_str()),
+        Some("v9.9.9")
+    );
 
     let backup = |_dst: &Path| Ok(());
     let err = updater
@@ -531,12 +591,18 @@ async fn etag_loaded_from_disk_without_payload_triggers_unconditional_request() 
     // 预先把一个 etag 写到磁盘，模拟"上次 run 写过 etag"
     std::fs::write(tmp.path().join(".update_etag"), "\"stale-etag-from-disk\"").unwrap();
 
-    let cfg = build_cfg(tmp.path(), &format!("{}/repos/o/r/releases/latest", server.uri()));
+    let cfg = build_cfg(
+        tmp.path(),
+        &format!("{}/repos/o/r/releases/latest", server.uri()),
+    );
     let updater = Updater::new(&cfg, "v0.4.2").unwrap();
 
     // 关键：第一次 check 必须无视磁盘上的 etag（因为内存里没 latest payload）
     let status = updater.check_latest().await.expect("must not 500");
-    assert_eq!(status.beta.as_ref().map(|c| c.latest_version.as_str()), Some("v9.9.9"));
+    assert_eq!(
+        status.beta.as_ref().map(|c| c.latest_version.as_str()),
+        Some("v9.9.9")
+    );
     assert!(status.beta.as_ref().map(|c| c.has_update).unwrap_or(false));
 }
 
@@ -553,7 +619,10 @@ async fn rate_limit_propagates_as_dedicated_error() {
         .await;
 
     let tmp = tempfile::tempdir().unwrap();
-    let cfg = build_cfg(tmp.path(), &format!("{}/repos/o/r/releases/latest", server.uri()));
+    let cfg = build_cfg(
+        tmp.path(),
+        &format!("{}/repos/o/r/releases/latest", server.uri()),
+    );
     let updater = Updater::new(&cfg, "v0.4.2").unwrap();
     let err = updater.check_latest().await.unwrap_err();
     assert!(matches!(err, UpdaterError::RateLimited), "got {err:?}");

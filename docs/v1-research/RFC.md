@@ -354,7 +354,7 @@ WordForge 已交付 v0.5.0 → v0.6.0-beta.3 的"七连发"：admin 一键升级
 ### 10.3 立即生效条款
 
 - `/api/v1/*` → 自 v1.0 发布起返回 410 Gone（已拍板 D2）；现有 4 个端点字段集永久冻结至删除日。
-- `/api/admin/monitoring/check-update` → 自 v1.0 发布起 deprecated（被 `/admin/updates/*` 取代）；v1.1 删除。
+- `/api/admin/monitoring/check-update` → **决议修订（v1.1.4，路径 A）**：原「v1.1 删除、被 `/admin/updates/*` 取代」已撤销——两者语义不可无损互替（前者轻量只读版本探测 + TTL 缓存，后者重型自更新机），**保留为内部 admin 端点、不删除**。详见 `release-calendar.md` §「立即生效条款」。
 
 ---
 

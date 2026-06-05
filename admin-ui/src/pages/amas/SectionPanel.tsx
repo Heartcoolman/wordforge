@@ -1,7 +1,6 @@
-import { For, createSignal, createMemo, Show } from 'solid-js';
-import { Card } from '@/components/ui/Card';
+import { For, createMemo, Show } from 'solid-js';
 import { Badge } from '@/components/ui/Badge';
-import { ParamField } from './ParamField';
+import { ParamCard } from '@/components/amas/ParamCard';
 import { PARAM_DICT, getByPath, setByPath, type FieldError } from './schema';
 
 interface SectionPanelProps {
@@ -21,12 +20,31 @@ const SECTION_LABEL_ZH: Record<string, string> = {
   coldStart: '冷启动',
 };
 
-/** 分节配置：按 section 折叠，每节内一列 ParamField。 */
+const SECTION_DESC_ZH: Record<string, string> = {
+  featureFlags: '8 个算法路由开关,关闭后退回 Heuristic 兜底',
+  ensemble: '3 路集成 (Heuristic / IGE / SWD) 投票权重 + 信任融合',
+  modeling: '注意力 / 疲劳 / 动机的 EMA 平滑参数',
+  constraints: '高疲劳保护 / 低注意力降难度的硬阈值',
+  objectiveWeights: '决策目标函数 5 项权重 (和应 ≈ 1)',
+  memoryModel: 'FSRS-5 w[0..18] + 目标留存率 + 间隔上限',
+  monitoring: '采样率 + 指标落盘间隔',
+  coldStart: '冷启动 → 探索 → 利用三相位切换阈值',
+};
+
+/**
+ * 分节配置(对齐 amas-config.html .grid.cols-4 设计图):
+ * 按 section 分组的扁平 4 列 ParamCard 网格,section 之间 spacing-y-5。
+ *
+ * 与旧 collapsible 版本的区别:
+ * - 旧版:8 section 折叠,默认只开第 1 个,需要点击展开 → 调参时来回点
+ * - 新版:全部默认展开,4 列扁平铺开,section 标题作为视觉锚点
+ *
+ * 移除了 Card 容器和折叠箭头,空间让给参数本身。
+ * 未在 PARAM_DICT 中精雕的字段(其余 ~225 项)在「JSON 高级」编辑。
+ */
 export function SectionPanel(props: SectionPanelProps) {
   const sections = Object.keys(PARAM_DICT);
-  // path → 错误消息
   const errorMap = createMemo(() => new Map(props.errors.map((e) => [e.path, e.message])));
-  // section → 错误数（预聚合，避免每渲染 filter）
   const errorsBySection = createMemo(() => {
     const m = new Map<string, number>();
     for (const e of props.errors) {
@@ -35,8 +53,7 @@ export function SectionPanel(props: SectionPanelProps) {
     }
     return m;
   });
-
-  const [openSection, setOpenSection] = createSignal<string | null>(sections[0] ?? null);
+  const totalParams = Object.values(PARAM_DICT).reduce((a, b) => a + b.length, 0);
 
   function setValue(path: string, v: unknown) {
     const next = structuredClone(props.config);
@@ -45,59 +62,48 @@ export function SectionPanel(props: SectionPanelProps) {
   }
 
   return (
-    <div class="space-y-2">
+    <div class="space-y-5">
+      <p class="text-xs text-content-tertiary">
+        共 <span class="font-mono tabular-nums">{totalParams}</span> 个已知字段,按 section 分组
+        4 列展开。其余字段请到「JSON 高级」编辑。
+      </p>
       <For each={sections}>
         {(section) => {
           const params = PARAM_DICT[section];
-          const isOpen = () => openSection() === section;
-          const panelId = `amas-section-${section}`;
           const sectionErrors = () => errorsBySection().get(section) ?? 0;
           return (
-            <Card variant="outlined" padding="none">
-              <button
-                type="button"
-                class="focus-ring-soft w-full flex items-center justify-between px-4 py-3 hover:bg-surface-secondary/50 transition-colors"
-                onClick={() => setOpenSection(isOpen() ? null : section)}
-                aria-expanded={isOpen()}
-                aria-controls={panelId}
-              >
-                <span class="flex items-center gap-2 text-sm font-semibold text-content">
+            <section id={`amas-section-${section}`} class="scroll-mt-24 space-y-3">
+              <div class="flex items-baseline gap-3 flex-wrap">
+                <h3 class="text-sm font-semibold text-content">
                   {SECTION_LABEL_ZH[section] ?? section}
-                  <span class="text-xs text-content-tertiary font-normal">{params.length} 项</span>
-                  <Show when={sectionErrors() > 0}>
-                    <Badge variant="error" size="sm">{sectionErrors()} 错</Badge>
+                </h3>
+                <span class="text-xs text-content-tertiary">
+                  <span class="font-mono tabular-nums">{params.length}</span> 项
+                  <Show when={SECTION_DESC_ZH[section]}>
+                    {' · '}
+                    {SECTION_DESC_ZH[section]}
                   </Show>
                 </span>
-                <svg
-                  class={`w-4 h-4 text-content-tertiary transition-transform duration-200 ${isOpen() ? 'rotate-180' : ''}`}
-                  viewBox="0 0 20 20"
-                  fill="currentColor"
-                  aria-hidden="true"
-                >
-                  <path
-                    fill-rule="evenodd"
-                    d="M5.23 7.21a.75.75 0 011.06.02L10 11.06l3.71-3.83a.75.75 0 111.08 1.04l-4.25 4.39a.75.75 0 01-1.08 0L5.21 8.27a.75.75 0 01.02-1.06z"
-                    clip-rule="evenodd"
-                  />
-                </svg>
-              </button>
-              {/* 保留 DOM 以让 aria-controls 始终有效 */}
-              <div id={panelId} hidden={!isOpen()} class="px-4 pb-4 pt-1 space-y-3 border-t border-border">
+                <Show when={sectionErrors() > 0}>
+                  <Badge variant="error" size="sm">
+                    {sectionErrors()} 错
+                  </Badge>
+                </Show>
+              </div>
+              <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-3">
                 <For each={params}>
                   {(meta) => (
-                    <div class="border-b border-border/50 pb-3 last:border-b-0 last:pb-0">
-                      <ParamField
-                        meta={meta}
-                        value={getByPath(props.config, meta.path)}
-                        error={errorMap().get(meta.path)}
-                        onChange={(v) => setValue(meta.path, v)}
-                        compact
-                      />
-                    </div>
+                    <ParamCard
+                      meta={meta}
+                      value={getByPath(props.config, meta.path)}
+                      error={errorMap().get(meta.path)}
+                      onChange={(v) => setValue(meta.path, v)}
+                      compact
+                    />
                   )}
                 </For>
               </div>
-            </Card>
+            </section>
           );
         }}
       </For>

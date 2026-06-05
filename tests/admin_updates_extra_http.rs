@@ -19,7 +19,11 @@ fn attach_updater(app: &common::app::TestApp, updater: std::sync::Arc<Updater>) 
     app.state.set_updater(updater);
 }
 
-fn make_updater(server_uri: &str, current_tag: &str, install_dir: &std::path::Path) -> std::sync::Arc<Updater> {
+fn make_updater(
+    server_uri: &str,
+    current_tag: &str,
+    install_dir: &std::path::Path,
+) -> std::sync::Arc<Updater> {
     Updater::new(
         &UpdateCheckConfig {
             api_url: format!("{server_uri}/repos/o/r/releases/latest"),

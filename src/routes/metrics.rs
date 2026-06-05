@@ -137,6 +137,13 @@ pub async fn metrics_handler(
         "",
         total_5xx as f64,
     );
+    gauge(
+        &mut out,
+        "http_inflight_requests",
+        "当前在途（正在处理中）的 HTTP 请求数——过载饱和度信号",
+        "",
+        crate::metrics_counters::inflight() as f64,
+    );
 
     // --- 是否处于维护模式 ---
     gauge(
@@ -155,7 +162,9 @@ pub async fn metrics_handler(
         let _ = writeln!(&mut out, "# HELP worker_last_run_seconds 每个 worker 上次完成时的 Unix 时间戳（秒），0 表示尚未运行");
         let _ = writeln!(&mut out, "# TYPE worker_last_run_seconds gauge");
         let rows = state
-            .run_store_task("metrics.worker_last_run", |store| store.list_worker_last_run())
+            .run_store_task("metrics.worker_last_run", |store| {
+                store.list_worker_last_run()
+            })
             .await
             .ok()
             .and_then(Result::ok)

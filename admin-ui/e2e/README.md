@@ -8,90 +8,66 @@
 
 ```
 admin-ui/e2e/
-├── admin.spec.ts           # 管理后台测试
-├── auth.spec.ts             # 认证流程测试  
-├── home-navigation.spec.ts  # 主页和导航测试
-├── learning-flow.spec.ts    # 学习流程测试
-├── notifications.spec.ts    # 通知系统测试
-├── profile.spec.ts          # 用户资料测试
-├── records.spec.ts          # 学习记录测试
-├── study-config.spec.ts     # 学习配置测试
-├── wordbook-center.spec.ts  # 词书中心测试
-├── wordbooks.spec.ts        # 词本管理测试
+├── admin-real-flows.spec.ts # admin GUI 真实功能流（本套件主战场）
+├── admin.spec.ts            # 管理后台登录页测试
+├── auth.spec.ts             # 用户旧路由迁移提示（legacy redirect）
+├── home-navigation.spec.ts  # 根路径重定向与 404 兜底
+├── learning-flow.spec.ts    # 学习页旧路由迁移提示（legacy redirect）
+├── notifications.spec.ts    # 通知旧路由迁移提示（legacy redirect）
+├── profile.spec.ts          # 用户资料旧路由迁移提示（legacy redirect）
+├── records.spec.ts          # 已删除路由 404 兜底
+├── study-config.spec.ts     # 已删除路由 404 兜底
+├── wordbook-center.spec.ts  # 词书中心旧路由迁移提示（legacy redirect）
+├── wordbooks.spec.ts        # 词本旧路由迁移提示（legacy redirect）
 ├── helpers/
 │   └── test-helpers.ts      # 测试辅助函数
 └── fixtures.ts              # 测试Fixtures
 
 ```
 
+> 用户前端已迁移至独立仓库 `wordforge-web`，admin GUI 才是本套件的主战场，真实功能流集中在 `admin-real-flows.spec.ts`。
+
 ## 测试覆盖范围
 
-### 认证模块 (`auth.spec.ts`)
-- 登录页面加载和表单验证
-- 错误凭据处理
-- 注册页面功能
-- 密码可见性切换
-- 忘记密码链接
+> 用户前端已迁移至独立仓库 `wordforge-web`，本仓库的用户旧路由（`/login`、`/profile`、`/learning`、`/wordbooks`、`/notifications`、`/wordbook-center` 等）统一渲染 `LegacyUserFrontendPage` 迁移提示页。以下这些 spec 已是 **legacy redirect 冒烟测试**，只验证旧路径给出明确迁移提示（不 404、不白屏），真实功能测试在独立仓 `wordforge-web`。
+
+### admin 真实功能流 (`admin-real-flows.spec.ts`)
+- admin GUI 的真实功能流（本套件主战场，以 mock 后端驱动）
 
 ### 管理后台 (`admin.spec.ts`)
-- 管理员登录
-- 权限验证
-- 侧边栏导航
+- admin 登录页加载与表单元素
+
+### 认证模块 (`auth.spec.ts`) — legacy redirect
+- `/login`、`/register` 等旧路由渲染迁移提示页
+- 验证迁移提示文案、不 404 / 不白屏
 
 ### 主页和导航 (`home-navigation.spec.ts`)
-- 页面加载
-- 导航栏功能
-- 主题切换
-- 移动端菜单
-- 404页面
+- 根路径 `/` 重定向到 `/admin/login`
+- 未知路由 404 兜底
 
-### 学习流程 (`learning-flow.spec.ts`)
-- 学习页面访问
-- 加载状态
-- 模式切换
-- 测验显示
+### 学习流程 (`learning-flow.spec.ts`) — legacy redirect
+- `/learning`、`/flashcard` 渲染迁移提示页
+- 不再 bootstrap 旧学习 / 测验 UI
 
-### 词本管理 (`wordbooks.spec.ts`)
-- 词本列表
-- 搜索功能
-- 详情页导航
-- 创建按钮
+### 词本管理 (`wordbooks.spec.ts`) — legacy redirect
+- `/wordbooks` 渲染迁移提示页，暴露 admin 入口链接
+- 旧列表 / 创建按钮不再出现
 
-### 词书中心 (`wordbook-center.spec.ts`)
-- 词书列表
-- 预览功能
-- 导入流程
-- 分类筛选
+### 词书中心 (`wordbook-center.spec.ts`) — legacy redirect
+- `/wordbook-center` 渲染迁移提示页（管理员词书中心在 `/admin/wordbook-center`）
 
-### 学习配置 (`study-config.spec.ts`)
-- 配置页面加载
-- 每日目标调整
-- 学习模式切换
-- 词本选择
-- AMAS设置
+### 学习配置 (`study-config.spec.ts`) — route removed
+- `/study-config` 路由已删除，落 404 兜底（AMAS 配置迁至 `/admin/amas-config`）
 
-### 用户资料 (`profile.spec.ts`)
-- 用户信息显示
-- 用户名编辑
-- 密码修改
-- 学习统计
-- 头像上传
-- 退出登录
+### 用户资料 (`profile.spec.ts`) — legacy redirect
+- `/profile` 渲染迁移提示页，暴露 admin 入口链接
+- 旧表单字段 / 退出登录操作不再出现
 
-### 通知系统 (`notifications.spec.ts`)
-- 通知列表
-- 标记已读
-- 筛选功能
-- 删除通知
-- 通知徽章
+### 通知系统 (`notifications.spec.ts`) — legacy redirect
+- `/notifications` 渲染迁移提示页
 
-### 学习记录 (`records.spec.ts`)
-- 历史记录
-- 日期筛选
-- 记录详情
-- 统计摘要
-- 分页功能
-- 导出记录
+### 学习记录 (`records.spec.ts`) — route removed
+- `/records` 路由已删除，落 404 兜底
 
 ## 运行测试
 
@@ -186,22 +162,16 @@ npx playwright show-report
 
 ## 辅助函数
 
-`helpers/test-helpers.ts` 提供了常用的辅助函数：
+`helpers/test-helpers.ts` 提供了常用的辅助函数（用户前端迁移后，`loginAsUser` 已移除）：
 
 ```typescript
-// 用户登录
-await loginAsUser(page, 'user@example.com', 'password');
+// 等待 Legacy 迁移提示页可见（用户旧路由统一渲染）
+await expectLegacyPage(page);
 
 // 管理员登录
 await loginAsAdmin(page, 'admin@example.com', 'admin123');
 
-// 等待导航完成
-await waitForNavigation(page);
-
-// 检查错误消息
-await expectErrorVisible(page);
-
-// 清除存储
+// 清除本地存储与 Cookie
 await clearStorage(page);
 ```
 
@@ -223,7 +193,7 @@ E2E测试可以集成到GitHub Actions工作流中：
 
 - name: Upload test results
   if: always()
-  uses: actions/upload-artifact@v3
+  uses: actions/upload-artifact@v4
   with:
     name: playwright-report
     path: admin-ui/playwright-report/

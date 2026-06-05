@@ -48,13 +48,34 @@ impl Store {
         to_version: &str,
         channel: &str,
     ) -> Result<(), StoreError> {
+        self.insert_update_audit_with_action(
+            id,
+            admin_id,
+            from_version,
+            to_version,
+            channel,
+            "self_update",
+        )
+    }
+
+    /// m022:同 `insert_update_audit`,但允许指定 `action`(默认 `self_update`)。
+    /// rollback 操作通过这个传入 `"rollback"`,前端 history 列表按 action 区分图标/颜色。
+    pub fn insert_update_audit_with_action(
+        &self,
+        id: &str,
+        admin_id: &str,
+        from_version: &str,
+        to_version: &str,
+        channel: &str,
+        action: &str,
+    ) -> Result<(), StoreError> {
         let conn = self.conn()?;
         let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
             "INSERT INTO update_audit_log
                 (id, admin_id, from_version, to_version, channel, started_at, outcome, action)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'in_progress', 'self_update')",
-            params![id, admin_id, from_version, to_version, channel, now],
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'in_progress', ?7)",
+            params![id, admin_id, from_version, to_version, channel, now, action],
         )?;
         Ok(())
     }
@@ -114,6 +135,44 @@ impl Store {
         Ok(())
     }
 
+    /// m024:按 (target_type, target_id) 取该目标最近 N 条审计。供 admin
+    /// 用户管理 Drawer 的"操作日志" tab(target_type='user', target_id=user.id)。
+    pub fn list_admin_audit_for_target(
+        &self,
+        target_type: &str,
+        target_id: &str,
+        limit: usize,
+    ) -> Result<Vec<UpdateAuditEntry>, StoreError> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, admin_id, from_version, to_version, channel,
+                    started_at, completed_at, outcome, error,
+                    action, target_type, target_id, metadata_json
+             FROM update_audit_log
+             WHERE target_type = ?1 AND target_id = ?2
+             ORDER BY started_at DESC
+             LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(params![target_type, target_id, limit as i64], |row| {
+            Ok(UpdateAuditEntry {
+                id: row.get(0)?,
+                admin_id: row.get(1)?,
+                from_version: row.get(2)?,
+                to_version: row.get(3)?,
+                channel: row.get(4)?,
+                started_at: row.get(5)?,
+                completed_at: row.get(6)?,
+                outcome: row.get(7)?,
+                error: row.get(8)?,
+                action: row.get(9)?,
+                target_type: row.get(10)?,
+                target_id: row.get(11)?,
+                metadata_json: row.get(12)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     /// 返回最近 N 条升级记录（按 started_at 倒序）。
     pub fn list_update_audit(&self, limit: usize) -> Result<Vec<UpdateAuditEntry>, StoreError> {
         let conn = self.conn()?;
@@ -142,7 +201,8 @@ impl Store {
                 metadata_json: row.get(12)?,
             })
         })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
     }
 }
 

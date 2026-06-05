@@ -121,6 +121,29 @@ async fn main() {
     );
     store.run_migrations().expect("Failed to run migrations");
 
+    // D3：回灌持久化的可用率小时桶，恢复跨重启的 SLO 30d 窗口（失败仅 warn 不阻断启动）。
+    {
+        let now_hour = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64 / 3600)
+            .unwrap_or(0);
+        match store.load_availability_rollup(now_hour - 30 * 24) {
+            Ok(rows) => {
+                let n = rows.len();
+                learning_backend::middleware::http_metrics::import_hour_rollup(rows);
+                if n > 0 {
+                    tracing::info!(hours = n, "回灌可用率小时桶，SLO 窗口跨重启恢复");
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "回灌可用率小时桶失败"),
+        }
+    }
+
+    // C2：启动后 seed AMAS 调参白名单（空表才写自 const，失败仅 warn 不阻断启动）
+    if let Err(e) = store.seed_tuning_whitelist_if_empty() {
+        tracing::warn!(error = %e, "启动 seed AMAS 调参白名单失败，回退 const fallback");
+    }
+
     learning_backend::blocking::init_blocking_semaphore(config.sqlite_pool_size as usize);
 
     let (shutdown_tx, _) = broadcast::channel::<()>(8);
@@ -159,13 +182,30 @@ async fn main() {
         .map(|s| s.maintenance_mode)
         .unwrap_or(false);
 
-    let state = AppState::new(
+    let mut state = AppState::new(
         store.clone(),
         amas_engine.clone(),
         &config,
         shutdown_tx.clone(),
         initial_maintenance,
     );
+
+    // m027：GeoIP（可选）。data/GeoLite2-Country.mmdb 在 binary 同目录或 cwd 都试一次。
+    {
+        let candidates = [
+            std::path::PathBuf::from("data/GeoLite2-Country.mmdb"),
+            std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|d| d.join("data/GeoLite2-Country.mmdb")))
+                .unwrap_or_default(),
+        ];
+        let reader = candidates
+            .iter()
+            .find(|p| p.exists())
+            .and_then(learning_backend::services::geoip::try_load);
+        state.set_geoip(reader);
+    }
+    let state = state;
 
     // v1.1-P0.6：资源包 Ed25519 签名器（与 db 同目录的 keys/）
     {
@@ -222,10 +262,14 @@ async fn main() {
         ));
     }
 
-    tokio::spawn(learning_backend::workers::heartbeat_watchdog::run(
-        state.clone(),
-        shutdown_tx.subscribe(),
-    ));
+    // 心跳看门狗下发 DataCorrupted SSE + 推进 miss 计数，非幂等，仅 leader 跑，
+    // 避免多实例对同一设备重复告警。
+    if config.worker.is_leader {
+        tokio::spawn(learning_backend::workers::heartbeat_watchdog::run(
+            state.clone(),
+            shutdown_tx.subscribe(),
+        ));
+    }
 
     // v1.1-P1 S2：领域事件总线 consumer。`event-bus` feature 关闭时 subscribe()
     // 返回 None，consumer 自动早退。AMAS 同步通路保留为主路径不变；这里只是
@@ -239,6 +283,28 @@ async fn main() {
         });
     }
 
+    // S2-1：outbox 异步消费 worker（领域事件持久化处理 + 指数退避重试 + 死信兜底）。
+    // 默认 records 走同步老路时 outbox 为空，本 loop 每 10s 一次空查询、零影响；opt-in
+    // (RECORDS_OUTBOX_ASYNC=true) 后驱动异步消费，关闭后仍排空残留事件。需 AppState 故走 interval loop。
+    // claim 非原子，多实例会重复处理同一事件致 AMAS 状态双累加，仅 leader 跑。
+    if config.worker.is_leader {
+        let outbox_state = state.clone();
+        let mut shutdown_rx = shutdown_tx.subscribe();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(10));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            tick.tick().await; // 跳过启动即触发
+            loop {
+                tokio::select! {
+                    _ = shutdown_rx.recv() => break,
+                    _ = tick.tick() => {
+                        learning_backend::workers::outbox_processor::run(&outbox_state).await;
+                    }
+                }
+            }
+        });
+    }
+
     tokio::spawn(learning_backend::workers::probe_confirm_sweeper::run(
         state.clone(),
         shutdown_tx.subscribe(),
@@ -248,6 +314,15 @@ async fn main() {
         state.clone(),
         shutdown_tx.subscribe(),
     ));
+
+    // m042/D2:定时广播下发 worker（每 60s 扫到期 scheduled_broadcasts 并 fan-out）。
+    // fan-out 非幂等，多实例会重复下发，仅 leader 跑。
+    if config.worker.is_leader {
+        tokio::spawn(learning_backend::workers::scheduled_broadcast::run(
+            state.clone(),
+            shutdown_tx.subscribe(),
+        ));
+    }
 
     // 时钟健康探测：启动时打一次（detached，不阻塞 listen），之后每小时再打。
     // 漂移超阈会 ERROR 日志告警 + `/health` 状态降级，详见 clock_health 模块文档。
@@ -269,6 +344,37 @@ async fn main() {
         config.auth_rate_limit.window_secs,
         shutdown_tx.subscribe(),
     ));
+    // W3-1：遥测限频器独立 cleanup loop（与业务限流并列，周期=遥测窗口）。
+    tokio::spawn(rate_limit_cleanup_loop(
+        state.telemetry_rate_limit().clone(),
+        config.telemetry_rate_limit.window_secs,
+        shutdown_tx.subscribe(),
+    ));
+
+    // 每日 DB 备份（独立 interval 循环，与 cron worker 解耦）。
+    // 备份 + 离站上传/prune 非幂等，多实例会并发上传/互删备份，仅 leader 跑。
+    if config.worker.is_leader {
+        let store = store.clone();
+        let backups_dir = std::path::Path::new(&config.database_url)
+            .parent()
+            .map(|p| p.join("backups"));
+        if let Some(dir) = backups_dir {
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(Duration::from_secs(24 * 3600));
+                tick.tick().await; // 跳过启动即触发
+                loop {
+                    tick.tick().await;
+                    match learning_backend::workers::db_backup::run_once(&store, &dir, 30).await {
+                        Ok(path) => {
+                            // B1:本地备份成功后逐 target 推送离站（file/rsync/s3），失败仅告警不中断
+                            learning_backend::workers::backup_offsite::run(&store, &path).await;
+                        }
+                        Err(e) => tracing::warn!(error = %e, "每日 DB 备份失败"),
+                    }
+                }
+            });
+        }
+    }
 
     let worker_handle = if config.worker.is_leader {
         let mut worker_manager = WorkerManager::new(
@@ -300,7 +406,7 @@ async fn main() {
 
     let cors_layer = build_cors_layer(&config);
 
-    let app = build_router(state)
+    let app = build_router(state.clone())
         .layer(cors_layer)
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http())
@@ -354,6 +460,11 @@ async fn main() {
     if let Err(e) = server_future.await {
         tracing::error!(error = %e, "HTTP server crashed");
     }
+
+    // W3-2：关停前补一次可用率落盘。此刻 server_future 已返回、不再有新请求写内存 hour 桶，
+    // 补落最近一次 cron flush（≤5min）到关停之间的请求/5xx 增量，消除重启后登录 SLO 桶缺口。
+    learning_backend::workers::metrics_flush::flush_availability_rollup(state.store());
+    tracing::info!("可用率小时桶已最终落盘");
 
     tracing::info!("Shutdown complete");
 }

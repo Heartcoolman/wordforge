@@ -1,0 +1,327 @@
+/* 词库中心页视觉：移植设计图 admin后端/wordbook-center.html <style>，scoped 在 .wbc 下。
+   admin-ui 已有 surface/content/elevation/radius/font/status 全套 token，这里补设计稿的
+   页面级组件类(page-header/row/grid/panel/btn/chip/input/select)与词库专属类(wb / freq / word-row-2 / import-zone)。 */
+
+/* —— 页头 —— */
+.wbc .page-header { margin-bottom: 4px; }
+.wbc .page-title { font: 700 24px/1.2 var(--font-display); letter-spacing: -0.02em; color: var(--content); }
+.wbc .page-desc { color: var(--content-secondary); font-size: 13px; margin-top: 4px; max-width: 86ch; }
+
+/* —— 布局原语 —— */
+.wbc .row { display: flex; align-items: center; gap: 12px; }
+.wbc .row.spread { justify-content: space-between; }
+.wbc .row.wrap { flex-wrap: wrap; }
+.wbc .gap-1 { gap: 4px; }
+.wbc .gap-2 { gap: 8px; }
+.wbc .gap-3 { gap: 12px; }
+.wbc .mt-2 { margin-top: 8px; }
+.wbc .mt-3 { margin-top: 12px; }
+.wbc .tnum { font-variant-numeric: tabular-nums; }
+.wbc .grid { display: grid; gap: 16px; }
+.wbc .grid.cols-12 { grid-template-columns: repeat(12, minmax(0, 1fr)); }
+@media (max-width: 1100px) { .wbc .grid.cols-12 > * { grid-column: 1 / -1 !important; } }
+
+/* —— 文本 helpers —— */
+.wbc .text-small { font-size: 12px; }
+.wbc .text-mono { font-family: var(--font-mono); }
+.wbc .text-tertiary { color: var(--content-tertiary); }
+.wbc .text-secondary { color: var(--content-secondary); }
+.wbc .text-accent { color: var(--accent); cursor: pointer; }
+.wbc .text-accent:hover { text-decoration: underline; }
+
+/* —— panel —— */
+.wbc .panel { background: var(--surface-elevated); border-radius: var(--radius-lg); box-shadow: var(--elevation-1); overflow: hidden; }
+.wbc .panel-header { padding: 14px 18px; display: flex; align-items: center; gap: 12px; border-bottom: 1px solid var(--border-hairline); }
+.wbc .panel-header h3 { font: 600 14px/1.3 var(--font-display); letter-spacing: -0.005em; color: var(--content); }
+.wbc .panel-header .aside { margin-left: auto; display: flex; align-items: center; gap: 12px; }
+.wbc .panel-body { padding: 18px; }
+.wbc .divider { height: 1px; background: var(--border-hairline); margin: 16px 0; }
+
+/* —— btn —— */
+.wbc .btn { display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 12px; border-radius: var(--radius-md); font-size: 13px; font-weight: 500; letter-spacing: -0.005em; transition: background var(--duration-fast), color var(--duration-fast), box-shadow var(--duration-fast); white-space: nowrap; user-select: none; cursor: pointer; }
+.wbc .btn svg { width: 15px; height: 15px; }
+.wbc .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.wbc .btn-sm { height: 28px; padding: 0 10px; font-size: 12px; }
+.wbc .btn-primary { background: var(--accent); color: var(--accent-content); }
+.wbc .btn-primary:hover:not(:disabled) { background: color-mix(in oklab, var(--accent) 88%, black); }
+.wbc .btn-secondary { background: var(--surface-elevated); color: var(--content); box-shadow: inset 0 0 0 1px var(--border); }
+.wbc .btn-secondary:hover:not(:disabled) { background: var(--surface-secondary); box-shadow: inset 0 0 0 1px var(--border-hover); }
+.wbc .btn-ghost { background: transparent; color: var(--content-secondary); }
+.wbc .btn-ghost:hover:not(:disabled) { background: var(--surface-secondary); color: var(--content); }
+.wbc .btn-icon { width: 30px; height: 30px; padding: 0; justify-content: center; background: transparent; color: var(--content-secondary); border-radius: var(--radius-md); cursor: pointer; display: inline-flex; align-items: center; }
+.wbc .btn-icon:hover { background: var(--surface-secondary); color: var(--content); }
+.wbc .btn-icon.is-on { background: var(--accent-light); color: var(--accent); }
+
+/* —— chip —— */
+.wbc .chip { display: inline-flex; align-items: center; gap: 5px; height: 22px; padding: 0 8px; border-radius: var(--radius-pill); font: 500 11.5px/1 var(--font-body); background: var(--surface-secondary); color: var(--content-secondary); white-space: nowrap; }
+.wbc .chip .dot { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.wbc .chip-accent { background: var(--accent-light); color: var(--accent); }
+.wbc .chip-success { background: var(--success-light); color: var(--success-strong); }
+.wbc .chip-warning { background: var(--warning-light); color: var(--warning-strong); }
+.wbc .chip-error { background: var(--error-light); color: var(--error-strong); }
+.wbc .chip-info { background: var(--info-light); color: var(--info-strong); }
+.wbc .chip-outline { background: transparent; box-shadow: inset 0 0 0 1px var(--border-hairline); color: var(--content-tertiary); }
+
+/* —— input / select —— */
+.wbc .input-wrap { position: relative; display: flex; align-items: center; }
+.wbc .input-wrap .icon-leading { position: absolute; left: 10px; width: 15px; height: 15px; color: var(--content-tertiary); pointer-events: none; }
+.wbc .input { width: 100%; height: 34px; padding: 0 12px; border-radius: var(--radius-md); background: var(--surface); color: var(--content); border: 1px solid var(--border-hairline); font-size: 13px; transition: border-color var(--duration-fast), box-shadow var(--duration-fast); }
+.wbc .input.has-leading { padding-left: 32px; }
+.wbc .input::placeholder { color: var(--content-tertiary); }
+.wbc .input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in oklab, var(--accent) 20%, transparent); }
+.wbc .select { height: 34px; padding: 0 28px 0 12px; border-radius: var(--radius-md); background: var(--surface); color: var(--content); border: 1px solid var(--border-hairline); font-size: 13px; cursor: pointer; appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 8px center; }
+.wbc .select:focus { outline: none; border-color: var(--accent); }
+
+/* ═══════════ 词库专属(wordbook-center.html <style> 原样移植) ═══════════ */
+
+.wb-grid {
+  display: grid;
+  grid-template-columns: 320px 1fr;
+  gap: 16px;
+  min-height: 600px;
+}
+@media (max-width: 1100px) { .wb-grid { grid-template-columns: 1fr; } }
+
+.wb-list {
+  background: var(--surface-elevated);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--elevation-1);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.wb-list-search {
+  padding: 12px;
+  border-bottom: 1px solid var(--border-hairline);
+}
+.wb-list-body {
+  flex: 1;
+  overflow-y: auto;
+  max-height: 720px;
+}
+.wb-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border-hairline);
+  cursor: pointer;
+  transition: background var(--duration-fast);
+  text-align: left;
+  width: 100%;
+}
+.wb-item:last-child { border-bottom: 0; }
+.wb-item:hover { background: var(--surface-secondary); }
+.wb-item.is-selected { background: var(--accent-light); }
+.wb-item .cover {
+  width: 44px; height: 44px;
+  border-radius: var(--radius-md);
+  display: grid; place-items: center;
+  font: 700 14px/1 var(--font-display);
+  color: #fff;
+  letter-spacing: -0.02em;
+  flex-shrink: 0;
+  background: linear-gradient(135deg, var(--accent), oklch(56% 0.22 300));
+}
+.wb-item .cover.c-1 { background: linear-gradient(135deg, oklch(58% 0.20 269), oklch(54% 0.22 290)); }
+.wb-item .cover.c-2 { background: linear-gradient(135deg, oklch(60% 0.18 162), oklch(56% 0.16 195)); }
+.wb-item .cover.c-3 { background: linear-gradient(135deg, oklch(72% 0.16 75), oklch(64% 0.18 50)); }
+.wb-item .cover.c-4 { background: linear-gradient(135deg, oklch(66% 0.16 245), oklch(58% 0.18 220)); }
+.wb-item .cover.c-5 { background: linear-gradient(135deg, oklch(60% 0.22 25), oklch(56% 0.22 5)); }
+.wb-item .cover.c-6 { background: linear-gradient(135deg, oklch(58% 0.22 290), oklch(56% 0.22 320)); }
+.wb-item .info { flex: 1; min-width: 0; }
+.wb-item .info .name { font: 600 13px/1.3 var(--font-display); color: var(--content); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wb-item .info .meta {
+  font-size: 11px;
+  color: var(--content-tertiary);
+  margin-top: 3px;
+  font-family: var(--font-mono);
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.wb-item .info .meta .dot { width: 2px; height: 2px; border-radius: 50%; background: var(--content-quaternary); align-self: center; }
+.wb-item .chip { flex-shrink: 0; }
+
+.wb-detail {
+  background: var(--surface-elevated);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--elevation-1);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.wb-detail-head {
+  padding: 20px 24px 18px;
+  display: grid;
+  grid-template-columns: 64px 1fr auto;
+  gap: 16px;
+  align-items: center;
+  border-bottom: 1px solid var(--border-hairline);
+}
+.wb-detail-head .cover {
+  width: 64px; height: 64px;
+  border-radius: var(--radius-lg);
+  background: linear-gradient(135deg, oklch(58% 0.20 269), oklch(54% 0.22 290));
+  color: #fff;
+  display: grid; place-items: center;
+  font: 700 22px/1 var(--font-display);
+  letter-spacing: -0.02em;
+}
+.wb-detail-head .info { min-width: 0; }
+.wb-detail-head .info h2 { font: 700 20px/1.2 var(--font-display); letter-spacing: -0.02em; color: var(--content); }
+.wb-detail-head .info .desc { font-size: 13px; color: var(--content-secondary); margin-top: 4px; }
+.wb-detail-head .actions { display: flex; gap: 6px; flex-shrink: 0; }
+@media (max-width: 1100px) {
+  .wb-detail-head { grid-template-columns: 64px 1fr; }
+  .wb-detail-head .actions { grid-column: 1 / -1; }
+}
+
+.wb-stats {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 1px;
+  background: var(--border-hairline);
+}
+.wb-stats > div {
+  background: var(--surface-elevated);
+  padding: 14px 18px;
+}
+.wb-stats .l { font-size: 11px; color: var(--content-tertiary); letter-spacing: 0.04em; text-transform: uppercase; }
+.wb-stats .v { font: 700 22px/1.05 var(--font-display); letter-spacing: -0.02em; margin-top: 4px; font-variant-numeric: tabular-nums; color: var(--content); }
+.wb-stats .v .unit { font-size: 12px; font-weight: 500; color: var(--content-tertiary); margin-left: 4px; }
+@media (max-width: 640px) { .wb-stats { grid-template-columns: repeat(2, 1fr); } }
+
+/* word frequency heatmap */
+.freq-grid {
+  display: grid;
+  grid-template-columns: repeat(30, 1fr);
+  gap: 3px;
+  padding: 18px;
+}
+.freq-cell {
+  aspect-ratio: 1;
+  border-radius: 3px;
+  background: var(--surface-secondary);
+  cursor: pointer;
+  transition: outline 120ms, transform 120ms;
+}
+.freq-cell:hover { outline: 2px solid var(--accent); transform: scale(1.2); z-index: 2; }
+.freq-cell.l-0 { background: var(--surface-secondary); }
+.freq-cell.l-1 { background: color-mix(in oklab, var(--accent) 12%, var(--surface-secondary)); }
+.freq-cell.l-2 { background: color-mix(in oklab, var(--accent) 28%, var(--surface-secondary)); }
+.freq-cell.l-3 { background: color-mix(in oklab, var(--accent) 50%, var(--surface-elevated)); }
+.freq-cell.l-4 { background: color-mix(in oklab, var(--accent) 70%, var(--surface-elevated)); }
+.freq-cell.l-5 { background: var(--accent); }
+
+/* word list */
+.word-list { padding: 6px 18px 18px; }
+.word-row-2 {
+  display: grid;
+  grid-template-columns: 1.4fr 0.8fr 1fr 80px 80px;
+  gap: 12px;
+  align-items: center;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border-hairline);
+  font-size: 12.5px;
+}
+.word-row-2.head {
+  font-size: 10.5px; color: var(--content-tertiary);
+  letter-spacing: 0.04em; text-transform: uppercase; font-weight: 500;
+  padding: 4px 0 8px;
+}
+.word-row-2 .word { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
+.word-row-2 .word strong { font: 600 14px/1.2 var(--font-display); color: var(--content); }
+.word-row-2 .word .ipa { font-family: var(--font-mono); font-size: 11px; color: var(--content-tertiary); }
+.word-row-2 .word .pos { font-size: 10.5px; color: var(--content-quaternary); font-style: italic; }
+.word-row-2 .gloss { color: var(--content-secondary); font-size: 12px; }
+.word-row-2 .gloss.example { color: var(--content-tertiary); font-style: italic; }
+.word-row-2 .num { text-align: right; font-family: var(--font-mono); font-variant-numeric: tabular-nums; color: var(--content); }
+.word-row-2 .num.acc-good { color: var(--success-strong); }
+.word-row-2 .num.acc-mid { color: var(--warning-strong); }
+.word-row-2 .num.acc-bad { color: var(--error-strong); }
+@media (max-width: 720px) {
+  .word-row-2 { grid-template-columns: 1fr; gap: 2px; }
+  .word-row-2 .num { text-align: left; }
+  .word-row-2.head { display: none; }
+}
+
+/* tabs underlined */
+.wb-tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border-hairline); padding: 0 18px; }
+.wb-tab {
+  padding: 12px 14px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--content-secondary);
+  display: inline-flex; align-items: center; gap: 8px;
+  position: relative;
+  cursor: pointer;
+  transition: color var(--duration-fast);
+  background: transparent;
+}
+.wb-tab:hover { color: var(--content); }
+.wb-tab.is-active { color: var(--accent); }
+.wb-tab.is-active::after {
+  content: '';
+  position: absolute; left: 14px; right: 14px; bottom: -1px;
+  height: 2px; background: var(--accent);
+  border-radius: var(--radius-pill);
+}
+.wb-tab .count {
+  background: var(--surface-secondary);
+  color: var(--content-tertiary);
+  padding: 1px 6px;
+  border-radius: var(--radius-pill);
+  font-size: 10.5px;
+  font-family: var(--font-mono);
+}
+.wb-tab.is-active .count { background: var(--accent-light); color: var(--accent); }
+
+/* user distribution bars */
+.wb-dist { padding: 18px; display: flex; flex-direction: column; gap: 14px; }
+.wb-dist-row { display: grid; grid-template-columns: 80px 1fr 64px; gap: 12px; align-items: center; }
+.wb-dist-row .l { font-size: 12px; color: var(--content-secondary); font-variant-numeric: tabular-nums; }
+.wb-dist-row .bar { height: 10px; background: var(--surface-secondary); border-radius: var(--radius-pill); overflow: hidden; }
+.wb-dist-row .bar > span { display: block; height: 100%; background: var(--accent); border-radius: var(--radius-pill); transition: width var(--duration-slow) var(--ease-out-expo); }
+.wb-dist-row .n { font: 500 12px/1 var(--font-mono); color: var(--content-tertiary); text-align: right; font-variant-numeric: tabular-nums; }
+
+/* change history */
+.wb-history { padding: 6px 18px 18px; display: flex; flex-direction: column; }
+.wb-history-item { display: grid; grid-template-columns: auto 1fr auto; gap: 12px; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--border-hairline); }
+.wb-history-item:last-child { border-bottom: 0; }
+.wb-history-item .detail { font-size: 12.5px; color: var(--content); min-width: 0; }
+.wb-history-item .detail span { color: var(--content-tertiary); }
+.wb-history-item .ts { font: 500 11px/1 var(--font-mono); color: var(--content-tertiary); white-space: nowrap; }
+
+/* import zone */
+.import-zone {
+  border: 2px dashed var(--border);
+  border-radius: var(--radius-lg);
+  padding: 32px;
+  text-align: center;
+  background: var(--surface-secondary);
+  transition: border-color var(--duration-fast), background var(--duration-fast);
+  cursor: pointer;
+}
+.import-zone:hover, .import-zone.is-drag { border-color: var(--accent); background: var(--accent-light); }
+.import-zone .ic {
+  width: 48px; height: 48px;
+  border-radius: var(--radius-lg);
+  background: var(--accent-light);
+  color: var(--accent);
+  display: grid; place-items: center;
+  margin: 0 auto 12px;
+}
+.import-zone .ic svg { width: 22px; height: 22px; }
+.import-zone strong { display: block; font: 600 14px/1.3 var(--font-display); color: var(--content); }
+
+/* csv 模板代码块 */
+.wbc .code-block { background: var(--surface-secondary); padding: 10px 12px; border-radius: var(--radius-md); font-family: var(--font-mono); font-size: 11px; line-height: 1.7; color: var(--content-secondary); overflow-x: auto; white-space: pre; }
+
+/* 远程目录浏览(降级整合) */
+.wbc .remote-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
+.wbc .remote-card { background: var(--surface-secondary); border-radius: var(--radius-md); padding: 12px 14px; display: flex; flex-direction: column; gap: 6px; border: 1px solid var(--border-hairline); }
+.wbc .remote-card .name { font: 600 13px/1.3 var(--font-display); color: var(--content); }
+.wbc .remote-card .desc { font-size: 12px; color: var(--content-secondary); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.wbc .remote-card .meta { font: 500 11px/1 var(--font-mono); color: var(--content-tertiary); display: flex; gap: 8px; flex-wrap: wrap; }

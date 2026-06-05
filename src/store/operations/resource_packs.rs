@@ -120,6 +120,68 @@ pub struct ResourcePackManifest {
     pub signature_algorithm: Option<String>,
 }
 
+/// 近 7 天某维度三态 outcome 计数（installed / verify_failed / rollback）。
+/// 失败 = verify_failed + rollback；下载/安装总数以 install_log 计数为真实源。
+#[derive(Debug, Clone, Default)]
+pub struct PackOutcomeCounts {
+    pub installed: i64,
+    pub verify_failed: i64,
+    pub rollback: i64,
+}
+
+impl PackOutcomeCounts {
+    fn add(&mut self, outcome: &str, count: i64) {
+        match outcome {
+            "installed" => self.installed += count,
+            "verify_failed" => self.verify_failed += count,
+            "rollback" => self.rollback += count,
+            _ => {}
+        }
+    }
+
+    /// 失败计数 = verify_failed + rollback。
+    pub fn failures(&self) -> i64 {
+        self.verify_failed + self.rollback
+    }
+
+    /// 三态总计。
+    pub fn total(&self) -> i64 {
+        self.installed + self.verify_failed + self.rollback
+    }
+}
+
+/// 三通道计数（stable / beta / internal）。
+#[derive(Debug, Clone, Default)]
+pub struct ChannelCounts {
+    pub stable: i64,
+    pub beta: i64,
+    pub internal: i64,
+}
+
+impl ChannelCounts {
+    fn add(&mut self, channel: &str, count: i64) {
+        match channel {
+            "stable" => self.stable += count,
+            "beta" => self.beta += count,
+            "internal" => self.internal += count,
+            _ => {}
+        }
+    }
+}
+
+/// 跨包全局聚合结果（`resource_pack_summary` 返回）。failureRate7d 由 handler
+/// 从 `outcomes_7d` 算（分母为 0 时返回 0，不在 store 侧除零）。
+#[derive(Debug, Clone)]
+pub struct ResourcePackSummary {
+    pub total_packs: i64,
+    pub new_packs_this_month: i64,
+    pub total_versions: i64,
+    pub versions_by_channel: ChannelCounts,
+    pub installs_today: i64,
+    pub installs_today_success: i64,
+    pub outcomes_7d: PackOutcomeCounts,
+}
+
 const VERSION_COLS: &str = "pack_id, version, sha256, signature, signature_alg, size_bytes, \
      min_app_version, channel, payload_path, published_at, deactivated_at";
 
@@ -165,6 +227,20 @@ impl Store {
             params![pack_id, description, now],
         )?;
         Ok(())
+    }
+
+    /// 判定某 `(pack_id, version)` 是否已存在（含软删除版本）。
+    /// 上传入口用此做先验去重，避免重传同版本号覆盖磁盘 payload.json 致激活版本验签失败。
+    pub fn pack_version_exists(&self, pack_id: &str, version: &str) -> Result<bool, StoreError> {
+        let conn = self.conn()?;
+        let exists: Option<i64> = conn
+            .query_row(
+                "SELECT 1 FROM resource_pack_versions WHERE pack_id = ?1 AND version = ?2 LIMIT 1",
+                params![pack_id, version],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(exists.is_some())
     }
 
     /// 写入一个新版本。pack_id 必须先 upsert 过（外键约束）。
@@ -265,7 +341,8 @@ impl Store {
                 updated_at: row.get(3)?,
             })
         })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
     }
 
     /// 聚合某 pack × version 的 telemetry：返回 (outcome, count) 列表。
@@ -282,9 +359,14 @@ impl Store {
              ORDER BY version DESC, outcome ASC",
         )?;
         let rows = stmt.query_map(params![pack_id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
         })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
     }
 
     /// 拿某 pack 的所有版本（admin 列表用）。倒序按 published_at。
@@ -298,7 +380,148 @@ impl Store {
              WHERE pack_id = ?1 ORDER BY published_at DESC"
         ))?;
         let rows = stmt.query_map(params![pack_id], version_from_row)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
+    /// 某 pack 在 install_log 的全量记录数（KPI「总下载/总安装」以 install_log 计数为真实源）。
+    pub fn pack_total_installs(&self, pack_id: &str) -> Result<i64, StoreError> {
+        let conn = self.conn()?;
+        conn.query_row(
+            "SELECT COUNT(*) FROM resource_pack_install_log WHERE pack_id = ?1",
+            params![pack_id],
+            |row| row.get(0),
+        )
+        .map_err(StoreError::from)
+    }
+
+    /// 某 pack 近 7 天各 outcome 计数 (installed / verify_failed / rollback)。
+    /// `since` 为 RFC3339 边界（now-7d），调用方在 Rust 侧用 chrono 算出后传入。
+    pub fn pack_outcomes_since(
+        &self,
+        pack_id: &str,
+        since: &str,
+    ) -> Result<PackOutcomeCounts, StoreError> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT outcome, COUNT(*) FROM resource_pack_install_log
+             WHERE pack_id = ?1 AND installed_at >= ?2
+             GROUP BY outcome",
+        )?;
+        let rows = stmt.query_map(params![pack_id, since], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        let mut out = PackOutcomeCounts::default();
+        for r in rows {
+            let (outcome, count) = r?;
+            out.add(&outcome, count);
+        }
+        Ok(out)
+    }
+
+    /// 某 pack 各通道当前激活版本：返回 (channel, version) 列表（无激活则空）。
+    /// JOIN `resource_pack_versions` 并过滤 `v.deactivated_at IS NULL`，与
+    /// `get_active_pack_version`（manifest 端点）一致 —— 停用版本不再被报告为激活，
+    /// 避免 admin 列表 active.{channel} 仍指向已被 manifest 摘除的版本。
+    pub fn pack_active_versions(
+        &self,
+        pack_id: &str,
+    ) -> Result<Vec<(ResourcePackChannel, String)>, StoreError> {
+        let conn = self.conn()?;
+        // JOIN 后 pack_id/channel/version 在两表都存在，必须用 a./v. 前缀消歧。
+        let mut stmt = conn.prepare(
+            "SELECT a.channel, a.version FROM resource_pack_active a \
+             INNER JOIN resource_pack_versions v \
+               ON v.pack_id = a.pack_id AND v.channel = a.channel AND v.version = a.version \
+             WHERE a.pack_id = ?1 AND v.deactivated_at IS NULL",
+        )?;
+        let rows = stmt.query_map(params![pack_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            let (ch, ver) = r?;
+            if let Some(channel) = ResourcePackChannel::from_str(&ch) {
+                out.push((channel, ver));
+            }
+        }
+        Ok(out)
+    }
+
+    /// 跨包全局聚合，供 `GET /api/admin/resource-packs/summary`。
+    /// 时间边界 (month_start / today_start / since_7d) 均为 RFC3339 字符串，
+    /// 由调用方在 Rust 侧用 chrono 算出后传入（同格式同时区下字典序==时间序）。
+    pub fn resource_pack_summary(
+        &self,
+        month_start: &str,
+        today_start: &str,
+        since_7d: &str,
+    ) -> Result<ResourcePackSummary, StoreError> {
+        let conn = self.conn()?;
+
+        let total_packs: i64 =
+            conn.query_row("SELECT COUNT(*) FROM resource_packs", [], |r| r.get(0))?;
+        let new_packs_this_month: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM resource_packs WHERE created_at >= ?1",
+            params![month_start],
+            |r| r.get(0),
+        )?;
+        let total_versions: i64 =
+            conn.query_row("SELECT COUNT(*) FROM resource_pack_versions", [], |r| {
+                r.get(0)
+            })?;
+
+        // 各通道版本数
+        let mut versions_by_channel = ChannelCounts::default();
+        {
+            let mut stmt = conn
+                .prepare("SELECT channel, COUNT(*) FROM resource_pack_versions GROUP BY channel")?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?;
+            for r in rows {
+                let (ch, count) = r?;
+                versions_by_channel.add(&ch, count);
+            }
+        }
+
+        let installs_today: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM resource_pack_install_log WHERE installed_at >= ?1",
+            params![today_start],
+            |r| r.get(0),
+        )?;
+        let installs_today_success: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM resource_pack_install_log
+             WHERE installed_at >= ?1 AND outcome = 'installed'",
+            params![today_start],
+            |r| r.get(0),
+        )?;
+
+        // 近 7 天各 outcome 计数（用于 failureRate7d + failures7dByOutcome）
+        let mut outcomes_7d = PackOutcomeCounts::default();
+        {
+            let mut stmt = conn.prepare(
+                "SELECT outcome, COUNT(*) FROM resource_pack_install_log
+                 WHERE installed_at >= ?1 GROUP BY outcome",
+            )?;
+            let rows = stmt.query_map(params![since_7d], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?;
+            for r in rows {
+                let (outcome, count) = r?;
+                outcomes_7d.add(&outcome, count);
+            }
+        }
+
+        Ok(ResourcePackSummary {
+            total_packs,
+            new_packs_this_month,
+            total_versions,
+            versions_by_channel,
+            installs_today,
+            installs_today_success,
+            outcomes_7d,
+        })
     }
 
     /// 写入一条客户端 telemetry 记录。
@@ -330,6 +553,7 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Datelike;
 
     fn store() -> Store {
         let s = Store::open(":memory:", 5000, 1).unwrap();
@@ -341,8 +565,7 @@ mod tests {
         ResourcePackVersion {
             pack_id: pack.to_string(),
             version: ver.to_string(),
-            sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-                .to_string(),
+            sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string(),
             signature: Some("base64-sig".to_string()),
             signature_alg: "ed25519".to_string(),
             size_bytes: 1234,
@@ -366,14 +589,18 @@ mod tests {
         );
         let c: ResourcePackChannel = serde_json::from_str("\"beta\"").unwrap();
         assert!(matches!(c, ResourcePackChannel::Beta));
-        assert_eq!(ResourcePackChannel::from_str("internal").unwrap().as_str(), "internal");
+        assert_eq!(
+            ResourcePackChannel::from_str("internal").unwrap().as_str(),
+            "internal"
+        );
         assert!(ResourcePackChannel::from_str("bogus").is_none());
     }
 
     #[test]
     fn upsert_and_list_packs() {
         let s = store();
-        s.upsert_resource_pack("wordbook-core", Some("核心词库")).unwrap();
+        s.upsert_resource_pack("wordbook-core", Some("核心词库"))
+            .unwrap();
         s.upsert_resource_pack("homepage-banners", None).unwrap();
         let list = s.list_resource_packs().unwrap();
         assert_eq!(list.len(), 2);
@@ -382,7 +609,8 @@ mod tests {
         assert_eq!(list[1].description.as_deref(), Some("核心词库"));
 
         // upsert 同 pack 刷新 description
-        s.upsert_resource_pack("wordbook-core", Some("v2 描述")).unwrap();
+        s.upsert_resource_pack("wordbook-core", Some("v2 描述"))
+            .unwrap();
         let list2 = s.list_resource_packs().unwrap();
         assert_eq!(list2[1].description.as_deref(), Some("v2 描述"));
     }
@@ -391,10 +619,18 @@ mod tests {
     fn insert_version_and_get_active() {
         let s = store();
         s.upsert_resource_pack("wordbook-core", None).unwrap();
-        s.insert_pack_version(&sample_version("wordbook-core", "1.0.0", ResourcePackChannel::Stable))
-            .unwrap();
-        s.insert_pack_version(&sample_version("wordbook-core", "1.1.0-rc.1", ResourcePackChannel::Beta))
-            .unwrap();
+        s.insert_pack_version(&sample_version(
+            "wordbook-core",
+            "1.0.0",
+            ResourcePackChannel::Stable,
+        ))
+        .unwrap();
+        s.insert_pack_version(&sample_version(
+            "wordbook-core",
+            "1.1.0-rc.1",
+            ResourcePackChannel::Beta,
+        ))
+        .unwrap();
 
         // 未激活时 get_active 返回 None
         assert!(s
@@ -402,8 +638,13 @@ mod tests {
             .unwrap()
             .is_none());
 
-        s.set_active_pack_version("wordbook-core", ResourcePackChannel::Stable, "1.0.0", Some("admin-1"))
-            .unwrap();
+        s.set_active_pack_version(
+            "wordbook-core",
+            ResourcePackChannel::Stable,
+            "1.0.0",
+            Some("admin-1"),
+        )
+        .unwrap();
         let active = s
             .get_active_pack_version("wordbook-core", ResourcePackChannel::Stable)
             .unwrap()
@@ -422,10 +663,14 @@ mod tests {
     fn set_active_overwrites_previous() {
         let s = store();
         s.upsert_resource_pack("wb", None).unwrap();
-        s.insert_pack_version(&sample_version("wb", "1.0.0", ResourcePackChannel::Stable)).unwrap();
-        s.insert_pack_version(&sample_version("wb", "1.1.0", ResourcePackChannel::Stable)).unwrap();
-        s.set_active_pack_version("wb", ResourcePackChannel::Stable, "1.0.0", None).unwrap();
-        s.set_active_pack_version("wb", ResourcePackChannel::Stable, "1.1.0", None).unwrap();
+        s.insert_pack_version(&sample_version("wb", "1.0.0", ResourcePackChannel::Stable))
+            .unwrap();
+        s.insert_pack_version(&sample_version("wb", "1.1.0", ResourcePackChannel::Stable))
+            .unwrap();
+        s.set_active_pack_version("wb", ResourcePackChannel::Stable, "1.0.0", None)
+            .unwrap();
+        s.set_active_pack_version("wb", ResourcePackChannel::Stable, "1.1.0", None)
+            .unwrap();
         let active = s
             .get_active_pack_version("wb", ResourcePackChannel::Stable)
             .unwrap()
@@ -437,8 +682,10 @@ mod tests {
     fn deactivate_excludes_from_active_query() {
         let s = store();
         s.upsert_resource_pack("wb", None).unwrap();
-        s.insert_pack_version(&sample_version("wb", "1.0.0", ResourcePackChannel::Stable)).unwrap();
-        s.set_active_pack_version("wb", ResourcePackChannel::Stable, "1.0.0", None).unwrap();
+        s.insert_pack_version(&sample_version("wb", "1.0.0", ResourcePackChannel::Stable))
+            .unwrap();
+        s.set_active_pack_version("wb", ResourcePackChannel::Stable, "1.0.0", None)
+            .unwrap();
         s.deactivate_pack_version("wb", "1.0.0").unwrap();
         // 软删除后 get_active 应当返回 None（manifest 路由摘除）
         assert!(s
@@ -448,13 +695,190 @@ mod tests {
     }
 
     #[test]
+    fn pack_active_versions_excludes_deactivated() {
+        // 与 get_active_pack_version 对齐：停用后 admin 列表也不应再把它当激活版本。
+        let s = store();
+        s.upsert_resource_pack("wb", None).unwrap();
+        s.insert_pack_version(&sample_version("wb", "1.0.0", ResourcePackChannel::Stable))
+            .unwrap();
+        s.insert_pack_version(&sample_version("wb", "1.1.0-rc", ResourcePackChannel::Beta))
+            .unwrap();
+        s.set_active_pack_version("wb", ResourcePackChannel::Stable, "1.0.0", None)
+            .unwrap();
+        s.set_active_pack_version("wb", ResourcePackChannel::Beta, "1.1.0-rc", None)
+            .unwrap();
+
+        // 停用前：两通道均报告激活
+        assert_eq!(s.pack_active_versions("wb").unwrap().len(), 2);
+
+        // 停用 stable 的激活版本后：只剩 beta，且与 get_active_pack_version 一致
+        s.deactivate_pack_version("wb", "1.0.0").unwrap();
+        let active = s.pack_active_versions("wb").unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(
+            active[0],
+            (ResourcePackChannel::Beta, "1.1.0-rc".to_string())
+        );
+        assert!(s
+            .get_active_pack_version("wb", ResourcePackChannel::Stable)
+            .unwrap()
+            .is_none());
+    }
+
+    /// 直接插一条 install_log 并指定 installed_at（绕过 record_pack_install 的 now）。
+    fn seed_install(s: &Store, pack: &str, ver: &str, outcome: &str, installed_at: &str) {
+        let conn = s.conn().unwrap();
+        conn.execute(
+            "INSERT INTO resource_pack_install_log
+                (pack_id, version, client_id, app_version, installed_at, outcome)
+             VALUES (?1, ?2, NULL, NULL, ?3, ?4)",
+            params![pack, ver, installed_at, outcome],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn per_pack_aggregations_total_outcomes7d_and_active() {
+        let s = store();
+        let now = chrono::Utc::now();
+        let today = now.to_rfc3339();
+        let week_ago = (now - chrono::Duration::days(8)).to_rfc3339();
+        let since_7d = (now - chrono::Duration::days(7)).to_rfc3339();
+
+        s.upsert_resource_pack("wb", None).unwrap();
+        s.insert_pack_version(&sample_version("wb", "1.0.0", ResourcePackChannel::Stable))
+            .unwrap();
+        s.insert_pack_version(&sample_version("wb", "1.1.0-rc", ResourcePackChannel::Beta))
+            .unwrap();
+
+        // 今日窗口内：2 installed + 1 verify_failed + 1 rollback
+        seed_install(&s, "wb", "1.0.0", "installed", &today);
+        seed_install(&s, "wb", "1.0.0", "installed", &today);
+        seed_install(&s, "wb", "1.0.0", "verify_failed", &today);
+        seed_install(&s, "wb", "1.0.0", "rollback", &today);
+        // 8 天前（落在 7 天窗口外）：1 installed
+        seed_install(&s, "wb", "1.0.0", "installed", &week_ago);
+
+        // 全量含窗口外那条
+        assert_eq!(s.pack_total_installs("wb").unwrap(), 5);
+
+        let o7 = s.pack_outcomes_since("wb", &since_7d).unwrap();
+        assert_eq!(o7.installed, 2);
+        assert_eq!(o7.verify_failed, 1);
+        assert_eq!(o7.rollback, 1);
+        assert_eq!(o7.failures(), 2);
+
+        // 各通道激活指针
+        s.set_active_pack_version("wb", ResourcePackChannel::Stable, "1.0.0", None)
+            .unwrap();
+        s.set_active_pack_version("wb", ResourcePackChannel::Beta, "1.1.0-rc", None)
+            .unwrap();
+        let mut active = s.pack_active_versions("wb").unwrap();
+        active.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
+        assert_eq!(active.len(), 2);
+        assert_eq!(
+            active[0],
+            (ResourcePackChannel::Beta, "1.1.0-rc".to_string())
+        );
+        assert_eq!(
+            active[1],
+            (ResourcePackChannel::Stable, "1.0.0".to_string())
+        );
+    }
+
+    #[test]
+    fn global_summary_aggregation() {
+        let s = store();
+        let now = chrono::Utc::now();
+        let today = now.to_rfc3339();
+        let week_ago = (now - chrono::Duration::days(8)).to_rfc3339();
+        let today_start = now
+            .date_naive()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc()
+            .to_rfc3339();
+        let since_7d = (now - chrono::Duration::days(7)).to_rfc3339();
+        // 取一个保证早于本月所有数据的本月界（本月 1 号 00:00:00Z）
+        let month_start = now
+            .date_naive()
+            .with_day(1)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc()
+            .to_rfc3339();
+
+        // 2 个 pack：upsert_resource_pack 用 now 作 created_at，故均计入「本月新增」
+        s.upsert_resource_pack("wb", None).unwrap();
+        s.upsert_resource_pack("hp", None).unwrap();
+        // 版本分布：wb 2 stable + 1 beta，hp 1 internal → stable=2 beta=1 internal=1，total=4
+        s.insert_pack_version(&sample_version("wb", "1.0.0", ResourcePackChannel::Stable))
+            .unwrap();
+        s.insert_pack_version(&sample_version("wb", "1.1.0", ResourcePackChannel::Stable))
+            .unwrap();
+        s.insert_pack_version(&sample_version("wb", "1.2.0-rc", ResourcePackChannel::Beta))
+            .unwrap();
+        s.insert_pack_version(&sample_version(
+            "hp",
+            "0.9.0",
+            ResourcePackChannel::Internal,
+        ))
+        .unwrap();
+
+        // install_log：今日 3 installed + 1 verify_failed + 1 rollback；8 天前 2 installed（窗口外）
+        seed_install(&s, "wb", "1.0.0", "installed", &today);
+        seed_install(&s, "wb", "1.0.0", "installed", &today);
+        seed_install(&s, "wb", "1.1.0", "installed", &today);
+        seed_install(&s, "wb", "1.0.0", "verify_failed", &today);
+        seed_install(&s, "hp", "0.9.0", "rollback", &today);
+        seed_install(&s, "wb", "1.0.0", "installed", &week_ago);
+        seed_install(&s, "wb", "1.0.0", "installed", &week_ago);
+
+        let sum = s
+            .resource_pack_summary(&month_start, &today_start, &since_7d)
+            .unwrap();
+        assert_eq!(sum.total_packs, 2);
+        assert_eq!(sum.new_packs_this_month, 2);
+        assert_eq!(sum.total_versions, 4);
+        assert_eq!(sum.versions_by_channel.stable, 2);
+        assert_eq!(sum.versions_by_channel.beta, 1);
+        assert_eq!(sum.versions_by_channel.internal, 1);
+        // 今日 5 条，其中 3 installed
+        assert_eq!(sum.installs_today, 5);
+        assert_eq!(sum.installs_today_success, 3);
+        // 近 7 天（含今日，排除 8 天前）：3 installed + 1 verify_failed + 1 rollback
+        assert_eq!(sum.outcomes_7d.installed, 3);
+        assert_eq!(sum.outcomes_7d.verify_failed, 1);
+        assert_eq!(sum.outcomes_7d.rollback, 1);
+        assert_eq!(sum.outcomes_7d.failures(), 2);
+        assert_eq!(sum.outcomes_7d.total(), 5);
+    }
+
+    #[test]
+    fn summary_empty_db_has_no_panic_and_zero_failures() {
+        let s = store();
+        let now = chrono::Utc::now();
+        let b = now.to_rfc3339();
+        let sum = s.resource_pack_summary(&b, &b, &b).unwrap();
+        assert_eq!(sum.total_packs, 0);
+        assert_eq!(sum.total_versions, 0);
+        assert_eq!(sum.installs_today, 0);
+        // failures()/total() 在空数据下安全返回 0（handler 据此规避除零）
+        assert_eq!(sum.outcomes_7d.failures(), 0);
+        assert_eq!(sum.outcomes_7d.total(), 0);
+    }
+
+    #[test]
     fn install_log_outcome_validation() {
         let s = store();
         s.upsert_resource_pack("wb", None).unwrap();
         s.record_pack_install("wb", "1.0.0", Some("client-1"), Some("1.0.0"), "installed")
             .unwrap();
-        s.record_pack_install("wb", "1.0.0", None, None, "verify_failed").unwrap();
-        s.record_pack_install("wb", "1.0.0", None, None, "rollback").unwrap();
+        s.record_pack_install("wb", "1.0.0", None, None, "verify_failed")
+            .unwrap();
+        s.record_pack_install("wb", "1.0.0", None, None, "rollback")
+            .unwrap();
 
         let err = s
             .record_pack_install("wb", "1.0.0", None, None, "garbage")

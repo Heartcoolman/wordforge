@@ -6,6 +6,25 @@ vi.mock('@/api/admin', () => ({
   adminApi: {
     checkStatus: vi.fn(),
     login: vi.fn(),
+    // 公共 /health 端点：未登录 createResource 在 mount 时拉取(version/uptime/availability/dbSize)
+    health: vi.fn(),
+    // 已登录 token 校验路径(本测试 token=null,不触发,但 page 引用故须存根)
+    getHealth: vi.fn(),
+  },
+}));
+
+vi.mock('@/api/health', () => ({
+  healthApi: {
+    getStatus: vi.fn(() => Promise.resolve({
+      status: 'healthy',
+      uptimeSecs: 3600,
+      services: {
+        store: { healthy: true },
+        amas: { healthy: true },
+        sse: { healthy: true },
+        wordbookCenter: { healthy: true, url: null },
+      },
+    })),
   },
 }));
 
@@ -31,6 +50,14 @@ describe('LoginPage', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockAdminApi.checkStatus.mockResolvedValue({ initialized: true });
+    mockAdminApi.health.mockResolvedValue({
+      status: 'healthy',
+      version: '1.1.0',
+      uptimeSecs: 90000,
+      dbSizeBytes: 5 * 1024 ** 2,
+      availability: { pct: 99.95, effectiveSecs: 7 * 86400, totalRequests: 1200 },
+    });
+    mockAdminApi.getHealth.mockResolvedValue({});
   });
 
   async function renderPage() {
@@ -38,10 +65,10 @@ describe('LoginPage', () => {
     return renderWithProviders(() => <LoginPage />);
   }
 
-  it('shows "管理后台登录" heading', async () => {
+  it('shows "登录管理后台" heading', async () => {
     await renderPage();
     await waitFor(() => {
-      expect(screen.getByText('管理后台登录')).toBeInTheDocument();
+      expect(screen.getByText('登录管理后台')).toBeInTheDocument();
     });
   });
 
@@ -59,10 +86,10 @@ describe('LoginPage', () => {
     });
   });
 
-  it('shows "登录" submit button', async () => {
+  it('shows submit button "进入管理后台"', async () => {
     await renderPage();
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: '登录' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /进入管理后台/ })).toBeInTheDocument();
     });
   });
 

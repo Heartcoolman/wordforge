@@ -1,0 +1,36 @@
+/* be:amas-advisor-sandbox:沙箱试运行结果块 + HistoryTable 列扩展 stat-pill
+   作用域限定 .amas-advisor，沿用 cockpit.css 的 --llm / 设计 token。 */
+.amas-advisor .sandbox-result {
+  margin: 0 18px 14px;
+  padding: 12px 14px;
+  background: var(--surface-secondary);
+  border: 1px solid var(--border-hairline);
+  border-radius: var(--radius-md);
+}
+.amas-advisor .sandbox-head {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
+  margin-bottom: 10px;
+}
+.amas-advisor .sandbox-head .title { font: 600 12.5px/1.3 var(--font-display); color: var(--llm-strong); }
+.amas-advisor .sandbox-head .meta { font-size: 11px; color: var(--content-tertiary); font-family: var(--font-mono); }
+.amas-advisor .sandbox-warn {
+  font-size: 11.5px; color: var(--error-strong);
+  background: var(--error-light); padding: 6px 10px; border-radius: var(--radius-sm); margin-bottom: 10px;
+}
+.amas-advisor .sandbox-metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.amas-advisor .sbx-metric {
+  background: var(--surface-elevated); border-radius: var(--radius-sm); padding: 8px 10px;
+}
+.amas-advisor .sbx-metric .l { font-size: 10.5px; color: var(--content-tertiary); letter-spacing: 0.03em; }
+.amas-advisor .sbx-metric .d { font: 700 16px/1.1 var(--font-display); margin-top: 3px; font-variant-numeric: tabular-nums; }
+.amas-advisor .sbx-metric .d.is-up { color: var(--success-strong); }
+.amas-advisor .sbx-metric .d.is-down { color: var(--error-strong); }
+.amas-advisor .sbx-metric .b { font-size: 10.5px; color: var(--content-tertiary); margin-top: 2px; font-family: var(--font-mono); }
+
+/* HistoryTable：参数变更 / 变化前后 / per-metric stat-pill 列 */
+.amas-advisor .hist-param { display: flex; flex-direction: column; gap: 2px; max-width: 22ch; }
+.amas-advisor .hist-rationale { font-size: 11px; color: var(--content-tertiary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.amas-advisor .hist-path { font-family: var(--font-mono); font-size: 11.5px; color: var(--llm-strong); }
+.amas-advisor .hist-change { font-family: var(--font-mono); font-size: 11.5px; color: var(--content-secondary); white-space: nowrap; }
+.amas-advisor .hist-change .from { color: var(--content-tertiary); }
+.amas-advisor .hist-change .arrow { color: var(--content-quaternary); margin: 0 4px; }

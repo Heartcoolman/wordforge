@@ -82,9 +82,7 @@ struct ClientErrorReport {
     component_stack: Option<String>,
 }
 
-async fn report_client_error(
-    JsonBody(body): JsonBody<ClientErrorReport>,
-) -> impl IntoResponse {
+async fn report_client_error(JsonBody(body): JsonBody<ClientErrorReport>) -> impl IntoResponse {
     let stack = body.stack.as_deref().unwrap_or("");
     let url = body.url.as_deref().unwrap_or("");
     let ua = body.user_agent.as_deref().unwrap_or("");
@@ -125,37 +123,73 @@ async fn submit_telemetry(
         ));
     }
 
-    // §12 strict-mode payload 级校验：timezone / language 必填；session_start 额外要求
-    // 指纹四件套（screenWidth / screenHeight / pixelRatio / cpuCores 均 > 0）。
-    // hard_block=false 时仅 warn 不拒绝；启用前需客户端先上线 strict-mode 兼容版本。
+    // m038 遥测硬识别:四要素必填(缺任一直接 400 拦截,不受 strict_mode 开关控制)。
+    // 平台/版本走 header,时区/型号走 payload.device。
+    let dev_platform = headers
+        .get("x-device-platform")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && *s != "unknown")
+        .ok_or_else(|| {
+            AppError::bad_request("MISSING_OS", "缺少 x-device-platform 头（客户端类型）")
+        })?;
+    let dev_app_version = headers
+        .get("x-app-version")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            AppError::bad_request("MISSING_APP_VERSION", "缺少 x-app-version 头（版本号）")
+        })?;
+    let dev_obj = body.payload.get("device").and_then(|v| v.as_object());
+    if dev_obj
+        .and_then(|d| d.get("timezone"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .is_none()
+    {
+        return Err(AppError::bad_request(
+            "MISSING_TIMEZONE",
+            "telemetry payload 缺少 device.timezone（时区）",
+        ));
+    }
+    let dev_model = dev_obj
+        .and_then(|d| d.get("model"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            AppError::bad_request(
+                "MISSING_DEVICE_MODEL",
+                "telemetry payload 缺少 device.model（设备型号）",
+            )
+        })?
+        .to_string();
+
+    // §12 strict-mode payload 级软校验：language 必填 + session_start 设备指纹。
+    // timezone 已由上方四要素硬校验接管,此处不再重复;language/指纹维持受 hard_block 开关。
     let strict = state.config().strict_mode.clone();
     if strict.enabled {
         let device = body.payload.get("device").and_then(|v| v.as_object());
-        let timezone_ok = device
-            .and_then(|d| d.get("timezone"))
-            .and_then(|v| v.as_str())
-            .is_some_and(|s| !s.is_empty());
         let language_ok = device
             .and_then(|d| d.get("language"))
             .and_then(|v| v.as_str())
             .is_some_and(|s| !s.is_empty());
 
-        if !timezone_ok {
-            strict_reject_or_warn(&strict, "MISSING_TIMEZONE", "telemetry payload 缺少 device.timezone")?;
-        }
         if !language_ok {
-            strict_reject_or_warn(&strict, "MISSING_LANGUAGE", "telemetry payload 缺少 device.language")?;
+            strict_reject_or_warn(
+                &strict,
+                "MISSING_LANGUAGE",
+                "telemetry payload 缺少 device.language",
+            )?;
         }
 
         if body.event_type == "session_start" {
             let fp_ok = device.is_some_and(|d| {
                 ["screenWidth", "screenHeight", "pixelRatio", "cpuCores"]
                     .iter()
-                    .all(|k| {
-                        d.get(*k)
-                            .and_then(|v| v.as_f64())
-                            .is_some_and(|n| n > 0.0)
-                    })
+                    .all(|k| d.get(*k).and_then(|v| v.as_f64()).is_some_and(|n| n > 0.0))
             });
             if !fp_ok {
                 strict_reject_or_warn(
@@ -165,6 +199,75 @@ async fn submit_telemetry(
                 )?;
             }
         }
+    }
+
+    // m038 遥测硬识别:device 必须已注册且归属一致(三态)。中间件已对本端点跳过 upsert,
+    // 故此处看到的是未被覆盖的真实 owner。
+    let owner = state
+        .run_store_task("telemetry.device_owner", {
+            let device_id = device_id.to_string();
+            move |store| store.get_client_device_owner(&device_id)
+        })
+        .await??;
+    match owner {
+        None => {
+            return Err(AppError {
+                status: StatusCode::FORBIDDEN,
+                code: "DEVICE_NOT_REGISTERED".into(),
+                message: "设备未注册，请先正常登录使用后再上报遥测".into(),
+                is_operational: true,
+            });
+        }
+        Some(Some(existing)) if existing != auth.user_id => {
+            return Err(AppError {
+                status: StatusCode::FORBIDDEN,
+                code: "DEVICE_OWNERSHIP_MISMATCH".into(),
+                message: "设备归属与当前账号不符".into(),
+                is_operational: true,
+            });
+        }
+        // Some(None)=未认领→claim;Some(Some(me))=归属一致→放行
+        _ => {}
+    }
+
+    // 核验通过/claim:落库设备(平台/版本/型号/归属)并刷新 last_seen。中间件已对本端点
+    // 跳过 upsert,此处全权负责;采样丢弃也照常更新设备活跃度。
+    state
+        .run_store_task("telemetry.upsert_device", {
+            let device_id = device_id.to_string();
+            let platform = dev_platform.to_string();
+            let user_id = auth.user_id.clone();
+            let app_version = dev_app_version.to_string();
+            let model = dev_model.clone();
+            move |store| {
+                store.upsert_client_device_with_extras(
+                    &device_id,
+                    &platform,
+                    &user_id,
+                    Some(&app_version),
+                    None,
+                    None,
+                    Some(&model),
+                )
+            }
+        })
+        .await??;
+
+    // W3-1：遥测专项 per-user 限频（独立于通用 API 双轨预算的更紧配额）。device 活跃度
+    // (last_seen)已由上方 upsert 刷新；超额则软丢弃（received:true, throttled:true 不落库），
+    // 与 sampledOut 早返回同位，防单个噪声客户端打满全局 SQLite 写信号量挤占学习数据写入。
+    let throttle_key = format!("u:{}", auth.user_id);
+    let max_entries = state.config().limits.rate_limit_max_entries;
+    let telemetry_max = state.config().telemetry_rate_limit.max_requests;
+    let throttle = state
+        .telemetry_rate_limit()
+        .limiter
+        .check_with_max(&throttle_key, max_entries, telemetry_max)
+        .await;
+    if !throttle.allowed {
+        return Ok(ok(
+            serde_json::json!({ "received": true, "throttled": true }),
+        ));
     }
 
     if let Some(obj) = body.payload.as_object() {
@@ -207,6 +310,35 @@ async fn submit_telemetry(
     let event_type = body.event_type;
     let request_id = body.request_id;
     let client_ts = body.client_ts;
+
+    // 数据探针采样注入(m031):locked 事件(on_demand/session_start)与配置里 locked
+    // 行恒落库;其余 event_type 按 probe_sampling_config / 全局默认 gate。rate<1.0 时用
+    // 确定性哈希 hash(device_id + id) mod 10000 / 10000.0 ∈ [0,1),>=rate 则采样丢弃。
+    // 默认全 1.0 → 零行为变化。
+    let always_keep = event_type == "on_demand" || event_type == "session_start";
+    let sampled_out = if always_keep {
+        false
+    } else {
+        let et = event_type.clone();
+        let rate = state
+            .run_store_task("telemetry.sample_rate", move |store| {
+                store.effective_sample_rate(&et)
+            })
+            .await??;
+        if rate >= 1.0 {
+            false
+        } else {
+            let bucket = sampling_bucket(&device_id_for_store, &insert_id);
+            bucket >= rate
+        }
+    };
+
+    if sampled_out {
+        return Ok(ok(
+            serde_json::json!({ "received": true, "sampledOut": true }),
+        ));
+    }
+
     state
         .run_store_task("telemetry.submit", move |store| {
             store.insert_telemetry_and_summary(
@@ -244,6 +376,16 @@ fn strict_reject_or_warn(
         tracing::warn!(code, message, "telemetry strict-mode soft-block (放行)");
         Ok(())
     }
+}
+
+/// 确定性采样桶:hash(device_id + id) mod 10000 / 10000.0 ∈ [0,1)。
+/// 同一 (device_id, id) 复现同一值,与 effective_rate 比较决定是否落库。
+fn sampling_bucket(device_id: &str, id: &str) -> f64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    device_id.hash(&mut hasher);
+    id.hash(&mut hasher);
+    (hasher.finish() % 10_000) as f64 / 10_000.0
 }
 
 fn extract_summary(payload: &serde_json::Value) -> TelemetrySummaryInput {

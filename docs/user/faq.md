@@ -68,7 +68,7 @@ AMAS 根据遗忘概率和 ELO 难度匹配选词，复现率高的单词意味�
 **页面一直加载中**
 
 1. 检查网络连接
-2. 确认服务器正常运行：访问 `https://your-server.example.com/health`，应返回 `{"status":"ok"}`
+2. 确认服务器正常运行：访问 `https://your-server.example.com/health`，会返回一个含 `status` 字段的 JSON 对象，`status` 取值可为 `ok` / `degraded` / `down`。其中 `degraded`（降级）表示部分非核心组件异常，但服务仍可正常使用，不要误判为故障。只要 HTTP 返回 200 且能拿到 JSON，即说明服务可达。
 3. 清除浏览器缓存 / 重新安装 App
 
 **收到"系统正在维护中"提示**

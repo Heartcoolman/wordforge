@@ -34,7 +34,11 @@ describe('AdminLayout', () => {
     const { AdminLayout } = await import('@/components/layout/AdminLayout');
     renderWithProviders(() => <AdminLayout>Content</AdminLayout>);
     expect(screen.getByText('用户管理')).toBeInTheDocument();
-    expect(screen.getByText('AMAS 配置')).toBeInTheDocument();
+    // PR redesign: '配置' → '调参'（对齐设计图）
+    expect(screen.getByText('AMAS 调参')).toBeInTheDocument();
+    // 新增：broadcast / resource-packs 在 sidebar 出现
+    expect(screen.getByText('系统广播')).toBeInTheDocument();
+    expect(screen.getByText('资源包')).toBeInTheDocument();
   });
 
   it('renders header', async () => {

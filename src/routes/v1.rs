@@ -2,7 +2,7 @@
 //!
 //! ⚠️  **设计警告（P3#6）**：V1 路由刻意**绕过 AMAS 引擎**——
 //!     - 所有端点自 2026-05-21 起停止处理业务逻辑，返回 410 Gone
-//!     - 迁移文档：<https://docs.wordforge.app/api/v1-deprecation>
+//!     - 迁移文档：<https://heartcoolman.github.io/wordforge/api-endpoints#v1-deprecation>
 //!     - Sunset 时间：2027-01-01
 //!
 //!   现行客户端（iOS）一律调用 /api/* 主端点，无 v1 调用。

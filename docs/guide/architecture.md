@@ -22,7 +22,7 @@
 │   │  - config_watcher     │◀────────── notify ──────┘          │
 │   │  - llm_advisor        │                                    │
 │   │  - update_checker     │                                    │
-│   │  - 17 个聚合/清理 job  │                                    │
+│   │  - 20 个聚合/清理 job  │                                    │
 │   └───────────────────────┘                                    │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -34,11 +34,11 @@
 | `main.rs` | 启动入口：加载 env / AMASConfig → 建 Store → 建 AMASEngine → AppState → 起 Router + Workers |
 | `config.rs` | 环境变量解析为强类型 `Config`（含 `UpdateCheckConfig`、`LlmConfig`、`AmasConfigOverrides` 等） |
 | `state.rs` | `AppState`：注入所有共享依赖给 handler |
-| `routes/` | HTTP 路由：`auth` / `users` / `words` / `wordbooks` / `learning` / `admin/*` / `realtime`（SSE） |
+| `routes/` | HTTP 路由：`auth` / `users` / `words` / `wordbooks` / `learning` / `feedback` / `probe_results` / `telemetry` / `realtime`（SSE） / `admin/*`（含 `probe` / `probe_telemetry` / `feedback` / `monitoring` / `rbac`） |
 | `services/` | 业务编排：`updater`（自更新）、`llm_provider`、`broadcast`、`metrics_reporter` 等 |
 | `store/` | SQLite 持久层：`schema.rs`（DDL）/`migrate.rs`（版本化迁移）/`operations/*`（按表分文件） |
 | `amas/` | AMAS 核心：见下方"AMAS 模块" |
-| `workers/` | 后台任务（共 20 项）：见下方"Workers" |
+| `workers/` | 后台任务（共 23 项）：见下方"Workers" |
 | `blocking.rs` | `run_blocking()`：把 SQLite/算法等阻塞计算丢到 `spawn_blocking` 池 |
 | `response.rs` | 统一 `AppError` + `ok()` JSON 响应包装 |
 
@@ -64,10 +64,14 @@ amas/
 │   ├── iad.rs          # 干扰感知衰减 (Interference-Aware Decay)
 │   ├── mtp.rs          # 间隔预测
 │   ├── ssp.rs          # 间隔策略预计算表
-│   └── evm.rs          # 期望值模型
+│   ├── evm.rs          # 期望值模型
+│   └── benchmark_adapter.rs # MDM 基准回放适配（t/r history → retention 区间）
+├── word_selector.rs    # 选词评分：综合算法输出对候选词排序
 ├── elo.rs              # ELO 评分 + ZPD 优先级
 ├── metrics.rs          # 内存级指标注册表
+├── metrics_persistence.rs # 指标快照落库 / 重启恢复
 ├── monitoring.rs       # 事件采样落库
+├── constants.rs        # 引擎级常量（锁清理阈值 / 信号阈值 等）
 └── tuning_whitelist.rs # 可调参数白名单 + 安全区间
 ```
 
@@ -96,11 +100,12 @@ amas/
 
 | 类别 | Worker |
 |---|---|
-| **AMAS** | `config_watcher`（热加载）、`llm_advisor`（DeepSeek 调参建议）、`algorithm_optimization`（指标聚合）、`monitoring_aggregate` |
+| **AMAS** | `config_watcher`（热加载，main.rs 持久跑）、`llm_advisor`（DeepSeek 调参建议）、`algorithm_optimization`（指标聚合）、`canary_monitor`（per-patch 金丝雀自动回滚监测） |
 | **聚合统计** | `daily_aggregation`、`weekly_report`、`metrics_flush`、`health_analysis` |
 | **缓存维护** | `cache_cleanup`、`confusion_pair_cache`、`session_cleanup`、`password_reset_cleanup` |
-| **学习数据** | `forgetting_alert`、`delayed_reward`、`word_clustering`、`embedding_generation`、`etymology_generation` |
-| **运维** | `heartbeat_watchdog`（持久跑，不归 Manager）、`update_checker`（GitHub Releases 轮询 + SSE）、`log_export` |
+| **学习数据** | `forgetting_alert`、`delayed_reward` |
+| **探针/监控** | `monitoring_retention`（事件表 retention + 月度 VACUUM）、`error_rate_watchdog`（5xx 滚动告警）、`scheduler_health_watchdog`（worker 漏跑检测）、`probe_cleanup`、`probe_confirm_sweeper` |
+| **运维** | `heartbeat_watchdog`（持久跑，不归 Manager）、`update_checker`（GitHub Releases 轮询 + SSE）、`log_export`、`db_backup`（每日备份独立循环） |
 
 ## 数据存储
 

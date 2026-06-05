@@ -15,7 +15,12 @@ export interface ResultCardProps {
   resultJson?: unknown;
   stderr?: string;
   onConfirmClick?: () => void;
+  /** 现场重放:把当前 script 回填到主编辑器并切到该 deviceId */
+  onReplayClick?: () => void;
 }
+
+/** 敏感字段关键字白名单(case-insensitive 匹配 resultJson 文本) */
+const SENSITIVE_KEYS = /\b(password|passwd|token|secret|api[_-]?key|authorization|jwt|cookie|session[_-]?id|access[_-]?key|refresh[_-]?token)\b/i;
 
 // stderr 默认仅显示折叠预览（前 N 字符），展开后才整体渲染避免长 trace 撑爆卡片
 const STDERR_PREVIEW_LIMIT = 320;
@@ -49,6 +54,12 @@ export default function ResultCard(props: ResultCardProps) {
     }
   });
 
+  // 敏感数据检测:把 result + stderr 拼成文本扫一次,命中关键字就显示 chip
+  const isRedacted = createMemo(() => {
+    const blob = `${jsonText()}\n${props.stderr ?? ''}`;
+    return SENSITIVE_KEYS.test(blob);
+  });
+
   const stderrLong = createMemo(() => (props.stderr ?? '').length > STDERR_PREVIEW_LIMIT);
   const stderrDisplay = createMemo(() => {
     const s = props.stderr ?? '';
@@ -69,8 +80,17 @@ export default function ResultCard(props: ResultCardProps) {
   return (
     <article class="rounded border border-border-hairline bg-surface-secondary p-3 space-y-2">
       <header class="flex items-center justify-between gap-2 text-xs">
-        <span class="font-mono truncate" title={props.deviceId}>
+        <span class="font-mono truncate flex items-center gap-1.5" title={props.deviceId}>
           {props.deviceId}
+          <Show when={isRedacted()}>
+            <span
+              class="inline-flex items-center gap-1 rounded-pill bg-warning-light text-warning-strong px-1.5 py-0.5 text-[10.5px] font-medium"
+              title="结果中检测到 password / token / secret 等敏感关键字 - 复制 / 截图前请人工脱敏"
+            >
+              <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="3" y="11" width="18" height="11" rx="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" /></svg>
+              脱敏
+            </span>
+          </Show>
         </span>
         <span class={`flex items-center gap-1 whitespace-nowrap rounded px-1.5 py-0.5 ${pillClass()}`}>
           <span>{props.status}</span>
@@ -123,6 +143,16 @@ export default function ResultCard(props: ResultCardProps) {
             onClick={() => props.onConfirmClick?.()}
           >
             确认执行
+          </button>
+        </Show>
+        <Show when={props.onReplayClick}>
+          <button
+            type="button"
+            class="rounded border border-border-hairline px-2 py-0.5 text-xs hover:bg-surface"
+            onClick={() => props.onReplayClick?.()}
+            title="把当前 script 回填到编辑器并切换 target 到此设备"
+          >
+            重放
           </button>
         </Show>
       </div>

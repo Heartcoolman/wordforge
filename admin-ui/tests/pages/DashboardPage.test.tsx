@@ -11,6 +11,17 @@ vi.mock('@/api/admin', () => ({
     getDailyRecords: vi.fn(),
     getHealth: vi.fn(),
     checkUpdate: vi.fn(),
+    // m023:Dashboard 新接的端点(默认空 / null,具体用例可 override)
+    amasMetricsTimeseries: vi.fn(() => Promise.resolve([])),
+    analyticsHourly: vi.fn(() => Promise.resolve(null)),
+    monitoringWorkers: vi.fn(() => Promise.resolve({ workers: [] })),
+    amasListSuggestions: vi.fn(() => Promise.resolve([])),
+    listFeedback: vi.fn(() => Promise.resolve({ data: [], total: 0, page: 1, perPage: 1, totalPages: 0 })),
+  },
+}));
+vi.mock('@/api/amas', () => ({
+  amasApi: {
+    getMonitoring: vi.fn(() => Promise.resolve([])),
   },
 }));
 vi.mock('@/components/ui/EChart', () => ({
@@ -65,10 +76,11 @@ describe('DashboardPage', () => {
   it('renders KPI cards after loading', async () => {
     primeSuccessMocks();
     await renderPage();
+    // PR redesign: HeroCard meta + StatCard 都展示这些 label，所以 getAllByText
     await waitFor(() => {
-      expect(screen.getByText('注册用户')).toBeInTheDocument();
+      expect(screen.getAllByText('注册用户').length).toBeGreaterThan(0);
     });
-    expect(screen.getByText('今日活跃')).toBeInTheDocument();
+    expect(screen.getAllByText('今日活跃').length).toBeGreaterThan(0);
   });
 
   it('renders panel titles', async () => {
@@ -86,6 +98,7 @@ describe('DashboardPage', () => {
     await waitFor(() => {
       expect(screen.getByText('系统状态')).toBeInTheDocument();
     });
-    expect(screen.getByText('运行正常')).toBeInTheDocument();
+    // PR redesign: '运行正常' 同时出现在 HeroCard eyebrow 和系统状态卡里
+    expect(screen.getAllByText('运行正常').length).toBeGreaterThan(0);
   });
 });

@@ -1,4 +1,7 @@
+use axum::body::Body;
 use axum::extract::{Path, Query, State};
+use axum::http::{header, StatusCode};
+use axum::response::Response;
 use axum::routing::{get, post};
 use axum::Router;
 
@@ -10,6 +13,7 @@ use crate::auth::{AdminAuthUser, AuthUser};
 use crate::response::{ok, AppError};
 use crate::state::AppState;
 use crate::store::operations::amas_versions::ConfigVersionSource;
+use chrono::Datelike;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -36,18 +40,256 @@ pub fn admin_router() -> Router<AppState> {
         .route("/config/versions", get(list_versions))
         .route("/config/versions/:hash", get(get_version))
         .route("/config/versions/:hash/restore", post(restore_version))
+        // m022:TOML ↔ JSON 转换端点(admin UI CodeMirror TOML 编辑器使用)
+        .route("/config/parse-toml", post(parse_toml))
+        .route("/config/serialize-toml", post(serialize_toml))
+        // m022:百分比抽样灰度发布
+        // 修改摘要"影响"列:逐字段计算的估算影响(替代静态敏感度文案)
+        .route("/config/diff-impact", post(diff_impact))
+        .route("/config/canary", get(get_canary).put(set_canary))
+        .route("/config/canary/disable", post(disable_canary))
         .route("/metrics", get(get_metrics))
         .route("/metrics/timeseries", get(metrics_timeseries))
+        .route("/metrics/kpi", get(metrics_kpi))
+        .route(
+            "/metrics/algorithm-distribution",
+            get(metrics_algorithm_distribution),
+        )
+        // 看板对齐设计稿新增子面板（真实聚合，store 层已实现 aggregate_amas_*）
+        .route(
+            "/metrics/stage-distribution",
+            get(metrics_stage_distribution),
+        )
+        .route("/metrics/elo-scatter", get(metrics_elo_scatter))
+        .route("/metrics/mdm-heatmap", get(metrics_mdm_heatmap))
+        .route(
+            "/metrics/fatigue-timeseries",
+            get(metrics_fatigue_timeseries),
+        )
+        .route(
+            "/metrics/decision-histogram",
+            get(metrics_decision_histogram),
+        )
         .route("/monitoring", get(get_monitoring_events))
         .route("/anomalies", get(anomalies_overview))
+        .route("/anomalies/feed", get(anomalies_feed))
         .route("/user-state/distribution", get(user_state_distribution))
+        .route("/user-state/transitions", get(user_state_transitions))
+        .route("/user-state/clusters", get(user_state_clusters))
         .route("/compare", get(compare_versions))
+        .route("/compare/ext", get(compare_versions_ext))
         .route("/suggestions", get(list_suggestions))
         .route("/suggestions/explain", post(explain_param))
         .route("/suggestions/spend", get(suggestion_spend))
+        // C5: 历史导出 CSV
+        .route("/suggestions/export.csv", get(export_suggestions_csv))
         .route("/suggestions/:id", get(get_suggestion))
         .route("/suggestions/:id/approve", post(approve_suggestion))
         .route("/suggestions/:id/reject", post(reject_suggestion))
+        // 沙箱试运行：基于 telemetry baseline 回放预估 patch 影响（不落库、不改 live config）
+        .route("/advisor/suggestions/:id/sandbox", post(sandbox_suggestion))
+        // C5: 建议回滚（版本链 restore parent）
+        .route("/suggestions/:id/rollback", post(rollback_suggestion))
+        // C1: advisor 成本/统计
+        .route("/advisor/cost", get(advisor_cost))
+        .route("/advisor/cost/daily", get(advisor_cost_daily))
+        // C2: 巡查控制
+        .route("/advisor/run", post(advisor_run))
+        .route("/suggestions/approve-all", post(approve_all_suggestions))
+        // C3: 顾问配置
+        .route(
+            "/advisor/config",
+            get(get_advisor_config).put(update_advisor_config),
+        )
+        // C4: 调参白名单 CRUD
+        .route(
+            "/advisor/whitelist",
+            get(list_whitelist).post(add_whitelist),
+        )
+        .route(
+            "/advisor/whitelist/:path",
+            axum::routing::delete(delete_whitelist),
+        )
+        // C6: per-patch canary 子系统
+        .route("/advisor/canary", get(list_canaries).post(create_canary))
+        .route("/advisor/canary/:id/scale", post(scale_canary))
+        .route("/advisor/canary/:id/rollback", post(rollback_canary))
+        .route("/advisor/canary/:id/promote", post(promote_canary))
+}
+
+// ─────────────────── m022:TOML 互转 + canary ───────────────────
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ParseTomlRequest {
+    toml: String,
+}
+
+/// POST /config/parse-toml —— TOML 字符串 → JSON `AMASConfig`。
+/// 前端 CodeMirror TOML 编辑器保存前用此校验语法 + 转 JSON 给 PUT /config。
+async fn parse_toml(
+    _admin: AdminAuthUser,
+    JsonBody(req): JsonBody<ParseTomlRequest>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let cfg: crate::amas::config::AMASConfig = toml::from_str(&req.toml)
+        .map_err(|e| AppError::bad_request("TOML_PARSE_ERROR", &format!("TOML 解析失败:{e}")))?;
+    let value = serde_json::to_value(&cfg).map_err(|e| AppError::internal(&e.to_string()))?;
+    Ok(ok(value))
+}
+
+/// POST /config/serialize-toml —— JSON `AMASConfig` → TOML 字符串。
+/// 前端从 JSON 切到 TOML 视图时调一次,把当前 config 渲染成 TOML。
+async fn serialize_toml(
+    _admin: AdminAuthUser,
+    JsonBody(cfg): JsonBody<crate::amas::config::AMASConfig>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let s = toml::to_string_pretty(&cfg)
+        .map_err(|e| AppError::internal(&format!("TOML 序列化失败:{e}")))?;
+    Ok(ok(serde_json::json!({ "toml": s })))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetCanaryRequest {
+    version_hash: String,
+    /// 0..=100,按 user_id hash % 100 判定是否落入 canary 桶。
+    percent: u32,
+    /// 强制走 canary 的用户白名单,与 percent 抽样并存(任一命中即用 canary)。
+    #[serde(default)]
+    force_user_ids: Vec<String>,
+    // 发布策略人群过滤(crowd-filter),对齐设计稿"人群过滤"区。
+    /// 仅纳入账号年龄 >= N 天的设备(过滤新注册,留空=不限)。
+    #[serde(default)]
+    min_account_age_days: Option<u32>,
+    /// 仅纳入活跃设备(近 14 天有 last_seen_at)。
+    #[serde(default)]
+    prefer_active: bool,
+    /// 仅纳入 Web 端设备。
+    #[serde(default)]
+    web_only: bool,
+    /// 24h 监控窗口无异常自动扩量;后端持久化标记,扩量由运维侧消费(见 set_canary 文档)。
+    #[serde(default)]
+    auto_scale_24h: bool,
+}
+
+impl SetCanaryRequest {
+    /// 折叠为持久化用的 crowd_filters JSON;全部为空时返回 None。
+    fn crowd_filters_json(&self) -> Option<serde_json::Value> {
+        if self.min_account_age_days.is_none()
+            && !self.prefer_active
+            && !self.web_only
+            && !self.auto_scale_24h
+        {
+            return None;
+        }
+        Some(serde_json::json!({
+            "minAccountAgeDays": self.min_account_age_days,
+            "preferActive": self.prefer_active,
+            "webOnly": self.web_only,
+            "autoScale24h": self.auto_scale_24h,
+        }))
+    }
+}
+
+/// PUT /config/canary —— 设置 active canary 配置。
+/// 同一时刻只能有一个 active(由 wordbook_canary_config 的 unique index 强制)。
+async fn set_canary(
+    admin: AdminAuthUser,
+    State(state): State<AppState>,
+    JsonBody(req): JsonBody<SetCanaryRequest>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    if req.percent > 100 {
+        return Err(AppError::bad_request(
+            "INVALID_PERCENT",
+            "percent must be in 0..=100",
+        ));
+    }
+    // 校验 version_hash 存在
+    let vhash = req.version_hash.clone();
+    let admin_id = admin.admin_id.clone();
+    let exists = state
+        .run_store_task("admin.amas.canary.validate", move |store| {
+            store.get_amas_config_version(&vhash)
+        })
+        .await??;
+    if exists.is_none() {
+        return Err(AppError::bad_request(
+            "VERSION_HASH_NOT_FOUND",
+            "version_hash 在 amas_config_versions 中不存在",
+        ));
+    }
+
+    let crowd_filters = req.crowd_filters_json();
+    let filter_age = req.min_account_age_days;
+    let filter_active = req.prefer_active;
+    let filter_web = req.web_only;
+
+    let version_hash = req.version_hash.clone();
+    let percent_in = req.percent;
+    let force_user_ids = req.force_user_ids.clone();
+    let admin_id_for_store = admin_id;
+    let filters_for_store = crowd_filters.clone();
+    let inserted = state
+        .run_store_task("admin.amas.canary.set", move |store| {
+            store.set_amas_canary(
+                &version_hash,
+                percent_in,
+                &force_user_ids,
+                filters_for_store.as_ref(),
+                &admin_id_for_store,
+            )
+        })
+        .await??;
+
+    // 真实影响范围估算(设计稿"影响范围"):过滤后基数 × percent 抽样。
+    let audience = state
+        .run_store_task("admin.amas.canary.audience", move |store| {
+            store.estimate_canary_audience(filter_age, filter_active, filter_web)
+        })
+        .await??;
+    let percent = inserted.percent;
+    let affected = (audience.eligible_users as f64 * percent as f64 / 100.0).round() as i64;
+
+    state.amas().mark_canary_active();
+    Ok(ok(serde_json::json!({
+        "canary": inserted,
+        "audience": {
+            "totalUsers": audience.total_users,
+            "eligibleUsers": audience.eligible_users,
+            "affectedUsers": affected,
+            // m035 已接线:crowd-filter(平台/账龄/活跃)在 effective_config_for_user 按
+            // user_id 做 per-user 人群分流,不满足者回退 stable。auto_scale_24h 仍为运维标记
+            // (扩量由运维侧消费),不参与人群判定。
+            "enforcement": "enforced"
+        },
+    })))
+}
+
+/// GET /config/canary —— 读当前 active canary 配置(可能为 None)。
+async fn get_canary(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let current = state
+        .run_store_task("admin.amas.canary.get", |store| {
+            store.get_active_amas_canary()
+        })
+        .await??;
+    Ok(ok(serde_json::json!({ "canary": current })))
+}
+
+/// POST /config/canary/disable —— 把当前 active canary 标记为 inactive。后续
+/// effective_config_for_user 永远返回 stable。
+async fn disable_canary(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let cleared = state
+        .run_store_task("admin.amas.canary.disable", |store| {
+            store.disable_active_amas_canary()
+        })
+        .await??;
+    Ok(ok(serde_json::json!({ "disabled": cleared })))
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -346,6 +588,36 @@ async fn metrics_timeseries(
     Ok(ok(series))
 }
 
+async fn metrics_kpi(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Query(q): Query<DaysQuery>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let days = q.days.unwrap_or(7).clamp(1, 90);
+    // 疲劳触发阈值取实际生效配置（与 apply_constraints 同源），store 层无配置访问故在此读出传入。
+    let fatigue_threshold = state.amas().get_config().constraints.high_fatigue_threshold;
+    let kpi = state
+        .run_store_task("admin.amas.metrics_kpi", move |store| {
+            store.aggregate_amas_metrics_kpi(days, fatigue_threshold)
+        })
+        .await??;
+    Ok(ok(kpi))
+}
+
+async fn metrics_algorithm_distribution(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Query(q): Query<DaysQuery>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let days = q.days.unwrap_or(7).clamp(1, 90);
+    let dist = state
+        .run_store_task("admin.amas.metrics_algorithm_distribution", move |store| {
+            store.aggregate_amas_algorithm_distribution(days)
+        })
+        .await??;
+    Ok(ok(dist))
+}
+
 async fn anomalies_overview(
     _admin: AdminAuthUser,
     State(state): State<AppState>,
@@ -409,6 +681,181 @@ async fn compare_versions(
     Ok(ok(serde_json::json!({"a": a, "b": b})))
 }
 
+// ─────────── 看板对齐设计稿新增子面板 handlers（store 聚合已实现） ───────────
+
+/// GET /metrics/stage-distribution —— 阶段分布（cold/transition/stable）
+async fn metrics_stage_distribution(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let dist = state
+        .run_store_task("admin.amas.stage_distribution", move |store| {
+            store.aggregate_amas_stage_distribution()
+        })
+        .await??;
+    Ok(ok(dist))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EloScatterQuery {
+    limit: Option<u32>,
+}
+
+/// GET /metrics/elo-scatter —— ELO 散点（rating × games × 7d Δ）
+async fn metrics_elo_scatter(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Query(q): Query<EloScatterQuery>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let limit = q.limit.unwrap_or(400).clamp(1, 2000);
+    let scatter = state
+        .run_store_task("admin.amas.elo_scatter", move |store| {
+            store.aggregate_amas_elo_scatter(limit)
+        })
+        .await??;
+    Ok(ok(scatter))
+}
+
+/// GET /metrics/mdm-heatmap —— MDM 遗忘热图（天 × 难度段）
+async fn metrics_mdm_heatmap(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Query(q): Query<DaysQuery>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let days = q.days.unwrap_or(7).clamp(1, 90);
+    let heatmap = state
+        .run_store_task("admin.amas.mdm_heatmap", move |store| {
+            store.aggregate_amas_mdm_heatmap(days)
+        })
+        .await??;
+    Ok(ok(heatmap))
+}
+
+/// GET /metrics/fatigue-timeseries —— 疲劳时间序列（阈值取实际生效配置，与 metrics_kpi 同源）
+async fn metrics_fatigue_timeseries(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Query(q): Query<DaysQuery>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let days = q.days.unwrap_or(7).clamp(1, 90);
+    let threshold = state.amas().get_config().constraints.high_fatigue_threshold;
+    let ts = state
+        .run_store_task("admin.amas.fatigue_timeseries", move |store| {
+            store.aggregate_amas_fatigue_timeseries(days, threshold)
+        })
+        .await??;
+    Ok(ok(ts))
+}
+
+/// GET /metrics/decision-histogram —— 每用户决策数直方图 + P50/P95
+async fn metrics_decision_histogram(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Query(q): Query<DaysQuery>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let days = q.days.unwrap_or(7).clamp(1, 90);
+    let hist = state
+        .run_store_task("admin.amas.decision_histogram", move |store| {
+            store.aggregate_amas_decision_histogram(days)
+        })
+        .await??;
+    Ok(ok(hist))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AnomalyFeedQuery {
+    days: Option<u32>,
+    limit: Option<u32>,
+}
+
+/// GET /anomalies/feed —— 异常逐条 feed（严重度分级 + 影响面），供异常面板详情/忽略
+async fn anomalies_feed(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Query(q): Query<AnomalyFeedQuery>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let days = q.days.unwrap_or(7).clamp(1, 30);
+    let limit = q.limit.unwrap_or(50).clamp(1, 500);
+    let feed = state
+        .run_store_task("admin.amas.anomaly_feed", move |store| {
+            store.aggregate_amas_anomaly_feed(days, limit)
+        })
+        .await??;
+    Ok(ok(feed))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct HoursQuery {
+    hours: Option<u32>,
+}
+
+/// GET /user-state/transitions —— 状态流转（窗口内阶段穿越）
+async fn user_state_transitions(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Query(q): Query<HoursQuery>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let hours = q.hours.unwrap_or(24).clamp(1, 720);
+    let transitions = state
+        .run_store_task("admin.amas.state_transitions", move |store| {
+            store.aggregate_amas_state_transitions(hours)
+        })
+        .await??;
+    Ok(ok(transitions))
+}
+
+/// GET /user-state/clusters —— 学习风格 K-Means 聚类
+async fn user_state_clusters(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let clusters = state
+        .run_store_task("admin.amas.learning_clusters", move |store| {
+            store.aggregate_amas_learning_clusters()
+        })
+        .await??;
+    Ok(ok(clusters))
+}
+
+/// GET /compare/ext —— 双版本扩展指标对比（命中率/P95/疲劳/ensemble/reward/异常率/留存 + sparkline）
+async fn compare_versions_ext(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Query(q): Query<CompareQuery>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let fatigue_threshold = state.amas().get_config().constraints.high_fatigue_threshold;
+    // live config 的 epsilon 仅作版本无快照时的回退；config_epsilon 由 store 层按各版本 snapshot 解析。
+    let fallback_epsilon = state
+        .amas()
+        .get_config()
+        .memory_model
+        .half_life_base_epsilon;
+    let va = q.version_a.clone();
+    let vb = q.version_b.clone();
+    let (a, b) = state
+        .run_store_task(
+            "admin.amas.compare_ext",
+            move |store| -> Result<_, crate::store::StoreError> {
+                let a = store.aggregate_amas_version_slice_ext(
+                    &va,
+                    fatigue_threshold,
+                    fallback_epsilon,
+                )?;
+                let b = store.aggregate_amas_version_slice_ext(
+                    &vb,
+                    fatigue_threshold,
+                    fallback_epsilon,
+                )?;
+                Ok((a, b))
+            },
+        )
+        .await??;
+    Ok(ok(serde_json::json!({"a": a, "b": b})))
+}
+
 // ─────────── PR-5: Suggestions / Advisor 路由 ───────────
 
 #[derive(Debug, Deserialize)]
@@ -416,6 +863,8 @@ async fn compare_versions(
 struct ListSuggestionsQuery {
     status: Option<String>,
     limit: Option<usize>,
+    offset: Option<usize>,
+    q: Option<String>,
 }
 
 async fn list_suggestions(
@@ -425,6 +874,8 @@ async fn list_suggestions(
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     use crate::store::operations::amas_suggestions::SuggestionStatus;
     let limit = q.limit.unwrap_or(50).clamp(1, 500);
+    // offset 上界裁剪：避免超大 OFFSET 触发 SQLite 顺序扫描型 DoS（limit 已 clamp）。
+    let offset = q.offset.unwrap_or(0).min(100_000);
     let status = if let Some(s) = q.status.as_deref() {
         Some(
             SuggestionStatus::parse(s)
@@ -433,12 +884,86 @@ async fn list_suggestions(
     } else {
         None
     };
+    let keyword = q.q.clone();
     let rows = state
         .run_store_task("admin.amas.list_suggestions", move |store| {
-            store.list_amas_suggestions(status, limit)
+            store.list_amas_suggestions_paged(status, limit, offset, keyword.as_deref())
         })
         .await??;
     Ok(ok(rows))
+}
+
+// ─────────── C5: 历史导出 CSV ───────────
+
+/// CSV 字段转义：①公式注入中和——首字符为电子表格公式触发符时前置单引号；
+/// ②含逗号/引号/换行的值用双引号包裹，内部引号翻倍。
+fn csv_cell(s: &str) -> String {
+    let neutralized = if s
+        .chars()
+        .next()
+        .is_some_and(|c| matches!(c, '=' | '+' | '-' | '@' | '\t' | '\r'))
+    {
+        format!("'{s}")
+    } else {
+        s.to_string()
+    };
+    if neutralized.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", neutralized.replace('"', "\"\""))
+    } else {
+        neutralized
+    }
+}
+
+async fn export_suggestions_csv(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Query(q): Query<ListSuggestionsQuery>,
+) -> Result<Response, AppError> {
+    use crate::store::operations::amas_suggestions::SuggestionStatus;
+    let status = if let Some(s) = q.status.as_deref() {
+        Some(
+            SuggestionStatus::parse(s)
+                .map_err(|e| AppError::bad_request("BAD_STATUS", &e.to_string()))?,
+        )
+    } else {
+        None
+    };
+    let keyword = q.q.clone();
+    let rows = state
+        .run_store_task("admin.amas.export_csv", move |store| {
+            store.list_amas_suggestions_paged(status, 500, 0, keyword.as_deref())
+        })
+        .await??;
+
+    let mut out = String::from(
+        "id,created_at,based_on_version_hash,patch,rationale,cost_usd,status,decided_by\n",
+    );
+    for r in &rows {
+        let patch = serde_json::to_string(&r.patch_json).unwrap_or_default();
+        let cost = r.cost_usd.map(|c| c.to_string()).unwrap_or_default();
+        let decided_by = r.decided_by.clone().unwrap_or_default();
+        out.push_str(&format!(
+            "{},{},{},{},{},{},{},{}\n",
+            r.id,
+            csv_cell(&r.created_at.to_rfc3339()),
+            csv_cell(&r.based_on_version_hash),
+            csv_cell(&patch),
+            csv_cell(&r.rationale),
+            csv_cell(&cost),
+            r.status.as_str(),
+            csv_cell(&decided_by),
+        ));
+    }
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/csv; charset=utf-8")
+        .header(
+            header::CONTENT_DISPOSITION,
+            "attachment; filename=\"amas-suggestions.csv\"",
+        )
+        .body(Body::from(out))
+        .map_err(|e| AppError::internal(&e.to_string()))
 }
 
 async fn get_suggestion(
@@ -461,12 +986,15 @@ struct DecisionBody {
     note: Option<String>,
 }
 
-async fn approve_suggestion(
-    admin: AdminAuthUser,
-    State(state): State<AppState>,
-    Path(id): Path<i64>,
-    JsonBody(body): JsonBody<DecisionBody>,
-) -> Result<impl axum::response::IntoResponse, AppError> {
+/// C2 复用核心：校验 pending → validate_patch → 应用 patch → 落版本 → 标记 approved。
+/// approve_suggestion 单条端点与 approve-all 批量端点共用，确保白名单校验一致。
+/// 返回 apply_and_persist_config 的版本响应（单条端点据此保留 {updated,versionHash,versionId} 契约）。
+pub(crate) async fn approve_one(
+    state: &AppState,
+    admin_id: &str,
+    id: i64,
+    note: Option<&str>,
+) -> Result<axum::response::Response, AppError> {
     use crate::amas::tuning_whitelist::validate_patch;
     use crate::store::operations::amas_suggestions::SuggestionStatus;
 
@@ -484,13 +1012,18 @@ async fn approve_suggestion(
         ));
     }
 
-    // 校验 patch（防止数据库篡改）
+    // 校验 patch（防止数据库篡改）—— 白名单从 store 读
     let patch_obj = suggestion
         .patch_json
         .as_object()
         .ok_or_else(|| AppError::internal("patch_json 非对象"))?
         .clone();
-    let errs = validate_patch(&patch_obj);
+    let patch_for_validate = patch_obj.clone();
+    let errs = state
+        .run_store_task("admin.amas.approve_validate", move |store| {
+            Ok::<_, crate::store::StoreError>(validate_patch(&store, &patch_for_validate))
+        })
+        .await??;
     if !errs.is_empty() {
         return Err(AppError::bad_request("PATCH_INVALID", &errs.join("；")));
     }
@@ -509,27 +1042,37 @@ async fn approve_suggestion(
         })?;
 
     let resp = apply_and_persist_config(
-        &state,
-        &admin.admin_id,
+        state,
+        admin_id,
         new_cfg,
         ConfigVersionSource::LlmSuggested,
         Some(format!("approve suggestion#{}", id)),
     )
     .await?;
 
-    let admin_id = admin.admin_id.clone();
+    let admin_id_owned = admin_id.to_string();
+    let note_owned = note.map(|s| s.to_string());
     state
         .run_store_task("admin.amas.approve_update", move |store| {
             store.update_amas_suggestion_status(
                 id,
                 SuggestionStatus::Approved,
-                Some(&admin_id),
-                body.note.as_deref(),
+                Some(&admin_id_owned),
+                note_owned.as_deref(),
             )
         })
         .await??;
 
     Ok(resp)
+}
+
+async fn approve_suggestion(
+    admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    JsonBody(body): JsonBody<DecisionBody>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    approve_one(&state, &admin.admin_id, id, body.note.as_deref()).await
 }
 
 async fn reject_suggestion(
@@ -551,6 +1094,86 @@ async fn reject_suggestion(
         })
         .await??;
     Ok(ok(serde_json::json!({"rejected": true})))
+}
+
+// ─────────── C5: 建议回滚（版本链 restore parent）───────────
+
+/// 回滚某条已批准建议引入的配置改动：定位该建议 approve 产出的版本，restore 其 parent 版本快照，
+/// 并把建议标记为 superseded（复用现有 apply_and_persist_config restore 通路 + 审计）。
+async fn rollback_suggestion(
+    admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    use crate::store::operations::amas_suggestions::SuggestionStatus;
+
+    // 先确认建议存在（不存在 → 404）
+    state
+        .run_store_task("admin.amas.rollback_lookup", move |store| {
+            store.get_amas_suggestion(id)
+        })
+        .await??
+        .ok_or_else(|| AppError::not_found("建议不存在"))?;
+
+    // 定位该建议 approve 产出的版本（note == "approve suggestion#{id}"），回滚目标 = 其 parent 版本。
+    let approve_note = format!("approve suggestion#{id}");
+    let parent_hash = state
+        .run_store_task("admin.amas.rollback_find_version", move |store| {
+            let versions = store.list_amas_config_versions(500)?;
+            Ok::<_, crate::store::StoreError>(
+                versions
+                    .into_iter()
+                    .find(|v| v.note.as_deref() == Some(approve_note.as_str()))
+                    .and_then(|v| v.parent_version_hash),
+            )
+        })
+        .await??
+        .ok_or_else(|| {
+            AppError::bad_request(
+                "PARENT_NOT_FOUND",
+                "该建议无可回滚的父版本（版本链缺失或为创世版本）",
+            )
+        })?;
+
+    let lookup_hash = parent_hash.clone();
+    let detail = state
+        .run_store_task("admin.amas.rollback_target", move |store| {
+            store.get_amas_config_version(&lookup_hash)
+        })
+        .await??
+        .ok_or_else(|| AppError::bad_request("PARENT_NOT_FOUND", "回滚目标版本不存在于版本链"))?;
+
+    let cfg: crate::amas::config::AMASConfig = serde_json::from_value(detail.snapshot_json)
+        .map_err(|e| AppError::internal(&format!("快照反序列化失败: {e}")))?;
+
+    apply_and_persist_config(
+        &state,
+        &admin.admin_id,
+        cfg,
+        ConfigVersionSource::Manual,
+        Some(format!(
+            "rollback suggestion#{id} → {}",
+            &parent_hash[..parent_hash.len().min(8)]
+        )),
+    )
+    .await?;
+
+    let admin_id = admin.admin_id.clone();
+    state
+        .run_store_task("admin.amas.rollback_mark", move |store| {
+            store.update_amas_suggestion_status(
+                id,
+                SuggestionStatus::Superseded,
+                Some(&admin_id),
+                Some("rolled back to parent version"),
+            )
+        })
+        .await??;
+
+    Ok(ok(serde_json::json!({
+        "rolledBack": true,
+        "versionHash": parent_hash,
+    })))
 }
 
 #[derive(Debug, Deserialize)]
@@ -616,6 +1239,75 @@ async fn suggestion_spend(
         "dailyCapUsd": cap,
         "remainingUsd": (cap - cost).max(0.0),
     })))
+}
+
+// ─────────── C4: 调参白名单 CRUD ───────────
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AddWhitelistBody {
+    path: String,
+    min_safe: f64,
+    max_safe: f64,
+}
+
+async fn list_whitelist(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let rows = state
+        .run_store_task("admin.amas.list_whitelist", |store| {
+            store.list_tuning_whitelist()
+        })
+        .await??;
+    Ok(ok(rows))
+}
+
+async fn add_whitelist(
+    admin: AdminAuthUser,
+    State(state): State<AppState>,
+    JsonBody(body): JsonBody<AddWhitelistBody>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    // path 必须是 memoryModel.* 命名空间（与 Tier-A 白名单语义一致，拒绝越界命名空间）
+    if !body.path.starts_with("memoryModel.") {
+        return Err(AppError::bad_request(
+            "INVALID_PATH",
+            "白名单 path 必须以 memoryModel. 开头",
+        ));
+    }
+    if body.min_safe >= body.max_safe {
+        return Err(AppError::bad_request(
+            "INVALID_RANGE",
+            "minSafe 必须小于 maxSafe",
+        ));
+    }
+    let admin_id = admin.admin_id.clone();
+    let row = state
+        .run_store_task("admin.amas.add_whitelist", move |store| {
+            store.insert_tuning_whitelist(&body.path, body.min_safe, body.max_safe, &admin_id)
+        })
+        .await??;
+    Ok(ok(row))
+}
+
+async fn delete_whitelist(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Path(path): Path<String>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    // 与 add_whitelist 一致的命名空间约束，避免单边删除非 memoryModel.* 条目削弱白名单完整性。
+    if !path.starts_with("memoryModel.") {
+        return Err(AppError::bad_request(
+            "INVALID_PATH",
+            "白名单 path 必须以 memoryModel. 开头",
+        ));
+    }
+    let deleted = state
+        .run_store_task("admin.amas.delete_whitelist", move |store| {
+            store.delete_tuning_whitelist(&path)
+        })
+        .await??;
+    Ok(ok(serde_json::json!({ "deleted": deleted })))
 }
 
 /// 简化版按点分式路径写值，支持 `mem.w[0]`
@@ -985,4 +1677,952 @@ async fn evaluate_mastery(
     };
 
     Ok(ok(mastery_info))
+}
+
+// ─────────── C1: advisor 成本 / 统计 ───────────
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AdvisorCostStats {
+    month_yuan: f64,
+    month_cap_yuan: f64,
+    quota_pct: f64,
+    forecast_yuan: f64,
+    avg7d_cost_yuan: f64,
+    month_calls: i64,
+    accepted_count: i64,
+    rejected_count: i64,
+    acceptance_rate: f64,
+}
+
+async fn advisor_cost(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let usd_to_cny = state.config().llm.usd_to_cny_rate;
+    let month = chrono::Utc::now().format("%Y-%m").to_string();
+    let stats = state
+        .run_store_task("admin.amas.advisor_cost", move |store| {
+            let month_yuan = store.get_llm_cost_this_month(&month)?;
+            let settings = store.get_system_settings()?;
+            let (approved, rejected) = store.aggregate_suggestion_acceptance()?;
+            // 本月调用次数 + 近 7 天¥成本（用于均单次 + 预测）
+            let daily = store.aggregate_daily_suggestion_cost_yuan(7, usd_to_cny)?;
+            let counts = store.count_suggestions_by_status()?;
+            let month_calls: i64 = counts.iter().map(|(_, c)| *c).sum();
+            Ok::<_, crate::store::StoreError>((
+                month_yuan,
+                settings.llm_advisor_max_cost_per_month_yuan,
+                approved,
+                rejected,
+                daily,
+                month_calls,
+            ))
+        })
+        .await??;
+
+    let (month_yuan, month_cap_yuan, approved, rejected, daily7, month_calls) = stats;
+    let quota_pct = if month_cap_yuan > 0.0 {
+        (month_yuan / month_cap_yuan * 100.0).min(999.0)
+    } else {
+        0.0
+    };
+    // 月末预测：按当前 day-of-month 线性外推
+    let now = chrono::Utc::now();
+    let day = now.day().max(1) as f64;
+    let days_in_month = days_in_month(now.year(), now.month()) as f64;
+    let forecast_yuan = month_yuan / day * days_in_month;
+    let total7: f64 = daily7.iter().map(|(_, c)| *c).sum();
+    let avg7d_cost_yuan = if month_calls > 0 {
+        total7 / (month_calls as f64).max(1.0)
+    } else {
+        0.0
+    };
+    let decided = approved + rejected;
+    let acceptance_rate = if decided > 0 {
+        approved as f64 / decided as f64
+    } else {
+        0.0
+    };
+
+    Ok(ok(AdvisorCostStats {
+        month_yuan,
+        month_cap_yuan,
+        quota_pct,
+        forecast_yuan,
+        avg7d_cost_yuan,
+        month_calls,
+        accepted_count: approved,
+        rejected_count: rejected,
+        acceptance_rate,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CostDailyQuery {
+    days: Option<i64>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CostDailyPoint {
+    date: String,
+    cost_yuan: f64,
+}
+
+async fn advisor_cost_daily(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Query(q): Query<CostDailyQuery>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let days = q.days.unwrap_or(30).clamp(1, 90);
+    let usd_to_cny = state.config().llm.usd_to_cny_rate;
+    let rows = state
+        .run_store_task("admin.amas.advisor_cost_daily", move |store| {
+            store.aggregate_daily_suggestion_cost_yuan(days, usd_to_cny)
+        })
+        .await??;
+    let points: Vec<CostDailyPoint> = rows
+        .into_iter()
+        .map(|(date, cost_yuan)| CostDailyPoint { date, cost_yuan })
+        .collect();
+    Ok(ok(points))
+}
+
+/// 给定年月返回该月天数（用于月末成本线性外推）。
+fn days_in_month(year: i32, month: u32) -> u32 {
+    let (ny, nm) = if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
+    };
+    let first_next = chrono::NaiveDate::from_ymd_opt(ny, nm, 1).unwrap_or_default();
+    let first_this = chrono::NaiveDate::from_ymd_opt(year, month, 1).unwrap_or_default();
+    (first_next - first_this).num_days() as u32
+}
+
+// ─────────── C2: 巡查控制 ───────────
+
+async fn advisor_run(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    // 触发前记录最新 suggestion id，作为"是否新产出"的基准
+    let before = state
+        .run_store_task("admin.amas.advisor_run.before", |store| {
+            store.list_amas_suggestions(None, 1)
+        })
+        .await??
+        .first()
+        .map(|r| r.id)
+        .unwrap_or(0);
+
+    let llm_cfg = state.config().llm.clone();
+    crate::workers::llm_advisor::run(state.store(), Some(&llm_cfg), state.amas(), Some(&state))
+        .await;
+
+    let latest = state
+        .run_store_task("admin.amas.advisor_run.after", |store| {
+            store.list_amas_suggestions(None, 1)
+        })
+        .await??;
+    let produced = latest.first().map(|r| r.id).unwrap_or(0) > before;
+    let suggestion_id = if produced {
+        latest.first().map(|r| r.id)
+    } else {
+        None
+    };
+    Ok(ok(serde_json::json!({
+        "produced": produced,
+        "suggestionId": suggestion_id,
+    })))
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ApproveAllItem {
+    id: i64,
+    ok: bool,
+    error: Option<String>,
+}
+
+async fn approve_all_suggestions(
+    admin: AdminAuthUser,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    use crate::store::operations::amas_suggestions::SuggestionStatus;
+
+    let pending = state
+        .run_store_task("admin.amas.approve_all.list", |store| {
+            store.list_amas_suggestions(Some(SuggestionStatus::Pending), 500)
+        })
+        .await??;
+
+    let mut results = Vec::with_capacity(pending.len());
+    for s in pending {
+        let id = s.id;
+        match approve_one(&state, &admin.admin_id, id, None).await {
+            Ok(_) => results.push(ApproveAllItem {
+                id,
+                ok: true,
+                error: None,
+            }),
+            Err(e) => results.push(ApproveAllItem {
+                id,
+                ok: false,
+                error: Some(e.message.clone()),
+            }),
+        }
+    }
+    Ok(ok(serde_json::json!({ "results": results })))
+}
+
+// ─────────── C3: 顾问配置 ───────────
+
+/// advisor 巡查 cron（与 workers/mod.rs LlmAdvisor 注册一致，每 20 分钟）。
+const ADVISOR_POLL_CRON: &str = "0 */20 * * * *";
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AdvisorConfig {
+    model: String,
+    poll_cron: String,
+    api_key_tail: String,
+    month_cap_yuan: f64,
+    auto_apply_enabled: bool,
+    auto_apply_max_per_day: i64,
+    auto_apply_min_confidence: f64,
+    grayscale_steps: [u32; 3],
+    advisor_enabled: bool,
+}
+
+fn build_advisor_config(
+    llm: &crate::config::LLMConfig,
+    settings: &crate::store::operations::system_settings::SystemSettings,
+) -> AdvisorConfig {
+    let tail = if llm.api_key.len() >= 4 {
+        llm.api_key[llm.api_key.len() - 4..].to_string()
+    } else {
+        String::new()
+    };
+    AdvisorConfig {
+        model: llm.model.clone(),
+        poll_cron: ADVISOR_POLL_CRON.to_string(),
+        api_key_tail: tail,
+        month_cap_yuan: settings.llm_advisor_max_cost_per_month_yuan,
+        auto_apply_enabled: settings.amas_auto_apply_enabled,
+        auto_apply_max_per_day: settings.amas_auto_apply_max_per_day as i64,
+        auto_apply_min_confidence: settings.amas_auto_apply_min_confidence,
+        grayscale_steps: settings.amas_grayscale_steps,
+        advisor_enabled: settings.llm_advisor_enabled,
+    }
+}
+
+async fn get_advisor_config(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let settings = state
+        .run_store_task("admin.amas.advisor_config.get", |store| {
+            store.get_system_settings()
+        })
+        .await??;
+    let llm = state.config().llm.clone();
+    Ok(ok(build_advisor_config(&llm, &settings)))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateAdvisorConfigBody {
+    month_cap_yuan: Option<f64>,
+    auto_apply_enabled: Option<bool>,
+    auto_apply_max_per_day: Option<i64>,
+    auto_apply_min_confidence: Option<f64>,
+    grayscale_steps: Option<[u32; 3]>,
+    advisor_enabled: Option<bool>,
+}
+
+async fn update_advisor_config(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    JsonBody(body): JsonBody<UpdateAdvisorConfigBody>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    // 校验灰度档位单调递增且末档 = 100
+    if let Some(steps) = body.grayscale_steps {
+        if !(steps[0] < steps[1] && steps[1] <= steps[2] && steps[2] == 100 && steps[0] >= 1) {
+            return Err(AppError::bad_request(
+                "INVALID_GRAYSCALE",
+                "灰度档位需满足 1 ≤ s0 < s1 ≤ s2 且 s2 = 100",
+            ));
+        }
+    }
+    if let Some(c) = body.auto_apply_min_confidence {
+        if !(0.0..=1.0).contains(&c) {
+            return Err(AppError::bad_request(
+                "INVALID_CONFIDENCE",
+                "min_confidence 需在 0..=1",
+            ));
+        }
+    }
+
+    let settings = state
+        .run_store_task("admin.amas.advisor_config.put", move |store| {
+            let mut s = store.get_system_settings()?;
+            if let Some(v) = body.month_cap_yuan {
+                s.llm_advisor_max_cost_per_month_yuan = v.max(0.0);
+            }
+            if let Some(v) = body.auto_apply_enabled {
+                s.amas_auto_apply_enabled = v;
+            }
+            if let Some(v) = body.auto_apply_max_per_day {
+                s.amas_auto_apply_max_per_day = v.clamp(0, 100) as u32;
+            }
+            if let Some(v) = body.auto_apply_min_confidence {
+                s.amas_auto_apply_min_confidence = v;
+            }
+            if let Some(v) = body.grayscale_steps {
+                s.amas_grayscale_steps = v;
+            }
+            if let Some(v) = body.advisor_enabled {
+                s.llm_advisor_enabled = v;
+            }
+            store.save_system_settings(&s)?;
+            Ok::<_, crate::store::StoreError>(s)
+        })
+        .await??;
+
+    let llm = state.config().llm.clone();
+    Ok(ok(build_advisor_config(&llm, &settings)))
+}
+
+// ─────────────────── diff-impact:逐字段估算影响 ───────────────────
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DiffImpactRequest {
+    /// path → 新值 的扁平 patch(点分式路径),与当前 live config 对比。
+    patch: serde_json::Map<String, serde_json::Value>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MetricImpact {
+    metric: &'static str,
+    delta_low_pt: f64,
+    delta_high_pt: f64,
+    direction: &'static str,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FieldImpact {
+    path: String,
+    from: serde_json::Value,
+    to: serde_json::Value,
+    rel_change: Option<f64>,
+    in_whitelist: bool,
+    impacts: Vec<MetricImpact>,
+    confidence: &'static str,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DiffImpactResponse {
+    fields: Vec<FieldImpact>,
+    telemetry_sample_size: i64,
+    confidence: &'static str,
+    method: &'static str,
+}
+
+fn diff_impact_kpi_f64(kpi: &serde_json::Value, keys: &[&str]) -> Option<f64> {
+    for k in keys {
+        if let Some(v) = kpi.get(k).and_then(|v| v.as_f64()) {
+            return Some(v);
+        }
+    }
+    None
+}
+
+/// 按点分式路径读 config 值,支持 `mem.w[0]` 下标。
+fn diff_impact_read_path(cfg: &serde_json::Value, path: &str) -> Option<serde_json::Value> {
+    let mut cur = cfg;
+    for part in path.split('.') {
+        if let Some(open) = part.find('[') {
+            let (key, rest) = part.split_at(open);
+            let idx: usize = rest[1..rest.len() - 1].parse().ok()?;
+            cur = cur.get(key)?.get(idx)?;
+        } else {
+            cur = cur.get(part)?;
+        }
+    }
+    Some(cur.clone())
+}
+
+/// POST /config/diff-impact —— 对一组 config 变更逐字段返回**计算的**估算影响(替代设计稿
+/// "命中率 +2~4%" 等静态敏感度文案)。
+///
+/// 模型:仅白名单(记忆模型)参数可建模;以有符号相对变化为驱动,经保守系数映射到百分点区间;
+/// 非白名单字段返回 flat。区间宽度随样本量收窄。dry-run 方向性估算(非在线 counterfactual),
+/// 故标 confidence。复用既有 read_path / tuning_whitelist::find。
+async fn diff_impact(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    JsonBody(req): JsonBody<DiffImpactRequest>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let current = state.amas().get_config();
+    let current_value =
+        serde_json::to_value(&current).map_err(|e| AppError::internal(&format!("ser: {e}")))?;
+
+    let fatigue_threshold = current.constraints.high_fatigue_threshold;
+    let kpi: serde_json::Value = state
+        .run_store_task("admin.amas.diff_impact_kpi", move |store| {
+            store
+                .aggregate_amas_metrics_kpi(7, fatigue_threshold)
+                .map(|k| serde_json::to_value(&k).unwrap_or(serde_json::Value::Null))
+        })
+        .await??;
+    let sample = diff_impact_kpi_f64(
+        &kpi,
+        &[
+            "decisionTotal",
+            "decision_total",
+            "sampleSize",
+            "totalEvents",
+        ],
+    )
+    .map(|v| v as i64)
+    .unwrap_or(0);
+
+    let width = if sample >= 200 {
+        0.6
+    } else if sample >= 50 {
+        1.0
+    } else {
+        1.6
+    };
+
+    let mut fields = Vec::with_capacity(req.patch.len());
+    let mut in_wl_count = 0usize;
+    for (path, to_val) in &req.patch {
+        let from_val =
+            diff_impact_read_path(&current_value, path).unwrap_or(serde_json::Value::Null);
+        let rel_change = match (from_val.as_f64(), to_val.as_f64()) {
+            (Some(f), Some(t)) if f.abs() > 1e-9 => Some((t - f) / f.abs()),
+            _ => None,
+        };
+        let in_whitelist = crate::amas::tuning_whitelist::find(path).is_some();
+        if in_whitelist {
+            in_wl_count += 1;
+        }
+
+        let drive = rel_change.unwrap_or(0.0).clamp(-1.0, 1.0);
+        let modeled = in_whitelist && rel_change.is_some() && drive.abs() > 1e-6;
+        let mk = |center: f64, metric: &'static str| {
+            let mid = (drive * center).clamp(-8.0, 8.0);
+            let half = (mid.abs() * 0.4 * width).max(0.3);
+            let (lo, hi) = (mid - half, mid + half);
+            let direction = if mid > 0.05 {
+                "up"
+            } else if mid < -0.05 {
+                "down"
+            } else {
+                "flat"
+            };
+            MetricImpact {
+                metric,
+                delta_low_pt: (lo * 10.0).round() / 10.0,
+                delta_high_pt: (hi * 10.0).round() / 10.0,
+                direction,
+            }
+        };
+        let flat = |metric: &'static str| MetricImpact {
+            metric,
+            delta_low_pt: 0.0,
+            delta_high_pt: 0.0,
+            direction: "flat",
+        };
+        let impacts = if modeled {
+            vec![
+                mk(2.0, "accuracy"),
+                mk(-0.8, "fatigue"),
+                mk(4.0, "d7Retention"),
+            ]
+        } else {
+            vec![flat("accuracy"), flat("fatigue"), flat("d7Retention")]
+        };
+
+        let confidence = if !in_whitelist {
+            "low"
+        } else if sample >= 200 {
+            "high"
+        } else if sample >= 50 {
+            "medium"
+        } else {
+            "low"
+        };
+
+        fields.push(FieldImpact {
+            path: path.clone(),
+            from: from_val,
+            to: to_val.clone(),
+            rel_change,
+            in_whitelist,
+            impacts,
+            confidence,
+        });
+    }
+
+    let all_in_wl = !fields.is_empty() && in_wl_count == fields.len();
+    let confidence = if all_in_wl && sample >= 200 {
+        "high"
+    } else if (all_in_wl || in_wl_count > 0) && sample >= 50 {
+        "medium"
+    } else {
+        "low"
+    };
+
+    Ok(ok(DiffImpactResponse {
+        fields,
+        telemetry_sample_size: sample,
+        confidence,
+        method: "telemetry-baseline + 白名单参数相对变化启发式(逐字段区间,无在线 counterfactual)",
+    }))
+}
+
+// ─────────────────── 沙箱试运行：单条 suggestion 影响预估 ───────────────────
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SandboxChange {
+    path: String,
+    from: serde_json::Value,
+    to: serde_json::Value,
+    rel_change: Option<f64>,
+    in_whitelist: bool,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SandboxMetricImpact {
+    /// baseline 当前值（百分点）。telemetry 无留存维度时 d7Retention 恒 None（诚实降级）。
+    baseline: Option<f64>,
+    predicted: Option<f64>,
+    delta_pt: f64,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SandboxSuggestionResponse {
+    suggestion_id: i64,
+    based_on_version_hash: String,
+    config_valid: bool,
+    config_error: Option<String>,
+    whitelist_ok: bool,
+    whitelist_errors: Vec<String>,
+    changes: Vec<SandboxChange>,
+    accuracy: SandboxMetricImpact,
+    fatigue: SandboxMetricImpact,
+    d7_retention: SandboxMetricImpact,
+    confidence: &'static str,
+    method: &'static str,
+    telemetry_sample_size: i64,
+}
+
+/// POST /advisor/suggestions/:id/sandbox —— 对一条 suggestion 做沙箱试运行：把 patch 应用到 live
+/// config 副本（不落库、不热重载），校验 config 合法性 + 白名单，并以 telemetry KPI 为 baseline
+/// 用白名单参数相对变化启发式预估 accuracy / fatigue / d7Retention 的百分点偏移。
+///
+/// 诚实降级：telemetry 仅有命中率/疲劳触发率维度，无 d7 留存观测，故 d7Retention.baseline 恒 None，
+/// 只返回方向性预估 delta。method 字段如实标注非在线 counterfactual。
+async fn sandbox_suggestion(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let suggestion = state
+        .run_store_task("admin.amas.sandbox_lookup", move |store| {
+            store.get_amas_suggestion(id)
+        })
+        .await??
+        .ok_or_else(|| AppError::not_found("建议不存在"))?;
+
+    let patch_obj = suggestion
+        .patch_json
+        .as_object()
+        .ok_or_else(|| AppError::internal("patch_json 非对象"))?
+        .clone();
+
+    // 白名单校验（store 驱动，const fallback）
+    let patch_for_validate = patch_obj.clone();
+    let whitelist_errors = state
+        .run_store_task("admin.amas.sandbox_whitelist", move |store| {
+            Ok::<_, crate::store::StoreError>(crate::amas::tuning_whitelist::validate_patch(
+                &store,
+                &patch_for_validate,
+            ))
+        })
+        .await??;
+    let whitelist_ok = whitelist_errors.is_empty();
+
+    // 应用 patch 到 live config 副本并校验（不热重载、不落库）
+    let current = state.amas().get_config();
+    let current_value =
+        serde_json::to_value(&current).map_err(|e| AppError::internal(&format!("ser: {e}")))?;
+    let mut cfg_value = current_value.clone();
+    for (path, value) in &patch_obj {
+        write_path(&mut cfg_value, path, value.clone());
+    }
+    let (config_valid, config_error) =
+        match serde_json::from_value::<crate::amas::config::AMASConfig>(cfg_value) {
+            Ok(cfg) => match cfg.validate() {
+                Ok(()) => (true, None),
+                Err(e) => (false, Some(e)),
+            },
+            Err(e) => (false, Some(format!("应用 patch 后反序列化失败: {e}"))),
+        };
+
+    // telemetry baseline（7 日 KPI）
+    let fatigue_threshold = current.constraints.high_fatigue_threshold;
+    let kpi = state
+        .run_store_task("admin.amas.sandbox_kpi", move |store| {
+            store.aggregate_amas_metrics_kpi(7, fatigue_threshold)
+        })
+        .await??;
+    let sample = kpi.decision_total as i64;
+    let acc_baseline = kpi.hit_rate * 100.0;
+    let fatigue_baseline = kpi.fatigue_trigger_rate * 100.0;
+
+    // 区间宽度→单值取中点；样本越多越收窄（与 diff_impact 同源启发式）。
+    let scale = if sample >= 200 {
+        1.0
+    } else if sample >= 50 {
+        0.8
+    } else {
+        0.5
+    };
+
+    // 各 path 相对变化求和作为驱动信号（仅白名单参数计入建模）。
+    let mut drive = 0.0;
+    let mut changes = Vec::with_capacity(patch_obj.len());
+    let mut modeled_any = false;
+    let mut all_in_wl = true;
+    for (path, to_val) in &patch_obj {
+        let from_val =
+            diff_impact_read_path(&current_value, path).unwrap_or(serde_json::Value::Null);
+        let rel_change = match (from_val.as_f64(), to_val.as_f64()) {
+            (Some(f), Some(t)) if f.abs() > 1e-9 => Some((t - f) / f.abs()),
+            _ => None,
+        };
+        let in_whitelist = crate::amas::tuning_whitelist::find(path).is_some();
+        if !in_whitelist {
+            all_in_wl = false;
+        }
+        if in_whitelist {
+            if let Some(rc) = rel_change {
+                if rc.abs() > 1e-6 {
+                    drive += rc.clamp(-1.0, 1.0);
+                    modeled_any = true;
+                }
+            }
+        }
+        changes.push(SandboxChange {
+            path: path.clone(),
+            from: from_val,
+            to: to_val.clone(),
+            rel_change,
+            in_whitelist,
+        });
+    }
+    let drive = drive.clamp(-1.0, 1.0);
+
+    // 中点百分点偏移（accuracy +, fatigue -, d7 +）；不可建模时全 0。
+    let mk_delta = |center: f64| -> f64 {
+        if !modeled_any {
+            return 0.0;
+        }
+        ((drive * center * scale).clamp(-8.0, 8.0) * 10.0).round() / 10.0
+    };
+    let acc_delta = mk_delta(2.0);
+    let fatigue_delta = mk_delta(-0.8);
+    let d7_delta = mk_delta(4.0);
+
+    let accuracy = SandboxMetricImpact {
+        baseline: Some((acc_baseline * 10.0).round() / 10.0),
+        predicted: Some(((acc_baseline + acc_delta) * 10.0).round() / 10.0),
+        delta_pt: acc_delta,
+    };
+    let fatigue = SandboxMetricImpact {
+        baseline: Some((fatigue_baseline * 10.0).round() / 10.0),
+        predicted: Some(((fatigue_baseline + fatigue_delta) * 10.0).round() / 10.0),
+        delta_pt: fatigue_delta,
+    };
+    // 诚实降级：无 d7 留存观测，baseline/predicted 恒 None。
+    let d7_retention = SandboxMetricImpact {
+        baseline: None,
+        predicted: None,
+        delta_pt: d7_delta,
+    };
+
+    let confidence = if all_in_wl && modeled_any && sample >= 200 {
+        "high"
+    } else if modeled_any && sample >= 50 {
+        "medium"
+    } else {
+        "low"
+    };
+
+    Ok(ok(SandboxSuggestionResponse {
+        suggestion_id: id,
+        based_on_version_hash: suggestion.based_on_version_hash,
+        config_valid,
+        config_error,
+        whitelist_ok,
+        whitelist_errors,
+        changes,
+        accuracy,
+        fatigue,
+        d7_retention,
+        confidence,
+        method: "telemetry-baseline + 白名单参数相对变化启发式（dry-run 方向性预估，非在线 counterfactual）",
+        telemetry_sample_size: sample,
+    }))
+}
+
+// ─────────────────── C6:per-patch canary 子系统 ───────────────────
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateCanaryRequest {
+    suggestion_id: i64,
+    /// 灰度初始百分比 1..=100,cohort 取 [0, percent)。
+    percent: u32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ScaleCanaryRequest {
+    percent: u32,
+}
+
+/// POST /advisor/canary —— approve 一条 pending suggestion 进灰度(非直接生效)。
+/// 落 canary version snapshot + 抓 stable baseline 切片 + 建 patch_canary 行(cohort [0,percent))。
+async fn create_canary(
+    admin: AdminAuthUser,
+    State(state): State<AppState>,
+    JsonBody(req): JsonBody<CreateCanaryRequest>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    use crate::store::operations::amas_suggestions::SuggestionStatus;
+
+    if req.percent == 0 || req.percent > 100 {
+        return Err(AppError::bad_request(
+            "INVALID_PERCENT",
+            "percent must be in 1..=100",
+        ));
+    }
+
+    // 取 pending suggestion + 校验状态
+    let sid = req.suggestion_id;
+    let suggestion = state
+        .run_store_task("admin.amas.canary.create_lookup", move |store| {
+            store.get_amas_suggestion(sid)
+        })
+        .await??
+        .ok_or_else(|| AppError::not_found("建议不存在"))?;
+    if !matches!(suggestion.status, SuggestionStatus::Pending) {
+        return Err(AppError::bad_request(
+            "BAD_STATUS",
+            "仅 pending 建议可进灰度",
+        ));
+    }
+
+    // baseline:当前 stable version 的切片(灰度起点)
+    let stable_hash = suggestion.based_on_version_hash.clone();
+    let baseline_json = state
+        .run_store_task("admin.amas.canary.baseline", move |store| {
+            store.aggregate_amas_version_slice(&stable_hash)
+        })
+        .await?
+        .map(|slice| serde_json::to_string(&slice).unwrap_or_else(|_| "{}".into()))
+        .unwrap_or_else(|_| "{}".into());
+
+    // 落 canary version snapshot:把 patch 应用到 stable 后入版本表(与 approve 同构造)
+    let patch_obj = suggestion
+        .patch_json
+        .as_object()
+        .ok_or_else(|| AppError::internal("patch_json 非对象"))?
+        .clone();
+    let current = state.amas().get_config();
+    let mut cfg_value =
+        serde_json::to_value(&current).map_err(|e| AppError::internal(&format!("ser: {e}")))?;
+    for (path, value) in &patch_obj {
+        write_path(&mut cfg_value, path, value.clone());
+    }
+    let new_cfg: crate::amas::config::AMASConfig = serde_json::from_value(cfg_value)
+        .map_err(|e| AppError::bad_request("PATCH_INVALID", &format!("应用 patch 失败: {e}")))?;
+    new_cfg
+        .validate()
+        .map_err(|e| AppError::bad_request("AMAS_INVALID_CONFIG", &e))?;
+    let snapshot_json = serde_json::to_string(&new_cfg)
+        .map_err(|e| AppError::internal(&format!("配置序列化失败: {e}")))?;
+
+    let parent_hash = suggestion.based_on_version_hash.clone();
+    let percent = req.percent;
+    let admin_id = admin.admin_id.clone();
+
+    // 槽分配（读 active 算 cohort_lo）+ 配额校验 + INSERT 收进单事务（store.create_active_patch_canary），
+    // 消除跨 task 的 TOCTOU 窗口；version snapshot 按 hash 幂等，留作前置步可安全单取连接。
+    let inserted = state
+        .run_store_task("admin.amas.canary.create", move |store| {
+            let (_vid, vhash) = store.insert_amas_config_version(
+                &snapshot_json,
+                &admin_id,
+                ConfigVersionSource::LlmSuggested,
+                Some(&format!("canary suggestion#{sid}")),
+                Some(&parent_hash),
+            )?;
+            store.create_active_patch_canary(sid, &vhash, percent, &baseline_json)
+        })
+        .await?
+        .map_err(|e| match e {
+            crate::store::StoreError::Validation(msg) => {
+                AppError::bad_request("CANARY_QUOTA_FULL", &msg)
+            }
+            other => AppError::internal(&other.to_string()),
+        })?;
+
+    state.amas().mark_canary_active();
+    Ok(ok(serde_json::to_value(&inserted).unwrap()))
+}
+
+/// GET /advisor/canary —— active+历史列表,每行附 live 切片(liveReward/liveAnomalyRate/baselineReward)。
+async fn list_canaries(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let rows = state
+        .run_store_task("admin.amas.canary.list", |store| {
+            let canaries = store.list_patch_canaries(None)?;
+            let mut out = Vec::with_capacity(canaries.len());
+            for c in canaries {
+                let live = store
+                    .aggregate_amas_version_slice(&c.version_hash)
+                    .unwrap_or_default();
+                let baseline: serde_json::Value =
+                    serde_json::from_str(&c.baseline_metrics_json).unwrap_or(serde_json::json!({}));
+                let mut v = serde_json::to_value(&c).unwrap_or(serde_json::json!({}));
+                if let Some(obj) = v.as_object_mut() {
+                    obj.insert("liveReward".into(), serde_json::json!(live.mean_reward));
+                    obj.insert(
+                        "liveAnomalyRate".into(),
+                        serde_json::json!(live.anomaly_rate),
+                    );
+                    obj.insert(
+                        "baselineReward".into(),
+                        baseline
+                            .get("meanReward")
+                            .cloned()
+                            .unwrap_or(serde_json::json!(0.0)),
+                    );
+                }
+                out.push(v);
+            }
+            Ok::<_, crate::store::StoreError>(out)
+        })
+        .await??;
+    Ok(ok(rows))
+}
+
+/// POST /advisor/canary/:id/scale —— 扩量到目标 percent,保持 cohort_lo 不变扩展 hi(store 校验不与其它 active canary 重叠)。
+async fn scale_canary(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    JsonBody(req): JsonBody<ScaleCanaryRequest>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    if req.percent == 0 || req.percent > 100 {
+        return Err(AppError::bad_request(
+            "INVALID_PERCENT",
+            "percent must be in 1..=100",
+        ));
+    }
+    let percent = req.percent;
+    // 读 cohort_lo + 排重叠校验 + UPDATE 收进单事务（store.scale_active_patch_canary），
+    // 消除「读 cohort_lo」与「update」拆两次 run_store_task 的 TOCTOU 窗口。
+    let updated = state
+        .run_store_task("admin.amas.canary.scale", move |store| {
+            store.scale_active_patch_canary(id, percent)
+        })
+        .await?
+        .map_err(|e| AppError::bad_request("SCALE_FAILED", &e.to_string()))?;
+    state.amas().mark_canary_active();
+    Ok(ok(serde_json::to_value(&updated).unwrap()))
+}
+
+/// POST /advisor/canary/:id/rollback —— 手动回滚(status='rolled_back')。
+async fn rollback_canary(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    state
+        .run_store_task("admin.amas.canary.rollback", move |store| {
+            store.set_patch_canary_status(id, "rolled_back")
+        })
+        .await?
+        .map_err(|e| AppError::bad_request("ROLLBACK_FAILED", &e.to_string()))?;
+    Ok(ok(serde_json::json!({ "rolledBack": true })))
+}
+
+/// POST /advisor/canary/:id/promote —— 100% → 提升 stable,status='effective'。
+async fn promote_canary(
+    admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let canary = state
+        .run_store_task("admin.amas.canary.promote_lookup", move |store| {
+            store.get_patch_canary(id)
+        })
+        .await??
+        .ok_or_else(|| AppError::not_found("canary 不存在"))?;
+    if canary.status != "active" {
+        return Err(AppError::bad_request(
+            "BAD_STATUS",
+            "仅 active canary 可提升",
+        ));
+    }
+    if canary.percent != 100 {
+        return Err(AppError::bad_request(
+            "NOT_FULL_ROLLOUT",
+            "仅 100% 灰度可提升 stable",
+        ));
+    }
+    // 把 canary version snapshot 提升为 stable(复用 restore 通路)
+    let vhash = canary.version_hash.clone();
+    let vhash_lookup = vhash.clone();
+    let detail = state
+        .run_store_task("admin.amas.canary.promote_version", move |store| {
+            store.get_amas_config_version(&vhash_lookup)
+        })
+        .await??
+        .ok_or_else(|| AppError::internal("canary version 不存在"))?;
+    let cfg: crate::amas::config::AMASConfig = serde_json::from_value(detail.snapshot_json)
+        .map_err(|e| AppError::internal(&format!("快照反序列化失败: {e}")))?;
+    apply_and_persist_config(
+        &state,
+        &admin.admin_id,
+        cfg,
+        ConfigVersionSource::Manual,
+        Some(format!("promote canary#{id} → stable")),
+    )
+    .await?;
+    state
+        .run_store_task("admin.amas.canary.promote_status", move |store| {
+            store.set_patch_canary_status(id, "effective")
+        })
+        .await??;
+    Ok(ok(
+        serde_json::json!({ "promoted": true, "versionHash": vhash }),
+    ))
 }

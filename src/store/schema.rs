@@ -10,6 +10,10 @@ CREATE TABLE IF NOT EXISTS users (
     updated_at TEXT NOT NULL,
     failed_login_count INTEGER NOT NULL DEFAULT 0,
     locked_until TEXT DEFAULT NULL,
+    role TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('user','staff','admin')),
+    status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','inactive','suspended')),
+    last_login_at TEXT DEFAULT NULL,
+    referrer_source TEXT DEFAULT NULL,
     PRIMARY KEY (id),
     UNIQUE (email)
 );
@@ -82,6 +86,8 @@ CREATE TABLE IF NOT EXISTS habit_profiles (
     sessions_per_day REAL NOT NULL DEFAULT 1.0,
     temporal_hourly_stats_json TEXT NOT NULL DEFAULT '[]',
     temporal_total_sessions INTEGER NOT NULL DEFAULT 0,
+    daily_goal_words INTEGER NOT NULL DEFAULT 30,
+    daily_goal_minutes INTEGER NOT NULL DEFAULT 25,
     PRIMARY KEY (user_id)
 );
 
@@ -162,6 +168,18 @@ CREATE TABLE IF NOT EXISTS wordbook_words (
 );
 CREATE INDEX IF NOT EXISTS idx_wordbook_words_word_id ON wordbook_words(word_id);
 
+-- m029:词库管理审计日志(admin 对词库的 create/update/delete/add_word/remove_word/import/sync)
+CREATE TABLE IF NOT EXISTS wordbook_audit_log (
+    id TEXT NOT NULL,
+    wordbook_id TEXT NOT NULL,
+    action TEXT NOT NULL,
+    detail TEXT NOT NULL DEFAULT '',
+    admin_id TEXT DEFAULT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (id)
+);
+CREATE INDEX IF NOT EXISTS idx_wordbook_audit_wordbook ON wordbook_audit_log(wordbook_id, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS etymologies (
     word_id TEXT NOT NULL,
     word TEXT NOT NULL,
@@ -199,11 +217,16 @@ CREATE TABLE IF NOT EXISTS wb_center_imports (
     remote_id TEXT NOT NULL,
     local_wordbook_id TEXT NOT NULL,
     version TEXT NOT NULL,
-    user_id TEXT DEFAULT NULL,
+    -- 归属用户。end-user 导入存其 user_id;admin/system 导入存空串 ''(而非 NULL):
+    -- NULL 在多列主键中被 SQLite 视为彼此不等,会让 admin 重复导入产生重复行而非 upsert,
+    -- 故归一为 '' 使其参与主键去重。Rust 层 WordbookCenterImport.user_id 仍用 None 表示 '' 系统态。
+    user_id TEXT NOT NULL DEFAULT '',
     imported_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     word_count INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (source_url_hash_prefix, remote_id)
+    -- 主键含 user_id:多个 end-user 各自维护对同一 center URL+remote_id 的独立导入记录,
+    -- 互不覆盖、互不阻断(此前缺 user_id 致第二个用户被 409 永久挡住且归属被覆盖)。
+    PRIMARY KEY (source_url_hash_prefix, remote_id, user_id)
 );
 CREATE INDEX IF NOT EXISTS idx_wb_center_imports_source_url ON wb_center_imports(source_url);
 CREATE INDEX IF NOT EXISTS idx_wb_center_imports_user ON wb_center_imports(user_id, updated_at DESC);
@@ -270,6 +293,7 @@ CREATE TABLE IF NOT EXISTS learning_records (
         CHECK (record_type IN ('learning', 'review', 'all')),
     self_rating INTEGER DEFAULT NULL
         CHECK (self_rating IS NULL OR self_rating BETWEEN 0 AND 3),
+    question_mode TEXT DEFAULT NULL,
     PRIMARY KEY (user_id, id)
 );
 CREATE INDEX IF NOT EXISTS idx_learning_records_user_time
@@ -391,6 +415,7 @@ CREATE TABLE IF NOT EXISTS user_elo (
     user_id TEXT NOT NULL,
     rating REAL NOT NULL DEFAULT 1200.0,
     games INTEGER NOT NULL DEFAULT 0,
+    sigma REAL NOT NULL DEFAULT 86.0,
     PRIMARY KEY (user_id)
 );
 
@@ -400,6 +425,16 @@ CREATE TABLE IF NOT EXISTS word_elo (
     games INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (word_id)
 );
+
+CREATE TABLE IF NOT EXISTS user_elo_history (
+    user_id TEXT NOT NULL,
+    snapshot_date TEXT NOT NULL,
+    rating REAL NOT NULL,
+    games INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (user_id, snapshot_date)
+);
+CREATE INDEX IF NOT EXISTS idx_user_elo_history_date
+    ON user_elo_history(snapshot_date);
 
 CREATE TABLE IF NOT EXISTS mastery_states (
     user_id TEXT NOT NULL,
@@ -442,6 +477,9 @@ CREATE TABLE IF NOT EXISTS engine_monitoring_events (
     selection_constraints_met INTEGER NOT NULL DEFAULT 0 CHECK (selection_constraints_met IN (0, 1)),
     reward_value REAL NOT NULL DEFAULT 0.0,
     config_version TEXT NOT NULL DEFAULT '',
+    routing_algo TEXT NOT NULL DEFAULT '',
+    routing_weights_json TEXT NOT NULL DEFAULT '{}',
+    is_correct INTEGER NOT NULL DEFAULT 0 CHECK (is_correct IN (0, 1)),
     PRIMARY KEY (id)
 );
 CREATE INDEX IF NOT EXISTS idx_monitoring_events_timestamp
@@ -481,8 +519,35 @@ CREATE TABLE IF NOT EXISTS system_settings (
     amas_auto_apply_max_per_day INTEGER NOT NULL DEFAULT 1,
     amas_auto_apply_min_confidence REAL NOT NULL DEFAULT 0.8,
     llm_advisor_max_cost_per_month_yuan REAL NOT NULL DEFAULT 100.0,
+    llm_advisor_enabled INTEGER NOT NULL DEFAULT 0 CHECK (llm_advisor_enabled IN (0, 1)),
+    amas_grayscale_steps TEXT NOT NULL DEFAULT '20,60,100',
+    -- m031:数据探针看板全局默认采样率([0,1]),作用于 telemetry_events 落库决策
+    telemetry_sample_rate REAL NOT NULL DEFAULT 1.0,
+    -- m040:canary 自动回滚两阈值(E3),运行时可配,默认 0.05
+    canary_reward_drop_threshold REAL NOT NULL DEFAULT 0.05,
+    canary_anomaly_rise_threshold REAL NOT NULL DEFAULT 0.05,
+    -- m043:客户端最低版本门控(D4)。min_client_version 优先于 env MIN_CLIENT_VERSION;
+    -- version_gate_enabled=1 时 strict-mode 即便整体关闭也按版本拒绝旧客户端(发布切流)
+    min_client_version TEXT DEFAULT NULL,
+    version_gate_enabled INTEGER NOT NULL DEFAULT 0 CHECK (version_gate_enabled IN (0, 1)),
     PRIMARY KEY (singleton_id)
 );
+
+-- m025:用户**自有**活动日志(区别于 admin_audit_log = admin 对用户的操作)
+-- action 例:'user.login' / 'session.complete' / 'goal.update' / 'fatigue.alert'
+CREATE TABLE IF NOT EXISTS user_activity_log (
+    id           TEXT NOT NULL,
+    user_id      TEXT NOT NULL,
+    action       TEXT NOT NULL,
+    detail_json  TEXT,
+    ip           TEXT,
+    created_at   TEXT NOT NULL,
+    PRIMARY KEY (id)
+);
+CREATE INDEX IF NOT EXISTS idx_user_activity_user_time
+    ON user_activity_log(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_user_activity_action
+    ON user_activity_log(action, created_at DESC);
 
 -- Client management
 CREATE TABLE IF NOT EXISTS client_devices (
@@ -495,10 +560,33 @@ CREATE TABLE IF NOT EXISTS client_devices (
     banned_at TEXT DEFAULT NULL,
     banned_by TEXT DEFAULT NULL,
     ban_reason TEXT DEFAULT NULL,
+    app_version TEXT DEFAULT NULL,
+    -- m024:GeoIP 反查的 ISO-3166-1 alpha-2 国家码(CN/US/...);last_ip 兼记本次 lookup 源
+    country TEXT DEFAULT NULL,
+    last_ip TEXT DEFAULT NULL,
+    -- m038:遥测硬识别上报的设备型号(payload.device.model),供 admin 设备列表/详情展示
+    model TEXT DEFAULT NULL,
     PRIMARY KEY (device_id)
 );
 CREATE INDEX IF NOT EXISTS idx_client_devices_user ON client_devices(user_id, last_seen_at DESC);
 CREATE INDEX IF NOT EXISTS idx_client_devices_active ON client_devices(last_seen_at DESC) WHERE is_banned = 0;
+CREATE INDEX IF NOT EXISTS idx_client_devices_app_version ON client_devices(app_version) WHERE app_version IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_client_devices_platform ON client_devices(platform, last_seen_at DESC);
+
+-- m024:强制升级策略(每平台一行)。min_version 以下启动拦截,suggested_version
+-- 以下顶部黄条提示,grayscale_pct 控制灰度推送百分比,pwa_silent_update 仅 Web 有意义。
+CREATE TABLE IF NOT EXISTS client_upgrade_policy (
+    platform TEXT NOT NULL,
+    min_version TEXT,
+    suggested_version TEXT,
+    grayscale_pct INTEGER NOT NULL DEFAULT 0 CHECK (grayscale_pct BETWEEN 0 AND 100),
+    pwa_silent_update INTEGER NOT NULL DEFAULT 1 CHECK (pwa_silent_update IN (0, 1)),
+    updated_at TEXT NOT NULL,
+    updated_by TEXT,
+    PRIMARY KEY (platform)
+);
+INSERT OR IGNORE INTO client_upgrade_policy (platform, updated_at)
+    VALUES ('web', datetime('now')), ('ios', datetime('now')), ('android', datetime('now'));
 
 CREATE TABLE IF NOT EXISTS telemetry_events (
     id TEXT NOT NULL,
@@ -514,6 +602,27 @@ CREATE TABLE IF NOT EXISTS telemetry_events (
 CREATE INDEX IF NOT EXISTS idx_telemetry_device ON telemetry_events(device_id, server_ts DESC);
 CREATE INDEX IF NOT EXISTS idx_telemetry_server_ts ON telemetry_events(server_ts DESC);
 
+-- m037:系统级告警表(AMAS 数据软拦截告警的可写载体)。
+-- admin 无应用内通知箱,告警靠此表落库 + /api/admin/monitoring/events 时间线透出。
+-- dedup key=(source,kind):同源同类失败合并计数,防 worker 周期失败把表打爆。
+CREATE TABLE IF NOT EXISTS system_alerts (
+    id TEXT NOT NULL,
+    source TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    severity TEXT NOT NULL,
+    title TEXT NOT NULL,
+    message TEXT NOT NULL DEFAULT '',
+    count INTEGER NOT NULL DEFAULT 1,
+    first_seen_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    -- m041:admin 收件箱已读/确认态(D1)。基线 DDL 镜像 ALTER 列，与 m038/m040/m043 同约定。
+    read_at TEXT DEFAULT NULL,
+    acked_by TEXT DEFAULT NULL,
+    PRIMARY KEY (id),
+    UNIQUE (source, kind)
+);
+CREATE INDEX IF NOT EXISTS idx_system_alerts_last_seen ON system_alerts(last_seen_at DESC);
+
 CREATE TABLE IF NOT EXISTS feedback_items (
     id TEXT NOT NULL,
     user_id TEXT NOT NULL,
@@ -521,10 +630,80 @@ CREATE TABLE IF NOT EXISTS feedback_items (
     body TEXT NOT NULL,
     route TEXT DEFAULT NULL,
     created_at TEXT NOT NULL,
+    priority TEXT NOT NULL DEFAULT 'normal',
+    status TEXT NOT NULL DEFAULT 'open',
+    assignee_admin_id INTEGER DEFAULT NULL,
+    resolved_at TEXT DEFAULT NULL,
+    resolution TEXT DEFAULT NULL,
+    device_profile_json TEXT DEFAULT NULL,
+    answer_snapshot_json TEXT DEFAULT NULL,
+    -- m030:工单化字段（已读/首响/CSAT/去重计数/GitHub Issue）
+    read_at TEXT DEFAULT NULL,
+    first_response_at TEXT DEFAULT NULL,
+    csat_score INTEGER DEFAULT NULL,
+    csat_comment TEXT DEFAULT NULL,
+    dedup_count INTEGER NOT NULL DEFAULT 0,
+    github_issue_url TEXT DEFAULT NULL,
     PRIMARY KEY (id)
 );
 CREATE INDEX IF NOT EXISTS idx_feedback_items_created_at ON feedback_items(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_feedback_items_user ON feedback_items(user_id, created_at DESC);
+
+-- m030:工单回复 / 时间线事件 / 附件
+CREATE TABLE IF NOT EXISTS feedback_replies (
+    id TEXT NOT NULL PRIMARY KEY,
+    feedback_id TEXT NOT NULL,
+    author_kind TEXT NOT NULL,
+    author_id TEXT,
+    body TEXT NOT NULL,
+    push_inapp INTEGER NOT NULL DEFAULT 0,
+    cc_email INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_feedback_replies_fb ON feedback_replies(feedback_id, created_at);
+
+CREATE TABLE IF NOT EXISTS feedback_events (
+    id TEXT NOT NULL PRIMARY KEY,
+    feedback_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    actor TEXT,
+    summary TEXT NOT NULL DEFAULT '',
+    ref_id TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_feedback_events_fb ON feedback_events(feedback_id, created_at);
+
+CREATE TABLE IF NOT EXISTS feedback_attachments (
+    id TEXT NOT NULL PRIMARY KEY,
+    feedback_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    url TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'image',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_feedback_attachments_fb ON feedback_attachments(feedback_id);
+
+-- m036:反馈中心公告/FAQ（存为草稿）+ 回复草稿持久化（每工单一份）
+CREATE TABLE IF NOT EXISTS feedback_announcements (
+    id TEXT NOT NULL PRIMARY KEY,
+    title TEXT NOT NULL,
+    body TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'announcement' CHECK (kind IN ('announcement', 'faq')),
+    published INTEGER NOT NULL DEFAULT 0 CHECK (published IN (0, 1)),
+    author_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_feedback_announcements_kind ON feedback_announcements(kind, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS feedback_reply_drafts (
+    feedback_id TEXT NOT NULL PRIMARY KEY,
+    body TEXT NOT NULL,
+    push_inapp INTEGER NOT NULL DEFAULT 0,
+    cc_email INTEGER NOT NULL DEFAULT 0,
+    author_id TEXT,
+    updated_at TEXT NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS telemetry_summaries (
     id TEXT NOT NULL,
@@ -596,8 +775,32 @@ CREATE TABLE IF NOT EXISTS amas_tuning_suggestions (
     cost_usd REAL,
     tokens_input INTEGER,
     tokens_output INTEGER,
-    confidence REAL
+    confidence REAL,
+    base_values_json TEXT DEFAULT NULL
 );
+
+CREATE TABLE IF NOT EXISTS wordbook_local_tags (
+    wordbook_id TEXT NOT NULL,
+    tag         TEXT NOT NULL,
+    created_at  TEXT NOT NULL,
+    created_by  TEXT,
+    PRIMARY KEY (wordbook_id, tag)
+);
+CREATE INDEX IF NOT EXISTS idx_wordbook_local_tags_tag ON wordbook_local_tags(tag);
+
+CREATE TABLE IF NOT EXISTS amas_canary_config (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    version_hash    TEXT NOT NULL,
+    percent         INTEGER NOT NULL CHECK (percent BETWEEN 0 AND 100),
+    force_user_ids  TEXT NOT NULL DEFAULT '[]',
+    active          INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0,1)),
+    created_at      TEXT NOT NULL,
+    created_by      TEXT NOT NULL,
+    -- m035:灰度发布人群过滤(crowd-filter)JSON:minAccountAgeDays/preferActive/webOnly/autoScale24h
+    crowd_filters   TEXT DEFAULT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_amas_canary_active ON amas_canary_config(active) WHERE active = 1;
+CREATE INDEX IF NOT EXISTS idx_amas_canary_created ON amas_canary_config(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_amas_suggestions_status_time
     ON amas_tuning_suggestions(status, created_at DESC);
 
@@ -642,4 +845,35 @@ CREATE TABLE IF NOT EXISTS llm_advisor_cost_ledger (
     last_updated_at TEXT NOT NULL,
     PRIMARY KEY (month)
 );
+
+-- m031:数据探针看板采样配置(按 telemetry event_type 主键)。
+-- priority 越小越优先;locked=1 的事件(on_demand/session_start)恒 1.0、禁改 rate。
+CREATE TABLE IF NOT EXISTS probe_sampling_config (
+    event_type  TEXT NOT NULL PRIMARY KEY,
+    sample_rate REAL NOT NULL DEFAULT 1.0 CHECK (sample_rate BETWEEN 0.0 AND 1.0),
+    enabled     INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+    locked      INTEGER NOT NULL DEFAULT 0 CHECK (locked IN (0, 1)),
+    priority    INTEGER NOT NULL DEFAULT 100,
+    updated_at  TEXT NOT NULL,
+    updated_by  TEXT
+);
+INSERT OR IGNORE INTO probe_sampling_config
+    (event_type, sample_rate, enabled, locked, priority, updated_at, updated_by)
+VALUES
+    ('*',             1.0, 1, 0, 1000, datetime('now'), 'seed'),
+    ('periodic',      1.0, 1, 0,  100, datetime('now'), 'seed'),
+    ('on_demand',     1.0, 1, 1,   10, datetime('now'), 'seed'),
+    ('session_start', 1.0, 1, 1,   10, datetime('now'), 'seed');
+
+CREATE TABLE IF NOT EXISTS probe_sampling_audit (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_type  TEXT NOT NULL,
+    action      TEXT NOT NULL CHECK (action IN ('add', 'mod', 'del', 'pause')),
+    old_value   TEXT,
+    new_value   TEXT,
+    admin_id    TEXT,
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_probe_sampling_audit_time
+    ON probe_sampling_audit(created_at DESC);
 "#;

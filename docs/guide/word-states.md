@@ -61,9 +61,9 @@ stateDiagram-v2
 
 | 操作 | 接口 | 结果状态 |
 |------|------|----------|
-| 标记已掌握 | `POST /api/v0/word-states/:word_id/mark-mastered` | `Mastered`，`mastery_level = 1.0` |
-| 重置单词 | `POST /api/v0/word-states/:word_id/reset` | `New`，所有计数归零 |
-| 批量覆盖 | `POST /api/v0/word-states/batch-update` | 任意目标状态（由请求体指定） |
+| 标记已掌握 | `POST /api/word-states/:word_id/mark-mastered` | `Mastered`，`mastery_level = 1.0` |
+| 重置单词 | `POST /api/word-states/:word_id/reset` | `New`，所有计数归零 |
+| 批量覆盖 | `POST /api/word-states/batch-update` | 任意目标状态（由请求体指定） |
 
 手动操作**绕过** AMAS 引擎直接写库，不重新计算记忆参数。
 

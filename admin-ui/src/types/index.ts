@@ -7,7 +7,6 @@ export type * from './wordbook';
 export type * from './wordState';
 export type * from './studyConfig';
 export type * from './learning';
-export type * from './notification';
 export type * from './content';
 export type * from './admin';
 export type * from './userProfile';

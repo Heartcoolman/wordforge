@@ -2,7 +2,177 @@
 
 所有版本变更记录均在此文件。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
-后续每次发版在文件顶部 append 最新条目；全量重建可运行 `bash scripts/build-changelog.sh`。
+后续每次发版在文件顶部手动 append 最新条目，再执行 `cp CHANGELOG.md docs/changelog.md` 同步站点副本（两份须保持一致）。注：本文件的手写复盘内容 GitHub Release body 不含，故**不可**用脚本从 Releases 全量重建覆盖。
+
+---
+
+## [v1.1.4-beta.3] — 2026-06-03 · Pre-release · 遥测面板分类 + 设备操作概览
+
+### ✨ 新功能与改进
+
+- **设备遥测面板重构为「操作概览 + 分类明细」**：设备管理「历史」面板顶部新增「这台设备做了什么」概览——功能使用排行 / 访问页面 / 点击热点 / 错误与事件分布 / 总时长与会话数，全部由后端全量聚合（featureUsage 累加、currentRoute 分组、clickTargets 按 label 聚合），一眼看懂无需逐条翻。设备画像提顶只显一次；原始记录折叠为明细，展开后系统按 event_type 分类筛选、点行看完整会话/行为/功能详情。新增 `GET /api/admin/telemetry/:device_id/summary` 聚合端点 + `event_type` 过滤。
+- **新功能引导导览加入「设备操作概览」屏**：升级后导览新增一屏介绍设备遥测操作概览；v1.1.4 波次标识翻新（`v1.1.4r2`），已看过 v1.1.4 早期导览的人会再弹一次完整导览。
+
+### 🐛 修复与改进
+
+- **实时事件流 5 秒刷新不跳不闪**：数据探针页实时遥测流轮询刷新时，正在阅读会被滚动归零、spinner 闪烁。改为渲染快照与 resource 解耦、按 id 复用未变行 DOM、spinner 仅首帧、手动锚定滚动补偿（贴顶看最新、滚下去看历史锚点不动），并关掉浏览器原生 overflow-anchor 防双重补偿。
+
+## [v1.1.4-beta.2] — 2026-06-03 · Pre-release · 引导导览换 v1.1.4 内容
+
+> 在 v1.1.4-beta.1（16 项 backlog 全集，见下方条目）之上仅叠加一项 admin UI 修正，其余一致。
+
+### 🐛 修复与改进
+
+- **新功能引导导览换为 v1.1.4 内容**：升级后弹出的导览改为本版运营闭环新功能（事件 outbox 死信运维 · 人工重投 / 丢弃 · 定时广播队列查看与取消 · 离站备份可观测 · 告警收件箱 canary 自动回滚进箱 + 一键全部已读）；`waveOf` 为 v1.1.4 设独立波次，从 v1.1.3 升级到本版后自动重弹一次。
+
+## [v1.1.4-beta.1] — 2026-06-03 · Pre-release · 收尾型 minor：事件总线深化 · 运营闭环 · 性能加固 · 契约对齐
+
+把 v1.1.3 埋下的四块「基建已建、闭环未做」半成品（outbox / 告警收件箱 / 定时广播 / 离站备份）收口，并对 v1.1.x 累积的契约文档漂移止血。**全程无 P0**，生产硬校验正确生效、无线上断流。新增迁移 m045–m047。
+
+### ✨ 新增与闭环
+
+- **领域事件幂等账本（W1-1）**：新增 `processed_events` 表（m045），把幂等标记与 AMAS 状态在同一事务原子写入，single/batch 入口在应用 AMAS 前预检命中即短路，把「重启不丢」补成 AMAS「精确一次」——为后续删手动 rollback / 切默认异步铺第一块基石。**`RECORDS_OUTBOX_ASYNC` 默认仍 false（同步老路），手动 rollback 保留**，生产零暴露。
+- **outbox 死信运维闭环（W1-2）**：admin 监控页死信 chip 可点开抽屉，列出明细（用户 / 事件类型 / 失败原因 / 进死信时间），支持人工重投（回 outbox、attempts 归零）与丢弃（均带二次确认）；毒丸消息（payload 解析失败 / 未知事件类型）判为永久错误，跳过指数退避直接进死信，不再空跑 5 次。
+- **canary 自动回滚进告警收件箱（W2-1）**：AMAS patch canary 触发自动回滚时写入 admin 告警收件箱（持久可追溯，含被回滚 patch 的 reward/anomaly 对比），补齐此前只发瞬态 SSE 的覆盖盲区。
+- **定时广播队列查看 / 取消（W2-2）**：DevicesPage 新增「待发排程」队列视图，可查看与取消待发的定时广播（原子抢占：已被到点下发则返回 409 不误取消）；迁移 m046 重建 `scheduled_broadcasts` 表加入 `canceled` 状态。
+- **告警收件箱「全部已读」（W2-3）**：NotificationBell 面板头一键清空未读角标。
+- **离站备份可观测（W2-4）**：`backup_offsite` worker 落 worker 心跳（admin worker 列表 + Prometheus 可见）；新增 `backup_target_status` 表（m047）记录每 target 上次成功 / 失败 / 字节数，settings 备份面板按 target 显示状态，灾备从「配了不知有没有用」变为可验证。
+- **遥测专项限频（W3-1）**：`/api/telemetry` 增加独立于通用 API 预算的 per-user 频率配额（`RATE_LIMIT_TELEMETRY_MAX`，默认 120/60s），超额软丢弃（不落库、仍刷新设备活跃度），防单个噪声客户端打满 SQLite 写路径挤占学习数据写入。
+- **门控变更审计留痕（W4-4）**：客户端最低版本门控（高危生产控制）变更时写入 `update_audit_log`，记录 old→new 与开关翻转。
+
+### 🐛 修复与加固
+
+- **关停最终落盘（W3-2）**：graceful shutdown 在服务停止后补一次可用率落盘，消除重启丢失登录 SLO 当前小时桶（≤5min）的缺口。
+- **延迟直方图桶细化（W3-3）**：`http_request_duration_seconds` 桶边界细化为 `[0.01,0.025,0.05,0.1,0.25,0.5,1.0,2.5]`，提升 100ms~2s 区间 p95/p99 精度；启动回灌对桶数变更的旧持久化行做安全重置（防 resize 错位污染历史 SLO，详见 `docs/runbook/metrics-buckets.md`）。
+
+### 📝 文档与契约
+
+- `docs/openapi.yaml` `info.version` 改由 `CARGO_PKG_VERSION` 派生，跨 v1.1.x 不再漂移（W4-1）。
+- `api-endpoints.md` 遥测段补齐 m038 四要素硬校验（平台 / 版本 header + `device.timezone` / `device.model`）+ 两个 403 三态归属表（W4-2）；用户段补齐 GDPR 注销（`DELETE /api/users/me`）与数据导出（`GET /api/users/me/export`，NDJSON / 24h 冷却 / 429）两端点（W4-3）。
+- `release-calendar.md` / `RFC.md`：撤销 `check-update` 端点「v1.1 删除」承诺，明确保留为内部 admin 端点（W4-5）；新增按 403 码差异化的客户端降级处置矩阵（W4-6）。
+
+### 🧹 代码债
+
+- 删除 admin-ui 死模块 `api/health.ts`（全站零引用）及其测试；后端占位字段注释澄清语义（W5-1）。
+
+> 质量：后端 `cargo test` 全绿、`clippy` 零新增告警；admin-ui `tsc` / `build` / `vitest`（1008 通过）全绿。11-agent 对抗式交叉验证捕获并修复 1 个 W1-1 原子性 blocker（回滚 AMAS 状态与清除幂等标记收敛为单事务，守住「标记存在 ⟺ AMAS 已应用」不变式）。
+
+## [v1.1.3-beta.2] — 2026-06-03 · Pre-release · 引导导览与更新页 CHANGELOG 修正
+
+> 在 v1.1.3-beta.1（19 项 backlog 全集，见下方条目）之上仅叠加两项 admin UI 修正，其余一致。
+
+### 🐛 修复与改进
+
+- **新功能引导导览换为 v1.1.3 内容**：更新后弹出的导览改为本版运维闭环新功能（告警收件箱 / 设备推送定时调度 + 草稿 / 客户端版本门控 / 事件 outbox 异步可观测）；`waveOf` 为 v1.1.3 设独立波次，升级到本版后自动重弹一次。
+- **更新页 CHANGELOG 卡片展示完整更新日志**：有 release notes 时优先渲染完整富文本（覆盖全部变更），原 compare-commits 派生列表（仅显示区间内少量提交）降为无 notes 时的回退。
+
+---
+
+## [v1.1.3-beta.1] — 2026-06-02 · Pre-release · 遥测契约协同 + 性能运维加固 + 事件 outbox + 功能补全
+
+收纳 v1.1.3 backlog 全 19 项（W1–W5）。
+
+### ✨ 新增与变更
+
+- **遥测契约协同（W1）**：admin-ui 自身遥测补 `device.model`（修 beta.4 硬识别引入的本仓自伤 400）；`tests/telemetry_http.rs` 补五拒绝码负路径断言；对齐 `docs/api-spec.md` / `docs/v1-client-migration.md` 过期契约。**顺带修复生产回归**：`device.rs` 遥测路径匹配 `/api/telemetry`→`/telemetry`（axum nest 剥前缀，beta.4 起遥测三态归属核验被旁路，本版修复后生效）。
+- **性能运维加固（W2）**：SQLite 连接池默认 16→8（配合 beta.3 cache_size 收紧峰值内存上界）；nginx 两份样例补 named upstream + `keepalive 64` + `map $http_upgrade`；新增 `deploy/sysctl.d` 抗突发参数 + runbook「内核 / nginx」段；systemd `MALLOC_ARENA_MAX=2`。
+- **DB 备份外迁（W2 · B1）**：每日备份按 `BackupTarget.uri` scheme 分发上传 file / rsync / S3（`object_store`），失败告警入 `system_alerts`，runbook 补离站章节。
+- **领域事件 outbox 基建（W3 · S2-1）**：新增 `outbox` + `events_dead_letter` 表 + 异步消费 worker（指数退避重试 + 死信兜底）+ admin 监控 outbox lag / 死信展示 + 开关 `RECORDS_OUTBOX_ASYNC`。**默认 false 走同步老路（amas_result 同步返回、行为不变）**，异步路径 opt-in。⚠️ 异步模式响应不含 amas_result，且崩溃窗口下事件可能被 AMAS 重复应用（RFC R06，「重启不丢」≠「重启不重复」）；切默认 / 删手动 rollback 待与学习端跨仓协同。
+- **功能补全（W4）**：admin 应用内通知 / 告警收件箱（`system_alerts` 加 read/ack + 收件箱组件 + 未读角标）；设备推送投递时机调度（延时 / 指定时间）+ 草稿存储；登录页 SLO 30d 经 `availability_rollup` 持久化跨重启可达；`min_client_version` 版本门控 admin 运行时可配（即时生效）。
+- **前端配套 + 代码债（W5）**：广播受众 400 码（`INVALID_VERSION_MIN` / `EMPTY_AUDIENCE`）前端提示 + semver 预校验；广播历史 week/failed 筛选下推后端跨页；canary 自动回滚阈值迁 `system_settings` 可配；vite manualChunks 拆 `vendor-echarts` / `vendor-codemirror`；v1 弃用文档 URL 改真实地址 + 稳定锚点；移除登录页 i18n 占位控件；删除失效的 `build-changelog.sh`。
+
+### 🗄️ 迁移
+
+- `m039` availability_rollup · `m040` canary 阈值 · `m041` system_alerts 收件箱列 · `m042` scheduled_broadcasts + push_drafts · `m043` min_client_version 门控 · `m044` outbox + events_dead_letter
+
+### 📌 勘误
+
+- 修正 rc.2 条目对「领域事件总线」的夸大表述（彼时仅落基础设施 + 计数旁路 consumer，非 AMAS 异步消费）。
+
+### 🧪 质量
+
+- 后端 `cargo test` 全过（含 outbox 重启不丢 / 死信、遥测五拒绝码、迁移幂等）；admin-ui `tsc` / `build` 通过、vitest 137 文件全过；24-agent 对抗式交叉验证 0 blocker，确认问题已修复或文档化。
+
+---
+
+## [v1.1.2-beta.4] — 2026-06-02 · Pre-release · 遥测硬识别 + AMAS 数据软拦截告警
+
+在 v1.1.2-beta.3 基础上叠加遥测身份强制与 AMAS 数据失败告警，其余一致。
+
+### ✨ 新增与变更
+
+- **遥测硬识别（破坏性契约变更，无开关）**：`POST /api/telemetry` 强制四要素——平台（`x-device-platform`）、版本（`x-app-version`）、时区（`payload.device.timezone`）、设备型号（`payload.device.model`，**新增必填字段**），缺任一直接 4xx；并校验设备已注册且归属一致（盗用 / 伪造 device_id → 403），归属为空时由首个登录用户认领。**需客户端配合上报 `device.model` 等字段，否则遥测被拦**
+- **AMAS 数据软拦截告警**：`metrics_flush` / `daily_aggregation` worker 与学习记录上报失败不再静默吞掉——失败不阻断流程，但主动告警。新增 `system_alerts` 表经 `/admin/monitoring` 监控时间线透出（admin 运维），受影响用户收应用内通知（小时桶去重防风暴）
+- **设备型号落库展示**：设备列表新增「型号」列、详情抽屉展示型号、CSV 导出含型号；版本 / 型号分布「未知」改「未上报」
+
+### 🗄️ 迁移
+
+- `m037` 新增 `system_alerts` 表；`m038` `client_devices` 新增 `model` 列
+
+---
+
+## [v1.1.2-beta.3] — 2026-06-01 · Pre-release · 系统监控过载饱和信号 + SQLite 防 OOM 收紧
+
+在 v1.1.2-beta.2 基础上叠加两项运维加固，其余一致。
+
+### 🐛 修复与性能
+
+- **系统监控新增过载饱和信号**：补 `http_inflight_requests`（in-flight gauge），修复「5xx=0 即显健康」盲区——请求堆积但未报 5xx 的过载状态现可观测、可告警
+- **收紧 SQLite 每连接 `cache_size` / `mmap_size`**：`cache_size` -64000 → -16000（≈62.5 MiB → 15.6 MiB/连接）、`mmap_size` 256 MiB → 128 MiB，按 pool 连接独占口径压低峰值内存，防高并发 OOM
+
+---
+
+## [v1.1.2-beta.2] — 2026-05-31 · Pre-release · 新增大版本新功能引导导览
+
+在 v1.1.2-beta.1 基础上**仅新增「新功能引导导览」**，其余内容（约 90 新增接口 / 15 迁移 / Admin 多块看板与安全性能修复）与 beta.1 完全一致，详见下方 [v1.1.2-beta.1]。
+
+- 升级进入本大版本后自动弹出一次全屏分步导览，逐屏介绍各新增看板并可一键直达
+- 同一大版本波次内重复升级不再重弹；顶栏「导览」按钮随时可重看；支持键盘 ←/→/Esc 操作
+
+---
+
+## [v1.1.1] — 2026-05-31 · Stable · v1.1.0-beta.4 转正
+
+将经 Beta 阶段（v1.1.0-beta.1 ~ beta.4）验证的内容**转正为正式稳定版**。
+
+- **内容与 `v1.1.0-beta.4` 完全一致**，仅版本号变更（`1.1.0-beta.4` → `1.1.1`）；无新增功能、无破坏性变更，可从早期版本平滑升级
+- 大跨度的 Admin 运维面更新（探针遥测、AMAS 多块看板、词书中心、RBAC、反馈工单中心及一批安全/性能修复）当时正在 Beta 通道测试（见 v1.1.2-beta.1），测试通过后再转正
+
+---
+
+## [v1.1.2-beta.1] — 2026-05-31 · Pre-release · Admin 运维面大版本更新
+
+> ⚠️ **这是一次大跨度 Beta 更新。** 相较 v1.1.0-beta.4，本次包含 **15 个数据库迁移、约 90 个新增接口、Admin 管理界面大面积重构与多块全新看板**。变更面非常广，**升级前请务必通读「升级前必读」并先备份数据库**。强烈建议先在非关键实例验证，确认无误后再用于生产。
+>
+> 适用对象：自托管本服务的运维者 / 管理员。普通学习端用户无需操作。
+
+### ⚠️ 升级前必读（务必逐条确认）
+
+1. **先手动备份数据库，再升级。** 升级后每日自动备份会**跳过首个周期**，刚重启的时间窗口内没有当天的恢复点。升级前请在 Admin 后台「版本更新 → 备份」手动触发一次，或直接 SSH 备份 `data/learning.db`。
+2. **数据库迁移是单向、不可逆的。** 升级成功后库结构会从当前版本前滚到最新（本次新增 15 个迁移步骤）。**一旦前滚，无法在保留新数据的前提下干净回退到旧版本。** 回退仅允许换回旧程序二进制（旧代码忽略新增列/表，可正常运行）；**禁止**恢复旧数据库备份（会丢失升级后产生的全部学习数据），除非库已损坏。
+3. **升级失败时的自动回滚只还原程序与前端，不还原数据库。** 内置升级器健康检查失败时自动换回旧程序/旧前端，但不动数据库；本批迁移纯增量，旧程序可继续在已前滚的库上运行。
+4. **当前运行版本必须 ≥ v1.1.0-beta.3 才能一键升级。** 更早版本旧升级器存在已知自重启死锁，需手动替换二进制。已实测从 v1.1.0-beta.4 可经 Admin 一键升级、无需手动干预。
+5. **「广播」功能行为收紧。** 受众「最低版本号」非法（如 `1.2` / `v2`）或受众过滤后无人匹配，现返回明确错误，不再静默返回「已发送（0 人）」。
+
+### ✨ 新增功能
+
+- **AMAS 引擎运维看板**：指标看板（核心 KPI / 算法分布 / 命中率·延迟·疲劳·奖励聚合）、版本对比（双配置并排比命中率·P95·ensemble·奖励·异常率·7 日留存，含 epsilon 等每版本参数）、决策直方图 / 疲劳时序 / MDM 热力图 / ELO 散点 / 阶段流转 / 学习风格聚类 / 异常 feed；灰度（Canary）支持按平台·账龄·活跃度人群过滤且逐用户真实生效
+- **探针遥测数据采集看板**：遥测采样数据实时可视化采集面板
+- **词书中心**：词书导入、筛选、预览、更新检查与同步管理
+- **管理员角色（RBAC）**：super_admin / admin 分级，邀请·改角色·删管理员·签发 API Key 等特权仅超级管理员可执行
+- **反馈工单中心**：升级为完整工单流（CSAT 评分、附件、设备画像、合并去重）
+- **其他**：设置分区化、每日自动数据库备份、数据分析看板（留存矩阵 / 用户状态分布）、系统监控看板（健康 / 数据库 / 公网探针 / AMAS 事件）
+
+### 🐛 安全与性能修复
+
+- **安全**：修复管理员越权提权（特权接口此前仅校验「是否管理员」、不校验角色）→ 强制超级管理员鉴权；反馈导出 CSV 公式注入防护（`= + - @` 开头不再被 Excel 当公式执行）；反馈提交字段边界校验（CSAT 分值 / 附件数量·长度 / JSON 体积上限）
+- **正确性**：灰度人群过滤真正生效（此前保存却被引擎忽略致全量下发）；灰度创建/扩量修复（此前稳态下可能零用户进入、监控拿不到样本致自动回滚失效）；广播静默零发送修复（见升级前必读 5）；指标时间戳按 UTC 跨时区归一；版本对比配置参数按版本快照解析（epsilon 不再错填为当前线上值）；反馈合并事务化
+- **性能**：留存矩阵查询 676 → 1（双层逐格查询重写为单条聚合）；批量封禁/解封 800 → 1 次往返（单事务批量）
+
+### ⚙️ 技术变更摘要
+
+- 数据库迁移 m022–m036（共 15 步），全部为新增列（带默认值）/ 新增表 / 新增索引 / 种子数据，**无破坏性变更、无数据回填**，可重入；已用生产数据快照实测前滚成功（21 → 36，完整性校验通过）
+- 后端约 90 个新增接口；Admin 前端约 190 个文件改动；后端测试 + 前端测试（组件 1010 + 端到端 52）均通过
 
 ---
 
@@ -275,10 +445,11 @@ rc.1（资源包热更）落地后，本 RC 交付 P1 + P2 主体工作。
 
 ### 新功能（事件总线）
 
-- 🚀 **领域事件总线**（P1-S2，commit 568f294）：records 写入旁路 emit `DomainEvent::LearningRecorded` →
-  AMAS engine 异步消费，事件总线（`src/services/event_bus.rs`）单向广播 + per-receiver
-  缓冲，避免 records→AMAS 紧耦合直接调用。新增 `tests/event_bus.rs` 单测覆盖 emit/recv
-  与背压 drop 行为。
+- 🚀 **领域事件总线基础设施**（P1-S2，commit 568f294）：records 写库成功后旁路 emit
+  `DomainEvent::RecordCreated`，事件总线（`src/services/event_bus.rs`）内存单向广播 +
+  per-receiver 缓冲。**此 RC 仅落基础设施 + 计数旁路 consumer，AMAS 仍走 handler 内同步通路
+  （非异步消费）**；outbox 持久化 + AMAS 真异步消费（opt-in）见 v1.1.3 S2-1。新增
+  `tests/event_bus.rs` 单测覆盖 emit/recv 与背压 drop 行为。
 
 ### 改进（rate_limit）
 

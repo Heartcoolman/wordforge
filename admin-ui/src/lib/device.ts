@@ -44,6 +44,9 @@ export interface DeviceFingerprint {
   osName: string;
   browserName: string;
   browserVersion: string;
+  // 设备型号。Web 端无可靠真型号，落 browser+OS 派生标识；
+  // 兜底固定 'web-admin' 占位，确保非空以满足后端 m038 必填校验（缺失即 400 MISSING_DEVICE_MODEL）。
+  model: string;
   timezone: string;
   language: string;
   touchSupport: boolean;
@@ -97,6 +100,14 @@ function parseUserAgent(): { osName: string; browserName: string; browserVersion
   return { osName, browserName, browserVersion };
 }
 
+// Web 端无系统级真型号 API，用 browser+OS 派生一个稳定标识；二者都未知时兜底 'web-admin'。
+function deriveDeviceModel(browserName: string, osName: string): string {
+  const browser = browserName && browserName !== 'Unknown' ? browserName : '';
+  const os = osName && osName !== 'Unknown' ? osName.trim() : '';
+  const derived = [browser, os].filter(Boolean).join(' on ').trim();
+  return derived || 'web-admin';
+}
+
 export function collectDeviceFingerprint(): DeviceFingerprint {
   const { osName, browserName, browserVersion } = parseUserAgent();
   return {
@@ -108,6 +119,7 @@ export function collectDeviceFingerprint(): DeviceFingerprint {
     osName,
     browserName,
     browserVersion,
+    model: deriveDeviceModel(browserName, osName),
     timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
     language: navigator.language,
     touchSupport: navigator.maxTouchPoints > 0,

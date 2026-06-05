@@ -845,14 +845,12 @@ fn run_fsrs_sim(words: &[f64], seed: u64, scenario: SimScenario) -> SimResult {
 // 算法 5: 纯艾宾浩斯 (百词斩风格) — 固定间隔
 // ============================================================================
 
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 struct EbbinghausState {
     box_level: usize,
     last_review_at: Option<i64>,
     review_count: u32,
 }
-
 
 const EBBINGHAUS_INTERVALS: [f64; 8] = [0.01, 0.02, 0.5, 1.0, 2.0, 4.0, 7.0, 15.0];
 
@@ -1076,14 +1074,12 @@ fn run_hlr_sim(words: &[f64], seed: u64, scenario: SimScenario) -> SimResult {
 // 算法 7: 改良 SM-2 + 游戏化 (Memrise 风格) — 6 级种花
 // ============================================================================
 
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 struct MemriseState {
     level: usize, // 0-5
     last_review_at: Option<i64>,
     review_count: u32,
 }
-
 
 const MEMRISE_INTERVALS_HOURS: [f64; 6] = [4.0, 12.0, 24.0, 72.0, 168.0, 720.0];
 

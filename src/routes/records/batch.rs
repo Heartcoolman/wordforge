@@ -18,13 +18,12 @@ use crate::store::operations::records::LearningRecord;
 use crate::store::operations::word_states::{WordLearningState, WordState};
 
 use super::single::{
-    capture_user_state_snapshot, restore_engine_algo_state, restore_user_state_snapshot,
-    CreateRecordRequest, CreateRecordResponse,
+    capture_user_state_snapshot, restore_user_state_snapshot, CreateRecordRequest,
+    CreateRecordResponse,
 };
 
 pub fn router() -> Router<AppState> {
-    Router::new()
-        .route("/batch", post(batch_create_records))
+    Router::new().route("/batch", post(batch_create_records))
 }
 
 // B33: Batch submit records
@@ -85,6 +84,25 @@ async fn batch_create_records(
             .await?;
     }
 
+    // m037 软拦截:部分/全部失败时告警(admin 监控 + 给该 user 应用内通知),不阻断响应。
+    if !errors.is_empty() {
+        let severity = if has_new_records { "warning" } else { "error" };
+        crate::services::alerting::raise_data_alert(
+            &state,
+            "amas.learning_record",
+            "batch_process_failed",
+            severity,
+            "学习数据上报处理失败".to_string(),
+            format!(
+                "批量上报 {} 条中 {} 条处理失败",
+                req.records.len(),
+                errors.len()
+            ),
+            Some(user_id.clone()),
+        )
+        .await;
+    }
+
     let payload = serde_json::json!({
         "count": results.len(),
         "failed": errors.len(),
@@ -140,10 +158,35 @@ pub(crate) async fn process_batch_record(
         created_at: req.created_at_override.unwrap_or_else(Utc::now),
         record_type: req.record_type_or_default(),
         self_rating: req.self_rating,
+        question_mode: req.question_mode.clone(),
     };
     let word_id = req.word_id.clone();
     let record_for_store = record.clone();
     let req_for_store = req.clone();
+
+    // W1-1：幂等账本预检（语义同 single：挡 AMAS 已应用但记录未落库的崩溃窗口重放）。
+    let already_processed = state
+        .run_store_task("records.batch.check_processed", {
+            let user_id = user_id_owned.clone();
+            let record_id = record.id.clone();
+            move |store| store.is_event_processed(&user_id, &record_id)
+        })
+        .await??;
+    if already_processed {
+        let record_for_replay = record.clone();
+        state
+            .run_store_task("records.batch.persist_replayed", move |store| {
+                store
+                    .create_record_with_updates(&record_for_replay, None, None)
+                    .map_err(|e| AppError::internal(&e.to_string()))
+            })
+            .await??;
+        return Ok(CreateRecordResponse {
+            record,
+            amas_result: None,
+            duplicate: true,
+        });
+    }
 
     // S6: 只捕获 word 级状态
     let mastery_key = format!("mastery:{word_id}");
@@ -164,7 +207,7 @@ pub(crate) async fn process_batch_record(
 
     let amas_result = state
         .amas()
-        .process_event(
+        .process_event_idempotent(
             user_id,
             RawEvent {
                 word_id: req.word_id.clone(),
@@ -182,8 +225,26 @@ pub(crate) async fn process_batch_record(
                 hint_used: req.hint_used.unwrap_or(false),
                 confused_with: req.confused_with.clone(),
             },
+            &record.id,
         )
         .await?;
+    // W1-1 并发收口：None 表示并发同 client_record_id 请求抢先写入幂等标记、本次 AMAS 已整笔回滚，
+    // 走与 already_processed 一致的裸记录回放（不重复累加 ELO/mastery/trust）。
+    let Some(amas_result) = amas_result else {
+        let record_for_replay = record.clone();
+        state
+            .run_store_task("records.batch.persist_replayed", move |store| {
+                store
+                    .create_record_with_updates(&record_for_replay, None, None)
+                    .map_err(|e| AppError::internal(&e.to_string()))
+            })
+            .await??;
+        return Ok(CreateRecordResponse {
+            record,
+            amas_result: None,
+            duplicate: true,
+        });
+    };
     let amas_config = state.amas().get_config();
     let amas_result_for_store = amas_result.clone();
 
@@ -245,7 +306,11 @@ pub(crate) async fn process_batch_record(
 
                 let mut next_session: Option<LearningSession> = None;
                 if let Some(ref sid) = req_for_store.session_id {
-                    if let Some(mut session) = store.get_learning_session(sid)? {
+                    // 归属校验：仅累加调用者本人的会话，防止跨用户篡改他人会话统计 (IDOR)。
+                    if let Some(mut session) = store
+                        .get_learning_session(sid)?
+                        .filter(|s| s.user_id == user_id_owned)
+                    {
                         session.total_questions += 1;
                         session.total_count += 1;
                         if req_for_store.is_correct {
@@ -268,17 +333,19 @@ pub(crate) async fn process_batch_record(
                         next_session.as_ref(),
                     )
                     .map_err(|error| {
-                        restore_engine_algo_state(
-                            &store,
-                            &user_id_owned,
-                            &mastery_key,
-                            &prev_mastery,
-                        );
-                        if let Err(e) = store.set_word_elo(&word_id, &prev_word_elo) {
-                            tracing::warn!(error = %e, "Failed to rollback word ELO in batch");
-                        }
-                        if let Err(e) = store.set_user_elo(&user_id_owned, &prev_user_elo) {
-                            tracing::warn!(error = %e, "Failed to rollback user ELO in batch");
+                        // W1-1：原子回滚 word 级状态（mastery + ELO）+ 清幂等标记（同一 tx）。
+                        // 守「标记存在 ⟺ AMAS 已应用」不变式，消除原多步非原子写之间的崩溃窗口
+                        // （重试丢 AMAS）。batch 不碰 user_state（user 级快照在批级单独处理）。
+                        let restore = crate::store::operations::engine::EngineStateRestore {
+                            user_id: &user_id_owned,
+                            user_state: None,
+                            algo_states: &[(mastery_key.as_str(), &prev_mastery)],
+                            user_elo: Some(&prev_user_elo),
+                            word_elo: Some((&word_id, &prev_word_elo)),
+                            clear_marker_record_id: Some(&record_for_store.id),
+                        };
+                        if let Err(e) = store.restore_engine_state_atomic(&restore) {
+                            tracing::warn!(error = %e, "batch 原子回滚 word 状态+清标记失败");
                         }
                         AppError::internal(&error.to_string())
                     })?;

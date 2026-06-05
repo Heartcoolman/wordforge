@@ -29,7 +29,7 @@ test.describe('Study Configuration (route removed)', () => {
     await page.goto('/admin/amas-config');
     // 未登录 ProtectedRoute 会跳到 /admin/login，断言落地页可识别
     await page.waitForURL('**/admin/login', { timeout: 10_000 });
-    await expect(page.getByText('管理后台登录')).toBeVisible();
+    await expect(page.getByText('登录管理后台')).toBeVisible();
   });
 
   test('404 page hints at removed page', async ({ page }) => {

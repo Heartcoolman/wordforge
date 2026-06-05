@@ -561,3 +561,749 @@ async fn it_amas_user_and_admin_endpoints() {
     let (config_as_user_status, _, _) = response_json(config_as_user).await;
     assert_eq!(config_as_user_status, StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn it_advisor_cost_endpoints() {
+    let app = spawn_test_server().await;
+    let admin_token = common::auth::setup_admin_and_get_token(&app.app).await;
+
+    let cost = request(
+        &app.app,
+        Method::GET,
+        "/api/admin/amas/advisor/cost",
+        None,
+        &[("authorization", auth_header(&admin_token))],
+    )
+    .await;
+    let (cost_status, _, cost_body) = response_json(cost).await;
+    assert_eq!(cost_status, StatusCode::OK);
+    // 空表兜底：所有数值字段为 0，acceptanceRate=0
+    assert!(cost_body["data"]["monthYuan"].is_number());
+    assert!(cost_body["data"]["monthCapYuan"].is_number());
+    assert!(cost_body["data"]["quotaPct"].is_number());
+    assert!(cost_body["data"]["acceptedCount"].is_number());
+    assert!(cost_body["data"]["rejectedCount"].is_number());
+    assert!(cost_body["data"]["acceptanceRate"].is_number());
+
+    let daily = request(
+        &app.app,
+        Method::GET,
+        "/api/admin/amas/advisor/cost/daily?days=30",
+        None,
+        &[("authorization", auth_header(&admin_token))],
+    )
+    .await;
+    let (daily_status, _, daily_body) = response_json(daily).await;
+    assert_eq!(daily_status, StatusCode::OK);
+    assert!(daily_body["data"].is_array());
+
+    // 鉴权：普通用户 401
+    let user_token = login_and_get_token(&app.app).await;
+    let denied = request(
+        &app.app,
+        Method::GET,
+        "/api/admin/amas/advisor/cost",
+        None,
+        &[("authorization", auth_header(&user_token))],
+    )
+    .await;
+    let (denied_status, _, _) = response_json(denied).await;
+    assert_eq!(denied_status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn it_advisor_run_and_approve_all() {
+    let app = spawn_test_server().await;
+    let admin_token = common::auth::setup_admin_and_get_token(&app.app).await;
+
+    // POST /advisor/run：LLM 默认 disabled（test config llm.enabled=false）→ produced=false
+    let run = request(
+        &app.app,
+        Method::POST,
+        "/api/admin/amas/advisor/run",
+        None,
+        &[("authorization", auth_header(&admin_token))],
+    )
+    .await;
+    let (run_status, _, run_body) = response_json(run).await;
+    assert_eq!(run_status, StatusCode::OK);
+    assert_eq!(run_body["data"]["produced"], false);
+    assert!(run_body["data"]["suggestionId"].is_null());
+
+    // 预置一条 pending 建议，approve-all 应处理它
+    app.state
+        .store()
+        .insert_amas_suggestion(
+            &learning_backend::store::operations::amas_suggestions::InsertSuggestion {
+                based_on_version_hash: "approveall-base".into(),
+                patch_json: r#"{"memoryModel.baseDesiredRetention":0.85}"#.into(),
+                rationale: "approve-all 测试".into(),
+                evidence_json: "{}".into(),
+                cost_usd: Some(0.01),
+                tokens_input: Some(10),
+                tokens_output: Some(5),
+                confidence: Some(0.9),
+                initial_status:
+                    learning_backend::store::operations::amas_suggestions::SuggestionStatus::Pending,
+                decided_by: None,
+                decision_note: None,
+                base_values_json: None,
+            },
+        )
+        .expect("insert pending");
+
+    let approve_all = request(
+        &app.app,
+        Method::POST,
+        "/api/admin/amas/suggestions/approve-all",
+        None,
+        &[("authorization", auth_header(&admin_token))],
+    )
+    .await;
+    let (aa_status, _, aa_body) = response_json(approve_all).await;
+    assert_eq!(aa_status, StatusCode::OK);
+    let results = aa_body["data"]["results"]
+        .as_array()
+        .expect("results array");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["ok"], true);
+
+    // 再 approve-all 一次：已无 pending → 空 results
+    let again = request(
+        &app.app,
+        Method::POST,
+        "/api/admin/amas/suggestions/approve-all",
+        None,
+        &[("authorization", auth_header(&admin_token))],
+    )
+    .await;
+    let (again_status, _, again_body) = response_json(again).await;
+    assert_eq!(again_status, StatusCode::OK);
+    assert_eq!(again_body["data"]["results"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn it_advisor_config_get_put() {
+    let app = spawn_test_server().await;
+    let admin_token = common::auth::setup_admin_and_get_token(&app.app).await;
+
+    let get = request(
+        &app.app,
+        Method::GET,
+        "/api/admin/amas/advisor/config",
+        None,
+        &[("authorization", auth_header(&admin_token))],
+    )
+    .await;
+    let (get_status, _, get_body) = response_json(get).await;
+    assert_eq!(get_status, StatusCode::OK);
+    let cfg = &get_body["data"];
+    assert!(cfg["model"].is_string());
+    assert!(cfg["pollCron"].is_string());
+    // API Key env-only 脱敏：test config api_key 为空 → 尾号空串
+    assert!(cfg["apiKeyTail"].is_string());
+    assert!(cfg["monthCapYuan"].is_number());
+    assert_eq!(cfg["autoApplyEnabled"], false);
+    assert!(cfg["grayscaleSteps"].is_array());
+    assert_eq!(cfg["grayscaleSteps"].as_array().unwrap().len(), 3);
+    assert_eq!(cfg["advisorEnabled"], false);
+
+    // PUT 仅更新可写字段
+    let put = request(
+        &app.app,
+        Method::PUT,
+        "/api/admin/amas/advisor/config",
+        Some(serde_json::json!({
+            "monthCapYuan": 250.0,
+            "autoApplyEnabled": true,
+            "autoApplyMaxPerDay": 5,
+            "autoApplyMinConfidence": 0.9,
+            "grayscaleSteps": [10, 50, 100],
+            "advisorEnabled": true
+        })),
+        &[("authorization", auth_header(&admin_token))],
+    )
+    .await;
+    let (put_status, _, put_body) = response_json(put).await;
+    assert_eq!(put_status, StatusCode::OK);
+    let updated = &put_body["data"];
+    assert!((updated["monthCapYuan"].as_f64().unwrap() - 250.0).abs() < 1e-9);
+    assert_eq!(updated["autoApplyEnabled"], true);
+    assert_eq!(updated["autoApplyMaxPerDay"], 5);
+    assert!((updated["autoApplyMinConfidence"].as_f64().unwrap() - 0.9).abs() < 1e-9);
+    assert_eq!(updated["grayscaleSteps"][0], 10);
+    assert_eq!(updated["advisorEnabled"], true);
+
+    // 持久化验证：再 GET 一次
+    let get2 = request(
+        &app.app,
+        Method::GET,
+        "/api/admin/amas/advisor/config",
+        None,
+        &[("authorization", auth_header(&admin_token))],
+    )
+    .await;
+    let (_, _, get2_body) = response_json(get2).await;
+    assert_eq!(get2_body["data"]["advisorEnabled"], true);
+    assert_eq!(get2_body["data"]["grayscaleSteps"][1], 50);
+}
+
+// ─────────── C4/C5: 白名单 + 历史 ───────────
+
+async fn setup_amas_admin_token(app: &common::app::TestApp) -> String {
+    let admin_email = format!("wl-admin-{}@test.com", uuid::Uuid::new_v4());
+    let setup = request(
+        &app.app,
+        Method::POST,
+        "/api/admin/auth/setup",
+        Some(serde_json::json!({ "email": admin_email, "password": "AdminPassw0rd!" })),
+        &[],
+    )
+    .await;
+    let (status, _, body) = response_json(setup).await;
+    assert_eq!(status, StatusCode::CREATED);
+    body["data"]["token"]
+        .as_str()
+        .expect("admin token")
+        .to_string()
+}
+
+#[tokio::test]
+async fn it_amas_advisor_whitelist_crud() {
+    let app = spawn_test_server().await;
+    let token = setup_amas_admin_token(&app).await;
+
+    // GET → seed 后应有 11 条
+    let list = request(
+        &app.app,
+        Method::GET,
+        "/api/admin/amas/advisor/whitelist",
+        None,
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (s, _, body) = response_json(list).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(body["data"].as_array().unwrap().len(), 11);
+
+    // POST 新增一条合法 path
+    let add = request(
+        &app.app,
+        Method::POST,
+        "/api/admin/amas/advisor/whitelist",
+        Some(serde_json::json!({ "path": "memoryModel.w[5]", "minSafe": 0.1, "maxSafe": 2.0 })),
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (s, _, body) = response_json(add).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(body["data"]["path"], "memoryModel.w[5]");
+    assert!((body["data"]["minSafe"].as_f64().unwrap() - 0.1).abs() < 1e-9);
+
+    // POST 越界区间 → 400
+    let bad_range = request(
+        &app.app,
+        Method::POST,
+        "/api/admin/amas/advisor/whitelist",
+        Some(serde_json::json!({ "path": "memoryModel.w[6]", "minSafe": 5.0, "maxSafe": 1.0 })),
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (s, _, _) = response_json(bad_range).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+
+    // POST 非 memoryModel.* path → 400
+    let bad_path = request(
+        &app.app,
+        Method::POST,
+        "/api/admin/amas/advisor/whitelist",
+        Some(serde_json::json!({ "path": "ensemble.foo", "minSafe": 0.0, "maxSafe": 1.0 })),
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (s, _, _) = response_json(bad_path).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+
+    // DELETE 存在 → deleted:true
+    let del = request(
+        &app.app,
+        Method::DELETE,
+        "/api/admin/amas/advisor/whitelist/memoryModel.w[5]",
+        None,
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (s, _, body) = response_json(del).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(body["data"]["deleted"], true);
+
+    // DELETE 不存在 → deleted:false
+    let del2 = request(
+        &app.app,
+        Method::DELETE,
+        "/api/admin/amas/advisor/whitelist/memoryModel.w[5]",
+        None,
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (s, _, body) = response_json(del2).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(body["data"]["deleted"], false);
+}
+
+#[tokio::test]
+async fn it_amas_suggestions_offset_and_q() {
+    let app = spawn_test_server().await;
+    let token = setup_amas_admin_token(&app).await;
+
+    // 直接经 store 落 3 条 pending
+    for (r, p) in [
+        (
+            "提升留存目标",
+            r#"{"memoryModel.baseDesiredRetention":0.85}"#,
+        ),
+        ("降低疲劳阈值", r#"{"memoryModel.w[2]":3.0}"#),
+        ("调整初始稳定性", r#"{"memoryModel.w[0]":1.0}"#),
+    ] {
+        app.state
+            .store()
+            .insert_amas_suggestion(
+                &learning_backend::store::operations::amas_suggestions::InsertSuggestion {
+                    based_on_version_hash: "h".into(),
+                    patch_json: p.into(),
+                    rationale: r.into(),
+                    evidence_json: "{}".into(),
+                    cost_usd: Some(0.01),
+                    tokens_input: Some(10),
+                    tokens_output: Some(5),
+                    confidence: Some(0.7),
+                    initial_status:
+                        learning_backend::store::operations::amas_suggestions::SuggestionStatus::Pending,
+                    decided_by: None,
+                    decision_note: None,
+                    base_values_json: None,
+                },
+            )
+            .expect("insert suggestion");
+    }
+
+    // limit=1 offset=0 → 1 条
+    let p1 = request(
+        &app.app,
+        Method::GET,
+        "/api/admin/amas/suggestions?limit=1&offset=0",
+        None,
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (s, _, body) = response_json(p1).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(body["data"].as_array().unwrap().len(), 1);
+
+    // q=留存 → 命中 1 条
+    let pq = request(
+        &app.app,
+        Method::GET,
+        "/api/admin/amas/suggestions?q=%E7%95%99%E5%AD%98",
+        None,
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (s, _, body) = response_json(pq).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(body["data"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn it_amas_suggestions_export_csv() {
+    let app = spawn_test_server().await;
+    let token = setup_amas_admin_token(&app).await;
+
+    app.state
+        .store()
+        .insert_amas_suggestion(
+            &learning_backend::store::operations::amas_suggestions::InsertSuggestion {
+                based_on_version_hash: "vhash-csv".into(),
+                patch_json: r#"{"memoryModel.w[0]":1.0}"#.into(),
+                rationale: "csv 测试理由".into(),
+                evidence_json: "{}".into(),
+                cost_usd: Some(0.02),
+                tokens_input: Some(10),
+                tokens_output: Some(5),
+                confidence: Some(0.7),
+                initial_status:
+                    learning_backend::store::operations::amas_suggestions::SuggestionStatus::Pending,
+                decided_by: None,
+                decision_note: None,
+                base_values_json: None,
+            },
+        )
+        .expect("insert suggestion");
+
+    let resp = request(
+        &app.app,
+        Method::GET,
+        "/api/admin/amas/suggestions/export.csv",
+        None,
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let status = resp.status();
+    let ct = resp
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = String::from_utf8(bytes.to_vec()).unwrap();
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(ct.starts_with("text/csv"), "content-type: {ct}");
+    let first_line = text.lines().next().unwrap();
+    assert_eq!(
+        first_line,
+        "id,created_at,based_on_version_hash,patch,rationale,cost_usd,status,decided_by"
+    );
+    assert!(text.contains("vhash-csv"));
+    assert!(text.contains("csv 测试理由"));
+}
+
+#[tokio::test]
+async fn it_amas_suggestion_rollback() {
+    let app = spawn_test_server().await;
+    let token = setup_amas_admin_token(&app).await;
+
+    // 不存在 id → 404
+    let nf = request(
+        &app.app,
+        Method::POST,
+        "/api/admin/amas/suggestions/999999/rollback",
+        None,
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (s, _, _) = response_json(nf).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+
+    // 先把当前 config PUT 一次 → 落入基线版本 V0（approve 产出版本的 parent）
+    let cfg = request(
+        &app.app,
+        Method::GET,
+        "/api/admin/amas/config",
+        None,
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (_, _, cfg_body) = response_json(cfg).await;
+    let put_base = request(
+        &app.app,
+        Method::PUT,
+        "/api/admin/amas/config?note=rollback-base",
+        Some(cfg_body["data"].clone()),
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (s, _, base_body) = response_json(put_base).await;
+    assert_eq!(s, StatusCode::OK);
+    let base_hash = base_body["data"]["versionHash"]
+        .as_str()
+        .expect("base version hash")
+        .to_string();
+
+    // 插入一条 pending suggestion，approve 后产出子版本（parent = V0）
+    let sid = app
+        .state
+        .store()
+        .insert_amas_suggestion(
+            &learning_backend::store::operations::amas_suggestions::InsertSuggestion {
+                based_on_version_hash: base_hash.clone(),
+                patch_json: r#"{"memoryModel.baseDesiredRetention":0.85}"#.into(),
+                rationale: "rollback 测试".into(),
+                evidence_json: "{}".into(),
+                cost_usd: Some(0.01),
+                tokens_input: Some(10),
+                tokens_output: Some(5),
+                confidence: Some(0.7),
+                initial_status:
+                    learning_backend::store::operations::amas_suggestions::SuggestionStatus::Pending,
+                decided_by: None,
+                decision_note: None,
+                base_values_json: None,
+            },
+        )
+        .expect("insert suggestion");
+
+    let approve = request(
+        &app.app,
+        Method::POST,
+        &format!("/api/admin/amas/suggestions/{sid}/approve"),
+        Some(serde_json::json!({ "note": "approve for rollback test" })),
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (s, _, _) = response_json(approve).await;
+    assert_eq!(s, StatusCode::OK);
+
+    let rollback = request(
+        &app.app,
+        Method::POST,
+        &format!("/api/admin/amas/suggestions/{sid}/rollback"),
+        None,
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (s, _, body) = response_json(rollback).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(body["data"]["rolledBack"], true);
+    // 回滚目标即基线版本 V0
+    assert_eq!(body["data"]["versionHash"].as_str().unwrap(), base_hash);
+
+    // suggestion 被标记 superseded
+    let got = request(
+        &app.app,
+        Method::GET,
+        &format!("/api/admin/amas/suggestions/{sid}"),
+        None,
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (_, _, got_body) = response_json(got).await;
+    assert_eq!(got_body["data"]["status"], "superseded");
+}
+
+// ─────────────────── C6:per-patch canary 子系统 ───────────────────
+
+/// 落一条 pending suggestion(基于当前 stable 序列化后的真实 version snapshot),返回 (suggestion_id, version_hash)。
+async fn seed_pending_suggestion(app: &common::app::TestApp) -> (i64, String) {
+    use learning_backend::store::operations::amas_suggestions::{
+        InsertSuggestion, SuggestionStatus,
+    };
+    use learning_backend::store::operations::amas_versions::ConfigVersionSource;
+
+    let store = app.state.store();
+    // 1) 落一个可灰度的 version snapshot(取当前 stable 序列化)
+    let snap = serde_json::to_string(&app.state.amas().get_config()).unwrap();
+    let (_vid, vhash) = store
+        .insert_amas_config_version(&snap, "admin", ConfigVersionSource::Manual, None, None)
+        .unwrap();
+
+    // 2) 落一条 pending suggestion(patch 用一个白名单内合法字段)
+    let sid = store
+        .insert_amas_suggestion(&InsertSuggestion {
+            based_on_version_hash: vhash.clone(),
+            patch_json: r#"{"memoryModel.baseDesiredRetention":0.9}"#.into(),
+            rationale: "canary test".into(),
+            evidence_json: "{}".into(),
+            cost_usd: Some(0.0),
+            tokens_input: Some(0),
+            tokens_output: Some(0),
+            confidence: Some(0.9),
+            initial_status: SuggestionStatus::Pending,
+            decided_by: None,
+            decision_note: None,
+            base_values_json: None,
+        })
+        .unwrap();
+    (sid, vhash)
+}
+
+#[tokio::test]
+async fn it_advisor_canary_create_scale_rollback_promote() {
+    let app = spawn_test_server().await;
+    let token = common::auth::setup_admin_and_get_token(&app.app).await;
+
+    let (suggestion_id, _vhash) = seed_pending_suggestion(&app).await;
+
+    // 1) 创建 canary 20%
+    let resp = request(
+        &app.app,
+        Method::POST,
+        "/api/admin/amas/advisor/canary",
+        Some(serde_json::json!({ "suggestionId": suggestion_id, "percent": 20 })),
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (status, _, body) = response_json(resp).await;
+    assert_eq!(status, StatusCode::OK);
+    let canary_id = body["data"]["id"].as_i64().expect("canary id");
+    assert_eq!(body["data"]["percent"], 20);
+    assert_eq!(body["data"]["status"], "active");
+
+    // 2) GET 列表含 live 字段
+    let resp = request(
+        &app.app,
+        Method::GET,
+        "/api/admin/amas/advisor/canary",
+        None,
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (status, _, body) = response_json(resp).await;
+    assert_eq!(status, StatusCode::OK);
+    let arr = body["data"].as_array().expect("canary array");
+    assert_eq!(arr.len(), 1);
+    assert!(arr[0].get("liveReward").is_some());
+    assert!(arr[0].get("liveAnomalyRate").is_some());
+    assert!(arr[0].get("baselineReward").is_some());
+
+    // 3) 扩量到 60%
+    let resp = request(
+        &app.app,
+        Method::POST,
+        &format!("/api/admin/amas/advisor/canary/{canary_id}/scale"),
+        Some(serde_json::json!({ "percent": 60 })),
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (status, _, _) = response_json(resp).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // 4) percent 越界 → 400
+    let resp = request(
+        &app.app,
+        Method::POST,
+        &format!("/api/admin/amas/advisor/canary/{canary_id}/scale"),
+        Some(serde_json::json!({ "percent": 150 })),
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (status, _, _) = response_json(resp).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // 5) 100% 提升 stable
+    let resp = request(
+        &app.app,
+        Method::POST,
+        &format!("/api/admin/amas/advisor/canary/{canary_id}/scale"),
+        Some(serde_json::json!({ "percent": 100 })),
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (status, _, _) = response_json(resp).await;
+    assert_eq!(status, StatusCode::OK);
+    let resp = request(
+        &app.app,
+        Method::POST,
+        &format!("/api/admin/amas/advisor/canary/{canary_id}/promote"),
+        None,
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (status, _, body) = response_json(resp).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["promoted"], true);
+    assert!(body["data"]["versionHash"].is_string());
+}
+
+#[tokio::test]
+async fn it_advisor_canary_manual_rollback_and_unknown_id() {
+    let app = spawn_test_server().await;
+    let token = common::auth::setup_admin_and_get_token(&app.app).await;
+    let (suggestion_id, _vhash) = seed_pending_suggestion(&app).await;
+
+    let resp = request(
+        &app.app,
+        Method::POST,
+        "/api/admin/amas/advisor/canary",
+        Some(serde_json::json!({ "suggestionId": suggestion_id, "percent": 20 })),
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (_, _, body) = response_json(resp).await;
+    let canary_id = body["data"]["id"].as_i64().unwrap();
+
+    // 手动回滚
+    let resp = request(
+        &app.app,
+        Method::POST,
+        &format!("/api/admin/amas/advisor/canary/{canary_id}/rollback"),
+        None,
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (status, _, body) = response_json(resp).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["rolledBack"], true);
+
+    // 回滚不存在 id → 400/404
+    let resp = request(
+        &app.app,
+        Method::POST,
+        "/api/admin/amas/advisor/canary/99999/rollback",
+        None,
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (status, _, _) = response_json(resp).await;
+    assert!(status == StatusCode::BAD_REQUEST || status == StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn it_advisor_canary_parallel_cohorts_non_overlap() {
+    let app = spawn_test_server().await;
+    let token = common::auth::setup_admin_and_get_token(&app.app).await;
+
+    let (sid1, _) = seed_pending_suggestion(&app).await;
+    let (sid2, _) = seed_pending_suggestion(&app).await;
+    let (sid3, _) = seed_pending_suggestion(&app).await;
+
+    // canary #1 20% → 分到 cohort [0,20)
+    let resp = request(
+        &app.app,
+        Method::POST,
+        "/api/admin/amas/advisor/canary",
+        Some(serde_json::json!({ "suggestionId": sid1, "percent": 20 })),
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (status, _, body) = response_json(resp).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["cohortLo"], 0);
+    assert_eq!(body["data"]["cohortHi"], 20);
+
+    // canary #2 30% → 不应因重叠被拒,分到下一空闲槽 cohort [20,50)
+    let resp = request(
+        &app.app,
+        Method::POST,
+        "/api/admin/amas/advisor/canary",
+        Some(serde_json::json!({ "suggestionId": sid2, "percent": 30 })),
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (status, _, body) = response_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "第二条并行 canary 应成功而非 overlap 被拒"
+    );
+    assert_eq!(body["data"]["cohortLo"], 20);
+    assert_eq!(body["data"]["cohortHi"], 50);
+
+    // canary #3 60% → 50+60>100 配额满,拒绝
+    let resp = request(
+        &app.app,
+        Method::POST,
+        "/api/admin/amas/advisor/canary",
+        Some(serde_json::json!({ "suggestionId": sid3, "percent": 60 })),
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (status, _, body) = response_json(resp).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["code"], "CANARY_QUOTA_FULL");
+
+    // 两条并行 active canary 都在
+    let resp = request(
+        &app.app,
+        Method::GET,
+        "/api/admin/amas/advisor/canary",
+        None,
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (_, _, body) = response_json(resp).await;
+    assert_eq!(body["data"].as_array().unwrap().len(), 2);
+}

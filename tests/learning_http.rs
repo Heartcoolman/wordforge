@@ -125,7 +125,10 @@ async fn get_learning_session_validates_ownership_and_existence() {
     .await;
     let (missing_status, _, missing_body) = response_json(missing).await;
     assert_eq!(missing_status, StatusCode::NOT_FOUND);
-    assert_eq!(missing_body["code"].as_str(), Some("LEARNING_SESSION_NOT_FOUND"));
+    assert_eq!(
+        missing_body["code"].as_str(),
+        Some("LEARNING_SESSION_NOT_FOUND")
+    );
 
     // user_b 查 user_a 的 session → 同样 404（避免信息泄漏）
     let cross = request(
@@ -138,5 +141,8 @@ async fn get_learning_session_validates_ownership_and_existence() {
     .await;
     let (cross_status, _, cross_body) = response_json(cross).await;
     assert_eq!(cross_status, StatusCode::NOT_FOUND);
-    assert_eq!(cross_body["code"].as_str(), Some("LEARNING_SESSION_NOT_FOUND"));
+    assert_eq!(
+        cross_body["code"].as_str(),
+        Some("LEARNING_SESSION_NOT_FOUND")
+    );
 }

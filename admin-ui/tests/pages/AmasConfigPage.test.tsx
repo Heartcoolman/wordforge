@@ -13,11 +13,24 @@ vi.mock('@/api/amas', () => ({
 vi.mock('@/api/admin', () => ({
   adminApi: {
     reloadAmas: vi.fn(),
+    // m022:CanaryCard 用的端点(无 active canary + 空版本列表)
+    amasGetCanary: vi.fn().mockResolvedValue({ canary: null }),
+    amasListVersions: vi.fn().mockResolvedValue([]),
+    amasSetCanary: vi.fn(),
+    amasDisableCanary: vi.fn(),
+    // m022:JsonAdvancedPanel TOML 模式
+    amasParseToml: vi.fn(),
+    amasSerializeToml: vi.fn(),
   },
 }));
 
 vi.mock('@/stores/ui', () => ({
   uiStore: { toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() } },
+}));
+
+// m027: JSON pane 改 CodeMirror 后 happy-dom 渲染不稳,mock 掉
+vi.mock('@/components/amas/TomlEditor', () => ({
+  default: () => null,
 }));
 
 import { amasApi } from '@/api/amas';
@@ -81,7 +94,8 @@ describe('AmasConfigPage', () => {
     mockAmasApi.getMetrics.mockResolvedValue(mockMetrics);
     await renderPage();
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: '保存配置' })).toBeInTheDocument();
+      // page-header 重构后:"保存配置" → "验证并应用"
+      expect(screen.getByRole('button', { name: '验证并应用' })).toBeInTheDocument();
     });
   });
 
@@ -99,24 +113,31 @@ describe('AmasConfigPage', () => {
     mockAmasApi.getMetrics.mockResolvedValue(mockMetrics);
     await renderPage();
     await waitFor(() => {
-      expect(screen.getByText('目标长期留存率')).toBeInTheDocument();
-      expect(screen.getByText('最大调度间隔（天）')).toBeInTheDocument();
+      // 三层运维视角重构后,Tier-A 字段同时出现在 quick knobs + Tier-A 11 维 grid
+      // → 全用 getAllByText
+      expect(screen.getAllByText('目标长期留存率').length).toBeGreaterThan(0);
+      expect(screen.getAllByText('最大调度间隔（天）').length).toBeGreaterThan(0);
     });
   });
 
-  it('switching to JSON 高级 tab reveals textarea with config', async () => {
+  it('switching to JSON 高级 tab reveals 三栏布局 with 配置树', async () => {
     mockAmasApi.getConfig.mockResolvedValue(mockConfig);
     mockAmasApi.getMetrics.mockResolvedValue(mockMetrics);
+    // m027: JsonAdvancedPanel.onMount 调 amasSerializeToml
+    const { adminApi } = await import('@/api/admin');
+    (adminApi.amasSerializeToml as ReturnType<typeof vi.fn>).mockResolvedValue({
+      toml: '[memoryModel]\nbaseDesiredRetention = 0.92\n',
+    });
     await renderPage();
     await waitFor(() => {
       expect(screen.getByRole('tab', { name: /JSON 高级/ })).toBeInTheDocument();
     });
     fireEvent.click(screen.getByRole('tab', { name: /JSON 高级/ }));
     await waitFor(() => {
-      const textarea = document.querySelector('textarea');
-      expect(textarea).toBeInTheDocument();
-      expect(textarea!.value).toContain('memoryModel');
-      expect(textarea!.value).toContain('baseDesiredRetention');
+      // JSON pane 重构为三栏 IDE,验证左栏 ConfigTree
+      expect(screen.getByText('配置树')).toBeInTheDocument();
+      // 工具栏 + 配置树 path 都含 amas_config.toml,getAllByText 兼容
+      expect(screen.getAllByText(/amas_config\.toml/).length).toBeGreaterThan(0);
     });
   });
 });

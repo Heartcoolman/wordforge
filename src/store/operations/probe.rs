@@ -70,10 +70,7 @@ pub struct ProbeListFilter {
 
 impl Store {
     /// 批量插入 dispatch 时的初始行（同一 batch 多 device）。
-    pub fn insert_probe_executions(
-        &self,
-        rows: &[ProbeInsert<'_>],
-    ) -> Result<(), StoreError> {
+    pub fn insert_probe_executions(&self, rows: &[ProbeInsert<'_>]) -> Result<(), StoreError> {
         if rows.is_empty() {
             return Ok(());
         }
@@ -260,9 +257,7 @@ fn row_to_probe(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProbeExecutionRow> 
         status: row.get(10)?,
         result_json: row.get(11)?,
         stderr: row.get(12)?,
-        duration_ms: row
-            .get::<_, Option<i64>>(13)?
-            .map(|v| v as u32),
+        duration_ms: row.get::<_, Option<i64>>(13)?.map(|v| v as u32),
         truncated: row.get::<_, i64>(14)? != 0,
         dispatched_at: row.get(15)?,
         confirmed_at: row.get(16)?,

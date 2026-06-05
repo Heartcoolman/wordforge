@@ -2,189 +2,157 @@ import { createResource, createSignal, createMemo, For, Show } from 'solid-js';
 import { Card } from '@/components/ui/Card';
 import { Spinner } from '@/components/ui/Spinner';
 import { Empty } from '@/components/ui/Empty';
-import { EChart } from '@/components/ui/EChart';
-import { Button } from '@/components/ui/Button';
-import { Select } from '@/components/ui/Select';
-import { Badge } from '@/components/ui/Badge';
-import { adminApi, type AmasConfigVersionRow, type AmasVersionSlice } from '@/api/admin';
-import { chartColor } from '@/lib/chartTheme';
+import { Sparkline } from '@/components/ui/Sparkline';
+import { adminApi, type AmasConfigVersionRow, type AmasVersionSliceExt } from '@/api/admin';
 
-const METRICS: { key: keyof AmasVersionSlice; label: string; format: (v: number) => string; lowerIsBetter: boolean }[] = [
-  { key: 'eventCount', label: '事件数', format: (v) => v.toFixed(0), lowerIsBetter: false },
-  { key: 'anomalyRate', label: '异常率', format: (v) => `${(v * 100).toFixed(2)}%`, lowerIsBetter: true },
-  { key: 'meanLatencyMs', label: '平均延迟 (ms)', format: (v) => v.toFixed(2), lowerIsBetter: true },
-  { key: 'meanReward', label: '平均 Reward', format: (v) => v.toFixed(4), lowerIsBetter: false },
-  { key: 'meanAttention', label: '平均注意力', format: (v) => v.toFixed(3), lowerIsBetter: false },
-  { key: 'meanFatigue', label: '平均疲劳', format: (v) => v.toFixed(3), lowerIsBetter: true },
-  { key: 'meanMotivation', label: '平均动机', format: (v) => v.toFixed(3), lowerIsBetter: false },
-  { key: 'meanConfidence', label: '平均信心', format: (v) => v.toFixed(3), lowerIsBetter: false },
+type RowDef = {
+  key: keyof AmasVersionSliceExt;
+  label: string;
+  desc: string;
+  fmt: (v: number | null) => string;
+  delta: (d: number) => string;
+  lowerBetter: boolean | null;
+};
+const signed = (x: number, dp: number) => `${x >= 0 ? '+' : ''}${x.toFixed(dp)}`;
+const pct = (v: number | null) => `${((v ?? 0) * 100).toFixed(1)}%`;
+
+// 对齐设计稿 amas-metrics.html 版本对比表的 7 行（口径以真实后端聚合为准）
+const ROWS: RowDef[] = [
+  { key: 'hitRate', label: '7d 命中率', desc: '用户首答对 / 决策数', fmt: pct, delta: (d) => `${signed(d * 100, 1)} pt`, lowerBetter: false },
+  { key: 'p95LatencyMs', label: 'P95 决策耗时', desc: '单次路由 95 分位', fmt: (v) => `${(v ?? 0).toFixed(1)} ms`, delta: (d) => `${signed(d, 1)} ms`, lowerBetter: true },
+  { key: 'fatigueRate', label: '疲劳触发率', desc: 'fatigue ≥ 阈值占比', fmt: pct, delta: (d) => `${signed(d * 100, 1)} pt`, lowerBetter: true },
+  { key: 'retention7d', label: '7d 留存', desc: '窗口前段活跃用户末 7d 回归率', fmt: pct, delta: (d) => `${signed(d * 100, 1)} pt`, lowerBetter: false },
+  { key: 'ensembleShare', label: 'ensemble 路由占比', desc: '8 算法分布主导率', fmt: pct, delta: (d) => `${signed(d * 100, 1)} pt`, lowerBetter: false },
+  { key: 'configEpsilon', label: 'memory_model.half_life_base_epsilon', desc: '配置项快照 diff', fmt: (v) => (v == null ? '—' : v.toFixed(3)), delta: (d) => signed(d, 3), lowerBetter: null },
+  { key: 'p95CompletionMs', label: 'P95 答题完成时间', desc: '用户视角 response_time 95 分位', fmt: (v) => `${((v ?? 0) / 1000).toFixed(2)} s`, delta: (d) => `${signed(d / 1000, 2)} s`, lowerBetter: true },
 ];
 
-export function VersionComparePanel() {
-  const [versionA, setVersionA] = createSignal<string>('');
-  const [versionB, setVersionB] = createSignal<string>('');
-
-  const [versions] = createResource(async () => adminApi.amasListVersions(50));
-
-  // 自动选择最近两个不同 version
-  const initialPick = createMemo(() => {
-    const list = versions() ?? [];
-    return { a: list[1]?.versionHash ?? '', b: list[0]?.versionHash ?? '' };
-  });
-
-  // 当版本列表到达且尚未选择，使用 initialPick
-  const effectiveA = () => versionA() || initialPick().a;
-  const effectiveB = () => versionB() || initialPick().b;
-
-  const [compare] = createResource(
-    () => [effectiveA(), effectiveB()] as const,
-    async ([a, b]) => {
-      if (!a || !b) return null;
-      return adminApi.amasCompareVersions(a, b);
-    },
-  );
-
-  const options = createMemo<{ value: string; label: string }[]>(() =>
-    (versions() ?? []).map((v: AmasConfigVersionRow) => ({
-      value: v.versionHash,
-      label: `${v.versionHash.slice(0, 10)} · ${v.source} · ${formatTime(v.createdAt)}${v.note ? ` · ${v.note}` : ''}`,
-    })),
-  );
-
-  const barOption = (): import('echarts').EChartsOption => {
-    const c = compare();
-    if (!c) return {};
-    const labels = METRICS.map((m) => m.label);
-    const aVals = METRICS.map((m) => Number(c.a[m.key]) || 0);
-    const bVals = METRICS.map((m) => Number(c.b[m.key]) || 0);
-    return {
-      grid: { left: 80, right: 30, top: 50, bottom: 30 },
-      legend: { top: 0, data: ['A', 'B'] },
-      tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
-      xAxis: { type: 'value' },
-      // 不使用 inverse，按 METRICS 数组业务顺序自上而下展示
-      yAxis: { type: 'category', data: labels },
-      series: [
-        { name: 'A', type: 'bar', data: aVals, itemStyle: { color: chartColor('accent') } },
-        { name: 'B', type: 'bar', data: bVals, itemStyle: { color: chartColor('success') } },
-      ],
-    };
-  };
-
-  return (
-    <div class="space-y-3">
-      <Card variant="elevated">
-        <h2 class="text-lg font-semibold text-content mb-1">版本对比</h2>
-        <p class="text-xs text-content-tertiary mb-4">
-          对比两个 config_version 在其生效期间产生的 monitoring 事件聚合指标。
-          ICI / logLoss / expectedMemory 需要离线 benchmark；当前面板基于 monitoring 实测可观察量（reward / 延迟 / 用户状态）。
-        </p>
-
-        <Show when={!versions.loading} fallback={<div class="flex justify-center py-12"><Spinner /></div>}>
-          <Show when={(versions() ?? []).length >= 2} fallback={<Empty title="至少需要两个版本" description="版本表中条目不足，先在 AMAS 配置页保存几次" />}>
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-              <div>
-                <label class="text-xs text-content-tertiary mb-1 block">版本 A（基线）</label>
-                <Select
-                  options={options()}
-                  value={effectiveA()}
-                  onChange={(e) => setVersionA(e.currentTarget.value)}
-                />
-              </div>
-              <div>
-                <label class="text-xs text-content-tertiary mb-1 block">版本 B（对比）</label>
-                <Select
-                  options={options()}
-                  value={effectiveB()}
-                  onChange={(e) => setVersionB(e.currentTarget.value)}
-                />
-              </div>
-            </div>
-
-            <div class="flex items-center flex-wrap gap-2 mt-3">
-              <Button size="sm" variant="ghost" onClick={() => { setVersionA(initialPick().a); setVersionB(initialPick().b); }}>
-                还原为最近两个版本
-              </Button>
-              <Button size="sm" variant="ghost" onClick={() => { setVersionA(versionB()); setVersionB(versionA()); }}>
-                交换 A / B
-              </Button>
-            </div>
-          </Show>
-        </Show>
-      </Card>
-
-      <Show when={!compare.loading && compare()} fallback={<Show when={compare.loading}><div class="min-h-[440px] flex items-center justify-center"><Spinner /></div></Show>}>
-        {(_) => {
-          const c = () => compare()!;
-          const noData = () => c().a.eventCount === 0 && c().b.eventCount === 0;
-          return (
-            <Show when={!noData()} fallback={<Card variant="elevated"><Empty title="两个版本均无 monitoring 事件" description="可能版本尚未上线或落库延迟" /></Card>}>
-              <Card variant="elevated">
-                <h3 class="text-sm font-semibold text-content mb-3">指标对比柱状图</h3>
-                <div class="relative">
-                  <EChart option={barOption} height="380px" />
-                  <Show when={compare.loading}>
-                    <div class="absolute inset-0 bg-bg-overlay/30 flex items-center justify-center">
-                      <Spinner />
-                    </div>
-                  </Show>
-                </div>
-              </Card>
-
-              <Card variant="elevated">
-                <h3 class="text-sm font-semibold text-content mb-3">差异表</h3>
-                <table class="w-full text-sm">
-                  <thead>
-                    <tr class="bg-surface-secondary border-b border-border">
-                      <th scope="col" class="px-3 py-2 text-left font-medium text-content-secondary">指标</th>
-                      <th scope="col" class="px-3 py-2 text-right font-medium text-content-secondary">A</th>
-                      <th scope="col" class="px-3 py-2 text-right font-medium text-content-secondary">B</th>
-                      <th scope="col" class="px-3 py-2 text-right font-medium text-content-secondary">Δ</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <For each={METRICS}>
-                      {(m) => {
-                        const a = Number(c().a[m.key]) || 0;
-                        const b = Number(c().b[m.key]) || 0;
-                        const delta = b - a;
-                        const pct = a !== 0 ? (delta / Math.abs(a)) * 100 : 0;
-                        const better = m.lowerIsBetter ? delta < 0 : delta > 0;
-                        const worse = m.lowerIsBetter ? delta > 0 : delta < 0;
-                        return (
-                          <tr class="border-b border-border/40">
-                            <td class="px-3 py-2 text-content">{m.label}</td>
-                            <td class="px-3 py-2 text-right font-mono">{m.format(a)}</td>
-                            <td class="px-3 py-2 text-right font-mono">{m.format(b)}</td>
-                            <td class="px-3 py-2 text-right font-mono">
-                              <Show when={a !== 0 || b !== 0} fallback={<span class="text-content-tertiary">—</span>}>
-                                <Badge variant={better ? 'success' : worse ? 'error' : 'default'} size="sm">
-                                  {delta > 0 ? '+' : ''}{m.format(delta)}{a !== 0 && ` (${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%)`}
-                                </Badge>
-                              </Show>
-                            </td>
-                          </tr>
-                        );
-                      }}
-                    </For>
-                  </tbody>
-                </table>
-                <p class="text-xs text-content-tertiary mt-3">
-                  绿色 = 朝预期方向变化；红色 = 反向变化。延迟、疲劳、异常率以低为佳；其余以高为佳。
-                </p>
-              </Card>
-            </Show>
-          );
-        }}
-      </Show>
-    </div>
-  );
-}
-
-function formatTime(iso: string): string {
+function formatTime(iso: string | null): string {
+  if (!iso) return '无事件';
   try {
     return new Date(iso).toLocaleString('zh-CN', { hour12: false });
   } catch {
     return iso;
   }
+}
+
+export function VersionComparePanel() {
+  const [versionA, setVersionA] = createSignal('');
+  const [versionB, setVersionB] = createSignal('');
+  const [versions] = createResource(() => adminApi.amasListVersions(50));
+
+  const initial = createMemo(() => {
+    const list = versions() ?? [];
+    return { a: list[1]?.versionHash ?? '', b: list[0]?.versionHash ?? '' };
+  });
+  const effA = () => versionA() || initial().a;
+  const effB = () => versionB() || initial().b;
+
+  const [compare] = createResource(
+    () => [effA(), effB()] as const,
+    async ([a, b]) => (a && b ? adminApi.amasCompareVersionsExt(a, b) : null),
+  );
+
+  const options = createMemo(() =>
+    (versions() ?? []).map((v: AmasConfigVersionRow) => ({
+      value: v.versionHash,
+      label: `${v.versionHash.slice(0, 10)} · ${v.source}${v.note ? ` · ${v.note}` : ''}`,
+    })),
+  );
+
+  const advice = (a: AmasVersionSliceExt, b: AmasVersionSliceExt): string => {
+    const wins: string[] = [];
+    if (b.hitRate > a.hitRate) wins.push('命中率');
+    if (b.p95LatencyMs < a.p95LatencyMs) wins.push('P95 耗时');
+    if (b.fatigueRate < a.fatigueRate) wins.push('疲劳触发率');
+    if (b.anomalyRate < a.anomalyRate) wins.push('异常率');
+    if (wins.length === 0) return 'B 版本相对 A 无明显改善，建议保持 A 或继续观察样本量。';
+    return `B 版本在 ${wins.join(' / ')} 上改善；可考虑灰度 20% → 50% → 100% 推进（注意两版本样本量差异）。`;
+  };
+
+  return (
+    <div class="space-y-3">
+      <Show when={!versions.loading} fallback={<Card variant="elevated"><div class="flex justify-center py-12"><Spinner /></div></Card>}>
+        <Show
+          when={(versions() ?? []).length >= 2}
+          fallback={<Card variant="elevated"><Empty title="至少需要两个版本" description="amas_config_versions 条目不足，先在 AMAS 配置页保存几次" /></Card>}
+        >
+          {/* cmp-header */}
+          <Show when={compare()} keyed fallback={<div class="min-h-[120px] flex items-center justify-center"><Spinner /></div>}>
+            {(c) => (
+              <>
+                <div class="cmp-header">
+                  <div class="cmp-side">
+                    <span class="l">基线版本 (A)</span>
+                    <select aria-label="基线版本" value={effA()} onChange={(e) => setVersionA(e.currentTarget.value)}>
+                      <For each={options()}>{(o) => <option value={o.value}>{o.label}</option>}</For>
+                    </select>
+                    <strong>{c.a.versionHash.slice(0, 10)}</strong>
+                    <span class="meta">{c.a.eventCount.toLocaleString()} 决策样本 · {formatTime(c.a.lastEventAt)}</span>
+                  </div>
+                  <div class="cmp-vs">→ vs →</div>
+                  <div class="cmp-side">
+                    <span class="l">对比版本 (B)</span>
+                    <select aria-label="对比版本" value={effB()} onChange={(e) => setVersionB(e.currentTarget.value)}>
+                      <For each={options()}>{(o) => <option value={o.value}>{o.label}</option>}</For>
+                    </select>
+                    <strong>{c.b.versionHash.slice(0, 10)}</strong>
+                    <span class="meta">{c.b.eventCount.toLocaleString()} 决策样本 · {formatTime(c.b.lastEventAt)}</span>
+                  </div>
+                </div>
+
+                <Show
+                  when={c.a.eventCount > 0 || c.b.eventCount > 0}
+                  fallback={<Card variant="elevated"><Empty title="两个版本均无 monitoring 事件" description="可能版本尚未上线或落库延迟" /></Card>}
+                >
+                  <div class="cmp-row h">
+                    <span>指标</span><span>A</span><span>B</span><span>Δ</span><span>B 趋势</span>
+                  </div>
+                  <For each={ROWS}>
+                    {(row) => {
+                      const av = c.a[row.key] as number | null;
+                      const bv = c.b[row.key] as number | null;
+                      const an = typeof av === 'number' ? av : null;
+                      const bn = typeof bv === 'number' ? bv : null;
+                      const hasDelta = an != null && bn != null;
+                      const d = hasDelta ? bn! - an! : 0;
+                      const cls =
+                        row.lowerBetter == null || Math.abs(d) < 1e-9
+                          ? 'is-flat'
+                          : (row.lowerBetter ? d < 0 : d > 0)
+                            ? 'is-up'
+                            : 'is-down';
+                      return (
+                        <div class="cmp-row">
+                          <div class="nm">{row.label}<div class="d">{row.desc}</div></div>
+                          <div class="v">{row.fmt(an)}</div>
+                          <div class="v">{row.fmt(bn)}</div>
+                          <div class={`delta ${cls}`}>{hasDelta ? row.delta(d) : '—'}</div>
+                          <div class="spark">
+                            <Show when={(c.b.spark?.length ?? 0) > 1} fallback={<span />}>
+                              <Sparkline
+                                data={c.b.spark}
+                                stroke="oklch(64% 0.16 162)"
+                                strokeWidth={1.5}
+                                ariaLabel={`${row.label} B 版本逐日趋势`}
+                                class="w-full h-full"
+                              />
+                            </Show>
+                          </div>
+                        </div>
+                      );
+                    }}
+                  </For>
+
+                  <div class="cmp-advice">
+                    <strong>建议：</strong> {advice(c.a, c.b)}
+                  </div>
+                </Show>
+              </>
+            )}
+          </Show>
+        </Show>
+      </Show>
+    </div>
+  );
 }

@@ -24,89 +24,54 @@ vi.mock('@/api/auth', () => ({ authApi: { refresh: vi.fn() } }));
 
 import { notificationsApi } from '@/api/notifications';
 
-describe('notificationsApi', () => {
-  it('list returns notifications', async () => {
-    const notifications = [
-      { id: 'n1', title: 'Welcome', message: 'Hello!', read: false, createdAt: '2026-02-10' },
-    ];
+const alert = {
+  id: 'a1',
+  source: 'amas.sync',
+  kind: 'sync_failed',
+  severity: 'error',
+  title: '同步失败',
+  message: '上报数据被软拦截',
+  count: 2,
+  firstSeenAt: '2026-06-02T01:00:00+00:00',
+  lastSeenAt: '2026-06-02T02:00:00+00:00',
+  readAt: null,
+  ackedBy: null,
+};
+
+describe('admin notificationsApi', () => {
+  it('list returns inbox items + unreadCount via admin route', async () => {
     server.use(
-      http.get(`${BASE}/api/notifications`, () =>
-        HttpResponse.json({ success: true, data: notifications })),
+      http.get(`${BASE}/api/admin/notifications`, ({ request }) => {
+        // 默认 list() 不带 unread 过滤
+        expect(new URL(request.url).searchParams.get('unread')).toBeNull();
+        expect(request.headers.get('Authorization')).toBe('Bearer fake-admin-token');
+        return HttpResponse.json({ success: true, data: { items: [alert], unreadCount: 1 } });
+      }),
     );
     const result = await notificationsApi.list();
-    expect(result).toEqual(notifications);
+    expect(result.unreadCount).toBe(1);
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0].id).toBe('a1');
   });
 
-  it('list sends query params when provided', async () => {
+  it('list passes unread=true filter', async () => {
     server.use(
-      http.get(`${BASE}/api/notifications`, ({ request }) => {
-        const url = new URL(request.url);
-        expect(url.searchParams.get('limit')).toBe('10');
-        expect(url.searchParams.get('unreadOnly')).toBe('true');
-        return HttpResponse.json({ success: true, data: [] });
+      http.get(`${BASE}/api/admin/notifications`, ({ request }) => {
+        expect(new URL(request.url).searchParams.get('unread')).toBe('true');
+        return HttpResponse.json({ success: true, data: { items: [], unreadCount: 0 } });
       }),
     );
-    const result = await notificationsApi.list({ limit: 10, unreadOnly: true });
-    expect(result).toEqual([]);
+    const result = await notificationsApi.list(true);
+    expect(result.items).toEqual([]);
+    expect(result.unreadCount).toBe(0);
   });
 
-  it('markRead marks a notification as read', async () => {
+  it('markRead posts to admin route and returns updated unreadCount', async () => {
     server.use(
-      http.put(`${BASE}/api/notifications/n1/read`, () =>
-        HttpResponse.json({ success: true, data: { read: true } })),
+      http.post(`${BASE}/api/admin/notifications/a1/read`, () =>
+        HttpResponse.json({ success: true, data: { read: true, unreadCount: 0 } })),
     );
-    const result = await notificationsApi.markRead('n1');
-    expect(result).toEqual({ read: true });
-  });
-
-  it('markAllRead marks all notifications as read', async () => {
-    server.use(
-      http.post(`${BASE}/api/notifications/read-all`, () =>
-        HttpResponse.json({ success: true, data: { markedRead: 5 } })),
-    );
-    const result = await notificationsApi.markAllRead();
-    expect(result).toEqual({ markedRead: 5 });
-  });
-
-  it('getBadges returns list of badges', async () => {
-    const badges = [{ id: 'b1', name: 'First Word', icon: 'star' }];
-    server.use(
-      http.get(`${BASE}/api/notifications/badges`, () =>
-        HttpResponse.json({ success: true, data: badges })),
-    );
-    const result = await notificationsApi.getBadges();
-    expect(result).toEqual(badges);
-  });
-
-  it('getPreferences returns user preferences', async () => {
-    const prefs = { emailNotifications: true, pushNotifications: false };
-    server.use(
-      http.get(`${BASE}/api/notifications/preferences`, () =>
-        HttpResponse.json({ success: true, data: prefs })),
-    );
-    const result = await notificationsApi.getPreferences();
-    expect(result).toEqual(prefs);
-  });
-
-  it('updatePreferences sends partial data and returns updated preferences', async () => {
-    const updated = { emailNotifications: false, pushNotifications: false };
-    server.use(
-      http.put(`${BASE}/api/notifications/preferences`, async ({ request }) => {
-        const body = await request.json() as Record<string, unknown>;
-        expect(body).toEqual({ emailNotifications: false });
-        return HttpResponse.json({ success: true, data: updated });
-      }),
-    );
-    const result = await notificationsApi.updatePreferences({ emailNotifications: false } as any);
-    expect(result).toEqual(updated);
-  });
-
-  it('getUnreadCount returns unread count', async () => {
-    server.use(
-      http.get(`${BASE}/api/notifications/unread-count`, () =>
-        HttpResponse.json({ success: true, data: { unreadCount: 3 } })),
-    );
-    const result = await notificationsApi.getUnreadCount();
-    expect(result).toEqual({ unreadCount: 3 });
+    const result = await notificationsApi.markRead('a1');
+    expect(result).toEqual({ read: true, unreadCount: 0 });
   });
 });

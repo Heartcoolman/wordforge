@@ -1,6 +1,6 @@
 [package]
 name = "learning-backend"
-version = "1.1.0-beta.4"
+version = "1.1.4-beta.3"
 edition = "2021"
 rust-version = "1.77"
 
@@ -34,7 +34,7 @@ tower-http = { version = "0.6", features = ["cors", "trace", "fs", "catch-panic"
 hyper = { version = "1", features = ["full"] }
 http-body-util = "0.1"
 
-rusqlite = { version = "0.39", features = ["bundled"] }
+rusqlite = { version = "0.39", features = ["bundled", "backup"] }
 r2d2 = "0.8"
 r2d2_sqlite = "0.33"
 
@@ -82,12 +82,19 @@ tar = "0.4"
 flate2 = "1"
 semver = "1"
 fs2 = "0.4"
+# m027:GeoIP 反查(MaxMind GeoLite2-Country.mmdb,需 data/GeoLite2-Country.mmdb 文件)
+maxminddb = "0.24"
 # M0-R2：minisign 验签（纯 Rust，无 C 依赖）
 minisign-verify = "0.2"
 # v1.1-P0.6：Ed25519 资源包签名（与 minisign 自更新链路解耦，对接文档 §7.1 要求 raw Ed25519）
 ed25519-dalek = { version = "2", features = ["std", "rand_core"] }
 # utoipa：OpenAPI 3.1 自动生成（M0-C2）；yaml feature 用于测试导出 docs/openapi.yaml
 utoipa = { version = "5.5.0", features = ["uuid", "chrono", "yaml"] }
+# m023:Dashboard 系统资源条 —— 进程 CPU/RSS + 磁盘 statvfs。关闭未用 component。
+sysinfo = { version = "0.32", default-features = false, features = ["system", "disk"] }
+# B1:DB 备份离站外迁 —— object_store(aws feature) 提供 S3 上传，比 aws-sdk-s3 轻。
+# file:// / rsync 不依赖此 crate（std::fs / 外部 rsync 命令）。
+object_store = { version = "0.11", default-features = false, features = ["aws"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -92,10 +92,7 @@ async fn dispatch_probe(
     // ── per-admin 限速 ──
     state
         .probe_service()
-        .check_and_record_admin_call(
-            &admin.admin_id,
-            state.config().probe.rate_limit_per_min,
-        )
+        .check_and_record_admin_call(&admin.admin_id, state.config().probe.rate_limit_per_min)
         .map_err(|_| {
             AppError::too_many_requests(&format!(
                 "admin 探针调用频率超限（{}/min）",
@@ -206,10 +203,7 @@ async fn dispatch_probe(
         })
         .collect();
     let store = state.store().clone();
-    let rows_owned: Vec<_> = rows
-        .iter()
-        .map(|r| OwnedRow::from_borrowed(r))
-        .collect();
+    let rows_owned: Vec<_> = rows.iter().map(|r| OwnedRow::from_borrowed(r)).collect();
     tokio::task::spawn_blocking(move || {
         let borrowed: Vec<ProbeInsert<'_>> = rows_owned.iter().map(|r| r.as_borrowed()).collect();
         store.insert_probe_executions(&borrowed)
@@ -343,17 +337,14 @@ async fn confirm_probe(
         .probe_service()
         .consume_confirm(&request_id, &body.device_id_suffix)
         .map_err(|e| match e {
-            ConfirmError::NotFound => {
-                AppError::not_found("confirm ticket 不存在或已被消费")
-            }
+            ConfirmError::NotFound => AppError::not_found("confirm ticket 不存在或已被消费"),
             ConfirmError::Expired => AppError::bad_request(
                 "PROBE_CONFIRM_EXPIRED",
                 "confirm token 已过期（60s TTL），请重新下发探针",
             ),
-            ConfirmError::SuffixMismatch => AppError::bad_request(
-                "PROBE_CONFIRM_SUFFIX_MISMATCH",
-                "device_id 后 5 位不匹配",
-            ),
+            ConfirmError::SuffixMismatch => {
+                AppError::bad_request("PROBE_CONFIRM_SUFFIX_MISMATCH", "device_id 后 5 位不匹配")
+            }
         })?;
 
     // 落库：confirmed_at + 状态保持 confirm_pending（客户端重跑后由 results
@@ -426,12 +417,11 @@ async fn list_probe(
         status: q.status,
     };
     let store = state.store().clone();
-    let (rows, total) = tokio::task::spawn_blocking(move || {
-        store.list_probe_executions(&filter, limit, offset)
-    })
-    .await
-    .map_err(|e| AppError::internal(&format!("spawn_blocking: {e}")))?
-    .map_err(|e| AppError::internal(&format!("list_probe_executions: {e}")))?;
+    let (rows, total) =
+        tokio::task::spawn_blocking(move || store.list_probe_executions(&filter, limit, offset))
+            .await
+            .map_err(|e| AppError::internal(&format!("spawn_blocking: {e}")))?
+            .map_err(|e| AppError::internal(&format!("list_probe_executions: {e}")))?;
     Ok(ok(serde_json::json!({ "rows": rows, "total": total })))
 }
 
@@ -468,10 +458,11 @@ async fn batch_stream(
     }
     let batch_id_for_total = batch_id.clone();
     let store = state.store().clone();
-    let expected = tokio::task::spawn_blocking(move || store.count_probe_in_batch(&batch_id_for_total))
-        .await
-        .map_err(|e| AppError::internal(&format!("spawn_blocking: {e}")))?
-        .map_err(|e| AppError::internal(&format!("count_probe_in_batch: {e}")))?;
+    let expected =
+        tokio::task::spawn_blocking(move || store.count_probe_in_batch(&batch_id_for_total))
+            .await
+            .map_err(|e| AppError::internal(&format!("spawn_blocking: {e}")))?
+            .map_err(|e| AppError::internal(&format!("count_probe_in_batch: {e}")))?;
     if expected == 0 {
         return Err(AppError::not_found("batch 不存在或已过期"));
     }
@@ -488,8 +479,15 @@ async fn batch_stream(
                     if payload.batch_id != batch_id {
                         continue;
                     }
+                    let is_terminal = payload.status != "confirm_required";
                     if let Ok(json) = serde_json::to_string(&payload) {
                         yield Ok(Event::default().event("result").data(json));
+                    }
+                    // confirm_required 非终态：不计入 received，否则流会在 admin 确认、
+                    // 客户端重跑的终态结果（ok/error/timeout/unsupported）到达前就关闭，
+                    // 导致 admin 永远看不到受控写动作的成败。
+                    if !is_terminal {
+                        continue;
                     }
                     received += 1;
                     if received >= expected {

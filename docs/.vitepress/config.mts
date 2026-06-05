@@ -55,6 +55,8 @@ export default defineConfig({
             { text: '故障处理', link: '/runbook/incident-response' },
             { text: '容量规划', link: '/runbook/scaling' },
             { text: '监控对接', link: '/runbook/monitoring-setup' },
+            { text: '维护模式', link: '/runbook/maintenance-mode' },
+            { text: 'nginx 与 TLS', link: '/runbook/nginx-tls' },
           ],
         },
       ],
@@ -118,6 +120,8 @@ export default defineConfig({
             { text: '故障处理', link: '/runbook/incident-response' },
             { text: '容量规划', link: '/runbook/scaling' },
             { text: '监控对接', link: '/runbook/monitoring-setup' },
+            { text: '维护模式', link: '/runbook/maintenance-mode' },
+            { text: 'nginx 与 TLS', link: '/runbook/nginx-tls' },
           ],
         },
         {
@@ -126,7 +130,6 @@ export default defineConfig({
           items: [
             { text: '契约对齐审计', link: '/alignment' },
             { text: 'AMAS Schema Codegen', link: '/amas-schema-codegen' },
-            { text: 'UI 审计报告', link: '/ui-audit' },
           ],
         },
       ],

@@ -27,13 +27,25 @@ const SYSTEM_PROMPT: &str = r#"你是 AMAS（自适应记忆与算法系统）�
 白名单字段（含安全区间，越界会被拒绝）：
 "#;
 
-fn build_system_prompt() -> String {
+fn build_system_prompt(store: &Store) -> String {
     let mut s = String::from(SYSTEM_PROMPT);
-    for entry in TIER_A_WHITELIST {
-        s.push_str(&format!(
-            "- {} ∈ [{}, {}]\n",
-            entry.path, entry.min_safe, entry.max_safe
-        ));
+    match store.list_tuning_whitelist() {
+        Ok(rows) if !rows.is_empty() => {
+            for r in &rows {
+                s.push_str(&format!(
+                    "- {} ∈ [{}, {}]\n",
+                    r.path, r.min_safe, r.max_safe
+                ));
+            }
+        }
+        _ => {
+            for entry in TIER_A_WHITELIST {
+                s.push_str(&format!(
+                    "- {} ∈ [{}, {}]\n",
+                    entry.path, entry.min_safe, entry.max_safe
+                ));
+            }
+        }
     }
     s.push_str("\n要求：patch 至多包含 3 个参数；优先调整与 evidence 关联最强的字段；不确定时输出 {\"patch\":{}}。");
     s
@@ -75,18 +87,28 @@ pub async fn run(
     }
 
     let current_month = chrono::Utc::now().format("%Y-%m").to_string();
-    let month_cap = store.get_system_settings().ok().map(|s| s.llm_advisor_max_cost_per_month_yuan).unwrap_or(llm_cfg.max_cost_per_month_yuan);
+    let month_cap = store
+        .get_system_settings()
+        .ok()
+        .map(|s| s.llm_advisor_max_cost_per_month_yuan)
+        .unwrap_or(llm_cfg.max_cost_per_month_yuan);
     match store.get_llm_cost_this_month(&current_month) {
         Ok(spent) if spent >= month_cap => {
             tracing::warn!(spent_yuan = spent, cap_yuan = month_cap, month = %current_month, "llm_advisor: 已达月成本上限，跳过本次");
             let resume = next_month_str(&current_month);
             if let Some(state) = app_state {
-                state.broadcast_to_all_sse(crate::state::SseEvent::LlmBudgetExceeded { spent_yuan: spent, cap_yuan: month_cap, resume_month: resume });
+                state.broadcast_to_all_sse(crate::state::SseEvent::LlmBudgetExceeded {
+                    spent_yuan: spent,
+                    cap_yuan: month_cap,
+                    resume_month: resume,
+                });
             }
             return;
         }
         Ok(_) => {}
-        Err(e) => { tracing::warn!(error = %e, "llm_advisor: 读取月成本失败，仍尝试运行"); }
+        Err(e) => {
+            tracing::warn!(error = %e, "llm_advisor: 读取月成本失败，仍尝试运行");
+        }
     }
 
     let evidence = match collect_evidence(store, engine) {
@@ -100,7 +122,10 @@ pub async fn run(
     let provider = LlmProvider::new(llm_cfg);
     let req = ChatRequest {
         messages: vec![
-            ChatMessage { role: "system".into(), content: build_system_prompt() },
+            ChatMessage {
+                role: "system".into(),
+                content: build_system_prompt(store),
+            },
             ChatMessage {
                 role: "user".into(),
                 content: format!(
@@ -123,12 +148,15 @@ pub async fn run(
 
     let cost = provider.estimate_cost_usd(&resp.usage);
     let cost_yuan = cost * llm_cfg.usd_to_cny_rate;
-    if let Err(e) = store.add_llm_cost(&current_month, cost_yuan) { tracing::warn!(error = %e, "llm_advisor: 月成本累计写入失败"); }
+    if let Err(e) = store.add_llm_cost(&current_month, cost_yuan) {
+        tracing::warn!(error = %e, "llm_advisor: 月成本累计写入失败");
+    }
 
     let parsed: serde_json::Value = match serde_json::from_str(&resp.content) {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!(error = %e, raw = %resp.content, "llm_advisor: 响应非 JSON");
+            record_billing_only(store, engine, &evidence, cost, &resp.usage, "响应非 JSON,仅计费留痕");
             return;
         }
     };
@@ -137,6 +165,7 @@ pub async fn run(
         Some(o) => o,
         None => {
             tracing::warn!(raw = %resp.content, "llm_advisor: 缺少 patch 字段");
+            record_billing_only(store, engine, &evidence, cost, &resp.usage, "缺少 patch 字段,仅计费留痕");
             return;
         }
     };
@@ -145,14 +174,18 @@ pub async fn run(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    let confidence = parsed.get("confidence").and_then(|v| v.as_f64()).unwrap_or(0.5);
+    let confidence = parsed
+        .get("confidence")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.5);
 
     if patch_obj.is_empty() {
         tracing::info!(rationale = %rationale, "llm_advisor: LLM 不建议改动，跳过");
+        record_billing_only(store, engine, &evidence, cost, &resp.usage, "空 patch（LLM 不建议改动），仅计费留痕");
         return;
     }
 
-    let validation_errors = validate_patch(&patch_obj);
+    let validation_errors = validate_patch(store, &patch_obj);
     if !validation_errors.is_empty() {
         tracing::warn!(
             errors = ?validation_errors,
@@ -170,6 +203,7 @@ pub async fn run(
             initial_status: SuggestionStatus::Rejected,
             decided_by: Some("worker:llm_advisor".into()),
             decision_note: Some(validation_errors.join("；")),
+            base_values_json: build_base_values(engine, &patch_obj),
         });
         return;
     }
@@ -200,6 +234,7 @@ pub async fn run(
         initial_status,
         decided_by: decided_by.clone(),
         decision_note: decision_note.clone(),
+        base_values_json: build_base_values(engine, &patch_obj),
     }) {
         Ok(id) => id,
         Err(e) => {
@@ -220,6 +255,32 @@ pub async fn run(
         }
     }
     tracing::debug!("llm_advisor: done");
+}
+
+/// 空 patch / 解析失败但已产生 usage 的调用,落一条 Rejected 留痕携带 cost_usd/tokens,
+/// 使日成本守卫(`aggregate_amas_suggestion_spend_today` 按表 SUM)与月账同源,避免双台账分叉。
+fn record_billing_only(
+    store: &Store,
+    engine: &AMASEngine,
+    evidence: &serde_json::Value,
+    cost: f64,
+    usage: &crate::services::llm_provider::ChatUsage,
+    note: &str,
+) {
+    let _ = store.insert_amas_suggestion(&InsertSuggestion {
+        based_on_version_hash: current_version_hash(engine),
+        patch_json: "{}".into(),
+        rationale: String::new(),
+        evidence_json: serde_json::to_string(evidence).unwrap_or_default(),
+        cost_usd: Some(cost),
+        tokens_input: Some(usage.prompt_tokens),
+        tokens_output: Some(usage.completion_tokens),
+        confidence: None,
+        initial_status: SuggestionStatus::Rejected,
+        decided_by: Some("worker:llm_advisor".into()),
+        decision_note: Some(note.into()),
+        base_values_json: None,
+    });
 }
 
 enum AutoDecision {
@@ -249,9 +310,7 @@ fn should_auto_apply(
         ));
     }
     // 当日已自动应用数
-    if let Ok(rows) =
-        store.list_amas_suggestions(Some(SuggestionStatus::AutoApplied), 200)
-    {
+    if let Ok(rows) = store.list_amas_suggestions(Some(SuggestionStatus::AutoApplied), 200) {
         let today = chrono::Utc::now() - chrono::Duration::days(1);
         let today_count = rows.iter().filter(|r| r.created_at >= today).count() as u32;
         if today_count >= settings.amas_auto_apply_max_per_day {
@@ -282,7 +341,8 @@ async fn auto_apply_patch(
         .reload_config(new_cfg.clone())
         .map_err(|e| format!("reload: {e}"))?;
     // 写回 toml（路径从 env 不易获取；fallback 默认）
-    let toml_path = std::env::var("AMAS_CONFIG_FILE").unwrap_or_else(|_| "amas_config.toml".to_string());
+    let toml_path =
+        std::env::var("AMAS_CONFIG_FILE").unwrap_or_else(|_| "amas_config.toml".to_string());
     if let Err(e) = new_cfg.write_to_toml(&toml_path) {
         tracing::warn!(path = %toml_path, error = %e, "llm_advisor: 写回 toml 失败");
     }
@@ -314,9 +374,15 @@ pub(crate) fn write_path(cfg: &mut serde_json::Value, path: &str, value: serde_j
         if let Some(open) = part.find('[') {
             let (key, rest) = part.split_at(open);
             let idx: usize = rest[1..rest.len() - 1].parse().unwrap_or(0);
-            let Some(obj) = cur.as_object_mut() else { return };
-            let Some(arr_val) = obj.get_mut(key) else { return };
-            let Some(arr) = arr_val.as_array_mut() else { return };
+            let Some(obj) = cur.as_object_mut() else {
+                return;
+            };
+            let Some(arr_val) = obj.get_mut(key) else {
+                return;
+            };
+            let Some(arr) = arr_val.as_array_mut() else {
+                return;
+            };
             if is_last {
                 if idx < arr.len() {
                     arr[idx] = value;
@@ -331,7 +397,9 @@ pub(crate) fn write_path(cfg: &mut serde_json::Value, path: &str, value: serde_j
             }
             return;
         } else {
-            let Some(obj) = cur.as_object_mut() else { return };
+            let Some(obj) = cur.as_object_mut() else {
+                return;
+            };
             cur = obj
                 .entry(part.to_string())
                 .or_insert_with(|| serde_json::Value::Object(Default::default()));
@@ -343,6 +411,29 @@ fn current_version_hash(engine: &AMASEngine) -> String {
     let cfg = engine.get_config();
     let json = serde_json::to_string(&cfg).unwrap_or_default();
     compute_config_hash(&json)
+}
+
+/// m022:把 patch 涉及的每个路径从当前 engine config 中 lookup 旧值,
+/// 序列化为 `{"path.to.field": oldValue}` JSON 字符串。
+/// 用于 InsertSuggestion.base_values_json,让 admin SuggestionCard 渲染左旧值/右新值 diff。
+/// 没匹配到任何 path 时返回 None(NULL 落库)。
+fn build_base_values(
+    engine: &AMASEngine,
+    patch_obj: &serde_json::Map<String, serde_json::Value>,
+) -> Option<String> {
+    let cfg = engine.get_config();
+    let cfg_json = serde_json::to_value(&cfg).ok()?;
+    let mut out = serde_json::Map::new();
+    for k in patch_obj.keys() {
+        if let Some(v) = read_path(&cfg_json, k) {
+            out.insert(k.clone(), v);
+        }
+    }
+    if out.is_empty() {
+        None
+    } else {
+        serde_json::to_string(&serde_json::Value::Object(out)).ok()
+    }
 }
 
 fn collect_evidence(
@@ -390,8 +481,12 @@ fn read_path(cfg: &serde_json::Value, path: &str) -> Option<serde_json::Value> {
     Some(cur.clone())
 }
 fn next_month_str(month: &str) -> String {
-    let (year_str, mon_str) = month.split_once('-').unwrap_or(("2000","01"));
+    let (year_str, mon_str) = month.split_once('-').unwrap_or(("2000", "01"));
     let year: i32 = year_str.parse().unwrap_or(2000);
     let mon: u32 = mon_str.parse().unwrap_or(1);
-    if mon == 12 { format!("{:04}-01", year + 1) } else { format!("{year:04}-{:02}", mon + 1) }
+    if mon == 12 {
+        format!("{:04}-01", year + 1)
+    } else {
+        format!("{year:04}-{:02}", mon + 1)
+    }
 }

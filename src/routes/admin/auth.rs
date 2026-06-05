@@ -26,13 +26,31 @@ pub fn router() -> Router<AppState> {
 
 /// 不受 auth rate limit 约束的公开路由
 pub fn public_router() -> Router<AppState> {
-    Router::new().route("/status", get(auth_status))
+    Router::new()
+        .route("/status", get(auth_status))
+        .route("/setup/env-check", get(env_check))
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AuthStatusResponse {
     initialized: bool,
+}
+
+/// setup 页五项环境自检的单项结果。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EnvCheckItem {
+    key: &'static str,
+    label: &'static str,
+    ok: bool,
+    detail: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EnvCheckResponse {
+    checks: Vec<EnvCheckItem>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -47,7 +65,13 @@ struct SetupRequest {
 struct LoginRequest {
     email: String,
     password: String,
+    /// 勾选"30 天保持登录"时为 true，签发 30 天有效期 token（仅限本设备）
+    #[serde(default)]
+    remember_me: bool,
 }
+
+/// 勾选"保持登录"时的 token 有效期：30 天
+const REMEMBER_ME_EXPIRES_IN_HOURS: u64 = 24 * 30;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -72,6 +96,118 @@ async fn auth_status(
         })
         .await??;
     Ok(ok(AuthStatusResponse { initialized }))
+}
+
+/// setup 页五项环境自检：公开预认证（与 /status 同级，不需要 admin token）。
+/// 全部为只读探测，不修改任何状态。
+async fn env_check(
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let mut checks = Vec::with_capacity(5);
+
+    // ① DB schema 迁移版本：当前版本 vs 全量迁移数
+    let expected = crate::store::migrate::migration_count() as u32;
+    let version_res = state
+        .run_store_task("admin_setup.env_check.schema_version", |store| {
+            crate::store::migrate::get_current_version(&store)
+        })
+        .await;
+    let (version_ok, version_detail) = match version_res {
+        Ok(Ok(v)) => (
+            v == expected,
+            format!("schema_version v{v} / 全量 {expected} 次 migration"),
+        ),
+        Ok(Err(e)) => (false, format!("读取 schema_version 失败：{e}")),
+        Err(e) => (false, format!("迁移版本探测任务失败：{e}")),
+    };
+    checks.push(EnvCheckItem {
+        key: "db_schema",
+        label: "DB schema 已迁移",
+        ok: version_ok,
+        detail: version_detail,
+    });
+
+    // ② 静态目录可写：api_only 模式下不托管 static，标记跳过为 ok
+    let (static_ok, static_detail) = if state.config().api_only {
+        (true, "API_ONLY 模式 · 不托管 static".to_string())
+    } else {
+        check_static_dir_writable()
+    };
+    checks.push(EnvCheckItem {
+        key: "static_writable",
+        label: "静态目录可写",
+        ok: static_ok,
+        detail: static_detail,
+    });
+
+    // ③ 端口监听：进程已起则必然在监听，报告绑定地址
+    let cfg = state.config();
+    checks.push(EnvCheckItem {
+        key: "listening_port",
+        label: "端口监听",
+        ok: true,
+        detail: format!("{}:{}", cfg.host, cfg.port),
+    });
+
+    // ④ Ed25519 资源包签名密钥：main.rs 启动期注入，None 表示加载/生成失败
+    let signer = state.resource_pack_signer().await;
+    let (key_ok, key_detail) = match signer {
+        Some(s) => {
+            let pk = s.public_key_base64();
+            let prefix: String = pk.chars().take(12).collect();
+            (true, format!("Ed25519 · 公钥 {prefix}…"))
+        }
+        None => (false, "签名器未就绪（密钥加载/生成失败）".to_string()),
+    };
+    checks.push(EnvCheckItem {
+        key: "signing_key",
+        label: "资源包签名密钥",
+        ok: key_ok,
+        detail: key_detail,
+    });
+
+    // ⑤ admin_users（物理表 admins）可达 / 是否为空
+    let admin_res = state
+        .run_store_task("admin_setup.env_check.admin_exists", |store| {
+            store.any_admin_exists()
+        })
+        .await;
+    let (admin_ok, admin_detail) = match admin_res {
+        Ok(Ok(exists)) => (
+            true,
+            if exists {
+                "已存在管理员".to_string()
+            } else {
+                "表可达 · 尚未初始化".to_string()
+            },
+        ),
+        Ok(Err(e)) => (false, format!("查询 admins 表失败：{e}")),
+        Err(e) => (false, format!("admins 表探测任务失败：{e}")),
+    };
+    checks.push(EnvCheckItem {
+        key: "admin_table",
+        label: "检测 admin_users 表",
+        ok: admin_ok,
+        detail: admin_detail,
+    });
+
+    Ok(ok(EnvCheckResponse { checks }))
+}
+
+/// 探测 static 目录是否存在且可写：写入再删除一个临时探针文件。
+fn check_static_dir_writable() -> (bool, String) {
+    let dir = std::path::Path::new("static");
+    if !dir.is_dir() {
+        return (false, "static/ 目录不存在".to_string());
+    }
+    let probe = dir.join(".env_check_probe");
+    match std::fs::write(&probe, b"") {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&probe);
+            (true, "static/ 可写".to_string())
+        }
+        Err(e) => (false, format!("static/ 不可写：{e}")),
+    }
 }
 
 async fn setup(
@@ -231,10 +367,16 @@ async fn login(
         ),
     }
 
+    // remember_me 勾选时签发 30 天 token，否则用默认 admin_jwt_expires_in_hours
+    let expires_in_hours = if req.remember_me {
+        REMEMBER_ME_EXPIRES_IN_HOURS
+    } else {
+        state.config().admin_jwt_expires_in_hours
+    };
     let token = sign_jwt_for_admin(
         &admin.id,
         &state.config().admin_jwt_secret,
-        state.config().admin_jwt_expires_in_hours,
+        expires_in_hours,
     )?;
 
     let session = Session {
@@ -242,7 +384,7 @@ async fn login(
         user_id: admin.id.clone(),
         token_type: "admin".to_string(),
         created_at: Utc::now(),
-        expires_at: Utc::now() + Duration::hours(state.config().admin_jwt_expires_in_hours as i64),
+        expires_at: Utc::now() + Duration::hours(expires_in_hours as i64),
         revoked: false,
     };
     state
