@@ -1,7 +1,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct MemoryModelConfig {
     pub short_term_learning_rate: f64,
@@ -207,7 +207,8 @@ impl Default for MemoryModelConfig {
             stability_base_days: 20.0,
             forgetting_curve_factor: 0.30,
             forgetting_curve_decay: -0.5,
-            forgetting_curve_floor: 0.0,
+            // 与 serde default_forgetting_curve_floor() 一致：非零渐近线 R→0.10（2021 MaiMemo）
+            forgetting_curve_floor: 0.10,
             w: default_w(),
             alpha_scale: 0.3,
             alpha_min: 0.1,
@@ -227,7 +228,7 @@ impl Default for MemoryModelConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct EvmConfig {
     #[serde(default = "default_evm_diversity_log_divisor")]
@@ -258,7 +259,7 @@ impl Default for EvmConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct IadConfig {
     pub interference_penalty_factor: f64,
@@ -289,7 +290,7 @@ impl Default for IadConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct MtpConfig {
     pub morpheme_transfer_coeff: f64,

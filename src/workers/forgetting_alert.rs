@@ -62,6 +62,15 @@ pub async fn run(store: &Store) {
                     _ => {}
                 }
 
+                // #37:先写 dedup 标记并校验成功,再发通知。dedup 表是跨 run 唯一幂等闸,
+                // 通知行每次用新 UUID 故 INSERT OR IGNORE 永不去重——若 dedup 写失败被吞掉,
+                // 该词次日仍判 None 会重复告警(无界 spam)。失败则跳过本词,宁可漏一次也不刷屏;
+                // 标记成功后通知发送失败只回滚标记,使下次可重试,避免漏发。
+                if let Err(e) = store.set_alert_dedup(user_id, &state.word_id, now_ms) {
+                    tracing::warn!(error = %e, "Forgetting alert: failed to write dedup marker, skipping to avoid duplicate alerts");
+                    continue;
+                }
+
                 let overdue_hours = now_ms.saturating_sub(review_ts_ms) / MILLIS_PER_HOUR;
                 let notification = serde_json::json!({
                     "id": uuid::Uuid::new_v4().to_string(),
@@ -77,10 +86,13 @@ pub async fn run(store: &Store) {
 
                 if let Err(e) = store.create_notification(&notification) {
                     tracing::warn!(error = %e, "Failed to insert forgetting alert notification");
+                    // 回滚标记(置 0 即小于任何 cutoff,下次 run 重新进入告警判定),避免漏发。
+                    if let Err(e2) = store.set_alert_dedup(user_id, &state.word_id, 0) {
+                        tracing::warn!(error = %e2, "Forgetting alert: failed to roll back dedup marker after notification failure");
+                    }
                     continue;
                 }
 
-                let _ = store.set_alert_dedup(user_id, &state.word_id, now_ms);
                 at_risk += 1;
             }
         }

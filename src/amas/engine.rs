@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use parking_lot::{Mutex, RwLock};
@@ -35,6 +35,11 @@ pub struct AMASEngine {
     /// 任何激活 canary 的写路径(set_canary / create_canary / scale_canary)必须调
     /// mark_canary_active() 置 true。stale-true 只是多查一次(无害),stale-false 才会漏路由。
     canary_active: Arc<AtomicBool>,
+    /// #22:canary 激活代际计数。mark_canary_active() 每次自增;effective_config_for_user 在两次
+    /// DB 读之前抓代际快照,确认零 active 后仅当代际未变才自清快路标志。激活路径"先提交 DB 行、
+    /// 后置标志"的时序下,若清理事件读表恰在激活提交之前发生,激活会顺带 bump 代际,使这次基于旧
+    /// 视图的自清因代际不符而放弃——封死"误清刚激活 canary"的丢更新竞态。
+    canary_generation: Arc<AtomicU64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -98,11 +103,14 @@ impl AMASEngine {
             ssp_policy: Arc::new(RwLock::new(ssp_policy)),
             // 初值 true:首个事件会真查一次并自校正为 false(若无 canary),不漏判。
             canary_active: Arc::new(AtomicBool::new(true)),
+            canary_generation: Arc::new(AtomicU64::new(0)),
         }
     }
 
     /// 标记"可能存在 active canary",激活 canary 的写路径调用后保证热路径不再跳过查询。
+    /// #22:先 bump 代际再置标志,使任何"基于激活前 DB 视图"的在途自清因代际不符而作废。
     pub fn mark_canary_active(&self) {
+        self.canary_generation.fetch_add(1, Ordering::AcqRel);
         self.canary_active.store(true, Ordering::Release);
     }
 
@@ -146,9 +154,14 @@ impl AMASEngine {
     pub fn effective_config_for_user(&self, user_id: &str) -> Arc<AMASConfig> {
         let stable: Arc<AMASConfig> = Arc::clone(&self.config.read());
         // 快路:确认无 active canary 时跳过下面 1-2 次 SQLite 查询(常态)。
+        // #22:在两次 DB 读之前抓快照 true,用作后面 compare_exchange 的 expected——若期间有
+        // mark_canary_active() 把标志重置为 true(或它本就保持 true),自清才允许;否则放弃自清,
+        // 杜绝"读到旧空表→刚激活的 canary 被 store(false) 误清→静默漏路由"的丢更新竞态。
         if !self.canary_active.load(Ordering::Acquire) {
             return stable;
         }
+        // #22:抓代际快照(必须在两次 DB 读之前)。自清仅在代际未被 mark_canary_active bump 时才允许。
+        let gen_snapshot = self.canary_generation.load(Ordering::Acquire);
         // hash(user_id) % 100 桶号,patch canary 与 m022 单 active 共用同一散列算法
         let bucket = {
             use std::hash::{Hash, Hasher};
@@ -183,8 +196,18 @@ impl AMASEngine {
             Ok(Some(c)) => c,
             Ok(None) => {
                 // 两类 canary 均无 active → 清快路标志,后续事件直接走快路。
-                if !any_active {
-                    self.canary_active.store(false, Ordering::Release);
+                // #22:仅当代际自抓取快照以来未被 mark_canary_active bump(即两次 DB 读期间无并发激活),
+                // 且标志仍为 true 时才自清。代际守护封死"读到激活提交前的空表→误清刚激活 canary"窗口;
+                // CAS(true→false) 再叠一层防 store 丢更新。代际变了就放弃自清,下个事件重查(无害多查一次)。
+                if !any_active
+                    && self.canary_generation.load(Ordering::Acquire) == gen_snapshot
+                {
+                    let _ = self.canary_active.compare_exchange(
+                        true,
+                        false,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    );
                 }
                 return stable;
             }
@@ -356,12 +379,29 @@ impl AMASEngine {
         );
 
         Self::update_session_counters(&mut context.user_state, &raw_event, now);
+        // #11/#14/#39：ELO 的 read-modify-write 收进 persist_state 的同一原子 tx，与 user_state/
+        // algo_states/幂等标记全有或全无。word_id 为空（如纯 quit 事件）则不带 ELO。
+        let elo_spec = (!raw_event.word_id.is_empty()).then(|| {
+            crate::store::operations::engine::EloUpdateSpec {
+                word_id: raw_event.word_id.clone(),
+                is_correct: raw_event.is_correct,
+                config: context.config.elo.clone(),
+                // 单用户对某词全局评分的累计净位移上限：取该词单次最大可能位移（novice 期 k_word）
+                // 的 4 倍，使正常学习者（净位移会随 ELO 收敛而衰减）几乎不受影响，但封死单设备
+                // 反复同向投毒把全局词难度推到 clamp 边界的路径（#14）。
+                max_user_word_displacement: context.config.elo.k_factor
+                    * context.config.elo.word_k_factor_ratio
+                    * context.config.elo.novice_k_multiplier
+                    * 4.0,
+            }
+        });
         // W1-1 并发收口：标记已被并发请求抢先写入则整笔回滚，返回 None 让调用方走裸记录回放。
         if !self.persist_state(
             user_id,
             &mut context.user_state,
             &context.algo_states,
             pending_algo,
+            elo_spec.as_ref(),
             idempotency_key,
         )? {
             return Ok(None);
@@ -647,23 +687,18 @@ impl AMASEngine {
         .await?
     }
 
+    /// #23/#24：完整重置用户引擎态。持 per-user 锁串行化于 process_event（不再与并发上报交错出
+    /// 混合态），并在单个原子 tx 内重置 user_state + 删除**全部** algo 状态（含每词 mastery/EVM
+    /// 与全局 IAD/MTP）+ 清 user_elo，杜绝原"只删 ige/swd/trust、ELO/per-word 记忆残留"的假重置。
     pub fn reset_user_state(&self, user_id: &str) -> Result<(), AppError> {
-        self.store
-            .set_engine_user_state(
-                user_id,
-                &serde_json::to_value(UserState::default())
-                    .map_err(|e| AppError::internal(&e.to_string()))?,
-            )
+        let user_lock = self.acquire_user_lock_blocking(user_id);
+        let _guard = user_lock.lock();
+
+        let default_state = serde_json::to_value(UserState::default())
             .map_err(|e| AppError::internal(&e.to_string()))?;
-
-        // 通过 Store 封装方法清除算法状态
-        for algo in &["ige", "swd", "trust"] {
-            self.store
-                .delete_engine_algo_state(user_id, algo)
-                .map_err(|e| AppError::internal(&e.to_string()))?;
-        }
-
-        Ok(())
+        self.store
+            .reset_engine_state_atomic(user_id, &default_state)
+            .map_err(|e| AppError::internal(&e.to_string()))
     }
 
     pub async fn reset_user_state_async(&self, user_id: &str) -> Result<(), AppError> {
@@ -705,6 +740,13 @@ impl AMASEngine {
         avg_response_time_ms: f64,
         mastery_efficiency: f64,
     ) -> Result<(), AppError> {
+        // #48：与 persist_state/update_visual_fatigue 一致的入参卫生——先 sanitize(NaN/Inf) 再
+        // clamp，防止任何调用方传入非有限/越界浮点污染 EMA（NaN 写入后永不恢复，并经 get_temporal_boost
+        // 透传至 study 下游）。accuracy/mastery_efficiency ∈ [0,1]，响应时长非负。
+        let accuracy = sanitize_float(accuracy, 0.0).clamp(0.0, 1.0);
+        let mastery_efficiency = sanitize_float(mastery_efficiency, 0.0).clamp(0.0, 1.0);
+        let avg_response_time_ms = sanitize_float(avg_response_time_ms, 0.0).max(0.0);
+
         let user_lock = self.acquire_user_lock_blocking(user_id);
         let _guard = user_lock.lock();
 
@@ -714,7 +756,13 @@ impl AMASEngine {
         };
         let mut user_state = self.load_or_init_state(user_id)?;
         let stats = &mut user_state.habit_profile.temporal_performance;
+        // #49：用 saturating get/pad 替代裸索引，防止持久化的 hourly_stats 短于 24 项时越界 panic。
         let idx = (hour as usize).min(23);
+        if stats.hourly_stats.len() <= idx {
+            stats
+                .hourly_stats
+                .resize_with(idx + 1, Default::default);
+        }
         let h = &mut stats.hourly_stats[idx];
 
         // EMA 指数平滑
@@ -751,7 +799,11 @@ impl AMASEngine {
         let state = self.load_or_init_state(user_id)?;
         let stats = &state.habit_profile.temporal_performance;
         let idx = (hour as usize).min(23);
-        let h = &stats.hourly_stats[idx];
+        // #49：持久化的 hourly_stats 若短于 24 项（旧/手改/迁移态），裸索引会 panic 阻断请求；
+        // 缺项视作无样本，退回中性 boost 1.0。
+        let Some(h) = stats.hourly_stats.get(idx) else {
+            return Ok(1.0);
+        };
 
         if h.session_count == 0 {
             return Ok(1.0);
@@ -1276,11 +1328,9 @@ impl AMASEngine {
                 .and_then(|v| serde_json::from_value(v).ok())
                 .unwrap_or_default();
 
-            let is_new_context = raw_event
-                .session_id
-                .as_deref()
-                .is_some_and(|sid| !sid.is_empty());
-            evm::record_context(&mut evm_state, is_new_context, &config.evm);
+            // #46：传入 session_id，由 record_context 按"是否首见该 session"判定 distinct 上下文，
+            // 而非仅凭"有无 session"每次都 +1。
+            evm::record_context(&mut evm_state, raw_event.session_id.as_deref(), &config.evm);
             adjusted_interval_scale *= evm::interval_modifier(&evm_state, &config.evm);
 
             if let Ok(val) = serde_json::to_value(&evm_state) {
@@ -1404,12 +1454,14 @@ impl AMASEngine {
 
     /// 返回 `true`=本次状态已提交；`false`=幂等标记已被并发请求抢先写入、整笔回滚（详见
     /// [`Store::persist_engine_state_atomic`]）。`idempotency_key` 为 `None` 时恒 `true`。
+    #[allow(clippy::too_many_arguments)]
     fn persist_state(
         &self,
         user_id: &str,
         user_state: &mut UserState,
         algo_states: &AlgoStates,
         pending_algo: Vec<(String, serde_json::Value)>,
+        elo: Option<&crate::store::operations::engine::EloUpdateSpec>,
         idempotency_key: Option<&str>,
     ) -> Result<bool, AppError> {
         // 在保存前清理浮点字段，防止 NaN 传播
@@ -1450,7 +1502,13 @@ impl AMASEngine {
         algo_entries.extend(pending_algo);
 
         self.store
-            .persist_engine_state_atomic(user_id, &user_state_json, &algo_entries, idempotency_key)
+            .persist_engine_state_atomic(
+                user_id,
+                &user_state_json,
+                &algo_entries,
+                elo,
+                idempotency_key,
+            )
             .map_err(|e| AppError::internal(&e.to_string()))
     }
 
@@ -2690,5 +2748,87 @@ mod tests {
             cfg.memory_model.base_desired_retention,
             stable.memory_model.base_desired_retention
         );
+    }
+
+    /// #47：引擎级幂等回滚分支覆盖。预先写入 processed_events 标记，再调
+    /// process_event_idempotent：persist_engine_state_atomic 命中 `INSERT OR IGNORE` 0 行 →
+    /// 整笔回滚 → 引擎早退返回 Ok(None)，且 user_state / per-word mastery / user_elo 零变更。
+    #[tokio::test]
+    async fn process_event_idempotent_rolls_back_on_existing_marker() {
+        let engine = test_engine(AMASConfig::default());
+        let user = "u-idem";
+        let key = "rec-dup-1";
+
+        // 预置标记：模拟并发同 client_record_id 请求已先行处理。
+        engine.store.mark_event_processed(user, key).unwrap();
+
+        let result = engine
+            .process_event_idempotent(
+                user,
+                RawEvent {
+                    word_id: "w-idem".to_string(),
+                    is_correct: true,
+                    response_time_ms: 500,
+                    session_id: Some("session-A".to_string()),
+                    ..RawEvent::default()
+                },
+                key,
+            )
+            .await
+            .expect("process_event_idempotent should not error");
+
+        // 核心断言：标记已存在 → 整笔回滚 → Ok(None)。
+        assert!(result.is_none(), "已存在标记时应返回 Ok(None)");
+
+        // 零变更：user_state 未落库、mastery / EVM per-word 状态未写、user_elo 仍为默认。
+        assert!(
+            engine.store.get_engine_user_state(user).unwrap().is_none(),
+            "回滚后不应写入 user_state"
+        );
+        assert!(engine
+            .store
+            .get_engine_algo_state(user, "mastery:w-idem")
+            .unwrap()
+            .is_none());
+        assert!(engine
+            .store
+            .get_engine_algo_state(user, "evm:w-idem")
+            .unwrap()
+            .is_none());
+        let elo = engine.store.get_user_elo(user).unwrap();
+        assert_eq!(elo.games, 0, "ELO 不应被回滚的事件累加");
+    }
+
+    /// #47：首个（胜出）请求应正常落库并写入标记，返回 Ok(Some)。与上面的回滚分支配对。
+    #[tokio::test]
+    async fn process_event_idempotent_first_call_applies_and_marks() {
+        let engine = test_engine(AMASConfig::default());
+        let user = "u-idem-win";
+        let key = "rec-win-1";
+
+        let result = engine
+            .process_event_idempotent(
+                user,
+                RawEvent {
+                    word_id: "w-win".to_string(),
+                    is_correct: true,
+                    response_time_ms: 500,
+                    session_id: Some("session-A".to_string()),
+                    ..RawEvent::default()
+                },
+                key,
+            )
+            .await
+            .expect("process_event_idempotent");
+
+        assert!(result.is_some(), "首次调用应返回 Ok(Some)");
+        assert!(
+            engine.store.is_event_processed(user, key).unwrap(),
+            "首次调用应写入幂等标记"
+        );
+        assert!(engine.store.get_engine_user_state(user).unwrap().is_some());
+        // ELO 已在同一原子 tx 内累加（#11/#39）。
+        let elo = engine.store.get_user_elo(user).unwrap();
+        assert_eq!(elo.games, 1, "胜出请求应在同 tx 内累加一局 ELO");
     }
 }

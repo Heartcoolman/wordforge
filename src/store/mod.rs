@@ -210,6 +210,27 @@ impl Store {
         Ok(result)
     }
 
+    /// 在**单条**池连接 + **单个 `BEGIN IMMEDIATE` 事务**内运行闭包：跨多步 read-modify-write
+    /// 全部走同一连接同一事务，commit 前任何早退（闭包返回 Err / COMMIT 失败 / panic）由
+    /// `Transaction` 的 Drop 自动 ROLLBACK。
+    ///
+    /// 用 `IMMEDIATE` 而非默认 `DEFERRED`：BEGIN 时即取写锁，避免「先 SELECT 拿读锁、再写时升级」
+    /// 的丢更新窗口与升级死锁（DEFERRED 读后写经典坑）。AMAS 热路径的 ELO/user_stats 计数器等
+    /// read-modify-write 必须经此原语，配合调用侧持有 per-user 锁，保证逻辑单元整体原子串行。
+    ///
+    /// B6/records 路径采纳说明见 `records.rs`/调用侧：把「ELO RMW + record 行 + user_stats」收进
+    /// 同一 `with_user_tx` 闭包，使「AMAS 状态 ⟺ ELO ⟺ 幂等标记」全有或全无。
+    pub fn with_user_tx<T>(
+        &self,
+        f: impl FnOnce(&rusqlite::Transaction) -> Result<T, StoreError>,
+    ) -> Result<T, StoreError> {
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let result = f(&tx)?;
+        tx.commit()?;
+        Ok(result)
+    }
+
     pub(crate) fn serialize_json<T: Serialize>(value: &T) -> Result<String, StoreError> {
         Ok(serde_json::to_string(value)?)
     }

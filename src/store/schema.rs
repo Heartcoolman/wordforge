@@ -426,6 +426,14 @@ CREATE TABLE IF NOT EXISTS word_elo (
     PRIMARY KEY (word_id)
 );
 
+-- #14 抗投毒:per-(user,word) 累计净位移账本,封死单用户无界推动全局 word_elo 污染他人排序。
+CREATE TABLE IF NOT EXISTS word_elo_user_contrib (
+    user_id TEXT NOT NULL,
+    word_id TEXT NOT NULL,
+    net_displacement REAL NOT NULL DEFAULT 0.0,
+    PRIMARY KEY (user_id, word_id)
+);
+
 CREATE TABLE IF NOT EXISTS user_elo_history (
     user_id TEXT NOT NULL,
     snapshot_date TEXT NOT NULL,

@@ -295,7 +295,7 @@ impl Store {
         }
     }
 
-    /// 原子写入 AMAS 状态（user_state + algo_states），可选附幂等标记。
+    /// 原子写入 AMAS 状态（user_state + algo_states + 可选 ELO），可选附幂等标记。
     ///
     /// 返回值（仅在 `idempotency` 为 `Some` 时有意义）：`true`=标记本次新插入、AMAS 状态已提交；
     /// `false`=标记已存在（并发竞态下另一请求先行处理），**整笔 tx 回滚**、本次 AMAS 增量被丢弃。
@@ -304,16 +304,23 @@ impl Store {
     /// W1-1 并发收口：`INSERT OR IGNORE` 标记的 affected rows 是权威仲裁——锁外预检 + 持锁应用之间
     /// 仍可能两个同 `client_record_id` 请求各自通过预检，此处以"谁先写进标记谁生效、后者整笔回滚"
     /// 消除二次累加 ELO/mastery/trust 的窗口。
+    ///
+    /// #11/#13/#18/#39：`elo` 为 `Some` 时，ELO 的 read-modify-write 在**本 tx 内**完成
+    /// （IMMEDIATE 写锁起点取得，详见 [`Store::with_user_tx`] 注释），与 user_state/algo_states/
+    /// 幂等标记同笔原子提交。这样既消除 ELO 跨连接 RMW 的丢更新，又让 ELO 进入「标记存在 ⟺ AMAS
+    /// 已应用」不变式（崩溃重试不丢/不二次累加 ELO）。
     pub fn persist_engine_state_atomic(
         &self,
         user_id: &str,
         user_state: &serde_json::Value,
         algo_states: &[(String, serde_json::Value)],
+        elo: Option<&EloUpdateSpec>,
         idempotency: Option<&str>,
     ) -> Result<bool, StoreError> {
         keys::validate_id(user_id)?;
         let mut conn = self.conn()?;
-        let tx = conn.transaction()?;
+        // IMMEDIATE：ELO RMW 在 BEGIN 即取写锁，杜绝读后写升级丢更新/死锁。
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let user_json = Self::serialize_json(user_state)?;
         let created_at = chrono::Utc::now().to_rfc3339();
         tx.execute(
@@ -331,6 +338,10 @@ impl Store {
                 params![user_id, algo_id, json],
             )?;
         }
+        // #11/#14/#39：ELO 同 tx 原子 RMW。
+        if let Some(spec) = elo {
+            Self::apply_elo_in_tx(&tx, user_id, spec)?;
+        }
         // W1-1：幂等标记与 AMAS 状态同 tx 原子提交,保证"标记存在 ⟺ AMAS 已应用"。
         // affected rows==0 即标记已被并发请求抢先写入 → 回滚本次重复增量。
         if let Some(client_record_id) = idempotency {
@@ -346,6 +357,117 @@ impl Store {
         }
         tx.commit()?;
         Ok(true)
+    }
+
+    /// #23/#24：在**单个 IMMEDIATE tx** 内完整重置某用户的引擎态——把 user_state 写回
+    /// `UserState::default`、删除该用户在 `engine_algo_states` 的**全部**行（ige/swd/trust + 每词
+    /// mastery:*/evm:* + 全局 iad/mtp 等，而非仅枚举三键）、清掉 `user_elo` 与
+    /// `word_elo_user_contrib` 账本行。全有或全无，杜绝原四条 autocommit 的部分重置/中途崩溃残留。
+    /// 调用侧须持 per-user 锁串行化于 process_event（见 [`AMASEngine::reset_user_state`]）。
+    pub fn reset_engine_state_atomic(
+        &self,
+        user_id: &str,
+        default_user_state: &serde_json::Value,
+    ) -> Result<(), StoreError> {
+        keys::validate_id(user_id)?;
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let json = Self::serialize_json(default_user_state)?;
+        let created_at = chrono::Utc::now().to_rfc3339();
+        tx.execute(
+            "INSERT INTO engine_user_states (user_id, state_json, created_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(user_id) DO UPDATE SET state_json=?2",
+            params![user_id, json, created_at],
+        )?;
+        // 删除该用户**所有** algo 状态：mastery:*/evm:*/iad/mtp/ige/swd/trust 一网打尽，
+        // 否则旧词记忆/IAD/MTP 残留会与 total_event_count=0 的冷启动态自相矛盾（#24）。
+        tx.execute(
+            "DELETE FROM engine_algo_states WHERE user_id=?1",
+            params![user_id],
+        )?;
+        tx.execute("DELETE FROM user_elo WHERE user_id=?1", params![user_id])?;
+        tx.execute(
+            "DELETE FROM word_elo_user_contrib WHERE user_id=?1",
+            params![user_id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// #11/#14：在给定 tx 内对 user_elo + word_elo 做一次 read-modify-write。
+    ///
+    /// - user_elo：按 `update_elo` 常规累加。
+    /// - word_elo（**全局共享**，被全员选词读取）：先按 `update_elo` 计算本次位移，再用
+    ///   `word_elo_user_contrib`（m050，per-(user,word) 累计净贡献）把**单个用户**对该词全局评分
+    ///   的累计净位移钳在 `±max_user_word_displacement`（#14 抗投毒）：单设备反复全错/全对再不能把
+    ///   某词推到 clamp 边界污染他人排序。games 计数仍照常累加（统计真实对局数）。
+    fn apply_elo_in_tx(
+        tx: &rusqlite::Transaction,
+        user_id: &str,
+        spec: &EloUpdateSpec,
+    ) -> Result<(), StoreError> {
+        use crate::amas::elo::{update_elo, EloRating};
+
+        let read_elo = |table: &str, key_col: &str, key: &str| -> Result<EloRating, StoreError> {
+            let r = tx
+                .query_row(
+                    &format!("SELECT rating, games FROM {table} WHERE {key_col}=?1"),
+                    params![key],
+                    |r| {
+                        Ok(EloRating {
+                            rating: r.get(0)?,
+                            games: r.get(1)?,
+                        })
+                    },
+                )
+                .optional()?;
+            Ok(r.unwrap_or_default())
+        };
+
+        let mut user_elo = read_elo("user_elo", "user_id", user_id)?;
+        let mut word_elo = read_elo("word_elo", "word_id", &spec.word_id)?;
+        let word_rating_before = word_elo.rating;
+
+        update_elo(&mut user_elo, &mut word_elo, spec.is_correct, &spec.config);
+
+        // #14 抗投毒：限制单用户对该词全局评分的累计净位移。
+        let cap = spec.max_user_word_displacement;
+        if cap > 0.0 {
+            let prior: f64 = tx
+                .query_row(
+                    "SELECT net_displacement FROM word_elo_user_contrib
+                     WHERE user_id=?1 AND word_id=?2",
+                    params![user_id, &spec.word_id],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .unwrap_or(0.0);
+            let raw_delta = word_elo.rating - word_rating_before;
+            // 把"用户累计净位移"钳到 [-cap, cap]，本次允许的实际位移随之收窄。
+            let allowed_total = (prior + raw_delta).clamp(-cap, cap);
+            let allowed_delta = allowed_total - prior;
+            word_elo.rating = (word_rating_before + allowed_delta)
+                .clamp(spec.config.min_elo, spec.config.max_elo);
+            tx.execute(
+                "INSERT INTO word_elo_user_contrib (user_id, word_id, net_displacement)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(user_id, word_id) DO UPDATE SET net_displacement=?3",
+                params![user_id, &spec.word_id, allowed_total],
+            )?;
+        }
+
+        tx.execute(
+            "INSERT INTO user_elo (user_id, rating, games) VALUES (?1, ?2, ?3)
+             ON CONFLICT(user_id) DO UPDATE SET rating=?2, games=?3",
+            params![user_id, user_elo.rating, user_elo.games],
+        )?;
+        tx.execute(
+            "INSERT INTO word_elo (word_id, rating, games) VALUES (?1, ?2, ?3)
+             ON CONFLICT(word_id) DO UPDATE SET rating=?2, games=?3",
+            params![&spec.word_id, word_elo.rating, word_elo.games],
+        )?;
+        Ok(())
     }
 
     /// W1-1：一次性**原子**回滚引擎状态 + 清除幂等标记。
@@ -422,6 +544,17 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
+}
+
+/// #11/#14/#39：[`Store::persist_engine_state_atomic`] 的 ELO 原子更新入参。
+/// 把"读 user_elo/word_elo → update_elo → 回写"收进引擎状态同一 tx，使 ELO 既不丢更新、
+/// 又落入「标记存在 ⟺ AMAS 已应用」不变式。
+pub struct EloUpdateSpec {
+    pub word_id: String,
+    pub is_correct: bool,
+    pub config: crate::amas::config::EloConfig,
+    /// 单用户对某词全局评分的累计净位移硬上限（#14 抗投毒）。`<= 0` 表示不限。
+    pub max_user_word_displacement: f64,
 }
 
 /// W1-1：[`Store::restore_engine_state_atomic`] 的入参。各字段语义见该方法文档。
@@ -658,7 +791,7 @@ mod tests {
             ("a2".to_string(), serde_json::json!({"l":2})),
         ];
         store
-            .persist_engine_state_atomic("u1", &user_state, &algo, None)
+            .persist_engine_state_atomic("u1", &user_state, &algo, None, None)
             .unwrap();
         let us = store.get_engine_user_state("u1").unwrap().unwrap();
         assert_eq!(us["attention"], 0.5);
@@ -670,7 +803,7 @@ mod tests {
         // 二次 atomic upsert 替换
         let algo2 = vec![("a1".into(), serde_json::json!({"l":99}))];
         store
-            .persist_engine_state_atomic("u1", &serde_json::json!({"attention":0.9}), &algo2, None)
+            .persist_engine_state_atomic("u1", &serde_json::json!({"attention":0.9}), &algo2, None, None)
             .unwrap();
         assert_eq!(
             store.get_engine_algo_state("u1", "a1").unwrap().unwrap()["l"],
@@ -680,7 +813,7 @@ mod tests {
         // 错误 ID
         assert!(matches!(
             store
-                .persist_engine_state_atomic("", &user_state, &[], None)
+                .persist_engine_state_atomic("", &user_state, &[], None, None)
                 .unwrap_err(),
             crate::store::StoreError::Validation(_)
         ));
@@ -703,6 +836,7 @@ mod tests {
                 "u1",
                 &serde_json::json!({"attention": 0.9}),
                 &algo,
+                None,
                 Some("rec-1"),
             )
             .unwrap();
@@ -733,5 +867,111 @@ mod tests {
             .get_engine_algo_state("u1", "mastery:w1")
             .unwrap()
             .is_none());
+    }
+
+    /// #24：reset_engine_state_atomic 必须清除该用户**全部** algo 状态（含每词 mastery/EVM、
+    /// 全局 IAD/MTP）+ user_elo，而非仅 ige/swd/trust。
+    #[test]
+    fn reset_engine_state_atomic_clears_all_per_user_state() {
+        let _t = tempfile::tempdir().unwrap();
+        let store = Store::open(_t.path().join("t.db").to_str().unwrap(), 5000, 2).unwrap();
+        store.run_migrations().unwrap();
+
+        // 铺设各类状态。
+        store
+            .set_engine_user_state("u1", &serde_json::json!({"totalEventCount": 42}))
+            .unwrap();
+        for key in ["ige", "swd", "trust", "mastery:w1", "evm:w1", "iad", "mtp"] {
+            store
+                .set_engine_algo_state("u1", key, &serde_json::json!({"x": 1}))
+                .unwrap();
+        }
+        store
+            .set_user_elo("u1", &crate::amas::elo::EloRating { rating: 1500.0, games: 9 })
+            .unwrap();
+
+        let default_state = serde_json::json!({"totalEventCount": 0});
+        store
+            .reset_engine_state_atomic("u1", &default_state)
+            .unwrap();
+
+        // user_state 回默认。
+        let us = store.get_engine_user_state("u1").unwrap().unwrap();
+        assert_eq!(us["totalEventCount"], 0);
+        // 全部 algo 状态删除（含 mastery/evm/iad/mtp，非仅三键）。
+        for key in ["ige", "swd", "trust", "mastery:w1", "evm:w1", "iad", "mtp"] {
+            assert!(
+                store.get_engine_algo_state("u1", key).unwrap().is_none(),
+                "reset 后 {key} 应被删除"
+            );
+        }
+        // user_elo 回默认（删除后读取得默认值，games=0）。
+        assert_eq!(store.get_user_elo("u1").unwrap().games, 0);
+    }
+
+    /// #11/#39：persist_engine_state_atomic 带 EloUpdateSpec 时，在同一 tx 内累加 user_elo/word_elo。
+    #[test]
+    fn persist_engine_state_atomic_applies_elo_in_same_tx() {
+        let _t = tempfile::tempdir().unwrap();
+        let store = Store::open(_t.path().join("t.db").to_str().unwrap(), 5000, 2).unwrap();
+        store.run_migrations().unwrap();
+
+        let spec = super::EloUpdateSpec {
+            word_id: "w1".to_string(),
+            is_correct: true,
+            config: crate::amas::config::EloConfig::default(),
+            max_user_word_displacement: 0.0, // 关掉抗投毒钳制,只验常规累加
+        };
+        store
+            .persist_engine_state_atomic(
+                "u1",
+                &serde_json::json!({"attention": 0.5}),
+                &[],
+                Some(&spec),
+                Some("rec-1"),
+            )
+            .unwrap();
+
+        let user_elo = store.get_user_elo("u1").unwrap();
+        let word_elo = store.get_word_elo("w1").unwrap();
+        assert_eq!(user_elo.games, 1);
+        assert_eq!(word_elo.games, 1);
+        assert!(user_elo.rating > 1200.0, "答对后用户 ELO 应上升");
+        assert!(store.is_event_processed("u1", "rec-1").unwrap());
+    }
+
+    /// #14：单用户对某词全局评分的累计净位移被钳在硬上限内——反复全错不能把该词推到 clamp 边界。
+    #[test]
+    fn word_elo_user_contribution_is_bounded() {
+        let _t = tempfile::tempdir().unwrap();
+        let store = Store::open(_t.path().join("t.db").to_str().unwrap(), 5000, 2).unwrap();
+        store.run_migrations().unwrap();
+
+        let cap = 50.0;
+        // 同一用户对同一词反复全错（word_elo 上行），50 次。
+        for i in 0..50 {
+            let spec = super::EloUpdateSpec {
+                word_id: "wpoison".to_string(),
+                is_correct: false,
+                config: crate::amas::config::EloConfig::default(),
+                max_user_word_displacement: cap,
+            };
+            store
+                .persist_engine_state_atomic(
+                    "attacker",
+                    &serde_json::json!({}),
+                    &[],
+                    Some(&spec),
+                    Some(&format!("rec-{i}")),
+                )
+                .unwrap();
+        }
+        let word_elo = store.get_word_elo("wpoison").unwrap();
+        // 净位移被钳在 ±cap：评分相对默认 1200 的偏移不超过 cap（含浮点余量）。
+        assert!(
+            (word_elo.rating - 1200.0).abs() <= cap + 1e-6,
+            "单用户净位移应被钳在 ±{cap}，实测 rating={}",
+            word_elo.rating
+        );
     }
 }

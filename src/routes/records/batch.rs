@@ -245,24 +245,14 @@ pub(crate) async fn process_batch_record(
             duplicate: true,
         });
     };
-    let amas_config = state.amas().get_config();
     let amas_result_for_store = amas_result.clone();
 
     state
         .run_store_task(
             "records.batch.persist",
             move |store| -> Result<_, AppError> {
-                let mut user_elo = store.get_user_elo(&user_id_owned)?;
-                let mut word_elo = store.get_word_elo(&word_id)?;
-                crate::amas::elo::update_elo(
-                    &mut user_elo,
-                    &mut word_elo,
-                    req_for_store.is_correct,
-                    &amas_config.elo,
-                );
-                store.set_user_elo(&user_id_owned, &user_elo)?;
-                store.set_word_elo(&word_id, &word_elo)?;
-
+                // ELO 现由 AMAS 引擎在 process_event_blocking → persist_engine_state_atomic
+                // 的锁定原子事务内应用，路由侧不再重复 RMW（否则 ELO 双重累加）。
                 let mut next_word_state: Option<WordLearningState> = None;
                 if let Some(ref wm) = amas_result_for_store.word_mastery {
                     let new_state = match wm.mastery_level {

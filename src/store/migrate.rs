@@ -109,6 +109,10 @@ fn migrations() -> Vec<(&'static str, MigrationFn)> {
             "049_wb_center_imports_user_pk",
             m049_wb_center_imports_user_pk,
         ),
+        (
+            "050_word_elo_user_contrib",
+            m050_word_elo_user_contrib,
+        ),
     ]
 }
 
@@ -212,6 +216,10 @@ fn migrations_down() -> Vec<(&'static str, MigrationFn)> {
         (
             "049_wb_center_imports_user_pk",
             m049_wb_center_imports_user_pk_down,
+        ),
+        (
+            "050_word_elo_user_contrib",
+            m050_word_elo_user_contrib_down,
         ),
     ]
 }
@@ -2490,6 +2498,30 @@ fn m049_wb_center_imports_user_pk_down(store: &Store) -> Result<(), StoreError> 
         CREATE INDEX IF NOT EXISTS idx_wb_center_imports_user ON wb_center_imports(user_id, updated_at DESC);",
     )?;
     tx.commit()?;
+    Ok(())
+}
+
+/// m050:#14 抗投毒——per-(user,word) 累计净位移账本。
+/// word_elo 是全局共享状态(主键仅 word_id),被全员选词读取;单设备反复同向上报会无界推动
+/// 该词全局评分污染他人排序。此表记录"单用户对某词全局评分的累计净贡献",persist_engine_state_atomic
+/// 据此把单用户净位移钳在硬上限内,封死投毒路径(详见 store/operations/engine.rs::apply_elo_in_tx)。
+fn m050_word_elo_user_contrib(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS word_elo_user_contrib (
+            user_id          TEXT NOT NULL,
+            word_id          TEXT NOT NULL,
+            net_displacement REAL NOT NULL DEFAULT 0.0,
+            PRIMARY KEY (user_id, word_id)
+        );",
+    )?;
+    Ok(())
+}
+
+/// m050 down:DROP 账本表。仅 dev/test。
+fn m050_word_elo_user_contrib_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch("DROP TABLE IF EXISTS word_elo_user_contrib;")?;
     Ok(())
 }
 

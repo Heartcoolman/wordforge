@@ -396,6 +396,83 @@ fn ssp_invalid_fields_fail() {
     }
 }
 
+#[test]
+fn forgetting_curve_and_w_array_invalid_fail() {
+    let mutators: [fn(&mut AMASConfig); 8] = [
+        |c| c.memory_model.forgetting_curve_factor = 0.0,
+        |c| c.memory_model.forgetting_curve_factor = f64::NAN,
+        |c| c.memory_model.forgetting_curve_decay = 0.0, // 必须 < 0
+        |c| c.memory_model.forgetting_curve_decay = 0.5, // 正值反转曲线
+        |c| c.memory_model.forgetting_curve_floor = 1.0, // 须在 [0,1)
+        |c| c.memory_model.forgetting_curve_floor = -0.1,
+        |c| c.memory_model.w[8] = f64::INFINITY,
+        |c| c.memory_model.w[0] = 1000.0, // 越界 magnitude
+    ];
+    for (i, m) in mutators.iter().enumerate() {
+        let mut c = AMASConfig::default();
+        m(&mut c);
+        assert!(c.validate().is_err(), "case {i}");
+    }
+}
+
+#[test]
+fn feature_temporal_boost_inverted_range_fails() {
+    let mut c = AMASConfig::default();
+    c.feature.temporal_boost_min = 1.5;
+    c.feature.temporal_boost_max = 0.5;
+    assert!(c.validate().is_err());
+
+    let mut c = AMASConfig::default();
+    c.feature.temporal_boost_min = f64::NAN;
+    assert!(c.validate().is_err());
+}
+
+#[test]
+fn elo_word_k_factor_ratio_invalid_fails() {
+    let mut c = AMASConfig::default();
+    c.elo.word_k_factor_ratio = 0.0;
+    assert!(c.validate().is_err());
+
+    let mut c = AMASConfig::default();
+    c.elo.word_k_factor_ratio = f64::NAN;
+    assert!(c.validate().is_err());
+}
+
+#[test]
+fn word_selector_divisor_fields_invalid_fail() {
+    let mutators: [fn(&mut AMASConfig); 5] = [
+        |c| c.word_selector.spacing_cooldown_secs = 0.0,
+        |c| c.word_selector.optimal_recall_sigma = 0.0,
+        |c| c.word_selector.sigmoid_steepness = 0.0,
+        |c| c.word_selector.recall_mastered_threshold = 1.5,
+        |c| c.word_selector.recall_mastered_threshold = -0.1,
+    ];
+    for (i, m) in mutators.iter().enumerate() {
+        let mut c = AMASConfig::default();
+        m(&mut c);
+        assert!(c.validate().is_err(), "case {i}");
+    }
+}
+
+#[test]
+fn ssp_solver_bounds_invalid_fail() {
+    let mut c = AMASConfig::default();
+    c.ssp.convergence_threshold = 0.0;
+    assert!(c.validate().is_err());
+
+    let mut c = AMASConfig::default();
+    c.ssp.convergence_threshold = -1.0;
+    assert!(c.validate().is_err());
+
+    let mut c = AMASConfig::default();
+    c.ssp.max_iterations = 0;
+    assert!(c.validate().is_err());
+
+    let mut c = AMASConfig::default();
+    c.ssp.max_iterations = 4_000_000_000;
+    assert!(c.validate().is_err());
+}
+
 // ---- AMASConfig::from_env / load_from_toml / write_to_toml ----
 
 #[test]
@@ -411,13 +488,31 @@ fn from_env_sets_ensemble_flag_and_sample_rate() {
 
 #[test]
 fn write_then_load_from_toml_roundtrip() {
-    let cfg = AMASConfig::default();
+    // 用 NON-default 配置做往返：若序列化丢字段，serde 会回填 default，
+    // 与下面被改过的值不等而触发断言 —— 比 is_ok() 真正校验值保真度。
+    let mut cfg = AMASConfig::default();
+    cfg.ssp.r_step = 0.0123;
+    cfg.ssp.max_iterations = 12_345;
+    cfg.ssp.convergence_threshold = 0.0456;
+    cfg.elo.min_elo = 350.0;
+    cfg.elo.max_elo = 2600.0;
+    cfg.elo.word_k_factor_ratio = 0.42;
+    cfg.memory_model.w[0] = 0.9999;
+    cfg.memory_model.w[18] = 0.1234;
+    cfg.memory_model.forgetting_curve_floor = 0.15;
+    cfg.word_selector.spacing_cooldown_secs = 123.0;
+    cfg.feature.temporal_boost_min = 0.4;
+    cfg.feature.temporal_boost_max = 1.6;
+    // 改后的配置仍须合法，确保往返不会因非法值被 load 拒绝。
+    assert!(cfg.validate().is_ok());
+
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("amas_test.toml");
     cfg.write_to_toml(path.to_str().unwrap()).expect("write");
     assert!(path.exists());
     let loaded = AMASConfig::load_from_toml(path.to_str().unwrap()).expect("load");
-    // round-trip 必须仍然 validate
+    // 值保真度：往返后必须逐字段相等（依赖 AMASConfig: PartialEq）
+    assert_eq!(loaded, cfg);
     assert!(loaded.validate().is_ok());
 }
 

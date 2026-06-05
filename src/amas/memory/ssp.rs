@@ -18,7 +18,7 @@ impl SspPolicy {
     /// 从目录加载预计算的策略表。
     /// 目录中应包含 `ssp_policy_d{1..10}.csv`，每行格式: `stability,interval`
     pub fn load(dir: &Path, config: &SspConfig) -> Result<Self, String> {
-        let index_len = (config.max_index - config.min_index) as usize;
+        let index_len = clamp_index_len(config);
         let mut tables = Vec::with_capacity(10);
 
         for d in 1..=10 {
@@ -60,7 +60,7 @@ impl SspPolicy {
 
     /// 从内存中的 DP 结果直接构建（用于 precompute 后直接使用）
     pub fn from_tables(tables: Vec<Vec<f64>>, config: &SspConfig) -> Self {
-        let index_len = (config.max_index - config.min_index) as usize;
+        let index_len = clamp_index_len(config);
         Self {
             tables,
             base: config.base,
@@ -117,6 +117,13 @@ pub struct PrecomputeResult {
 /// stability bins / R 网格规模硬上界，兜底防御非法配置（step ≤ 0 / 极小 r_step）导致的失控分配。
 const MAX_GRID_BINS: usize = 100_000;
 
+/// 计算均匀（非双网格）路径的 stability bins 数量。
+/// 用 i64 做减法避免 `max_index - min_index` 在 i32 下溢出（min_index 极小时 debug 会 panic、release 会回绕），
+/// 并钳到 [0, MAX_GRID_BINS]，防止大负 min_index 触发数十 GB 级 value/optimal_r 分配导致 OOM。
+fn clamp_index_len(config: &SspConfig) -> usize {
+    (config.max_index as i64 - config.min_index as i64).clamp(0, MAX_GRID_BINS as i64) as usize
+}
+
 fn build_dual_grid_stability_list(config: &SspConfig) -> Vec<f64> {
     let s_min = config.base.powi(config.min_index);
     let s_max = config.base.powi(config.max_index);
@@ -141,6 +148,25 @@ fn build_dual_grid_stability_list(config: &SspConfig) -> Vec<f64> {
         list.push(s_min);
     }
     list
+}
+
+/// cost_params 的 S/D 线性调制系数：返回 `(1 + coeff_s * ln(S) + coeff_d * (D-1)/9)`。
+/// 默认全零系数时恒返回 1.0（与未调制行为逐位一致）。S 用 ln 归一（stability 跨多个数量级，
+/// 网格本身按 log 等比），D 用 (D-1)/9 归一到 [0,1]。下钳到 0 防止系数过大产生负代价；
+/// 非有限输入回退到无调制，避免污染 DP cell。
+#[inline]
+fn cost_modulation(s: f64, difficulty: f64, coeff_s: f64, coeff_d: f64) -> f64 {
+    if coeff_s == 0.0 && coeff_d == 0.0 {
+        return 1.0;
+    }
+    let s_norm = s.max(0.01).ln();
+    let d_norm = (difficulty - 1.0) / 9.0;
+    let m = 1.0 + coeff_s * s_norm + coeff_d * d_norm;
+    if m.is_finite() {
+        m.max(0.0)
+    } else {
+        1.0
+    }
 }
 
 /// 从 (S, R) 计算间隔天数（FSRS-5 幂律遗忘曲线的反函数）
@@ -177,7 +203,7 @@ pub fn precompute(
     let stability_list: Vec<f64> = if dual_grid {
         build_dual_grid_stability_list(config)
     } else {
-        let index_len = (config.max_index - config.min_index) as usize;
+        let index_len = clamp_index_len(config);
         (0..index_len)
             .map(|i| base.powi(i as i32 + min_idx))
             .collect()
@@ -185,6 +211,11 @@ pub fn precompute(
     let s_len = stability_list.len();
 
     let s_to_idx = |s: f64| -> usize {
+        // 有限性守卫：NaN/±inf 的 stability 映射到最低 bin（index 0），
+        // 避免 partition_point / ln() 产出越界或被截断的索引而写入错误 DP cell。
+        if !s.is_finite() {
+            return 0;
+        }
         if dual_grid {
             stability_list
                 .partition_point(|&b| b < s)
@@ -206,6 +237,8 @@ pub fn precompute(
     let cost_hard = config.recall_cost * 1.5;
     let cost_good = config.recall_cost;
     let cost_easy = config.recall_cost * 0.75;
+    // 参数化代价调制系数（默认全零 → 调制因子恒为 1.0，行为不变）
+    let cp = &config.cost_params;
 
     // V(d, s)：全局值函数（10 × s_len）
     let init_cost = 1_000_000.0_f64;
@@ -234,6 +267,14 @@ pub fn precompute(
                 let old_v = value[d_idx][s_idx];
                 let mut best_v = old_v;
                 let mut best_r = optimal_r[d_idx][s_idx];
+
+                // 按当前 (S, D) 调制 recall / forget 代价（cost_params 默认时调制因子=1.0）
+                let recall_mod = cost_modulation(s, difficulty, cp.recall_s_coeff, cp.recall_d_coeff);
+                let forget_mod = cost_modulation(s, difficulty, cp.forget_s_coeff, cp.forget_d_coeff);
+                let c_hard = cost_hard * recall_mod;
+                let c_good = cost_good * recall_mod;
+                let c_easy = cost_easy * recall_mod;
+                let c_forget = config.forget_cost * forget_mod;
 
                 for &r in &r_values {
                     let interval = fsrs5_next_interval(s, r, memory_config);
@@ -264,10 +305,10 @@ pub fn precompute(
                     let v_easy = value[((d_easy.round() as i32).clamp(1, 10) - 1) as usize]
                         [s_to_idx(s_easy)];
 
-                    let exp_cost = (1.0 - p) * (config.forget_cost + gamma * v_again)
-                        + p * prob_hard * (cost_hard + gamma * v_hard)
-                        + p * prob_good * (cost_good + gamma * v_good)
-                        + p * prob_easy * (cost_easy + gamma * v_easy);
+                    let exp_cost = (1.0 - p) * (c_forget + gamma * v_again)
+                        + p * prob_hard * (c_hard + gamma * v_hard)
+                        + p * prob_good * (c_good + gamma * v_good)
+                        + p * prob_easy * (c_easy + gamma * v_easy);
 
                     if exp_cost < best_v {
                         best_v = exp_cost;
@@ -672,6 +713,63 @@ mod tests {
         assert!(result.is_err());
         let msg = result.unwrap_err();
         assert!(msg.contains("Failed to") || msg.contains("dir"));
+    }
+
+    #[test]
+    fn cost_params_default_is_noop_but_nondefault_changes_policy() {
+        use crate::amas::config::SspCostParams;
+        let mem = MemoryModelConfig::default();
+
+        // 默认 cost_params（全零）：调制因子恒为 1.0，表与显式 baseline 应逐位一致
+        let base_cfg = SspConfig {
+            max_iterations: 60,
+            dual_grid_enabled: false,
+            ..Default::default()
+        };
+        let baseline = precompute(&base_cfg, &mem);
+
+        // 非默认 forget_s_coeff：cost_params 必须真实影响策略表（证明非死配置）
+        let modulated_cfg = SspConfig {
+            max_iterations: 60,
+            dual_grid_enabled: false,
+            cost_params: SspCostParams {
+                forget_s_coeff: 2.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let modulated = precompute(&modulated_cfg, &mem);
+
+        assert_eq!(baseline.tables.len(), modulated.tables.len());
+        let mut differs = false;
+        for (b_row, m_row) in baseline.tables.iter().zip(modulated.tables.iter()) {
+            for (b, m) in b_row.iter().zip(m_row.iter()) {
+                if (b - m).abs() > 1e-9 {
+                    differs = true;
+                }
+            }
+        }
+        assert!(
+            differs,
+            "non-default cost_params must change the SSP policy (otherwise still dead config)"
+        );
+    }
+
+    #[test]
+    fn negative_min_index_is_clamped_no_oom() {
+        // 大负 min_index：未钳制会触发数十 GB 分配 / i32 溢出。钳到 MAX_GRID_BINS 后应安全返回。
+        let cfg = SspConfig {
+            dual_grid_enabled: false,
+            min_index: -50_000_000,
+            max_index: 200,
+            max_iterations: 1,
+            ..Default::default()
+        };
+        let result = precompute(&cfg, &MemoryModelConfig::default());
+        assert_eq!(result.tables.len(), 10);
+        assert!(result.stability_list.len() <= MAX_GRID_BINS);
+        // load/from_tables 同样走 clamp，不应 panic 或越界分配
+        assert!(clamp_index_len(&cfg) <= MAX_GRID_BINS);
     }
 
     #[test]

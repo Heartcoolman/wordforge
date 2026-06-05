@@ -175,6 +175,12 @@ async fn main() {
             tracing::info!(path = %default_path, "已生成默认 AMAS 配置文件");
         }
     }
+    // 启动期信任门：TOML 加载路径绕过了 validate()，未校验配置会让 AMASEngine::new 构建出
+    // 含 NaN/Inf/反转曲线/越界 clamp 边界的引擎，污染调度并在首次复习/记录写入时 panic。
+    // 在此显式校验，非法配置直接拒绝启动（fail loud），不带病上线。
+    if let Err(e) = amas_config.validate() {
+        panic!("AMAS 配置校验失败，拒绝启动: {e}");
+    }
     let amas_engine = Arc::new(AMASEngine::new(amas_config, store.clone()));
 
     let initial_maintenance = store

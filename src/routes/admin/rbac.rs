@@ -21,7 +21,7 @@ use crate::auth::{hash_password, AdminAuthUser};
 use crate::extractors::JsonBody;
 use crate::response::{created, ok, AppError};
 use crate::state::AppState;
-use crate::store::operations::admin_rbac::NewApiKey;
+use crate::store::operations::admin_rbac::{NewApiKey, RoleGuardOutcome};
 
 const VALID_ROLES: &[&str] = &["super_admin", "admin"];
 const VALID_SCOPES: &[&str] = &["read", "write", "admin"];
@@ -142,23 +142,16 @@ async fn patch_admin_role(
         .run_store_task(
             "admin.rbac.update_role",
             move |store| -> Result<_, AppError> {
-                let current = store
-                    .get_admin_role(&target_id)?
-                    .ok_or_else(|| AppError::not_found("管理员不存在"))?;
-                // 守卫:降级最后一个 super-admin 会导致无人能管角色。
-                if current == "super_admin" && role_for_task != "super_admin" {
-                    let supers = store.count_admins_with_role("super_admin")?;
-                    if supers <= 1 {
-                        return Err(AppError::conflict(
-                            "LAST_SUPER_ADMIN",
-                            "不能降级最后一个超级管理员",
-                        ));
-                    }
+                // 守卫与 UPDATE 在单条连接同一 BEGIN IMMEDIATE 事务内完成,消除
+                // check-then-act 的 TOCTOU(并发降级清空最后一个 super-admin)。
+                match store.update_admin_role_guarded(&target_id, &role_for_task, &now)? {
+                    RoleGuardOutcome::Ok(view) => Ok(view),
+                    RoleGuardOutcome::LastSuperAdmin => Err(AppError::conflict(
+                        "LAST_SUPER_ADMIN",
+                        "不能降级最后一个超级管理员",
+                    )),
+                    RoleGuardOutcome::NotFound => Err(AppError::not_found("管理员不存在")),
                 }
-                let view = store
-                    .update_admin_role(&target_id, &role_for_task, &now)?
-                    .ok_or_else(|| AppError::not_found("管理员不存在"))?;
-                Ok(view)
             },
         )
         .await??;
@@ -190,23 +183,16 @@ async fn delete_admin(
         .run_store_task(
             "admin.rbac.delete_admin",
             move |store| -> Result<(), AppError> {
-                let current = store
-                    .get_admin_role(&target_id)?
-                    .ok_or_else(|| AppError::not_found("管理员不存在"))?;
-                // 守卫:删除最后一个 super-admin 会锁死 RBAC 管理。
-                if current == "super_admin" {
-                    let supers = store.count_admins_with_role("super_admin")?;
-                    if supers <= 1 {
-                        return Err(AppError::conflict(
-                            "LAST_SUPER_ADMIN",
-                            "不能删除最后一个超级管理员",
-                        ));
-                    }
+                // 守卫与 DELETE 在单条连接同一 BEGIN IMMEDIATE 事务内完成,消除
+                // check-then-act 的 TOCTOU(并发删除清空最后一个 super-admin)。
+                match store.delete_admin_guarded(&target_id)? {
+                    RoleGuardOutcome::Ok(()) => Ok(()),
+                    RoleGuardOutcome::LastSuperAdmin => Err(AppError::conflict(
+                        "LAST_SUPER_ADMIN",
+                        "不能删除最后一个超级管理员",
+                    )),
+                    RoleGuardOutcome::NotFound => Err(AppError::not_found("管理员不存在")),
                 }
-                if !store.delete_admin(&target_id)? {
-                    return Err(AppError::not_found("管理员不存在"));
-                }
-                Ok(())
             },
         )
         .await??;

@@ -26,6 +26,8 @@ type SuggestionRow = (
 #[serde(rename_all = "snake_case")]
 pub enum SuggestionStatus {
     Pending,
+    /// 已进灰度但尚未全量生效：从 Pending 迁出，使其不能再被 approve/approve-all 二次全量应用(#9)。
+    InCanary,
     Approved,
     Rejected,
     Superseded,
@@ -37,6 +39,7 @@ impl SuggestionStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Pending => "pending",
+            Self::InCanary => "in_canary",
             Self::Approved => "approved",
             Self::Rejected => "rejected",
             Self::Superseded => "superseded",
@@ -48,6 +51,7 @@ impl SuggestionStatus {
     pub fn parse(s: &str) -> Result<Self, StoreError> {
         Ok(match s {
             "pending" => Self::Pending,
+            "in_canary" => Self::InCanary,
             "approved" => Self::Approved,
             "rejected" => Self::Rejected,
             "superseded" => Self::Superseded,
@@ -319,6 +323,54 @@ impl Store {
         Ok(())
     }
 
+    /// 原子状态抢占(CAS)：仅当当前 status == `expected` 才迁移到 `new_status`(#10)。
+    /// affected==0 区分「行不存在」(NotFound)与「源状态不符 / 已被并发判定」(Conflict)。
+    /// approve_one 用它在应用 patch 前抢占 Pending，使并发 approve 只有一个胜出，杜绝重复 apply。
+    pub fn cas_amas_suggestion_status(
+        &self,
+        id: i64,
+        expected: SuggestionStatus,
+        new_status: SuggestionStatus,
+        decided_by: Option<&str>,
+        decision_note: Option<&str>,
+    ) -> Result<(), StoreError> {
+        let conn = self.conn()?;
+        let now = Utc::now().to_rfc3339();
+        let affected = conn.execute(
+            "UPDATE amas_tuning_suggestions
+             SET status = ?1, decided_by = ?2, decided_at = ?3, decision_note = ?4
+             WHERE id = ?5 AND status = ?6",
+            params![
+                new_status.as_str(),
+                decided_by,
+                now,
+                decision_note,
+                id,
+                expected.as_str()
+            ],
+        )?;
+        if affected == 0 {
+            // 复用已持有的 conn 做存在性判定，禁止再 self.conn() 申第二条连接：
+            // pool_size==1 时二次申请会死锁至 connection_timeout → Pool 错误掩盖 Conflict/NotFound。
+            let exists: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM amas_tuning_suggestions WHERE id = ?1)",
+                params![id],
+                |row| row.get::<_, i64>(0),
+            )? != 0;
+            if exists {
+                return Err(StoreError::Conflict {
+                    entity: "amas_tuning_suggestions".into(),
+                    key: id.to_string(),
+                });
+            }
+            return Err(StoreError::NotFound {
+                entity: "amas_tuning_suggestions".into(),
+                key: id.to_string(),
+            });
+        }
+        Ok(())
+    }
+
     /// 已用日成本 / 已用 token —— 用于触发日上限
     pub fn aggregate_amas_suggestion_spend_today(&self) -> Result<(f64, u64, u64), StoreError> {
         let cutoff = (Utc::now() - Duration::days(1)).to_rfc3339();
@@ -472,6 +524,46 @@ mod tests {
         assert_eq!(row.decided_by.as_deref(), Some("admin"));
         assert_eq!(row.decision_note.as_deref(), Some("ok"));
         assert!(row.decided_at.is_some());
+    }
+
+    #[test]
+    fn cas_status_claims_once_then_conflicts() {
+        let store = fresh_store();
+        let id = store
+            .insert_amas_suggestion(&ins(SuggestionStatus::Pending))
+            .unwrap();
+        // 首次抢占 Pending→Approved 成功
+        store
+            .cas_amas_suggestion_status(
+                id,
+                SuggestionStatus::Pending,
+                SuggestionStatus::Approved,
+                Some("admin"),
+                None,
+            )
+            .unwrap();
+        // 二次抢占已非 Pending → Conflict
+        let err = store
+            .cas_amas_suggestion_status(
+                id,
+                SuggestionStatus::Pending,
+                SuggestionStatus::Approved,
+                Some("admin2"),
+                None,
+            )
+            .unwrap_err();
+        assert!(matches!(err, StoreError::Conflict { .. }));
+        // 不存在的 id → NotFound
+        let err2 = store
+            .cas_amas_suggestion_status(
+                9999,
+                SuggestionStatus::Pending,
+                SuggestionStatus::Approved,
+                None,
+                None,
+            )
+            .unwrap_err();
+        assert!(matches!(err2, StoreError::NotFound { .. }));
     }
 
     #[test]
