@@ -55,7 +55,7 @@ test.describe('Home Page and Navigation', () => {
   test('admin login is responsive at mobile width', async ({ page }) => {
     await page.setViewportSize({ width: 375, height: 667 });
     await page.goto('/admin/login');
-    await expect(page.getByText('管理后台登录')).toBeVisible();
+    await expect(page.getByText('登录管理后台')).toBeVisible();
     await expect(page.locator('input[type="email"]')).toBeVisible();
   });
 

@@ -166,7 +166,7 @@ async function mockAdminApi(page: Page, overrides: { wordbookUrl?: string } = {}
         generatedAt: '2026-05-19T00:00:00Z',
         days: Number(url.searchParams.get('days') ?? 7),
         category: 'all',
-        summary: { totalDurationSecs: 7200, sessionCount: 12, recordCount: 180, correctCount: 150, accuracy: 0.83, newWords: 32, reviewWords: 148, masteredWords: 9 },
+        summary: { totalDurationSecs: 7200, sessionCount: 12, recordCount: 180, correctCount: 150, accuracy: 0.83, newWords: 32, reviewWords: 148, masteredWords: 9, recordCountDeltaPct: 0.1, accuracyDeltaPt: 0.03, prevAccuracy: 0.8 },
         daily: [{ date: '2026-05-19', durationSecs: 1200, sessionCount: 2, recordCount: 30, correctCount: 25, accuracy: 0.83, newWords: 5, reviewWords: 25, masteredWords: 1 }],
       }));
     }
@@ -190,33 +190,111 @@ async function mockAdminApi(page: Page, overrides: { wordbookUrl?: string } = {}
         daily: [{ date: '2026-05-19', learning: 12, review: 18, all: 0 }],
       }));
     }
-    if (path === '/api/admin/analytics/retention-curve') {
+    // v1.1.4 dashboard / analytics 新增聚合端点
+    if (path === '/api/admin/analytics/hourly') {
+      const matrix = Array.from({ length: 7 }, () => Array.from({ length: 24 }, () => 1));
+      return json(ok({ generatedAt: '2026-05-19T00:00:00Z', days: Number(url.searchParams.get('days') ?? 7), matrix, total: 168 }));
+    }
+    if (path === '/api/admin/analytics/kpi-summary') {
       return json(ok({
         generatedAt: '2026-05-19T00:00:00Z',
-        category: 'all',
-        averageRetention: 0.82,
-        points: [{ daysSinceLearn: 1, retention: 0.92, sampleSize: 20 }, { daysSinceLearn: 7, retention: 0.74, sampleSize: 12 }],
+        days: Number(url.searchParams.get('days') ?? 7),
+        rangeStart: '2026-05-12', rangeEnd: '2026-05-19',
+        newRegistrations: { value: 12, prevValue: 10, deltaPct: 0.2 },
+        dauAverage: { value: 11, prevValue: 9, deltaPct: 0.22 },
+        d7Retention: { value: 0.74, prevValue: 0.7, deltaPt: 0.04 },
+        studyDurationSecs: { value: 7200, prevValue: 6000, deltaPct: 0.2 },
       }));
     }
-    if (path === '/api/admin/analytics/word-states') {
+    if (path === '/api/admin/analytics/funnel') {
       return json(ok({
         generatedAt: '2026-05-19T00:00:00Z',
-        category: 'all',
-        states: { newCount: 20, learning: 30, reviewing: 40, mastered: 50, forgotten: 2 },
-        totals: { trackedWords: 142, bookmarkedWords: 18, dueReviewWords: 22, overdueReviewWords: 5, averageMasteryLevel: 0.66 },
+        days: Number(url.searchParams.get('days') ?? 7),
+        rangeStart: '2026-05-12', rangeEnd: '2026-05-19',
+        steps: [
+          { key: 'register', label: '注册', sublabel: '本窗口队列', count: 42, pct: 1, deltaPt: null, tone: 'normal' },
+          { key: 'pick_wordbook', label: '选词书', sublabel: '挑选词书', count: 30, pct: 0.71, deltaPt: 0.05, tone: 'good' },
+          { key: 'first_answer', label: '首次答题', sublabel: '完成第一题', count: 22, pct: 0.52, deltaPt: -0.03, tone: 'warn' },
+          { key: 'd1_return', label: '次日回访', sublabel: 'D1 留存', count: 14, pct: 0.33, deltaPt: -0.02, tone: 'warn' },
+        ],
+        biggestDropFrom: '选词书', biggestDropTo: '首次答题', biggestDropPt: 0.19,
       }));
+    }
+    if (path === '/api/admin/analytics/retention-matrix') {
+      return json(ok({
+        generatedAt: '2026-05-19T00:00:00Z',
+        weeks: 3,
+        cohorts: [
+          { cohortStart: '2026-05-05', size: 20, cells: [1, 0.6, 0.4] },
+          { cohortStart: '2026-05-12', size: 18, cells: [1, 0.5, null] },
+        ],
+      }));
+    }
+    if (path === '/api/admin/analytics/question-distribution') {
+      return json(ok({
+        generatedAt: '2026-05-19T00:00:00Z',
+        days: Number(url.searchParams.get('days') ?? 7),
+        totalRecords: 180,
+        questionTypes: [{ key: 'mcq', label: '选择题', count: 100, pct: 0.55 }, { key: 'spell', label: '拼写', count: 80, pct: 0.45 }],
+        difficultyBins: [
+          { label: '简单', min: 0, max: 1100, count: 40, pct: 0.22 },
+          { label: '中等', min: 1100, max: 1300, count: 100, pct: 0.55 },
+          { label: '困难', min: 1300, max: null, count: 40, pct: 0.22 },
+        ],
+      }));
+    }
+    if (path === '/api/admin/analytics/word-frequency') {
+      return json(ok({
+        generatedAt: '2026-05-19T00:00:00Z',
+        days: Number(url.searchParams.get('days') ?? 7),
+        limit: 10,
+        sort: url.searchParams.get('sort') ?? 'count',
+        rows: [
+          { rank: 1, wordId: 'w-1', spelling: 'abandon', pos: 'v.', recordCount: 30, accuracy: 0.7, elo: 1250, mastery: 0.5 },
+          { rank: 2, wordId: 'w-2', spelling: 'benevolent', pos: 'adj.', recordCount: 22, accuracy: 0.55, elo: 1320, mastery: 0.4 },
+        ],
+      }));
+    }
+    if (path === '/api/admin/analytics/insights') {
+      return json(ok({
+        generatedAt: '2026-05-19T00:00:00Z',
+        days: Number(url.searchParams.get('days') ?? 7),
+        items: [
+          { tone: 'success', title: '留存改善', body: 'd7 留存较上窗口提升 4 个百分点。' },
+          { tone: 'warning', title: '首答流失', body: '选词书到首次答题流失 19 个百分点,建议优化引导。' },
+        ],
+      }));
+    }
+
+    // be:analytics-misc:用户筛选 chip 计数
+    if (path === '/api/admin/users/facets') {
+      return json(ok({ total: 42, active: 11, inactive7d: 8, banned: 2, admins: 1 }));
     }
 
     if (path === '/api/admin/users' && method === 'GET') {
       return json(ok({
         data: [
-          { id: 'u-1', username: 'alice', email: 'alice@example.com', isBanned: false, failedLoginCount: 0, lockedUntil: null, createdAt: '2026-05-19T00:00:00Z', updatedAt: '2026-05-19T00:00:00Z' },
+          {
+            id: 'u-1', username: 'alice', email: 'alice@example.com', role: 'user', status: 'active',
+            isBanned: false, failedLoginCount: 0, lockedUntil: null,
+            createdAt: '2026-05-19T00:00:00Z', updatedAt: '2026-05-19T00:00:00Z', lastLoginAt: '2026-05-19T00:00:00Z',
+            stats: { recordCount: 120, correctCount: 90, last20Outcomes: [1, 0, 1, 1, 0, 1, 1, 1, 0, 1] },
+          },
         ],
         total: 1,
         page: 1,
         perPage: 20,
         totalPages: 1,
       }));
+    }
+    // m024/m025:Drawer 数据源（详情抽屉打开时拉取,返回空集即可）
+    if (/^\/api\/admin\/users\/u-1\/(profile|sessions|devices|audit-log|extras|activity-log)$/.test(path)) {
+      if (path.endsWith('/profile')) return json(ok({ userId: 'u-1', totalRecords: 120, correctRecords: 90, accuracy: 0.75, avgResponseTimeMs: 120, sessionCount: 8, wordbookDistribution: [] }));
+      if (path.endsWith('/sessions')) return json(ok({ sessions: [] }));
+      if (path.endsWith('/devices')) return json(ok({ devices: [] }));
+      if (path.endsWith('/audit-log')) return json(ok({ entries: [] }));
+      if (path.endsWith('/extras')) return json(ok({}));
+      if (path.endsWith('/activity-log')) return json(ok({ entries: [] }));
     }
     if (path === '/api/admin/users/u-1/ban') {
       return json(ok({ banned: true, userId: 'u-1', sessionsRevoked: 1 }));
@@ -238,8 +316,59 @@ async function mockAdminApi(page: Page, overrides: { wordbookUrl?: string } = {}
       state.settings = { ...state.settings, ...(body as Record<string, unknown>) };
       return json(ok(state.settings));
     }
+    // v1.1.4 系统设置页:section 化 config + RBAC + API keys + 维护模式
+    if (path === '/api/admin/settings/config' && method === 'GET') {
+      return json(ok({
+        sections: [
+          { section: 'site', json: { brand: 'WordForge', subtitle: '运维 GUI', accent: '#5b6dff', theme: 'system', timezone: 'Asia/Shanghai', language: 'zh-CN', canonicalUrl: 'https://wf.test', adminUrl: 'https://wf.test/admin', cdnUrl: '', logoUrl: '', seo: '', maintenanceMode: false }, updatedAt: '2026-05-19T00:00:00Z' },
+          { section: 'auth', json: { jwt: { accessTtlMinutes: 120, refreshTtlDays: 30, rotation: true, algorithm: 'RS256' }, oauth: { google: true }, registration: { policy: 'open' }, twoFactor: { admin: 'required', paid: 'optional', regular: 'optional' }, lockout: { maxFailures: 5, windowMinutes: 15, lockMinutes: 30 }, password: { minLength: 8, minZxcvbnScore: 3, historyCount: 5 } }, updatedAt: '2026-05-19T00:00:00Z' },
+          { section: 'ratelimit', json: { globalRps: 200, anonRpm: 60, authRpm: 120, paidRpm: 300, ipBlocklist: { thresholdPerHour: 100, banHours: 24 }, sensitive: [] }, updatedAt: '2026-05-19T00:00:00Z' },
+          { section: 'audit', json: { retentionDays: 365, hashChain: true, siem: { target: 'none', url: '' } }, updatedAt: '2026-05-19T00:00:00Z' },
+          { section: 'backup', json: { fullCron: '0 3 * * 0', incrementalCron: '0 */6 * * *', walArchive: true, targets: [] }, updatedAt: '2026-05-19T00:00:00Z' },
+        ],
+      }));
+    }
+    if (path.startsWith('/api/admin/settings/config/') && method === 'PUT') {
+      const section = path.split('/').pop()!;
+      return json(ok({ section, json: body ?? {}, updatedAt: '2026-06-04T00:00:00Z' }));
+    }
+    if (path === '/api/admin/settings/snapshots' && method === 'GET') {
+      return json(ok({ snapshots: [] }));
+    }
+    if (path === '/api/admin/settings/snapshots' && method === 'POST') {
+      return json(ok({ id: 1, label: null, createdAt: '2026-06-04T00:00:00Z' }));
+    }
+    if (path === '/api/admin/settings/admins') {
+      return json(ok({ admins: [{ id: 'admin-1', email: 'admin@example.com', role: 'super_admin', createdAt: '2026-05-19T00:00:00Z' }] }));
+    }
+    if (path === '/api/admin/settings/api-keys') {
+      return json(ok({ keys: [] }));
+    }
+    if (path === '/api/admin/settings/backup-status') {
+      return json(ok({ targets: [] }));
+    }
+    if (path === '/api/admin/settings/maintenance' && method === 'POST') {
+      const next = (body as { active?: boolean } | undefined)?.active ?? false;
+      return json(ok({ active: next }));
+    }
+    if (path === '/api/admin/settings/version-gate') {
+      return json(ok({ enabled: false, minClientVersion: null, effectiveMinClientVersion: null }));
+    }
+    // GET /api/admin/broadcast → 看板（stats + broadcasts + pagination）
+    if (path === '/api/admin/broadcast' && method === 'GET') {
+      return json(ok({
+        stats: { total: 3, totalSent: 1024, avgReadRate: 0.62, online: 8 },
+        broadcasts: [
+          { id: 'bc-1', createdAt: '2026-05-19T00:00:00Z', author: 'admin', title: '历史广播', message: '内容', sentCount: 1024, readCount: 600, readRate: 0.6 },
+        ],
+        pagination: { total: 1, offset: 0, limit: 20 },
+      }));
+    }
     if (path === '/api/admin/broadcast/preview') {
       return json(ok({ matched: 428, total: 1024 }));
+    }
+    if (path === '/api/admin/broadcast/scheduled') {
+      return json(ok({ items: [] }));
     }
     // m042/D2:推送草稿存/取/删
     if (path === '/api/admin/broadcast/draft' && method === 'GET') {
@@ -267,7 +396,11 @@ async function mockAdminApi(page: Page, overrides: { wordbookUrl?: string } = {}
     }
 
     if (path === '/api/admin/monitoring/health') {
-      return json(ok({ status: 'healthy', dbSizeBytes: 3_145_728, uptimeSecs: 7200, version: '0.4.3' }));
+      return json(ok({
+        status: 'healthy', dbSizeBytes: 3_145_728, uptimeSecs: 7200, version: '0.4.3',
+        services: { store: { healthy: true }, amas: { healthy: true }, sse: { healthy: true, activeConnections: 1 } },
+        resources: { cpuPct: 12.5, memoryRssBytes: 52_428_800, pool: { connections: 2, max: 8 }, inflightRequests: 1 },
+      }));
     }
     if (path === '/api/admin/monitoring/database') {
       return json(ok({ sizeOnDisk: 3_145_728, tableCount: 18, tables: ['users', 'words'], pageSize: 4096, pageCount: 768, walEnabled: true }));
@@ -275,32 +408,65 @@ async function mockAdminApi(page: Page, overrides: { wordbookUrl?: string } = {}
     if (path === '/api/admin/monitoring/check-update') {
       return json(ok({ currentVersion: '0.4.3', latestVersion: '0.4.4', hasUpdate: true, releaseUrl: 'https://example.test/release', releaseNotes: 'Bug fixes' }));
     }
+    // v1.1.4 系统监控页:滚动请求指标 / 实时日志 / 派生告警时间线
+    if (path === '/api/admin/monitoring/requests') {
+      return json(ok({
+        window: url.searchParams.get('window') ?? '1h',
+        totalRequests: 1200, errorCount: 4, error5xx: 1, p50Ms: 12, p95Ms: 80, p99Ms: 140, qps: 3.2, availabilityPct: 99.95,
+        series: [
+          { t: Math.floor(Date.now() / 1000) - 60, qps: 3.0, p99Ms: 130 },
+          { t: Math.floor(Date.now() / 1000), qps: 3.4, p99Ms: 140 },
+        ],
+      }));
+    }
+    if (path === '/api/admin/monitoring/logs') {
+      return json(ok({ logs: [{ ts: Date.now(), level: 'INFO', target: 'learning_backend', message: 'request handled' }] }));
+    }
+    if (path === '/api/admin/monitoring/events') {
+      return json(ok({ events: [{ id: 'ev-1', kind: 'worker_failure', severity: 'warn', title: 'worker 抖动', message: 'llm_advisor 一次失败', at: '2026-05-19T00:00:00Z' }] }));
+    }
     if (path === '/api/admin/amas/monitoring') {
       return json(ok([{ timestamp: '2026-05-19T00:00:00Z', eventType: 'invariant_violation', data: { field: 'fatigue', value: 1.2 } }]));
+    }
+    if (path === '/api/admin/amas/advisor/cost') {
+      return json(ok({ monthYuan: 1.2, monthCapYuan: 100, quotaPct: 0.012, forecastYuan: 3.5, avg7dCostYuan: 0.1, monthCalls: 12, acceptedCount: 5, rejectedCount: 2, acceptanceRate: 0.71, todayYuan: 0.05, usdToCny: 7.3 }));
     }
     if (path === '/api/admin/monitoring/workers') {
       return json(ok({
         workers: [
-          { name: 'amas_decision_loop', lastRunAt: '2026-05-19T00:00:00Z', lastDurationMs: 12, lastOutcome: 'ok' },
-          { name: 'session_aggregator', lastRunAt: '2026-05-19T00:00:00Z', lastDurationMs: 8, lastOutcome: 'ok' },
+          { workerName: 'amas_decision_loop', lastRunAt: 1747641600, lastDurationMs: 12, lastOutcome: 'ok', lastError: null },
+          { workerName: 'session_aggregator', lastRunAt: 1747641600, lastDurationMs: 8, lastOutcome: 'ok', lastError: null },
         ],
       }));
     }
-    // Resource packs:list/upload/setActive/deactivate/stats
+    // Resource packs:list（AdminPackEntry[]）+ summary + stats
     if (path === '/api/admin/resource-packs' && method === 'GET') {
       return json(ok([
         {
           packId: 'cet4-2k',
-          name: 'CET-4 2K',
-          channels: {
-            stable: { activeVersion: 'v1.2.0', versions: [{ version: 'v1.2.0', publishedAt: '2026-04-01', sizeBytes: 524288 }] },
-            beta: { activeVersion: null, versions: [{ version: 'v1.3.0-beta.1', publishedAt: '2026-05-12', sizeBytes: 540000 }] },
-          },
+          description: 'CET-4 2K 核心词',
+          createdAt: '2026-04-01T00:00:00Z',
+          updatedAt: '2026-05-12T00:00:00Z',
+          active: { stable: 'v1.2.0', beta: null, internal: null },
+          totalInstalls: 128,
+          outcomes7d: { installed: 120, verify_failed: 5, rollback: 3 },
+          versions: [
+            { packId: 'cet4-2k', version: 'v1.2.0', sha256: 'a'.repeat(64), signature: 'sig', signatureAlg: 'Ed25519', sizeBytes: 524288, minAppVersion: '0.7.0', channel: 'stable', payloadPath: 'static/packs/cet4-2k/v1.2.0/payload.json', publishedAt: '2026-04-01T00:00:00Z', deactivatedAt: null },
+            { packId: 'cet4-2k', version: 'v1.3.0-beta.1', sha256: 'b'.repeat(64), signature: 'sig', signatureAlg: 'Ed25519', sizeBytes: 540000, minAppVersion: null, channel: 'beta', payloadPath: 'static/packs/cet4-2k/v1.3.0-beta.1/payload.json', publishedAt: '2026-05-12T00:00:00Z', deactivatedAt: null },
+          ],
         },
       ]));
     }
+    if (path === '/api/admin/resource-packs/summary') {
+      return json(ok({
+        totalPacks: 1, newPacksThisMonth: 0, totalVersions: 2,
+        versionsByChannel: { stable: 1, beta: 1, internal: 0 },
+        installsToday: 32, installsTodaySuccess: 30, failureRate7d: 0.06,
+        failures7dByOutcome: { verify_failed: 5, rollback: 3 }, onlineClients: 8,
+      }));
+    }
     if (path.startsWith('/api/admin/resource-packs/') && method === 'GET' && path.endsWith('/stats')) {
-      return json(ok({ downloads: 128, lastFetchedAt: '2026-05-18T22:00:00Z' }));
+      return json(ok({ packId: 'cet4-2k', stats: [{ version: 'v1.2.0', outcome: 'installed', count: 120 }] }));
     }
 
     if (path === '/api/admin/clients') {
@@ -324,6 +490,28 @@ async function mockAdminApi(page: Page, overrides: { wordbookUrl?: string } = {}
         }],
       }));
     }
+    // m027:设备页平台聚合 + 版本分布 + 升级策略
+    if (path === '/api/admin/clients/distribution') {
+      return json(ok({
+        platforms: [
+          { platform: 'web', total: 30, active7d: 12, monthOverMonthPct: 8 },
+          { platform: 'ios', total: 10, active7d: 4, monthOverMonthPct: -2 },
+          { platform: 'android', total: 5, active7d: 2, monthOverMonthPct: 1 },
+        ],
+        versions: [
+          { platform: 'web', version: '0.7.0', count: 20 },
+          { platform: 'web', version: '0.6.0', count: 10 },
+        ],
+        policies: [
+          { platform: 'web', minVersion: null, suggestedVersion: '0.7.0', grayscalePct: 0, pwaSilentUpdate: true },
+          { platform: 'ios', minVersion: null, suggestedVersion: null, grayscalePct: 0, pwaSilentUpdate: false },
+          { platform: 'android', minVersion: null, suggestedVersion: null, grayscalePct: 0, pwaSilentUpdate: false },
+        ],
+      }));
+    }
+    if (path === '/api/admin/clients/paginated') {
+      return json(ok({ data: [], total: 0, page: 1, perPage: 20, totalPages: 1 }));
+    }
     if (path === '/api/admin/clients/device-live-123456/ban') {
       return json(ok({ banned: true, deviceId: 'device-live-123456' }));
     }
@@ -332,6 +520,20 @@ async function mockAdminApi(page: Page, overrides: { wordbookUrl?: string } = {}
     }
     if (path.endsWith('/request-telemetry')) {
       return json(ok({ requestId: 'telemetry-request-1' }));
+    }
+    // 遥测分类总览（设备画像 + 每类聚合 + 操作概览）
+    if (path.startsWith('/api/admin/telemetry/') && path.endsWith('/summary')) {
+      return json(ok({
+        total: 1,
+        firstTs: '2026-05-19 12:00:00',
+        lastTs: '2026-05-19 12:01:00',
+        byEventType: [{ eventType: 'snapshot', count: 1, avgDurationSecs: 180, totalErrors: 0, avgActionsPerMin: 4.2, avgResponseMs: 120 }],
+        deviceProfile: { cpuCores: 8, memoryGb: 16, screenWidth: 1440, screenHeight: 900, pixelRatio: 2, osName: 'macOS', browserName: 'Chromium', browserVersion: '124', timezone: 'Asia/Shanghai', language: 'zh-CN', touchSupport: false, onlineStatus: true },
+        featureUsage: [{ name: 'learning', count: 3 }],
+        routes: [{ name: '/learning', count: 2 }],
+        clickTargets: [],
+        totalClicks: 12, totalErrors: 0, totalDurationSecs: 180, sessionCount: 1,
+      }));
     }
     if (path === '/api/admin/telemetry/device-live-123456' || path === '/api/admin/telemetry/device-recent-987654') {
       return json(ok({
@@ -348,6 +550,23 @@ async function mockAdminApi(page: Page, overrides: { wordbookUrl?: string } = {}
           featureUsage: { learning: 3 },
         }],
       }));
+    }
+
+    // v1.1.4 词库中心:本地词库列表 + 单本统计（左列表 + 右详情数据源）
+    if (path === '/api/admin/wordbooks' && method === 'GET') {
+      return json(ok({
+        items: [
+          { id: 'wb-1', name: 'CET-4 核心词', description: '大学英语四级高频词', type: 'system', wordCount: 3200, activeUsers: 42, tags: ['考试'], createdAt: '2026-05-19T00:00:00Z' },
+        ],
+        total: 1, page: 1, perPage: 200, totalPages: 1,
+        counts: { all: 1, system: 1, user: 0, totalEntries: 3200 },
+      }));
+    }
+    if (/^\/api\/admin\/wordbooks\/[^/]+\/stats$/.test(path)) {
+      return json(ok({ wordbookId: 'wb-1', totalWords: 3200, activeUsers: 42, avgMastery: 0.62, weeklyAnswers: 180 }));
+    }
+    if (/^\/api\/admin\/wordbooks\/[^/]+\/words$/.test(path) && method === 'GET') {
+      return json(ok({ data: [], total: 0, page: 1, perPage: 20, totalPages: 1 }));
     }
 
     if (path === '/api/admin/wordbook-center/browse') {
@@ -386,6 +605,15 @@ async function mockAdminApi(page: Page, overrides: { wordbookUrl?: string } = {}
         lastCheckedAt: '2026-05-19T00:00:00Z', autoCheckEnabled: true, allowDowngrade: false,
       }));
     }
+    if (path === '/api/admin/updates/history') {
+      return json(ok({ entries: [] }));
+    }
+    if (path === '/api/admin/updates/backups') {
+      return json(ok({ backups: [], totalBytes: 0 }));
+    }
+    if (path === '/api/admin/updates/changelog') {
+      return json(ok({ available: false, channel: 'stable', totalCommits: 0, categories: [] }));
+    }
 
     if (path === '/api/admin/amas/config' && method === 'GET') {
       return json(ok(baseConfig));
@@ -414,12 +642,59 @@ async function mockAdminApi(page: Page, overrides: { wordbookUrl?: string } = {}
         { date: '2026-05-19', algorithm: 'ige', callCount: 12, avgLatencyUs: 8000, errorCount: 1 },
       ]));
     }
+    if (path === '/api/admin/amas/metrics/kpi') {
+      return json(ok({ decisionTotal: 120, hitCount: 90, hitRate: 0.75, avgLatencyMs: 7, fatigueTriggerCount: 8, fatigueTriggerRate: 0.06, fatigueThreshold: 0.9 }));
+    }
+    if (path === '/api/admin/amas/metrics/algorithm-distribution') {
+      return json(ok([
+        { algorithm: 'heuristic', count: 60, pct: 0.5 },
+        { algorithm: 'ige', count: 40, pct: 0.33 },
+        { algorithm: 'swd', count: 20, pct: 0.17 },
+      ]));
+    }
+    if (path === '/api/admin/amas/metrics/stage-distribution') {
+      return json(ok({
+        totalUsers: 42,
+        stages: [
+          { stage: 'cold', users: 12, pct: 0.29, avgDecisions: 5, retention7d: 0.4, mainRoute: 'heuristic' },
+          { stage: 'transition', users: 18, pct: 0.43, avgDecisions: 30, retention7d: 0.6, mainRoute: 'ige' },
+          { stage: 'stable', users: 12, pct: 0.29, avgDecisions: 90, retention7d: 0.8, mainRoute: 'swd' },
+        ],
+        trend: [{ date: '2026-05-19', cold: 12, transition: 18, stable: 12 }],
+      }));
+    }
+    if (path === '/api/admin/amas/metrics/elo-scatter') {
+      return json(ok({ points: [{ elo: 1250, decisions: 30, deltaElo: 15 }], total: 1, meanElo: 1250 }));
+    }
+    if (path === '/api/admin/amas/metrics/mdm-heatmap') {
+      return json(ok({ days: ['2026-05-19'], bandCount: 14, cells: [Array.from({ length: 14 }, () => 0.3)], peak: 0.3 }));
+    }
+    if (path === '/api/admin/amas/metrics/fatigue-timeseries') {
+      return json(ok({ points: [{ date: '2026-05-19', avgFatigue: 0.4, peakFatigue: 0.7, triggerCount: 2 }], avgIntensity: 0.4, totalTriggers: 2, threshold: 0.9 }));
+    }
+    if (path === '/api/admin/amas/metrics/decision-histogram') {
+      return json(ok({ buckets: [{ label: '0-10', count: 12 }, { label: '10-50', count: 18 }, { label: '50+', count: 12 }], p50: 30, p95: 90, totalUsers: 42 }));
+    }
     if (path === '/api/admin/amas/anomalies') {
       return json(ok({ totalEvents: 120, anomalyCount: 3, violationCount: 1, coldStartExplore: 10, coldStartExploit: 20, byDay: [{ date: '2026-05-19', total: 120, anomalies: 3, violations: 1 }], topViolationFields: [{ field: 'fatigue', count: 1 }] }));
+    }
+    if (path === '/api/admin/amas/anomalies/feed') {
+      return json(ok({
+        summary: { error: 1, warn: 2, info: 0, invariantPass: 118, invariantTotal: 120, passRate: 0.983 },
+        items: [
+          { id: 'anom-1', timestamp: '2026-05-19T00:00:00Z', severity: 'error', code: 'fatigue_out_of_range', title: '疲劳越界', userId: 'user-alice-1', value: 1.2, expectedRange: '[0,1]', impactedUsers: 1, impactPct: 0.02 },
+        ],
+      }));
     }
     if (path === '/api/admin/amas/user-state/distribution') {
       const hist = (field: string) => ({ field, min: 0, max: 1, bins: [1, 2, 3, 2, 1], mean: 0.5, median: 0.5, sampleSize: 9 });
       return json(ok({ attention: hist('attention'), fatigue: hist('fatigue'), motivation: hist('motivation'), confidence: hist('confidence'), coldStartExplore: 5, coldStartExploit: 8 }));
+    }
+    if (path === '/api/admin/amas/user-state/transitions') {
+      return json(ok({ windowHours: 24, transitions: [{ from: 'cold', to: 'transition', count: 5 }] }));
+    }
+    if (path === '/api/admin/amas/user-state/clusters') {
+      return json(ok({ k: 4, totalUsers: 42, clusters: [{ label: '快而准', count: 12, pct: 0.29, avgResponseMs: 800, errorRate: 0.1, recordsPerActiveDay: 30 }] }));
     }
     if (path === '/api/admin/amas/compare') {
       return json(ok({
@@ -427,13 +702,21 @@ async function mockAdminApi(page: Page, overrides: { wordbookUrl?: string } = {}
         b: { versionHash: 'def456current', eventCount: 40, anomalyCount: 1, anomalyRate: 0.025, meanLatencyMs: 6, meanReward: 0.45, meanAttention: 0.8, meanFatigue: 0.3, meanMotivation: 0.6, meanConfidence: 0.7, firstEventAt: null, lastEventAt: null },
       }));
     }
-    if (path === '/api/admin/amas/suggestions') {
+    if (path === '/api/admin/amas/compare/ext') {
+      const slice = (versionHash: string, eventCount: number) => ({
+        versionHash, eventCount, hitRate: 0.75, p95LatencyMs: 80, meanLatencyMs: 7, fatigueRate: 0.06,
+        ensembleShare: 0.4, meanReward: 0.4, anomalyRate: 0.05, retention7d: 0.6, p95CompletionMs: 1200,
+        spark: [1, 2, 3], configEpsilon: 0.1, firstEventAt: '2026-05-18T00:00:00Z', lastEventAt: '2026-05-19T00:00:00Z',
+      });
+      return json(ok({ a: slice('abc123older', 20), b: slice('def456current', 40) }));
+    }
+    if (path === '/api/admin/amas/suggestions' && method === 'GET') {
       const status = url.searchParams.get('status');
-      const suggestions = [
-        { id: 7, createdAt: '2026-05-19T00:00:00Z', basedOnVersionHash: 'def456current', patchJson: { 'memoryModel.baseDesiredRetention': 0.86 }, rationale: '提高近期留存稳定性', evidenceJson: { sample: 120 }, status: 'pending', decidedBy: null, decidedAt: null, decisionNote: null, costUsd: 0.0123, tokensInput: 1000, tokensOutput: 400, confidence: 0.91 },
-        { id: 6, createdAt: '2026-05-18T00:00:00Z', basedOnVersionHash: 'abc123older', patchJson: { 'modeling.fatigueIncreaseRate': 0.018 }, rationale: '降低疲劳累积', evidenceJson: {}, status: 'approved', decidedBy: 'admin-1', decidedAt: '2026-05-18T01:00:00Z', decisionNote: null, costUsd: 0.01, tokensInput: 800, tokensOutput: 300, confidence: 0.88 },
+      // 仅 pending 返回待审建议;approved/rejected/auto_applied 返回空,避免重复决策按钮干扰断言
+      const pending = [
+        { id: 7, createdAt: '2026-05-19T00:00:00Z', basedOnVersionHash: 'def456current', patchJson: { 'memoryModel.baseDesiredRetention': 0.86 }, baseValuesJson: { 'memoryModel.baseDesiredRetention': 0.92 }, rationale: '提高近期留存稳定性', evidenceJson: { sample: 120 }, status: 'pending', decidedBy: null, decidedAt: null, decisionNote: null, costUsd: 0.0123, tokensInput: 1000, tokensOutput: 400, confidence: 0.91 },
       ];
-      return json(ok(status === 'pending' ? suggestions.filter((s) => s.status === 'pending') : suggestions));
+      return json(ok(status === 'pending' ? pending : []));
     }
     if (path === '/api/admin/amas/suggestions/7/approve') {
       return json(ok({ updated: true, versionHash: 'approved789', versionId: 5 }));
@@ -446,6 +729,19 @@ async function mockAdminApi(page: Page, overrides: { wordbookUrl?: string } = {}
     }
     if (path === '/api/admin/amas/suggestions/explain') {
       return json(ok({ explanation: '该参数控制目标留存率。', model: 'test', costUsd: 0.001, tokensInput: 10, tokensOutput: 10 }));
+    }
+    // LLM 顾问页附属端点（成本曲线 / 顾问配置 / 白名单 / canary）
+    if (path === '/api/admin/amas/advisor/cost/daily') {
+      return json(ok([{ date: '2026-05-19', costYuan: 0.1 }]));
+    }
+    if (path === '/api/admin/amas/advisor/config') {
+      return json(ok({ model: 'test-model', pollCron: '0 * * * *', apiKeyTail: '••1234', monthCapYuan: 100, autoApplyEnabled: false, autoApplyMaxPerDay: 2, autoApplyMinConfidence: 0.8, grayscaleSteps: [20, 50, 100], advisorEnabled: true }));
+    }
+    if (path === '/api/admin/amas/advisor/whitelist') {
+      return json(ok([]));
+    }
+    if (path === '/api/admin/amas/advisor/canary') {
+      return json(ok([]));
     }
 
     return json({ success: false, code: 'NOT_MOCKED', message: `No mock for ${method} ${path}` }, 500);
@@ -475,8 +771,9 @@ test.describe('Admin real UI flows', () => {
 
     await expect(page.getByRole('heading', { name: '用户管理' })).toBeVisible();
     await page.getByRole('button', { name: '打开导航菜单' }).click();
-    await expect(page.getByRole('link', { name: /AMAS 配置/ })).toBeVisible();
-    await page.getByRole('link', { name: /用户管理/ }).click();
+    // v1.1.4 侧边栏:旧「AMAS 配置」拆为「AMAS 调参 / AMAS 指标 / LLM 顾问」
+    await expect(page.getByRole('link', { name: 'AMAS 调参' })).toBeVisible();
+    await page.getByRole('link', { name: '用户管理' }).click();
     await expect(page.getByText('alice')).toBeVisible();
   });
 
@@ -489,25 +786,35 @@ test.describe('Admin real UI flows', () => {
     // WindowPicker 用 role="radio"（a11y 加固，原 button）
     await page.getByRole('radio', { name: '14天' }).click();
     await expect(page).toHaveURL(/days=14/);
-    await expect(page.getByText('14天答题数')).toBeVisible();
+    // KPI 卡标题随窗口动态拼为「{days} 天答题数」（v1.1.4 带空格）
+    await expect(page.getByText('14 天答题数')).toBeVisible();
   });
 
-  test('analytics switches windows and renders retention/state panels', async ({ page }) => {
+  test('analytics switches windows and renders funnel/cohort panels', async ({ page }) => {
     await mockAdminApi(page);
     await page.goto('/admin/analytics');
 
-    await expect(page.getByRole('heading', { name: '深度分析' })).toBeVisible();
-    await page.getByRole('radio', { name: '30天' }).click();
+    // v1.1.4 深度分析重构为漏斗 + cohort 矩阵 + 答题分布 + 词频,heading 改「数据分析」
+    await expect(page.getByRole('heading', { name: '数据分析' })).toBeVisible();
+    // 时间窗用 segmented button（非 role=radio），按钮文案带空格「30 天」
+    await page.getByRole('button', { name: '30 天' }).click();
     await expect(page).toHaveURL(/days=30/);
-    await expect(page.getByText('记忆遗忘曲线')).toBeVisible();
-    await expect(page.getByText('单词状态分布')).toBeVisible();
+    await expect(page.getByRole('heading', { name: /注册到长期留存 · 漏斗/ })).toBeVisible();
+    await expect(page.getByRole('heading', { name: /留存矩阵 · 7 周 cohort/ })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '答题分布' })).toBeVisible();
   });
+
+  // v1.1.4 用户管理重构:行内直接「封禁/重置密码」按钮收进每行三点「更多操作」菜单。
+  async function openRowMenu(page: Page) {
+    await expect(page.getByText('alice')).toBeVisible();
+    await page.getByRole('button', { name: 'alice 更多操作' }).click();
+  }
 
   test('user management supports ban confirmation', async ({ page }) => {
     const state = await mockAdminApi(page);
     await page.goto('/admin/users');
 
-    await expect(page.getByText('alice')).toBeVisible();
+    await openRowMenu(page);
     await page.getByRole('button', { name: '封禁' }).click();
     await expect(page.getByRole('heading', { name: '确认封禁' })).toBeVisible();
     await page.getByRole('button', { name: '确认封禁' }).click();
@@ -518,6 +825,7 @@ test.describe('Admin real UI flows', () => {
     await mockAdminApi(page);
     await page.goto('/admin/users');
 
+    await openRowMenu(page);
     await page.getByRole('button', { name: '重置密码' }).click();
     await page.getByText('生成重置密钥').click();
     await expect(page.getByText('reset-key-123')).toBeVisible();
@@ -527,6 +835,7 @@ test.describe('Admin real UI flows', () => {
     await mockAdminApi(page);
     await page.goto('/admin/users');
 
+    await openRowMenu(page);
     await page.getByRole('button', { name: '重置密码' }).click();
     await page.getByText('直接重置密码').click();
     await page.getByLabel('新密码').fill('Strongp4ssword!');
@@ -539,6 +848,7 @@ test.describe('Admin real UI flows', () => {
     const state = await mockAdminApi(page);
     await page.goto('/admin/users');
 
+    await openRowMenu(page);
     await page.getByRole('button', { name: '重置密码' }).click();
     await page.getByText('直接重置密码').click();
     await page.getByLabel('新密码').fill('Strongp4ssword!');
@@ -547,49 +857,53 @@ test.describe('Admin real UI flows', () => {
     await expect.poll(() => state.calls.some((c) => c.path === '/api/admin/users/u-1/set-password')).toBe(true);
   });
 
-  test('settings saves basic settings', async ({ page }) => {
+  // v1.1.4 系统设置重构为 7 板块 section 化（site/auth/ratelimit/audit/backup + RBAC + API keys），
+  // 旧的「最大用户数」单字段已不存在;保存改为按 section PUT /settings/config/:section。
+  test('settings edits a site field and saves the section', async ({ page }) => {
     const state = await mockAdminApi(page);
     await page.goto('/admin/settings');
 
-    await page.getByLabel('最大用户数').fill('2000');
-    await page.getByRole('button', { name: '保存设置' }).first().click();
-    await expect.poll(() => state.calls.some((c) => c.method === 'PUT' && c.path === '/api/admin/settings')).toBe(true);
+    // 改「站点与外观」板块的品牌名称（首个 placeholder=品牌名称 的输入）
+    await page.getByPlaceholder('品牌名称').fill('WordForge X');
+    // dirty 后 save-bar 出现,点「全部保存」触发 section PUT
+    await page.getByRole('button', { name: /全部保存/ }).click();
+    await expect
+      .poll(() => state.calls.some((c) => c.method === 'PUT' && c.path === '/api/admin/settings/config/site'))
+      .toBe(true);
   });
 
-  test('settings confirms maintenance mode before saving', async ({ page }) => {
-    await mockAdminApi(page);
+  test('settings confirms maintenance mode before applying', async ({ page }) => {
+    const state = await mockAdminApi(page);
     await page.goto('/admin/settings');
 
-    await page.getByLabel('维护模式').click();
+    // 维护模式从 MaintenanceBanner 的「进入维护模式」按钮触发二次确认
+    await page.getByRole('button', { name: '进入维护模式' }).click();
     await expect(page.getByRole('heading', { name: '确认开启维护模式' })).toBeVisible();
-    await page.getByRole('button', { name: '确认开启' }).click();
-    await expect(page.getByLabel('维护模式')).toBeChecked();
+    await page.getByRole('button', { name: '进入维护模式' }).last().click();
+    await expect
+      .poll(() => state.calls.some((c) => c.method === 'POST' && c.path === '/api/admin/settings/maintenance'))
+      .toBe(true);
+    await expect(page.getByText('维护模式运行中 · 仅管理员可访问')).toBeVisible();
   });
 
   test('broadcast page sends system message after confirmation', async ({ page }) => {
     const state = await mockAdminApi(page);
     await page.goto('/admin/broadcast');
 
-    await page.getByPlaceholder('通知标题').fill('维护通知');
-    await page.getByPlaceholder('通知内容').fill('今晚维护 10 分钟');
+    // v1.1.4 撰写表单:标题 #bc-title / 正文 #bc-message，发送按钮「发送广播」
+    await page.locator('#bc-title').fill('维护通知');
+    await page.locator('#bc-message').fill('今晚维护 10 分钟');
     await page.getByRole('button', { name: '发送广播' }).click();
-    await expect(page.getByRole('heading', { name: /确认发送/ })).toBeVisible();
-    await page.getByRole('button', { name: '确认发送' }).click();
-    await expect.poll(() => state.calls.some((c) => c.path === '/api/admin/broadcast')).toBe(true);
+    // ConfirmDialog 标题「确认发送广播？」，确认按钮「立即发送」
+    await expect(page.getByRole('heading', { name: /确认发送广播/ })).toBeVisible();
+    await page.getByRole('button', { name: '立即发送' }).click();
+    await expect
+      .poll(() => state.calls.some((c) => c.path === '/api/admin/broadcast' && c.method === 'POST'))
+      .toBe(true);
   });
 
-  test('broadcast page switches to update tab and sends update notice', async ({ page }) => {
-    const state = await mockAdminApi(page);
-    await page.goto('/admin/broadcast');
-
-    // 切到'更新通知' tab
-    await page.getByRole('tab', { name: /更新通知/ }).click();
-    await page.getByPlaceholder(/请刷新页面/).fill('请刷新页面以获取最新内容');
-    await page.getByRole('button', { name: /发送更新通知/ }).click();
-    await expect(page.getByRole('heading', { name: /确认发送/ })).toBeVisible();
-    await page.getByRole('button', { name: '确认发送' }).click();
-    await expect.poll(() => state.calls.some((c) => c.path === '/api/admin/broadcast-update')).toBe(true);
-  });
+  // 注:旧「更新通知」tab + broadcast-update 流程在 v1.1.4 系统广播页已整体移除
+  // （broadcastUpdate API 仍在但无 UI 入口），故删除原 'switches to update tab' 用例。
 
   test('command palette opens on ⌘K and navigates via Enter', async ({ page }) => {
     await mockAdminApi(page);
@@ -611,10 +925,11 @@ test.describe('Admin real UI flows', () => {
     await mockAdminApi(page);
     await page.goto('/admin/resource-packs');
 
-    // hero
-    await expect(page.getByRole('heading', { name: '资源包管理' })).toBeVisible();
+    // hero（v1.1.4 标题为「资源包」）
+    await expect(page.getByRole('heading', { name: '资源包' })).toBeVisible();
     // 通道 tab 应当至少包含 stable / beta
     await expect(page.getByRole('tab', { name: /stable/i })).toBeVisible();
+    await expect(page.getByRole('tab', { name: /beta/i })).toBeVisible();
   });
 
   test('wordbook center shows unconfigured state', async ({ page }) => {
@@ -624,18 +939,20 @@ test.describe('Admin real UI flows', () => {
     await expect(page.getByText('尚未配置词书中心 URL')).toBeVisible();
   });
 
-  test('wordbook center filters, previews, and imports a wordbook', async ({ page }) => {
+  test('wordbook center previews and imports a remote wordbook', async ({ page }) => {
     const state = await mockAdminApi(page);
     await page.goto('/admin/wordbook-center');
 
-    await expect(page.getByText('CET-4 核心词')).toBeVisible();
-    await page.getByPlaceholder('搜索词书...').fill('CET');
-    await expect(page.getByText('IELTS 学术词')).toBeHidden();
-    await page.getByText('CET-4 核心词').click();
+    // v1.1.4 远程目录在底部 ImportSection;远程卡片含「预览」「导入」按钮
+    const remoteCard = page.locator('.remote-card', { hasText: 'CET-4 核心词' });
+    await expect(remoteCard).toBeVisible();
+    await remoteCard.getByRole('button', { name: '预览' }).click();
     await expect(page.getByText('abandon')).toBeVisible();
-    await page.getByRole('button', { name: '关闭' }).click();
-    await page.getByRole('button', { name: '导入为系统词书' }).click();
-    // 新增二次确认 ConfirmDialog
+    // 预览 Modal 顶部关闭按钮（aria-label 关闭）
+    await page.getByRole('button', { name: '关闭', exact: true }).click();
+    await remoteCard.getByRole('button', { name: '导入' }).click();
+    // 二次确认 ConfirmDialog「确认导入词库」
+    await expect(page.getByRole('heading', { name: '确认导入词库' })).toBeVisible();
     await page.getByRole('button', { name: '确认导入' }).click();
     await expect.poll(() => state.calls.some((c) => c.path === '/api/admin/wordbook-center/import/cet4')).toBe(true);
   });
@@ -650,14 +967,16 @@ test.describe('Admin real UI flows', () => {
     await expect.poll(() => state.calls.some((c) => c.path === '/api/admin/wordbook-center/updates/ielts/sync')).toBe(true);
   });
 
-  test('monitoring page renders health, database, public probe, and AMAS events', async ({ page }) => {
+  test('monitoring page renders health, workers, requests, and live log panels', async ({ page }) => {
     await mockAdminApi(page);
     await page.goto('/admin/monitoring');
 
-    await expect(page.getByText('系统健康')).toBeVisible();
-    await expect(page.getByText('数据库信息')).toBeVisible();
-    await expect(page.getByText('公开健康探针')).toBeVisible();
-    await expect(page.getByText('invariant_violation')).toBeVisible();
+    // v1.1.4 系统监控重构:SLO + 服务状态 + worker 心跳 + 实时请求/日志/告警时间线
+    await expect(page.getByRole('heading', { name: '系统监控' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '服务状态' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Worker 心跳' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '实时日志' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '告警时间线' })).toBeVisible();
   });
 
   test('clients page bans live device with reason', async ({ page }) => {
@@ -743,7 +1062,8 @@ test.describe('Admin real UI flows', () => {
 
     await expect(page.getByText('当前版本')).toBeVisible();
     await page.getByRole('button', { name: '立即检查' }).click();
-    await page.getByRole('button', { name: /一键升级到 0\.4\.4/ }).click();
+    // v1.1.4 升级主按钮文案为「立即升级到 X」
+    await page.getByRole('button', { name: /立即升级到 0\.4\.4/ }).click();
     await expect(page.getByRole('heading', { name: '确认一键更新' })).toBeVisible();
     await expect.poll(() => state.calls.some((c) => c.path === '/api/admin/updates/check')).toBe(true);
   });
@@ -752,21 +1072,29 @@ test.describe('Admin real UI flows', () => {
     const state = await mockAdminApi(page);
     await page.goto('/admin/amas-config');
 
-    await expect(page.getByText('AMAS 调参')).toBeVisible();
+    // 标题在侧栏链接 + 页头 h1 各出现一次,断言收敛到 heading
+    await expect(page.getByRole('heading', { name: 'AMAS 调参' })).toBeVisible();
+    // 首个 number 输入是「目标长期留存率」(baseDesiredRetention,合法区间 [0.7,0.97],baseline=0.92)。
+    // 填合法值才能避开校验错误（非法值会让「验证并应用」禁用、dirty 角标改显校验错误）。
     const firstNumber = page.locator('input[type="number"]').first();
-    await firstNumber.fill('0.5');
-    await expect(page.getByText('未保存的修改')).toBeVisible();
-    await page.getByRole('button', { name: '放弃修改' }).click();
-    await expect(page.getByText('未保存的修改')).toBeHidden();
-    await firstNumber.fill('0.5');
-    await page.getByRole('button', { name: '保存配置' }).click();
-    // 新增 ConfirmDialog："确认保存 AMAS 配置"
+    await firstNumber.fill('0.85');
+    // v1.1.4 dirty 角标文案「未保存 · N 处」，丢弃改用「回滚到 baseline」+ ConfirmDialog，保存按钮「验证并应用」
+    const dirtyBadge = page.getByText(/未保存 · \d+ 处/);
+    await expect(dirtyBadge).toBeVisible();
+    await page.getByRole('button', { name: '回滚到 baseline' }).click();
+    await page.getByRole('button', { name: '确认回滚' }).click();
+    await expect(dirtyBadge).toBeHidden();
+    await firstNumber.fill('0.85');
+    await page.getByRole('button', { name: '验证并应用' }).click();
+    // ConfirmDialog："确认保存 AMAS 配置"
     await page.getByRole('button', { name: '确认保存' }).click();
     await expect.poll(() => state.calls.some((c) => c.method === 'PUT' && c.path === '/api/admin/amas/config')).toBe(true);
-    // 保存成功后 baseline 同步 → dirty=false → 热重载按钮被 disabled (title="无修改")
-    // 想触发热重载需再造一次脏修改
-    await firstNumber.fill('0.6');
-    await expect(page.getByText('未保存的修改')).toBeVisible();
+    // 保存成功后 baseline 同步 → dirty=false。必须等 saveConfig 的 setBaseline 落定
+    // （否则随后再造的脏修改会被 setBaseline(config) 吞掉），以 dirty 角标消失为信号。
+    await expect(dirtyBadge).toBeHidden();
+    // 想触发热重载需再造一次脏修改（仍取合法区间内值）
+    await firstNumber.fill('0.88');
+    await expect(dirtyBadge).toBeVisible();
     await page.getByRole('button', { name: '热重载' }).click();
     // 热重载同样走 ConfirmDialog："确认热重载 AMAS 配置"
     await page.getByRole('button', { name: '确认热重载' }).click();
@@ -789,29 +1117,28 @@ test.describe('Admin real UI flows', () => {
     await mockAdminApi(page);
     await page.goto('/admin/amas-metrics');
 
+    // 默认 metrics tab 末尾固定双轴时序卡，h3 与 tab 同名
     await expect(page.getByRole('heading', { name: '算法延迟 / 错误率' })).toBeVisible();
     await page.getByRole('tab', { name: /异常/ }).click();
-    await expect(page.getByText('异常次数')).toBeVisible();
+    await expect(page.getByRole('heading', { name: '异常 / 不变量违反' })).toBeVisible();
     await page.getByRole('tab', { name: /用户状态分布/ }).click();
-    await expect(page.getByText('注意力')).toBeVisible();
+    await expect(page.getByRole('heading', { name: '每用户决策数分布' })).toBeVisible();
     await page.getByRole('tab', { name: /版本对比/ }).click();
-    await expect(page.getByText('差异表')).toBeVisible();
+    // 版本对比面板 A/B 选择器 + 指标差异行
+    await expect(page.getByText('基线版本 (A)')).toBeVisible();
+    await expect(page.getByText('对比版本 (B)')).toBeVisible();
   });
 
-  test('AMAS advisor approves and rejects pending suggestions', async ({ page }) => {
+  test('AMAS advisor approves and rejects a pending suggestion', async ({ page }) => {
     const state = await mockAdminApi(page);
-    // 批准/拒绝改用项目自带 ConfirmDialog/Modal，不再触发浏览器原生 confirm()/prompt()
     await page.goto('/admin/amas-advisor');
 
+    // v1.1.4 LLM 顾问:SuggestionCard 的「批准并应用」「拒绝」直接调 API（无二次确认弹窗）。
+    // 待审区只有一条建议（id 7,mock 保持返回故批准后仍在列表),用 .first() 收敛到该卡。
     await expect(page.getByText('提高近期留存稳定性')).toBeVisible();
-    // 卡片"批准并应用" → 打开 ConfirmDialog；dialog 内同名按钮才真正调 API（取 last）
     await page.getByRole('button', { name: '批准并应用' }).first().click();
-    await expect(page.getByRole('heading', { name: '确认批准并应用 patch' })).toBeVisible();
-    await page.getByRole('button', { name: '批准并应用' }).last().click();
     await expect.poll(() => state.calls.some((c) => c.path === '/api/admin/amas/suggestions/7/approve')).toBe(true);
-    // 卡片"拒绝" → 打开 Modal；Modal 内"确认拒绝"才真正调 API
-    await page.getByRole('button', { name: '拒绝' }).click();
-    await page.getByRole('button', { name: '确认拒绝' }).click();
+    await page.getByRole('button', { name: '拒绝' }).first().click();
     await expect.poll(() => state.calls.some((c) => c.path === '/api/admin/amas/suggestions/7/reject')).toBe(true);
   });
 });

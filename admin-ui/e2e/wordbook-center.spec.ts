@@ -30,7 +30,7 @@ test.describe('Wordbook Center (legacy redirect)', () => {
     await page.goto('/admin/wordbook-center');
     // 未登录会被 ProtectedRoute 跳到管理员登录
     await page.waitForURL('**/admin/login', { timeout: 10_000 });
-    await expect(page.getByText('管理后台登录')).toBeVisible();
+    await expect(page.getByText('登录管理后台')).toBeVisible();
   });
 
   test('legacy notice references migrated repo name', async ({ page }) => {
