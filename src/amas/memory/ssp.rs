@@ -173,7 +173,12 @@ fn cost_modulation(s: f64, difficulty: f64, coeff_s: f64, coeff_d: f64) -> f64 {
 fn fsrs5_next_interval(s: f64, r: f64, config: &crate::amas::config::MemoryModelConfig) -> f64 {
     let factor = config.forgetting_curve_factor;
     let decay = config.forgetting_curve_decay;
-    let ivl = s / factor * (r.powf(1.0 / decay) - 1.0);
+    let floor = config.forgetting_curve_floor;
+    // 与 mdm::compute_interval 一致：先把目标保持率反楼层化 (r-floor)/(1-floor) 再反演幂律。漏掉此项
+    // 时 floor>0 下本函数不再是 fsrs5_recall 的反函数（fsrs5_recall = floor+(1-floor)*power_law），
+    // 导致 SSP 策略表的目标 R 与实际产出间隔系统性错配（默认 floor 0.1 起即偏移）。
+    let adjusted = ((r - floor) / (1.0 - floor).max(1e-9)).clamp(1e-6, 1.0);
+    let ivl = s / factor * (adjusted.powf(1.0 / decay) - 1.0);
     ivl.max(1.0).floor()
 }
 

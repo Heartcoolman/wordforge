@@ -542,27 +542,14 @@ pub(crate) async fn apply_and_persist_config(
     cfg.validate()
         .map_err(|e| AppError::bad_request("AMAS_INVALID_CONFIG", &e))?;
 
-    state
-        .amas()
-        .reload_config(cfg.clone())
-        .map_err(|e| AppError::bad_request("AMAS_INVALID_CONFIG", &e))?;
-
-    // 写回 TOML 文件，保持文件与内存状态一致
-    let toml_path = state
-        .config()
-        .amas_config_file
-        .clone()
-        .unwrap_or_else(|| "amas_config.toml".to_string());
-    if let Err(e) = cfg.write_to_toml(&toml_path) {
-        tracing::warn!(path = %toml_path, error = %e, "写回 AMAS 配置文件失败");
-    }
-
-    // 序列化为 canonical JSON 并落版本表
+    // 原子性收口：先落版本行（唯一易失败的 DB 步骤：SQLITE_BUSY/磁盘满），再做不可逆的 live 热重载。
+    // 这样"apply 失败 ⟹ live 内存未变"——approve_one 的 Approved→Pending 回退即可让 live 与建议状态保持
+    // 一致、可安全重试。旧顺序（先 reload 后插版本）下版本插入失败会留下"live 已是新配置但无任何已落地
+    // 版本行"的悬挂态，而回退只动建议状态、无从复位 live，造成 live/审计/建议三方背离。
     let snapshot_json = serde_json::to_string(&cfg)
         .map_err(|e| AppError::internal(&format!("配置序列化失败: {e}")))?;
-
     let admin_id_owned = admin_id.to_string();
-    let snapshot_for_db = snapshot_json.clone();
+    let snapshot_for_db = snapshot_json;
     let note_for_db = note.clone();
     let (version_id, version_hash) = state
         .run_store_task("admin.amas.insert_version", move |store| {
@@ -580,6 +567,23 @@ pub(crate) async fn apply_and_persist_config(
             )
         })
         .await??;
+
+    // 版本已落库后再热重载进 live 内存。reload_config 仅在 validate 失败时返错，而上面已对同一 cfg
+    // validate 过（SSP 预计算无 Result），故此步等效不会失败、不会引入"版本在、live 未变"的新窗口。
+    state
+        .amas()
+        .reload_config(cfg.clone())
+        .map_err(|e| AppError::bad_request("AMAS_INVALID_CONFIG", &e))?;
+
+    // 写回 TOML 文件（best-effort），保持文件与内存状态一致
+    let toml_path = state
+        .config()
+        .amas_config_file
+        .clone()
+        .unwrap_or_else(|| "amas_config.toml".to_string());
+    if let Err(e) = cfg.write_to_toml(&toml_path) {
+        tracing::warn!(path = %toml_path, error = %e, "写回 AMAS 配置文件失败");
+    }
 
     tracing::info!(
         admin_id = %admin_id,
@@ -1165,17 +1169,28 @@ async fn rollback_suggestion(
         .await??
         .ok_or_else(|| AppError::not_found("建议不存在"))?;
 
-    // 定位该建议 approve 产出的版本（note == "approve suggestion#{id}"），回滚目标 = 其 parent 版本。
+    // 定位该建议产出的版本，回滚目标 = 其 parent 版本。两条产出路径：
+    //   ① approve（note == "approve suggestion#{id}"）；
+    //   ② canary promote（建议 in_canary→approved，promote 版本 note 为 "promote canary#..." 不含
+    //      suggestion id）→ 按 suggestion_id 结构化定位 effective canary，其版本的 parent 即回滚目标
+    //      （promote 时新 stable 版本 parent = 该 canary 版本 parent = 灰度起点 baseline）。
     let approve_note = format!("approve suggestion#{id}");
     let parent_hash = state
         .run_store_task("admin.amas.rollback_find_version", move |store| {
             let versions = store.list_amas_config_versions(500)?;
-            Ok::<_, crate::store::StoreError>(
-                versions
-                    .into_iter()
-                    .find(|v| v.note.as_deref() == Some(approve_note.as_str()))
-                    .and_then(|v| v.parent_version_hash),
-            )
+            if let Some(parent) = versions
+                .into_iter()
+                .find(|v| v.note.as_deref() == Some(approve_note.as_str()))
+                .and_then(|v| v.parent_version_hash)
+            {
+                return Ok::<_, crate::store::StoreError>(Some(parent));
+            }
+            if let Some(vhash) = store.effective_canary_version_for_suggestion(id)? {
+                if let Some(v) = store.get_amas_config_version(&vhash)? {
+                    return Ok(v.parent_version_hash);
+                }
+            }
+            Ok(None)
         })
         .await??
         .ok_or_else(|| {
@@ -1324,6 +1339,43 @@ async fn explain_param(
         .await?
     {
         tracing::warn!(error = %e, "explain_param: 月成本台账写入失败");
+    }
+    // 计费留痕(#7) 之二：日成本守卫按 amas_tuning_suggestions.cost_usd 汇总
+    // （aggregate_amas_suggestion_spend_today），故 explain 的花费也必须落一条 billing-only 留痕行，
+    // 否则 explain 永不计入 spend_today、日上限形同虚设（只剩月上限+限流兜底）。与 worker 侧
+    // record_billing_only 同源；状态 Rejected，不进 pending 待办列表。
+    let billing_cost = cost;
+    let billing_in = resp.usage.prompt_tokens;
+    let billing_out = resp.usage.completion_tokens;
+    if let Err(e) = state
+        .run_store_task("admin.amas.explain.billing_row", move |store| {
+            use crate::store::operations::amas_suggestions::{InsertSuggestion, SuggestionStatus};
+            let based = store
+                .list_amas_config_versions(1)
+                .ok()
+                .and_then(|mut v| v.pop())
+                .map(|r| r.version_hash)
+                .unwrap_or_default();
+            store
+                .insert_amas_suggestion(&InsertSuggestion {
+                    based_on_version_hash: based,
+                    patch_json: "{}".into(),
+                    rationale: String::new(),
+                    evidence_json: "{}".into(),
+                    cost_usd: Some(billing_cost),
+                    tokens_input: Some(billing_in),
+                    tokens_output: Some(billing_out),
+                    confidence: None,
+                    initial_status: SuggestionStatus::Rejected,
+                    decided_by: Some("admin:explain".into()),
+                    decision_note: Some("explain billing-only".into()),
+                    base_values_json: None,
+                })
+                .map(|_| ())
+        })
+        .await?
+    {
+        tracing::warn!(error = %e, "explain_param: 日成本留痕写入失败");
     }
     Ok(ok(serde_json::json!({
         "explanation": resp.content,
@@ -2690,7 +2742,7 @@ async fn rollback_canary(
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     state
         .run_store_task("admin.amas.canary.rollback", move |store| {
-            store.set_patch_canary_status(id, "rolled_back")
+            store.rollback_patch_canary_and_release_suggestion(id)
         })
         .await?
         .map_err(|e| AppError::bad_request("ROLLBACK_FAILED", &e.to_string()))?;

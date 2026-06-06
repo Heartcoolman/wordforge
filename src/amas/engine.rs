@@ -380,19 +380,29 @@ impl AMASEngine {
 
         Self::update_session_counters(&mut context.user_state, &raw_event, now);
         // #11/#14/#39：ELO 的 read-modify-write 收进 persist_state 的同一原子 tx，与 user_state/
-        // algo_states/幂等标记全有或全无。word_id 为空（如纯 quit 事件）则不带 ELO。
-        let elo_spec = (!raw_event.word_id.is_empty()).then(|| {
+        // algo_states/幂等标记全有或全无。**仅幂等路径（携带 client_record_id 的 records 流）应用 ELO**：
+        // word_elo 是全局共享、被全员选词读取的写，只应由正规学习事件驱动。非幂等诊断端点
+        // （/api/amas/process-event、/batch-process）不带幂等键，既无重试去重也无回滚快照——若在此写
+        // ELO，重试会双重累加 user_elo、并污染全局 word_elo（本 PR 前这些端点对 ELO 零副作用）。
+        // 故 idempotency_key 为 None 时不带 ELO；word_id 为空（纯 quit 事件）同样不带。
+        let elo_spec = (idempotency_key.is_some() && !raw_event.word_id.is_empty()).then(|| {
+            // #14 抗投毒上限固定取 **stable 基线** ELO 参数派生（非 per-event effective config）：把单
+            // 用户对某词全局评分的累计净位移钳在该词单次最大可能位移（novice 期 k_word）的 4 倍内。账本
+            // word_elo_user_contrib 是 per-(user,word) 全局单一累加器、无配置版本维度；若 cap 改用 canary
+            // 的 effective config，用户在 canary/stable 间往返会按浮动 cap 累计——高 cap canary 段可越过
+            // stable 投毒边界，低 cap stable 段又会给正确作答施加伪负位移。cap 钉死 stable 才保证不变式一致。
+            let stable_cap = {
+                let stable = self.config.read();
+                stable.elo.k_factor
+                    * stable.elo.word_k_factor_ratio
+                    * stable.elo.novice_k_multiplier
+                    * 4.0
+            };
             crate::store::operations::engine::EloUpdateSpec {
                 word_id: raw_event.word_id.clone(),
                 is_correct: raw_event.is_correct,
                 config: context.config.elo.clone(),
-                // 单用户对某词全局评分的累计净位移上限：取该词单次最大可能位移（novice 期 k_word）
-                // 的 4 倍，使正常学习者（净位移会随 ELO 收敛而衰减）几乎不受影响，但封死单设备
-                // 反复同向投毒把全局词难度推到 clamp 边界的路径（#14）。
-                max_user_word_displacement: context.config.elo.k_factor
-                    * context.config.elo.word_k_factor_ratio
-                    * context.config.elo.novice_k_multiplier
-                    * 4.0,
+                max_user_word_displacement: stable_cap,
             }
         });
         // W1-1 并发收口：标记已被并发请求抢先写入则整笔回滚，返回 None 让调用方走裸记录回放。

@@ -292,6 +292,15 @@ impl AMASConfig {
         {
             return Err("memory_model.forgetting_curve_floor must be in [0,1)".to_string());
         }
+        // 跨字段：floor 必须严格小于 retention_min。运行期 target_recall（desired_retention）被夹到
+        // [retention_min, retention_max]，若 floor >= retention_min，则 target_recall 可 <= floor，使
+        // compute_interval 的 (target-floor)/(1-floor) 夹到 1e-6、产出退化(max 夹紧)间隔而非报错。
+        if self.memory_model.forgetting_curve_floor >= self.memory_model.retention_min {
+            return Err(
+                "memory_model.forgetting_curve_floor must be < retention_min (else desired_retention can fall at/below the asymptote and degenerate intervals)"
+                    .to_string(),
+            );
+        }
         // FSRS-5 w[] 权重：w[8]/w[11] 等经 .exp() 消费，非有限或过大会 overflow 为 Inf，
         // 进而污染 stability 并以 JSON null 落库；逐元素拒绝非有限及越界值。
         if self

@@ -86,8 +86,11 @@ impl Store {
     }
 
     /// #3：批量取候选词 ELO。原实现按 word_id 逐个 `get_word_elo`（N 次 pool.get + N 次查询）；
-    /// 改为单条 `WHERE word_id IN (...)`，分块 ≤900 占位符以避开 SQLite 参数上限。缺失的词不入表，
-    /// 调用方对缺失项用默认值（与逐个查 `unwrap_or_default` 行为一致）。
+    /// 改为单条 `WHERE word_id IN (...)`，分块 ≤900 占位符以避开 SQLite 参数上限。**表中缺失的词
+    /// （未被任何人作答过的新词，常态）回退 `EloRating::default()`（rating=default_elo 1200）填入**，
+    /// 与旧逐个查 `get_word_elo`（内部 `unwrap_or_default` 落 EloRating 默认 1200）同语义：调用方
+    /// word_selector 需要"全员默认 1200"才能正确算 ZPD 距离；若让其 `Option::<f64>::unwrap_or_default()`
+    /// 得 0.0，新词会被挤出 ZPD 高斯峰值、选词排序全错。
     pub fn get_word_elos_by_ids(
         &self,
         word_ids: &[String],
@@ -117,6 +120,13 @@ impl Store {
                 let (word_id, elo) = row?;
                 result.entry(word_id).or_insert(elo);
             }
+        }
+        // 表中缺失的词回退默认 ELO（rating 1200），保持与旧逐个查 unwrap_or_default 一致的"全员默认"
+        // 语义；缺了它，调用方对缺失项会落到 f64 默认 0.0，污染新词 ZPD 评分。
+        for word_id in word_ids {
+            result
+                .entry(word_id.clone())
+                .or_insert_with(EloRating::default);
         }
         Ok(result)
     }
