@@ -113,6 +113,10 @@ fn migrations() -> Vec<(&'static str, MigrationFn)> {
             "050_word_elo_user_contrib",
             m050_word_elo_user_contrib,
         ),
+        (
+            "051_suggestion_status_in_canary",
+            m051_suggestion_status_in_canary,
+        ),
     ]
 }
 
@@ -220,6 +224,10 @@ fn migrations_down() -> Vec<(&'static str, MigrationFn)> {
         (
             "050_word_elo_user_contrib",
             m050_word_elo_user_contrib_down,
+        ),
+        (
+            "051_suggestion_status_in_canary",
+            m051_suggestion_status_in_canary_down,
         ),
     ]
 }
@@ -2522,6 +2530,91 @@ fn m050_word_elo_user_contrib(store: &Store) -> Result<(), StoreError> {
 fn m050_word_elo_user_contrib_down(store: &Store) -> Result<(), StoreError> {
     let conn = store.conn()?;
     conn.execute_batch("DROP TABLE IF EXISTS word_elo_user_contrib;")?;
+    Ok(())
+}
+
+/// m051:#9 灰度迁出态——把 'in_canary' 纳入 amas_tuning_suggestions.status 的 CHECK 白名单。
+/// create_canary_and_claim_suggestion 把 Pending→InCanary('in_canary') 收进建灰度同一事务,
+/// 防建议在灰度期间被 approve/approve-all 二次全量应用;但旧库的 CHECK 不含该值,UPDATE 直接约束违例。
+/// SQLite 无法在位 ALTER CHECK,故整表重建(12 步式)迁移已有数据并刷新索引。
+fn m051_suggestion_status_in_canary(store: &Store) -> Result<(), StoreError> {
+    let mut conn = store.conn()?;
+    let tx = conn.transaction()?;
+    tx.execute_batch(
+        "DROP TABLE IF EXISTS amas_tuning_suggestions_new;
+        CREATE TABLE amas_tuning_suggestions_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            based_on_version_hash TEXT NOT NULL,
+            patch_json TEXT NOT NULL,
+            rationale TEXT NOT NULL,
+            evidence_json TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('pending','in_canary','approved','rejected','superseded','expired','auto_applied')),
+            decided_by TEXT,
+            decided_at TEXT,
+            decision_note TEXT,
+            cost_usd REAL,
+            tokens_input INTEGER,
+            tokens_output INTEGER,
+            confidence REAL,
+            base_values_json TEXT DEFAULT NULL
+        );
+        INSERT INTO amas_tuning_suggestions_new
+            (id, created_at, based_on_version_hash, patch_json, rationale, evidence_json,
+             status, decided_by, decided_at, decision_note, cost_usd, tokens_input,
+             tokens_output, confidence, base_values_json)
+        SELECT id, created_at, based_on_version_hash, patch_json, rationale, evidence_json,
+               status, decided_by, decided_at, decision_note, cost_usd, tokens_input,
+               tokens_output, confidence, base_values_json
+          FROM amas_tuning_suggestions;
+        DROP TABLE amas_tuning_suggestions;
+        ALTER TABLE amas_tuning_suggestions_new RENAME TO amas_tuning_suggestions;
+        CREATE INDEX IF NOT EXISTS idx_amas_suggestions_status_time
+            ON amas_tuning_suggestions(status, created_at DESC);",
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// m051 down:回退到不含 'in_canary' 的 CHECK。仅 dev/test。
+/// 旧 CHECK 容不下 'in_canary',按其来源态把残留行映射回 'pending'。
+fn m051_suggestion_status_in_canary_down(store: &Store) -> Result<(), StoreError> {
+    let mut conn = store.conn()?;
+    let tx = conn.transaction()?;
+    tx.execute_batch(
+        "DROP TABLE IF EXISTS amas_tuning_suggestions_old;
+        CREATE TABLE amas_tuning_suggestions_old (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            based_on_version_hash TEXT NOT NULL,
+            patch_json TEXT NOT NULL,
+            rationale TEXT NOT NULL,
+            evidence_json TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('pending','approved','rejected','superseded','expired','auto_applied')),
+            decided_by TEXT,
+            decided_at TEXT,
+            decision_note TEXT,
+            cost_usd REAL,
+            tokens_input INTEGER,
+            tokens_output INTEGER,
+            confidence REAL,
+            base_values_json TEXT DEFAULT NULL
+        );
+        INSERT INTO amas_tuning_suggestions_old
+            (id, created_at, based_on_version_hash, patch_json, rationale, evidence_json,
+             status, decided_by, decided_at, decision_note, cost_usd, tokens_input,
+             tokens_output, confidence, base_values_json)
+        SELECT id, created_at, based_on_version_hash, patch_json, rationale, evidence_json,
+               CASE WHEN status = 'in_canary' THEN 'pending' ELSE status END,
+               decided_by, decided_at, decision_note, cost_usd, tokens_input,
+               tokens_output, confidence, base_values_json
+          FROM amas_tuning_suggestions;
+        DROP TABLE amas_tuning_suggestions;
+        ALTER TABLE amas_tuning_suggestions_old RENAME TO amas_tuning_suggestions;
+        CREATE INDEX IF NOT EXISTS idx_amas_suggestions_status_time
+            ON amas_tuning_suggestions(status, created_at DESC);",
+    )?;
+    tx.commit()?;
     Ok(())
 }
 

@@ -64,6 +64,27 @@ impl Store {
         Ok(result.unwrap_or_default())
     }
 
+    /// #14 抗投毒账本：取单用户对某词全局评分的累计净位移（m050）。无行视为 0.0。
+    /// 回滚快照（W1-1）据此把 `word_elo_user_contrib` 连同 `word_elo` 一并捕获/恢复，
+    /// 否则部分提交后回滚会留下账本前移、重放误钳合法位移。
+    pub fn get_word_elo_user_contrib(
+        &self,
+        user_id: &str,
+        word_id: &str,
+    ) -> Result<f64, StoreError> {
+        keys::validate_id(user_id)?;
+        keys::validate_id(word_id)?;
+        let conn = self.conn()?;
+        let v: Option<f64> = conn
+            .query_row(
+                "SELECT net_displacement FROM word_elo_user_contrib WHERE user_id=?1 AND word_id=?2",
+                params![user_id, word_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(v.unwrap_or(0.0))
+    }
+
     /// #3：批量取候选词 ELO。原实现按 word_id 逐个 `get_word_elo`（N 次 pool.get + N 次查询）；
     /// 改为单条 `WHERE word_id IN (...)`，分块 ≤900 占位符以避开 SQLite 参数上限。缺失的词不入表，
     /// 调用方对缺失项用默认值（与逐个查 `unwrap_or_default` 行为一致）。

@@ -117,6 +117,8 @@ struct EngineStateSnapshot {
     mastery_key: String,
     user_elo: crate::amas::elo::EloRating,
     word_elo: crate::amas::elo::EloRating,
+    /// #14：抗投毒账本（user,word）净位移快照，与 word_elo 同步捕获/回滚。
+    word_elo_contrib: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -157,6 +159,7 @@ fn capture_engine_state_snapshot(
         mastery_key,
         user_elo: store.get_user_elo(user_id)?,
         word_elo: store.get_word_elo(word_id)?,
+        word_elo_contrib: store.get_word_elo_user_contrib(user_id, word_id)?,
     })
 }
 
@@ -182,6 +185,7 @@ fn restore_engine_state_snapshot(
         ],
         user_elo: Some(&snapshot.user_elo),
         word_elo: Some((word_id, &snapshot.word_elo)),
+        word_elo_contrib: Some((word_id, snapshot.word_elo_contrib)),
         clear_marker_record_id: clear_marker,
     };
     if let Err(error) = store.restore_engine_state_atomic(&restore) {

@@ -364,6 +364,10 @@ impl Store {
     /// mastery:*/evm:* + 全局 iad/mtp 等，而非仅枚举三键）、清掉 `user_elo` 与
     /// `word_elo_user_contrib` 账本行。全有或全无，杜绝原四条 autocommit 的部分重置/中途崩溃残留。
     /// 调用侧须持 per-user 锁串行化于 process_event（见 [`AMASEngine::reset_user_state`]）。
+    ///
+    /// #14 抗投毒：清账本前必须先把该用户对各词全局 `word_elo` 的累计净位移**扣回**。否则
+    /// `/api/amas/reset` 用户可达上限→reset→再推，反复刷新单词位移配额绕过钳制，而被推高的
+    /// 全局词评分仍残留污染他人排序。扣减把全局词评分还原到"该用户从未触碰"的水平。
     pub fn reset_engine_state_atomic(
         &self,
         user_id: &str,
@@ -387,6 +391,17 @@ impl Store {
             params![user_id],
         )?;
         tx.execute("DELETE FROM user_elo WHERE user_id=?1", params![user_id])?;
+        // #14：先把该用户对各全局词评分的累计净位移扣回，再清账本——否则 reset 等于免费
+        // 归还位移配额，同设备可反复 push→reset→push 突破单词钳制（被推高的全局评分仍残留）。
+        tx.execute(
+            "UPDATE word_elo
+                SET rating = rating - COALESCE((
+                        SELECT net_displacement FROM word_elo_user_contrib c
+                         WHERE c.word_id = word_elo.word_id AND c.user_id = ?1), 0.0)
+              WHERE word_id IN (
+                        SELECT word_id FROM word_elo_user_contrib WHERE user_id = ?1)",
+            params![user_id],
+        )?;
         tx.execute(
             "DELETE FROM word_elo_user_contrib WHERE user_id=?1",
             params![user_id],
@@ -535,6 +550,16 @@ impl Store {
                 params![word_id, elo.rating, elo.games],
             )?;
         }
+        // #14：抗投毒账本随 word_elo 一并回滚（同 tx）。否则 word_elo 复位、账本仍前移，
+        // 重放会按虚高的 prior 净位移把合法位移误钳。捕获值为 0.0 即归零（语义等同无行）。
+        if let Some((word_id, net)) = r.word_elo_contrib {
+            tx.execute(
+                "INSERT INTO word_elo_user_contrib (user_id, word_id, net_displacement)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(user_id, word_id) DO UPDATE SET net_displacement=?3",
+                params![r.user_id, word_id, net],
+            )?;
+        }
         if let Some(rec_id) = r.clear_marker_record_id {
             tx.execute(
                 "DELETE FROM processed_events WHERE user_id=?1 AND client_record_id=?2",
@@ -566,6 +591,8 @@ pub struct EngineStateRestore<'a> {
     pub algo_states: &'a [(&'a str, &'a Option<serde_json::Value>)],
     pub user_elo: Option<&'a crate::amas::elo::EloRating>,
     pub word_elo: Option<(&'a str, &'a crate::amas::elo::EloRating)>,
+    /// #14：Some((word_id, net_displacement))=同 tx 把抗投毒账本复位到捕获时的净位移。
+    pub word_elo_contrib: Option<(&'a str, f64)>,
     /// Some(client_record_id)=同 tx 删除 processed_events 标记。
     pub clear_marker_record_id: Option<&'a str>,
 }
@@ -853,6 +880,7 @@ mod tests {
                 algo_states: &[("mastery:w1", &none_val)],
                 user_elo: Some(&elo),
                 word_elo: Some(("w1", &elo)),
+                word_elo_contrib: None,
                 clear_marker_record_id: Some("rec-1"),
             })
             .unwrap();
@@ -972,6 +1000,100 @@ mod tests {
             (word_elo.rating - 1200.0).abs() <= cap + 1e-6,
             "单用户净位移应被钳在 ±{cap}，实测 rating={}",
             word_elo.rating
+        );
+    }
+
+    /// #14（Codex P2）：reset 必须把该用户对各词全局评分的累计净位移**扣回**再清账本，
+    /// 否则 push→reset→push 可反复免费归还配额绕过钳制，而被推高的全局评分仍残留污染他人。
+    #[test]
+    fn reset_subtracts_word_contrib_restoring_global_elo() {
+        let _t = tempfile::tempdir().unwrap();
+        let store = Store::open(_t.path().join("t.db").to_str().unwrap(), 5000, 2).unwrap();
+        store.run_migrations().unwrap();
+
+        // 攻击者反复全错把某词全局评分推离默认（is_correct=false → word_elo 上行）。
+        let cap = 50.0;
+        for i in 0..30 {
+            let spec = super::EloUpdateSpec {
+                word_id: "wpoison".to_string(),
+                is_correct: false,
+                config: crate::amas::config::EloConfig::default(),
+                max_user_word_displacement: cap,
+            };
+            store
+                .persist_engine_state_atomic(
+                    "attacker",
+                    &serde_json::json!({}),
+                    &[],
+                    Some(&spec),
+                    Some(&format!("rec-{i}")),
+                )
+                .unwrap();
+        }
+        let pushed = store.get_word_elo("wpoison").unwrap().rating;
+        let contrib = store.get_word_elo_user_contrib("attacker", "wpoison").unwrap();
+        assert!(contrib.abs() > 1.0, "账本应记录非零净位移");
+        assert!((pushed - 1200.0).abs() > 1.0, "全局评分应已被推离默认 1200");
+
+        store
+            .reset_engine_state_atomic("attacker", &serde_json::json!({}))
+            .unwrap();
+
+        let after = store.get_word_elo("wpoison").unwrap().rating;
+        assert!(
+            (after - (pushed - contrib)).abs() < 1e-6,
+            "reset 应把净位移 {contrib} 扣回全局评分：{pushed}→{after}"
+        );
+        assert!(
+            (after - 1200.0).abs() < 1e-6,
+            "唯一贡献者 reset 后全局评分应回到从未触碰的水平 1200，实测 {after}"
+        );
+        assert_eq!(
+            store
+                .get_word_elo_user_contrib("attacker", "wpoison")
+                .unwrap(),
+            0.0,
+            "账本行应已清除"
+        );
+    }
+
+    /// #14（Codex P2）：restore_engine_state_atomic 把抗投毒账本随 word_elo 一并复位到捕获值，
+    /// 否则部分提交后回滚会留下账本前移、重放误钳合法位移。
+    #[test]
+    fn restore_recovers_word_contrib_ledger() {
+        use super::EngineStateRestore;
+        let _t = tempfile::tempdir().unwrap();
+        let store = Store::open(_t.path().join("t.db").to_str().unwrap(), 5000, 2).unwrap();
+        store.run_migrations().unwrap();
+
+        // 模拟事件处理把账本推进到 25.0。
+        store
+            .conn()
+            .unwrap()
+            .execute(
+                "INSERT INTO word_elo_user_contrib (user_id, word_id, net_displacement)
+                 VALUES ('u1','w1', 25.0)",
+                [],
+            )
+            .unwrap();
+
+        let no_algo: &[(&str, &Option<serde_json::Value>)] = &[];
+        store
+            .restore_engine_state_atomic(&EngineStateRestore {
+                user_id: "u1",
+                user_state: None,
+                algo_states: no_algo,
+                user_elo: None,
+                word_elo: None,
+                word_elo_contrib: Some(("w1", 5.0)),
+                clear_marker_record_id: None,
+            })
+            .unwrap();
+
+        assert_eq!(
+            store.get_word_elo_user_contrib("u1", "w1").unwrap(),
+            5.0,
+            "回滚应把账本复位到捕获值 5.0"
         );
     }
 }

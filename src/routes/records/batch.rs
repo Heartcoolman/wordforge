@@ -190,7 +190,7 @@ pub(crate) async fn process_batch_record(
 
     // S6: 只捕获 word 级状态
     let mastery_key = format!("mastery:{word_id}");
-    let (prev_mastery, prev_word_elo, prev_user_elo) = state
+    let (prev_mastery, prev_word_elo, prev_user_elo, prev_word_contrib) = state
         .run_store_task("records.batch.snapshot", {
             let user_id = user_id_owned.clone();
             let word_id = word_id.clone();
@@ -200,6 +200,7 @@ pub(crate) async fn process_batch_record(
                     store.get_engine_algo_state(&user_id, &mastery_key)?,
                     store.get_word_elo(&word_id)?,
                     store.get_user_elo(&user_id)?,
+                    store.get_word_elo_user_contrib(&user_id, &word_id)?,
                 ))
             }
         })
@@ -332,6 +333,7 @@ pub(crate) async fn process_batch_record(
                             algo_states: &[(mastery_key.as_str(), &prev_mastery)],
                             user_elo: Some(&prev_user_elo),
                             word_elo: Some((&word_id, &prev_word_elo)),
+                            word_elo_contrib: Some((&word_id, prev_word_contrib)),
                             clear_marker_record_id: Some(&record_for_store.id),
                         };
                         if let Err(e) = store.restore_engine_state_atomic(&restore) {

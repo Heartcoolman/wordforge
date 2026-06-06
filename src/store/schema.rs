@@ -776,7 +776,7 @@ CREATE TABLE IF NOT EXISTS amas_tuning_suggestions (
     patch_json TEXT NOT NULL,
     rationale TEXT NOT NULL,
     evidence_json TEXT NOT NULL,
-    status TEXT NOT NULL CHECK (status IN ('pending','approved','rejected','superseded','expired','auto_applied')),
+    status TEXT NOT NULL CHECK (status IN ('pending','in_canary','approved','rejected','superseded','expired','auto_applied')),
     decided_by TEXT,
     decided_at TEXT,
     decision_note TEXT,

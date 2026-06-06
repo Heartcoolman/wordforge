@@ -72,7 +72,11 @@ pub(crate) async fn wordbook_center_probe(state: &AppState) -> (bool, bool) {
         return (true, true);
     };
 
+    // connect_timeout 显式钳住"建连"阶段：黑洞地址（如不可达的 wordbook center）下,
+    // 总 timeout 在部分平台不可靠地中断 TCP connect,会拖到 OS 默认连接超时（数秒~分钟）。
+    // 加 3s connect_timeout 让探针确定性快失败,既守 /health 的 SLO,也消除 health_http 时序 flaky。
     let client = match reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(3))
         .timeout(Duration::from_secs(5))
         .build()
     {

@@ -1081,14 +1081,39 @@ pub(crate) async fn approve_one(
             other => AppError::internal(&other.to_string()),
         })?;
 
-    apply_and_persist_config(
+    // CAS 抢占在 apply 之前确保胜者唯一,但 apply_and_persist_config 若中途失败(SSP 预计算/reload/
+    // 版本插入报错),建议已非 pending,重试与 approve-all 都会跳过它——成了"已批准却无任何已落地的持久
+    // 配置版本"。故 apply 失败时把抢占回退 Approved→Pending,让重试可重新抢占。CAS 仅当仍为 Approved
+    // 才回退,不覆盖期间可能发生的其它合法迁移。
+    let applied = apply_and_persist_config(
         state,
         admin_id,
         new_cfg,
         ConfigVersionSource::LlmSuggested,
         Some(format!("approve suggestion#{}", id)),
     )
-    .await
+    .await;
+    if applied.is_err() {
+        let revert = state
+            .run_store_task("admin.amas.approve_revert", move |store| {
+                store.cas_amas_suggestion_status(
+                    id,
+                    SuggestionStatus::Approved,
+                    SuggestionStatus::Pending,
+                    None,
+                    None,
+                )
+            })
+            .await;
+        if let Err(e) = revert.map_err(|e| e.to_string()).and_then(|r| r.map_err(|e| e.to_string())) {
+            tracing::error!(
+                suggestion_id = id,
+                error = %e,
+                "approve apply 失败后回退 Approved→Pending 未成功，建议可能卡在 approved 态"
+            );
+        }
+    }
+    applied
 }
 
 async fn approve_suggestion(
