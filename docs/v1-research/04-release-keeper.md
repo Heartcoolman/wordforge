@@ -15,7 +15,7 @@
 | `.github/workflows/release.yml` | `push tags v*` | 双架构（x86_64 / aarch64）musl 交叉编译 → tarball + sha256 → GH Release，**prerelease 规则已硬编码** | 健康（v0.6.0-beta.3 起加 `prerelease: ${{ contains(github.ref_name, '-') }}`，`release.yml:105`） |
 | `.github/workflows/coverage.yml` | push/PR `main`/`develop` | 后端 + 前端覆盖率，门槛 lines/functions/regions ≥ 80%；忽略 `main.rs`/`bin/`/`logging.rs`/`lib.rs`/`llm_advisor.rs`/`heartbeat_watchdog.rs`/`update_checker.rs`/`updater.rs`（`coverage.yml:23`） | 健康；但 5 个不可测入口的忽略名单需要每加一个 worker / service 同步维护 |
 | `.github/workflows/deploy-docs.yml` | push `main` 且 `docs/**` 变更 | VitePress 构建并部署到 GitHub Pages | 健康 |
-| `.github/workflows/e2e-tests.yml` | push/PR `main`/`develop` | Playwright E2E（chromium）；分支 `verify-auto-update-v044` 单独跑 `scripts/verify-release-auto-update.sh` | 健康，但 v044 verify 脚本的契约**已过期**（见 §1.5） |
+| `.github/workflows/e2e-tests.yml` | push/PR `main`/`develop` | Playwright E2E（chromium）。~~分支 `verify-auto-update-v044` 单独跑 `scripts/verify-release-auto-update.sh`~~ 该 verify job 已移除（见下） | 健康；CI 现已无自更新冒烟验证（`scripts/verify-release-auto-update.sh` 仍由 `ga-regression-check.sh` 引用，故保留） |
 | ~~`.github/workflows/verify-auto-update-v043.yml`~~ | ~~仅 `workflow_dispatch`~~ | ~~v0.4.2→v0.4.3 升级冒烟~~ | **已删除**（commit `a022e6b`，2026-06-06）：连同 `scripts/verify-auto-update-v043.sh` 一并移除，由 `e2e-tests.yml` 的 `verify-auto-update-v044` job（走 `scripts/verify-release-auto-update.sh`）取代 |
 
 ### 1.2 stable / beta 双通道

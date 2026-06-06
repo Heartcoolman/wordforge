@@ -67,7 +67,7 @@
 ### 3.1 后端 / API（本仓核心）
 
 1. **P0 · API 契约稳定 + 客户端 SDK / OpenAPI 双供给** — **[来自反馈]** 第 10 项契约对齐踩 3 P0 + 9 P1，第三轮才追到 100%；**[来自竞品对标]** Quizlet Partner Platform 走 SDK + API gateway 路线。当前 `docs/openapi.yaml` 在，缺生成式 SDK。
-2. **P0 · 自更新生产闭环可回归** — **[来自反馈]** 第 1 项 7 个 commit 才 23 秒闭环；当前 `verify-auto-update-v044` job 只对 v0.4.x 锁死；v1 前必须做"任意 → 任意"版自更新 e2e job 模板。
+2. **P0 · 自更新生产闭环可回归** — **[来自反馈]** 第 1 项 7 个 commit 才 23 秒闭环；原 `verify-auto-update-v044` job 只对 v0.4.x 锁死，已从 `e2e-tests.yml` 移除（CI 现已无自更新冒烟验证）；v1 前必须做"任意 → 任意"版自更新 e2e job 模板。
 3. **P0 · paginated 契约前端类型护栏** — **[来自反馈]** 第 2 项 ErrorBoundary 全屏事故；需在 `frontend/src/api/` 层加 lint 规则禁 `items:`，或改 codegen 全自动。
 4. **P0 · strict-mode 豁免清单 + release notes 自检** — **[来自反馈]** 第 3 项发现 release notes 写 `X-Client-Platform` 而实现是 `x-device-platform`、错误码 `MISSING_OS` ≠ `MISSING_PLATFORM`；契约文档与代码对齐必须 CI 化。
 5. **P1 · 多客户端账户多端同步规约** — **[来自竞品对标]** 5/5 标杆全标配；当前 iOS 单端 + admin 单端，**无显式多端 session 冲突策略**（如 last-write-wins / CRDT）。最少 v1 要写规约文档 + 在 `wordforge_client_backend_alignment_*` 里固化。
