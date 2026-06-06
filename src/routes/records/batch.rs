@@ -190,7 +190,7 @@ pub(crate) async fn process_batch_record(
 
     // S6: 只捕获 word 级状态
     let mastery_key = format!("mastery:{word_id}");
-    let (prev_mastery, prev_word_elo, prev_user_elo) = state
+    let (prev_mastery, prev_word_elo, prev_user_elo, prev_word_contrib) = state
         .run_store_task("records.batch.snapshot", {
             let user_id = user_id_owned.clone();
             let word_id = word_id.clone();
@@ -200,6 +200,7 @@ pub(crate) async fn process_batch_record(
                     store.get_engine_algo_state(&user_id, &mastery_key)?,
                     store.get_word_elo(&word_id)?,
                     store.get_user_elo(&user_id)?,
+                    store.get_word_elo_user_contrib(&user_id, &word_id)?,
                 ))
             }
         })
@@ -245,24 +246,14 @@ pub(crate) async fn process_batch_record(
             duplicate: true,
         });
     };
-    let amas_config = state.amas().get_config();
     let amas_result_for_store = amas_result.clone();
 
     state
         .run_store_task(
             "records.batch.persist",
             move |store| -> Result<_, AppError> {
-                let mut user_elo = store.get_user_elo(&user_id_owned)?;
-                let mut word_elo = store.get_word_elo(&word_id)?;
-                crate::amas::elo::update_elo(
-                    &mut user_elo,
-                    &mut word_elo,
-                    req_for_store.is_correct,
-                    &amas_config.elo,
-                );
-                store.set_user_elo(&user_id_owned, &user_elo)?;
-                store.set_word_elo(&word_id, &word_elo)?;
-
+                // ELO 现由 AMAS 引擎在 process_event_blocking → persist_engine_state_atomic
+                // 的锁定原子事务内应用，路由侧不再重复 RMW（否则 ELO 双重累加）。
                 let mut next_word_state: Option<WordLearningState> = None;
                 if let Some(ref wm) = amas_result_for_store.word_mastery {
                     let new_state = match wm.mastery_level {
@@ -342,6 +333,7 @@ pub(crate) async fn process_batch_record(
                             algo_states: &[(mastery_key.as_str(), &prev_mastery)],
                             user_elo: Some(&prev_user_elo),
                             word_elo: Some((&word_id, &prev_word_elo)),
+                            word_elo_contrib: Some((&word_id, prev_word_contrib)),
                             clear_marker_record_id: Some(&record_for_store.id),
                         };
                         if let Err(e) = store.restore_engine_state_atomic(&restore) {

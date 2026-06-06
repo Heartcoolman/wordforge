@@ -134,6 +134,96 @@ impl Store {
         })
     }
 
+    /// 原子建灰度 + 迁出 suggestion(#9)。单事务内：
+    /// 1) 拒绝同一 suggestion_id 已有 active canary（防一条建议反复占额 / 重复灰度，等价 active 行唯一约束）；
+    /// 2) 落 canary version snapshot（hash 幂等，补写 note/parent）；
+    /// 3) 分配空闲 cohort 槽 + 配额校验 + INSERT active canary 行；
+    /// 4) CAS 把 suggestion 从 Pending 迁到 InCanary（affected==0→Conflict，已被并发 approve/灰度）。
+    /// 使「建灰度」与「建议状态迁移」要么整体成功要么整体不发生，杜绝灰度 + 全量双重生效。
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_canary_and_claim_suggestion(
+        &self,
+        suggestion_id: i64,
+        snapshot_json: &str,
+        author_admin_id: &str,
+        note: Option<&str>,
+        parent_version_hash: Option<&str>,
+        percent: u32,
+        baseline_metrics_json: &str,
+    ) -> Result<PatchCanary, StoreError> {
+        use crate::store::operations::amas_suggestions::SuggestionStatus;
+        use crate::store::operations::amas_versions::{
+            insert_amas_config_version_in_conn, ConfigVersionSource,
+        };
+        self.with_transaction(|conn| {
+            // 1) 同一 suggestion 已有 active 灰度 → 拒绝（防重复占额）。
+            let dup: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM amas_patch_canary WHERE suggestion_id = ?1 AND status = 'active'",
+                params![suggestion_id],
+                |r| r.get(0),
+            )?;
+            if dup > 0 {
+                return Err(StoreError::Validation(format!(
+                    "建议 #{suggestion_id} 已有进行中的灰度，请勿重复创建"
+                )));
+            }
+            // 2) 落 version snapshot。
+            let (_vid, vhash) = insert_amas_config_version_in_conn(
+                conn,
+                snapshot_json,
+                author_admin_id,
+                ConfigVersionSource::LlmSuggested,
+                note,
+                parent_version_hash,
+            )?;
+            // 3) 分配 cohort 槽 + 配额校验 + INSERT。
+            let cohort_lo = active_canaries_in_conn(conn, None)?
+                .iter()
+                .map(|c| c.cohort_hi)
+                .max()
+                .unwrap_or(0);
+            let cohort_hi = cohort_lo + percent;
+            if cohort_hi > 100 {
+                return Err(StoreError::Validation(format!(
+                    "灰度配额已满：已占用 {cohort_lo}%，再加 {percent}% 超过 100%"
+                )));
+            }
+            let id = insert_patch_canary_in_conn(
+                conn,
+                suggestion_id,
+                &vhash,
+                percent,
+                cohort_lo,
+                cohort_hi,
+                baseline_metrics_json,
+            )?;
+            // 4) CAS 迁出 Pending（同事务，建议不再能被 approve 二次全量应用）。
+            let now = chrono::Utc::now().to_rfc3339();
+            let affected = conn.execute(
+                "UPDATE amas_tuning_suggestions
+                 SET status = ?1, decided_by = ?2, decided_at = ?3
+                 WHERE id = ?4 AND status = ?5",
+                params![
+                    SuggestionStatus::InCanary.as_str(),
+                    author_admin_id,
+                    now,
+                    suggestion_id,
+                    SuggestionStatus::Pending.as_str(),
+                ],
+            )?;
+            if affected == 0 {
+                return Err(StoreError::Conflict {
+                    entity: "amas_tuning_suggestions".into(),
+                    key: suggestion_id.to_string(),
+                });
+            }
+            get_patch_canary_in_conn(conn, id)?.ok_or_else(|| StoreError::NotFound {
+                entity: "amas_patch_canary".into(),
+                key: id.to_string(),
+            })
+        })
+    }
+
     /// 扩量:更新 percent + cohort 区间;校验不与其它 active 行重叠(排除自身)。
     /// 同上,「读 active+排重叠校验+UPDATE」收进单事务同一连接。
     pub fn update_patch_canary_scale(
@@ -185,26 +275,57 @@ impl Store {
         })
     }
 
-    /// 置状态(active/effective/rolled_back)。
-    pub fn set_patch_canary_status(&self, id: i64, status: &str) -> Result<(), StoreError> {
+    /// 置状态(active/effective/rolled_back)，带源状态门禁(CAS)。
+    /// `expected` 为 Some 时 UPDATE 仅在当前 status 匹配才生效，affected==0 → Conflict(说明期间被
+    /// 并发改写，如自动回滚把 active→rolled_back)；None 退化为无条件 UPDATE(仅 affected==0→NotFound)。
+    /// 杜绝 promote 把 rolled_back 覆盖回 effective 这类非法状态机迁移(#16)。
+    pub fn set_patch_canary_status_cas(
+        &self,
+        id: i64,
+        status: &str,
+        expected: Option<&str>,
+    ) -> Result<(), StoreError> {
         if !matches!(status, "active" | "effective" | "rolled_back") {
             return Err(StoreError::Validation(format!(
                 "invalid canary status: {status}"
             )));
         }
         let conn = self.conn()?;
-        let now = chrono::Utc::now().to_rfc3339();
-        let affected = conn.execute(
-            "UPDATE amas_patch_canary SET status = ?1, updated_at = ?2 WHERE id = ?3",
-            params![status, now, id],
-        )?;
-        if affected == 0 {
-            return Err(StoreError::NotFound {
-                entity: "amas_patch_canary".into(),
-                key: id.to_string(),
-            });
-        }
-        Ok(())
+        set_patch_canary_status_in_conn(&conn, id, status, expected)
+    }
+
+    /// 无条件置状态(兼容旧调用)。手动回滚/手动置位等无并发竞态的场景沿用。
+    pub fn set_patch_canary_status(&self, id: i64, status: &str) -> Result<(), StoreError> {
+        self.set_patch_canary_status_cas(id, status, None)
+    }
+
+    /// 原子提升 canary 为 effective + 把 canary version snapshot 提升为 stable(#8/#41)。
+    /// 单事务内：CAS status active→effective（affected==0→Conflict，说明已被自动/并发回滚），
+    /// 落 stable 版本行(insert_amas_config_version)。状态翻转与版本落库要么整体成功要么整体不发生，
+    /// 消除「stable 已变但 canary 仍 active」的悬挂态。返回落库后的 (version_id, version_hash)。
+    /// 注意：reload_config(改 live 内存)由调用方在本函数成功提交后再做(内存态无法纳入 DB 事务)。
+    #[allow(clippy::too_many_arguments)]
+    pub fn promote_patch_canary_tx(
+        &self,
+        id: i64,
+        snapshot_json: &str,
+        author_admin_id: &str,
+        source: crate::store::operations::amas_versions::ConfigVersionSource,
+        note: Option<&str>,
+        parent_version_hash: Option<&str>,
+    ) -> Result<(i64, String), StoreError> {
+        self.with_transaction(|conn| {
+            // CAS：仅当仍 active 才提升；期间被回滚则 affected==0 → Conflict，放弃提升。
+            set_patch_canary_status_in_conn(conn, id, "effective", Some("active"))?;
+            crate::store::operations::amas_versions::insert_amas_config_version_in_conn(
+                conn,
+                snapshot_json,
+                author_admin_id,
+                source,
+                note,
+                parent_version_hash,
+            )
+        })
     }
 
     /// 取单条 canary;不存在返 None。
@@ -212,6 +333,21 @@ impl Store {
         let conn = self.conn()?;
         get_patch_canary_in_conn(&conn, id)
     }
+}
+
+/// 把某 suggestion 关联的所有 active canary 行置 rolled_back(#19:rollback_suggestion 复用)。
+/// 在 `conn` 给定的事务内执行，使灰度路由回退与 stable 回滚同事务。返回受影响行数。
+pub fn rollback_active_canaries_for_suggestion_in_conn(
+    conn: &Connection,
+    suggestion_id: i64,
+) -> Result<usize, StoreError> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let affected = conn.execute(
+        "UPDATE amas_patch_canary SET status = 'rolled_back', updated_at = ?1
+         WHERE suggestion_id = ?2 AND status = 'active'",
+        params![now, suggestion_id],
+    )?;
+    Ok(affected)
 }
 
 /// 事务内读全部 active canary(可排除 exclude_id),供 cohort 校验/槽分配在同一连接内 SELECT。
@@ -281,6 +417,43 @@ fn insert_patch_canary_in_conn(
         ],
     )?;
     Ok(conn.last_insert_rowid())
+}
+
+/// 事务内置 canary 状态，带源状态门禁(CAS)。
+/// `expected`=Some 时 WHERE 叠加 status=expected，affected==0 区分「行不存在」(NotFound)与
+/// 「源状态不符」(Conflict);None 退化为仅按 id 的无条件 UPDATE。
+fn set_patch_canary_status_in_conn(
+    conn: &Connection,
+    id: i64,
+    status: &str,
+    expected: Option<&str>,
+) -> Result<(), StoreError> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let affected = match expected {
+        Some(exp) => conn.execute(
+            "UPDATE amas_patch_canary SET status = ?1, updated_at = ?2
+             WHERE id = ?3 AND status = ?4",
+            params![status, now, id, exp],
+        )?,
+        None => conn.execute(
+            "UPDATE amas_patch_canary SET status = ?1, updated_at = ?2 WHERE id = ?3",
+            params![status, now, id],
+        )?,
+    };
+    if affected == 0 {
+        // 行存在但源状态不符 → Conflict；行不存在 → NotFound。
+        if expected.is_some() && get_patch_canary_in_conn(conn, id)?.is_some() {
+            return Err(StoreError::Conflict {
+                entity: "amas_patch_canary".into(),
+                key: id.to_string(),
+            });
+        }
+        return Err(StoreError::NotFound {
+            entity: "amas_patch_canary".into(),
+            key: id.to_string(),
+        });
+    }
+    Ok(())
 }
 
 /// 事务内取单条 canary;不存在返 None。
@@ -420,6 +593,44 @@ mod tests {
         s.set_patch_canary_status(a, "effective").unwrap();
         assert_eq!(s.get_patch_canary(a).unwrap().unwrap().status, "effective");
         assert!(s.get_active_patch_canaries().unwrap().is_empty());
+    }
+
+    #[test]
+    fn cas_status_guards_source_state() {
+        // #16：CAS 仅在源状态匹配时迁移；已 rolled_back 不能再被 active→effective 覆盖。
+        let s = store();
+        let a = s.insert_patch_canary(1, "h1", 100, 0, 100, "{}").unwrap();
+        s.set_patch_canary_status(a, "rolled_back").unwrap();
+        // 期望源状态 active，实际 rolled_back → Conflict（不覆盖回 effective）
+        let err = s
+            .set_patch_canary_status_cas(a, "effective", Some("active"))
+            .unwrap_err();
+        assert!(matches!(err, StoreError::Conflict { .. }));
+        assert_eq!(s.get_patch_canary(a).unwrap().unwrap().status, "rolled_back");
+        // 不存在的 id（带 expected）→ NotFound
+        let err2 = s
+            .set_patch_canary_status_cas(999, "effective", Some("active"))
+            .unwrap_err();
+        assert!(matches!(err2, StoreError::NotFound { .. }));
+    }
+
+    #[test]
+    fn rollback_active_canaries_for_suggestion_scopes_by_id_and_active() {
+        // #19：仅置该 suggestion 的 active 行为 rolled_back，不动其它 suggestion / 非 active 行。
+        let s = store();
+        let a = s.insert_patch_canary(5, "h1", 20, 0, 20, "{}").unwrap();
+        let b = s.insert_patch_canary(5, "h2", 20, 20, 40, "{}").unwrap();
+        let c = s.insert_patch_canary(9, "h3", 20, 40, 60, "{}").unwrap();
+        s.set_patch_canary_status(b, "effective").unwrap(); // 非 active，不应被回滚
+        let n = s
+            .with_transaction(|conn| {
+                super::rollback_active_canaries_for_suggestion_in_conn(conn, 5)
+            })
+            .unwrap();
+        assert_eq!(n, 1); // 仅 a（suggestion 5 的 active 行）
+        assert_eq!(s.get_patch_canary(a).unwrap().unwrap().status, "rolled_back");
+        assert_eq!(s.get_patch_canary(b).unwrap().unwrap().status, "effective");
+        assert_eq!(s.get_patch_canary(c).unwrap().unwrap().status, "active");
     }
 
     #[test]

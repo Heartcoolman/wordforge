@@ -451,8 +451,8 @@ fn it_exercises_memory_models_and_metrics_registry() {
     let evm_cfg = learning_backend::amas::config::EvmConfig::default();
     let mut evm_state = evm::EvmState::default();
     assert_eq!(evm::context_diversity_bonus(&evm_state, &evm_cfg), 0.0);
-    evm::record_context(&mut evm_state, true, &evm_cfg);
-    evm::record_context(&mut evm_state, false, &evm_cfg);
+    evm::record_context(&mut evm_state, Some("ctx-1"), &evm_cfg);
+    evm::record_context(&mut evm_state, Some("ctx-2"), &evm_cfg);
     let evm_bonus = evm::context_diversity_bonus(&evm_state, &evm_cfg);
     assert!(evm_bonus > 0.0);
     assert!(evm_bonus <= 0.3);

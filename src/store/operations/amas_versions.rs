@@ -79,8 +79,62 @@ fn parse_dt(s: String) -> rusqlite::Result<DateTime<Utc>> {
         })
 }
 
+/// 写入/更新一条配置版本（按 hash 幂等），在给定 `conn`(可为事务连接)内执行。
+/// 命中已存在 hash 时：若调用方提供了 `note`/`parent_version_hash`，则 UPDATE 补写之
+/// （之前是静默丢弃，导致 approve 撞历史 hash 后 rollback 按 note 永远定位不到目标，#34/#44）。
+/// 仅在传入值非 None 时覆盖，避免无 note 的幂等写抹掉历史 note。
+pub(crate) fn insert_amas_config_version_in_conn(
+    conn: &rusqlite::Connection,
+    snapshot_json: &str,
+    author_admin_id: &str,
+    source: ConfigVersionSource,
+    note: Option<&str>,
+    parent_version_hash: Option<&str>,
+) -> Result<(i64, String), StoreError> {
+    let hash = compute_config_hash(snapshot_json);
+
+    // 幂等：若 hash 已存在则补写 note/parent 后返回现有 id（锚点随之存活）。
+    if let Some(id) = conn
+        .query_row(
+            "SELECT id FROM amas_config_versions WHERE version_hash = ?1",
+            params![&hash],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+    {
+        if note.is_some() || parent_version_hash.is_some() {
+            conn.execute(
+                "UPDATE amas_config_versions SET
+                    note = COALESCE(?1, note),
+                    parent_version_hash = COALESCE(?2, parent_version_hash)
+                 WHERE version_hash = ?3",
+                params![note, parent_version_hash, &hash],
+            )?;
+        }
+        return Ok((id, hash));
+    }
+
+    let now = Utc::now();
+    conn.execute(
+        "INSERT INTO amas_config_versions
+         (version_hash, snapshot_json, author_admin_id, source, note, parent_version_hash, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            &hash,
+            snapshot_json,
+            author_admin_id,
+            source.as_str(),
+            note,
+            parent_version_hash,
+            now.to_rfc3339(),
+        ],
+    )?;
+    let id = conn.last_insert_rowid();
+    Ok((id, hash))
+}
+
 impl Store {
-    /// 写入一条配置版本。若 `version_hash` 已存在则返回现有 id（幂等）。
+    /// 写入一条配置版本。若 `version_hash` 已存在则补写 note/parent 后返回现有 id（幂等 + 锚点存活）。
     pub fn insert_amas_config_version(
         &self,
         snapshot_json: &str,
@@ -89,38 +143,15 @@ impl Store {
         note: Option<&str>,
         parent_version_hash: Option<&str>,
     ) -> Result<(i64, String), StoreError> {
-        let hash = compute_config_hash(snapshot_json);
         let conn = self.conn()?;
-
-        // 幂等：若 hash 已存在则直接返回
-        if let Some(id) = conn
-            .query_row(
-                "SELECT id FROM amas_config_versions WHERE version_hash = ?1",
-                params![&hash],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?
-        {
-            return Ok((id, hash));
-        }
-
-        let now = Utc::now();
-        conn.execute(
-            "INSERT INTO amas_config_versions
-             (version_hash, snapshot_json, author_admin_id, source, note, parent_version_hash, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                &hash,
-                snapshot_json,
-                author_admin_id,
-                source.as_str(),
-                note,
-                parent_version_hash,
-                now.to_rfc3339(),
-            ],
-        )?;
-        let id = conn.last_insert_rowid();
-        Ok((id, hash))
+        insert_amas_config_version_in_conn(
+            &conn,
+            snapshot_json,
+            author_admin_id,
+            source,
+            note,
+            parent_version_hash,
+        )
     }
 
     /// 列出配置版本（按 created_at 倒序）。
@@ -270,6 +301,37 @@ mod tests {
         assert_eq!(id1, id2);
         assert_eq!(h1, h2);
         assert_eq!(store.list_amas_config_versions(10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn idempotent_collision_updates_note_and_parent() {
+        // #34/#44：撞已存在 hash 时，仍应补写新 note/parent，使 rollback 按 note 能定位到目标。
+        let store = fresh_store();
+        let (id1, h1) = store
+            .insert_amas_config_version(r#"{"y":1}"#, "a", ConfigVersionSource::Manual, None, None)
+            .unwrap();
+        // 再写同 snapshot（同 hash），带新 note + parent
+        let (id2, h2) = store
+            .insert_amas_config_version(
+                r#"{"y":1}"#,
+                "a",
+                ConfigVersionSource::LlmSuggested,
+                Some("approve suggestion#9"),
+                Some("parent-hash"),
+            )
+            .unwrap();
+        assert_eq!(id1, id2);
+        assert_eq!(h1, h2);
+        // 仍只有一行，但 note/parent 已补写
+        assert_eq!(store.list_amas_config_versions(10).unwrap().len(), 1);
+        let row = store
+            .list_amas_config_versions(10)
+            .unwrap()
+            .into_iter()
+            .find(|v| v.version_hash == h1)
+            .unwrap();
+        assert_eq!(row.note.as_deref(), Some("approve suggestion#9"));
+        assert_eq!(row.parent_version_hash.as_deref(), Some("parent-hash"));
     }
 
     #[test]

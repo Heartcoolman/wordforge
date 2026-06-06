@@ -65,8 +65,8 @@
 - **维度**：release
 - **估时**：0.5 人日
 - **依赖**：无
-- **描述**：`scripts/verify-release-auto-update.sh:118-127` 与 `scripts/verify-auto-update-v043.sh` 改用 `{stable, beta}` 嵌套契约 + apply 必带 `channel`；同时删除 `cargo build --release` 现编步骤（违反"禁服务器编译"规则），改为下载 release artifact。
-- **验收**：`verify-auto-update-v044` 分支 CI 跑通 v0.6.0-beta.X → v0.6.0-beta.Y 升级冒烟；`verify-auto-update-v043.yml` workflow 在 v0.4.x 上仍能跑或显式 deprecate。
+- **描述**：`scripts/verify-release-auto-update.sh:118-127` 改用 `{stable, beta}` 嵌套契约 + apply 必带 `channel`；同时删除 `cargo build --release` 现编步骤（违反"禁服务器编译"规则），改为下载 release artifact。（`scripts/verify-auto-update-v043.sh` 及其 `verify-auto-update-v043.yml` 已于 commit `a022e6b` 删除，无需再改。）
+- **验收**：~~`verify-auto-update-v044` 分支 CI 跑通升级冒烟~~。旧 `verify-auto-update-v043.yml` 与 `verify-auto-update-v044` job 均已移除（CI 现无自更新冒烟验证）；本条改为"v1 前重做任意→任意版自更新 e2e 模板"（见 signal-miner P0#2），原冒烟验收作废。
 - **源**：release-keeper §1.5 / §6.1 C6
 
 ### M0-R · 发布流

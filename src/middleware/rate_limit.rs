@@ -22,6 +22,8 @@ const NUM_SHARDS: usize = 16;
 /// - `u:<user_id>` 用于已登录请求（按 sub 限流，绕开同 IP 多用户互踩）
 const KEY_PREFIX_IP: &str = "ip:";
 const KEY_PREFIX_USER: &str = "u:";
+/// `a:<admin_id>` 用于 admin 贵操作端点的 per-admin 限流（与 user 命名空间隔离）。
+const KEY_PREFIX_ADMIN: &str = "a:";
 
 #[derive(Debug, Clone)]
 struct WindowEntry {
@@ -168,6 +170,10 @@ fn user_key(user_id: &str) -> String {
     format!("{KEY_PREFIX_USER}{user_id}")
 }
 
+fn admin_key(admin_id: &str) -> String {
+    format!("{KEY_PREFIX_ADMIN}{admin_id}")
+}
+
 fn normalize_ip_for_rate_limit(ip: IpAddr) -> IpAddr {
     match ip {
         IpAddr::V4(_) => ip,
@@ -213,10 +219,58 @@ pub async fn rate_limit_middleware(
         return Ok(next.run(req).await);
     }
 
-    // 管理员后台不走全局限流；其认证子树（/api/admin/auth/*）由
-    // auth_rate_limit_middleware 单独按 IP 限流（见 routes/mod.rs）。
+    // 管理员后台原则上不走全局限流；其认证子树（/api/admin/auth/*）由
+    // auth_rate_limit_middleware 单独按 IP 限流（见 routes/mod.rs）。但 admin
+    // 业务路由里存在贵操作端点（尤其 AMAS 的 approve-all/advisor-run 等会产生
+    // 500 倍写放大），须对这类写放大端点叠加 per-admin 限流，廉价只读端点仍放行。
     if path.starts_with("/api/admin/") {
-        return Ok(next.run(req).await);
+        if path.starts_with("/api/admin/auth/") || !is_expensive_admin_endpoint(req.method(), &path)
+        {
+            return Ok(next.run(req).await);
+        }
+
+        let connect_ip = req
+            .extensions()
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|ci| ci.0.ip());
+        let ip = extract_client_ip(req.headers(), state.config().trust_proxy, connect_ip);
+        let max_entries = state.config().limits.rate_limit_max_entries;
+        let cfg = state.config();
+        // 按 admin JWT sub 限流（隔离同 IP 多 admin），验签失败/缺失回退按 IP。
+        // 配额复用 authenticated 档：贵写操作天然低频，够用且不误伤正常运维。
+        let key = match resolve_admin_from_request(req.headers(), &cfg.admin_jwt_secret) {
+            Some(admin_id) => admin_key(&admin_id),
+            None => ip_key(ip),
+        };
+        let max_requests = cfg.rate_limit.authenticated_max_requests();
+
+        let result = state
+            .rate_limit()
+            .limiter
+            .check_with_max(&key, max_entries, max_requests)
+            .await;
+
+        if !result.allowed {
+            let mut response = (
+                axum::http::StatusCode::TOO_MANY_REQUESTS,
+                Json(ErrorBody {
+                    success: false,
+                    code: "RATE_LIMITED".to_string(),
+                    message: "请求过于频繁".to_string(),
+                    trace_id: None,
+                }),
+            )
+                .into_response();
+            apply_rate_limit_headers(&mut response, &result);
+            if let Ok(v) = cfg.rate_limit.window_secs.to_string().parse() {
+                response.headers_mut().insert("retry-after", v);
+            }
+            return Ok(response);
+        }
+
+        let mut response = next.run(req).await;
+        apply_rate_limit_headers(&mut response, &result);
+        return Ok(response);
     }
 
     let connect_ip = req
@@ -277,6 +331,44 @@ fn resolve_user_from_request(headers: &HeaderMap, jwt_secret: &str) -> Option<St
         return None;
     }
     Some(claims.sub)
+}
+
+/// 仅靠 admin JWT 验签提取 admin_id：token 缺失/验签失败/token_type 非 "admin" → None。
+/// admin token 用独立的 `admin_jwt_secret` 签发，故此处不能复用 user 的 jwt_secret。
+fn resolve_admin_from_request(headers: &HeaderMap, admin_jwt_secret: &str) -> Option<String> {
+    let token = extract_token_from_headers(headers).ok()?;
+    let claims = verify_jwt(&token, admin_jwt_secret).ok()?;
+    if claims.token_type != "admin" {
+        return None;
+    }
+    Some(claims.sub)
+}
+
+/// 判定 admin 端点是否属于「贵/写放大」类，需叠加限流。
+/// 命中条件（满足其一）：
+///   - 任意写方法（POST/PUT/PATCH/DELETE）落在 `/api/admin/amas/`：AMAS 配置写均会
+///     写 amas_config.toml + 插 amas_config_versions，approve-all 更是 500 倍放大；
+///   - AMAS 重聚合只读端点（metrics/* 等）：每请求做一次 KPI/切片聚合，可被高频压垮。
+/// 廉价 admin 只读端点（看板高频 GET）不命中，避免误限导致后台不可用。
+fn is_expensive_admin_endpoint(method: &axum::http::Method, path: &str) -> bool {
+    if !path.starts_with("/api/admin/amas/") {
+        return false;
+    }
+    let is_write = matches!(
+        *method,
+        axum::http::Method::POST
+            | axum::http::Method::PUT
+            | axum::http::Method::PATCH
+            | axum::http::Method::DELETE
+    );
+    if is_write {
+        return true;
+    }
+    // 重聚合只读端点：metrics_*、user-state 分布/聚类、anomalies feed 等。
+    path.starts_with("/api/admin/amas/metrics")
+        || path.starts_with("/api/admin/amas/user-state/")
+        || path.starts_with("/api/admin/amas/anomalies")
+        || path.starts_with("/api/admin/amas/config/diff-impact")
 }
 
 fn normalize_api_path(raw_path: &str) -> String {
@@ -474,6 +566,36 @@ mod tests {
     }
 
     #[test]
+    fn expensive_admin_endpoint_classification() {
+        use axum::http::Method;
+        // 写方法落在 amas/ → 贵端点。
+        assert!(is_expensive_admin_endpoint(
+            &Method::POST,
+            "/api/admin/amas/suggestions/approve-all"
+        ));
+        assert!(is_expensive_admin_endpoint(
+            &Method::PUT,
+            "/api/admin/amas/config"
+        ));
+        // amas 重聚合只读端点 → 贵端点。
+        assert!(is_expensive_admin_endpoint(
+            &Method::GET,
+            "/api/admin/amas/metrics/kpi"
+        ));
+        assert!(is_expensive_admin_endpoint(
+            &Method::GET,
+            "/api/admin/amas/user-state/distribution"
+        ));
+        // amas 廉价只读（如 /config GET、/state）不命中。
+        assert!(!is_expensive_admin_endpoint(
+            &Method::GET,
+            "/api/admin/amas/state"
+        ));
+        // 非 amas 的 admin 端点不命中。
+        assert!(!is_expensive_admin_endpoint(&Method::POST, "/api/admin/x"));
+    }
+
+    #[test]
     fn ipv4_not_aggregated() {
         let ip: IpAddr = "10.0.0.1".parse().unwrap();
         assert_eq!(normalize_ip_for_rate_limit(ip), ip);
@@ -523,6 +645,10 @@ mod tests {
         Router::new()
             .route("/api/users/me", get(|| async { "ok" }))
             .route("/api/admin/x", get(|| async { "admin-ok" }))
+            .route(
+                "/api/admin/amas/suggestions/approve-all",
+                axum::routing::post(|| async { "approved" }),
+            )
             .route("/non-api", get(|| async { "ok" }))
             .layer(axum::middleware::from_fn_with_state(
                 state.clone(),
@@ -663,6 +789,44 @@ mod tests {
 
     #[tokio::test]
     async fn middleware_admin_path_bypasses_check() {
+        let (state, _tmp) = build_state(60, 1).await;
+        let app = build_router(state);
+        for _ in 0..5 {
+            let req = Request::builder()
+                .uri("/api/admin/x")
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+    }
+
+    #[tokio::test]
+    async fn middleware_throttles_expensive_amas_admin_endpoint() {
+        // approve-all 是写放大贵端点：max=1 时第 2 次应被 429（不再无限放行）。
+        let (state, _tmp) = build_state(60, 1).await;
+        let app = build_router(state);
+        let mk = || {
+            Request::builder()
+                .method("POST")
+                .uri("/api/admin/amas/suggestions/approve-all")
+                .body(Body::empty())
+                .unwrap()
+        };
+        let resp1 = app.clone().oneshot(mk()).await.unwrap();
+        assert_eq!(resp1.status(), StatusCode::OK);
+        let resp2 = app.oneshot(mk()).await.unwrap();
+        assert_eq!(resp2.status(), StatusCode::TOO_MANY_REQUESTS);
+        let body = axum::body::to_bytes(resp2.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["code"], "RATE_LIMITED");
+    }
+
+    #[tokio::test]
+    async fn middleware_cheap_admin_endpoint_still_bypasses() {
+        // 廉价 admin 只读端点（非 amas 贵端点）仍不限流：max=1 也能连发 5 次。
         let (state, _tmp) = build_state(60, 1).await;
         let app = build_router(state);
         for _ in 0..5 {

@@ -12,6 +12,16 @@ use crate::amas::engine::AMASEngine;
 /// 文件修改后 500ms 防抖，验证通过后调用 engine.reload_config()。
 pub async fn run(path: String, amas: Arc<AMASEngine>) {
     let watch_path = PathBuf::from(&path);
+    // #36:监听父目录而非文件本身。inotify 把 watch 绑在 inode 上,而 write_to_toml 用
+    // 临时文件 + atomic rename 替换目标,会换 inode 让文件级 watch 失效(首次保存后静默失聪)。
+    // 目录 inode 稳定,rename-replace 始终可观测;再按事件路径的文件名过滤回目标文件。
+    let canonical_target = std::fs::canonicalize(&watch_path).ok();
+    let target_file_name = watch_path.file_name().map(|n| n.to_os_string());
+    let watch_dir = watch_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
 
     let (tx, mut rx) = mpsc::channel::<notify::Result<notify::Event>>(8);
 
@@ -30,12 +40,12 @@ pub async fn run(path: String, amas: Arc<AMASEngine>) {
         }
     };
 
-    if let Err(e) = watcher.watch(&watch_path, RecursiveMode::NonRecursive) {
-        tracing::warn!(path = %path, error = %e, "监听配置文件失败，热重载不可用");
+    if let Err(e) = watcher.watch(&watch_dir, RecursiveMode::NonRecursive) {
+        tracing::warn!(dir = %watch_dir.display(), error = %e, "监听配置目录失败，热重载不可用");
         return;
     }
 
-    tracing::info!(path = %path, "AMAS 配置文件监听已启动");
+    tracing::info!(path = %path, dir = %watch_dir.display(), "AMAS 配置文件监听已启动");
 
     while let Some(event_result) = rx.recv().await {
         let event = match event_result {
@@ -46,7 +56,27 @@ pub async fn run(path: String, amas: Arc<AMASEngine>) {
             }
         };
 
-        let is_modify = matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_));
+        // 目录级监听会收到目录内所有文件事件,只放行命中目标文件的:优先比对 canonical 全路径,
+        // 回退比对文件名(rename 来源临时文件/目标尚不可 canonicalize 时)。
+        let hits_target = event.paths.iter().any(|p| {
+            if let (Some(ct), Ok(cp)) = (&canonical_target, std::fs::canonicalize(p)) {
+                if &cp == ct {
+                    return true;
+                }
+            }
+            match (&target_file_name, p.file_name()) {
+                (Some(want), Some(got)) => got == want.as_os_str(),
+                _ => false,
+            }
+        });
+        if !hits_target {
+            continue;
+        }
+
+        let is_modify = matches!(
+            event.kind,
+            EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
+        );
         if !is_modify {
             continue;
         }

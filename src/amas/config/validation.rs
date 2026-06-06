@@ -111,6 +111,15 @@ impl AMASConfig {
         if !(0.0..=1.0).contains(&self.feature.incorrect_quality_scale) {
             return Err("feature.incorrect_quality_scale must be in [0,1]".to_string());
         }
+        // temporal_boost_min/max 作为 f64::clamp 的边界，min > max 会 panic 学习热路径。
+        if !self.feature.temporal_boost_min.is_finite()
+            || !self.feature.temporal_boost_max.is_finite()
+            || self.feature.temporal_boost_min > self.feature.temporal_boost_max
+        {
+            return Err(
+                "feature.temporal_boost_min must be finite and <= temporal_boost_max".to_string(),
+            );
+        }
 
         // RewardConfig
         if self.reward.speed_reward_scale < 0.0 || self.reward.speed_reward_scale > 10.0 {
@@ -142,6 +151,9 @@ impl AMASConfig {
         }
         if self.elo.zpd_gaussian_sigma <= 0.0 {
             return Err("elo.zpd_gaussian_sigma must be > 0".to_string());
+        }
+        if !self.elo.word_k_factor_ratio.is_finite() || self.elo.word_k_factor_ratio <= 0.0 {
+            return Err("elo.word_k_factor_ratio must be finite and > 0".to_string());
         }
 
         // FatigueDecayConfig
@@ -259,6 +271,40 @@ impl AMASConfig {
             return Err("memory_model.min_interval_secs must be > 0".to_string());
         }
 
+        // FSRS 遗忘曲线参数：被作除数 / 倒数指数 / 渐近线消费，必须有限且在定义域内。
+        // factor 是严格正缩放因子（除数）；decay 是衰减幂律指数（必须 < 0 否则遗忘曲线反转）；
+        // floor 是非零渐近线 R→floor，须在 [0,1)。
+        if !self.memory_model.forgetting_curve_factor.is_finite()
+            || self.memory_model.forgetting_curve_factor <= 0.0
+        {
+            return Err("memory_model.forgetting_curve_factor must be finite and > 0".to_string());
+        }
+        if !self.memory_model.forgetting_curve_decay.is_finite()
+            || self.memory_model.forgetting_curve_decay >= 0.0
+        {
+            return Err(
+                "memory_model.forgetting_curve_decay must be finite and < 0 (FSRS power-law exponent)"
+                    .to_string(),
+            );
+        }
+        if !self.memory_model.forgetting_curve_floor.is_finite()
+            || !(0.0..1.0).contains(&self.memory_model.forgetting_curve_floor)
+        {
+            return Err("memory_model.forgetting_curve_floor must be in [0,1)".to_string());
+        }
+        // FSRS-5 w[] 权重：w[8]/w[11] 等经 .exp() 消费，非有限或过大会 overflow 为 Inf，
+        // 进而污染 stability 并以 JSON null 落库；逐元素拒绝非有限及越界值。
+        if self
+            .memory_model
+            .w
+            .iter()
+            .any(|x| !x.is_finite() || x.abs() > 100.0)
+        {
+            return Err(
+                "memory_model.w[*] must all be finite and within [-100,100]".to_string(),
+            );
+        }
+
         // EvmConfig — diversity_log_divisor 必须 > 1，否则 ln() 产生 NaN/Inf
         if self.evm.diversity_log_divisor <= 1.0 {
             return Err("evm.diversity_log_divisor must be > 1".to_string());
@@ -301,6 +347,25 @@ impl AMASConfig {
         }
         if self.word_selector.new_word_gaussian_sigma <= 0.0 {
             return Err("word_selector.new_word_gaussian_sigma must be > 0".to_string());
+        }
+        // spacing_cooldown_secs / optimal_recall_sigma / sigmoid_steepness 均作除数，=0 注入 NaN 进评分。
+        if !self.word_selector.spacing_cooldown_secs.is_finite()
+            || self.word_selector.spacing_cooldown_secs <= 0.0
+        {
+            return Err("word_selector.spacing_cooldown_secs must be finite and > 0".to_string());
+        }
+        if !self.word_selector.optimal_recall_sigma.is_finite()
+            || self.word_selector.optimal_recall_sigma <= 0.0
+        {
+            return Err("word_selector.optimal_recall_sigma must be finite and > 0".to_string());
+        }
+        if !self.word_selector.sigmoid_steepness.is_finite()
+            || self.word_selector.sigmoid_steepness <= 0.0
+        {
+            return Err("word_selector.sigmoid_steepness must be finite and > 0".to_string());
+        }
+        if !(0.0..=1.0).contains(&self.word_selector.recall_mastered_threshold) {
+            return Err("word_selector.recall_mastered_threshold must be in [0,1]".to_string());
         }
 
         // InterventionConfig
@@ -362,6 +427,13 @@ impl AMASConfig {
         }
         if self.ssp.dual_grid_threshold_days <= 0.0 {
             return Err("ssp.dual_grid_threshold_days must be > 0".to_string());
+        }
+        // DP 求解器边界：threshold<=0 使早停永不触发，配合超大 max_iterations 让同步 precompute 长时间卡死调用线程。
+        if !self.ssp.convergence_threshold.is_finite() || self.ssp.convergence_threshold <= 0.0 {
+            return Err("ssp.convergence_threshold must be finite and > 0".to_string());
+        }
+        if self.ssp.max_iterations == 0 || self.ssp.max_iterations > 1_000_000 {
+            return Err("ssp.max_iterations must be in [1, 1_000_000]".to_string());
         }
 
         Ok(())

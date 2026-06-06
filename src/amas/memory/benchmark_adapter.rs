@@ -5,7 +5,10 @@ use crate::amas::config::MemoryModelConfig;
 use super::mdm::{compute_interval, recall_probability, update_strength, MdmState};
 
 const DAY_MS: i64 = 86_400_000;
-const SUCCESS_QUALITY: f64 = 0.95;
+/// 二元 recall（1=记住）按 FSRS 二元拟合惯例映射到 Good(3)，而非 Easy(4)。
+/// update_strength 的评分带为 `<=0.85 → Good(3)`、`>0.85 → Easy(4)`；
+/// 取 0.7 落在 Good 带内，避免首评 stability 取 w[3]（Easy）造成约 5x 膨胀、扭曲调参与算法对比。
+const SUCCESS_QUALITY: f64 = 0.7;
 const FAILURE_QUALITY: f64 = 0.0;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

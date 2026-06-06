@@ -492,6 +492,44 @@ async fn restore_version(
     .await
 }
 
+/// 唯一的「把 stored patch 应用到 live config 并对用户生效」前置校验通道(#6/#17)。
+/// 无条件先跑 tuning_whitelist::validate_patch(白名单 path allowlist + 更严区间，防 DB 篡改/白名单漂移)，
+/// 再把 patch 逐路径写入 base config 副本、反序列化、AMASConfig::validate()。
+/// approve_one / create_canary 共用此闸，杜绝 canary 旁路白名单这一不对称缺口。
+pub(crate) async fn validate_and_build_patched_config(
+    state: &AppState,
+    base: &crate::amas::config::AMASConfig,
+    patch_obj: &serde_json::Map<String, serde_json::Value>,
+) -> Result<crate::amas::config::AMASConfig, AppError> {
+    use crate::amas::tuning_whitelist::validate_patch;
+
+    // 白名单闸(store 驱动)：path allowlist + 安全区间。
+    let patch_for_validate = patch_obj.clone();
+    let errs = state
+        .run_store_task("admin.amas.patch_validate", move |store| {
+            Ok::<_, crate::store::StoreError>(validate_patch(&store, &patch_for_validate))
+        })
+        .await??;
+    if !errs.is_empty() {
+        return Err(AppError::bad_request("PATCH_INVALID", &errs.join("；")));
+    }
+
+    // 应用 patch 到 base config 副本 → 反序列化 → 结构校验。
+    let mut cfg_value =
+        serde_json::to_value(base).map_err(|e| AppError::internal(&format!("ser: {e}")))?;
+    for (path, value) in patch_obj {
+        write_path(&mut cfg_value, path, value.clone());
+    }
+    let new_cfg: crate::amas::config::AMASConfig =
+        serde_json::from_value(cfg_value).map_err(|e| {
+            AppError::bad_request("PATCH_INVALID", &format!("应用 patch 后反序列化失败: {e}"))
+        })?;
+    new_cfg
+        .validate()
+        .map_err(|e| AppError::bad_request("AMAS_INVALID_CONFIG", &e))?;
+    Ok(new_cfg)
+}
+
 /// 内部 helper：校验 + 热重载 + 写 toml + 落版本表。
 /// 三档来源（manual / llm_suggested / llm_auto）共用此函数，确保审计与回滚都一致。
 pub(crate) async fn apply_and_persist_config(
@@ -995,7 +1033,6 @@ pub(crate) async fn approve_one(
     id: i64,
     note: Option<&str>,
 ) -> Result<axum::response::Response, AppError> {
-    use crate::amas::tuning_whitelist::validate_patch;
     use crate::store::operations::amas_suggestions::SuggestionStatus;
 
     let suggestion = state
@@ -1012,58 +1049,71 @@ pub(crate) async fn approve_one(
         ));
     }
 
-    // 校验 patch（防止数据库篡改）—— 白名单从 store 读
+    // 白名单 + 结构校验后构造 new config（单一前置闸，防 DB 篡改/白名单漂移，#6/#17）
     let patch_obj = suggestion
         .patch_json
         .as_object()
         .ok_or_else(|| AppError::internal("patch_json 非对象"))?
         .clone();
-    let patch_for_validate = patch_obj.clone();
-    let errs = state
-        .run_store_task("admin.amas.approve_validate", move |store| {
-            Ok::<_, crate::store::StoreError>(validate_patch(&store, &patch_for_validate))
-        })
-        .await??;
-    if !errs.is_empty() {
-        return Err(AppError::bad_request("PATCH_INVALID", &errs.join("；")));
-    }
-
-    // 应用 patch 到当前 config
     let current = state.amas().get_config();
-    let cfg_value =
-        serde_json::to_value(&current).map_err(|e| AppError::internal(&format!("ser: {e}")))?;
-    let mut cfg_value = cfg_value;
-    for (path, value) in &patch_obj {
-        write_path(&mut cfg_value, path, value.clone());
-    }
-    let new_cfg: crate::amas::config::AMASConfig =
-        serde_json::from_value(cfg_value).map_err(|e| {
-            AppError::bad_request("PATCH_INVALID", &format!("应用 patch 后反序列化失败: {e}"))
+    let new_cfg = validate_and_build_patched_config(state, &current, &patch_obj).await?;
+
+    // 原子抢占 Pending→Approved（CAS）：并发 approve / approve-all 只有一个胜出，杜绝重复 apply(#10)。
+    // 校验通过后才抢占，避免坏 patch 误占状态；抢占在 apply 之前，确保胜者唯一。
+    let admin_id_owned = admin_id.to_string();
+    let note_owned = note.map(|s| s.to_string());
+    state
+        .run_store_task("admin.amas.approve_claim", move |store| {
+            store.cas_amas_suggestion_status(
+                id,
+                SuggestionStatus::Pending,
+                SuggestionStatus::Approved,
+                Some(&admin_id_owned),
+                note_owned.as_deref(),
+            )
+        })
+        .await?
+        .map_err(|e| match e {
+            crate::store::StoreError::Conflict { .. } => {
+                AppError::bad_request("BAD_STATUS", "该建议已被并发处理")
+            }
+            crate::store::StoreError::NotFound { .. } => AppError::not_found("建议不存在"),
+            other => AppError::internal(&other.to_string()),
         })?;
 
-    let resp = apply_and_persist_config(
+    // CAS 抢占在 apply 之前确保胜者唯一,但 apply_and_persist_config 若中途失败(SSP 预计算/reload/
+    // 版本插入报错),建议已非 pending,重试与 approve-all 都会跳过它——成了"已批准却无任何已落地的持久
+    // 配置版本"。故 apply 失败时把抢占回退 Approved→Pending,让重试可重新抢占。CAS 仅当仍为 Approved
+    // 才回退,不覆盖期间可能发生的其它合法迁移。
+    let applied = apply_and_persist_config(
         state,
         admin_id,
         new_cfg,
         ConfigVersionSource::LlmSuggested,
         Some(format!("approve suggestion#{}", id)),
     )
-    .await?;
-
-    let admin_id_owned = admin_id.to_string();
-    let note_owned = note.map(|s| s.to_string());
-    state
-        .run_store_task("admin.amas.approve_update", move |store| {
-            store.update_amas_suggestion_status(
-                id,
-                SuggestionStatus::Approved,
-                Some(&admin_id_owned),
-                note_owned.as_deref(),
-            )
-        })
-        .await??;
-
-    Ok(resp)
+    .await;
+    if applied.is_err() {
+        let revert = state
+            .run_store_task("admin.amas.approve_revert", move |store| {
+                store.cas_amas_suggestion_status(
+                    id,
+                    SuggestionStatus::Approved,
+                    SuggestionStatus::Pending,
+                    None,
+                    None,
+                )
+            })
+            .await;
+        if let Err(e) = revert.map_err(|e| e.to_string()).and_then(|r| r.map_err(|e| e.to_string())) {
+            tracing::error!(
+                suggestion_id = id,
+                error = %e,
+                "approve apply 失败后回退 Approved→Pending 未成功，建议可能卡在 approved 态"
+            );
+        }
+    }
+    applied
 }
 
 async fn approve_suggestion(
@@ -1158,21 +1208,39 @@ async fn rollback_suggestion(
     )
     .await?;
 
+    // 标记 superseded + 把该建议关联的活跃灰度行一并置 rolled_back，收进同一事务(#19)：
+    // 否则 stable 已恢复但 amas_patch_canary 仍 active，engine 继续把 cohort 路由到被回滚的版本。
     let admin_id = admin.admin_id.clone();
-    state
+    let rolled_canaries = state
         .run_store_task("admin.amas.rollback_mark", move |store| {
-            store.update_amas_suggestion_status(
-                id,
-                SuggestionStatus::Superseded,
-                Some(&admin_id),
-                Some("rolled back to parent version"),
-            )
+            store.with_transaction(|conn| {
+                conn.execute(
+                    "UPDATE amas_tuning_suggestions
+                     SET status = ?1, decided_by = ?2, decided_at = ?3, decision_note = ?4
+                     WHERE id = ?5",
+                    rusqlite::params![
+                        SuggestionStatus::Superseded.as_str(),
+                        &admin_id,
+                        chrono::Utc::now().to_rfc3339(),
+                        "rolled back to parent version",
+                        id,
+                    ],
+                )?;
+                crate::store::operations::amas_patch_canary::rollback_active_canaries_for_suggestion_in_conn(
+                    conn, id,
+                )
+            })
         })
         .await??;
+    if rolled_canaries > 0 {
+        // 灰度路由不再活体下发，引擎需刷新 active canary 缓存标记。
+        state.amas().mark_canary_active();
+    }
 
     Ok(ok(serde_json::json!({
         "rolledBack": true,
         "versionHash": parent_hash,
+        "rolledBackCanaries": rolled_canaries,
     })))
 }
 
@@ -1195,6 +1263,40 @@ async fn explain_param(
         return Err(AppError::bad_request("LLM_DISABLED", "LLM 未启用"));
     }
 
+    // 预算守卫(#7)：调用前复用 llm_advisor 的日/月成本上限，超限直接 4xx 拦截，
+    // 防 admin token 泄露后对付费 LLM 端点无限刷量(billing-DoS)。
+    let daily_cap = llm_cfg.daily_cost_cap_usd;
+    let current_month = chrono::Utc::now().format("%Y-%m").to_string();
+    let month_for_query = current_month.clone();
+    let (spend_today, month_cap, spent_month) = state
+        .run_store_task("admin.amas.explain.budget", move |store| {
+            let (cost, _, _) = store.aggregate_amas_suggestion_spend_today()?;
+            let cap = store
+                .get_system_settings()
+                .map(|s| s.llm_advisor_max_cost_per_month_yuan)
+                .unwrap_or(0.0);
+            let spent = store.get_llm_cost_this_month(&month_for_query)?;
+            Ok::<_, crate::store::StoreError>((cost, cap, spent))
+        })
+        .await??;
+    let month_cap = if month_cap > 0.0 {
+        month_cap
+    } else {
+        llm_cfg.max_cost_per_month_yuan
+    };
+    if spend_today >= daily_cap {
+        return Err(AppError::bad_request(
+            "BUDGET_EXCEEDED",
+            "已达 LLM 日成本上限，请稍后再试",
+        ));
+    }
+    if spent_month >= month_cap {
+        return Err(AppError::bad_request(
+            "BUDGET_EXCEEDED",
+            "已达 LLM 月成本上限，请下月再试",
+        ));
+    }
+
     let provider = LlmProvider::new(&llm_cfg);
     let prompt = format!(
         "用 80 字以内中文，向运营人员解释 AMAS 参数 `{}` 当前值 {} 的含义、增大/减小会带来什么后果。直接给结论，不要寒暄。",
@@ -1213,6 +1315,16 @@ async fn explain_param(
         .map_err(|e| AppError::internal(&format!("LLM 调用失败: {e}")))?;
 
     let cost = provider.estimate_cost_usd(&resp.usage);
+    // 计费留痕(#7)：把本次调用成本写入月度台账，使下次预算守卫与 spend 看板可见。
+    let cost_yuan = cost * llm_cfg.usd_to_cny_rate;
+    if let Err(e) = state
+        .run_store_task("admin.amas.explain.ledger", move |store| {
+            store.add_llm_cost(&current_month, cost_yuan)
+        })
+        .await?
+    {
+        tracing::warn!(error = %e, "explain_param: 月成本台账写入失败");
+    }
     Ok(ok(serde_json::json!({
         "explanation": resp.content,
         "model": resp.model,
@@ -1318,7 +1430,15 @@ fn write_path(cfg: &mut serde_json::Value, path: &str, value: serde_json::Value)
         let is_last = i == parts.len() - 1;
         if let Some(open) = part.find('[') {
             let (key, rest) = part.split_at(open);
-            let idx: usize = rest[1..rest.len() - 1].parse().unwrap_or(0);
+            // 校验下标段形如 `[N]`：strip 失败(如末尾裸 `[`)则路径不可解析，整体跳过，
+            // 避免对 `rest[1..rest.len()-1]` 做逆序切片 panic(#33)。
+            let Some(idx) = rest
+                .strip_prefix('[')
+                .and_then(|r| r.strip_suffix(']'))
+                .and_then(|inner| inner.parse::<usize>().ok())
+            else {
+                return;
+            };
             let Some(obj) = cur.as_object_mut() else {
                 return;
             };
@@ -2050,7 +2170,12 @@ fn diff_impact_read_path(cfg: &serde_json::Value, path: &str) -> Option<serde_js
     for part in path.split('.') {
         if let Some(open) = part.find('[') {
             let (key, rest) = part.split_at(open);
-            let idx: usize = rest[1..rest.len() - 1].parse().ok()?;
+            // 下标段须形如 `[N]`；末尾裸 `[` 等非法形态返回 None 而非逆序切片 panic(#33)。
+            let idx: usize = rest
+                .strip_prefix('[')
+                .and_then(|r| r.strip_suffix(']'))?
+                .parse()
+                .ok()?;
             cur = cur.get(key)?.get(idx)?;
         } else {
             cur = cur.get(part)?;
@@ -2446,47 +2571,45 @@ async fn create_canary(
         .map(|slice| serde_json::to_string(&slice).unwrap_or_else(|_| "{}".into()))
         .unwrap_or_else(|_| "{}".into());
 
-    // 落 canary version snapshot:把 patch 应用到 stable 后入版本表(与 approve 同构造)
+    // 落 canary version snapshot:把 patch 应用到 stable 后入版本表(与 approve 同构造)。
+    // 经唯一前置闸 validate_and_build_patched_config：白名单(path allowlist + 更严区间) + 结构校验，
+    // 关闭 canary 旁路 validate_patch 的不对称缺口(#6/#17)。
     let patch_obj = suggestion
         .patch_json
         .as_object()
         .ok_or_else(|| AppError::internal("patch_json 非对象"))?
         .clone();
     let current = state.amas().get_config();
-    let mut cfg_value =
-        serde_json::to_value(&current).map_err(|e| AppError::internal(&format!("ser: {e}")))?;
-    for (path, value) in &patch_obj {
-        write_path(&mut cfg_value, path, value.clone());
-    }
-    let new_cfg: crate::amas::config::AMASConfig = serde_json::from_value(cfg_value)
-        .map_err(|e| AppError::bad_request("PATCH_INVALID", &format!("应用 patch 失败: {e}")))?;
-    new_cfg
-        .validate()
-        .map_err(|e| AppError::bad_request("AMAS_INVALID_CONFIG", &e))?;
+    let new_cfg = validate_and_build_patched_config(&state, &current, &patch_obj).await?;
     let snapshot_json = serde_json::to_string(&new_cfg)
         .map_err(|e| AppError::internal(&format!("配置序列化失败: {e}")))?;
 
     let parent_hash = suggestion.based_on_version_hash.clone();
     let percent = req.percent;
     let admin_id = admin.admin_id.clone();
+    let canary_note = format!("canary suggestion#{sid}");
 
-    // 槽分配（读 active 算 cohort_lo）+ 配额校验 + INSERT 收进单事务（store.create_active_patch_canary），
-    // 消除跨 task 的 TOCTOU 窗口；version snapshot 按 hash 幂等，留作前置步可安全单取连接。
+    // 单事务：拒绝重复灰度 + 落版本 + 建 active canary 行 + 迁出 suggestion(Pending→InCanary)(#9)。
+    // 消除「建议仍 Pending 可被 approve 全量应用」与「同一建议反复占满灰度配额」两条缺口。
     let inserted = state
         .run_store_task("admin.amas.canary.create", move |store| {
-            let (_vid, vhash) = store.insert_amas_config_version(
+            store.create_canary_and_claim_suggestion(
+                sid,
                 &snapshot_json,
                 &admin_id,
-                ConfigVersionSource::LlmSuggested,
-                Some(&format!("canary suggestion#{sid}")),
+                Some(&canary_note),
                 Some(&parent_hash),
-            )?;
-            store.create_active_patch_canary(sid, &vhash, percent, &baseline_json)
+                percent,
+                &baseline_json,
+            )
         })
         .await?
         .map_err(|e| match e {
             crate::store::StoreError::Validation(msg) => {
                 AppError::bad_request("CANARY_QUOTA_FULL", &msg)
+            }
+            crate::store::StoreError::Conflict { .. } => {
+                AppError::bad_request("BAD_STATUS", "该建议已被并发处理（已批准或已进灰度）")
             }
             other => AppError::internal(&other.to_string()),
         })?;
@@ -2598,8 +2721,38 @@ async fn promote_canary(
             "仅 100% 灰度可提升 stable",
         ));
     }
-    // 把 canary version snapshot 提升为 stable(复用 restore 通路)
+
     let vhash = canary.version_hash.clone();
+
+    // 复核 baseline 退化守卫(#15)：聚合 live 切片 + 解析 baseline，复用与 canary_monitor 同一
+    // should_rollback 纯函数。若已判定应回滚则拒绝提升，避免抢在 monitor 周期前把退化 patch 推全量。
+    let vhash_for_slice = vhash.clone();
+    let baseline_json = canary.baseline_metrics_json.clone();
+    let (live, baseline, reward_drop_th, anomaly_rise_th) = state
+        .run_store_task("admin.amas.canary.promote_guard", move |store| {
+            let live = store.aggregate_amas_version_slice(&vhash_for_slice)?;
+            let baseline: crate::amas::monitoring::CanaryBaseline =
+                serde_json::from_str(&baseline_json).unwrap_or_default();
+            let (rd, ar) = store
+                .get_system_settings()
+                .map(|s| {
+                    (
+                        s.canary_reward_drop_threshold,
+                        s.canary_anomaly_rise_threshold,
+                    )
+                })
+                .unwrap_or((0.05, 0.05));
+            Ok::<_, crate::store::StoreError>((live, baseline, rd, ar))
+        })
+        .await??;
+    if crate::amas::monitoring::should_rollback(&baseline, &live, reward_drop_th, anomaly_rise_th) {
+        return Err(AppError::bad_request(
+            "CANARY_DEGRADED",
+            "该灰度已触发退化守卫（reward 下跌或异常率飙升），拒绝提升为 stable",
+        ));
+    }
+
+    // 取 canary version snapshot 并结构校验。
     let vhash_lookup = vhash.clone();
     let detail = state
         .run_store_task("admin.amas.canary.promote_version", move |store| {
@@ -2609,20 +2762,62 @@ async fn promote_canary(
         .ok_or_else(|| AppError::internal("canary version 不存在"))?;
     let cfg: crate::amas::config::AMASConfig = serde_json::from_value(detail.snapshot_json)
         .map_err(|e| AppError::internal(&format!("快照反序列化失败: {e}")))?;
-    apply_and_persist_config(
-        &state,
-        &admin.admin_id,
-        cfg,
-        ConfigVersionSource::Manual,
-        Some(format!("promote canary#{id} → stable")),
-    )
-    .await?;
-    state
-        .run_store_task("admin.amas.canary.promote_status", move |store| {
-            store.set_patch_canary_status(id, "effective")
+    cfg.validate()
+        .map_err(|e| AppError::bad_request("AMAS_INVALID_CONFIG", &e))?;
+    let snapshot_json = serde_json::to_string(&cfg)
+        .map_err(|e| AppError::internal(&format!("配置序列化失败: {e}")))?;
+
+    // 单事务原子提升(#8/#16/#41)：CAS canary active→effective + 落 stable 版本行。
+    // 期间被 monitor 自动回滚（active→rolled_back）→ CAS affected==0 → Conflict，放弃提升，
+    // 不污染 stable，也不把 rolled_back 覆盖回 effective。
+    let admin_id = admin.admin_id.clone();
+    let parent = detail.parent_version_hash.clone();
+    let promote_note = format!("promote canary#{id} → stable");
+    let (version_id, version_hash) = state
+        .run_store_task("admin.amas.canary.promote_tx", move |store| {
+            store.promote_patch_canary_tx(
+                id,
+                &snapshot_json,
+                &admin_id,
+                ConfigVersionSource::Manual,
+                Some(&promote_note),
+                parent.as_deref(),
+            )
         })
-        .await??;
+        .await?
+        .map_err(|e| match e {
+            crate::store::StoreError::Conflict { .. } => AppError::bad_request(
+                "CANARY_ROLLED_BACK",
+                "该灰度已被自动/手动回滚，无法提升",
+            ),
+            crate::store::StoreError::NotFound { .. } => AppError::not_found("canary 不存在"),
+            other => AppError::internal(&other.to_string()),
+        })?;
+
+    // DB 状态已原子落定后，再把配置热重载进 live 内存 + 写回 TOML（内存态无法纳入 DB 事务）。
+    state
+        .amas()
+        .reload_config(cfg.clone())
+        .map_err(|e| AppError::internal(&format!("热重载配置失败: {e}")))?;
+    let toml_path = state
+        .config()
+        .amas_config_file
+        .clone()
+        .unwrap_or_else(|| "amas_config.toml".to_string());
+    if let Err(e) = cfg.write_to_toml(&toml_path) {
+        tracing::warn!(path = %toml_path, error = %e, "promote_canary: 写回 AMAS 配置文件失败");
+    }
+    tracing::info!(
+        admin_id = %admin.admin_id,
+        action = "promote_canary",
+        canary_id = id,
+        version_id,
+        version_hash = %version_hash,
+        "管理员提升 canary 为 stable"
+    );
+    state.amas().mark_canary_active();
+
     Ok(ok(
-        serde_json::json!({ "promoted": true, "versionHash": vhash }),
+        serde_json::json!({ "promoted": true, "versionHash": version_hash }),
     ))
 }

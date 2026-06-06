@@ -64,16 +64,59 @@ impl Store {
         Ok(result.unwrap_or_default())
     }
 
+    /// #14 抗投毒账本：取单用户对某词全局评分的累计净位移（m050）。无行视为 0.0。
+    /// 回滚快照（W1-1）据此把 `word_elo_user_contrib` 连同 `word_elo` 一并捕获/恢复，
+    /// 否则部分提交后回滚会留下账本前移、重放误钳合法位移。
+    pub fn get_word_elo_user_contrib(
+        &self,
+        user_id: &str,
+        word_id: &str,
+    ) -> Result<f64, StoreError> {
+        keys::validate_id(user_id)?;
+        keys::validate_id(word_id)?;
+        let conn = self.conn()?;
+        let v: Option<f64> = conn
+            .query_row(
+                "SELECT net_displacement FROM word_elo_user_contrib WHERE user_id=?1 AND word_id=?2",
+                params![user_id, word_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(v.unwrap_or(0.0))
+    }
+
+    /// #3：批量取候选词 ELO。原实现按 word_id 逐个 `get_word_elo`（N 次 pool.get + N 次查询）；
+    /// 改为单条 `WHERE word_id IN (...)`，分块 ≤900 占位符以避开 SQLite 参数上限。缺失的词不入表，
+    /// 调用方对缺失项用默认值（与逐个查 `unwrap_or_default` 行为一致）。
     pub fn get_word_elos_by_ids(
         &self,
         word_ids: &[String],
     ) -> Result<HashMap<String, EloRating>, StoreError> {
+        if word_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let conn = self.conn()?;
         let mut result = HashMap::with_capacity(word_ids.len());
-        for word_id in word_ids {
-            if result.contains_key(word_id) {
-                continue;
+        for chunk in word_ids.chunks(900) {
+            let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
+            let sql = format!(
+                "SELECT word_id, rating, games FROM word_elo WHERE word_id IN ({})",
+                placeholders.join(",")
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    EloRating {
+                        rating: r.get(1)?,
+                        games: r.get(2)?,
+                    },
+                ))
+            })?;
+            for row in rows {
+                let (word_id, elo) = row?;
+                result.entry(word_id).or_insert(elo);
             }
-            result.insert(word_id.clone(), self.get_word_elo(word_id)?);
         }
         Ok(result)
     }
@@ -89,18 +132,58 @@ impl Store {
         Ok(())
     }
 
+    /// #3：批量取候选词 mastery 状态。原实现按 word_id 逐个 `get_engine_algo_state`（N 次
+    /// pool.get + N 次查询）；改为单条 `WHERE user_id=? AND algo_id IN ('mastery:w1',...)`，分块
+    /// ≤900 占位符避开 SQLite 参数上限。返回值 key 为 word_id（去掉 `mastery:` 前缀），缺失项为
+    /// `None`，与原逐个查行为一致。
     fn batch_get_mastery_values(
         &self,
         user_id: &str,
         word_ids: &[String],
     ) -> Result<HashMap<String, Option<serde_json::Value>>, StoreError> {
-        let mut map = HashMap::with_capacity(word_ids.len());
+        keys::validate_id(user_id)?;
+        let mut map: HashMap<String, Option<serde_json::Value>> =
+            HashMap::with_capacity(word_ids.len());
+        // 预填 None，保证每个去重后的 word_id 都有条目（缺行即 None）。
         for word_id in word_ids {
-            if map.contains_key(word_id) {
-                continue;
+            map.entry(word_id.clone()).or_insert(None);
+        }
+        if word_ids.is_empty() {
+            return Ok(map);
+        }
+        let conn = self.conn()?;
+        let unique_ids: Vec<&String> = {
+            let mut seen = std::collections::HashSet::new();
+            word_ids.iter().filter(|id| seen.insert(*id)).collect()
+        };
+        for chunk in unique_ids.chunks(900) {
+            let algo_ids: Vec<String> = chunk.iter().map(|w| format!("mastery:{w}")).collect();
+            // 占位符 ?2..?N+1（?1 留给 user_id）。
+            let placeholders: String = (0..algo_ids.len())
+                .map(|i| format!("?{}", i + 2))
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "SELECT algo_id, state_json FROM engine_algo_states
+                 WHERE user_id=?1 AND algo_id IN ({placeholders})"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            // 参数：user_id 在前，随后 N 个 algo_id。
+            let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(algo_ids.len() + 1);
+            params.push(&user_id);
+            for a in &algo_ids {
+                params.push(a);
             }
-            let state = self.get_engine_algo_state(user_id, &format!("mastery:{word_id}"))?;
-            map.insert(word_id.clone(), state);
+            let rows = stmt.query_map(params.as_slice(), |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?;
+            for row in rows {
+                let (algo_id, json) = row?;
+                if let Some(word_id) = algo_id.strip_prefix("mastery:") {
+                    let value: serde_json::Value = Self::deserialize_json(&json)?;
+                    map.insert(word_id.to_string(), Some(value));
+                }
+            }
         }
         Ok(map)
     }

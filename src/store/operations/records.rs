@@ -163,7 +163,11 @@ impl Store {
     ) -> Result<(), StoreError> {
         keys::validate_id(&record.id)?;
         let mut conn = self.conn()?;
-        let tx = conn.transaction()?;
+        // #42：IMMEDIATE 而非默认 DEFERRED——user_stats 计数器是 SELECT total_records→Rust +1→
+        // 绝对值 UPSERT 的 read-modify-write，DEFERRED 下两并发同用户事务会各自读到 N 再都写 N+1
+        // （丢更新），且读后写升级易触发 SQLITE_BUSY 死锁。BEGIN IMMEDIATE 在事务起点即取写锁，
+        // 让并发写串行化而非互相覆盖。
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
 
         // 幂等插入:仅吞主键 (user_id,id) 冲突。并发同 client_record_id 请求中,其一走"裸记录回放"
         // 抢先插入同一行时,本次全量持久化不再因主键冲突报错——否则调用方会把这当成持久化失败而

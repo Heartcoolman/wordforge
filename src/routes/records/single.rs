@@ -117,6 +117,8 @@ struct EngineStateSnapshot {
     mastery_key: String,
     user_elo: crate::amas::elo::EloRating,
     word_elo: crate::amas::elo::EloRating,
+    /// #14：抗投毒账本（user,word）净位移快照，与 word_elo 同步捕获/回滚。
+    word_elo_contrib: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -157,6 +159,7 @@ fn capture_engine_state_snapshot(
         mastery_key,
         user_elo: store.get_user_elo(user_id)?,
         word_elo: store.get_word_elo(word_id)?,
+        word_elo_contrib: store.get_word_elo_user_contrib(user_id, word_id)?,
     })
 }
 
@@ -182,6 +185,7 @@ fn restore_engine_state_snapshot(
         ],
         user_elo: Some(&snapshot.user_elo),
         word_elo: Some((word_id, &snapshot.word_elo)),
+        word_elo_contrib: Some((word_id, snapshot.word_elo_contrib)),
         clear_marker_record_id: clear_marker,
     };
     if let Err(error) = store.restore_engine_state_atomic(&restore) {
@@ -366,24 +370,14 @@ pub(crate) async fn process_single_record(
             duplicate: true,
         });
     };
-    let amas_config = state.amas().get_config();
     let amas_result_for_store = amas_result.clone();
 
     state
         .run_store_task(
             "records.single.persist",
             move |store| -> Result<_, AppError> {
-                let mut user_elo = store.get_user_elo(&user_id_owned)?;
-                let mut word_elo = store.get_word_elo(&word_id)?;
-                crate::amas::elo::update_elo(
-                    &mut user_elo,
-                    &mut word_elo,
-                    req_for_store.is_correct,
-                    &amas_config.elo,
-                );
-                store.set_user_elo(&user_id_owned, &user_elo)?;
-                store.set_word_elo(&word_id, &word_elo)?;
-
+                // ELO 现由 AMAS 引擎在 process_event_blocking → persist_engine_state_atomic
+                // 的锁定原子事务内应用，路由侧不再重复 RMW（否则 ELO 双重累加）。
                 let mut next_word_state: Option<WordLearningState> = None;
                 if let Some(ref wm) = amas_result_for_store.word_mastery {
                     let new_state = match wm.mastery_level {

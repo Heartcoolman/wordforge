@@ -4,7 +4,54 @@ use serde::{Deserialize, Serialize};
 
 use crate::amas::config::AMASConfig;
 use crate::amas::types::*;
+use crate::store::operations::amas_telemetry::VersionMetricsSlice;
 use crate::store::Store;
+
+/// canary 退化守卫的 baseline 输入（灰度起始时 stable 切片快照）。
+/// 字段名兼容 `VersionMetricsSlice` 的 camelCase 序列化，可直接由 `baseline_metrics_json` 反序列化。
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CanaryBaseline {
+    /// baseline 切片自身样本量。退化 baseline（解析失败 default / 零样本 stable 切片）下
+    /// event_count 不足，reward 轴对照不可信，须跳过以免漏报回滚。
+    #[serde(default)]
+    pub event_count: u64,
+    #[serde(default)]
+    pub mean_reward: f64,
+    #[serde(default)]
+    pub anomaly_rate: f64,
+}
+
+/// canary 退化守卫的最少样本量：live 切片 event_count 不足时跳过判定（避免早期噪声误回滚）。
+pub const CANARY_MIN_SAMPLE: u64 = 50;
+
+/// 纯判定：给定 baseline、live 切片与两阈值，是否应回滚。样本不足返回 false。
+/// canary_monitor worker 与 promote_canary 复核共用此函数，确保「应回滚的退化 patch」在两条路径上判定一致。
+pub fn should_rollback(
+    baseline: &CanaryBaseline,
+    live: &VersionMetricsSlice,
+    reward_drop_threshold: f64,
+    anomaly_rise_threshold: f64,
+) -> bool {
+    if live.event_count < CANARY_MIN_SAMPLE {
+        return false;
+    }
+    // anomaly 轴：不依赖 baseline 样本量。baseline.anomaly_rate 退化为 0 时 anomaly_rise=live，
+    // 仍能正确捕获异常率飙升，故始终生效（也是退化 baseline 下的兜底回滚轴）。
+    let anomaly_rise = live.anomaly_rate - baseline.anomaly_rate;
+    if anomaly_rise > anomaly_rise_threshold {
+        return true;
+    }
+    // reward 轴：reward_drop = baseline - live，仅在 baseline 样本充足时可信。退化 baseline
+    //（解析失败 default 或零样本 stable 切片，event_count < MIN_SAMPLE 且 mean_reward 记 0）下，
+    // reward_drop 对任意正 live reward 恒为负 → reward 轴漏报回滚。故 baseline 样本不足时跳过
+    // reward 轴，避免把"应回滚"误判为"通过"。
+    if baseline.event_count < CANARY_MIN_SAMPLE {
+        return false;
+    }
+    let reward_drop = baseline.mean_reward - live.mean_reward;
+    reward_drop > reward_drop_threshold
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InvariantViolation {
@@ -365,6 +412,46 @@ mod tests {
             false,
         );
         assert!(store.get_recent_monitoring_events(10).unwrap().is_empty());
+    }
+
+    fn slice(count: u64, reward: f64, anomaly: f64) -> VersionMetricsSlice {
+        VersionMetricsSlice {
+            version_hash: "h".into(),
+            event_count: count,
+            mean_reward: reward,
+            anomaly_rate: anomaly,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn should_rollback_on_reward_drop_or_anomaly_rise() {
+        let baseline = CanaryBaseline {
+            event_count: 100,
+            mean_reward: 0.80,
+            anomaly_rate: 0.01,
+        };
+        // reward 降 0.10 > 0.05
+        assert!(should_rollback(&baseline, &slice(100, 0.70, 0.01), 0.05, 0.05));
+        // anomaly 升 0.09 > 0.05
+        assert!(should_rollback(&baseline, &slice(100, 0.80, 0.10), 0.05, 0.05));
+        // 均在阈值内
+        assert!(!should_rollback(&baseline, &slice(100, 0.78, 0.02), 0.05, 0.05));
+    }
+
+    #[test]
+    fn should_rollback_skips_small_sample_and_degraded_baseline() {
+        let baseline = CanaryBaseline {
+            event_count: 100,
+            mean_reward: 0.80,
+            anomaly_rate: 0.01,
+        };
+        // live 样本 < 50 不判定
+        assert!(!should_rollback(&baseline, &slice(10, 0.0, 1.0), 0.05, 0.05));
+        // 退化 baseline（event_count=0）下 reward 轴跳过，但 anomaly 轴兜底
+        let degraded = CanaryBaseline::default();
+        assert!(!should_rollback(&degraded, &slice(100, 0.70, 0.02), 0.05, 0.05));
+        assert!(should_rollback(&degraded, &slice(100, 0.70, 0.20), 0.05, 0.05));
     }
 
     #[test]

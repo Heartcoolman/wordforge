@@ -112,8 +112,10 @@ async fn spawn_with_full_config_dual(
             .to_string(),
         api_only: false,
         sqlite_busy_timeout_ms: 5000,
-        // CI 上 ubuntu 磁盘 IO 较慢，并发测试时 pool 等连接 250ms 不够导致 Pool(Error(None)) panic
-        sqlite_connection_timeout_ms: 2000,
+        // CI 上 ubuntu 磁盘 IO 较慢 + llvm-cov 插桩使建连更慢，并发测试时 pool 等连接易超时
+        // panic Pool(Error(None))。历经 250→2000 仍在 coverage job 偶发，提到 10s 给足裕量（纯
+        // 测试耐心值，生产用各自 config，不受影响；不会让正常用例变慢，仅在病态争用时多等）。
+        sqlite_connection_timeout_ms: 10000,
         sqlite_pool_size: 2,
         records_outbox_async: false,
         jwt_secret: test_secret,

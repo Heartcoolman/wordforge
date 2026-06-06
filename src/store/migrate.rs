@@ -109,6 +109,14 @@ fn migrations() -> Vec<(&'static str, MigrationFn)> {
             "049_wb_center_imports_user_pk",
             m049_wb_center_imports_user_pk,
         ),
+        (
+            "050_word_elo_user_contrib",
+            m050_word_elo_user_contrib,
+        ),
+        (
+            "051_suggestion_status_in_canary",
+            m051_suggestion_status_in_canary,
+        ),
     ]
 }
 
@@ -212,6 +220,14 @@ fn migrations_down() -> Vec<(&'static str, MigrationFn)> {
         (
             "049_wb_center_imports_user_pk",
             m049_wb_center_imports_user_pk_down,
+        ),
+        (
+            "050_word_elo_user_contrib",
+            m050_word_elo_user_contrib_down,
+        ),
+        (
+            "051_suggestion_status_in_canary",
+            m051_suggestion_status_in_canary_down,
         ),
     ]
 }
@@ -2488,6 +2504,115 @@ fn m049_wb_center_imports_user_pk_down(store: &Store) -> Result<(), StoreError> 
         ALTER TABLE wb_center_imports_old RENAME TO wb_center_imports;
         CREATE INDEX IF NOT EXISTS idx_wb_center_imports_source_url ON wb_center_imports(source_url);
         CREATE INDEX IF NOT EXISTS idx_wb_center_imports_user ON wb_center_imports(user_id, updated_at DESC);",
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// m050:#14 抗投毒——per-(user,word) 累计净位移账本。
+/// word_elo 是全局共享状态(主键仅 word_id),被全员选词读取;单设备反复同向上报会无界推动
+/// 该词全局评分污染他人排序。此表记录"单用户对某词全局评分的累计净贡献",persist_engine_state_atomic
+/// 据此把单用户净位移钳在硬上限内,封死投毒路径(详见 store/operations/engine.rs::apply_elo_in_tx)。
+fn m050_word_elo_user_contrib(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS word_elo_user_contrib (
+            user_id          TEXT NOT NULL,
+            word_id          TEXT NOT NULL,
+            net_displacement REAL NOT NULL DEFAULT 0.0,
+            PRIMARY KEY (user_id, word_id)
+        );",
+    )?;
+    Ok(())
+}
+
+/// m050 down:DROP 账本表。仅 dev/test。
+fn m050_word_elo_user_contrib_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch("DROP TABLE IF EXISTS word_elo_user_contrib;")?;
+    Ok(())
+}
+
+/// m051:#9 灰度迁出态——把 'in_canary' 纳入 amas_tuning_suggestions.status 的 CHECK 白名单。
+/// create_canary_and_claim_suggestion 把 Pending→InCanary('in_canary') 收进建灰度同一事务,
+/// 防建议在灰度期间被 approve/approve-all 二次全量应用;但旧库的 CHECK 不含该值,UPDATE 直接约束违例。
+/// SQLite 无法在位 ALTER CHECK,故整表重建(12 步式)迁移已有数据并刷新索引。
+fn m051_suggestion_status_in_canary(store: &Store) -> Result<(), StoreError> {
+    let mut conn = store.conn()?;
+    let tx = conn.transaction()?;
+    tx.execute_batch(
+        "DROP TABLE IF EXISTS amas_tuning_suggestions_new;
+        CREATE TABLE amas_tuning_suggestions_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            based_on_version_hash TEXT NOT NULL,
+            patch_json TEXT NOT NULL,
+            rationale TEXT NOT NULL,
+            evidence_json TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('pending','in_canary','approved','rejected','superseded','expired','auto_applied')),
+            decided_by TEXT,
+            decided_at TEXT,
+            decision_note TEXT,
+            cost_usd REAL,
+            tokens_input INTEGER,
+            tokens_output INTEGER,
+            confidence REAL,
+            base_values_json TEXT DEFAULT NULL
+        );
+        INSERT INTO amas_tuning_suggestions_new
+            (id, created_at, based_on_version_hash, patch_json, rationale, evidence_json,
+             status, decided_by, decided_at, decision_note, cost_usd, tokens_input,
+             tokens_output, confidence, base_values_json)
+        SELECT id, created_at, based_on_version_hash, patch_json, rationale, evidence_json,
+               status, decided_by, decided_at, decision_note, cost_usd, tokens_input,
+               tokens_output, confidence, base_values_json
+          FROM amas_tuning_suggestions;
+        DROP TABLE amas_tuning_suggestions;
+        ALTER TABLE amas_tuning_suggestions_new RENAME TO amas_tuning_suggestions;
+        CREATE INDEX IF NOT EXISTS idx_amas_suggestions_status_time
+            ON amas_tuning_suggestions(status, created_at DESC);",
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// m051 down:回退到不含 'in_canary' 的 CHECK。仅 dev/test。
+/// 旧 CHECK 容不下 'in_canary',按其来源态把残留行映射回 'pending'。
+fn m051_suggestion_status_in_canary_down(store: &Store) -> Result<(), StoreError> {
+    let mut conn = store.conn()?;
+    let tx = conn.transaction()?;
+    tx.execute_batch(
+        "DROP TABLE IF EXISTS amas_tuning_suggestions_old;
+        CREATE TABLE amas_tuning_suggestions_old (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            based_on_version_hash TEXT NOT NULL,
+            patch_json TEXT NOT NULL,
+            rationale TEXT NOT NULL,
+            evidence_json TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('pending','approved','rejected','superseded','expired','auto_applied')),
+            decided_by TEXT,
+            decided_at TEXT,
+            decision_note TEXT,
+            cost_usd REAL,
+            tokens_input INTEGER,
+            tokens_output INTEGER,
+            confidence REAL,
+            base_values_json TEXT DEFAULT NULL
+        );
+        INSERT INTO amas_tuning_suggestions_old
+            (id, created_at, based_on_version_hash, patch_json, rationale, evidence_json,
+             status, decided_by, decided_at, decision_note, cost_usd, tokens_input,
+             tokens_output, confidence, base_values_json)
+        SELECT id, created_at, based_on_version_hash, patch_json, rationale, evidence_json,
+               CASE WHEN status = 'in_canary' THEN 'pending' ELSE status END,
+               decided_by, decided_at, decision_note, cost_usd, tokens_input,
+               tokens_output, confidence, base_values_json
+          FROM amas_tuning_suggestions;
+        DROP TABLE amas_tuning_suggestions;
+        ALTER TABLE amas_tuning_suggestions_old RENAME TO amas_tuning_suggestions;
+        CREATE INDEX IF NOT EXISTS idx_amas_suggestions_status_time
+            ON amas_tuning_suggestions(status, created_at DESC);",
     )?;
     tx.commit()?;
     Ok(())

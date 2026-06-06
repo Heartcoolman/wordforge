@@ -50,6 +50,17 @@ pub struct NewApiKey<'a> {
     pub expires_at: Option<&'a str>,
 }
 
+/// 角色变更/删除守卫的原子结果:区分「目标不存在」「最后一个 super-admin」与成功。
+/// 路由层据此映射到既有 AppError(not_found / LAST_SUPER_ADMIN 409),保持响应不变。
+pub enum RoleGuardOutcome<T> {
+    /// 目标管理员不存在。
+    NotFound,
+    /// 命中「最后一个 super-admin」守卫,操作被拒。
+    LastSuperAdmin,
+    /// 操作成功,携带返回值(改角色返回视图;删除返回 ())。
+    Ok(T),
+}
+
 impl Store {
     // ─────────────── 管理员 RBAC ───────────────
 
@@ -131,6 +142,96 @@ impl Store {
                 |r| r.get::<_, String>(0),
             )
             .optional()?)
+    }
+
+    /// 原子变更管理员角色:在**单条连接 + BEGIN IMMEDIATE 事务**内完成
+    /// 「读当前角色 → 计数 super-admin → UPDATE」,消除路由层 check-then-act 的
+    /// TOCTOU 丢更新(两个并发降级各自看到 supers==2 而双双提交,清空 super-admin)。
+    pub fn update_admin_role_guarded(
+        &self,
+        admin_id: &str,
+        new_role: &str,
+        updated_at: &str,
+    ) -> Result<RoleGuardOutcome<AdminRoleView>, StoreError> {
+        self.with_user_tx(|tx| {
+            let current: Option<String> = tx
+                .query_row(
+                    "SELECT role FROM admins WHERE id = ?1",
+                    params![admin_id],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()?;
+            let Some(current) = current else {
+                return Ok(RoleGuardOutcome::NotFound);
+            };
+            // 守卫:降级最后一个 super-admin 会导致无人能管角色。
+            if current == "super_admin" && new_role != "super_admin" {
+                let supers: i64 = tx.query_row(
+                    "SELECT COUNT(*) FROM admins WHERE role = ?1",
+                    params!["super_admin"],
+                    |r| r.get(0),
+                )?;
+                if supers <= 1 {
+                    return Ok(RoleGuardOutcome::LastSuperAdmin);
+                }
+            }
+            tx.execute(
+                "UPDATE admins SET role = ?1, updated_at = ?2 WHERE id = ?3",
+                params![new_role, updated_at, admin_id],
+            )?;
+            let view = tx.query_row(
+                "SELECT id, email, role, created_at, locked_until FROM admins WHERE id = ?1",
+                params![admin_id],
+                |r| {
+                    Ok(AdminRoleView {
+                        id: r.get(0)?,
+                        email: r.get(1)?,
+                        role: r.get(2)?,
+                        created_at: r.get(3)?,
+                        locked_until: r.get(4)?,
+                    })
+                },
+            )?;
+            Ok(RoleGuardOutcome::Ok(view))
+        })
+    }
+
+    /// 原子删除管理员:在**单条连接 + BEGIN IMMEDIATE 事务**内完成
+    /// 「读当前角色 → 计数 super-admin → 级联删 admin_sessions + admins」,
+    /// 同 [`Self::update_admin_role_guarded`] 消除「删最后一个 super-admin」的 TOCTOU。
+    pub fn delete_admin_guarded(
+        &self,
+        admin_id: &str,
+    ) -> Result<RoleGuardOutcome<()>, StoreError> {
+        self.with_user_tx(|tx| {
+            let current: Option<String> = tx
+                .query_row(
+                    "SELECT role FROM admins WHERE id = ?1",
+                    params![admin_id],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()?;
+            let Some(current) = current else {
+                return Ok(RoleGuardOutcome::NotFound);
+            };
+            // 守卫:删除最后一个 super-admin 会锁死 RBAC 管理。
+            if current == "super_admin" {
+                let supers: i64 = tx.query_row(
+                    "SELECT COUNT(*) FROM admins WHERE role = ?1",
+                    params!["super_admin"],
+                    |r| r.get(0),
+                )?;
+                if supers <= 1 {
+                    return Ok(RoleGuardOutcome::LastSuperAdmin);
+                }
+            }
+            tx.execute(
+                "DELETE FROM admin_sessions WHERE user_id = ?1",
+                params![admin_id],
+            )?;
+            tx.execute("DELETE FROM admins WHERE id = ?1", params![admin_id])?;
+            Ok(RoleGuardOutcome::Ok(()))
+        })
     }
 
     /// 变更管理员角色。返回更新后的视图;不存在返回 None。
@@ -312,6 +413,56 @@ mod tests {
         assert!(s.delete_admin("a2").unwrap());
         assert_eq!(s.list_admins().unwrap().len(), 1);
         assert!(!s.delete_admin("nope").unwrap());
+    }
+
+    #[test]
+    fn guarded_role_change_blocks_last_super_admin() {
+        let s = store();
+        s.invite_admin("a1", "a1@x.com", "h", "super_admin", "2026-01-01T00:00:00Z")
+            .unwrap();
+        // 仅一个 super-admin:降级被守卫拦截。
+        assert!(matches!(
+            s.update_admin_role_guarded("a1", "admin", "2026-01-02T00:00:00Z")
+                .unwrap(),
+            RoleGuardOutcome::LastSuperAdmin
+        ));
+        // 目标不存在:NotFound。
+        assert!(matches!(
+            s.update_admin_role_guarded("nope", "admin", "2026-01-02T00:00:00Z")
+                .unwrap(),
+            RoleGuardOutcome::NotFound
+        ));
+        // 有两个 super-admin 时降级成功。
+        s.invite_admin("a2", "a2@x.com", "h", "super_admin", "2026-01-03T00:00:00Z")
+            .unwrap();
+        assert!(matches!(
+            s.update_admin_role_guarded("a1", "admin", "2026-01-04T00:00:00Z")
+                .unwrap(),
+            RoleGuardOutcome::Ok(v) if v.role == "admin"
+        ));
+        assert_eq!(s.count_admins_with_role("super_admin").unwrap(), 1);
+    }
+
+    #[test]
+    fn guarded_delete_blocks_last_super_admin() {
+        let s = store();
+        s.invite_admin("a1", "a1@x.com", "h", "super_admin", "2026-01-01T00:00:00Z")
+            .unwrap();
+        assert!(matches!(
+            s.delete_admin_guarded("a1").unwrap(),
+            RoleGuardOutcome::LastSuperAdmin
+        ));
+        assert!(matches!(
+            s.delete_admin_guarded("nope").unwrap(),
+            RoleGuardOutcome::NotFound
+        ));
+        s.invite_admin("a2", "a2@x.com", "h", "super_admin", "2026-01-02T00:00:00Z")
+            .unwrap();
+        assert!(matches!(
+            s.delete_admin_guarded("a1").unwrap(),
+            RoleGuardOutcome::Ok(())
+        ));
+        assert_eq!(s.count_admins_with_role("super_admin").unwrap(), 1);
     }
 
     #[test]

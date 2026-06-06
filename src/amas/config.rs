@@ -20,7 +20,7 @@ pub use modeling::*;
 pub use ssp::*;
 pub use word_selector::*;
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 #[schemars(rename_all = "camelCase")]
 pub struct AMASConfig {
