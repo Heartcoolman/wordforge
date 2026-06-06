@@ -299,6 +299,25 @@ impl Store {
         self.set_patch_canary_status_cas(id, status, None)
     }
 
+    /// 取某建议"已提升为 stable"(effective)的 patch canary 的 version_hash;无则 None。
+    /// 供建议级回滚(rollback_suggestion)定位 promote 产出的回滚目标——promote 版本的 note 为
+    /// "promote canary#..." 不含 suggestion id，故按 suggestion_id 结构化解析，不依赖脆弱的 note 串匹配。
+    pub fn effective_canary_version_for_suggestion(
+        &self,
+        suggestion_id: i64,
+    ) -> Result<Option<String>, StoreError> {
+        let conn = self.conn()?;
+        Ok(conn
+            .query_row(
+                "SELECT version_hash FROM amas_patch_canary
+                 WHERE suggestion_id = ?1 AND status = 'effective'
+                 ORDER BY id DESC LIMIT 1",
+                params![suggestion_id],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?)
+    }
+
     /// 原子提升 canary 为 effective + 把 canary version snapshot 提升为 stable(#8/#41)。
     /// 单事务内：CAS status active→effective（affected==0→Conflict，说明已被自动/并发回滚），
     /// 落 stable 版本行(insert_amas_config_version)。状态翻转与版本落库要么整体成功要么整体不发生，
@@ -314,17 +333,68 @@ impl Store {
         note: Option<&str>,
         parent_version_hash: Option<&str>,
     ) -> Result<(i64, String), StoreError> {
+        use crate::store::operations::amas_suggestions::SuggestionStatus;
         self.with_transaction(|conn| {
             // CAS：仅当仍 active 才提升；期间被回滚则 affected==0 → Conflict，放弃提升。
             set_patch_canary_status_in_conn(conn, id, "effective", Some("active"))?;
-            crate::store::operations::amas_versions::insert_amas_config_version_in_conn(
-                conn,
-                snapshot_json,
-                author_admin_id,
-                source,
-                note,
-                parent_version_hash,
-            )
+            let (version_id, version_hash) =
+                crate::store::operations::amas_versions::insert_amas_config_version_in_conn(
+                    conn,
+                    snapshot_json,
+                    author_admin_id,
+                    source,
+                    note,
+                    parent_version_hash,
+                )?;
+            // canary 的 config 已成为 stable，关联建议从 in_canary 迁到终态 approved（同事务）。否则建议
+            // 永久卡 in_canary：approve 要 pending→BAD_STATUS、再 canary 要 pending→Conflict，永不可达。
+            // CAS 仅当建议仍 in_canary 才迁，不误伤期间被改写的建议（affected==0 视作已迁移，不报错）。
+            let suggestion_id: i64 = conn.query_row(
+                "SELECT suggestion_id FROM amas_patch_canary WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )?;
+            let now = chrono::Utc::now().to_rfc3339();
+            conn.execute(
+                "UPDATE amas_tuning_suggestions SET status = ?1, decided_at = ?2
+                 WHERE id = ?3 AND status = ?4",
+                params![
+                    SuggestionStatus::Approved.as_str(),
+                    now,
+                    suggestion_id,
+                    SuggestionStatus::InCanary.as_str(),
+                ],
+            )?;
+            Ok((version_id, version_hash))
+        })
+    }
+
+    /// 回滚 canary 为 rolled_back，并把仍处 in_canary 的关联建议放回 pending（同一事务）。
+    /// 手动回滚（rollback_canary handler）与自动回滚（canary_monitor）共用本方法：否则建议永久卡
+    /// in_canary——既不能再 approve（要 pending）也不能再 canary（要 pending），运维只能重新生成。
+    /// CAS 仅当建议仍 in_canary 才迁，不误伤已 promote→approved 等被改写的建议（affected==0 不报错）。
+    /// canary 状态翻转无条件（与旧 set_patch_canary_status 一致，兼容 active/effective 任意源态）。
+    pub fn rollback_patch_canary_and_release_suggestion(&self, id: i64) -> Result<(), StoreError> {
+        use crate::store::operations::amas_suggestions::SuggestionStatus;
+        self.with_transaction(|conn| {
+            let suggestion_id: i64 = conn.query_row(
+                "SELECT suggestion_id FROM amas_patch_canary WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )?;
+            set_patch_canary_status_in_conn(conn, id, "rolled_back", None)?;
+            let now = chrono::Utc::now().to_rfc3339();
+            conn.execute(
+                "UPDATE amas_tuning_suggestions SET status = ?1, decided_at = ?2
+                 WHERE id = ?3 AND status = ?4",
+                params![
+                    SuggestionStatus::Pending.as_str(),
+                    now,
+                    suggestion_id,
+                    SuggestionStatus::InCanary.as_str(),
+                ],
+            )?;
+            Ok(())
         })
     }
 

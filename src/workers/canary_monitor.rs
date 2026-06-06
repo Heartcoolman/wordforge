@@ -105,7 +105,7 @@ pub async fn run(state: &AppState) {
         ) {
             continue;
         }
-        if let Err(e) = store.set_patch_canary_status(c.id, "rolled_back") {
+        if let Err(e) = store.rollback_patch_canary_and_release_suggestion(c.id) {
             tracing::warn!(id = c.id, error = %e, "canary_monitor: 自动回滚置状态失败");
             continue;
         }
