@@ -16,7 +16,7 @@
 | `.github/workflows/coverage.yml` | push/PR `main`/`develop` | 后端 + 前端覆盖率，门槛 lines/functions/regions ≥ 80%；忽略 `main.rs`/`bin/`/`logging.rs`/`lib.rs`/`llm_advisor.rs`/`heartbeat_watchdog.rs`/`update_checker.rs`/`updater.rs`（`coverage.yml:23`） | 健康；但 5 个不可测入口的忽略名单需要每加一个 worker / service 同步维护 |
 | `.github/workflows/deploy-docs.yml` | push `main` 且 `docs/**` 变更 | VitePress 构建并部署到 GitHub Pages | 健康 |
 | `.github/workflows/e2e-tests.yml` | push/PR `main`/`develop` | Playwright E2E（chromium）；分支 `verify-auto-update-v044` 单独跑 `scripts/verify-release-auto-update.sh` | 健康，但 v044 verify 脚本的契约**已过期**（见 §1.5） |
-| `.github/workflows/verify-auto-update-v043.yml` | 仅 `workflow_dispatch` | v0.4.2→v0.4.3 升级冒烟 | **过期遗产**，对应 `scripts/verify-auto-update-v043.sh` 仍用单通道 flat 字段 |
+| ~~`.github/workflows/verify-auto-update-v043.yml`~~ | ~~仅 `workflow_dispatch`~~ | ~~v0.4.2→v0.4.3 升级冒烟~~ | **已删除**（commit `a022e6b`，2026-06-06）：连同 `scripts/verify-auto-update-v043.sh` 一并移除，由 `e2e-tests.yml` 的 `verify-auto-update-v044` job（走 `scripts/verify-release-auto-update.sh`）取代 |
 
 ### 1.2 stable / beta 双通道
 
@@ -43,7 +43,7 @@
 | 项 | 现状 | 不一致点 |
 |---|---|---|
 | `scripts/verify-release-auto-update.sh:118-127` | jq 校验 `.data.latestVersion == $latest`、构造 `{"targetVersion":..., "confirmCurrentVersion":...}` | v0.6.0-beta.3 起契约改为 `{stable, beta}` 嵌套 + apply 必带 `channel`；这两个脚本只覆盖单通道老路径，**升级到 v044 的 verify 当下能跑只是因为后端单 release 时 fallback 让 `stable=beta=same`**（`updater.rs:835-842`），新发布双通道并存时立即破。 |
-| `scripts/verify-auto-update-v043.sh` | 同上 | 同上，且代码里仍 `cargo build --release` 现编后端 → 跟生产"禁服务器编译"规则矛盾 |
+| ~~`scripts/verify-auto-update-v043.sh`~~ | **已删除**（commit `a022e6b`） | 原因：仍用单通道 flat 字段 + `cargo build --release` 现编后端（违反"禁服务器编译"规则）。已随工作流一并移除 |
 | `docs/auto-update.md:30-46, 158-160` | 流程图与 API 表只画 `apply` 单通道路径；无 `channel` 参数说明、无 stable/beta 概念 | 与 v0.6.0-beta.3 落地代码不一致 |
 | `docs/openapi.yaml:4` | `version: 0.4.3` | 距当前 v0.6.0-beta.4 落后 4 个 release；规格也极简（10 个端点 stub），与 `docs/api-endpoints.md` 的 100+ 端点详表不同源 |
 | `docs/api-endpoints.md:2353-2371` SSE 事件表 | 列了 6 个（`amas_state / maintenance / update_available / telemetry_request / banned / unbanned / data_corrupted`） | 后端 `SseEvent` 枚举（`src/state.rs:25-84`）实际 9 个变体——缺 `new_llm_suggestion / release_available / update_progress / probe_request / probe_confirm`，且 `update_available` 文档示例的 payload 还是 v0.3.x 格式 |
@@ -292,7 +292,7 @@
 | C3 | 把 SSE 事件表写进 OpenAPI（AsyncAPI 风格 description）或单独 `events.md`；补缺的 4 个事件 | 0.5 天 | `docs/api-endpoints.md:2353-2371` 更新 + 加 `release_available / update_progress / new_llm_suggestion / probe_request / probe_confirm` |
 | C4 | 给所有 v1 stable handler 加 `#[deprecated(since = ...)]` 标记位预留；引入 `Deprecation` / `Sunset` response header 中间件 | 0.5 天 | 一个 `tests/deprecation_header.rs` 集成测试 |
 | C5 | 明确 `/api/v1/*` 兼容层"永久冻结 + 不接新调用方"的弃用公告（`routes/v1.rs:1-11` 已警告，但没对外公告） | 0.2 天 | `api-endpoints.md` 第 18 节加红色 banner |
-| C6 | 修 `verify-release-auto-update.sh` 与 `verify-auto-update-v043.sh` 的契约：用新 `{stable, beta}` 双通道 + `channel` 字段 | 0.5 天 | 跑通 v0.6.0-beta.X → v0.6.0-beta.Y 升级冒烟 |
+| C6 | 修 `verify-release-auto-update.sh` 的契约：用新 `{stable, beta}` 双通道 + `channel` 字段（`verify-auto-update-v043.sh` 已于 commit `a022e6b` 删除，无需再修） | 0.5 天 | 跑通 v0.6.0-beta.X → v0.6.0-beta.Y 升级冒烟 |
 
 ### 6.2 发布流（P0）
 
