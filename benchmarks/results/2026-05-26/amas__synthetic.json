@@ -1,0 +1,23 @@
+{
+  "scheduler": "amas",
+  "dataset": "synthetic",
+  "prediction": {
+    "logLoss": 0.9355619113514937,
+    "ici": 0.45900670037122693,
+    "auc": 0.6481810154816116,
+    "maeP": 0.5453522348766707
+  },
+  "dhp": {
+    "expectedMemoryFinal": 26106.7608,
+    "masteredCount": 23773,
+    "totalReviews": 400768,
+    "efficiency": 0.065142
+  },
+  "policy": {
+    "finalRecallRate": 0.6399,
+    "reviewsPerDay": 4452.9778,
+    "retentionStability": 0.959118
+  },
+  "runtime_seconds": 82.1,
+  "notes": ""
+}

@@ -1,0 +1,24 @@
+[package]
+name = "wordforge-loadtest"
+version = "0.1.0"
+edition = "2021"
+description = "WordForge 学习端 /api/* 并发承载压测工具（交互式加减设备 + 实时仪表盘）"
+
+[[bin]]
+name = "wordforge-loadtest"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+
+# 独立 workspace，避免被仓库根 learning-backend crate 吸收，
+# 不影响后端 `cargo build`。
+[workspace]

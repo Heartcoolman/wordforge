@@ -1,0 +1,23 @@
+{
+  "scheduler": "hlr",
+  "dataset": "maimemo",
+  "prediction": {
+    "logLoss": 10.241211823311827,
+    "ici": 0.8748199054848744,
+    "auc": 0.44294681432272726,
+    "maeP": 0.8753135835599883
+  },
+  "dhp": {
+    "expectedMemoryFinal": 26237.3845,
+    "masteredCount": 0,
+    "totalReviews": 738320,
+    "efficiency": 0.035537
+  },
+  "policy": {
+    "finalRecallRate": 0.836,
+    "reviewsPerDay": 8203.5556,
+    "retentionStability": 0.959456
+  },
+  "runtime_seconds": 50.09,
+  "notes": ""
+}

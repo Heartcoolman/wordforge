@@ -1,0 +1,10 @@
+duckdb>=1.5.1
+numpy>=2.0
+optuna>=4.8
+pandas>=2.2
+py7zr>=1.0
+pyarrow>=23.0
+scikit-learn>=1.8
+torch>=2.11
+tqdm>=4.67
+

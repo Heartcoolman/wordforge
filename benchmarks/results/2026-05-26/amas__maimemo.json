@@ -1,0 +1,23 @@
+{
+  "scheduler": "amas",
+  "dataset": "maimemo",
+  "prediction": {
+    "logLoss": 0.3290340693501356,
+    "ici": 0.07035486501006463,
+    "auc": 0.7899679449753859,
+    "maeP": 0.2273765922837778
+  },
+  "dhp": {
+    "expectedMemoryFinal": 17571.6687,
+    "masteredCount": 17353,
+    "totalReviews": 174551,
+    "efficiency": 0.100668
+  },
+  "policy": {
+    "finalRecallRate": 0.7526,
+    "reviewsPerDay": 1939.4556,
+    "retentionStability": 0.94583
+  },
+  "runtime_seconds": 50.09,
+  "notes": ""
+}

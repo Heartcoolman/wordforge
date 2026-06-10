@@ -1,0 +1,23 @@
+{
+  "scheduler": "leitner",
+  "dataset": "synthetic",
+  "prediction": {
+    "logLoss": 1.4413032508318648,
+    "ici": 0.4688795902071339,
+    "auc": 0.5277172851328402,
+    "maeP": 0.5715868700999857
+  },
+  "dhp": {
+    "expectedMemoryFinal": 38436.2114,
+    "masteredCount": 0,
+    "totalReviews": 628645,
+    "efficiency": 0.061141
+  },
+  "policy": {
+    "finalRecallRate": 0.8538,
+    "reviewsPerDay": 6984.944444444444,
+    "retentionStability": 0.9049701553942512
+  },
+  "runtime_seconds": 0.16,
+  "notes": "v0.6: HLR theta=paper(0.5,-1.0,-0.3); oracle 跨数据集复用"
+}

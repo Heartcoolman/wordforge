@@ -1,0 +1,6 @@
+w	d	t_history	r_history	delta_t	p_recall	total_cnt
+word_a	2	0	0	1	0.82	12
+word_a	2	0,1	0,1	3	0.74	5
+word_b	5	0	1	2	0.41	8
+word_c	3	0	0	4	0.63	7
+

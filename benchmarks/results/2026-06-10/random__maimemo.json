@@ -1,0 +1,23 @@
+{
+ "scheduler": "random",
+ "dataset": "maimemo",
+ "prediction": {
+  "logLoss": 1.179834716434237,
+  "ici": 0.42396197283131964,
+  "auc": 0.22382335961052455,
+  "maeP": 0.4918834616435447
+ },
+ "dhp": {
+  "expectedMemoryFinal": 18506.269,
+  "masteredCount": 0,
+  "totalReviews": 200760,
+  "efficiency": 0.092181
+ },
+ "policy": {
+  "finalRecallRate": 0.0,
+  "reviewsPerDay": 2230.6666666666665,
+  "retentionStability": 0.8302068713350781
+ },
+ "runtime_seconds": 15.33,
+ "notes": "v1.0-fsrs6: AMAS 生产内核升级 FSRS-6 (21w+trainable decay) + tuned v3 决策层回写"
+}

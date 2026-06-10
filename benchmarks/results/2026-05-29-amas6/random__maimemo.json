@@ -1,0 +1,23 @@
+{
+  "scheduler": "random",
+  "dataset": "maimemo",
+  "prediction": {
+    "logLoss": 1.179576163288474,
+    "ici": 0.42384986023617144,
+    "auc": 0.22398980087575066,
+    "maeP": 0.49179280895467403
+  },
+  "dhp": {
+    "expectedMemoryFinal": 18485.2084,
+    "masteredCount": 0,
+    "totalReviews": 200760,
+    "efficiency": 0.092076
+  },
+  "policy": {
+    "finalRecallRate": 0.0,
+    "reviewsPerDay": 2230.6666666666665,
+    "retentionStability": 0.8302449776832868
+  },
+  "runtime_seconds": 3.86,
+  "notes": "v0.9: 新增 amas6 (AMAS 全栈 + FSRS-6 底层)"
+}

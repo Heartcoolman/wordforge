@@ -1,0 +1,23 @@
+{
+  "scheduler": "dhp",
+  "dataset": "duolingo_hlr",
+  "prediction": {
+    "logLoss": 0.4221261484778566,
+    "ici": 0.16956952792710298,
+    "auc": 0.5385576186706266,
+    "maeP": 0.23982269067289924
+  },
+  "dhp": {
+    "expectedMemoryFinal": 8562.9221,
+    "masteredCount": 7295,
+    "totalReviews": 87531,
+    "efficiency": 0.097827
+  },
+  "policy": {
+    "finalRecallRate": 0.7843,
+    "reviewsPerDay": 972.5667,
+    "retentionStability": 0.934269
+  },
+  "runtime_seconds": 14.66,
+  "notes": ""
+}

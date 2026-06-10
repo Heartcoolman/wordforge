@@ -1,0 +1,23 @@
+{
+  "scheduler": "amas",
+  "dataset": "maimemo",
+  "prediction": {
+    "logLoss": 0.3289856994285852,
+    "ici": 0.0703470979178107,
+    "auc": 0.7900851639345747,
+    "maeP": 0.22736252083944952
+  },
+  "dhp": {
+    "expectedMemoryFinal": 17566.5292,
+    "masteredCount": 17342,
+    "totalReviews": 173924,
+    "efficiency": 0.101001
+  },
+  "policy": {
+    "finalRecallRate": 0.7514,
+    "reviewsPerDay": 1932.4888888888888,
+    "retentionStability": 0.9074316653262593
+  },
+  "runtime_seconds": 5.39,
+  "notes": "v0.7: 独立 oracle (duolingo/synthetic MPS 重训)"
+}

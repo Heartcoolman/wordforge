@@ -1,0 +1,23 @@
+{
+  "scheduler": "fsrs6",
+  "dataset": "synthetic",
+  "prediction": {
+    "logLoss": 0.5089151089520809,
+    "ici": 0.2111804146001315,
+    "auc": 0.6305665074824882,
+    "maeP": 0.3758610449046369
+  },
+  "dhp": {
+    "expectedMemoryFinal": 21659.1838,
+    "masteredCount": 22102,
+    "totalReviews": 345102,
+    "efficiency": 0.062762
+  },
+  "policy": {
+    "finalRecallRate": 0.3401,
+    "reviewsPerDay": 3834.4666666666667,
+    "retentionStability": 0.9073249532997211
+  },
+  "runtime_seconds": 0.22,
+  "notes": "v0.9: 新增 amas6 (AMAS 全栈 + FSRS-6 底层)"
+}

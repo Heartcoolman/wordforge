@@ -1,0 +1,23 @@
+{
+  "scheduler": "fsrs",
+  "dataset": "maimemo",
+  "prediction": {
+    "logLoss": 0.3290235796278717,
+    "ici": 0.07040414794338483,
+    "auc": 0.789869223386879,
+    "maeP": 0.2273726557780567
+  },
+  "dhp": {
+    "expectedMemoryFinal": 17526.2014,
+    "masteredCount": 18099,
+    "totalReviews": 176570,
+    "efficiency": 0.099259
+  },
+  "policy": {
+    "finalRecallRate": 0.7088,
+    "reviewsPerDay": 1961.888888888889,
+    "retentionStability": 0.9030417798447166
+  },
+  "runtime_seconds": 5.98,
+  "notes": "v0.6: HLR theta=paper(0.5,-1.0,-0.3); oracle 跨数据集复用"
+}
