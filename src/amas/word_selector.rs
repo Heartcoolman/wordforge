@@ -329,8 +329,8 @@ mod tests {
         let stability = 10.0;
         let floor = mm.forgetting_curve_floor;
         let adjusted_target = ((target_recall - floor) / (1.0 - floor).max(1e-9)).clamp(1e-6, 1.0);
-        let elapsed_days = stability / mm.forgetting_curve_factor
-            * (adjusted_target.powf(1.0 / mm.forgetting_curve_decay) - 1.0);
+        let elapsed_days =
+            stability / mm.curve_factor() * (adjusted_target.powf(-1.0 / mm.curve_decay()) - 1.0);
 
         MdmState {
             stability,

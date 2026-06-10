@@ -94,9 +94,10 @@ impl Default for HeuristicConfig {
             low_motivation_difficulty_drop: 0.1,
             low_motivation_max_batch: 8,
             confidence_base: 0.7,
-            confidence_decay_cap: 0.5,
+            // bench tuned v3：decay 更慢（500 事件尺度）、上限收紧
+            confidence_decay_cap: 0.3,
             confidence_min: 0.2,
-            confidence_decay_scale: 200.0,
+            confidence_decay_scale: 500.0,
         }
     }
 }
@@ -131,7 +132,8 @@ impl Default for IgeConfig {
             batch_size: 10,
             interval_scale: 1.0,
             ucb_confidence_coeff: 2.0,
-            default_confidence: 0.6,
+            // bench tuned v3
+            default_confidence: 0.65,
             difficulty_bin_count: 20,
             ratio_bin_count: 16,
             pretrained_difficulty_rewards: None,

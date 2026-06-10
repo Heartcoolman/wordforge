@@ -112,8 +112,8 @@
         "coldStartEventThreshold": 10,
         "coldStartNewRatio": 0.5,
         "confidenceBase": 0.7,
-        "confidenceDecayCap": 0.5,
-        "confidenceDecayScale": 200.0,
+        "confidenceDecayCap": 0.3,
+        "confidenceDecayScale": 500.0,
         "confidenceMin": 0.2,
         "lowAccuracyDifficultyDrop": 0.15,
         "lowAccuracyRatioDrop": 0.1,
@@ -145,7 +145,7 @@
     "ige": {
       "default": {
         "batchSize": 10,
-        "defaultConfidence": 0.6,
+        "defaultConfidence": 0.65,
         "difficultyBinCount": 20,
         "intervalScale": 1.0,
         "pretrainedDifficultyRewards": null,
@@ -205,20 +205,20 @@
         "alphaMax": 0.5,
         "alphaMin": 0.1,
         "alphaScale": 0.3,
-        "baseDesiredRetention": 0.92,
+        "baseDesiredRetention": 0.9,
         "compositeWeightLong": 0.5,
         "compositeWeightMedium": 0.3,
         "compositeWeightShort": 0.2,
         "consolidationBonus": 1.5,
         "consolidationRateScale": 0.25,
         "forgettingCurveDecay": -0.5,
-        "forgettingCurveFactor": 0.3,
+        "forgettingCurveFactor": 0.2345679012345679,
         "forgettingCurveFloor": 0.0,
         "forgettingThreshold": 0.2,
         "halfLifeBaseEpsilon": 0.3,
         "halfLifePower": 1.5,
         "halfLifeTimeUnitSecs": 1296000.0,
-        "highAccuracyRetentionBoost": 0.02,
+        "highAccuracyRetentionBoost": 0.03,
         "highAccuracyThreshold": 0.9,
         "highFatigueRetentionDrop": 0.05,
         "highFatigueThreshold": 0.6,
@@ -237,31 +237,33 @@
         "recallRiskBonus": 0.2,
         "recallRiskThreshold": 0.55,
         "retentionMax": 0.95,
-        "retentionMin": 0.7,
+        "retentionMin": 0.75,
         "reviewingThreshold": 0.4,
         "shortTermLearningRate": 0.85,
         "stabilityBaseDays": 20.0,
         "streakMinGapMs": 1800000,
         "w": [
-          0.4072,
-          1.1829,
-          3.1262,
-          15.4722,
-          7.1949,
-          0.5345,
-          1.4604,
-          0.0046,
-          1.54575,
-          0.1192,
-          1.01925,
-          1.9395,
-          0.11,
-          0.29605,
-          2.2698,
-          0.2315,
-          2.9898,
-          0.51655,
-          0.6621
+          0.212,
+          1.2931,
+          2.3065,
+          8.2956,
+          6.4133,
+          0.8334,
+          3.0194,
+          0.001,
+          1.8722,
+          0.1666,
+          0.796,
+          1.4835,
+          0.0614,
+          0.2629,
+          1.6483,
+          0.6014,
+          1.8729,
+          0.5425,
+          0.0912,
+          0.0658,
+          0.1542
         ]
       },
       "allOf": [
@@ -577,7 +579,7 @@
           "format": "double"
         },
         "warmupHeuristicBoost": {
-          "default": 0.2,
+          "default": 0.1,
           "type": "number",
           "format": "double"
         },
@@ -1125,18 +1127,20 @@
           "format": "double"
         },
         "forgettingCurveDecay": {
+          "description": "DEPRECATED（FSRS-6 起）：遗忘曲线 decay 即 trainable 参数 `w[20]`（`curve_decay()`）， 本字段仅为旧配置/DB 快照反序列化兼容保留，运行时不再读取。",
           "default": -0.5,
           "type": "number",
           "format": "double"
         },
         "forgettingCurveFactor": {
+          "description": "DEPRECATED（FSRS-6 起）：遗忘曲线 factor 由 `w[20]` 派生（`curve_factor()`）， 本字段仅为旧配置/DB 快照反序列化兼容保留，运行时不再读取。",
           "default": 0.2345679012345679,
           "type": "number",
           "format": "double"
         },
         "forgettingCurveFloor": {
-          "description": "2021 MaiMemo study: forgetting curve has non-zero asymptote R→floor (not 0)",
-          "default": 0.1,
+          "description": "2021 MaiMemo study: forgetting curve has non-zero asymptote R→floor (not 0) FSRS-6 标准曲线无渐近线，默认 0.0；保留为可调项。",
+          "default": 0.0,
           "type": "number",
           "format": "double"
         },
@@ -1159,7 +1163,7 @@
           "format": "double"
         },
         "highAccuracyRetentionBoost": {
-          "default": 0.02,
+          "default": 0.03,
           "type": "number",
           "format": "double"
         },
@@ -1249,7 +1253,7 @@
           "format": "double"
         },
         "retentionMin": {
-          "default": 0.7,
+          "default": 0.75,
           "type": "number",
           "format": "double"
         },
@@ -1262,7 +1266,6 @@
           "format": "double"
         },
         "stabilityBaseDays": {
-          "description": "FSRS-style power-law forgetting curve: R = (1 + factor * t/S)^decay",
           "default": 20.0,
           "type": "number",
           "format": "double"
@@ -1273,34 +1276,37 @@
           "format": "int64"
         },
         "w": {
+          "description": "反序列化兼容 19 维 FSRS-5 旧配置：自动迁移（w19=0 维持旧同日公式，w20=0.5 维持旧 decay）。",
           "default": [
-            0.4072,
-            1.1829,
-            3.1262,
-            15.4722,
-            7.1949,
-            0.5345,
-            1.4604,
-            0.0046,
-            1.54575,
-            0.1192,
-            1.01925,
-            1.9395,
-            0.11,
-            0.29605,
-            2.2698,
-            0.2315,
-            2.9898,
-            0.51655,
-            0.6621
+            0.212,
+            1.2931,
+            2.3065,
+            8.2956,
+            6.4133,
+            0.8334,
+            3.0194,
+            0.001,
+            1.8722,
+            0.1666,
+            0.796,
+            1.4835,
+            0.0614,
+            0.2629,
+            1.6483,
+            0.6014,
+            1.8729,
+            0.5425,
+            0.0912,
+            0.0658,
+            0.1542
           ],
           "type": "array",
           "items": {
             "type": "number",
             "format": "double"
           },
-          "maxItems": 19,
-          "minItems": 19
+          "maxItems": 21,
+          "minItems": 21
         }
       }
     },

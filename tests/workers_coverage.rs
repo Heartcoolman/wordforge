@@ -306,6 +306,12 @@ async fn it_runs_worker_tasks_and_persists_side_effects() {
     workers::llm_advisor::run(store.as_ref(), None, &engine, None).await;
     workers::delayed_reward::run(store.as_ref()).await;
     workers::forgetting_alert::run(store.as_ref()).await;
+    // persist_tuned_config 会写 AMAS_CONFIG_FILE(缺省 amas_config.toml)——
+    // 重定向到临时路径,防测试副作用污染仓库工作树的真实配置文件
+    std::env::set_var(
+        "AMAS_CONFIG_FILE",
+        std::env::temp_dir().join("wf-test-amas-config.toml"),
+    );
     workers::algorithm_optimization::run(store.as_ref(), &engine).await;
     workers::daily_aggregation::run(store.as_ref()).await;
     workers::health_analysis::run(store.as_ref()).await;

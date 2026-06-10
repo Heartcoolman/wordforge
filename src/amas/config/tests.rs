@@ -680,7 +680,8 @@ frustration = 0.15
 // 直接覆盖每个 default_xxx 函数（lib 层 unit-touch，确保覆盖区域 entry）
 #[test]
 fn all_default_fns_return_expected_constants() {
-    assert!((default_warmup_heuristic_boost() - 0.20).abs() < 1e-9);
+    // bench tuned v3 回写后的值
+    assert!((default_warmup_heuristic_boost() - 0.10).abs() < 1e-9);
     assert_eq!(default_response_speed_max_ms(), 10000.0);
     assert_eq!(default_fatigue_quit_increase(), 0.2);
     assert!(default_engagement_pause_penalty() > 0.0);
@@ -728,4 +729,53 @@ fn subconfig_default_impls_construct_valid_values() {
     let _ = LearningStrategyConfig::default();
     let _ = SspCostParams::default();
     let _ = SspConfig::default();
+}
+
+// === FSRS-6 w 反序列化：21 维直取 / 19 维 FSRS-5 旧配置自动迁移 ===
+fn default_memory_json_with_w(w: &[f64]) -> serde_json::Value {
+    let mut v = serde_json::to_value(MemoryModelConfig::default()).expect("serialize default");
+    v["w"] = serde_json::json!(w);
+    v
+}
+
+#[test]
+fn memory_w_deserializes_21_dims_directly() {
+    let mut w: Vec<f64> = (0..21).map(|i| 0.1 + i as f64 * 0.01).collect();
+    w[20] = 0.3; // decay 须在 [0.05, 2.0]
+    let cfg: MemoryModelConfig =
+        serde_json::from_value(default_memory_json_with_w(&w)).expect("21-dim w must parse");
+    assert!((cfg.w[20] - 0.3).abs() < 1e-12);
+    assert!((cfg.w[0] - 0.1).abs() < 1e-12);
+}
+
+#[test]
+fn memory_w_migrates_legacy_19_dims() {
+    let w: Vec<f64> = (0..19).map(|i| 0.2 + i as f64 * 0.01).collect();
+    let cfg: MemoryModelConfig = serde_json::from_value(default_memory_json_with_w(&w))
+        .expect("legacy 19-dim w must parse");
+    // 前 19 维保留
+    assert!((cfg.w[0] - 0.2).abs() < 1e-12);
+    assert!((cfg.w[18] - 0.38).abs() < 1e-12);
+    // 迁移补位：w19=0（旧同日公式无饱和项）、w20=0.5（旧固定 |decay|）
+    assert_eq!(cfg.w[19], 0.0);
+    assert_eq!(cfg.w[20], 0.5);
+    // 迁移后的曲线 helper 行为：decay=0.5 → factor=0.9^(-2)-1
+    assert!((cfg.curve_decay() - 0.5).abs() < 1e-12);
+    assert!((cfg.curve_factor() - (0.9_f64.powf(-2.0) - 1.0)).abs() < 1e-12);
+}
+
+#[test]
+fn memory_w_rejects_other_lengths() {
+    let w = vec![1.0; 20];
+    assert!(serde_json::from_value::<MemoryModelConfig>(default_memory_json_with_w(&w)).is_err());
+}
+
+#[test]
+fn curve_helpers_clamp_decay_to_safe_domain() {
+    let mut cfg = MemoryModelConfig::default();
+    cfg.w[20] = 0.0; // 越界小
+    assert!((cfg.curve_decay() - 0.05).abs() < 1e-12);
+    cfg.w[20] = 10.0; // 越界大
+    assert!((cfg.curve_decay() - 2.0).abs() < 1e-12);
+    assert!(cfg.curve_factor().is_finite());
 }

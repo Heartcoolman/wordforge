@@ -32,20 +32,25 @@ pub struct MemoryModelConfig {
     pub mastery_window_size: u32,
     #[serde(default = "default_streak_min_gap_ms")]
     pub streak_min_gap_ms: i64,
-    /// FSRS-style power-law forgetting curve: R = (1 + factor * t/S)^decay
     #[serde(default = "default_stability_base_days")]
     pub stability_base_days: f64,
+    /// DEPRECATED（FSRS-6 起）：遗忘曲线 factor 由 `w[20]` 派生（`curve_factor()`），
+    /// 本字段仅为旧配置/DB 快照反序列化兼容保留，运行时不再读取。
     #[serde(default = "default_forgetting_curve_factor")]
     pub forgetting_curve_factor: f64,
+    /// DEPRECATED（FSRS-6 起）：遗忘曲线 decay 即 trainable 参数 `w[20]`（`curve_decay()`），
+    /// 本字段仅为旧配置/DB 快照反序列化兼容保留，运行时不再读取。
     #[serde(default = "default_forgetting_curve_decay")]
     pub forgetting_curve_decay: f64,
     /// 2021 MaiMemo study: forgetting curve has non-zero asymptote R→floor (not 0)
+    /// FSRS-6 标准曲线无渐近线，默认 0.0；保留为可调项。
     #[serde(default = "default_forgetting_curve_floor")]
     pub forgetting_curve_floor: f64,
 
-    // === FSRS-5 DSR parameters (19 weights in array form) ===
-    #[serde(default = "default_w")]
-    pub w: [f64; 19],
+    // === FSRS-6 DSR parameters (21 weights; w[19]=同日饱和指数, w[20]=曲线 decay) ===
+    /// 反序列化兼容 19 维 FSRS-5 旧配置：自动迁移（w19=0 维持旧同日公式，w20=0.5 维持旧 decay）。
+    #[serde(default = "default_w", deserialize_with = "de_w_legacy_or_fsrs6")]
+    pub w: [f64; 21],
     // === 原 mastery.rs 模块级常量 ===
     #[serde(default = "default_alpha_scale")]
     pub alpha_scale: f64,
@@ -106,7 +111,33 @@ pub(crate) fn default_forgetting_curve_decay() -> f64 {
     -0.5
 }
 pub(crate) fn default_forgetting_curve_floor() -> f64 {
-    0.10
+    0.0
+}
+
+/// 19 维 FSRS-5 旧配置迁移用：旧同日复习公式无 S^(-w19) 饱和项，置 0 保持行为。
+const LEGACY_W19_SAME_DAY_SATURATION: f64 = 0.0;
+/// 19 维 FSRS-5 旧配置迁移用：旧曲线固定 decay |−0.5|，保持曲线形状连续。
+const LEGACY_W20_DECAY: f64 = 0.5;
+
+/// `w` 反序列化：21 维（FSRS-6）直取；19 维（FSRS-5 旧配置/DB 快照）自动迁移。
+fn de_w_legacy_or_fsrs6<'de, D>(deserializer: D) -> Result<[f64; 21], D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v: Vec<f64> = Vec::deserialize(deserializer)?;
+    match v.len() {
+        21 => Ok(std::array::from_fn(|i| v[i])),
+        19 => {
+            let mut w = [0.0; 21];
+            w[..19].copy_from_slice(&v);
+            w[19] = LEGACY_W19_SAME_DAY_SATURATION;
+            w[20] = LEGACY_W20_DECAY;
+            Ok(w)
+        }
+        n => Err(serde::de::Error::custom(format!(
+            "memoryModel.w expects 21 weights (FSRS-6) or legacy 19 (FSRS-5), got {n}"
+        ))),
+    }
 }
 
 pub(crate) fn default_alpha_scale() -> f64 {
@@ -122,7 +153,8 @@ pub(crate) fn default_forgetting_threshold() -> f64 {
     0.2
 }
 pub(crate) fn default_retention_min() -> f64 {
-    0.70
+    // bench tuned v3：抬高下限防过度拉长间隔
+    0.75
 }
 pub(crate) fn default_retention_max() -> f64 {
     0.95
@@ -137,7 +169,8 @@ pub(crate) fn default_high_accuracy_threshold() -> f64 {
     0.9
 }
 pub(crate) fn default_high_accuracy_retention_boost() -> f64 {
-    0.02
+    // bench tuned v3
+    0.03
 }
 pub(crate) fn default_high_fatigue_threshold() -> f64 {
     0.6
@@ -152,31 +185,45 @@ pub(crate) fn default_low_motivation_retention_drop() -> f64 {
     0.03
 }
 
-// FSRS-5 公版默认参数 —— 与前端 schema.ts memoryModel.w[*] default 字面对齐
+// FSRS-6 公版默认参数（py-fsrs DEFAULT_PARAMETERS）—— 与前端 schema memoryModel.w[*] default 字面对齐
 // 产线由 amas_config.toml 的 [memoryModel].w 覆盖；该 default 仅在
 // 无配置文件场景下生效，并对应前端"重置默认"按钮的目标值。
-pub(crate) fn default_w() -> [f64; 19] {
+pub(crate) fn default_w() -> [f64; 21] {
     [
-        0.4072,  // w0: initial stability after Again（FSRS-5 公版）
-        1.1829,  // w1: initial stability after Hard
-        3.1262,  // w2: initial stability after Good
-        15.4722, // w3: initial stability after Easy
-        7.1949,  // w4: initial difficulty base
-        0.5345,  // w5: difficulty scaling
-        1.4604,  // w6: difficulty change per grade
-        0.0046,  // w7: mean reversion weight
-        1.54575, // w8: stability increase base
-        0.1192,  // w9: stability increase power
-        1.01925, // w10: spacing effect
-        1.9395,  // w11: post-lapse stability base
-        0.11,    // w12: post-lapse difficulty power
-        0.29605, // w13: post-lapse stability power
-        2.2698,  // w14: post-lapse R scaling
-        0.2315,  // w15: Hard bonus
-        2.9898,  // w16: Easy bonus
-        0.51655, // w17: same-day review scaling
-        0.6621,  // w18: same-day review offset
+        0.212,  // w0: initial stability after Again（FSRS-6 公版）
+        1.2931, // w1: initial stability after Hard
+        2.3065, // w2: initial stability after Good
+        8.2956, // w3: initial stability after Easy
+        6.4133, // w4: initial difficulty base
+        0.8334, // w5: difficulty scaling
+        3.0194, // w6: difficulty change per grade
+        0.001,  // w7: mean reversion weight
+        1.8722, // w8: stability increase base
+        0.1666, // w9: stability increase power
+        0.796,  // w10: spacing effect
+        1.4835, // w11: post-lapse stability base
+        0.0614, // w12: post-lapse difficulty power
+        0.2629, // w13: post-lapse stability power
+        1.6483, // w14: post-lapse R scaling
+        0.6014, // w15: Hard penalty
+        1.8729, // w16: Easy bonus
+        0.5425, // w17: same-day review scaling
+        0.0912, // w18: same-day review offset
+        0.0658, // w19: same-day stability saturation（FSRS-6 新增）
+        0.1542, // w20: forgetting curve decay（FSRS-6 新增，trainable）
     ]
+}
+
+impl MemoryModelConfig {
+    /// FSRS-6 遗忘曲线 decay = `w[20]`（trainable），钳到安全域防 0 除/爆幂。
+    pub fn curve_decay(&self) -> f64 {
+        self.w[20].clamp(0.05, 2.0)
+    }
+
+    /// FSRS-6 遗忘曲线 factor = 0.9^(-1/decay) − 1，保证 R(S,S)=0.9（floor=0 时）。
+    pub fn curve_factor(&self) -> f64 {
+        0.9_f64.powf(-1.0 / self.curve_decay()) - 1.0
+    }
 }
 
 impl Default for MemoryModelConfig {
@@ -199,27 +246,29 @@ impl Default for MemoryModelConfig {
             half_life_power: 1.5,
             recall_risk_bonus: 0.2,
             recall_risk_threshold: 0.55,
-            base_desired_retention: 0.92,
+            // FSRS 官方推荐 desired_retention，与 R(S,S)=0.9 语义自洽
+            base_desired_retention: 0.9,
             passive_decay_half_life_days: 30.0,
             passive_decay_power: 0.30,
             mastery_window_size: 20,
             streak_min_gap_ms: 1_800_000,
             stability_base_days: 20.0,
-            forgetting_curve_factor: 0.30,
+            // DEPRECATED 字段：运行时曲线参数从 w[20] 派生（curve_decay/curve_factor）
+            forgetting_curve_factor: 19.0 / 81.0,
             forgetting_curve_decay: -0.5,
-            // 与 serde default_forgetting_curve_floor() 一致：非零渐近线 R→0.10（2021 MaiMemo）
-            forgetting_curve_floor: 0.10,
+            // FSRS-6 标准曲线无渐近线；保留为可调项
+            forgetting_curve_floor: 0.0,
             w: default_w(),
             alpha_scale: 0.3,
             alpha_min: 0.1,
             alpha_max: 0.5,
             forgetting_threshold: 0.2,
-            retention_min: 0.70,
+            retention_min: 0.75,
             retention_max: 0.95,
             max_interval_days: 90.0,
             min_interval_secs: 60,
             high_accuracy_threshold: 0.9,
-            high_accuracy_retention_boost: 0.02,
+            high_accuracy_retention_boost: 0.03,
             high_fatigue_threshold: 0.6,
             high_fatigue_retention_drop: 0.05,
             low_motivation_threshold: -0.2,

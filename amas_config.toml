@@ -9,14 +9,15 @@ mtpEnabled = false
 sspEnabled = false
 
 [ensemble]
-baseWeightHeuristic = 0.4
-baseWeightIge = 0.3
-baseWeightSwd = 0.3
+# bench tuned v3（真实数据 forward simulation 调优值回写）
+baseWeightHeuristic = 0.35
+baseWeightIge = 0.4
+baseWeightSwd = 0.25
 warmupSamples = 20
 blendScale = 100.0
 blendMax = 0.5
 minWeight = 0.15
-warmupHeuristicBoost = 0.2
+warmupHeuristicBoost = 0.1
 
 [modeling]
 attentionSmoothing = 0.3
@@ -116,15 +117,15 @@ lowAccuracyRatioDrop = 0.1
 lowMotivationDifficultyDrop = 0.1
 lowMotivationMaxBatch = 8
 confidenceBase = 0.7
-confidenceDecayCap = 0.5
+confidenceDecayCap = 0.3
 confidenceMin = 0.2
-confidenceDecayScale = 200.0
+confidenceDecayScale = 500.0
 
 [ige]
 batchSize = 10
 intervalScale = 1.0
 ucbConfidenceCoeff = 2.0
-defaultConfidence = 0.6
+defaultConfidence = 0.65
 difficultyBinCount = 20
 ratioBinCount = 16
 
@@ -152,46 +153,48 @@ halfLifeTimeUnitSecs = 1296000.0
 halfLifePower = 1.5
 recallRiskBonus = 0.2
 recallRiskThreshold = 0.55
-baseDesiredRetention = 0.849021
+baseDesiredRetention = 0.9
 passiveDecayHalfLifeDays = 30.0
 passiveDecayPower = 0.3
 masteryWindowSize = 20
 streakMinGapMs = 1800000
 stabilityBaseDays = 20.0
-forgettingCurveFactor = 0.3
-forgettingCurveDecay = -0.5
-forgettingCurveFloor = 0.1
+# FSRS-6: 曲线 factor/decay 由 w[20] 派生（forgettingCurveFactor/Decay 已废弃，不再写入）
+forgettingCurveFloor = 0.0
+# FSRS-6 公版 21 维（w[19]=同日饱和指数, w[20]=曲线 decay）
 w = [
-    0.174453,
-    0.660618,
-    3.132149,
-    5.944611,
-    7.1949,
-    0.5345,
-    1.4604,
-    0.0046,
-    1.208657,
-    0.273007,
-    0.384712,
-    1.9395,
-    0.11,
-    0.29605,
-    2.2698,
-    0.165065,
-    4.340478,
-    0.51655,
-    0.6621,
+    0.212,
+    1.2931,
+    2.3065,
+    8.2956,
+    6.4133,
+    0.8334,
+    3.0194,
+    0.001,
+    1.8722,
+    0.1666,
+    0.796,
+    1.4835,
+    0.0614,
+    0.2629,
+    1.6483,
+    0.6014,
+    1.8729,
+    0.5425,
+    0.0912,
+    0.0658,
+    0.1542,
 ]
 alphaScale = 0.3
 alphaMin = 0.1
 alphaMax = 0.5
 forgettingThreshold = 0.2
-retentionMin = 0.7
+retentionMin = 0.75
 retentionMax = 0.95
-maxIntervalDays = 114.565366
+maxIntervalDays = 90.0
 minIntervalSecs = 60
 highAccuracyThreshold = 0.9
-highAccuracyRetentionBoost = 0.02
+highAccuracyRetentionBoost = 0.03
 highFatigueThreshold = 0.6
 highFatigueRetentionDrop = 0.05
 lowMotivationThreshold = -0.2

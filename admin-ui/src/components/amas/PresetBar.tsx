@@ -21,7 +21,6 @@ interface UiPreset {
 
 const UI_PRESETS: UiPreset[] = [
   { id: 'factory_default', label: '出厂默认 (factory_default)', implemented: true },
-  { id: 'tuned_2026_05_15', label: '已调优 (2026-05-15)', implemented: true },
   { id: 'conservative', label: '保守 (conservative)', implemented: false },
   { id: 'aggressive', label: '激进 (aggressive)', implemented: false },
   { id: 'heuristic_only', label: '仅启发式 (heuristic-only)', implemented: false },
@@ -53,7 +52,6 @@ export function PresetBar(props: PresetBarProps) {
   const currentLabel = createMemo(() => {
     const m = matchedPreset();
     if (m === 'factory_default') return '出厂默认';
-    if (m === 'tuned_2026_05_15') return '已调优 2026-05-15';
     return '自定义草稿';
   });
 

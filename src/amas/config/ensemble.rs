@@ -16,20 +16,22 @@ pub struct EnsembleConfig {
 }
 
 pub(crate) fn default_warmup_heuristic_boost() -> f64 {
-    0.20
+    0.10
 }
 
 impl Default for EnsembleConfig {
     fn default() -> Self {
         Self {
-            base_weight_heuristic: 0.40,
-            base_weight_ige: 0.30,
-            base_weight_swd: 0.30,
+            // bench tuned v3（真实数据 forward simulation，2026-05 回写）：
+            // IGE 权重提升、warmup heuristic 加成减半
+            base_weight_heuristic: 0.35,
+            base_weight_ige: 0.40,
+            base_weight_swd: 0.25,
             warmup_samples: 20,
             blend_scale: 100.0,
             blend_max: 0.50,
             min_weight: 0.15,
-            warmup_heuristic_boost: 0.20,
+            warmup_heuristic_boost: 0.10,
         }
     }
 }

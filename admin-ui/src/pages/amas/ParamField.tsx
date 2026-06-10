@@ -156,17 +156,6 @@ export function ParamField(props: ParamFieldProps) {
           >
             默认 {formatChip(props.meta.default)}
           </button>
-          <Show when={props.meta.tuned_2026_05_15 !== undefined}>
-            <button
-              type="button"
-              class="focus-ring-soft px-1.5 py-0.5 rounded -mx-1 text-content-tertiary hover:text-success transition-colors underline-offset-2 hover:underline"
-              title="应用 2026-05-15 已调优值"
-              aria-label={`应用 ${props.meta.label_zh} 的 2026-05-15 调优值 ${formatChip(props.meta.tuned_2026_05_15!)}`}
-              onClick={() => props.onChange(props.meta.tuned_2026_05_15)}
-            >
-              已调优 {formatChip(props.meta.tuned_2026_05_15!)}
-            </button>
-          </Show>
           <button
             type="button"
             class="focus-ring-soft px-1.5 py-0.5 rounded -mx-1 text-content-tertiary hover:text-accent transition-colors disabled:opacity-60 disabled:cursor-not-allowed"

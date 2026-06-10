@@ -22,13 +22,12 @@ export interface ParamMeta {
   max?: number;
   step?: number;
   default: number | boolean;
-  tuned_2026_05_15?: number | boolean;
   description_zh: string;
   affects?: Affects[];
   sensitivity?: Sensitivity;
 }
 
-/** Tier-A 11 维：经 2026-05-15 调参验证收益最大的参数集合 */
+/** Tier-A 12 维：经调参验证收益最大的参数集合（FSRS-6 起含 w[20] 曲线 decay） */
 export const TIER_A_PATHS: readonly string[] = [
   'memoryModel.w[0]',
   'memoryModel.w[1]',
@@ -41,6 +40,7 @@ export const TIER_A_PATHS: readonly string[] = [
   'memoryModel.w[16]',
   'memoryModel.baseDesiredRetention',
   'memoryModel.maxIntervalDays',
+  'memoryModel.w[20]',
 ] as const;
 
 /** 字段元数据；按 section 分组以便 UI 渲染 */
@@ -50,20 +50,20 @@ export const PARAM_DICT: Record<string, ParamMeta[]> = {
     { path: 'featureFlags.heuristicEnabled', label_zh: '启用 Heuristic', type: 'bool', default: true, description_zh: '基于规则的冷启动策略' },
     { path: 'featureFlags.igeEnabled', label_zh: '启用 IGE', type: 'bool', default: true, description_zh: '信息增益探索（UCB bandit）' },
     { path: 'featureFlags.swdEnabled', label_zh: '启用 SWD', type: 'bool', default: true, description_zh: '相似度加权距离决策' },
-    { path: 'featureFlags.mdmEnabled', label_zh: '启用 MDM 记忆模型', type: 'bool', default: true, description_zh: 'FSRS-5 难度-稳定性-可提取性模型；关闭后退回简单 SM-2' },
+    { path: 'featureFlags.mdmEnabled', label_zh: '启用 MDM 记忆模型', type: 'bool', default: true, description_zh: 'FSRS-6 难度-稳定性-可提取性模型；关闭后退回简单 SM-2' },
     { path: 'featureFlags.iadEnabled', label_zh: '启用 IAD', type: 'bool', default: false, description_zh: '干扰感知衰减（混淆词对追踪）；实验性' },
     { path: 'featureFlags.mtpEnabled', label_zh: '启用 MTP', type: 'bool', default: false, description_zh: '词素迁移预测；实验性' },
     { path: 'featureFlags.sspEnabled', label_zh: '启用 SSP-MMC', type: 'bool', default: false, description_zh: '离线 DP 最优调度（计算密集）；实验性' },
   ],
   ensemble: [
-    { path: 'ensemble.baseWeightHeuristic', label_zh: 'Heuristic 初始权重', type: 'number', min: 0, max: 1, step: 0.01, default: 0.4, description_zh: '三路集成 Heuristic 通道的初始权重；三者之和需 ≈ 1', sensitivity: 'high' },
-    { path: 'ensemble.baseWeightIge', label_zh: 'IGE 初始权重', type: 'number', min: 0, max: 1, step: 0.01, default: 0.3, description_zh: '三路集成 IGE 通道的初始权重；三者之和需 ≈ 1' },
-    { path: 'ensemble.baseWeightSwd', label_zh: 'SWD 初始权重', type: 'number', min: 0, max: 1, step: 0.01, default: 0.3, description_zh: '三路集成 SWD 通道的初始权重；三者之和需 ≈ 1' },
+    { path: 'ensemble.baseWeightHeuristic', label_zh: 'Heuristic 初始权重', type: 'number', min: 0, max: 1, step: 0.01, default: 0.35, description_zh: '三路集成 Heuristic 通道的初始权重；三者之和需 ≈ 1', sensitivity: 'high' },
+    { path: 'ensemble.baseWeightIge', label_zh: 'IGE 初始权重', type: 'number', min: 0, max: 1, step: 0.01, default: 0.4, description_zh: '三路集成 IGE 通道的初始权重；三者之和需 ≈ 1' },
+    { path: 'ensemble.baseWeightSwd', label_zh: 'SWD 初始权重', type: 'number', min: 0, max: 1, step: 0.01, default: 0.25, description_zh: '三路集成 SWD 通道的初始权重；三者之和需 ≈ 1' },
     { path: 'ensemble.warmupSamples', label_zh: '热身样本数', type: 'integer', min: 1, max: 1000, step: 1, default: 20, description_zh: '热身阶段事件数；之后集成根据信任度动态调权' },
     { path: 'ensemble.blendScale', label_zh: '信任融合速率', type: 'number', min: 1, max: 1000, step: 1, default: 100, description_zh: '越大融合越慢，权重收敛越平滑' },
     { path: 'ensemble.blendMax', label_zh: '权重最大偏移', type: 'number', min: 0, max: 1, step: 0.01, default: 0.5, description_zh: '信任融合后偏离初始权重的上限' },
     { path: 'ensemble.minWeight', label_zh: '最小权重下限', type: 'number', min: 0, max: 0.33, step: 0.01, default: 0.15, description_zh: '任一通道的权重下限，防止某路被压成零' },
-    { path: 'ensemble.warmupHeuristicBoost', label_zh: '热身期 Heuristic 加成', type: 'number', min: 0, max: 1, step: 0.01, default: 0.2, description_zh: '热身阶段额外赋予 Heuristic 的权重' },
+    { path: 'ensemble.warmupHeuristicBoost', label_zh: '热身期 Heuristic 加成', type: 'number', min: 0, max: 1, step: 0.01, default: 0.1, description_zh: '热身阶段额外赋予 Heuristic 的权重' },
   ],
   modeling: [
     { path: 'modeling.attentionSmoothing', label_zh: '注意力 EMA 系数', type: 'number', min: 0, max: 1, step: 0.01, default: 0.3, description_zh: '注意力信号的指数平滑系数（α）' },
@@ -91,32 +91,34 @@ export const PARAM_DICT: Record<string, ParamMeta[]> = {
     { path: 'objectiveWeights.frustration', label_zh: '挫折权重', type: 'number', min: 0, max: 1, step: 0.05, default: 0.1, description_zh: '目标函数中挫折抑制的权重；五项和需 ≈ 1' },
   ],
   memoryModel: [
-    // Tier-A —— FSRS-5 w 数组中已验证的高杠杆下标
-    { path: 'memoryModel.w[0]', label_zh: '初始稳定性 · Again', type: 'number', min: 0.01, max: 5, step: 0.01, default: 0.4072, tuned_2026_05_15: 0.174453, description_zh: 'FSRS-5 w[0]：评级 Again 时的初始稳定性（天）', affects: ['retention', 'prediction'], sensitivity: 'high' },
-    { path: 'memoryModel.w[1]', label_zh: '初始稳定性 · Hard', type: 'number', min: 0.01, max: 5, step: 0.01, default: 1.1829, tuned_2026_05_15: 0.660618, description_zh: 'FSRS-5 w[1]：评级 Hard 时的初始稳定性（天）', affects: ['retention', 'prediction'], sensitivity: 'high' },
-    { path: 'memoryModel.w[2]', label_zh: '初始稳定性 · Good', type: 'number', min: 0.1, max: 20, step: 0.01, default: 3.1262, tuned_2026_05_15: 3.132149, description_zh: 'FSRS-5 w[2]：评级 Good 时的初始稳定性（天）', affects: ['retention', 'prediction'], sensitivity: 'ultra' },
-    { path: 'memoryModel.w[3]', label_zh: '初始稳定性 · Easy', type: 'number', min: 0.5, max: 30, step: 0.01, default: 15.4722, tuned_2026_05_15: 5.944611, description_zh: 'FSRS-5 w[3]：评级 Easy 时的初始稳定性（天）', affects: ['retention', 'prediction'], sensitivity: 'high' },
-    { path: 'memoryModel.w[4]', label_zh: '难度初值偏移', type: 'number', min: 0, max: 10, step: 0.01, default: 7.1949, description_zh: 'FSRS-5 w[4]：难度初始化偏移（标准值，建议不动）' },
-    { path: 'memoryModel.w[5]', label_zh: '难度初始化系数', type: 'number', min: 0, max: 5, step: 0.01, default: 0.5345, description_zh: 'FSRS-5 w[5]：难度初始化乘子（标准值，建议不动）' },
-    { path: 'memoryModel.w[6]', label_zh: '难度均值回归', type: 'number', min: 0, max: 5, step: 0.01, default: 1.4604, description_zh: 'FSRS-5 w[6]：难度均值回归系数（标准值，建议不动）' },
-    { path: 'memoryModel.w[7]', label_zh: '难度调节阻尼', type: 'number', min: 0, max: 1, step: 0.0001, default: 0.0046, description_zh: 'FSRS-5 w[7]：难度调节阻尼（标准值，建议不动）' },
-    { path: 'memoryModel.w[8]', label_zh: '稳定性增长乘子', type: 'number', min: 0.1, max: 5, step: 0.001, default: 1.54575, tuned_2026_05_15: 1.208657, description_zh: 'FSRS-5 w[8]：稳定性增长基础乘子', affects: ['retention'], sensitivity: 'high' },
-    { path: 'memoryModel.w[9]', label_zh: '稳定性增长幂指数', type: 'number', min: 0, max: 1, step: 0.001, default: 0.1192, tuned_2026_05_15: 0.273007, description_zh: 'FSRS-5 w[9]：稳定性增长幂', affects: ['retention'], sensitivity: 'high' },
-    { path: 'memoryModel.w[10]', label_zh: '间隔效应系数', type: 'number', min: 0, max: 2, step: 0.01, default: 1.01925, tuned_2026_05_15: 0.384712, description_zh: 'FSRS-5 w[10]：间隔效应（spacing effect）', affects: ['retention'], sensitivity: 'high' },
-    { path: 'memoryModel.w[11]', label_zh: '失败稳定性下降', type: 'number', min: 0, max: 5, step: 0.01, default: 1.9395, description_zh: 'FSRS-5 w[11]：失败后稳定性下降（标准值）' },
-    { path: 'memoryModel.w[12]', label_zh: '失败难度增加', type: 'number', min: 0, max: 1, step: 0.01, default: 0.11, description_zh: 'FSRS-5 w[12]：失败后难度增加（标准值）' },
-    { path: 'memoryModel.w[13]', label_zh: '失败重置系数', type: 'number', min: 0, max: 1, step: 0.01, default: 0.29605, description_zh: 'FSRS-5 w[13]：失败重置（标准值）' },
-    { path: 'memoryModel.w[14]', label_zh: '失败回弹系数', type: 'number', min: 0, max: 5, step: 0.01, default: 2.2698, description_zh: 'FSRS-5 w[14]：失败回弹（标准值）' },
-    { path: 'memoryModel.w[15]', label_zh: 'Hard 评级加成', type: 'number', min: 0, max: 1, step: 0.001, default: 0.2315, tuned_2026_05_15: 0.165065, description_zh: 'FSRS-5 w[15]：Hard 评级稳定性加成', affects: ['retention'], sensitivity: 'med' },
-    { path: 'memoryModel.w[16]', label_zh: 'Easy 评级加成', type: 'number', min: 0.5, max: 8, step: 0.01, default: 2.9898, tuned_2026_05_15: 4.340478, description_zh: 'FSRS-5 w[16]：Easy 评级稳定性加成', affects: ['retention'], sensitivity: 'ultra' },
-    { path: 'memoryModel.w[17]', label_zh: '同日复习缩放', type: 'number', min: 0, max: 2, step: 0.01, default: 0.51655, description_zh: 'FSRS-5 w[17]：同日复习缩放（标准值）' },
-    { path: 'memoryModel.w[18]', label_zh: '同日复习偏移', type: 'number', min: 0, max: 2, step: 0.01, default: 0.6621, description_zh: 'FSRS-5 w[18]：同日复习偏移（标准值）' },
-    { path: 'memoryModel.baseDesiredRetention', label_zh: '目标长期留存率', type: 'number', min: 0.7, max: 0.97, step: 0.005, default: 0.92, tuned_2026_05_15: 0.849021, description_zh: '调度目标留存率；越低间隔越长、复习越少、风险越大', affects: ['retention'], sensitivity: 'ultra' },
-    { path: 'memoryModel.maxIntervalDays', label_zh: '最大调度间隔（天）', type: 'number', min: 30, max: 365, step: 1, default: 90, tuned_2026_05_15: 114.565366, description_zh: '单词最大调度间隔上限；超过将被钳制', affects: ['retention'], sensitivity: 'ultra' },
+    // Tier-A —— FSRS-6 w 数组中已验证的高杠杆下标
+    { path: 'memoryModel.w[0]', label_zh: '初始稳定性 · Again', type: 'number', min: 0.01, max: 5, step: 0.01, default: 0.212, description_zh: 'FSRS-6 w[0]：评级 Again 时的初始稳定性（天）', affects: ['retention', 'prediction'], sensitivity: 'high' },
+    { path: 'memoryModel.w[1]', label_zh: '初始稳定性 · Hard', type: 'number', min: 0.01, max: 5, step: 0.01, default: 1.2931, description_zh: 'FSRS-6 w[1]：评级 Hard 时的初始稳定性（天）', affects: ['retention', 'prediction'], sensitivity: 'high' },
+    { path: 'memoryModel.w[2]', label_zh: '初始稳定性 · Good', type: 'number', min: 0.1, max: 20, step: 0.01, default: 2.3065, description_zh: 'FSRS-6 w[2]：评级 Good 时的初始稳定性（天）', affects: ['retention', 'prediction'], sensitivity: 'ultra' },
+    { path: 'memoryModel.w[3]', label_zh: '初始稳定性 · Easy', type: 'number', min: 0.5, max: 30, step: 0.01, default: 8.2956, description_zh: 'FSRS-6 w[3]：评级 Easy 时的初始稳定性（天）', affects: ['retention', 'prediction'], sensitivity: 'high' },
+    { path: 'memoryModel.w[4]', label_zh: '难度初值偏移', type: 'number', min: 0, max: 10, step: 0.01, default: 6.4133, description_zh: 'FSRS-6 w[4]：难度初始化偏移（标准值，建议不动）' },
+    { path: 'memoryModel.w[5]', label_zh: '难度初始化系数', type: 'number', min: 0, max: 5, step: 0.01, default: 0.8334, description_zh: 'FSRS-6 w[5]：难度初始化乘子（标准值，建议不动）' },
+    { path: 'memoryModel.w[6]', label_zh: '难度均值回归', type: 'number', min: 0, max: 5, step: 0.01, default: 3.0194, description_zh: 'FSRS-6 w[6]：难度均值回归系数（标准值，建议不动）' },
+    { path: 'memoryModel.w[7]', label_zh: '难度调节阻尼', type: 'number', min: 0, max: 1, step: 0.0001, default: 0.001, description_zh: 'FSRS-6 w[7]：难度调节阻尼（标准值，建议不动）' },
+    { path: 'memoryModel.w[8]', label_zh: '稳定性增长乘子', type: 'number', min: 0.1, max: 5, step: 0.001, default: 1.8722, description_zh: 'FSRS-6 w[8]：稳定性增长基础乘子', affects: ['retention'], sensitivity: 'high' },
+    { path: 'memoryModel.w[9]', label_zh: '稳定性增长幂指数', type: 'number', min: 0, max: 1, step: 0.001, default: 0.1666, description_zh: 'FSRS-6 w[9]：稳定性增长幂', affects: ['retention'], sensitivity: 'high' },
+    { path: 'memoryModel.w[10]', label_zh: '间隔效应系数', type: 'number', min: 0, max: 2, step: 0.01, default: 0.796, description_zh: 'FSRS-6 w[10]：间隔效应（spacing effect）', affects: ['retention'], sensitivity: 'high' },
+    { path: 'memoryModel.w[11]', label_zh: '失败稳定性下降', type: 'number', min: 0, max: 5, step: 0.01, default: 1.4835, description_zh: 'FSRS-6 w[11]：失败后稳定性下降（标准值）' },
+    { path: 'memoryModel.w[12]', label_zh: '失败难度增加', type: 'number', min: 0, max: 1, step: 0.01, default: 0.0614, description_zh: 'FSRS-6 w[12]：失败后难度增加（标准值）' },
+    { path: 'memoryModel.w[13]', label_zh: '失败重置系数', type: 'number', min: 0, max: 1, step: 0.01, default: 0.2629, description_zh: 'FSRS-6 w[13]：失败重置（标准值）' },
+    { path: 'memoryModel.w[14]', label_zh: '失败回弹系数', type: 'number', min: 0, max: 5, step: 0.01, default: 1.6483, description_zh: 'FSRS-6 w[14]：失败回弹（标准值）' },
+    { path: 'memoryModel.w[15]', label_zh: 'Hard 评级加成', type: 'number', min: 0, max: 1, step: 0.001, default: 0.6014, description_zh: 'FSRS-6 w[15]：Hard 评级稳定性加成', affects: ['retention'], sensitivity: 'med' },
+    { path: 'memoryModel.w[16]', label_zh: 'Easy 评级加成', type: 'number', min: 0.5, max: 8, step: 0.01, default: 1.8729, description_zh: 'FSRS-6 w[16]：Easy 评级稳定性加成', affects: ['retention'], sensitivity: 'ultra' },
+    { path: 'memoryModel.w[17]', label_zh: '同日复习缩放', type: 'number', min: 0, max: 2, step: 0.01, default: 0.5425, description_zh: 'FSRS-6 w[17]：同日复习缩放（标准值）' },
+    { path: 'memoryModel.w[18]', label_zh: '同日复习偏移', type: 'number', min: 0, max: 2, step: 0.01, default: 0.0912, description_zh: 'FSRS-6 w[18]：同日复习偏移（标准值）' },
+    { path: 'memoryModel.w[19]', label_zh: '同日饱和指数', type: 'number', min: 0, max: 1, step: 0.001, default: 0.0658, description_zh: 'FSRS-6 w[19]：同日复习 S^(-w19) 饱和项——小稳定性增长快、大稳定性增长慢（FSRS-6 新增）' },
+    { path: 'memoryModel.w[20]', label_zh: '遗忘曲线 decay', type: 'number', min: 0.05, max: 2, step: 0.001, default: 0.1542, description_zh: 'FSRS-6 w[20]：遗忘曲线衰减指数（可训练）；factor 由 0.9^(-1/decay)-1 派生保证 R(S,S)=0.9', affects: ['retention', 'prediction'], sensitivity: 'ultra' },
+    { path: 'memoryModel.baseDesiredRetention', label_zh: '目标长期留存率', type: 'number', min: 0.7, max: 0.97, step: 0.005, default: 0.9, description_zh: '调度目标留存率；越低间隔越长、复习越少、风险越大', affects: ['retention'], sensitivity: 'ultra' },
+    { path: 'memoryModel.maxIntervalDays', label_zh: '最大调度间隔（天）', type: 'number', min: 30, max: 365, step: 1, default: 90, description_zh: '单词最大调度间隔上限；超过将被钳制', affects: ['retention'], sensitivity: 'ultra' },
     { path: 'memoryModel.alphaScale', label_zh: 'α 学习率缩放', type: 'number', min: 0, max: 1, step: 0.05, default: 0.3, description_zh: '难度/稳定性学习率的缩放因子' },
     { path: 'memoryModel.alphaMin', label_zh: 'α 学习率下限', type: 'number', min: 0, max: 1, step: 0.05, default: 0.1, description_zh: '每事件 α 下限；与 alphaMax 共同限定 α 区间' },
     { path: 'memoryModel.alphaMax', label_zh: 'α 学习率上限', type: 'number', min: 0, max: 1, step: 0.05, default: 0.5, description_zh: '每事件 α 上限；需 > alphaMin' },
-    { path: 'memoryModel.retentionMin', label_zh: '自适应留存下限', type: 'number', min: 0.5, max: 0.95, step: 0.01, default: 0.7, description_zh: '根据用户状态调整后留存率下限' },
+    { path: 'memoryModel.retentionMin', label_zh: '自适应留存下限', type: 'number', min: 0.5, max: 0.95, step: 0.01, default: 0.75, description_zh: '根据用户状态调整后留存率下限' },
     { path: 'memoryModel.retentionMax', label_zh: '自适应留存上限', type: 'number', min: 0.7, max: 0.99, step: 0.01, default: 0.95, description_zh: '根据用户状态调整后留存率上限' },
   ],
   monitoring: [
@@ -273,7 +275,7 @@ export function validateConfig(cfg: Record<string, unknown>): FieldError[] {
 
 // ──────────────────────────── Preset ────────────────────────────
 
-export type PresetId = 'factory_default' | 'tuned_2026_05_15';
+export type PresetId = 'factory_default';
 
 export interface PresetInfo {
   id: PresetId;
@@ -281,19 +283,18 @@ export interface PresetInfo {
   description_zh: string;
 }
 
+// 2026-06-10 FSRS-6 升级：移除"已调优 2026-05-15"preset——其值属 FSRS-5 19 维空间，
+// 套用到 FSRS-6 公式有害；FSRS-6 公版默认即当前最优（12 维 TPE 重调参未越过 DHP 守门）。
 export const PRESETS: PresetInfo[] = [
-  { id: 'factory_default', label_zh: '出厂默认', description_zh: 'AMASConfig::default()；未经调参的基线' },
-  { id: 'tuned_2026_05_15', label_zh: '已调优（2026-05-15）', description_zh: 'Tier-A 11 维已调优；预测 +10.6% / 记忆量 +14%' },
+  { id: 'factory_default', label_zh: '出厂默认', description_zh: 'AMASConfig::default()；FSRS-6 公版参数' },
 ];
 
 /** 在当前 cfg 之上应用 preset 的覆盖；返回新对象。 */
 export function applyPreset(cfg: Record<string, unknown>, preset: PresetId): Record<string, unknown> {
+  void preset; // 目前仅 factory_default 一个 preset
   const cloned = structuredClone(cfg);
   for (const meta of PARAM_INDEX.values()) {
-    const value = preset === 'tuned_2026_05_15' && meta.tuned_2026_05_15 !== undefined
-      ? meta.tuned_2026_05_15
-      : meta.default;
-    setByPath(cloned, meta.path, value);
+    setByPath(cloned, meta.path, meta.default);
   }
   return cloned;
 }

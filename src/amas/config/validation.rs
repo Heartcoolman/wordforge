@@ -301,7 +301,7 @@ impl AMASConfig {
                     .to_string(),
             );
         }
-        // FSRS-5 w[] 权重：w[8]/w[11] 等经 .exp() 消费，非有限或过大会 overflow 为 Inf，
+        // FSRS-6 w[] 权重：w[8]/w[11] 等经 .exp() 消费，非有限或过大会 overflow 为 Inf，
         // 进而污染 stability 并以 JSON null 落库；逐元素拒绝非有限及越界值。
         if self
             .memory_model
@@ -311,6 +311,22 @@ impl AMASConfig {
         {
             return Err(
                 "memory_model.w[*] must all be finite and within [-100,100]".to_string(),
+            );
+        }
+        // FSRS-6 结构性约束：初始 stability w[0..4] 必须为正（S0 直接查表）
+        if self.memory_model.w[..4].iter().any(|&s0| s0 <= 0.0) {
+            return Err("memory_model.w[0..4] (initial stability) must be > 0".to_string());
+        }
+        // w[19] 同日饱和指数：负值会让大 S 同日复习爆增长；官方 clipper 域 [0,1]
+        if !(0.0..=1.0).contains(&self.memory_model.w[19]) {
+            return Err(
+                "memory_model.w[19] (same-day saturation) must be in [0,1]".to_string(),
+            );
+        }
+        // w[20] 遗忘曲线 decay：curve_decay() 运行时钳到 [0.05,2]，配置层拒绝域外值
+        if !(0.05..=2.0).contains(&self.memory_model.w[20]) {
+            return Err(
+                "memory_model.w[20] (forgetting curve decay) must be in [0.05,2.0]".to_string(),
             );
         }
 

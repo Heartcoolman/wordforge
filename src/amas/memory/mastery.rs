@@ -197,7 +197,10 @@ mod tests {
     #[test]
     fn incorrect_and_correct_answers_move_stability_in_opposite_directions() {
         let config = MemoryModelConfig::default();
-        let base = reviewed_state(&config);
+        let mut base = reviewed_state(&config);
+        // 隔 2 天走长期路径：FSRS-6 同日分支对已稳卡片 Good 复习是 S 持平（饱和+G≥3 下限），
+        // 本测试意图是长期方向性，需避开同日分支。
+        rewind_last_review(&mut base, 2 * 86_400_000);
         let mut correct_state = base.clone();
         let mut incorrect_state = base;
 

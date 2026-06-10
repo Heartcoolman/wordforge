@@ -2,8 +2,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::amas::config::MemoryModelConfig;
 
-/// AMAS v2: DSR (Difficulty-Stability-Retrievability) architecture
-/// Uses FSRS-5 formulas for state transitions with AMAS-unique scheduling.
+/// AMAS v3: DSR (Difficulty-Stability-Retrievability) architecture
+/// Uses FSRS-6 formulas (21-dim w, trainable forgetting-curve decay w[20])
+/// for state transitions with AMAS-unique scheduling.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MdmState {
     /// Stability: interval in days at which R = 90%.
@@ -76,7 +77,7 @@ impl MdmState {
 }
 
 /// Main DSR update function.
-/// Uses FSRS-5 formulas for stability transitions.
+/// Uses FSRS-6 formulas for stability transitions.
 ///
 /// quality: 0.0-1.0, mapped to FSRS grade:
 ///   quality <= 0.15 → Again(1), <= 0.5 → Hard(2), <= 0.85 → Good(3), else Easy(4)
@@ -126,10 +127,17 @@ pub fn update_strength(
             .unwrap_or(1.0);
 
         let target_stability = if elapsed_days < 1.0 {
-            // Same-day review: FSRS-5 short-term stability formula
+            // Same-day review: FSRS-6 short-term formula S' = S·e^{w17·(G-3+w18)}·S^{-w19}
+            // （w19 饱和项：小 S 增长快、大 S 增长慢；G≥3 时强制 S'≥S）
             let grade_f = grade as f64;
             let exponent = (config.w[17] * (grade_f - 3.0 + config.w[18])).clamp(-20.0, 20.0);
-            (prev_stability * exponent.exp()).max(0.01)
+            let saturation = prev_stability.powf(-config.w[19]);
+            let s_short = (prev_stability * exponent.exp() * saturation).max(0.01);
+            if grade >= 3 {
+                s_short.max(prev_stability)
+            } else {
+                s_short
+            }
         } else if grade >= 2 {
             // Successful recall: S'_r = S * (e^w8 * (11-D) * S^{-w9} * (e^{w10*(1-R)} - 1) * bonus + 1)
             let bonus = if grade == 2 {
@@ -161,7 +169,9 @@ pub fn update_strength(
 
         state.difficulty =
             (prev_difficulty + (target_difficulty - prev_difficulty) * alpha).clamp(1.0, 10.0);
-        state.stability = (prev_stability + (target_stability - prev_stability) * alpha).max(0.01);
+        // S 上限对齐 FSRS-6 参考实现（≈100 年），防极端 w 组合下幂运算溢出
+        state.stability =
+            (prev_stability + (target_stability - prev_stability) * alpha).clamp(0.01, 36_500.0);
     }
 
     // Sync backward-compatible fields
@@ -203,23 +213,24 @@ pub fn composite_strength(state: &MdmState, _config: &MemoryModelConfig) -> f64 
     (state.stability / 30.0).clamp(0.0, 1.0)
 }
 
-/// FSRS power-law forgetting curve with asymptote:
-/// R(t,S) = floor + (1-floor) * (1 + factor * t/S)^decay
+/// FSRS-6 power-law forgetting curve with asymptote:
+/// R(t,S) = floor + (1-floor) * (1 + factor * t/S)^(-decay)
+/// decay = w[20] (trainable), factor = 0.9^(-1/decay) - 1 so that R(S,S)=0.9 (floor=0)
 pub fn recall_probability(state: &MdmState, now_ms: i64, config: &MemoryModelConfig) -> f64 {
     match state.last_review_at {
         None => 0.0,
         Some(last) => {
             let elapsed_days = ((now_ms - last) as f64 / 86_400_000.0).max(0.0);
             let s = state.stability.max(0.01);
-            let power_law = (1.0 + config.forgetting_curve_factor * elapsed_days / s)
-                .powf(config.forgetting_curve_decay);
+            let power_law = (1.0 + config.curve_factor() * elapsed_days / s)
+                .powf(-config.curve_decay());
             let floor = config.forgetting_curve_floor;
             (floor + (1.0 - floor) * power_law).clamp(0.0, 1.0)
         }
     }
 }
 
-/// Interval: solve R = floor + (1-floor) * (1 + factor*t/S)^decay for t
+/// Interval: solve R = floor + (1-floor) * (1 + factor*t/S)^(-decay) for t
 pub fn compute_interval(
     state: &MdmState,
     target_recall: f64,
@@ -229,8 +240,8 @@ pub fn compute_interval(
     let s = state.stability.max(0.01);
     let floor = config.forgetting_curve_floor;
     let adjusted_target = ((target_recall - floor) / (1.0 - floor).max(1e-9)).clamp(1e-6, 1.0);
-    let interval_days = s / config.forgetting_curve_factor
-        * (adjusted_target.powf(1.0 / config.forgetting_curve_decay) - 1.0);
+    let interval_days = s / config.curve_factor()
+        * (adjusted_target.powf(-1.0 / config.curve_decay()) - 1.0);
     let interval_secs = interval_days * 86400.0;
     ((interval_secs * interval_scale.max(0.1)).min(config.max_interval_days * 86400.0) as i64)
         .max(config.min_interval_secs)

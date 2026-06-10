@@ -34,29 +34,16 @@ interface PresetCardInfo {
 
 const PRESET_CARDS: PresetCardInfo[] = [
   {
-    id: 'tuned_2026_05_15',
-    name: '已调优 2026-05-15',
-    badge: '推荐',
-    desc: 'Tier-A 11 维已调优,预测 +10.6% / 记忆量 +14%。生产首选。',
-    implemented: true,
-    props: [
-      { k: 'baseDesiredRetention', v: '0.849' },
-      { k: 'maxIntervalDays', v: '114' },
-      { k: 'w[16]', v: '4.34' },
-      { k: 'w[2]', v: '3.13' },
-    ],
-  },
-  {
     id: 'factory_default',
-    name: '出厂默认',
-    badge: '基线',
-    desc: 'AMASConfig::default(),未经调参的 FSRS-5 标准初始值。新部署 / 排错使用。',
+    name: '出厂默认 (FSRS-6)',
+    badge: '推荐',
+    desc: 'AMASConfig::default()=FSRS-6 公版参数(21 维 w+可训练 decay)。2026-06-10 重调参确认其已近 Pareto 前沿,生产首选。',
     implemented: true,
     props: [
-      { k: 'baseDesiredRetention', v: '0.92' },
+      { k: 'baseDesiredRetention', v: '0.9' },
       { k: 'maxIntervalDays', v: '90' },
-      { k: 'w[16]', v: '2.99' },
-      { k: 'w[2]', v: '3.13' },
+      { k: 'w[20] decay', v: '0.154' },
+      { k: 'w[2]', v: '2.31' },
     ],
   },
   {
@@ -118,7 +105,7 @@ const QUICK_KNOB_PATHS: readonly string[] = [
  * 1. 4 preset cards 横排(2 真 + 2 占位 disabled)
  * 2. 算法 flag block(8 flag · 4 决策蓝条 + 4 记忆黄条)
  * 3. 核心 4 旋钮 block(高敏 ultra 字段)
- * 4. Tier-A 11 维 grid(原有 FSRS-5 已调优精雕项,保留以承接调参收益)
+ * 4. Tier-A 12 维 grid(FSRS-6 高杠杆精雕项,含 w[20] 曲线 decay)
  */
 export function TierAPanel(props: TierAPanelProps) {
   const errorMap = createMemo(() => new Map(props.errors.map((e) => [e.path, e.message])));
@@ -131,7 +118,7 @@ export function TierAPanel(props: TierAPanelProps) {
 
   /** 当前 config 是否完全匹配某 preset */
   const matchedPreset = createMemo<PresetId | null>(() => {
-    for (const id of ['tuned_2026_05_15', 'factory_default'] as PresetId[]) {
+    for (const id of ['factory_default'] as PresetId[]) {
       const fresh = applyPreset({}, id);
       if (diffKnown(fresh, props.config).length === 0) return id;
     }
@@ -270,11 +257,11 @@ export function TierAPanel(props: TierAPanelProps) {
         </div>
       </Card>
 
-      {/* Tier-A 11 维 grid (保留原有功能) */}
+      {/* Tier-A 12 维 grid (保留原有功能) */}
       <Card variant="elevated" padding="lg">
         <div class="space-y-3">
           <div>
-            <h3 class="text-sm font-semibold text-content">Tier-A 11 维 · 已调优精雕项</h3>
+            <h3 class="text-sm font-semibold text-content">Tier-A 12 维 · 高杠杆精雕项</h3>
             <p class="mt-1 text-xs text-content-tertiary leading-snug">
               经 2026-05-15 调参验证,调整这 11 个参数即可拿到核心收益(预测 +10.6% / 记忆量 +14%)。
               其它参数对核心指标贡献较小,建议保持默认或在「分节配置」中谨慎调整。

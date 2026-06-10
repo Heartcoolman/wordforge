@@ -220,6 +220,12 @@ async fn algorithm_optimization_lowers_difficulty_on_low_accuracy() {
     }
 
     let before = engine.get_config().constraints.max_difficulty_when_fatigued;
+    // persist_tuned_config 会写 AMAS_CONFIG_FILE(缺省 amas_config.toml)——
+    // 重定向到临时路径,防测试副作用污染仓库工作树的真实配置文件
+    std::env::set_var(
+        "AMAS_CONFIG_FILE",
+        std::env::temp_dir().join("wf-test-amas-config.toml"),
+    );
     workers::algorithm_optimization::run(&store, &engine).await;
     let after = engine.get_config().constraints.max_difficulty_when_fatigued;
     assert!(
@@ -268,6 +274,12 @@ async fn algorithm_optimization_raises_difficulty_on_high_accuracy() {
     }
 
     let before = engine.get_config().constraints.max_difficulty_when_fatigued;
+    // persist_tuned_config 会写 AMAS_CONFIG_FILE(缺省 amas_config.toml)——
+    // 重定向到临时路径,防测试副作用污染仓库工作树的真实配置文件
+    std::env::set_var(
+        "AMAS_CONFIG_FILE",
+        std::env::temp_dir().join("wf-test-amas-config.toml"),
+    );
     workers::algorithm_optimization::run(&store, &engine).await;
     let after = engine.get_config().constraints.max_difficulty_when_fatigued;
     assert!(
@@ -283,6 +295,12 @@ async fn algorithm_optimization_no_change_when_records_below_threshold() {
 
     let before = engine.get_config().constraints.max_difficulty_when_fatigued;
     // 没有任何 record，total_records=0 < 50
+    // persist_tuned_config 会写 AMAS_CONFIG_FILE(缺省 amas_config.toml)——
+    // 重定向到临时路径,防测试副作用污染仓库工作树的真实配置文件
+    std::env::set_var(
+        "AMAS_CONFIG_FILE",
+        std::env::temp_dir().join("wf-test-amas-config.toml"),
+    );
     workers::algorithm_optimization::run(&store, &engine).await;
     let after = engine.get_config().constraints.max_difficulty_when_fatigued;
     assert!((after - before).abs() < f64::EPSILON);
