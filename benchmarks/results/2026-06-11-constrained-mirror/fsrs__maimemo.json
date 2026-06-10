@@ -1,0 +1,23 @@
+{
+ "scheduler": "fsrs",
+ "dataset": "maimemo",
+ "prediction": {
+  "logLoss": 0.3658621275769106,
+  "ici": 0.10918650226589757,
+  "auc": 0.7704970288386481,
+  "maeP": 0.27005574444782576
+ },
+ "dhp": {
+  "expectedMemoryFinal": 21008.3659,
+  "masteredCount": 13543,
+  "totalReviews": 183469,
+  "efficiency": 0.114506
+ },
+ "policy": {
+  "finalRecallRate": 0.5671,
+  "reviewsPerDay": 2038.5444444444445,
+  "retentionStability": 0.9004488211785311
+ },
+ "runtime_seconds": 17.82,
+ "notes": "constrained re-tune winner under parity-aligned DHP mirror (repaired NM0), production write-back 2026-06-11"
+}

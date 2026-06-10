@@ -1,0 +1,23 @@
+{
+ "scheduler": "sm2",
+ "dataset": "maimemo",
+ "prediction": {
+  "logLoss": 0.3868864601032393,
+  "ici": 0.09702406622110761,
+  "auc": 0.5874981435901337,
+  "maeP": 0.21181840024383383
+ },
+ "dhp": {
+  "expectedMemoryFinal": 21021.2787,
+  "masteredCount": 12219,
+  "totalReviews": 243158,
+  "efficiency": 0.086451
+ },
+ "policy": {
+  "finalRecallRate": 0.8685,
+  "reviewsPerDay": 2701.7555555555555,
+  "retentionStability": 0.9008468926526797
+ },
+ "runtime_seconds": 15.44,
+ "notes": "constrained re-tune winner under parity-aligned DHP mirror (repaired NM0), production write-back 2026-06-11"
+}

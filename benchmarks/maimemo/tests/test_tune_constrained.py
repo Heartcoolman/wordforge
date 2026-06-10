@@ -281,7 +281,7 @@ def test_tune_funnel_conclusive_negative(monkeypatch, tmp_path):
 
 def test_seed_trials_inside_windows():
     seeds = _seed_trial_params()
-    assert len(seeds) == 8
+    assert len(seeds) == 12
     for seed in seeds:
         assert set(seed) == set(SEARCH_WINDOWS)
         for name, value in seed.items():

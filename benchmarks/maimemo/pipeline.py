@@ -806,13 +806,24 @@ def evaluate(paths: BenchPaths, memory_config: Dict[str, Any], split: str = "val
 # Tune (optimized: fewer trials, shared server, single-pass scoring)
 # ---------------------------------------------------------------------------
 
-# 6 个 prediction-live 维度的原始窗口（probe 核验），其余维度钉死在 DEFAULT 值
+# 14 个双活（objective-live ∧ gate-live）维度的窗口，其余维度钉死在 DEFAULT 值。
+# 2026-06-11 镜像对齐（grade 3/1 + alpha 平滑 + 难度动力学）后 per-dim 探针重测：
+# 对齐解锁难度链路 w4-w7（mean reversion 锚 d0(4) 持续作用，w4 守门峰值 40.7%）
+# 与遗忘分支 w11-w14（G=1 路径双侧可达）；原 6 维窗口原样保留。
 SEARCH_WINDOWS: Dict[str, Tuple[float, float]] = {
     "w_0": (0.05, 0.60),
     "w_2": (1.00, 5.00),
+    "w_4": (3.50, 9.50),
+    "w_5": (0.30, 2.00),
+    "w_6": (1.00, 4.00),
+    "w_7": (0.001, 0.15),
     "w_8": (1.00, 3.00),
     "w_9": (0.05, 0.40),
     "w_10": (0.30, 1.50),
+    "w_11": (0.50, 3.00),
+    "w_12": (0.01, 0.25),
+    "w_13": (0.05, 0.70),
+    "w_14": (0.50, 3.50),
     "w_20": (0.10, 0.80),
 }
 _W_INDEX = {name: int(name.split("_")[1]) for name in SEARCH_WINDOWS}
@@ -821,17 +832,24 @@ _W_INDEX = {name: int(name.split("_")[1]) for name in SEARCH_WINDOWS}
 def _mutate_config(
     trial: optuna.Trial, windows: Dict[str, Tuple[float, float]] | None = None
 ) -> Dict[str, Any]:
-    """Search space = 6 prediction-live dims（12 → 6，2026-06-10 DHP 约束漏斗）。
+    """Search space = 14 双活 dims（6 → 14，2026-06-11 镜像对齐后探针重判）。
 
-    保留（窗口不变，probe 核验对 prediction 有真实信号）：
-      w_0 / w_2 / w_8 / w_9 / w_10 / w_20
+    双活 = objective-live（adapter replay 路径结构可达）∧ gate-live（对齐镜像闭环探针
+    腿变化 ≥0.1%）。继承 6 维：w_0/w_2/w_8/w_9/w_10/w_20（窗口不变）；对齐解锁 8 维：
+      - w_4/w_5/w_6/w_7：难度动力学 — 旧镜像 D 冻结使其守门盲；对齐后 mean reversion
+        锚 d0(4)=f(w4,w5) 持续作用，w_4 守门峰值 40.7% 为全空间最强杠杆
+      - w_11/w_12/w_13/w_14：遗忘分支 — G=1 双侧可达，守门 2.8-3.8%
 
-    钉死在 DEFAULT_MEMORY_MODEL_CONFIG（删除 suggest），逐维理由：
-      - w_1, w_15：三条路径全死维 — 二值成绩映射使 Hard/Easy 分支不可达
-      - w_3, w_16：gate-only/objective-blind — 目标零收益、纯闸门风险，stock 值最大化 DHP 余量
-      - base_desired_retention：objective-blind 且 gate-critical（2026-06-10 全员被拒的根因）；
+    维持钉死，逐维理由：
+      - w_1, w_15：三路全死 — 二值映射使 Hard(2) 不可达（grade 对齐后依旧）
+      - w_3, w_16：三路全死 — 成功现映射 Good(3)，Easy(4) 双侧不可达（对齐前为
+        gate-only 失真源，正是本次镜像修复的主病灶）
+      - w_17/w_18/w_19：objective-live 但 gate-blind — 闭环模拟无同日复习（due≥day+1），
+        探针三腿 0.00%；进空间有守门外滑移风险
+      - base_desired_retention：objective-blind 且 gate-critical（2026-06-10 全员被拒根因）；
         生产 retention 敏感性由报告行 retentionSensitivity 覆盖（D9）
-      - max_interval_days：gate 不可见（mirror 无上限），仅剩可被套利的弱效率信号
+      - max_interval_days：gate 不可见（mirror 与 Rust 同享 90d 默认顶帽，且 90 天闭环内
+        due=day+顶帽 恒越仿真窗、复习计划不受影响），仅剩可被套利的弱效率信号
 
     windows 仅供 D10 局部精炼传缩窄盒；None = 原始窗口。
     """
@@ -878,24 +896,32 @@ _REPAIRED_NEAR_MISSES: Tuple[Dict[str, float], ...] = (
 
 
 def _seed_trial_params() -> List[Dict[str, float]]:
-    """D5 八个种子（FIFO 入队即弹出顺序；键名与 suggest 名严格一致）。
+    """D5 教师种子，12 个（FIFO 入队即弹出顺序；键名与 suggest 名严格一致）。
 
     enqueue 按 VERBATIM 透传不裁剪越界值，所有取值已核验在 SEARCH_WINDOWS 内
-    （由 test_seed_trials_inside_windows 守护）。
+    （由 test_seed_trials_inside_windows 守护）。14 维空间下种子必须全维显式
+    （部分指定会让 sampler 随机补维，破坏教学确定性）：6 维历史种子以 stock
+    补齐新 8 维。
     """
     stock = dict(_STOCK_ANCHOR_PARAMS)
     half_step = {
-        name: (stock[name] + _REPAIRED_NEAR_MISSES[0][name]) / 2.0 for name in SEARCH_WINDOWS
+        name: (stock[name] + _REPAIRED_NEAR_MISSES[0].get(name, stock[name])) / 2.0
+        for name in SEARCH_WINDOWS
     }
     return [
-        stock,                            # 1. stock 锚点（约束接线自检靶）
-        dict(_REPAIRED_NEAR_MISSES[0]),   # 2-4. 修复后的 near-miss
-        dict(_REPAIRED_NEAR_MISSES[1]),
-        dict(_REPAIRED_NEAR_MISSES[2]),
-        half_step,                        # 5. stock↔NM0 每维中点
-        {**stock, "w_20": 0.22},          # 6-7. w_20 阶梯
+        stock,                                  # 1. stock 锚点（约束接线自检靶）
+        {**stock, **_REPAIRED_NEAR_MISSES[0]},  # 2-4. 修复后的 near-miss（新维回 stock）
+        {**stock, **_REPAIRED_NEAR_MISSES[1]},
+        {**stock, **_REPAIRED_NEAR_MISSES[2]},
+        half_step,                              # 5. stock↔NM0 每维中点
+        {**stock, "w_20": 0.22},                # 6-7. w_20 阶梯
         {**stock, "w_20": 0.30},
-        {**stock, "w_0": 0.10},           # 8. w_0 探针
+        {**stock, "w_0": 0.10},                 # 8. w_0 探针
+        # 9-12. 对齐解锁维的边界教师（2026-06-11）：教 TPE 新维梯度方向
+        {**stock, "w_4": 4.5},                  # D0 锚下探（probe ×0.75 守门 5%）
+        {**stock, "w_4": 8.0},                  # D0 锚上探
+        {**stock, "w_11": 1.0, "w_12": 0.10, "w_13": 0.40, "w_14": 2.30},  # 遗忘组向 FSRS-5 官方风格
+        {**stock, "w_6": 2.0, "w_7": 0.05},     # 难度增量减半 + 真 mean reversion
     ]
 
 
@@ -1116,7 +1142,9 @@ def tune(paths: BenchPaths, stage1_trials: int = 128) -> Dict[str, Any]:
 
         study = optuna.create_study(
             direction="maximize",
-            sampler=_make_constrained_sampler(DEFAULT_RANDOM_SEED, 16),
+            # 14 维空间 startup 16→24：multivariate TPE 建模前需更多样的随机底料
+            # （不可行随机 trial 经 DHP 短路仅花 ~0.07s，代价可忽略）
+            sampler=_make_constrained_sampler(DEFAULT_RANDOM_SEED, 24),
         )
         # D5 种子：FIFO 弹出，trial 0 必为 stock 锚点
         for params in _seed_trial_params():
