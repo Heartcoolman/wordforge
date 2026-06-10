@@ -4,7 +4,8 @@ import json
 import math
 import os
 import random
-from typing import Any, Dict, List, Tuple
+import warnings
+from typing import Any, Dict, List, Sequence, Tuple
 
 import duckdb
 import numpy as np
@@ -64,6 +65,11 @@ def _resolved_calibration_batch_size(device: str, requested: int | None) -> int:
 def _duckdb_connect(threads: int | None = None) -> duckdb.DuckDBPyConnection:
     conn = duckdb.connect()
     conn.execute(f"PRAGMA threads={_resolved_thread_count(threads)}")
+    # 确定性断言：4M 行头部截断依赖插入序保持
+    ordered = conn.execute("SELECT current_setting('preserve_insertion_order')").fetchone()[0]
+    assert ordered is True or str(ordered).lower() == "true", (
+        "duckdb preserve_insertion_order is off; deterministic head truncation broken"
+    )
     return conn
 
 
@@ -86,10 +92,12 @@ def load_prefix_frame(paths: BenchPaths, split: str, user_fraction: float = 1.0)
         bucket_filter = ""
     else:
         bucket_filter = f"AND (user_bucket_100 / 10) % 10 < {sub_bucket_count}"
+    # 数据卫生过滤同 iter_prefix_batches（负 delta 行会杀死 adapter server）
     query = f"""
         SELECT *
         FROM read_parquet('{(paths.parquet / "prefix_events.parquet").as_posix()}')
         WHERE split = ?
+          AND t_history NOT LIKE '%-%'
           {bucket_filter}
     """
     conn = _duckdb_connect()
@@ -103,17 +111,26 @@ def iter_prefix_batches(
     batch_rows: int = 100_000,
     max_rows: int | None = None,
     duckdb_threads: int | None = None,
+    user_buckets: Sequence[int] | None = None,
 ):
-    sub_bucket_count = max(1, min(10, int(math.ceil(user_fraction * 10))))
-    if sub_bucket_count >= 10:
-        bucket_filter = ""
+    if user_buckets is not None:
+        # 显式十分位桶选择（stage2 用不相交桶取得独立证据）；None 时与旧行为逐字节一致
+        bucket_list = ", ".join(str(int(bucket)) for bucket in user_buckets)
+        bucket_filter = f"AND CAST(FLOOR((user_bucket_100 / 10) % 10) AS INTEGER) IN ({bucket_list})"
     else:
-        bucket_filter = f"AND (user_bucket_100 / 10) % 10 < {sub_bucket_count}"
+        sub_bucket_count = max(1, min(10, int(math.ceil(user_fraction * 10))))
+        if sub_bucket_count >= 10:
+            bucket_filter = ""
+        else:
+            bucket_filter = f"AND (user_bucket_100 / 10) % 10 < {sub_bucket_count}"
     limit_sql = f"LIMIT {int(max_rows)}" if max_rows else ""
+    # 数据卫生：时间戳乱序产生的负 delta 行（全库仅 test split 1 行）物理无意义，
+    # 且会触发 adapter server 的 delta_t>=0 校验并杀死进程（单条坏请求 = 整轮评分失败）。
     query = f"""
         SELECT *
         FROM read_parquet('{(paths.parquet / "prefix_events.parquet").as_posix()}')
         WHERE split = ?
+          AND t_history NOT LIKE '%-%'
           {bucket_filter}
         {limit_sql}
     """
@@ -534,6 +551,86 @@ def _dhp_reference(memory_config: Dict[str, Any], paths: BenchPaths) -> Dict[str
     return {"wordforge": current, "configEcho": memory_config}
 
 
+DHP_GUARDRAIL = 0.9
+DHP_CONSTRAINT_KEYS = ("expectedMemory", "nextDayMemory", "targetCount")
+
+
+def _dhp_constraints(
+    dhp: Dict[str, Any], baseline_dhp: Dict[str, Any]
+) -> Tuple[bool, Tuple[float, ...]]:
+    """Returns (feasible: bool, components: tuple[float,float,float]).
+
+    feasible uses the GATE'S LITERAL expression dhp[k] >= 0.9*base[k] (boolean authority);
+    components are normalized magnitudes 0.9 - dhp[k]/base[k] for TPE's least-violation ranking.
+    The boolean and the magnitudes are DECOUPLED on purpose (1-ulp boundary hardening):
+    if feasible, components are clamped to <= 0.0 (min(c, 0.0)); if infeasible, the violated
+    components are forced >= +1e-12. Non-finite dhp value or base <= 0 → feasible=False, component=1.0
+    (never NaN — optuna raises ValueError on NaN constraints inside tell(), stranding a poisoned trial).
+    """
+    feasible = True
+    components: List[float] = []
+    for key in DHP_CONSTRAINT_KEYS:
+        value = dhp.get(key)
+        base = baseline_dhp.get(key)
+        if (
+            not isinstance(value, (int, float))
+            or not isinstance(base, (int, float))
+            or not math.isfinite(value)
+            or not math.isfinite(base)
+            or base <= 0
+        ):
+            feasible = False
+            components.append(1.0)
+            continue
+        leg_ok = value >= DHP_GUARDRAIL * base
+        component = DHP_GUARDRAIL - value / base
+        components.append(min(component, 0.0) if leg_ok else max(component, 1e-12))
+        feasible = feasible and leg_ok
+    return feasible, tuple(components)
+
+
+def _make_constrained_sampler(seed: int, n_startup_trials: int) -> optuna.samplers.TPESampler:
+    # constraints_func 与 multivariate 在构造时各发一条 ExperimentalWarning，就地过滤；
+    # 约束绑定协议（optuna 4.8.0 源码核验）：tell() 内以 state=RUNNING 调 constraints_func，
+    # 因此每次 tell 前必须无条件 set_user_attr("constraint", ...)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", optuna.exceptions.ExperimentalWarning)
+        return optuna.samplers.TPESampler(
+            seed=seed,
+            multivariate=True,
+            n_startup_trials=n_startup_trials,
+            constraints_func=lambda t: t.user_attrs["constraint"],
+        )
+
+
+def _warn_if_unverified_optuna() -> None:
+    if optuna.__version__ != "4.8.0":
+        warnings.warn(
+            "constrained tune() relies on optuna 4.8.0 internals (tell-time constraint "
+            f"binding, infeasible values ignored by TPE); got {optuna.__version__}",
+            RuntimeWarning,
+        )
+
+
+def _verify_constrained_tpe() -> None:
+    """启动金丝雀：toy 约束研究断言 best_trial 是可行最优（x≈0.5 区），而非裸最优（x→1）。"""
+    study = optuna.create_study(
+        direction="maximize", sampler=_make_constrained_sampler(DEFAULT_RANDOM_SEED, 4)
+    )
+    xs: List[float] = []
+    for _ in range(15):
+        trial = study.ask()
+        x = trial.suggest_float("x", 0.0, 1.0)
+        trial.set_user_attr("constraint", (x - 0.5,))
+        study.tell(trial, x)
+        xs.append(x)
+    feasible = [x for x in xs if x <= 0.5]
+    if not feasible or study.best_trial.params["x"] != max(feasible):
+        raise RuntimeError(
+            "constrained TPE canary failed: best_trial is not the feasible best"
+        )
+
+
 # ---------------------------------------------------------------------------
 # SINGLE-PASS evaluate: all models in one data traversal
 # ---------------------------------------------------------------------------
@@ -551,6 +648,7 @@ def _single_pass_evaluate(
     skip_slow_baselines: bool = False,
     max_rows: int | None = None,
     dhp_student: DHPStudent | None = None,
+    user_buckets: Sequence[int] | None = None,
 ) -> Dict[str, Any]:
     """Evaluate models in a SINGLE pass over the data.
 
@@ -575,7 +673,10 @@ def _single_pass_evaluate(
     dhp_model = DHPActiveModel(dhp_student) if (include_baselines and not skip_slow_baselines and dhp_student is not None) else None
 
     for frame in tqdm(
-        iter_prefix_batches(paths, split=split, user_fraction=user_fraction, max_rows=max_rows),
+        iter_prefix_batches(
+            paths, split=split, user_fraction=user_fraction, max_rows=max_rows,
+            user_buckets=user_buckets,
+        ),
         desc=f"eval({split} {user_fraction:.0%})",
         unit="batch",
     ):
@@ -705,61 +806,97 @@ def evaluate(paths: BenchPaths, memory_config: Dict[str, Any], split: str = "val
 # Tune (optimized: fewer trials, shared server, single-pass scoring)
 # ---------------------------------------------------------------------------
 
-def _mutate_config(trial: optuna.Trial) -> Dict[str, Any]:
-    """Search space = 12 high-leverage dims (Tier-A only) starting from FSRS-6 defaults.
+# 6 个 prediction-live 维度的原始窗口（probe 核验），其余维度钉死在 DEFAULT 值
+SEARCH_WINDOWS: Dict[str, Tuple[float, float]] = {
+    "w_0": (0.05, 0.60),
+    "w_2": (1.00, 5.00),
+    "w_8": (1.00, 3.00),
+    "w_9": (0.05, 0.40),
+    "w_10": (0.30, 1.50),
+    "w_20": (0.10, 0.80),
+}
+_W_INDEX = {name: int(name.split("_")[1]) for name in SEARCH_WINDOWS}
 
-    Iter 1 with 25-dim wide search produced 0 winners (top trials -2.8% to -4% predictionGain
-    vs baseline). Root cause: TPE 64 trials cannot adequately cover 25-dim space — too many
-    irrelevant dims dilute signal. Researcher's Tier-A recommendation: tune only the 9 most
-    sensitive FSRS-5 weights, lock everything else to known-good values.
 
-    Tuned dims (12):
-      - w[0..3]   (initial stability per rating)
-      - w[8..10]  (stability boost on recall)
-      - w[15..16] (hard penalty / easy bonus)
-      - w[20]     (forgetting-curve decay, FSRS-6 trainable)
-      - baseDesiredRetention
-      - maxIntervalDays
+def _mutate_config(
+    trial: optuna.Trial, windows: Dict[str, Tuple[float, float]] | None = None
+) -> Dict[str, Any]:
+    """Search space = 6 prediction-live dims（12 → 6，2026-06-10 DHP 约束漏斗）。
 
-    Locked dims (defaults from DEFAULT_MEMORY_MODEL_CONFIG = FSRS-6 official):
-      - w[4..7]   (difficulty params, FSRS-6 standard)
-      - w[11..14] (lapse stability params)
-      - w[17..19] (same-day review incl. w[19] saturation)
-      - forgettingCurveFloor = 0.0
-      - minIntervalSecs = 60
+    保留（窗口不变，probe 核验对 prediction 有真实信号）：
+      w_0 / w_2 / w_8 / w_9 / w_10 / w_20
+
+    钉死在 DEFAULT_MEMORY_MODEL_CONFIG（删除 suggest），逐维理由：
+      - w_1, w_15：三条路径全死维 — 二值成绩映射使 Hard/Easy 分支不可达
+      - w_3, w_16：gate-only/objective-blind — 目标零收益、纯闸门风险，stock 值最大化 DHP 余量
+      - base_desired_retention：objective-blind 且 gate-critical（2026-06-10 全员被拒的根因）；
+        生产 retention 敏感性由报告行 retentionSensitivity 覆盖（D9）
+      - max_interval_days：gate 不可见（mirror 无上限），仅剩可被套利的弱效率信号
+
+    windows 仅供 D10 局部精炼传缩窄盒；None = 原始窗口。
     """
     config = json.loads(json.dumps(DEFAULT_MEMORY_MODEL_CONFIG))
-
-    # ---- Tier-A w[] (10 dims) — windows around FSRS-6 official defaults ----
     weights = list(config["w"])
-    # w0-w3: initial stability — windows around FSRS-6 official [0.212, 1.2931, 2.3065, 8.2956]
-    weights[0] = trial.suggest_float("w_0", 0.05, 0.60)
-    weights[1] = trial.suggest_float("w_1", 0.40, 2.50)
-    weights[2] = trial.suggest_float("w_2", 1.00, 5.00)
-    weights[3] = trial.suggest_float("w_3", 4.00, 16.00)
-    # w8: S boost (exp) — FSRS-6 default 1.8722
-    weights[8] = trial.suggest_float("w_8", 1.00, 3.00)
-    # w9: S saturation (S^-w9) — FSRS-6 default 0.1666
-    weights[9] = trial.suggest_float("w_9", 0.05, 0.40)
-    # w10: R-bonus on recall — FSRS-6 default 0.796
-    weights[10] = trial.suggest_float("w_10", 0.30, 1.50)
-    # w15: hard-penalty multiplier — FSRS-6 default 0.6014
-    weights[15] = trial.suggest_float("w_15", 0.30, 1.00)
-    # w16: easy-bonus multiplier — FSRS-6 default 1.8729
-    weights[16] = trial.suggest_float("w_16", 1.20, 3.50)
-    # w20: forgetting-curve decay (FSRS-6 trainable) — default 0.1542, 多数用户 <0.2
-    weights[20] = trial.suggest_float("w_20", 0.10, 0.80)
+    for name, (low, high) in (windows or SEARCH_WINDOWS).items():
+        weights[_W_INDEX[name]] = trial.suggest_float(name, low, high)
     config["w"] = weights
-
-    # ---- baseDesiredRetention (1 dim) ----
-    # Researcher report §4.1: 0.85 (-25% workload) or 0.90 (Anki default, U-curve sweetspot)
-    config["baseDesiredRetention"] = trial.suggest_float("base_desired_retention", 0.80, 0.92)
-
-    # ---- maxIntervalDays (1 dim) ----
-    # Current 90 is tight; let TPE explore [60, 180]
-    config["maxIntervalDays"] = trial.suggest_float("max_interval_days", 60.0, 180.0)
-
     return config
+
+
+_STOCK_ANCHOR_PARAMS: Dict[str, float] = {
+    name: float(DEFAULT_MEMORY_MODEL_CONFIG["w"][idx]) for name, idx in _W_INDEX.items()
+}
+# 2026-06-10 run 三个 near-miss 在 6 个存活维上的投影（钉死维回退 stock）——直接检验
+# +29-40% 校准角在移除 gate-killer 后能否幸存。来源（冻结历史记录，全精度照抄）：
+# ~/.wordforge-bench/maimemo/reports/tuning_summary.json nearMisses[0..2]
+_REPAIRED_NEAR_MISSES: Tuple[Dict[str, float], ...] = (
+    {
+        "w_0": 0.07978223679403902,
+        "w_2": 3.02498794640543,
+        "w_8": 1.6259347829476551,
+        "w_9": 0.2533678250394599,
+        "w_10": 1.1124862163489901,
+        "w_20": 0.2632510019126722,
+    },
+    {
+        "w_0": 0.08041269355978323,
+        "w_2": 2.9305596369135642,
+        "w_8": 1.6241486350160141,
+        "w_9": 0.2520068375839821,
+        "w_10": 1.1287184743061447,
+        "w_20": 0.27197432266552485,
+    },
+    {
+        "w_0": 0.09198069520607176,
+        "w_2": 2.5731565730123,
+        "w_8": 1.6065116959233467,
+        "w_9": 0.2455277063490539,
+        "w_10": 1.1281524448213665,
+        "w_20": 0.2710885682127271,
+    },
+)
+
+
+def _seed_trial_params() -> List[Dict[str, float]]:
+    """D5 八个种子（FIFO 入队即弹出顺序；键名与 suggest 名严格一致）。
+
+    enqueue 按 VERBATIM 透传不裁剪越界值，所有取值已核验在 SEARCH_WINDOWS 内
+    （由 test_seed_trials_inside_windows 守护）。
+    """
+    stock = dict(_STOCK_ANCHOR_PARAMS)
+    half_step = {
+        name: (stock[name] + _REPAIRED_NEAR_MISSES[0][name]) / 2.0 for name in SEARCH_WINDOWS
+    }
+    return [
+        stock,                            # 1. stock 锚点（约束接线自检靶）
+        dict(_REPAIRED_NEAR_MISSES[0]),   # 2-4. 修复后的 near-miss
+        dict(_REPAIRED_NEAR_MISSES[1]),
+        dict(_REPAIRED_NEAR_MISSES[2]),
+        half_step,                        # 5. stock↔NM0 每维中点
+        {**stock, "w_20": 0.22},          # 6-7. w_20 阶梯
+        {**stock, "w_20": 0.30},
+        {**stock, "w_0": 0.10},           # 8. w_0 探针
+    ]
 
 
 def _candidate_score(
@@ -772,33 +909,41 @@ def _candidate_score(
     hlr_model: HLRBaseline,
     server=None,
     max_rows: int | None = None,
+    include_interval: bool = True,
+    ratio_cap: float | None = None,
+    user_buckets: Sequence[int] | None = None,
 ) -> Dict[str, Any]:
     results = _single_pass_evaluate(
         paths, memory_config, split, user_fraction,
         hlr_model=hlr_model, oracle=oracle, server=server,
-        include_interval=True, include_baselines=False,
-        max_rows=max_rows,
+        include_interval=include_interval, include_baselines=False,
+        max_rows=max_rows, user_buckets=user_buckets,
     )
     prediction = results["wordforge"]
-    prediction_score = prediction_composite(prediction, baseline_prediction)
-    interval_policy = results["interval_policy"]
-    # policyScore = safety * efficiency is structurally ≈0 on MaiMemo data:
-    # the GRU oracle infers very short half-lives (optimalMeanDelta=1.0 day),
-    # making safety=0 regardless of model quality. Drive optimization with
-    # prediction_score; keep mean efficiency as a light guardrail.
-    avg_efficiency = float(
-        sum(interval_policy["targets"][f"{ret:.2f}"]["efficiency"] for ret in RETENTION_TARGETS)
-        / max(len(RETENTION_TARGETS), 1)
-    )
-    objective = 0.85 * prediction_score + 0.15 * avg_efficiency
-    return {
-        "objective": objective,
+    # D2 语义变更：objective == 该阶段使用的 prediction composite（s1/s2 capped@1.5
+    # 防单指标劫持，s3/selected uncapped 与旧闸门标量一致）。0.15*avgEfficiency 项已删——
+    # 其唯一搜索消费方 maxIntervalDays/retention 均已钉死；iterative_tune 读
+    # selected.metrics.objective 仍内部自洽。
+    prediction_score = prediction_composite(prediction, baseline_prediction, ratio_cap=ratio_cap)
+    metrics: Dict[str, Any] = {
+        "objective": prediction_score,
         "prediction": prediction,
         "predictionScore": prediction_score,
-        "intervalPolicy": interval_policy,
-        "avgEfficiency": avg_efficiency,
         "rows": results["rows"],
     }
+    if include_interval:
+        interval_policy = results["interval_policy"]
+        # policyScore = safety * efficiency is structurally ≈0 on MaiMemo data:
+        # the GRU oracle infers very short half-lives (optimalMeanDelta=1.0 day),
+        # making safety=0 regardless of model quality. avgEfficiency 仅保留为
+        # 报告字段（tuning_summary 向后兼容），不再参与 objective。
+        avg_efficiency = float(
+            sum(interval_policy["targets"][f"{ret:.2f}"]["efficiency"] for ret in RETENTION_TARGETS)
+            / max(len(RETENTION_TARGETS), 1)
+        )
+        metrics["intervalPolicy"] = interval_policy
+        metrics["avgEfficiency"] = avg_efficiency
+    return metrics
 
 
 def iterative_tune(
@@ -912,8 +1057,23 @@ def _config_hash_short(config: Dict[str, Any], length: int = 8) -> str:
 
 def tune(paths: BenchPaths, stage1_trials: int = 128) -> Dict[str, Any]:
     _ensure_oracle_guard(paths)
+    # D8 启动守卫：软版本告警 + 约束语义金丝雀（毫秒级）
+    _warn_if_unverified_optuna()
+    _verify_constrained_tpe()
     oracle = _load_oracle(paths)
     hlr_model = _load_hlr(paths)
+
+    # D7 备忘缓存：per-trial 约束、stage-3、闸门、baseline、精炼共用同一 DHP 入口，
+    # 使"约束 vs 闸门"分歧在结构上不可能出现
+    dhp_memo: Dict[str, Dict[str, Any]] = {}
+
+    def _dhp_cached(config: Dict[str, Any]) -> Dict[str, Any]:
+        key = json.dumps(config, sort_keys=True, separators=(",", ":"))
+        if key not in dhp_memo:
+            dhp_memo[key] = _dhp_reference(config, paths)["wordforge"]
+        return dhp_memo[key]
+
+    baseline_dhp = _dhp_cached(DEFAULT_MEMORY_MODEL_CONFIG)
 
     with AdapterServer() as server:
         # Precompute baseline once（max_rows 预算：全量 val 23M 行 oracle 推理不可行，
@@ -928,38 +1088,109 @@ def tune(paths: BenchPaths, stage1_trials: int = 128) -> Dict[str, Any]:
         baseline_interval_policy = baseline_results["interval_policy"]
         baseline_rows = baseline_results["rows"]
 
+        def _gate_candidate(
+            config: Dict[str, Any], metrics: Dict[str, Any], dhp: Dict[str, Any]
+        ) -> Dict[str, Any]:
+            # D11：闸门算术逐字节保留（uncapped predictionScore + 三条 DHP 腿）
+            prediction_gain = (metrics["predictionScore"] - 1.0) * 100.0
+            interval_gain = (
+                metrics["intervalPolicy"]["targets"]["0.85"]["intervalScore"]
+                - baseline_interval_policy["targets"]["0.85"]["intervalScore"]
+            ) * 100.0
+            # interval_gain is structurally ≈0 on MaiMemo (see _candidate_score comment),
+            # so the passes gate uses prediction_gain + DHP guardrails only.
+            passes = (
+                prediction_gain >= 0.5
+                and dhp["expectedMemory"] >= baseline_dhp["expectedMemory"] * 0.9
+                and dhp["nextDayMemory"] >= baseline_dhp["nextDayMemory"] * 0.9
+                and dhp["targetCount"] >= baseline_dhp["targetCount"] * 0.9
+            )
+            return {
+                "memoryModel": config,
+                "metrics": metrics,
+                "dhpReference": dhp,
+                "predictionGainPercent": prediction_gain,
+                "interval85GainPercent": interval_gain,
+                "passes": passes,
+            }
+
         study = optuna.create_study(
             direction="maximize",
-            sampler=optuna.samplers.TPESampler(seed=DEFAULT_RANDOM_SEED),
+            sampler=_make_constrained_sampler(DEFAULT_RANDOM_SEED, 16),
         )
+        # D5 种子：FIFO 弹出，trial 0 必为 stock 锚点
+        for params in _seed_trial_params():
+            study.enqueue_trial(params)
 
-        # Stage 1: configurable trials on 2% of users
-        scored_trials: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
-        for _ in tqdm(range(stage1_trials), desc=f"tune stage1 ({stage1_trials} trials)"):
+        # Stage 1: DHP-first 短路 + 约束感知 TPE（2% 用户、capped 目标、不跑 interval）
+        stage1_records: List[Dict[str, Any]] = []
+        anchor_feasible = False
+        for index in tqdm(range(stage1_trials), desc=f"tune stage1 ({stage1_trials} trials)"):
             trial = study.ask()
             config = _mutate_config(trial)
-            metrics = _candidate_score(
-                paths, "val", 0.02, config,
-                baseline_prediction=baseline_prediction,
-                oracle=oracle, hlr_model=hlr_model, server=server,
-            )
-            study.tell(trial, metrics["objective"])
-            scored_trials.append((config, metrics))
+            dhp = _dhp_cached(config)
+            feasible, comps = _dhp_constraints(dhp, baseline_dhp)
+            # 必须在 tell 前无条件绑定：4.8.0 在 tell() 内读 user_attrs["constraint"]，
+            # 缺失会 KeyError 且 trial 仍以 constraints=None 的 COMPLETE 态毒化后续采样
+            trial.set_user_attr("constraint", comps)
+            if not feasible:
+                # 哨兵 tell：不可行 trial 仅按违反量之和排序，telled 值不进 TPE 分裂
+                study.tell(trial, 0.0)
+                record: Dict[str, Any] = {
+                    "objective": 0.0,
+                    "dhpFeasible": False,
+                    "dhp": dhp,
+                    "dhpConstraint": comps,
+                    "shortCircuited": True,
+                }
+            else:
+                metrics = _candidate_score(
+                    paths, "val", 0.02, config,
+                    baseline_prediction=baseline_prediction,
+                    oracle=oracle, hlr_model=hlr_model, server=server,
+                    include_interval=False, ratio_cap=1.5,
+                )
+                study.tell(trial, metrics["objective"])
+                record = {
+                    **metrics,
+                    "dhpFeasible": True,
+                    "dhp": dhp,
+                    "dhpConstraint": comps,
+                    "shortCircuited": False,
+                }
+            record["params"] = dict(trial.params)
+            record["config"] = config
+            stage1_records.append(record)
+            if index == 0:
+                # D5 锚点自检：stock 配置 == baseline 配置 ⇒ 比率恰为 1.0，分量恰为 -0.1
+                if not feasible or any(abs(c + 0.1) > 1e-9 for c in comps):
+                    raise RuntimeError("constraint wiring broken")
+                anchor_feasible = True
 
-        # Stage 2: top 16 on 10% of users
-        stage1 = sorted(scored_trials, key=lambda pair: pair[1]["objective"], reverse=True)[:16]
+        feasible_sorted = sorted(
+            (r for r in stage1_records if r["dhpFeasible"]),
+            key=lambda r: r["objective"],
+            reverse=True,
+        )
+        feasible_count = len(feasible_sorted)
+
+        # Stage 2: 不相交用户桶 (1, 2) 上复评 top-16 可行 trial（stage1 固定在桶 0），
+        # 晋升从此基于统计独立证据（修复 ceil(0.02*10)==ceil(0.10*10)==1 同桶缺陷）
         stage2 = []
-        for config, _ in tqdm(stage1, desc="tune stage2"):
+        for record in tqdm(feasible_sorted[: min(16, feasible_count)], desc="tune stage2"):
             metrics = _candidate_score(
-                paths, "val", 0.10, config,
+                paths, "val", 0.10, record["config"],
                 baseline_prediction=baseline_prediction,
                 oracle=oracle, hlr_model=hlr_model, server=server,
-                max_rows=2_000_000,
+                max_rows=2_000_000, include_interval=False, ratio_cap=1.5,
+                user_buckets=(1, 2),
             )
-            stage2.append((config, metrics))
-        stage2 = sorted(stage2, key=lambda pair: pair[1]["objective"], reverse=True)[:4]
+            stage2.append((record["config"], metrics))
+        stage2 = sorted(stage2, key=lambda pair: pair[1]["objective"], reverse=True)[
+            : min(4, len(stage2))
+        ]
 
-        # Stage 3: top 4 on 100% of users (was 8)
+        # Stage 3: top 4 on 100% — uncapped + interval，语义与旧版一致
         finalists = []
         for config, _ in tqdm(stage2, desc="tune stage3"):
             metrics = _candidate_score(
@@ -968,38 +1199,178 @@ def tune(paths: BenchPaths, stage1_trials: int = 128) -> Dict[str, Any]:
                 oracle=oracle, hlr_model=hlr_model, server=server,
                 max_rows=4_000_000,
             )
-            dhp = _dhp_reference(config, paths)["wordforge"]
-            finalists.append((config, metrics, dhp))
+            finalists.append((config, metrics, _dhp_cached(config)))
 
-    baseline_dhp = _dhp_reference(DEFAULT_MEMORY_MODEL_CONFIG, paths)["wordforge"]
-    selected = None
-    near_misses = []
-    for config, metrics, dhp in sorted(finalists, key=lambda entry: entry[1]["objective"], reverse=True):
-        prediction_gain = (metrics["predictionScore"] - 1.0) * 100.0
-        interval_gain = (
-            metrics["intervalPolicy"]["targets"]["0.85"]["intervalScore"]
-            - baseline_interval_policy["targets"]["0.85"]["intervalScore"]
-        ) * 100.0
-        # interval_gain is structurally ≈0 on MaiMemo (see _candidate_score comment),
-        # so the passes gate uses prediction_gain + DHP guardrails only.
-        passes = (
-            prediction_gain >= 0.5
-            and dhp["expectedMemory"] >= baseline_dhp["expectedMemory"] * 0.9
-            and dhp["nextDayMemory"] >= baseline_dhp["nextDayMemory"] * 0.9
-            and dhp["targetCount"] >= baseline_dhp["targetCount"] * 0.9
-        )
-        candidate = {
-            "memoryModel": config,
-            "metrics": metrics,
-            "dhpReference": dhp,
-            "predictionGainPercent": prediction_gain,
-            "interval85GainPercent": interval_gain,
-            "passes": passes,
+        gated: List[Dict[str, Any]] = []
+        for config, metrics, dhp in sorted(
+            finalists, key=lambda entry: entry[1]["objective"], reverse=True
+        ):
+            # D6 回归检查：备忘缓存的 per-trial DHP 必须与闸门时刻新算结果逐位一致
+            if _dhp_reference(config, paths)["wordforge"] != dhp:
+                raise RuntimeError("DHP memo cache diverged from gate-time reference")
+            gated.append(_gate_candidate(config, metrics, dhp))
+
+        selected = None
+        near_misses = []
+        for candidate in gated:
+            if candidate["passes"] and selected is None:
+                selected = candidate
+            else:
+                near_misses.append(candidate)
+
+        # D10 条件局部精炼（确定性救援）：无人过闸 且 最佳可行 finalist 增益 >= 0.25%
+        refinement: Dict[str, Any] = {
+            "triggered": False, "trials": 0, "bestGain": None, "passed": False,
         }
-        if passes and selected is None:
-            selected = candidate
-        else:
-            near_misses.append(candidate)
+        if selected is None and gated and gated[0]["predictionGainPercent"] >= 0.25:
+            refinement["triggered"] = True
+            center = gated[0]["memoryModel"]
+            # 每维 ±15% 原窗宽的盒子，居中于最佳可行 finalist，裁剪回原窗口
+            boxes: Dict[str, Tuple[float, float]] = {}
+            for name, (low, high) in SEARCH_WINDOWS.items():
+                width = high - low
+                value = float(center["w"][_W_INDEX[name]])
+                boxes[name] = (max(low, value - 0.15 * width), min(high, value + 0.15 * width))
+            refine_study = optuna.create_study(
+                direction="maximize",
+                sampler=_make_constrained_sampler(DEFAULT_RANDOM_SEED + 1, 8),
+            )
+            refined: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
+            for _ in tqdm(range(24), desc="tune refine"):
+                trial = refine_study.ask()
+                config = _mutate_config(trial, windows=boxes)
+                dhp = _dhp_cached(config)
+                feasible, comps = _dhp_constraints(dhp, baseline_dhp)
+                trial.set_user_attr("constraint", comps)
+                if not feasible:
+                    refine_study.tell(trial, 0.0)
+                    continue
+                metrics = _candidate_score(
+                    paths, "val", 0.02, config,
+                    baseline_prediction=baseline_prediction,
+                    oracle=oracle, hlr_model=hlr_model, server=server,
+                    include_interval=False, ratio_cap=1.5,
+                )
+                refine_study.tell(trial, metrics["objective"])
+                refined.append((config, metrics))
+            refinement["trials"] = 24
+            promoted = []
+            for config, _ in sorted(
+                refined, key=lambda pair: pair[1]["objective"], reverse=True
+            )[:2]:
+                metrics = _candidate_score(
+                    paths, "val", 1.0, config,
+                    baseline_prediction=baseline_prediction,
+                    oracle=oracle, hlr_model=hlr_model, server=server,
+                    max_rows=4_000_000,
+                )
+                promoted.append((config, metrics, _dhp_cached(config)))
+            for config, metrics, dhp in sorted(
+                promoted, key=lambda entry: entry[1]["objective"], reverse=True
+            ):
+                candidate = _gate_candidate(config, metrics, dhp)
+                gain = candidate["predictionGainPercent"]
+                if refinement["bestGain"] is None or gain > refinement["bestGain"]:
+                    refinement["bestGain"] = gain
+                if candidate["passes"] and selected is None:
+                    selected = candidate
+                    refinement["passed"] = True
+
+        # D9 nullReplicates：stock 配置在 10 个十分位桶上各评一次，量化桶间噪声
+        null_objectives: List[float] = []
+        for bucket in range(10):
+            metrics = _candidate_score(
+                paths, "val", 0.02, DEFAULT_MEMORY_MODEL_CONFIG,
+                baseline_prediction=baseline_prediction,
+                oracle=oracle, hlr_model=hlr_model, server=server,
+                include_interval=False, ratio_cap=1.5, user_buckets=(bucket,),
+            )
+            null_objectives.append(float(metrics["objective"]))
+
+        # D9 boundaryAutopsy：8 个最小违反（正分量和最小）的不可行 trial，stage1 之后补测
+        infeasible_records = [r for r in stage1_records if not r["dhpFeasible"]]
+        boundary_autopsy: List[Dict[str, Any]] = []
+        for record in sorted(
+            infeasible_records,
+            key=lambda r: sum(c for c in r["dhpConstraint"] if c > 0),
+        )[:8]:
+            metrics = _candidate_score(
+                paths, "val", 0.02, record["config"],
+                baseline_prediction=baseline_prediction,
+                oracle=oracle, hlr_model=hlr_model, server=server,
+                include_interval=False, ratio_cap=1.5,
+            )
+            comps = record["dhpConstraint"]
+            boundary_autopsy.append({
+                "params": record["params"],
+                "constraint": list(comps),
+                "objective": float(metrics["objective"]),
+                "whichGuardrailBinds": DHP_CONSTRAINT_KEYS[
+                    max(range(len(comps)), key=lambda i: comps[i])
+                ],
+            })
+
+    # ---- D9 诊断与负面协议（对 tuning_summary 纯 ADDITIVE）----
+    verdict = (
+        "winner"
+        if selected is not None
+        else ("conclusive_negative" if feasible_count >= 30 else "inconclusive_explore")
+    )
+    best_candidate = selected if selected is not None else (gated[0] if gated else None)
+
+    quarters: List[float] = []
+    total = len(stage1_records)
+    for quarter in range(4):
+        chunk = stage1_records[quarter * total // 4 : (quarter + 1) * total // 4]
+        quarters.append(
+            float(sum(1 for r in chunk if r["dhpFeasible"]) / len(chunk)) if chunk else 0.0
+        )
+
+    trajectory: List[float | None] = []
+    best_so_far = None
+    for record in stage1_records:
+        if record["dhpFeasible"]:
+            best_so_far = (
+                record["objective"] if best_so_far is None
+                else max(best_so_far, record["objective"])
+            )
+        trajectory.append(best_so_far)
+
+    top16 = feasible_sorted[: min(16, feasible_count)]
+    param_dispersion: Dict[str, Dict[str, float]] = {}
+    if top16:
+        for name in SEARCH_WINDOWS:
+            values = np.asarray([r["params"][name] for r in top16], dtype=float)
+            param_dispersion[name] = {
+                "min": float(values.min()),
+                "p25": float(np.percentile(values, 25)),
+                "p50": float(np.percentile(values, 50)),
+                "p75": float(np.percentile(values, 75)),
+                "max": float(values.max()),
+            }
+
+    retention_sensitivity = None
+    avg_due_recall = None
+    if best_candidate is not None:
+        production_config = json.loads(json.dumps(best_candidate["memoryModel"]))
+        production_config["baseDesiredRetention"] = 0.90  # 生产默认值；report-only，不动闸门
+        production_dhp = _dhp_cached(production_config)
+        retention_sensitivity = {
+            "dhp": production_dhp,
+            "wouldStillPassDhpLegs": all(
+                production_dhp[key] >= baseline_dhp[key] * DHP_GUARDRAIL
+                for key in DHP_CONSTRAINT_KEYS
+            ),
+        }
+        candidate_recall = float(best_candidate["dhpReference"]["avgDueRecall"])
+        baseline_recall = float(baseline_dhp["avgDueRecall"])
+        recall_ratio = candidate_recall / max(baseline_recall, 1e-12)
+        avg_due_recall = {
+            "baseline": baseline_recall,
+            "selectedCandidate": candidate_recall,
+            "ratio": recall_ratio,
+            "warn": recall_ratio < 0.95,
+        }
 
     if selected is None:
         selected = {
@@ -1018,6 +1389,47 @@ def tune(paths: BenchPaths, stage1_trials: int = 128) -> Dict[str, Any]:
             "keptBaseline": True,
         }
 
+    # predictionDeltas（WARN 级报告，非闸门条款）：比率沿用 composite 约定
+    # （smaller-better 用 base/cur，auc 用 cur/base），ratio < 1.0 即该指标恶化
+    selected_prediction = selected["metrics"]["prediction"]
+
+    def _delta(key: str, smaller_better: bool) -> Dict[str, float]:
+        base = float(baseline_prediction[key])
+        current = float(selected_prediction[key])
+        ratio = (base / max(current, 1e-12)) if smaller_better else (current / max(base, 1e-12))
+        return {"val_baseline": base, "val_candidate": current, "ratio": ratio}
+
+    prediction_deltas: Dict[str, Any] = {
+        "logLoss": _delta("logLoss", True),
+        "ici": _delta("ici", True),
+        "auc": _delta("auc", False),
+        "maeP": _delta("maeP", True),
+    }
+    prediction_deltas["anyMetricWorse"] = any(
+        prediction_deltas[key]["ratio"] < 1.0 for key in ("logLoss", "ici", "auc", "maeP")
+    )
+
+    search_diagnostics = {
+        "verdict": verdict,
+        "feasibleCount": feasible_count,
+        "infeasibleCount": len(infeasible_records),
+        "shortCircuitedCount": sum(1 for r in stage1_records if r["shortCircuited"]),
+        "feasibleShareByQuarter": quarters,
+        "bestFeasibleTrajectory": trajectory,
+        "paramDispersion": param_dispersion,
+        "nullReplicates": {
+            "objectives": null_objectives,
+            "mean": float(np.mean(null_objectives)),
+            "std": float(np.std(null_objectives)),
+        },
+        "boundaryAutopsy": boundary_autopsy,
+        "anchorFeasible": anchor_feasible,
+        "retentionSensitivity": retention_sensitivity,
+        "avgDueRecall": avg_due_recall,
+        "predictionDeltas": prediction_deltas,
+        "refinement": refinement,
+    }
+
     result = {
         "selected": selected,
         "baseline": {
@@ -1026,6 +1438,7 @@ def tune(paths: BenchPaths, stage1_trials: int = 128) -> Dict[str, Any]:
             "dhpReference": baseline_dhp,
         },
         "nearMisses": near_misses[:3],
+        "searchDiagnostics": search_diagnostics,
     }
     (paths.reports / "tuning_summary.json").write_text(
         json.dumps(result, indent=2, ensure_ascii=False),

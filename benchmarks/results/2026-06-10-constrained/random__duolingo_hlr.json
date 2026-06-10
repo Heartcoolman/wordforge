@@ -1,0 +1,23 @@
+{
+ "scheduler": "random",
+ "dataset": "duolingo_hlr",
+ "prediction": {
+  "logLoss": 0.2583670939886113,
+  "ici": 0.062165254231977406,
+  "auc": 0.5121301067678041,
+  "maeP": 0.16256887030012118
+ },
+ "dhp": {
+  "expectedMemoryFinal": 27.6845,
+  "masteredCount": 0,
+  "totalReviews": 87934,
+  "efficiency": 0.000315
+ },
+ "policy": {
+  "finalRecallRate": 0.0,
+  "reviewsPerDay": 977.0444444444445,
+  "retentionStability": 0.894980312980504
+ },
+ "runtime_seconds": 6.91,
+ "notes": "constrained-tune winner (repaired NM2), production write-back 2026-06-10"
+}

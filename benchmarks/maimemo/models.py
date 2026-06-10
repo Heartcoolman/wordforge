@@ -1045,13 +1045,21 @@ def probability_metric_summary(y_true: np.ndarray, probabilities: np.ndarray) ->
     }
 
 
-def prediction_composite(metrics: Dict[str, float], baseline_metrics: Dict[str, float]) -> float:
+def prediction_composite(
+    metrics: Dict[str, float],
+    baseline_metrics: Dict[str, float],
+    ratio_cap: float | None = None,
+) -> float:
+    # ratio_cap：搜索期每个分量比率截断到 min(ratio, cap)，防单指标劫持
+    # （2026-06-10：ICI 比率 2.33 独占 +0.40 而 maeP 反而变差）；None = 旧版无截断
     def ratio(smaller_better: bool, key: str) -> float:
         base = baseline_metrics[key]
         current = metrics[key]
         if smaller_better:
-            return float(base / max(current, EPS))
-        return float(current / max(base, EPS))
+            value = float(base / max(current, EPS))
+        else:
+            value = float(current / max(base, EPS))
+        return value if ratio_cap is None else min(value, ratio_cap)
 
     return (
         0.35 * ratio(True, "logLoss")

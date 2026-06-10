@@ -1,0 +1,23 @@
+{
+ "scheduler": "leitner",
+ "dataset": "maimemo",
+ "prediction": {
+  "logLoss": 0.4635164193385687,
+  "ici": 0.17208992195521533,
+  "auc": 0.29376696028741245,
+  "maeP": 0.3053959325831491
+ },
+ "dhp": {
+  "expectedMemoryFinal": 25389.5461,
+  "masteredCount": 0,
+  "totalReviews": 355167,
+  "efficiency": 0.071486
+ },
+ "policy": {
+  "finalRecallRate": 0.8925,
+  "reviewsPerDay": 3946.3,
+  "retentionStability": 0.8966378652618476
+ },
+ "runtime_seconds": 15.65,
+ "notes": "constrained-tune winner (repaired NM2), production write-back 2026-06-10"
+}

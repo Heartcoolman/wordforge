@@ -41,9 +41,18 @@ def ensure_reference_assets(root: Path) -> Dict[str, Path]:
     return {"parameters": parameters_path, "policy_dir": policy_dir}
 
 
+_DHP_PARAMS_CACHE: Dict[str, Dict[str, float]] = {}
+
+
 def load_dhp_params(path: Path) -> Dict[str, float]:
-    with path.open("r", encoding="utf-8") as handle:
-        return {key: float(value) for key, value in next(csv.DictReader(handle)).items()}
+    # 模块级缓存（按 str(path)）：per-trial 约束会高频调用，避免重复解析 CSV
+    key = str(path)
+    if key not in _DHP_PARAMS_CACHE:
+        with path.open("r", encoding="utf-8") as handle:
+            _DHP_PARAMS_CACHE[key] = {
+                name: float(value) for name, value in next(csv.DictReader(handle)).items()
+            }
+    return dict(_DHP_PARAMS_CACHE[key])
 
 
 def load_policy_tables(policy_dir: Path) -> Dict[int, List[int]]:
@@ -224,7 +233,6 @@ def run_wordforge_reference(
     memory_config: Dict[str, object],
     seed: int = 42,
 ) -> Dict[str, float]:
-    _ = load_policy_tables(policy_dir)
     student = DHPStudent(**load_dhp_params(parameters_path))
     rng = random.Random(seed)
     items = [

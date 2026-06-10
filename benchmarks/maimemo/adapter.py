@@ -11,8 +11,8 @@ ADAPTER_BINARY = REPO_ROOT / "target" / "release" / "maimemo_mdm_adapter"
 
 
 def ensure_adapter_binary() -> Path:
-    if ADAPTER_BINARY.exists():
-        return ADAPTER_BINARY
+    # 总是构建（新鲜时 ~0.2s no-op）：mdm.rs 在本分支有改动，
+    # 仅在缺失时构建会让陈旧二进制静默用旧模型打分
     subprocess.run(
         ["cargo", "build", "--release", "--bin", "maimemo_mdm_adapter"],
         cwd=REPO_ROOT,

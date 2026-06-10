@@ -1,0 +1,23 @@
+{
+ "scheduler": "fsrs6",
+ "dataset": "maimemo",
+ "prediction": {
+  "logLoss": 0.30266440904205005,
+  "ici": 0.02537611003716694,
+  "auc": 0.8075039969700119,
+  "maeP": 0.1759526280108402
+ },
+ "dhp": {
+  "expectedMemoryFinal": 16357.1678,
+  "masteredCount": 9919,
+  "totalReviews": 118134,
+  "efficiency": 0.138463
+ },
+ "policy": {
+  "finalRecallRate": 0.3571,
+  "reviewsPerDay": 1312.6,
+  "retentionStability": 0.902834516000285
+ },
+ "runtime_seconds": 15.89,
+ "notes": "constrained-tune winner (repaired NM2), production write-back 2026-06-10"
+}

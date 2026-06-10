@@ -9,7 +9,7 @@
   - `sequence_groups.parquet`
 - `fit_oracle`：训练一个 `GRU-HLR` oracle，并同时训练 `HLR` baseline。
 - `evaluate`：对一份 `memoryModel` 配置跑三层评估，输出 `benchmark_metrics.json`。
-- `tune`：用分阶段 `TPE + successive halving` 搜索候选配置。
+- `tune`：用分阶段 `约束 TPE + successive halving` 搜索候选配置——每 trial 跑确定性 DHP 模拟，三条 0.9× 守门腿编码为 optuna `constraints_func`（不可行 trial 短路跳过预测评估），stage2 在不相交十分位桶上晋级，最终守门（uncapped prediction gain ≥0.5% + DHP 三腿 ≥0.9×基线）保持不变。
 
 ## 环境
 

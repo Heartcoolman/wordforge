@@ -73,6 +73,10 @@ bench v0.5→v0.9 在真实数据 forward simulation 上调优、与 FSRS-6 底�
 
 结论：**FSRS-6 公版参数（数亿评测记录训练）在 maimemo 回放上已近 Pareto 前沿**。5-15 能 +10.6% 是因为旧 baseline（手工混合默认）远离前沿；前沿收益本轮已由结构升级本身兑现。单数据集 TPE 在公版之上找不到不伤记忆量的改进方向，这与 FSRS 社区"per-user 优化才有显著增益"的经验一致——AMAS 的 per-user 适配由 alpha 平滑 + adaptive_desired_retention + 在线调参白名单承担。
 
+> **⚠️ 本节结论已被 §8 推翻（2026-06-10 当日晚些时候）**：上述"全拒"是 DHP 盲目标函数 + TPE
+> 单变量羊群效应的搜索假象，不是前沿证据。把 DHP 守门约束编码进搜索循环并修复搜索空间病灶后，
+> 同一个校准角落剥离毒维即过全门（+29.1% val / +27.8% test，记忆量三腿合规），已写回生产。详见 §8。
+
 ### 2.4 admin GUI preset 体系清理
 
 "已调优 2026-05-15" preset 整体移除（schema.ts 16 处标注 / PresetBar / TierAPanel 卡片 / ParamField chip / 相关测试）：其值属 FSRS-5 19 维空间，在 FSRS-6 公式下套用有害（如 w[3]=5.94、retention 0.849 都是旧空间的最优点）。出厂默认卡片升级为"出厂默认 (FSRS-6)"并标记推荐。
@@ -143,3 +147,101 @@ val/test 几乎一致，无过拟合迹象（公版参数本就不是在本数�
 2. **决策层 tuned v3 的评估器是 Python 镜像**：与 Rust 实现在 ensemble/heuristic 结构上同语义但 IGE 不同构；回写仅限数值语义一一对应的 9 字段，并经 Rust Monte Carlo 全系统回归验证。
 3. **oracle 跨数据集复用**：duolingo_hlr/synthetic 的 GRU oracle 独立训练（v0.7 起），但 prediction 维度在 duolingo_hlr 上仍因 87% 正例率而区分度低（全员 AUC≈0.54）。
 4. **本轮未动子系统**：iad/mtp/ssp featureFlags 仍 disabled（生产默认）；EVM/wordSelector 数值未调（wordSelector 的有效性已由 simulate 的 mastered 增益背书，单参数级调优需在线 A/B）。
+5. **DHP 守门镜像的保真度缺口**（§8 勘察确认，刻意未在本轮修复）：镜像把成功映射为 grade 4（每次成功吃 w16 easy-bonus、首评读 w3 而非 w2）、无 alpha 平滑（等效 α=1.0，稳定性演化比生产激进 ~3 倍）、难度冻结、无 maxIntervalDays 上限、基线锚定 bench retention 0.92（生产 0.90）。守门是相对比较（候选与基线同镜像），系统性失真大体对消，且 §8 胜者在对称 0.90 复检下三腿全过；但绝对量级（如 targetCount 613）不能直接解读为生产预期。镜像对齐 adapter 语义（grade 3 映射）留作后续单独变更——会重置守门基线，需与历史结果隔离。
+
+## 8. 约束搜索修复与胜者落地（同日第二轮）
+
+§2.3 的"守门正确拒绝 = 公版即前沿"结论存在方法论缺口：**搜索目标函数对 DHP 完全失明**（DHP 只在
+4 个决赛者上事后计算），"全拒"只能证明"纯 prediction 最优方向必然伤记忆"，不能排除折中点存在。
+本节为缺口闭合全过程（多智能体勘察 → 设计评审团 → 实现+对抗审查 → 约束搜索 → 验证落地）。
+
+### 8.1 逐维探针勘察：旧搜索空间的四类病灶
+
+对 12 个搜索维做确定性探针（单维扰动 → adapter 预测 / interval 效率项 / DHP 模拟三路 bit 级对比）：
+
+| 病灶 | 维度 | 机制 |
+|---|---|---|
+| 三路全死 | w1, w15 | bench 把对错二值映射为 Good/Again（adapter SUCCESS_QUALITY=0.7），Hard/Easy 分支在 adapter 与镜像中均不可达 |
+| 守门盲区互补 | w3, w16（守门活/目标盲）vs w2（目标活/守门盲） | 镜像把成功记为 grade 4（首评读 w3、每次成功吃 w16 bonus），adapter 记为 grade 3（读 w2）——目标函数与守门各看半边，TPE 可零反馈破坏 w3/w16（near-miss 的 w3 腰斩即崩塌主因之一，目标函数全程不知情） |
+| 目标盲+守门致命 | baseDesiredRetention | 预测路径 bit 级不可见（探针证实），却直接驱动镜像调度；near-miss 0.8255 → 0.92 单维即 targetCount 8→319 |
+| 采样器羊群效应 | 全部 12 维 | TPESampler 默认 multivariate=False，零信号维被早期高分 trial 的取值冻结成针尖（连三路全死的 w15 都聚在 ±0.003）——retention 聚在 0.825 是 seed-42 偶然事故而非信号 |
+
+另发现独立潜在缺陷：`ceil(0.02×10)==ceil(0.10×10)==1`，旧 stage2 的"10% 用户"与 stage1 的"2%"解析到
+**同一个十分位桶**，且 stage2 的 max_rows=2M 使其成为 stage1 数据的严格子集——晋级从未见过新数据。
+
+### 8.2 重设计（评审团定稿 D1-D14 要点）
+
+- **搜索空间 12 → 6 维**（w0/w2/w8/w9/w10/w20，窗口不变）：病灶维全部钉死公版值。
+- **DHP 约束进循环**：每 trial 先跑 DHP 模拟（实测 0.07 s、完全确定、bit 级可复现守门基线 613/3127.75），
+  三条 0.9× 守门腿编码为 optuna 4.8 `constraints_func`（归一化违约幅度喂排序；可行性布尔用守门原表达式
+  判定，与幅度解耦消除 1-ulp 边界风险）；不可行 trial 短路跳过 ~14 s 预测评估（违约 trial 的目标值
+  不进 TPE 分裂，经安装源码核实）。约束与守门共享同一 memo 缓存，结构上不可能分叉。
+- **8 个边界教师种子**：公版锚点（约束自检必须恰为 (-0.1,-0.1,-0.1)）+ 3 个"修复版 near-miss"
+  （活维投影、毒维回退公版）+ 半步/w20 阶梯/w0 探针。
+- **stage2 改不相交十分位桶**（修 8.1 末缺陷）；搜索期目标 = 1.5 倍封顶的纯预测复合分
+  （防 ICI 单指标劫持；0.15 效率项随毒维钉死一并移除）；**最终守门逐字节不变**（uncapped、100%@4M）。
+- **否定性裁决协议**：verdict ∈ {winner, conclusive_negative(可行≥30), inconclusive_explore}，
+  附可行率分布、零假设噪声标定（公版 ×10 桶）、边界尸检、retention 0.90 敏感性、逐指标回归红旗。
+- 实现经 3 路对抗审查零缺陷放行；新增 14 个单测（套件 27→41）；接线自检复现 near-miss 8/14/14
+  且判不可行。顺手修复：adapter 二进制无条件重建（本轮真抓到陈旧二进制）、test split 数据卫生
+  （全库 2.31 亿行唯一一行负 delta_t 脏数据恰在 test，会杀死 adapter server，SQL 层过滤）。
+
+### 8.3 结果：winner（4 决赛者全过门）
+
+128 trial：58 可行 / 70 不可行（短路），可行率逐季稳定 ~44%（采样器学会边界而未塌缩）。
+
+| 候选 | prediction gain (100%@4M) | targetCount | 身份 |
+|---|---|---|---|
+| **selected** | **+29.1%** | 571（−6.9%，合规） | **= 修复版 NM2 种子**：上轮被处决的校准角落，剥离毒维后完整存活 |
+| finalist 2 | +26.0% | **671（+9.5%）** | TPE 自主发现 |
+| finalist 3 | +23.0% | 655（+6.9%） | TPE 自主发现 |
+| finalist 4 | +19.2% | 638（+4.1%） | TPE 自主发现 |
+
+可行改进区是一片真实高原而非孤针。胜者 expectedMemory **+2.7%**、nextDayMemory **+2.5%**（优于基线），
+avgDueRecall 0.688→0.666（−3.2%，未触 0.95 警戒）；maeP −2.5% 劣化（守门复合分本身接受的权衡，
+已按 WARN 级记录 anyMetricWorse=true）。增益解剖：ICI −48.7%（主导）+ logLoss −2.7% + AUC +0.46%。
+
+**验证链**：
+- test split（同水位 100%@4M，留出用户）：+27.8%，逐指标模式完美复现（ICI −47.5% / logLoss −2.6% /
+  maeP −2.5%）——无 val 特异过拟合。
+- 对称 retention 0.90 复检（候选与基线同锚，修正实现侧 0.92 vs 0.90 不对称比较）：targetCount
+  243 vs 215（**反超 +13%**），三腿全过（最紧余量 −0.0966）。
+- 零假设噪声：公版 2% 桶间复合分 0.9994 ± 0.0216 —— +29% 信号远超噪声。
+
+### 8.4 落地
+
+胜者 6 维写回生产 `amas_config.toml` 与 bench `DEFAULT_MEMORY_MODEL_CONFIG`（w[0]=0.0920 /
+w[2]=2.5732 / w[8]=1.6065 / w[9]=0.2455 / w[10]=1.1282 / w[20]=0.2711，全精度见文件）；Rust 代码
+default_w 保持 FSRS-6 公版（toml 承载调优值，沿 5-15 惯例）；fsrs45/fsrs6/amas6 对照臂锁定公版不受影响。
+回归：bench pytest 41/41、cargo test --lib 831/831。leaderboard 以胜者配置复跑（结果
+`benchmarks/results/2026-06-10-constrained/`，报告 `docs/algo-bench-2026-06-10-constrained/`）：见 8.5。
+
+部署提示（叠加 §6）：w 变化改变间隔分布（decay 0.154→0.271 使同 S 下超期惩罚更陡、临期更缓；
+初始稳定性 w0 下调让首评失败词更早复习）。建议随既有 beta 通道一并观察 AMAS 看板 7 天。
+
+### 8.5 leaderboard 复跑（胜者配置）
+
+| 排名 | 算法 | Borda | duolingo_hlr | maimemo | synthetic |
+|---|---|---|---|---|---|
+| 1 | fsrs45 | 28 | 2 | 2 | 1 |
+| **2** | **amas（胜者配置）** | **25** | 5 | **1** | 2 |
+| 3 | amas6（锁公版对照） | 23 | 1 | 5 | 4 |
+| 4 | fsrs（同配置纯调度） | 23 | 4 | 3 | 3 |
+| 5 | fsrs6（锁公版对照） | 19 | 3 | 6 | 5 |
+| 6-10 | dhp / sm2 / random / leitner / hlr | ≤13 | — | — | — |
+
+对比上午公版快照（§5）：综合 Borda 25 第 2 不变，但成色质变——**maimemo 主数据集 2 → 1，首次反超
+fsrs45**（mastered 17376 vs 15907、ICI 0.0164 全场最佳、logLoss 0.3072；对比公版 amas：mastered
+15501→17376 即 **+12.1%**，与守门 expectedMemory/nextDayMemory 反超基线的读数一致）；synthetic 1 → 2
+（decay 向 maimemo 真实回放偏移的小代价，其 ground truth 为 DHP 合成）；duolingo_hlr 5 不变（87%
+正例率、全员 AUC≈0.54 的低区分数据集）。隔离确认：fsrs45/fsrs6/amas6 三个锁公版对照臂数字与上午
+逐位一致。
+
+### 8.6 结论修正（替代 §2.3）
+
+1. **FSRS-6 公版不是 maimemo 回放上的 Pareto 前沿**——存在 +29% prediction 且记忆量三腿合规
+   （其中两腿反超）的可行点，且可行改进区是高原（4 决赛者全过门）而非孤针。
+2. §2.3 的"全拒"由两层方法论缺陷制造：DHP 盲目标 + TPE 单变量羊群效应冻结毒维。**"守门拒绝"
+   永远不能直接解读为"前沿"，必须先证可行区被探索过**（本轮起 searchDiagnostics 强制此证明）。
+3. 离线全局 w 调参在守门进环后仍有价值；下一步更高杠杆是镜像 grade 映射对齐（§7.5）与
+   per-user 在线适配，以及把 maeP 非回归加入约束消除残余权衡。

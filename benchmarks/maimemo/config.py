@@ -86,22 +86,24 @@ DEFAULT_MEMORY_MODEL_CONFIG: Dict[str, Any] = {
     "masteryWindowSize": 20,
     "stabilityBaseDays": 20.0,
     # FSRS-6：曲线参数由 w[20] 派生（这里写派生值，兜底未升级的消费方）
-    "forgettingCurveFactor": 0.9 ** (-1.0 / 0.1542) - 1.0,
-    "forgettingCurveDecay": -0.1542,
+    "forgettingCurveFactor": 0.9 ** (-1.0 / 0.2710885682127271) - 1.0,
+    "forgettingCurveDecay": -0.2710885682127271,
     "forgettingCurveFloor": 0.0,
-    # FSRS-6 公版 21 维（w[19]=同日饱和, w[20]=曲线 decay）
+    # FSRS-6 21 维（w[19]=同日饱和, w[20]=曲线 decay）。
+    # 2026-06-10 DHP 约束调参胜者：w[0,2,8,9,10,20] 调优（三条 0.9x 守门腿全过，
+    # test split +27.8%），其余维 FSRS-6 公版 —— 与生产 amas_config.toml 同步。
     "w": [
-        0.212,
+        0.09198069520607176,
         1.2931,
-        2.3065,
+        2.5731565730123,
         8.2956,
         6.4133,
         0.8334,
         3.0194,
         0.001,
-        1.8722,
-        0.1666,
-        0.796,
+        1.6065116959233467,
+        0.2455277063490539,
+        1.1281524448213665,
         1.4835,
         0.0614,
         0.2629,
@@ -111,7 +113,7 @@ DEFAULT_MEMORY_MODEL_CONFIG: Dict[str, Any] = {
         0.5425,
         0.0912,
         0.0658,
-        0.1542,
+        0.2710885682127271,
     ],
 }
 
