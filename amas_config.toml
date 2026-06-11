@@ -192,10 +192,10 @@ w = [
 alphaScale = 0.3
 alphaMin = 0.1
 alphaMax = 0.5
-# 双腿信任调度（0=关闭；选型确认后再写回）：alphaRampTau=成功腿连击挂靠 τ_s，
-# alphaLapseRampTau=失败腿累计 lapse 挂靠 τ_f
-alphaRampTau = 0.0
-alphaLapseRampTau = 0.0
+# 双腿信任调度：alphaRampTau=成功腿连击挂靠 τ_s，alphaLapseRampTau=失败腿累计 lapse 挂靠 τ_f
+# 2026-06-12 D5 选型写回：dual(3.0, 6.0)（预注册闸门胜者，val 3 种子；w 维持 NM0 不动）
+alphaRampTau = 3.0
+alphaLapseRampTau = 6.0
 forgettingThreshold = 0.2
 retentionMin = 0.75
 retentionMax = 0.95

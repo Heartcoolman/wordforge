@@ -275,6 +275,9 @@ def test_dual_trust_lapse_semantics():
     """
     frozen_cfg = json.loads(json.dumps(DEFAULT_MEMORY_MODEL_CONFIG))
     frozen_cfg["alphaScale"] = 0.25
+    # DEFAULT 已写回 dual(3,6)（2026-06-12）：本测试自检冻结语义基线，显式归零双腿
+    frozen_cfg["alphaRampTau"] = 0.0
+    frozen_cfg["alphaLapseRampTau"] = 0.0
     config = json.loads(json.dumps(frozen_cfg))
     config["alphaLapseRampTau"] = 6.0
 

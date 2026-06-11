@@ -90,11 +90,12 @@ DEFAULT_MEMORY_MODEL_CONFIG: Dict[str, Any] = {
     "alphaScale": 0.3,
     "alphaMin": 0.1,
     "alphaMax": 0.5,
-    # 双腿信任调度（0=关闭，与 amas_config.toml 同值）：
+    # 双腿信任调度（与 amas_config.toml 同值）：
     # alphaRampTau=成功腿连击挂靠 τ_s（语义替换旧 count 挂靠，旧语义从未发布 ON），
     # alphaLapseRampTau=失败腿累计 lapse 挂靠 τ_f
-    "alphaRampTau": 0.0,
-    "alphaLapseRampTau": 0.0,
+    # 2026-06-12 D5 选型写回：dual(3.0, 6.0)（预注册闸门胜者；FSRS_BASELINE 保持 0.0 隔离）
+    "alphaRampTau": 3.0,
+    "alphaLapseRampTau": 6.0,
     # FSRS-6：曲线参数由 w[20] 派生（这里写派生值，兜底未升级的消费方）
     "forgettingCurveFactor": 0.9 ** (-1.0 / 0.2632510019126722) - 1.0,
     "forgettingCurveDecay": -0.2632510019126722,

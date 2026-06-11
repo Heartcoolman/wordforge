@@ -799,3 +799,14 @@ fn curve_helpers_clamp_decay_to_safe_domain() {
     assert!((cfg.curve_decay() - 2.0).abs() < 1e-12);
     assert!(cfg.curve_factor().is_finite());
 }
+
+#[test]
+fn repo_root_amas_config_loads_validates_and_pins_d5_knobs() {
+    // 2026-06-12 D5 写回门禁：仓库根 amas_config.toml 必须可加载且过校验，
+    // 双腿信任调度船值钉死 dual(3.0, 6.0)（预注册闸门胜者）
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/amas_config.toml");
+    let cfg = AMASConfig::load_from_toml(path).expect("load repo-root amas_config.toml");
+    cfg.validate().expect("repo-root amas_config.toml must validate");
+    assert_eq!(cfg.memory_model.alpha_ramp_tau, 3.0);
+    assert_eq!(cfg.memory_model.alpha_lapse_ramp_tau, 6.0);
+}

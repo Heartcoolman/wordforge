@@ -892,7 +892,7 @@ def _mutate_config(
         due=day+顶帽 恒越仿真窗、复习计划不受影响），仅剩可被套利的弱效率信号
 
     windows 仅供 D10 局部精炼传缩窄盒；None = 原始窗口。
-    非 w 键（alphaRampTau）直接写 config 顶层标量；DEFAULT 自带 0.0（关闭）。
+    非 w 键（alphaRampTau）直接写 config 顶层标量；DEFAULT 已写回 3.0（2026-06-12 D5）。
     """
     config = json.loads(json.dumps(DEFAULT_MEMORY_MODEL_CONFIG))
     weights = list(config["w"])
@@ -908,9 +908,10 @@ def _mutate_config(
 
 _STOCK_ANCHOR_PARAMS: Dict[str, float] = {
     **{name: float(DEFAULT_MEMORY_MODEL_CONFIG["w"][idx]) for name, idx in _W_INDEX.items()},
-    # 锚点 tau=0.0 在搜索窗 (1.5,4.0) 之外：optuna 4.8.0 对窗口外 fixed param 仅发
-    # UserWarning 并 VERBATIM 透传（已实测 30-trial TPE 不崩），保证 trial 0 配置
-    # 与守门基线逐位相等，约束自检 (floor-1.0) 接线成立
+    # 锚点 tau 程序化镜像 DEFAULT（2026-06-12 D5 写回后 =3.0，已在窗口 (1.5,4.0) 内），
+    # 保证 trial 0 配置与守门基线逐位相等，约束自检 (floor-1.0) 接线成立。
+    # optuna 4.8.0 对窗口外 fixed param 仅发 UserWarning 并 VERBATIM 透传——该行为
+    # pin 保留在 test_anchor_seed_out_of_window_passes_verbatim（防未来 DEFAULT 漂移）
     "alphaRampTau": float(DEFAULT_MEMORY_MODEL_CONFIG["alphaRampTau"]),
 }
 # 2026-06-10 run 三个 near-miss 在 6 个存活维上的投影（钉死维回退 stock）——直接检验
@@ -947,21 +948,21 @@ _REPAIRED_NEAR_MISSES: Tuple[Dict[str, float], ...] = (
 def _seed_trial_params() -> List[Dict[str, float]]:
     """D5 教师种子，14 个（FIFO 入队即弹出顺序；键名与 suggest 名严格一致）。
 
-    enqueue 按 VERBATIM 透传不裁剪越界值；除锚点 alphaRampTau=0.0（刻意窗口外，
-    见 _STOCK_ANCHOR_PARAMS 注释）外所有取值在 SEARCH_WINDOWS 内（由
-    test_seed_trials_inside_windows 守护）。15 维空间下种子必须全维显式
+    enqueue 按 VERBATIM 透传不裁剪越界值；所有取值在 SEARCH_WINDOWS 内（2026-06-12
+    D5 写回后锚点 tau=3.0 亦在窗口内，由 test_seed_trials_inside_windows 守护）。
+    15 维空间下种子必须全维显式
     （部分指定会让 sampler 随机补维，破坏教学确定性）。
     2026-06-12：性能教师统一带 tau=3.0（val tau 网格 stock-w 内点最优）；
     另设 tau 阶梯教师 {2.5, 3.5}（stock w）教 TPE tau 维曲率。
     """
-    stock = dict(_STOCK_ANCHOR_PARAMS)          # tau=0.0（锚点专用，窗口外）
+    stock = dict(_STOCK_ANCHOR_PARAMS)          # tau=DEFAULT（D5 写回后 3.0）
     perf = {**stock, "alphaRampTau": 3.0}       # 性能教师基座
     half_step = {
         name: (perf[name] + _REPAIRED_NEAR_MISSES[0].get(name, perf[name])) / 2.0
         for name in SEARCH_WINDOWS
     }
     return [
-        stock,                                  # 1. stock 锚点（约束接线自检靶；tau=0.0）
+        stock,                                  # 1. stock 锚点（约束接线自检靶；tau=DEFAULT）
         {**perf, **_REPAIRED_NEAR_MISSES[0]},   # 2-4. 修复后的 near-miss（新维回 stock）
         {**perf, **_REPAIRED_NEAR_MISSES[1]},
         {**perf, **_REPAIRED_NEAR_MISSES[2]},

@@ -4,7 +4,7 @@
 1. _dhp_constraints 边界语义（可行/不可行/精确边界/NaN/零基线）
 2. 真 optuna 约束研究：同种子确定性 + best_trial 偏向可行最优
 3. TuneFunnelSmokeTest：全 fake 跑真 tune()（winner / conclusive_negative 两景）
-4. 14 个种子落在 SEARCH_WINDOWS 内（enqueue VERBATIM 陷阱守护；锚点 tau 窗口外 pin）
+4. 14 个种子落在 SEARCH_WINDOWS 内（enqueue VERBATIM 陷阱守护；合成窗口外值 pin）
 5. iterative_tune 冒烟（schema 无 KeyError）
 6. ExperimentalWarning 已过滤 + 版本守卫告警
 """
@@ -302,45 +302,51 @@ def test_tune_funnel_conclusive_negative(monkeypatch, tmp_path):
 
 # ---------------------------------------------------------------------------
 # 4. 种子全部在窗口内（enqueue 按 VERBATIM 透传，不做越界裁剪）
-#    唯一例外：锚点 alphaRampTau=0.0 刻意在窗口 (1.5,4.0) 外（见下一条 pin 测试）
+#    2026-06-12 D5 写回后 DEFAULT tau=3.0 在窗口 (1.5,4.0) 内，锚点不再例外
 # ---------------------------------------------------------------------------
 
 def test_seed_trials_inside_windows():
     seeds = _seed_trial_params()
     assert len(seeds) == 14
-    for index, seed in enumerate(seeds):
+    for seed in seeds:
         assert set(seed) == set(SEARCH_WINDOWS)
         for name, value in seed.items():
-            if index == 0 and name == "alphaRampTau":
-                continue  # 锚点 tau 单独断言
             low, high = SEARCH_WINDOWS[name]
             assert low <= value <= high, f"seed {name}={value} outside [{low}, {high}]"
-    # stock 锚点必须程序化等于 DEFAULT（防字面漂移），tau=0.0 == DEFAULT 关闭值
+    # stock 锚点必须程序化等于 DEFAULT（防字面漂移），tau=3.0 == D5 写回船值
     stock = seeds[0]
     for name, idx in pipeline._W_INDEX.items():
         assert stock[name] == DEFAULT_MEMORY_MODEL_CONFIG["w"][idx]
-    assert stock["alphaRampTau"] == DEFAULT_MEMORY_MODEL_CONFIG["alphaRampTau"] == 0.0
-    # tau 阶梯教师 {2.5, 3.5} 在 stock w 上；性能教师统一 tau=3.0
+    assert stock["alphaRampTau"] == DEFAULT_MEMORY_MODEL_CONFIG["alphaRampTau"] == 3.0
+    # tau 阶梯教师 {2.5, 3.5} 在 stock w 上；锚点/性能教师统一 tau=3.0
     taus = sorted({seed["alphaRampTau"] for seed in seeds})
-    assert taus == [0.0, 2.5, 3.0, 3.5]
+    assert taus == [2.5, 3.0, 3.5]
 
 
 def test_anchor_seed_out_of_window_passes_verbatim():
     """optuna 4.8.0 行为 pin：窗口外 fixed param 仅发 UserWarning 并逐字透传。
 
-    锚点自检（trial 0 配置 == DEFAULT == 守门基线）依赖该语义；optuna 升级若改为
-    重采样，本测试先红。
+    2026-06-12 D5 写回后锚点 tau=3.0 已在窗口内，锚点自检（trial 0 配置 ==
+    DEFAULT == 守门基线）不再依赖该语义；保留合成窗口外值 pin 防 optuna 升级
+    改为重采样（未来 DEFAULT 漂移仍可能复现窗口外锚点）。
     """
     study = optuna.create_study(
         direction="maximize", sampler=_make_constrained_sampler(DEFAULT_RANDOM_SEED, 4)
     )
-    study.enqueue_trial(_seed_trial_params()[0])
+    anchor = _seed_trial_params()[0]
+    study.enqueue_trial(anchor)                            # 锚点（全维窗口内）
+    study.enqueue_trial({**anchor, "alphaRampTau": 0.0})   # 合成窗口外值
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
-        trial = study.ask()
-        config = _mutate_config(trial)
-    assert config == DEFAULT_MEMORY_MODEL_CONFIG  # 逐键逐位相等 ⇒ 锚点分量恰为 floor-1.0
-    assert trial.params["alphaRampTau"] == 0.0
+        trial0 = study.ask()
+        config0 = _mutate_config(trial0)
+        trial1 = study.ask()
+        config1 = _mutate_config(trial1)
+    assert config0 == DEFAULT_MEMORY_MODEL_CONFIG  # 逐键逐位相等 ⇒ 锚点分量恰为 floor-1.0
+    assert trial1.params["alphaRampTau"] == 0.0    # 窗口外逐字透传，未被重采样
+    expected = json.loads(json.dumps(DEFAULT_MEMORY_MODEL_CONFIG))
+    expected["alphaRampTau"] = 0.0
+    assert config1 == expected
 
 
 def test_mastered_objective_term_formula():
