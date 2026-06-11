@@ -1,14 +1,16 @@
 """非官方口径附录脚本：DHP 维度替代加权下的 10 条目 TEST 榜重算。
 
-官方管线（benchmarks/maimemo/leaderboard.py）唯一被替换的环节是 dhp_raw 公式；
-prediction_raw / policy_raw / per-dataset min-max normalize / 0.45-0.35-0.20 加权 /
-Borda 计数全部逐字复用官方模块函数，保证除 DHP 公式外零偏离。
+官方管线（benchmarks/maimemo/leaderboard.py）唯一被替换的环节是 dhp_raw 公式：
+prediction_raw / policy_raw 直接来自官方 `_compute_raw_scores`（非重新实现），
+per-dataset min-max normalize / 0.45-0.35-0.20 加权 / Borda 计数全部逐字复用
+官方模块函数，保证除 dhp_raw 一列外零偏离。official 变体即官方管线本身，
+作为零偏离自检锚点（输出须与 01-leaderboard.md 综合排名表逐字一致）。
 
 三种口径：
   official : dhp_raw = 0.7*masteredCount + 0.3*efficiency*10000        (v0.9 现行)
   alt      : dhp_raw = 0.5*expectedMemoryFinal + 0.3*efficiency*10000 + 0.2*masteredCount
-             (oracle 真值加权；0.5*expectedMemoryFinal + 0.5*efficiency*1000 的
-              pre-v0.9 公式先例见 leaderboard.py:87 docstring)
+             (oracle 真值加权；pre-v0.9 公式先例 0.5*expectedMemoryFinal +
+              0.5*efficiency*1000 见 leaderboard.py `_compute_raw_scores` docstring)
   pure_em  : dhp_raw = expectedMemoryFinal                              (纯 oracle 真值)
 
 用法（仓库根目录）：
@@ -28,17 +30,9 @@ sys.path.insert(0, str(REPO_ROOT))
 import pandas as pd  # noqa: E402
 
 from benchmarks.maimemo.leaderboard import (  # noqa: E402
-    DHP_EFF_SCALE,
-    DHP_W_EFFICIENCY,
-    DHP_W_MASTERED,
-    PRED_W_AUC,
-    PRED_W_ICI,
-    PRED_W_LOGLOSS,
-    POLICY_REVIEWS_CAP,
-    POLICY_W_LOW_REVIEWS,
-    POLICY_W_STABILITY,
     _compute_dataset_rank_and_borda,
     _compute_final_score,
+    _compute_raw_scores,
     _load_results,
     _normalize_per_dataset,
     aggregate_borda,
@@ -52,19 +46,10 @@ ALT_EFF_SCALE = 10000.0
 
 
 def _raw_scores(df: pd.DataFrame, dhp_variant: str) -> pd.DataFrame:
-    """prediction_raw / policy_raw 与官方逐字一致；dhp_raw 按 variant 替换。"""
-    df = df.copy()
-    log_loss_norm = (df["logLoss"].clip(upper=2.0)) / 2.0
-    df["prediction_raw"] = (
-        PRED_W_LOGLOSS * (1.0 - log_loss_norm)
-        + PRED_W_ICI * (1.0 - df["ici"])
-        + PRED_W_AUC * df["auc"]
-    )
+    """三列 raw 一律先走官方 `_compute_raw_scores`，再按 variant 仅覆写 dhp_raw。"""
+    df = _compute_raw_scores(df)
     if dhp_variant == "official":
-        df["dhp_raw"] = (
-            DHP_W_MASTERED * df["masteredCount"]
-            + DHP_W_EFFICIENCY * df["efficiency"] * DHP_EFF_SCALE
-        )
+        pass  # 官方公式原样保留 → 自检锚点
     elif dhp_variant == "alt":
         df["dhp_raw"] = (
             ALT_W_EM * df["expectedMemoryFinal"]
@@ -75,11 +60,6 @@ def _raw_scores(df: pd.DataFrame, dhp_variant: str) -> pd.DataFrame:
         df["dhp_raw"] = df["expectedMemoryFinal"]
     else:
         raise ValueError(f"unknown dhp_variant: {dhp_variant}")
-    reviews_norm = (df["reviewsPerDay"] / POLICY_REVIEWS_CAP).clip(upper=1.0)
-    df["policy_raw"] = (
-        POLICY_W_STABILITY * df["retentionStability"]
-        + POLICY_W_LOW_REVIEWS * (1.0 - reviews_norm)
-    )
     return df
 
 
@@ -122,9 +102,9 @@ def main() -> None:
     args = ap.parse_args()
 
     variants = [
-        ("official", "官方口径（v0.9 现行：0.7·mastered + 0.3·efficiency·10000）"),
-        ("alt", "替代口径 A（非官方：0.5·expectedMemoryFinal + 0.3·efficiency·10000 + 0.2·mastered）"),
-        ("pure_em", "替代口径 B（非官方：纯 expectedMemoryFinal）"),
+        ("official", "官方口径（v0.9 现行：0.7·mastered + 0.3·efficiency·10000）〔自检锚点〕"),
+        ("alt", "替代口径 A〔非官方〕（0.5·expectedMemoryFinal + 0.3·efficiency·10000 + 0.2·mastered）"),
+        ("pure_em", "替代口径 B〔非官方〕（纯 expectedMemoryFinal）"),
     ]
     for key, title in variants:
         df, agg = compute_board(args.results, key)
