@@ -1,0 +1,23 @@
+{
+ "scheduler": "fsrs",
+ "dataset": "synthetic",
+ "prediction": {
+  "logLoss": 0.7356203589002941,
+  "ici": 0.35978303778444215,
+  "auc": 0.5440957301232635,
+  "maeP": 0.4930007606973582
+ },
+ "dhp": {
+  "expectedMemoryFinal": 30284.8174,
+  "masteredCount": 12035,
+  "totalReviews": 541625,
+  "efficiency": 0.055915
+ },
+ "policy": {
+  "finalRecallRate": 0.6482,
+  "reviewsPerDay": 6018.055555555556,
+  "retentionStability": 0.8959462885025022
+ },
+ "runtime_seconds": 11.04,
+ "notes": ""
+}

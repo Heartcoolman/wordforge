@@ -1,0 +1,23 @@
+{
+ "scheduler": "fsrs",
+ "dataset": "maimemo",
+ "prediction": {
+  "logLoss": 0.3364174492440658,
+  "ici": 0.07952909621871318,
+  "auc": 0.7922778970000868,
+  "maeP": 0.24127464782973562
+ },
+ "dhp": {
+  "expectedMemoryFinal": 20134.8655,
+  "masteredCount": 16202,
+  "totalReviews": 164613,
+  "efficiency": 0.122316
+ },
+ "policy": {
+  "finalRecallRate": 0.5196,
+  "reviewsPerDay": 1829.0333333333333,
+  "retentionStability": 0.9065123794238041
+ },
+ "runtime_seconds": 18.22,
+ "notes": ""
+}

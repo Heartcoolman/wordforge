@@ -1,0 +1,23 @@
+{
+ "scheduler": "leitner",
+ "dataset": "maimemo",
+ "prediction": {
+  "logLoss": 0.4633494515870518,
+  "ici": 0.17200941033534106,
+  "auc": 0.2938664505097944,
+  "maeP": 0.30533020584327086
+ },
+ "dhp": {
+  "expectedMemoryFinal": 25387.1614,
+  "masteredCount": 0,
+  "totalReviews": 355200,
+  "efficiency": 0.071473
+ },
+ "policy": {
+  "finalRecallRate": 0.8939,
+  "reviewsPerDay": 3946.6666666666665,
+  "retentionStability": 0.8967074755947823
+ },
+ "runtime_seconds": 15.77,
+ "notes": ""
+}
