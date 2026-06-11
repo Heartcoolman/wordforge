@@ -401,15 +401,21 @@ def run_wordforge_reference(
 
     next_day_memory = 0.0
     target_count = 0
+    mastered_proxy = 0
     for item in items:
         if item.halflife is None or item.last_date is None:
             continue
         next_day_memory += math.pow(2.0, -(LEARN_DAYS - item.last_date) / item.halflife)
         if item.halflife >= TARGET_HALFLIFE:
             target_count += 1
+        # 镜像 simulate.py mastered_count 语义：调度器自报终态 next-interval >= 30 天
+        # （闭环内引入即复习，last_date is not None == 至少复习过一次）
+        if item.mirror.interval_days() >= 30:
+            mastered_proxy += 1
     return {
         "expectedMemory": expected_memory,
         "nextDayMemory": next_day_memory,
         "targetCount": target_count,
+        "masteredProxy": mastered_proxy,
         "avgDueRecall": sum(due_recall_series) / len(due_recall_series),
     }

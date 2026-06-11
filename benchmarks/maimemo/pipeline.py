@@ -551,17 +551,45 @@ def _dhp_reference(memory_config: Dict[str, Any], paths: BenchPaths) -> Dict[str
     return {"wordforge": current, "configEcho": memory_config}
 
 
-DHP_GUARDRAIL = 0.9
-DHP_CONSTRAINT_KEYS = ("expectedMemory", "nextDayMemory", "targetCount")
+# 预注册 per-leg 守门下限（基线 = (NM0 w, tau=0.0) = 当前生产冠军；2026-06-12 tau 网格实测
+# 校准，详见 docs/amas-tuning-2026-06-12/00-pre-registered-gates.md）：
+#   - expectedMemory / nextDayMemory ≥ 0.90x：沿用历史纪律；tau 网格实测 tau∈{2.5,3.0,3.5}
+#     反而抬升这两腿（1.16-1.20x），0.90x 防的是 w 侧记忆质量塌方
+#   - targetCount ≥ 0.95x（0.90→0.95 收紧）：tau 对该腿近中性（0.99-1.03x），更大跌幅只能
+#     来自 w 侧用真实半衰期换 mastered 的套利；tau3-stock 实测 0.9899x 留 4% 余量
+#   - masteredProxy ≥ 1.00x（新腿）：冲榜指标本体——胜者不得低于现冠军自报掌握量；
+#     tau3-stock 实测 1.954x，余量巨大
+DHP_GUARDRAIL_FLOORS: Dict[str, float] = {
+    "expectedMemory": 0.90,
+    "nextDayMemory": 0.90,
+    "targetCount": 0.95,
+    "masteredProxy": 1.00,
+}
+DHP_CONSTRAINT_KEYS = tuple(DHP_GUARDRAIL_FLOORS)
+# 锚点自检靶：stock 配置 == baseline 配置 ⇒ 每腿比率恰为 1.0 ⇒ 分量恰为 floor-1.0
+DHP_ANCHOR_COMPONENTS = tuple(floor - 1.0 for floor in DHP_GUARDRAIL_FLOORS.values())
+
+# Stage-1/2 mastered 感知目标（2026-06-12 预注册，公式不得事后修改）：
+#   objective = prediction_composite(ratio_cap=1.5)
+#             + MASTERED_OBJECTIVE_WEIGHT * min(masteredProxy/baseline - 1.0, MASTERED_OBJECTIVE_RATIO_CAP)
+# Stage-3 保持纯 prediction composite（uncapped），masteredProxy 仅记录不进目标。
+MASTERED_OBJECTIVE_WEIGHT = 0.5
+MASTERED_OBJECTIVE_RATIO_CAP = 1.5
+
+
+def _mastered_objective_term(dhp: Dict[str, Any], baseline_dhp: Dict[str, Any]) -> float:
+    base = float(baseline_dhp["masteredProxy"])
+    ratio = float(dhp["masteredProxy"]) / max(base, 1.0)
+    return MASTERED_OBJECTIVE_WEIGHT * min(ratio - 1.0, MASTERED_OBJECTIVE_RATIO_CAP)
 
 
 def _dhp_constraints(
     dhp: Dict[str, Any], baseline_dhp: Dict[str, Any]
 ) -> Tuple[bool, Tuple[float, ...]]:
-    """Returns (feasible: bool, components: tuple[float,float,float]).
+    """Returns (feasible: bool, components: tuple[float,...] aligned with DHP_CONSTRAINT_KEYS).
 
-    feasible uses the GATE'S LITERAL expression dhp[k] >= 0.9*base[k] (boolean authority);
-    components are normalized magnitudes 0.9 - dhp[k]/base[k] for TPE's least-violation ranking.
+    feasible uses the GATE'S LITERAL expression dhp[k] >= floor_k*base[k] (boolean authority);
+    components are normalized magnitudes floor_k - dhp[k]/base[k] for TPE's least-violation ranking.
     The boolean and the magnitudes are DECOUPLED on purpose (1-ulp boundary hardening):
     if feasible, components are clamped to <= 0.0 (min(c, 0.0)); if infeasible, the violated
     components are forced >= +1e-12. Non-finite dhp value or base <= 0 → feasible=False, component=1.0
@@ -569,7 +597,7 @@ def _dhp_constraints(
     """
     feasible = True
     components: List[float] = []
-    for key in DHP_CONSTRAINT_KEYS:
+    for key, floor in DHP_GUARDRAIL_FLOORS.items():
         value = dhp.get(key)
         base = baseline_dhp.get(key)
         if (
@@ -582,8 +610,8 @@ def _dhp_constraints(
             feasible = False
             components.append(1.0)
             continue
-        leg_ok = value >= DHP_GUARDRAIL * base
-        component = DHP_GUARDRAIL - value / base
+        leg_ok = value >= floor * base
+        component = floor - value / base
         components.append(min(component, 0.0) if leg_ok else max(component, 1e-12))
         feasible = feasible and leg_ok
     return feasible, tuple(components)
@@ -806,36 +834,48 @@ def evaluate(paths: BenchPaths, memory_config: Dict[str, Any], split: str = "val
 # Tune (optimized: fewer trials, shared server, single-pass scoring)
 # ---------------------------------------------------------------------------
 
-# 14 个双活（objective-live ∧ gate-live）维度的窗口，其余维度钉死在 DEFAULT 值。
-# 2026-06-11 镜像对齐（grade 3/1 + alpha 平滑 + 难度动力学）后 per-dim 探针重测：
-# 对齐解锁难度链路 w4-w7（mean reversion 锚 d0(4) 持续作用，w4 守门峰值 40.7%）
-# 与遗忘分支 w11-w14（G=1 路径双侧可达）；原 6 维窗口原样保留。
+# 14 个双活（objective-live ∧ gate-live）w 维 + 1 个非 w 结构旋钮（alphaRampTau），
+# 其余维度钉死在 DEFAULT 值。2026-06-11 镜像对齐后 per-dim 探针重测：对齐解锁难度链路
+# w4-w7（mean reversion 锚 d0(4) 持续作用，w4 守门峰值 40.7%）与遗忘分支 w11-w14
+# （G=1 路径双侧可达）。
+# 2026-06-12 增量：
+#   - alphaRampTau (1.5, 4.0)：val tau 网格在 stock w 下呈内点最优 tau=3.0（tau=4.0 全腿
+#     回落；tau∈{1.5,2.0} 触 duo expMemFinal 塌方线被拒）——峰值可能随 w 移动，进搜索；
+#     tau=0（关闭）仅作为锚点种子在窗口外注入，TPE 分布不含 0
+#   - w_2 5.0→8.5 / w_8 3.0→3.5 / w_10 1.5→2.0 拓宽：旧"公版即最优"结论是在 alpha=0.3
+#     冻结语义下得出的，D1（连击动态 alpha）+ D2（alphaRampTau）落地后该结论失效；
+#     duo/syn mastered 残差（x1.68/x1.57）需要增长侧 headroom；记忆质量由 per-leg
+#     守门下限（DHP_GUARDRAIL_FLOORS）与胜者级二元闸门兜底。其余窗口不变。
 SEARCH_WINDOWS: Dict[str, Tuple[float, float]] = {
     "w_0": (0.05, 0.60),
-    "w_2": (1.00, 5.00),
+    "w_2": (1.00, 8.50),
     "w_4": (3.50, 9.50),
     "w_5": (0.30, 2.00),
     "w_6": (1.00, 4.00),
     "w_7": (0.001, 0.15),
-    "w_8": (1.00, 3.00),
+    "w_8": (1.00, 3.50),
     "w_9": (0.05, 0.40),
-    "w_10": (0.30, 1.50),
+    "w_10": (0.30, 2.00),
     "w_11": (0.50, 3.00),
     "w_12": (0.01, 0.25),
     "w_13": (0.05, 0.70),
     "w_14": (0.50, 3.50),
     "w_20": (0.10, 0.80),
+    "alphaRampTau": (1.5, 4.0),
 }
-_W_INDEX = {name: int(name.split("_")[1]) for name in SEARCH_WINDOWS}
+_W_INDEX = {
+    name: int(name.split("_")[1]) for name in SEARCH_WINDOWS if name.startswith("w_")
+}
 
 
 def _mutate_config(
     trial: optuna.Trial, windows: Dict[str, Tuple[float, float]] | None = None
 ) -> Dict[str, Any]:
-    """Search space = 14 双活 dims（6 → 14，2026-06-11 镜像对齐后探针重判）。
+    """Search space = 14 双活 w dims + alphaRampTau（2026-06-12 升 15 维）。
 
     双活 = objective-live（adapter replay 路径结构可达）∧ gate-live（对齐镜像闭环探针
-    腿变化 ≥0.1%）。继承 6 维：w_0/w_2/w_8/w_9/w_10/w_20（窗口不变）；对齐解锁 8 维：
+    腿变化 ≥0.1%）。继承 6 维：w_0/w_2/w_8/w_9/w_10/w_20（2026-06-12 拓宽
+    w_2/w_8/w_10，理由见 SEARCH_WINDOWS 注释）；对齐解锁 8 维：
       - w_4/w_5/w_6/w_7：难度动力学 — 旧镜像 D 冻结使其守门盲；对齐后 mean reversion
         锚 d0(4)=f(w4,w5) 持续作用，w_4 守门峰值 40.7% 为全空间最强杠杆
       - w_11/w_12/w_13/w_14：遗忘分支 — G=1 双侧可达，守门 2.8-3.8%
@@ -852,17 +892,26 @@ def _mutate_config(
         due=day+顶帽 恒越仿真窗、复习计划不受影响），仅剩可被套利的弱效率信号
 
     windows 仅供 D10 局部精炼传缩窄盒；None = 原始窗口。
+    非 w 键（alphaRampTau）直接写 config 顶层标量；DEFAULT 自带 0.0（关闭）。
     """
     config = json.loads(json.dumps(DEFAULT_MEMORY_MODEL_CONFIG))
     weights = list(config["w"])
     for name, (low, high) in (windows or SEARCH_WINDOWS).items():
-        weights[_W_INDEX[name]] = trial.suggest_float(name, low, high)
+        value = trial.suggest_float(name, low, high)
+        if name in _W_INDEX:
+            weights[_W_INDEX[name]] = value
+        else:
+            config[name] = value
     config["w"] = weights
     return config
 
 
 _STOCK_ANCHOR_PARAMS: Dict[str, float] = {
-    name: float(DEFAULT_MEMORY_MODEL_CONFIG["w"][idx]) for name, idx in _W_INDEX.items()
+    **{name: float(DEFAULT_MEMORY_MODEL_CONFIG["w"][idx]) for name, idx in _W_INDEX.items()},
+    # 锚点 tau=0.0 在搜索窗 (1.5,4.0) 之外：optuna 4.8.0 对窗口外 fixed param 仅发
+    # UserWarning 并 VERBATIM 透传（已实测 30-trial TPE 不崩），保证 trial 0 配置
+    # 与守门基线逐位相等，约束自检 (floor-1.0) 接线成立
+    "alphaRampTau": float(DEFAULT_MEMORY_MODEL_CONFIG["alphaRampTau"]),
 }
 # 2026-06-10 run 三个 near-miss 在 6 个存活维上的投影（钉死维回退 stock）——直接检验
 # +29-40% 校准角在移除 gate-killer 后能否幸存。来源（冻结历史记录，全精度照抄）：
@@ -896,32 +945,38 @@ _REPAIRED_NEAR_MISSES: Tuple[Dict[str, float], ...] = (
 
 
 def _seed_trial_params() -> List[Dict[str, float]]:
-    """D5 教师种子，12 个（FIFO 入队即弹出顺序；键名与 suggest 名严格一致）。
+    """D5 教师种子，14 个（FIFO 入队即弹出顺序；键名与 suggest 名严格一致）。
 
-    enqueue 按 VERBATIM 透传不裁剪越界值，所有取值已核验在 SEARCH_WINDOWS 内
-    （由 test_seed_trials_inside_windows 守护）。14 维空间下种子必须全维显式
-    （部分指定会让 sampler 随机补维，破坏教学确定性）：6 维历史种子以 stock
-    补齐新 8 维。
+    enqueue 按 VERBATIM 透传不裁剪越界值；除锚点 alphaRampTau=0.0（刻意窗口外，
+    见 _STOCK_ANCHOR_PARAMS 注释）外所有取值在 SEARCH_WINDOWS 内（由
+    test_seed_trials_inside_windows 守护）。15 维空间下种子必须全维显式
+    （部分指定会让 sampler 随机补维，破坏教学确定性）。
+    2026-06-12：性能教师统一带 tau=3.0（val tau 网格 stock-w 内点最优）；
+    另设 tau 阶梯教师 {2.5, 3.5}（stock w）教 TPE tau 维曲率。
     """
-    stock = dict(_STOCK_ANCHOR_PARAMS)
+    stock = dict(_STOCK_ANCHOR_PARAMS)          # tau=0.0（锚点专用，窗口外）
+    perf = {**stock, "alphaRampTau": 3.0}       # 性能教师基座
     half_step = {
-        name: (stock[name] + _REPAIRED_NEAR_MISSES[0].get(name, stock[name])) / 2.0
+        name: (perf[name] + _REPAIRED_NEAR_MISSES[0].get(name, perf[name])) / 2.0
         for name in SEARCH_WINDOWS
     }
     return [
-        stock,                                  # 1. stock 锚点（约束接线自检靶）
-        {**stock, **_REPAIRED_NEAR_MISSES[0]},  # 2-4. 修复后的 near-miss（新维回 stock）
-        {**stock, **_REPAIRED_NEAR_MISSES[1]},
-        {**stock, **_REPAIRED_NEAR_MISSES[2]},
-        half_step,                              # 5. stock↔NM0 每维中点
-        {**stock, "w_20": 0.22},                # 6-7. w_20 阶梯
-        {**stock, "w_20": 0.30},
-        {**stock, "w_0": 0.10},                 # 8. w_0 探针
+        stock,                                  # 1. stock 锚点（约束接线自检靶；tau=0.0）
+        {**perf, **_REPAIRED_NEAR_MISSES[0]},   # 2-4. 修复后的 near-miss（新维回 stock）
+        {**perf, **_REPAIRED_NEAR_MISSES[1]},
+        {**perf, **_REPAIRED_NEAR_MISSES[2]},
+        half_step,                              # 5. perf↔NM0 每维中点（tau=3.0）
+        {**perf, "w_20": 0.22},                 # 6-7. w_20 阶梯
+        {**perf, "w_20": 0.30},
+        {**perf, "w_0": 0.10},                  # 8. w_0 探针
         # 9-12. 对齐解锁维的边界教师（2026-06-11）：教 TPE 新维梯度方向
-        {**stock, "w_4": 4.5},                  # D0 锚下探（probe ×0.75 守门 5%）
-        {**stock, "w_4": 8.0},                  # D0 锚上探
-        {**stock, "w_11": 1.0, "w_12": 0.10, "w_13": 0.40, "w_14": 2.30},  # 遗忘组向 FSRS-5 官方风格
-        {**stock, "w_6": 2.0, "w_7": 0.05},     # 难度增量减半 + 真 mean reversion
+        {**perf, "w_4": 4.5},                   # D0 锚下探（probe ×0.75 守门 5%）
+        {**perf, "w_4": 8.0},                   # D0 锚上探
+        {**perf, "w_11": 1.0, "w_12": 0.10, "w_13": 0.40, "w_14": 2.30},  # 遗忘组向 FSRS-5 官方风格
+        {**perf, "w_6": 2.0, "w_7": 0.05},      # 难度增量减半 + 真 mean reversion
+        # 13-14. tau 阶梯教师（stock w）：内点最优两翼
+        {**stock, "alphaRampTau": 2.5},
+        {**stock, "alphaRampTau": 3.5},
     ]
 
 
@@ -1125,11 +1180,10 @@ def tune(paths: BenchPaths, stage1_trials: int = 128) -> Dict[str, Any]:
             ) * 100.0
             # interval_gain is structurally ≈0 on MaiMemo (see _candidate_score comment),
             # so the passes gate uses prediction_gain + DHP guardrails only.
-            passes = (
-                prediction_gain >= 0.5
-                and dhp["expectedMemory"] >= baseline_dhp["expectedMemory"] * 0.9
-                and dhp["nextDayMemory"] >= baseline_dhp["nextDayMemory"] * 0.9
-                and dhp["targetCount"] >= baseline_dhp["targetCount"] * 0.9
+            # 闸门与 per-trial 约束共用 DHP_GUARDRAIL_FLOORS（预注册 per-leg 下限）
+            passes = prediction_gain >= 0.5 and all(
+                dhp[key] >= baseline_dhp[key] * floor
+                for key, floor in DHP_GUARDRAIL_FLOORS.items()
             )
             return {
                 "memoryModel": config,
@@ -1178,6 +1232,11 @@ def tune(paths: BenchPaths, stage1_trials: int = 128) -> Dict[str, Any]:
                     oracle=oracle, hlr_model=hlr_model, server=server,
                     include_interval=False, ratio_cap=1.5,
                 )
+                # mastered 感知目标（stage-1，预注册公式见 MASTERED_OBJECTIVE_WEIGHT 注释）
+                mastered_term = _mastered_objective_term(dhp, baseline_dhp)
+                metrics["masteredProxy"] = dhp["masteredProxy"]
+                metrics["masteredObjectiveTerm"] = mastered_term
+                metrics["objective"] = float(metrics["objective"] + mastered_term)
                 study.tell(trial, metrics["objective"])
                 record = {
                     **metrics,
@@ -1190,8 +1249,11 @@ def tune(paths: BenchPaths, stage1_trials: int = 128) -> Dict[str, Any]:
             record["config"] = config
             stage1_records.append(record)
             if index == 0:
-                # D5 锚点自检：stock 配置 == baseline 配置 ⇒ 比率恰为 1.0，分量恰为 -0.1
-                if not feasible or any(abs(c + 0.1) > 1e-9 for c in comps):
+                # D5 锚点自检：stock 配置 == baseline 配置 ⇒ 比率恰为 1.0，
+                # 分量恰为 floor-1.0（per-leg 下限下的 DHP_ANCHOR_COMPONENTS）
+                if not feasible or any(
+                    abs(c - e) > 1e-9 for c, e in zip(comps, DHP_ANCHOR_COMPONENTS)
+                ):
                     raise RuntimeError("constraint wiring broken")
                 anchor_feasible = True
 
@@ -1213,12 +1275,19 @@ def tune(paths: BenchPaths, stage1_trials: int = 128) -> Dict[str, Any]:
                 max_rows=2_000_000, include_interval=False, ratio_cap=1.5,
                 user_buckets=(1, 2),
             )
+            # stage-2 与 stage-1 同公式（DHP 备忘缓存命中，零额外闭环开销）
+            stage2_dhp = _dhp_cached(record["config"])
+            mastered_term = _mastered_objective_term(stage2_dhp, baseline_dhp)
+            metrics["masteredProxy"] = stage2_dhp["masteredProxy"]
+            metrics["masteredObjectiveTerm"] = mastered_term
+            metrics["objective"] = float(metrics["objective"] + mastered_term)
             stage2.append((record["config"], metrics))
         stage2 = sorted(stage2, key=lambda pair: pair[1]["objective"], reverse=True)[
             : min(4, len(stage2))
         ]
 
-        # Stage 3: top 4 on 100% — uncapped + interval，语义与旧版一致
+        # Stage 3: top 4 on 100% — uncapped + interval，目标语义与旧版一致
+        # （纯 prediction composite，不混 mastered 项）；masteredProxy 仅记录
         finalists = []
         for config, _ in tqdm(stage2, desc="tune stage3"):
             metrics = _candidate_score(
@@ -1227,7 +1296,9 @@ def tune(paths: BenchPaths, stage1_trials: int = 128) -> Dict[str, Any]:
                 oracle=oracle, hlr_model=hlr_model, server=server,
                 max_rows=4_000_000,
             )
-            finalists.append((config, metrics, _dhp_cached(config)))
+            stage3_dhp = _dhp_cached(config)
+            metrics["masteredProxy"] = stage3_dhp["masteredProxy"]
+            finalists.append((config, metrics, stage3_dhp))
 
         gated: List[Dict[str, Any]] = []
         for config, metrics, dhp in sorted(
@@ -1253,11 +1324,17 @@ def tune(paths: BenchPaths, stage1_trials: int = 128) -> Dict[str, Any]:
         if selected is None and gated and gated[0]["predictionGainPercent"] >= 0.25:
             refinement["triggered"] = True
             center = gated[0]["memoryModel"]
-            # 每维 ±15% 原窗宽的盒子，居中于最佳可行 finalist，裁剪回原窗口
+            # 每维 ±15% 原窗宽的盒子，居中于最佳可行 finalist，裁剪回原窗口；
+            # 非 w 维读 config 顶层标量。中心值先夹回窗口（锚点 tau=0.0 在窗口外，
+            # 若它成为中心，不夹会产生 low>high 的非法盒）
             boxes: Dict[str, Tuple[float, float]] = {}
             for name, (low, high) in SEARCH_WINDOWS.items():
                 width = high - low
-                value = float(center["w"][_W_INDEX[name]])
+                if name in _W_INDEX:
+                    value = float(center["w"][_W_INDEX[name]])
+                else:
+                    value = float(center.get(name, DEFAULT_MEMORY_MODEL_CONFIG[name]))
+                value = min(max(value, low), high)
                 boxes[name] = (max(low, value - 0.15 * width), min(high, value + 0.15 * width))
             refine_study = optuna.create_study(
                 direction="maximize",
@@ -1279,6 +1356,11 @@ def tune(paths: BenchPaths, stage1_trials: int = 128) -> Dict[str, Any]:
                     oracle=oracle, hlr_model=hlr_model, server=server,
                     include_interval=False, ratio_cap=1.5,
                 )
+                # 精炼是 stage-1 同级筛选，沿用 mastered 感知目标
+                mastered_term = _mastered_objective_term(dhp, baseline_dhp)
+                metrics["masteredProxy"] = dhp["masteredProxy"]
+                metrics["masteredObjectiveTerm"] = mastered_term
+                metrics["objective"] = float(metrics["objective"] + mastered_term)
                 refine_study.tell(trial, metrics["objective"])
                 refined.append((config, metrics))
             refinement["trials"] = 24
@@ -1292,7 +1374,9 @@ def tune(paths: BenchPaths, stage1_trials: int = 128) -> Dict[str, Any]:
                     oracle=oracle, hlr_model=hlr_model, server=server,
                     max_rows=4_000_000,
                 )
-                promoted.append((config, metrics, _dhp_cached(config)))
+                promoted_dhp = _dhp_cached(config)
+                metrics["masteredProxy"] = promoted_dhp["masteredProxy"]
+                promoted.append((config, metrics, promoted_dhp))
             for config, metrics, dhp in sorted(
                 promoted, key=lambda entry: entry[1]["objective"], reverse=True
             ):
@@ -1332,7 +1416,11 @@ def tune(paths: BenchPaths, stage1_trials: int = 128) -> Dict[str, Any]:
             boundary_autopsy.append({
                 "params": record["params"],
                 "constraint": list(comps),
-                "objective": float(metrics["objective"]),
+                # 与 stage-1 目标同口径（含 mastered 项），便于跨界对照
+                "objective": float(
+                    metrics["objective"]
+                    + _mastered_objective_term(record["dhp"], baseline_dhp)
+                ),
                 "whichGuardrailBinds": DHP_CONSTRAINT_KEYS[
                     max(range(len(comps)), key=lambda i: comps[i])
                 ],
@@ -1386,8 +1474,8 @@ def tune(paths: BenchPaths, stage1_trials: int = 128) -> Dict[str, Any]:
         retention_sensitivity = {
             "dhp": production_dhp,
             "wouldStillPassDhpLegs": all(
-                production_dhp[key] >= baseline_dhp[key] * DHP_GUARDRAIL
-                for key in DHP_CONSTRAINT_KEYS
+                production_dhp[key] >= baseline_dhp[key] * floor
+                for key, floor in DHP_GUARDRAIL_FLOORS.items()
             ),
         }
         candidate_recall = float(best_candidate["dhpReference"]["avgDueRecall"])

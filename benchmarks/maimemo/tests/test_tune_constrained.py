@@ -4,7 +4,7 @@
 1. _dhp_constraints 边界语义（可行/不可行/精确边界/NaN/零基线）
 2. 真 optuna 约束研究：同种子确定性 + best_trial 偏向可行最优
 3. TuneFunnelSmokeTest：全 fake 跑真 tune()（winner / conclusive_negative 两景）
-4. 8 个种子全部落在 SEARCH_WINDOWS 内（enqueue VERBATIM 陷阱守护）
+4. 14 个种子落在 SEARCH_WINDOWS 内（enqueue VERBATIM 陷阱守护；锚点 tau 窗口外 pin）
 5. iterative_tune 冒烟（schema 无 KeyError）
 6. ExperimentalWarning 已过滤 + 版本守卫告警
 """
@@ -24,17 +24,26 @@ from benchmarks.maimemo.config import (
     BenchPaths,
 )
 from benchmarks.maimemo.pipeline import (
+    DHP_ANCHOR_COMPONENTS,
     DHP_CONSTRAINT_KEYS,
+    DHP_GUARDRAIL_FLOORS,
     SEARCH_WINDOWS,
     _dhp_constraints,
     _make_constrained_sampler,
+    _mastered_objective_term,
+    _mutate_config,
     _seed_trial_params,
     iterative_tune,
     tune,
 )
 
 
-BASE_DHP = {"expectedMemory": 100.0, "nextDayMemory": 50.0, "targetCount": 10.0}
+BASE_DHP = {
+    "expectedMemory": 100.0,
+    "nextDayMemory": 50.0,
+    "targetCount": 10.0,
+    "masteredProxy": 20.0,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -44,7 +53,9 @@ BASE_DHP = {"expectedMemory": 100.0, "nextDayMemory": 50.0, "targetCount": 10.0}
 def test_constraints_feasible_equal_to_baseline():
     feasible, comps = _dhp_constraints(dict(BASE_DHP), BASE_DHP)
     assert feasible is True
-    assert comps == pytest.approx((-0.1, -0.1, -0.1))
+    # per-leg 下限：分量 = floor - 1.0（0.90/0.90/0.95/1.00 ⇒ -0.1/-0.1/-0.05/0.0）
+    assert comps == pytest.approx(DHP_ANCHOR_COMPONENTS)
+    assert comps == pytest.approx((-0.1, -0.1, -0.05, 0.0))
     assert all(c <= 0.0 for c in comps)
 
 
@@ -53,11 +64,21 @@ def test_constraints_infeasible_violation_magnitude():
     feasible, comps = _dhp_constraints(dhp, BASE_DHP)
     assert feasible is False
     assert comps[0] >= 1e-12 and comps[0] == pytest.approx(0.1)
-    assert comps[1] <= 0.0 and comps[2] <= 0.0
+    assert all(c <= 0.0 for c in comps[1:])
+
+
+def test_constraints_mastered_regression_is_infeasible():
+    # masteredProxy 下限是 1.0x：低于基线即不可行（冲榜指标不许回退）
+    dhp = dict(BASE_DHP, masteredProxy=19.0)
+    feasible, comps = _dhp_constraints(dhp, BASE_DHP)
+    assert feasible is False
+    assert comps[3] == pytest.approx(0.05)
 
 
 def test_constraints_exact_boundary_is_feasible():
-    dhp = {key: value * 0.9 for key, value in BASE_DHP.items()}
+    dhp = {
+        key: value * DHP_GUARDRAIL_FLOORS[key] for key, value in BASE_DHP.items()
+    }
     feasible, comps = _dhp_constraints(dhp, BASE_DHP)
     assert feasible is True
     assert all(c <= 0.0 for c in comps)
@@ -185,6 +206,7 @@ def _install_funnel_fakes(monkeypatch, candidate_prediction):
                 "expectedMemory": 4000.0,
                 "nextDayMemory": 3000.0,
                 "targetCount": 600.0,
+                "masteredProxy": 800.0,
                 "avgDueRecall": 0.8,
             },
             "configEcho": memory_config,
@@ -244,7 +266,10 @@ def test_tune_funnel_winner(monkeypatch, tmp_path):
     for key in CANDIDATE_KEYS:
         assert key in selected
     assert selected["passes"] is True
-    for key in ("objective", "prediction", "predictionScore", "intervalPolicy", "avgEfficiency", "rows"):
+    for key in (
+        "objective", "prediction", "predictionScore", "intervalPolicy",
+        "avgEfficiency", "rows", "masteredProxy",
+    ):
         assert key in selected["metrics"]
     assert len(summary["nearMisses"]) <= 3
 
@@ -277,20 +302,54 @@ def test_tune_funnel_conclusive_negative(monkeypatch, tmp_path):
 
 # ---------------------------------------------------------------------------
 # 4. 种子全部在窗口内（enqueue 按 VERBATIM 透传，不做越界裁剪）
+#    唯一例外：锚点 alphaRampTau=0.0 刻意在窗口 (1.5,4.0) 外（见下一条 pin 测试）
 # ---------------------------------------------------------------------------
 
 def test_seed_trials_inside_windows():
     seeds = _seed_trial_params()
-    assert len(seeds) == 12
-    for seed in seeds:
+    assert len(seeds) == 14
+    for index, seed in enumerate(seeds):
         assert set(seed) == set(SEARCH_WINDOWS)
         for name, value in seed.items():
+            if index == 0 and name == "alphaRampTau":
+                continue  # 锚点 tau 单独断言
             low, high = SEARCH_WINDOWS[name]
             assert low <= value <= high, f"seed {name}={value} outside [{low}, {high}]"
-    # stock 锚点必须程序化等于 DEFAULT（防字面漂移）
+    # stock 锚点必须程序化等于 DEFAULT（防字面漂移），tau=0.0 == DEFAULT 关闭值
     stock = seeds[0]
     for name, idx in pipeline._W_INDEX.items():
         assert stock[name] == DEFAULT_MEMORY_MODEL_CONFIG["w"][idx]
+    assert stock["alphaRampTau"] == DEFAULT_MEMORY_MODEL_CONFIG["alphaRampTau"] == 0.0
+    # tau 阶梯教师 {2.5, 3.5} 在 stock w 上；性能教师统一 tau=3.0
+    taus = sorted({seed["alphaRampTau"] for seed in seeds})
+    assert taus == [0.0, 2.5, 3.0, 3.5]
+
+
+def test_anchor_seed_out_of_window_passes_verbatim():
+    """optuna 4.8.0 行为 pin：窗口外 fixed param 仅发 UserWarning 并逐字透传。
+
+    锚点自检（trial 0 配置 == DEFAULT == 守门基线）依赖该语义；optuna 升级若改为
+    重采样，本测试先红。
+    """
+    study = optuna.create_study(
+        direction="maximize", sampler=_make_constrained_sampler(DEFAULT_RANDOM_SEED, 4)
+    )
+    study.enqueue_trial(_seed_trial_params()[0])
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        trial = study.ask()
+        config = _mutate_config(trial)
+    assert config == DEFAULT_MEMORY_MODEL_CONFIG  # 逐键逐位相等 ⇒ 锚点分量恰为 floor-1.0
+    assert trial.params["alphaRampTau"] == 0.0
+
+
+def test_mastered_objective_term_formula():
+    base = {"masteredProxy": 800.0}
+    # 等于基线 ⇒ 0；+20% ⇒ 0.5*0.2；超 cap（ratio-1 > 1.5）截到 0.5*1.5；回退为负不截
+    assert _mastered_objective_term({"masteredProxy": 800.0}, base) == pytest.approx(0.0)
+    assert _mastered_objective_term({"masteredProxy": 960.0}, base) == pytest.approx(0.1)
+    assert _mastered_objective_term({"masteredProxy": 2400.0}, base) == pytest.approx(0.75)
+    assert _mastered_objective_term({"masteredProxy": 400.0}, base) == pytest.approx(-0.25)
 
 
 # ---------------------------------------------------------------------------
