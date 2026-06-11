@@ -118,6 +118,7 @@ export const PARAM_DICT: Record<string, ParamMeta[]> = {
     { path: 'memoryModel.alphaScale', label_zh: 'α 学习率缩放', type: 'number', min: 0, max: 1, step: 0.05, default: 0.3, description_zh: '难度/稳定性学习率的缩放因子' },
     { path: 'memoryModel.alphaMin', label_zh: 'α 学习率下限', type: 'number', min: 0, max: 1, step: 0.05, default: 0.1, description_zh: '每事件 α 下限；与 alphaMax 共同限定 α 区间' },
     { path: 'memoryModel.alphaMax', label_zh: 'α 学习率上限', type: 'number', min: 0, max: 1, step: 0.05, default: 0.5, description_zh: '每事件 α 上限；需 > alphaMin' },
+    { path: 'memoryModel.alphaRampTau', label_zh: 'α 阻尼衰减时间常数', type: 'number', min: 0, max: 100, step: 0.5, default: 0, description_zh: '证据递减阻尼：成功复习时残余阻尼 (1-α) 随累计复习数指数衰减，复习越多越信任新证据；0 = 关闭（冻结语义）' },
     { path: 'memoryModel.retentionMin', label_zh: '自适应留存下限', type: 'number', min: 0.5, max: 0.95, step: 0.01, default: 0.75, description_zh: '根据用户状态调整后留存率下限' },
     { path: 'memoryModel.retentionMax', label_zh: '自适应留存上限', type: 'number', min: 0.7, max: 0.99, step: 0.01, default: 0.95, description_zh: '根据用户状态调整后留存率上限' },
   ],

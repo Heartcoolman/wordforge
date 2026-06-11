@@ -253,6 +253,10 @@ impl AMASConfig {
         if self.memory_model.alpha_min >= self.memory_model.alpha_max {
             return Err("memory_model.alpha_min must be < alpha_max".to_string());
         }
+        // 0=关闭；上限防极小 tau 误配（exp 下溢无 UB，纯域约束）
+        if !(0.0..=100.0).contains(&self.memory_model.alpha_ramp_tau) {
+            return Err("memory_model.alpha_ramp_tau must be in [0,100]".to_string());
+        }
         if !(0.0..=1.0).contains(&self.memory_model.forgetting_threshold) {
             return Err("memory_model.forgetting_threshold must be in [0,1]".to_string());
         }

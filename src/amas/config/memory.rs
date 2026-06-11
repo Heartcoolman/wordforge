@@ -58,6 +58,10 @@ pub struct MemoryModelConfig {
     pub alpha_min: f64,
     #[serde(default = "default_alpha_max")]
     pub alpha_max: f64,
+    /// 证据递减阻尼时间常数：成功复习时 alpha_eff(n)=1-(1-alpha)·e^{-(n-1)/tau}；
+    /// 0.0=关闭（冻结语义），DB 旧快照/未声明配置反序列化即得旧行为。
+    #[serde(default = "default_alpha_ramp_tau")]
+    pub alpha_ramp_tau: f64,
     #[serde(default = "default_forgetting_threshold")]
     pub forgetting_threshold: f64,
     // === 原 mdm.rs 模块级常量 ===
@@ -148,6 +152,10 @@ pub(crate) fn default_alpha_min() -> f64 {
 }
 pub(crate) fn default_alpha_max() -> f64 {
     0.5
+}
+pub(crate) fn default_alpha_ramp_tau() -> f64 {
+    // 默认关闭：未声明该旋钮的配置（含 DB 历史快照）必须反序列化为精确旧语义
+    0.0
 }
 pub(crate) fn default_forgetting_threshold() -> f64 {
     0.2
@@ -262,6 +270,7 @@ impl Default for MemoryModelConfig {
             alpha_scale: 0.3,
             alpha_min: 0.1,
             alpha_max: 0.5,
+            alpha_ramp_tau: 0.0,
             forgetting_threshold: 0.2,
             retention_min: 0.75,
             retention_max: 0.95,

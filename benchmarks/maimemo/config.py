@@ -90,6 +90,8 @@ DEFAULT_MEMORY_MODEL_CONFIG: Dict[str, Any] = {
     "alphaScale": 0.3,
     "alphaMin": 0.1,
     "alphaMax": 0.5,
+    # 证据递减阻尼（0=关闭，与 amas_config.toml 同值；调参胜者 Phase 4 写回）
+    "alphaRampTau": 0.0,
     # FSRS-6：曲线参数由 w[20] 派生（这里写派生值，兜底未升级的消费方）
     "forgettingCurveFactor": 0.9 ** (-1.0 / 0.2632510019126722) - 1.0,
     "forgettingCurveDecay": -0.2632510019126722,
@@ -130,6 +132,8 @@ FSRS_BASELINE_CONFIG: Dict[str, Any] = {
     "forgettingCurveFactor": 19.0 / 81.0,
     "forgettingCurveDecay": -0.5,
     "forgettingCurveFloor": 0.0,
+    # 竞品隔离：显式关闭证据递减阻尼，DEFAULT 即便日后调参写回也不随动
+    "alphaRampTau": 0.0,
     "w": [
         0.40255, 1.18385, 3.173, 15.69105, 7.1949, 0.5345, 1.4604, 0.0046,
         1.54575, 0.1192, 1.01925, 1.9395, 0.11, 0.29605, 2.2698, 0.2315,

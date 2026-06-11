@@ -181,6 +181,10 @@ export interface LearningStrategyConfig {
 export interface MemoryModelConfig {
   alphaMax?: number;
   alphaMin?: number;
+  /**
+   * 证据递减阻尼时间常数：成功复习时 alpha_eff(n)=1-(1-alpha)·e^{-(n-1)/tau}； 0.0=关闭（冻结语义），DB 旧快照/未声明配置反序列化即得旧行为。
+   */
+  alphaRampTau?: number;
   alphaScale?: number;
   baseDesiredRetention?: number;
   compositeWeightLong: number;

@@ -245,6 +245,37 @@ def test_mirror_dynamic_alpha_families():
     print(f"\ndynamic-alpha parity: max state abs err = {max_state_err:.3e}")
 
 
+def test_mirror_alpha_ramp_tau_families():
+    """(f) alphaRampTau ∈ {0.0, 2.5, 5.0} × 长混合成功/失败历史（n 至 20）。
+
+    tau=0.0 必须与冻结语义逐位一致（默认关闭）；tau>0 验证证据递减阻尼的
+    Rust↔Python 1e-9 对拍（成功 ramp、失败保持原阻尼）。
+    """
+    rng = random.Random(20260612)
+    base_w = [float(v) for v in DEFAULT_MEMORY_MODEL_CONFIG["w"]]
+    max_state_err = 0.0
+    with AdapterServer() as server:
+        for tau in (0.0, 2.5, 5.0):
+            for k in range(8):
+                w = [value * rng.uniform(0.5, 1.5) for value in base_w]
+                w[20] = max(0.05, min(2.0, w[20]))
+                config = json.loads(json.dumps(DEFAULT_MEMORY_MODEL_CONFIG))
+                config["w"] = w
+                config["alphaRampTau"] = tau
+                config["baseDesiredRetention"] = 0.90
+                config["forgettingCurveFloor"] = 0.0
+                length = rng.randint(12, 20)
+                case = {
+                    "t": [rng.choice([0, 1, 1, 2, 3, 7]) for _ in range(length)],
+                    "r": [rng.choice([0, 1, 1, 1]) for _ in range(length)],
+                }
+                err, _ = _assert_case_parity(
+                    server, config, case, f"ramp tau={tau} case {k}"
+                )
+                max_state_err = max(max_state_err, err)
+    print(f"\nalpha-ramp parity: max state abs err = {max_state_err:.3e}")
+
+
 def test_mirror_matches_rust_adapter_legacy_19dim():
     cases = _generate_legacy_cases()
     # 自检：负 w17 例中存在 step>=1 的同日成功（G≥3 下限实际触发点；seed 下确定成立）

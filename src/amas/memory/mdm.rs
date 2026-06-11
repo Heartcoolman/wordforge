@@ -167,6 +167,16 @@ pub fn update_strength(
             .clamp(0.01, prev_stability)
         };
 
+        // 证据递减阻尼（alphaRampTau，0=关闭即冻结语义）：成功复习时残余阻尼 (1-alpha)
+        // 随累计复习数衰减 alpha_eff(n) = 1-(1-alpha)·e^{-(n-1)/tau}；失败（Again）保持原阻尼
+        // —— lapse target 已在上方 clamp 到 prev_S，软降是有意语义
+        let alpha = if grade >= 2 && config.alpha_ramp_tau > 0.0 {
+            let n = state.review_count as f64; // pre-increment，本分支 ≥ 1
+            1.0 - (1.0 - alpha) * (-(n - 1.0) / config.alpha_ramp_tau).exp()
+        } else {
+            alpha
+        };
+
         state.difficulty =
             (prev_difficulty + (target_difficulty - prev_difficulty) * alpha).clamp(1.0, 10.0);
         // S 上限对齐 FSRS-6 参考实现（≈100 年），防极端 w 组合下幂运算溢出

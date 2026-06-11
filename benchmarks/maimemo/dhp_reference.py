@@ -132,6 +132,8 @@ class WordforgeMirrorState:
     alpha_min: float = 0.1
     alpha_max: float = 0.5
     streak_min_gap_days: float = DEFAULT_STREAK_MIN_GAP_DAYS
+    # 证据递减阻尼时间常数（mdm.rs alphaRampTau；0.0=关闭即冻结语义）
+    alpha_ramp_tau: float = 0.0
     stability: float = 0.4
     difficulty: float = 5.0
     review_count: int = 0
@@ -231,6 +233,12 @@ class WordforgeMirrorState:
                     ),
                 )
 
+            # 证据递减阻尼（mdm.rs alphaRampTau）：成功时残余阻尼 (1-alpha) 随复习数衰减；
+            # 失败保持原阻尼。运算结合序与 Rust 表达式一致（1e-9 对拍）
+            if grade >= 2 and self.alpha_ramp_tau > 0.0:
+                n = float(self.review_count)  # pre-increment，本分支 ≥ 1
+                alpha = 1.0 - (1.0 - alpha) * math.exp(-(n - 1.0) / self.alpha_ramp_tau)
+
             # alpha 平滑（mdm.rs:170-174）：D 夹 [1,10]；S 以 prev_S_safe 为基点，夹 [0.01, 36500]
             self.difficulty = max(
                 1.0,
@@ -283,6 +291,8 @@ def _alpha_kwargs_from_config(memory_config: Dict[str, object]) -> Dict[str, flo
         "alpha_max": float(memory_config.get("alphaMax", 0.5)),
         "streak_min_gap_days": float(memory_config.get("streakMinGapMs", 1_800_000))
         / 86_400_000.0,
+        # 缺省 0.0（关闭）= Rust serde default，未声明旋钮的配置保持冻结语义
+        "alpha_ramp_tau": float(memory_config.get("alphaRampTau", 0.0)),
     }
 
 
