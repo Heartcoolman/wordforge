@@ -152,6 +152,10 @@ pub fn replay_history(
 
     let mut state = MdmState::default();
     let mut now_ms = 0i64;
+    // 忠实重放 mastery.rs:69-87 的连击动态 alpha（先推进连击、失败清零、首评 gap 恒过）。
+    // interval_scale 钉死 1.0：生产 adjusted_interval_scale ~0.95-1.08，base alpha 偏差 ≤8%，
+    // 耦合会破坏 Rust↔Python 对拍可测性，作为已接受的残余保真缺口记录。
+    let mut streak: u32 = 0;
 
     for (&delta_t, &result) in t_history.iter().zip(r_history.iter()) {
         if delta_t < 0 {
@@ -163,7 +167,18 @@ pub fn replay_history(
         } else {
             SUCCESS_QUALITY
         };
-        update_strength(&mut state, quality, 0.3, now_ms, config);
+        if result != 0 {
+            let gap_ok = state.review_count == 0 || delta_t * DAY_MS >= config.streak_min_gap_ms;
+            if gap_ok {
+                streak += 1;
+            }
+        } else {
+            streak = 0;
+        }
+        let base_alpha = (1.0 * config.alpha_scale).clamp(config.alpha_min, config.alpha_max);
+        let streak_bonus = 1.0 + (streak.min(5) as f64) * 0.1;
+        let alpha = (base_alpha * streak_bonus).clamp(config.alpha_min, config.alpha_max);
+        update_strength(&mut state, quality, alpha, now_ms, config);
     }
 
     Ok(state)

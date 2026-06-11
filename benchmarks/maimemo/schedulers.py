@@ -17,7 +17,7 @@ import random
 from typing import List, Protocol, runtime_checkable
 
 from .config import DEFAULT_MEMORY_MODEL_CONFIG
-from .dhp_reference import DHPStudent, WordforgeMirrorState
+from .dhp_reference import DHPStudent, WordforgeMirrorState, _alpha_kwargs_from_config
 
 
 # ---------------------------------------------------------------------------
@@ -78,6 +78,7 @@ class FSRSScheduler:
             forgetting_curve_factor=float(self._cfg.get("forgettingCurveFactor", 19.0 / 81.0)),
             forgetting_curve_decay=float(self._cfg.get("forgettingCurveDecay", -0.5)),
             forgetting_curve_floor=float(self._cfg.get("forgettingCurveFloor", 0.0)),
+            **_alpha_kwargs_from_config(self._cfg),
         )
 
     def warm_start(
@@ -406,6 +407,7 @@ class AMASScheduler:
             forgetting_curve_factor=self._factor,
             forgetting_curve_decay=self._decay_e,
             forgetting_curve_floor=self._floor,
+            **_alpha_kwargs_from_config(self._cfg),
         )
 
     # ------------------------------------------------------------------
@@ -624,18 +626,9 @@ class AMASScheduler:
         base_days    = self._state.interval_days()
         ivl_scale    = self._ensemble_interval_scale()
 
-        # Stability-aware scale clamp.
-        # Low stability (new word) → allow mild expansion to build spacing.
-        # Mid stability → conservative, small expansion only.
-        # High stability (well-learned) → allow moderate expansion to skip
-        #   unnecessary reviews and boost efficiency; compress on failure signal.
-        s = max(1e-6, float(self._state.stability))
-        if s < 10.0:
-            ivl_scale = max(0.85, min(1.05, ivl_scale))
-        elif s < 30.0:
-            ivl_scale = max(0.88, min(1.04, ivl_scale))
-        else:
-            ivl_scale = max(0.90, min(1.08, ivl_scale))   # allow expansion for well-learned words
+        # 保真对齐生产 ensemble.rs:131：interval_scale.max(0.1)，无上界、无稳定度分带
+        # （bench 独有的分带 clamp 已移除；90 天硬帽与 mdm.rs compute_interval 一致保留）
+        ivl_scale = max(0.1, ivl_scale)
 
         scaled_days = max(1.0, base_days * ivl_scale)
         # AMAS engine hard cap: MAX_INTERVAL_DAYS = 90 (src/amas/memory/mdm.rs)

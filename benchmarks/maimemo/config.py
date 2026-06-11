@@ -84,7 +84,12 @@ DEFAULT_MEMORY_MODEL_CONFIG: Dict[str, Any] = {
     "passiveDecayHalfLifeDays": 30.0,
     "passiveDecayPower": 0.30,
     "masteryWindowSize": 20,
+    "streakMinGapMs": 1800000,
     "stabilityBaseDays": 20.0,
+    # 连击动态 alpha（mastery.rs，与 amas_config.toml 同值；bench 重放 interval_scale 钉 1.0）
+    "alphaScale": 0.3,
+    "alphaMin": 0.1,
+    "alphaMax": 0.5,
     # FSRS-6：曲线参数由 w[20] 派生（这里写派生值，兜底未升级的消费方）
     "forgettingCurveFactor": 0.9 ** (-1.0 / 0.2632510019126722) - 1.0,
     "forgettingCurveDecay": -0.2632510019126722,

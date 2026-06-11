@@ -112,10 +112,10 @@ class DHPStudent:
 # 勿映射 Easy(4)：首评 stability 会取 w[3] 造成约 5x 膨胀，扭曲调参闸门
 SUCCESS_GRADE = 3
 FAIL_GRADE = 1
-# update_strength 的 alpha（adapter 固定传 0.3）
-ALPHA = 0.3
 # S 上限对齐 mdm.rs（FSRS-6 参考实现 ≈100 年，防极端 w 组合幂运算溢出）
 STABILITY_CAP_DAYS = 36_500.0
+# 连击最小间隔（mastery.rs streak_min_gap_ms=1800000 的天级形态，≈30 分钟）
+DEFAULT_STREAK_MIN_GAP_DAYS = 1_800_000.0 / 86_400_000.0
 
 
 @dataclass
@@ -127,9 +127,15 @@ class WordforgeMirrorState:
     forgetting_curve_floor: float
     # 间隔顶侧夹紧（mdm.rs compute_interval max_interval_days，Rust 默认 90.0）
     max_interval_days: float = 90.0
+    # 连击动态 alpha（mastery.rs:82-85 / benchmark_adapter.rs 重放，interval_scale 钉 1.0）
+    alpha_scale: float = 0.3
+    alpha_min: float = 0.1
+    alpha_max: float = 0.5
+    streak_min_gap_days: float = DEFAULT_STREAK_MIN_GAP_DAYS
     stability: float = 0.4
     difficulty: float = 5.0
     review_count: int = 0
+    correct_streak: int = 0
 
     def recall(self, elapsed_days: float) -> float:
         power = math.pow(
@@ -142,9 +148,24 @@ class WordforgeMirrorState:
         )
 
     def update(self, recalled: int, elapsed_days: float) -> None:
-        """逐句镜像 mdm.rs::update_strength（quality 0.7/0.0、alpha=0.3 的 adapter 调用形态）。"""
+        """逐句镜像 mdm.rs::update_strength（quality 0.7/0.0 + 连击动态 alpha 的 adapter 重放形态）。
+
+        alpha 镜像 mastery.rs:69-87 @ interval_scale=1.0：成功先推进连击（首评 gap 恒过、
+        同日 delta_t=0 不加不清）、失败清零，再 base 夹 → ×(1+0.1·min(streak,5)) → 整体夹。
+        """
         grade = SUCCESS_GRADE if recalled == 1 else FAIL_GRADE
         w = self.weights
+        if recalled == 1:
+            gap_ok = self.review_count == 0 or elapsed_days >= self.streak_min_gap_days
+            if gap_ok:
+                self.correct_streak += 1
+        else:
+            self.correct_streak = 0
+        base_alpha = max(
+            self.alpha_min, min(self.alpha_max, 1.0 * self.alpha_scale)
+        )
+        streak_bonus = 1.0 + min(self.correct_streak, 5) * 0.1
+        alpha = max(self.alpha_min, min(self.alpha_max, base_alpha * streak_bonus))
         if self.review_count == 0:
             # 首评（mdm.rs review_count==0 分支）：S/D 直接赋值，无 alpha 平滑、无 S 上限
             self.stability = w[grade - 1]
@@ -213,13 +234,13 @@ class WordforgeMirrorState:
             # alpha 平滑（mdm.rs:170-174）：D 夹 [1,10]；S 以 prev_S_safe 为基点，夹 [0.01, 36500]
             self.difficulty = max(
                 1.0,
-                min(10.0, prev_difficulty + (target_difficulty - prev_difficulty) * ALPHA),
+                min(10.0, prev_difficulty + (target_difficulty - prev_difficulty) * alpha),
             )
             self.stability = max(
                 0.01,
                 min(
                     STABILITY_CAP_DAYS,
-                    prev_stability + (target_stability - prev_stability) * ALPHA,
+                    prev_stability + (target_stability - prev_stability) * alpha,
                 ),
             )
         self.review_count += 1
@@ -254,10 +275,22 @@ class RefItem:
     last_date: int | None = None
     state: List[float] | None = None
 
+def _alpha_kwargs_from_config(memory_config: Dict[str, object]) -> Dict[str, float]:
+    """连击动态 alpha 四参数（缺省值与 Rust serde default 一致）。"""
+    return {
+        "alpha_scale": float(memory_config.get("alphaScale", 0.3)),
+        "alpha_min": float(memory_config.get("alphaMin", 0.1)),
+        "alpha_max": float(memory_config.get("alphaMax", 0.5)),
+        "streak_min_gap_days": float(memory_config.get("streakMinGapMs", 1_800_000))
+        / 86_400_000.0,
+    }
+
+
 def _mirror_from_config(memory_config: Dict[str, object]) -> WordforgeMirrorState:
     weights = list(memory_config["w"])
     # 顶侧间隔夹紧与 Rust default_max_interval_days() 同默认（90 天）
     max_interval_days = float(memory_config.get("maxIntervalDays", 90.0))
+    alpha_kwargs = _alpha_kwargs_from_config(memory_config)
     if len(weights) >= 21:
         # FSRS-6：曲线参数由 w[20] 派生（与 Rust MemoryModelConfig::curve_* 一致）
         decay = max(0.05, min(2.0, float(weights[20])))
@@ -270,6 +303,7 @@ def _mirror_from_config(memory_config: Dict[str, object]) -> WordforgeMirrorStat
                 memory_config.get("forgettingCurveFloor", 0.0)
             ),
             max_interval_days=max_interval_days,
+            **alpha_kwargs,
         )
     return WordforgeMirrorState(
         weights=weights,
@@ -284,6 +318,7 @@ def _mirror_from_config(memory_config: Dict[str, object]) -> WordforgeMirrorStat
             memory_config.get("forgettingCurveFloor", DEFAULT_FORGETTING_CURVE_FLOOR)
         ),
         max_interval_days=max_interval_days,
+        **alpha_kwargs,
     )
 
 

@@ -5,7 +5,8 @@
 另有 60 个 19 维 FSRS-5 旧权重用例（Rust 侧走 w19=0/w20=0.5 迁移路径）+ 1 个
 定向回归例，覆盖同日 G≥3 下限在 19 维分支的对等。
 Python 侧 WordforgeMirrorState 与 Rust 侧 maimemo_mdm_adapter（mdm.rs 真值，
-quality 0.7/0.0、alpha=0.3）各自重放同一历史：
+quality 0.7/0.0、alpha 由 config+history 派生的连击动态 alpha —— 不再固定 0.3）
+各自重放同一历史：
 
 - stability / difficulty：abs ≤ 1e-9 + 1e-9·|rust|
 - interval（retention 0.85 / 0.90）：复刻 mdm.rs compute_interval 的秒级管线
@@ -171,6 +172,77 @@ def test_mirror_matches_rust_adapter():
         f"\nmirror parity: {CASE_COUNT} cases, max state abs err = {max_state_err:.3e}, "
         f"intervals compared = {interval_compared}"
     )
+
+
+def test_dynamic_alpha_streak_semantics():
+    """纯 Python 侧连击语义自检：首评恒过、同日不加不清、失败清零。"""
+    mirror = _mirror_from_config(DEFAULT_MEMORY_MODEL_CONFIG)
+    mirror.update(1, 0.0)  # 首评：gap_ok 恒真 → streak 1
+    assert mirror.correct_streak == 1
+    mirror.update(1, 0.0)  # 同日成功：gap 0 < 30min → 不加不清
+    assert mirror.correct_streak == 1
+    mirror.update(1, 1.0)  # 跨日成功 → 2
+    assert mirror.correct_streak == 2
+    mirror.update(0, 1.0)  # 失败清零
+    assert mirror.correct_streak == 0
+
+
+def _dynamic_alpha_cases() -> list[tuple[str, dict, dict]]:
+    """连击动态 alpha 定向族 (a)-(d)：返回 (label, config, case)。
+
+    (a) ≥7 连续成功 —— streak 饱和 min(streak,5)；
+    (b) 失败穿插 —— 清零后重爬坡；
+    (c) 混入 delta_t=0 同日条目 —— gap 规则不加不清；
+    (d) alphaScale=0.45 —— base×bonus 撞 alphaMax 夹紧。
+    """
+    base = json.loads(json.dumps(DEFAULT_MEMORY_MODEL_CONFIG))
+    boosted = json.loads(json.dumps(DEFAULT_MEMORY_MODEL_CONFIG))
+    boosted["alphaScale"] = 0.45
+    families: list[tuple[str, dict, dict]] = [
+        ("a_saturation", base, {"t": [1] * 10, "r": [1] * 10}),
+        ("b_reset_reramp", base, {"t": [1] * 12, "r": [1, 1, 1, 0, 1, 1, 0, 1, 1, 1, 1, 1]}),
+        ("c_same_day_mix", base, {"t": [0, 0, 1, 0, 1, 1, 0, 2, 0, 1], "r": [1, 1, 1, 1, 0, 1, 1, 1, 1, 1]}),
+        ("d_alpha_max_clamp", boosted, {"t": [1] * 8, "r": [1] * 8}),
+    ]
+    # 每族追加 5 个种子随机变体（含随机 w 扰动，保持族特征）
+    rng = random.Random(20260611)
+    base_w = [float(v) for v in DEFAULT_MEMORY_MODEL_CONFIG["w"]]
+    out: list[tuple[str, dict, dict]] = []
+    for label, config, case in families:
+        out.append((label, config, dict(case, retention=0.90)))
+        for k in range(5):
+            w = [value * rng.uniform(0.5, 1.5) for value in base_w]
+            w[20] = max(0.05, min(2.0, w[20]))
+            cfg = json.loads(json.dumps(config))
+            cfg["w"] = w
+            if label == "a_saturation":
+                t = [rng.randint(1, 4) for _ in range(rng.randint(7, 12))]
+                r = [1] * len(t)
+            elif label == "b_reset_reramp":
+                t = [rng.randint(1, 4) for _ in range(12)]
+                r = [1] * 12
+                for pos in rng.sample(range(1, 11), 2):
+                    r[pos] = 0
+            elif label == "c_same_day_mix":
+                t = [rng.choice([0, 0, 1, 2]) for _ in range(rng.randint(8, 14))]
+                r = [rng.randint(0, 1) for _ in t]
+            else:  # d_alpha_max_clamp
+                t = [rng.randint(1, 3) for _ in range(rng.randint(6, 10))]
+                r = [1] * len(t)
+            out.append((f"{label}_rnd{k}", cfg, {"t": t, "r": r, "retention": 0.90}))
+    return out
+
+
+def test_mirror_dynamic_alpha_families():
+    max_state_err = 0.0
+    with AdapterServer() as server:
+        for label, config, case in _dynamic_alpha_cases():
+            config = json.loads(json.dumps(config))
+            config["baseDesiredRetention"] = float(case.get("retention", 0.90))
+            config["forgettingCurveFloor"] = 0.0
+            err, _ = _assert_case_parity(server, config, case, f"dyn-alpha {label}")
+            max_state_err = max(max_state_err, err)
+    print(f"\ndynamic-alpha parity: max state abs err = {max_state_err:.3e}")
 
 
 def test_mirror_matches_rust_adapter_legacy_19dim():

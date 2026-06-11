@@ -17,7 +17,7 @@ from sklearn.metrics import roc_auc_score
 from sklearn.preprocessing import StandardScaler
 
 from .config import DEFAULT_MEMORY_MODEL_CONFIG, FSRS_BASELINE_CONFIG, RETENTION_TARGETS
-from .dhp_reference import DHPStudent
+from .dhp_reference import DHPStudent, _mirror_from_config
 
 
 EPS = 1e-9
@@ -342,8 +342,6 @@ class HLRBaseline:
 
 
 DAY_MS = 86_400_000
-SUCCESS_QUALITY = 0.95
-FAILURE_QUALITY = 0.0
 MAX_INTERVAL_DAYS = 90.0
 MIN_INTERVAL_SECS = 60
 
@@ -378,82 +376,18 @@ def _fsrs_compute_interval_days(
 def _replay_history_python(
     t_history: List[int],
     r_history: List[int],
-    w: List[float],
-    factor: float,
-    decay: float,
-    floor: float,
+    memory_config: Dict[str, Any],
 ) -> tuple[float, float, int]:
-    """Replay a review history using FSRS-5 formulas. Returns (stability, difficulty, review_count)."""
-    stability = 0.4
-    difficulty = 5.0
-    last_review_ms: int | None = None
-    review_count = 0
+    """无 Rust adapter 时的纯 Python 重放，委托 WordforgeMirrorState 镜像。
 
+    与 benchmark_adapter.rs replay_history 同语义（quality 0.7/0.0 → Good/Again、
+    连击动态 alpha、w[20] 派生曲线），消除旧实现的 Easy 映射 / 无 alpha 平滑漂移。
+    Returns (stability, difficulty, review_count)。
+    """
+    mirror = _mirror_from_config(memory_config)
     for delta_t, result in zip(t_history, r_history):
-        quality = SUCCESS_QUALITY if result != 0 else FAILURE_QUALITY
-        grade = (
-            1 if quality <= 0.15
-            else 2 if quality <= 0.5
-            else 3 if quality <= 0.85
-            else 4
-        )
-
-        now_ms = (last_review_ms or 0) + delta_t * DAY_MS
-
-        if review_count == 0:
-            # First review: initial stability from w0-w3
-            g = max(0, min(3, grade - 1))
-            stability = w[g]
-            # Initial difficulty: D0(G) = w4 - e^{w5*(G-1)} + 1
-            difficulty = max(1.0, min(10.0, w[4] - math.exp(w[5] * (grade - 1.0)) + 1.0))
-        else:
-            # Compute current R
-            if last_review_ms is not None:
-                elapsed_days = max(0.0, (now_ms - last_review_ms) / 86_400_000.0)
-            else:
-                elapsed_days = 0.0
-            r = _fsrs_recall_probability(stability, elapsed_days, factor, decay, floor)
-
-            # Update difficulty
-            delta_d = -w[6] * (grade - 3.0)
-            d_prime = difficulty + delta_d * (10.0 - difficulty) / 9.0
-            d0_4 = max(1.0, min(10.0, w[4] - math.exp(w[5] * 3.0) + 1.0))
-            difficulty = max(1.0, min(10.0, w[7] * d0_4 + (1.0 - w[7]) * d_prime))
-
-            if elapsed_days < 1.0:
-                # Same-day review: FSRS-5 short-term stability formula
-                grade_f = float(grade)
-                exponent = max(-20.0, min(20.0, w[17] * (grade_f - 3.0 + w[18])))
-                stability = max(0.01, stability * math.exp(exponent))
-            elif grade >= 2:
-                # Successful recall
-                bonus = w[15] if grade == 2 else (w[16] if grade == 4 else 1.0)
-                s_inc = max(
-                    0.0,
-                    math.exp(w[8])
-                    * (11.0 - difficulty)
-                    * max(stability, 0.01) ** (-w[9])
-                    * (math.exp(w[10] * (1.0 - r)) - 1.0)
-                    * bonus,
-                )
-                stability = max(0.01, stability * (s_inc + 1.0))
-            else:
-                # Forgetting
-                stability = max(
-                    0.01,
-                    min(
-                        stability,
-                        w[11]
-                        * difficulty ** (-w[12])
-                        * ((stability + 1.0) ** w[13] - 1.0)
-                        * math.exp(w[14] * (1.0 - r)),
-                    ),
-                )
-
-        review_count += 1
-        last_review_ms = now_ms
-
-    return stability, difficulty, review_count
+        mirror.update(1 if result != 0 else 0, float(delta_t))
+    return mirror.stability, mirror.difficulty, mirror.review_count
 
 
 class WordForgeAdapterModel:
@@ -462,8 +396,14 @@ class WordForgeAdapterModel:
     def __init__(self, memory_config: Dict[str, Any], server=None) -> None:
         self.config = json.loads(json.dumps(memory_config))
         self.w: List[float] = list(self.config["w"])
-        self.factor: float = float(self.config.get("forgettingCurveFactor", 0.30))
-        self.decay: float = float(self.config.get("forgettingCurveDecay", -0.5))
+        if len(self.w) >= 21:
+            # FSRS-6：曲线参数由 w[20] 派生，与 Rust curve_decay/curve_factor 及镜像一致
+            _decay = max(0.05, min(2.0, float(self.w[20])))
+            self.factor: float = math.pow(0.9, -1.0 / _decay) - 1.0
+            self.decay: float = -_decay
+        else:
+            self.factor = float(self.config.get("forgettingCurveFactor", 0.30))
+            self.decay = float(self.config.get("forgettingCurveDecay", -0.5))
         self.floor: float = float(self.config.get("forgettingCurveFloor", 0.0))
         self.server = server
 
@@ -528,7 +468,7 @@ class WordForgeAdapterModel:
             next_t = float(row.next_t)
 
             stability, difficulty, review_count = _replay_history_python(
-                t_hist, r_hist, self.w, self.factor, self.decay, self.floor,
+                t_hist, r_hist, self.config,
             )
 
             p_recall = _fsrs_recall_probability(stability, next_t, self.factor, self.decay, self.floor) if review_count > 0 else 0.0
