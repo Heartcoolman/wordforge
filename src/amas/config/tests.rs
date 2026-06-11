@@ -242,7 +242,7 @@ fn swd_max_history_zero_fails() {
 
 #[test]
 fn memory_model_invalid_fields_fail() {
-    let mutators: [fn(&mut AMASConfig); 16] = [
+    let mutators: [fn(&mut AMASConfig); 19] = [
         |c| c.memory_model.short_term_learning_rate = 2.0,
         |c| c.memory_model.medium_term_learning_rate = -0.1,
         |c| c.memory_model.long_term_learning_rate = 1.5,
@@ -271,11 +271,24 @@ fn memory_model_invalid_fields_fail() {
             c.memory_model.retention_min = 0.9;
             c.memory_model.retention_max = 0.5;
         },
+        |c| c.memory_model.alpha_ramp_tau = -0.1,
+        |c| c.memory_model.alpha_ramp_tau = 100.1,
+        |c| c.memory_model.alpha_ramp_tau = f64::NAN,
     ];
     for (i, m) in mutators.iter().enumerate() {
         let mut c = AMASConfig::default();
         m(&mut c);
         assert!(c.validate().is_err(), "case {i}");
+    }
+}
+
+#[test]
+fn alpha_ramp_tau_valid_boundaries_pass() {
+    // [0,100] 闭区间：0.0（默认关闭）与 100.0 均合法
+    for v in [0.0, 100.0] {
+        let mut c = AMASConfig::default();
+        c.memory_model.alpha_ramp_tau = v;
+        assert!(c.validate().is_ok(), "tau {v}");
     }
 }
 

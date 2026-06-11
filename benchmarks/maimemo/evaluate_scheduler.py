@@ -139,9 +139,11 @@ def _sample_test_rows(
     selected = all_users[:n_users]
     df = full[full["user_id"].isin(selected)].copy()
 
+    # 无条件排序：GROUP BY 输出序无保证，行序确定性不得依赖 max_words_per_user 路径
+    df = df.sort_values(["user_id", "word_id"]).reset_index(drop=True)
+
     # 每用户限词数
     if max_words_per_user > 0:
-        df = df.sort_values(["user_id", "word_id"]).reset_index(drop=True)
         df = (
             df.groupby("user_id", as_index=False, sort=False, group_keys=False)
             .head(max_words_per_user)

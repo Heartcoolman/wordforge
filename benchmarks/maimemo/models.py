@@ -386,6 +386,9 @@ def _replay_history_python(
     """
     mirror = _mirror_from_config(memory_config)
     for delta_t, result in zip(t_history, r_history):
+        if delta_t < 0:
+            # 对齐 benchmark_adapter.rs replay_history：负 delta 硬报错而非静默计算
+            raise ValueError(f"delta_t must be >= 0, got {delta_t}")
         mirror.update(1 if result != 0 else 0, float(delta_t))
     return mirror.stability, mirror.difficulty, mirror.review_count
 

@@ -230,6 +230,28 @@ def _dynamic_alpha_cases() -> list[tuple[str, dict, dict]]:
                 t = [rng.randint(1, 3) for _ in range(rng.randint(6, 10))]
                 r = [1] * len(t)
             out.append((f"{label}_rnd{k}", cfg, {"t": t, "r": r, "retention": 0.90}))
+
+    # (e) alphaScale < alphaMin —— 内层 base clamp 判别配置：无内夹时 alpha 恒 0.1
+    # （0.05×bonus ≤ 0.075 → 外夹拉回 0.1），有内夹则 0.11..0.15
+    floored = json.loads(json.dumps(DEFAULT_MEMORY_MODEL_CONFIG))
+    floored["alphaScale"] = 0.05
+    out.append(("e_base_below_min", floored, {"t": [1] * 8, "r": [1] * 8, "retention": 0.90}))
+    out.append((
+        "e_base_below_min_mix",
+        floored,
+        {"t": [1, 0, 1, 2, 1, 1, 0, 1, 1, 1], "r": [1, 1, 1, 0, 1, 1, 1, 1, 0, 1], "retention": 0.90},
+    ))
+    # (g) alphaMax > 1 —— mdm.rs:92 入口 [0,1] clamp 判别配置（base×bonus 可达 1.35）；
+    # bench adapter 不调 validate()，缺镜像入口夹时此族会发散
+    over_unit = json.loads(json.dumps(DEFAULT_MEMORY_MODEL_CONFIG))
+    over_unit["alphaScale"] = 0.9
+    over_unit["alphaMax"] = 1.5
+    out.append(("g_entry_unit_clamp", over_unit, {"t": [1] * 8, "r": [1] * 8, "retention": 0.90}))
+    out.append((
+        "g_entry_unit_clamp_mix",
+        over_unit,
+        {"t": [1, 1, 0, 1, 2, 1, 1, 0, 1, 1], "r": [1, 1, 1, 1, 0, 1, 1, 1, 1, 1], "retention": 0.90},
+    ))
     return out
 
 
@@ -273,6 +295,24 @@ def test_mirror_alpha_ramp_tau_families():
                     server, config, case, f"ramp tau={tau} case {k}"
                 )
                 max_state_err = max(max_state_err, err)
+
+        # 19 维 legacy × tau>0：legacy 迁移路径（w19=0/w20=0.5）与 ramp 的正交性对拍
+        legacy_base_w = [float(v) for v in FSRS_BASELINE_CONFIG["w"]]
+        for k in range(4):
+            config = json.loads(json.dumps(FSRS_BASELINE_CONFIG))
+            config["w"] = [value * rng.uniform(0.5, 1.5) for value in legacy_base_w]
+            config["alphaRampTau"] = 2.5
+            config["baseDesiredRetention"] = 0.90
+            config["forgettingCurveFloor"] = 0.0
+            length = rng.randint(12, 20)
+            case = {
+                "t": [rng.choice([0, 1, 1, 2, 3, 7]) for _ in range(length)],
+                "r": [rng.choice([0, 1, 1, 1]) for _ in range(length)],
+            }
+            err, _ = _assert_case_parity(
+                server, config, case, f"ramp legacy case {k}"
+            )
+            max_state_err = max(max_state_err, err)
     print(f"\nalpha-ramp parity: max state abs err = {max_state_err:.3e}")
 
 

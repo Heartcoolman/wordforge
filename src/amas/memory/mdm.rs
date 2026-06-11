@@ -338,4 +338,125 @@ mod tests {
 
         assert!(high_alpha.stability > low_alpha.stability);
     }
+
+    const DAY_MS: i64 = 86_400_000;
+
+    fn ramp_config(tau: f64) -> MemoryModelConfig {
+        let mut config = MemoryModelConfig::default();
+        config.alpha_ramp_tau = tau;
+        config
+    }
+
+    /// tau=0（serde/Default 默认，分支不进）必须与冻结语义逐位一致；
+    /// tau>0 在 n=1（首次平滑复习，exp(-0)=1）对二进制可精确表示的 alpha 位级回原值
+    /// （非二进制精确 alpha 如 0.33 时 1-(1-α) round-trip 有 1 ULP 误差，属 IEEE 固有）
+    #[test]
+    fn alpha_ramp_tau_zero_and_n1_keep_frozen_semantics() {
+        let base_config = MemoryModelConfig::default();
+        assert_eq!(base_config.alpha_ramp_tau, 0.0);
+        let zero_config = ramp_config(0.0);
+        let ramped_config = ramp_config(5.0);
+
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut frozen = MdmState::default();
+        let mut zeroed = MdmState::default();
+        let mut ramped = MdmState::default();
+        // 首评（review_count==0 分支，alpha 未用）+ 首次平滑复习（n=1）；
+        // alpha 取 dyadic 0.25：1.0-0.25=0.75、1.0-0.75=0.25 均精确
+        for step in [0i64, 1] {
+            let at = now + step * DAY_MS;
+            update_strength(&mut frozen, 0.7, 0.25, at, &base_config);
+            update_strength(&mut zeroed, 0.7, 0.25, at, &zero_config);
+            update_strength(&mut ramped, 0.7, 0.25, at, &ramped_config);
+        }
+        assert_eq!(frozen.stability, zeroed.stability);
+        assert_eq!(frozen.difficulty, zeroed.difficulty);
+        assert_eq!(frozen.stability, ramped.stability);
+        assert_eq!(frozen.difficulty, ramped.difficulty);
+    }
+
+    /// 隐式 alpha_eff 对闭式公式：同一前置状态分别以 tau=0 / tau>0 更新一步，
+    /// (S'_ramp − prev)/(S'_frozen − prev) = alpha_eff/alpha；并断言 n 递进单调
+    #[test]
+    fn alpha_ramp_implied_alpha_matches_closed_form_and_grows_with_n() {
+        let base_config = MemoryModelConfig::default();
+        let tau = 5.0;
+        let ramped_config = ramp_config(tau);
+        let alpha = 0.3;
+
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut state = MdmState::default();
+        update_strength(&mut state, 0.7, alpha, now, &base_config);
+
+        let mut prev_eff = 0.0;
+        for step in 1..=6i64 {
+            let at = now + step * DAY_MS;
+            let n = state.review_count as f64; // pre-increment n（本分支 ≥1）
+            let mut frozen = state.clone();
+            let mut ramped = state.clone();
+            update_strength(&mut frozen, 0.7, alpha, at, &base_config);
+            update_strength(&mut ramped, 0.7, alpha, at, &ramped_config);
+
+            let expected_eff = 1.0 - (1.0 - alpha) * (-(n - 1.0) / tau).exp();
+            let mut implied_eff = expected_eff;
+            for (got, base, prev) in [
+                (ramped.stability, frozen.stability, state.stability),
+                (ramped.difficulty, frozen.difficulty, state.difficulty),
+            ] {
+                if (base - prev).abs() <= 1e-9 {
+                    continue; // 平滑增量过小时比值数值不稳，跳过
+                }
+                implied_eff = alpha * (got - prev) / (base - prev);
+                assert!(
+                    (implied_eff - expected_eff).abs() <= 1e-9 * expected_eff.max(1.0),
+                    "step {step}: implied {implied_eff} vs expected {expected_eff}"
+                );
+            }
+            assert!(
+                implied_eff > prev_eff,
+                "step {step}: alpha_eff 应随 n 单调递增 ({implied_eff} <= {prev_eff})"
+            );
+            prev_eff = implied_eff;
+            state = frozen;
+        }
+    }
+
+    /// grade==1（Again）不进 ramp 分支：tau>0 与 tau=0 状态逐位一致
+    #[test]
+    fn alpha_ramp_skips_again_grade() {
+        let base_config = MemoryModelConfig::default();
+        let ramped_config = ramp_config(2.5);
+        let now = chrono::Utc::now().timestamp_millis();
+
+        let mut frozen = MdmState::default();
+        update_strength(&mut frozen, 0.7, 0.3, now, &base_config);
+        update_strength(&mut frozen, 0.7, 0.3, now + DAY_MS, &base_config);
+        let mut ramped = frozen.clone();
+        // n=2：成功档 alpha_eff 已偏离，但失败（quality 0.0 → Again）必须保持原阻尼
+        update_strength(&mut frozen, 0.0, 0.3, now + 2 * DAY_MS, &base_config);
+        update_strength(&mut ramped, 0.0, 0.3, now + 2 * DAY_MS, &ramped_config);
+        assert_eq!(frozen.stability, ramped.stability);
+        assert_eq!(frozen.difficulty, ramped.difficulty);
+    }
+
+    /// quality 0.4→Hard(2)、0.95→Easy(4) 均进 ramp 分支
+    /// （bench 域只打 Good/Again，此处直测生产域 4 档 grade 门控）
+    #[test]
+    fn alpha_ramp_engages_hard_and_easy_grades() {
+        let base_config = MemoryModelConfig::default();
+        let ramped_config = ramp_config(2.5);
+        let now = chrono::Utc::now().timestamp_millis();
+
+        for quality in [0.4, 0.95] {
+            let mut seed = MdmState::default();
+            update_strength(&mut seed, 0.7, 0.3, now, &base_config);
+            update_strength(&mut seed, 0.7, 0.3, now + DAY_MS, &base_config);
+            // n=2：alpha_eff != alpha → 状态必须发散
+            let mut frozen = seed.clone();
+            let mut ramped = seed;
+            update_strength(&mut frozen, quality, 0.3, now + 2 * DAY_MS, &base_config);
+            update_strength(&mut ramped, quality, 0.3, now + 2 * DAY_MS, &ramped_config);
+            assert_ne!(frozen.stability, ramped.stability, "quality {quality}");
+        }
+    }
 }

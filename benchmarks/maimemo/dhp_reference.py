@@ -168,6 +168,9 @@ class WordforgeMirrorState:
         )
         streak_bonus = 1.0 + min(self.correct_streak, 5) * 0.1
         alpha = max(self.alpha_min, min(self.alpha_max, base_alpha * streak_bonus))
+        # mdm.rs:92 入口 alpha.clamp(0.0,1.0) 的镜像；alphaMax ≤ 1 的合法域内为 no-op，
+        # 但 bench adapter 不调 validate()，alphaMax > 1 时缺此夹会与 Rust 发散
+        alpha = max(0.0, min(1.0, alpha))
         if self.review_count == 0:
             # 首评（mdm.rs review_count==0 分支）：S/D 直接赋值，无 alpha 平滑、无 S 上限
             self.stability = w[grade - 1]
