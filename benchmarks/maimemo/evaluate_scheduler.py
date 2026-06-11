@@ -81,6 +81,12 @@ def _sample_test_rows(
     每个 (user, word) 取最长 history (按 LENGTH(t_history) ARG_MAX)。
     注：DuckDB 1.5.1 在某些 parquet 上 ROW_NUMBER 触发 InternalException,
     所以这里用 ARG_MAX(field, LENGTH(t_history)) 实现等价的 rn=1 语义。
+
+    确定性：裸 LENGTH(t_history) 在并列时 tie-break 依赖扫描顺序（多线程下
+    每个 ARG_MAX 还可能取自不同行），重复运行有 ~5e-5 logLoss 抖动。改用
+    内容序复合键（长度 → 历史串 → 结果串 → next_t/next_r），全部 ARG_MAX
+    共用同一键，保证重复运行返回逐行相同的结果；纯算法中立（不依赖任何
+    scheduler 的得分）。
     """
     conn = duckdb.connect()
     conn.execute(f"PRAGMA threads={duckdb_threads}")
@@ -104,15 +110,17 @@ def _sample_test_rows(
             break
 
     bucket_list = ", ".join(str(b) for b in needed)
+    # 确定性复合 tie-break 键：主序仍是 LENGTH(t_history)（最长 history 语义不变）
+    tie_key = "(LENGTH(t_history), t_history, r_history, next_t, next_r, difficulty)"
     query = f"""
         SELECT
             u AS user_id,
             w AS word_id,
-            ARG_MAX(t_history, LENGTH(t_history)) AS t_history,
-            ARG_MAX(r_history, LENGTH(t_history)) AS r_history,
-            ARG_MAX(difficulty, LENGTH(t_history)) AS difficulty,
-            ARG_MAX(next_t, LENGTH(t_history)) AS next_t,
-            ARG_MAX(next_r, LENGTH(t_history)) AS next_r
+            ARG_MAX(t_history, {tie_key}) AS t_history,
+            ARG_MAX(r_history, {tie_key}) AS r_history,
+            ARG_MAX(difficulty, {tie_key}) AS difficulty,
+            ARG_MAX(next_t, {tie_key}) AS next_t,
+            ARG_MAX(next_r, {tie_key}) AS next_r
         FROM read_parquet('{parquet_path}')
         WHERE split = 'test'
           AND user_bucket_100 IN ({bucket_list})
