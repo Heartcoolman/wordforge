@@ -132,12 +132,16 @@ class WordforgeMirrorState:
     alpha_min: float = 0.1
     alpha_max: float = 0.5
     streak_min_gap_days: float = DEFAULT_STREAK_MIN_GAP_DAYS
-    # 证据递减阻尼时间常数（mdm.rs alphaRampTau；0.0=关闭即冻结语义）
+    # 双腿信任调度（mdm.rs，语义替换旧 count 挂靠；0.0=关闭即冻结语义）：
+    # 成功腿 alphaRampTau=τ_s 挂靠 correct_streak（失败清零→阻尼重启）；
+    # 失败腿 alphaLapseRampTau=τ_f 挂靠累计 lapse 数（首错 f=1 no-op，leech 加速压 S）
     alpha_ramp_tau: float = 0.0
+    alpha_lapse_ramp_tau: float = 0.0
     stability: float = 0.4
     difficulty: float = 5.0
     review_count: int = 0
     correct_streak: int = 0
+    lapse_count: int = 0
 
     def recall(self, elapsed_days: float) -> float:
         power = math.pow(
@@ -163,6 +167,8 @@ class WordforgeMirrorState:
                 self.correct_streak += 1
         else:
             self.correct_streak = 0
+            # 累计 lapse 在 alpha 计算前自增（生产 f = total_attempts - total_correct 含本次失败）
+            self.lapse_count += 1
         base_alpha = max(
             self.alpha_min, min(self.alpha_max, 1.0 * self.alpha_scale)
         )
@@ -236,11 +242,17 @@ class WordforgeMirrorState:
                     ),
                 )
 
-            # 证据递减阻尼（mdm.rs alphaRampTau）：成功时残余阻尼 (1-alpha) 随复习数衰减；
-            # 失败保持原阻尼。运算结合序与 Rust 表达式一致（1e-9 对拍）
-            if grade >= 2 and self.alpha_ramp_tau > 0.0:
-                n = float(self.review_count)  # pre-increment，本分支 ≥ 1
-                alpha = 1.0 - (1.0 - alpha) * math.exp(-(n - 1.0) / self.alpha_ramp_tau)
+            # 双腿信任调度（mastery.rs is_correct 闸门的镜像；二元数据下与 grade≥2 恒等）：
+            # 成功腿挂靠连击（失败清零→全阻尼重启），失败腿挂靠累计 lapse（首错保护）。
+            # 运算结合序与 Rust 表达式同序（1e-9 对拍纪律）
+            if grade >= 2:
+                if self.alpha_ramp_tau > 0.0:
+                    # 同日成功 gap_ok=false streak 冻结；lapse 后同日成功 streak=0 → k=1 no-op
+                    k = float(max(self.correct_streak, 1))
+                    alpha = 1.0 - (1.0 - alpha) * math.exp(-(k - 1.0) / self.alpha_ramp_tau)
+            elif self.alpha_lapse_ramp_tau > 0.0:
+                f = float(max(self.lapse_count, 1))
+                alpha = 1.0 - (1.0 - alpha) * math.exp(-(f - 1.0) / self.alpha_lapse_ramp_tau)
 
             # alpha 平滑（mdm.rs:170-174）：D 夹 [1,10]；S 以 prev_S_safe 为基点，夹 [0.01, 36500]
             self.difficulty = max(
@@ -296,6 +308,7 @@ def _alpha_kwargs_from_config(memory_config: Dict[str, object]) -> Dict[str, flo
         / 86_400_000.0,
         # 缺省 0.0（关闭）= Rust serde default，未声明旋钮的配置保持冻结语义
         "alpha_ramp_tau": float(memory_config.get("alphaRampTau", 0.0)),
+        "alpha_lapse_ramp_tau": float(memory_config.get("alphaLapseRampTau", 0.0)),
     }
 
 

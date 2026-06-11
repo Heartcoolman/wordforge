@@ -58,10 +58,16 @@ pub struct MemoryModelConfig {
     pub alpha_min: f64,
     #[serde(default = "default_alpha_max")]
     pub alpha_max: f64,
-    /// 证据递减阻尼时间常数：成功复习时 alpha_eff(n)=1-(1-alpha)·e^{-(n-1)/tau}；
-    /// 0.0=关闭（冻结语义），DB 旧快照/未声明配置反序列化即得旧行为。
+    /// 双腿信任调度·成功腿时间常数 τ_s：成功复习（grade≥2）时
+    /// alpha_eff(k)=1-(1-alpha)·e^{-(k-1)/tau}，k=本次记账后的 correct_streak
+    /// （失败清零→阻尼重启）；0.0=关闭（冻结语义），DB 旧快照/未声明配置反序列化即得旧行为。
     #[serde(default = "default_alpha_ramp_tau")]
     pub alpha_ramp_tau: f64,
+    /// 双腿信任调度·失败腿时间常数 τ_f：失败（Again）时
+    /// alpha_eff(f)=1-(1-alpha)·e^{-(f-1)/tau}，f=含本次的累计 lapse 数
+    /// （首错 f=1 即 no-op = 偶发失误保护）；0.0=关闭（冻结语义）。
+    #[serde(default = "default_alpha_lapse_ramp_tau")]
+    pub alpha_lapse_ramp_tau: f64,
     #[serde(default = "default_forgetting_threshold")]
     pub forgetting_threshold: f64,
     // === 原 mdm.rs 模块级常量 ===
@@ -155,6 +161,10 @@ pub(crate) fn default_alpha_max() -> f64 {
 }
 pub(crate) fn default_alpha_ramp_tau() -> f64 {
     // 默认关闭：未声明该旋钮的配置（含 DB 历史快照）必须反序列化为精确旧语义
+    0.0
+}
+pub(crate) fn default_alpha_lapse_ramp_tau() -> f64 {
+    // 默认关闭：同 alpha_ramp_tau，未声明即冻结语义
     0.0
 }
 pub(crate) fn default_forgetting_threshold() -> f64 {
@@ -271,6 +281,7 @@ impl Default for MemoryModelConfig {
             alpha_min: 0.1,
             alpha_max: 0.5,
             alpha_ramp_tau: 0.0,
+            alpha_lapse_ramp_tau: 0.0,
             forgetting_threshold: 0.2,
             retention_min: 0.75,
             retention_max: 0.95,

@@ -267,53 +267,111 @@ def test_mirror_dynamic_alpha_families():
     print(f"\ndynamic-alpha parity: max state abs err = {max_state_err:.3e}")
 
 
-def test_mirror_alpha_ramp_tau_families():
-    """(f) alphaRampTau ∈ {0.0, 2.5, 5.0} × 长混合成功/失败历史（n 至 20）。
+def test_dual_trust_lapse_semantics():
+    """纯 Python 侧双腿语义自检：首错 no-op、lapse 累计不清零、elif 互斥。
 
-    tau=0.0 必须与冻结语义逐位一致（默认关闭）；tau>0 验证证据递减阻尼的
-    Rust↔Python 1e-9 对拍（成功 ramp、失败保持原阻尼）。
+    位级断言用 dyadic alphaScale=0.25：失败步 streak=0 → alpha=0.25 精确，
+    1-(1-α) round-trip 无 1 ULP 误差（0.3 不满足，IEEE 固有）。
+    """
+    frozen_cfg = json.loads(json.dumps(DEFAULT_MEMORY_MODEL_CONFIG))
+    frozen_cfg["alphaScale"] = 0.25
+    config = json.loads(json.dumps(frozen_cfg))
+    config["alphaLapseRampTau"] = 6.0
+
+    # 首错 f=1 ⇒ e^0=1 ⇒ 与冻结语义逐位一致（偶发失误保护）
+    frozen = _mirror_from_config(frozen_cfg)
+    ramped = _mirror_from_config(config)
+    for recalled, delta in [(1, 0.0), (1, 1.0), (0, 2.0)]:
+        frozen.update(recalled, delta)
+        ramped.update(recalled, delta)
+    assert ramped.lapse_count == 1
+    assert ramped.stability == frozen.stability
+    assert ramped.difficulty == frozen.difficulty
+
+    # 第二次失败 f=2 实化；后续成功不清 lapse 累计（与 streak 不同），
+    # 且成功腿关闭（tau_s=0）时成功步永不吃失败腿 ramp（elif 互斥）
+    frozen.update(0, 1.0)
+    ramped.update(0, 1.0)
+    assert ramped.lapse_count == 2
+    assert ramped.stability != frozen.stability
+    state_after_fail = (ramped.stability, ramped.difficulty)
+    ramped.update(1, 1.0)
+    assert ramped.lapse_count == 2  # 成功不清 lapse
+    # 成功步 alpha 未被失败腿污染：把同状态用冻结配置重放一步对照
+    probe = _mirror_from_config(frozen_cfg)
+    probe.stability, probe.difficulty = state_after_fail
+    probe.review_count = 4
+    probe.correct_streak = 0
+    probe.lapse_count = 2
+    probe.update(1, 1.0)
+    assert probe.stability == ramped.stability
+    assert probe.difficulty == ramped.difficulty
+
+
+def _dual_trust_case(rng: random.Random, fail_heavy: bool) -> dict:
+    """长混合历史；fail_heavy=失败占优（lapse 腿密集触发），否则成功占优。"""
+    length = rng.randint(12, 20)
+    weights = [0, 0, 0, 1] if fail_heavy else [0, 1, 1, 1]
+    return {
+        "t": [rng.choice([0, 1, 1, 2, 3, 7]) for _ in range(length)],
+        "r": [rng.choice(weights) for _ in range(length)],
+    }
+
+
+def test_mirror_dual_trust_ramp_families():
+    """(f) 双腿信任调度族 —— Rust↔Python 1e-9 对拍。
+
+    - tau=(0,0)：冻结语义逐位回归（默认关闭）
+    - 成功腿单开 tau_s ∈ {2.5, 5.0}：混合历史（streak 挂靠 + 失败清零重启）
+    - 失败腿单开 tau_f ∈ {2.5, 6.0}：失败占优历史 n∈[12,20]（首错 no-op + leech 实化）
+    - 双开 (3.0, 6.0) / (3.0, 5.0)：候选 ship 值（elif 互斥路径全覆盖）
+    - 19 维 legacy × 双开：legacy 迁移路径（w19=0/w20=0.5）与双腿的正交性
     """
     rng = random.Random(20260612)
     base_w = [float(v) for v in DEFAULT_MEMORY_MODEL_CONFIG["w"]]
+    families: list[tuple[str, float, float, bool]] = [
+        ("frozen", 0.0, 0.0, False),
+        ("success_2.5", 2.5, 0.0, False),
+        ("success_5.0", 5.0, 0.0, False),
+        ("lapse_2.5", 0.0, 2.5, True),
+        ("lapse_6.0", 0.0, 6.0, True),
+        ("dual_3_6", 3.0, 6.0, False),
+        ("dual_3_6_failheavy", 3.0, 6.0, True),
+        ("dual_3_5", 3.0, 5.0, True),
+    ]
     max_state_err = 0.0
     with AdapterServer() as server:
-        for tau in (0.0, 2.5, 5.0):
-            for k in range(8):
+        for label, tau_s, tau_f, fail_heavy in families:
+            for k in range(6):
                 w = [value * rng.uniform(0.5, 1.5) for value in base_w]
                 w[20] = max(0.05, min(2.0, w[20]))
                 config = json.loads(json.dumps(DEFAULT_MEMORY_MODEL_CONFIG))
                 config["w"] = w
-                config["alphaRampTau"] = tau
+                config["alphaRampTau"] = tau_s
+                config["alphaLapseRampTau"] = tau_f
                 config["baseDesiredRetention"] = 0.90
                 config["forgettingCurveFloor"] = 0.0
-                length = rng.randint(12, 20)
-                case = {
-                    "t": [rng.choice([0, 1, 1, 2, 3, 7]) for _ in range(length)],
-                    "r": [rng.choice([0, 1, 1, 1]) for _ in range(length)],
-                }
+                case = _dual_trust_case(rng, fail_heavy)
                 err, _ = _assert_case_parity(
-                    server, config, case, f"ramp tau={tau} case {k}"
+                    server, config, case, f"dual-trust {label} case {k}"
                 )
                 max_state_err = max(max_state_err, err)
 
-        # 19 维 legacy × tau>0：legacy 迁移路径（w19=0/w20=0.5）与 ramp 的正交性对拍
+        # 19 维 legacy × 双开：legacy 迁移路径与双腿 ramp 的正交性对拍
         legacy_base_w = [float(v) for v in FSRS_BASELINE_CONFIG["w"]]
         for k in range(4):
             config = json.loads(json.dumps(FSRS_BASELINE_CONFIG))
             config["w"] = [value * rng.uniform(0.5, 1.5) for value in legacy_base_w]
-            config["alphaRampTau"] = 2.5
+            config["alphaRampTau"] = 3.0
+            config["alphaLapseRampTau"] = 6.0
             config["baseDesiredRetention"] = 0.90
             config["forgettingCurveFloor"] = 0.0
-            length = rng.randint(12, 20)
-            case = {
-                "t": [rng.choice([0, 1, 1, 2, 3, 7]) for _ in range(length)],
-                "r": [rng.choice([0, 1, 1, 1]) for _ in range(length)],
-            }
+            case = _dual_trust_case(rng, fail_heavy=(k % 2 == 1))
             err, _ = _assert_case_parity(
-                server, config, case, f"ramp legacy case {k}"
+                server, config, case, f"dual-trust legacy case {k}"
             )
             max_state_err = max(max_state_err, err)
-    print(f"\nalpha-ramp parity: max state abs err = {max_state_err:.3e}")
+    print(f"\ndual-trust parity: max state abs err = {max_state_err:.3e}")
 
 
 def test_mirror_matches_rust_adapter_legacy_19dim():

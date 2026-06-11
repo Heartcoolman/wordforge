@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::amas::config::MemoryModelConfig;
 
-use super::mdm::{compute_interval, recall_probability, update_strength, MdmState};
+use super::mdm::{compute_interval, recall_probability, update_strength_with_evidence, MdmState};
 
 const DAY_MS: i64 = 86_400_000;
 /// 二元 recall（1=记住）按 FSRS 二元拟合惯例映射到 Good(3)，而非 Easy(4)。
@@ -152,10 +152,12 @@ pub fn replay_history(
 
     let mut state = MdmState::default();
     let mut now_ms = 0i64;
-    // 忠实重放 mastery.rs:69-87 的连击动态 alpha（先推进连击、失败清零、首评 gap 恒过）。
+    // 忠实重放 mastery.rs:69-99 的连击动态 alpha（先推进连击、失败清零、首评 gap 恒过）
+    // 与双腿信任调度证据（advance-before-update：streak=记账后连击，lapses 含本次失败）。
     // interval_scale 钉死 1.0：生产 adjusted_interval_scale ~0.95-1.08，base alpha 偏差 ≤8%，
     // 耦合会破坏 Rust↔Python 对拍可测性，作为已接受的残余保真缺口记录。
     let mut streak: u32 = 0;
+    let mut lapses: u32 = 0;
 
     for (&delta_t, &result) in t_history.iter().zip(r_history.iter()) {
         if delta_t < 0 {
@@ -174,11 +176,13 @@ pub fn replay_history(
             }
         } else {
             streak = 0;
+            // 累计 lapse 在更新前自增（生产 lapses = total_attempts - total_correct 含本次失败）
+            lapses += 1;
         }
         let base_alpha = (1.0 * config.alpha_scale).clamp(config.alpha_min, config.alpha_max);
         let streak_bonus = 1.0 + (streak.min(5) as f64) * 0.1;
         let alpha = (base_alpha * streak_bonus).clamp(config.alpha_min, config.alpha_max);
-        update_strength(&mut state, quality, alpha, now_ms, config);
+        update_strength_with_evidence(&mut state, quality, alpha, streak, lapses, now_ms, config);
     }
 
     Ok(state)

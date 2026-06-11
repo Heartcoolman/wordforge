@@ -84,7 +84,18 @@ pub fn update_mastery_at(
     let streak_bonus = 1.0 + (state.correct_streak.min(5) as f64) * 0.1;
     let alpha = (base_alpha * streak_bonus).clamp(config.alpha_min, config.alpha_max);
 
-    super::mdm::update_strength(&mut state.mdm, quality, alpha, now, config);
+    // 双腿信任调度证据（advance-before-update）：streak=本次记账后的 correct_streak；
+    // lapses=total_attempts-total_correct（total_attempts 已自增，失败时含本次）
+    let lapse_count = state.total_attempts - state.total_correct;
+    super::mdm::update_strength_with_evidence(
+        &mut state.mdm,
+        quality,
+        alpha,
+        state.correct_streak,
+        lapse_count,
+        now,
+        config,
+    );
 
     state.recent_results.push(is_correct);
     let window = config.mastery_window_size as usize;

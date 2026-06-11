@@ -179,10 +179,14 @@ export interface LearningStrategyConfig {
   sprintNewRatio: number;
 }
 export interface MemoryModelConfig {
+  /**
+   * 双腿信任调度·失败腿时间常数 τ_f：失败（Again）时 alpha_eff(f)=1-(1-alpha)·e^{-(f-1)/tau}，f=含本次的累计 lapse 数 （首错 f=1 即 no-op = 偶发失误保护）；0.0=关闭（冻结语义）。
+   */
+  alphaLapseRampTau?: number;
   alphaMax?: number;
   alphaMin?: number;
   /**
-   * 证据递减阻尼时间常数：成功复习时 alpha_eff(n)=1-(1-alpha)·e^{-(n-1)/tau}； 0.0=关闭（冻结语义），DB 旧快照/未声明配置反序列化即得旧行为。
+   * 双腿信任调度·成功腿时间常数 τ_s：成功复习（grade≥2）时 alpha_eff(k)=1-(1-alpha)·e^{-(k-1)/tau}，k=本次记账后的 correct_streak （失败清零→阻尼重启）；0.0=关闭（冻结语义），DB 旧快照/未声明配置反序列化即得旧行为。
    */
   alphaRampTau?: number;
   alphaScale?: number;

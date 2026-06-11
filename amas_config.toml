@@ -192,8 +192,10 @@ w = [
 alphaScale = 0.3
 alphaMin = 0.1
 alphaMax = 0.5
-# 证据递减阻尼时间常数（0=关闭；Phase 4 调参胜者再写回）
+# 双腿信任调度（0=关闭；选型确认后再写回）：alphaRampTau=成功腿连击挂靠 τ_s，
+# alphaLapseRampTau=失败腿累计 lapse 挂靠 τ_f
 alphaRampTau = 0.0
+alphaLapseRampTau = 0.0
 forgettingThreshold = 0.2
 retentionMin = 0.75
 retentionMax = 0.95

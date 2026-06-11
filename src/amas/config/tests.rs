@@ -242,7 +242,7 @@ fn swd_max_history_zero_fails() {
 
 #[test]
 fn memory_model_invalid_fields_fail() {
-    let mutators: [fn(&mut AMASConfig); 19] = [
+    let mutators: [fn(&mut AMASConfig); 22] = [
         |c| c.memory_model.short_term_learning_rate = 2.0,
         |c| c.memory_model.medium_term_learning_rate = -0.1,
         |c| c.memory_model.long_term_learning_rate = 1.5,
@@ -274,6 +274,9 @@ fn memory_model_invalid_fields_fail() {
         |c| c.memory_model.alpha_ramp_tau = -0.1,
         |c| c.memory_model.alpha_ramp_tau = 100.1,
         |c| c.memory_model.alpha_ramp_tau = f64::NAN,
+        |c| c.memory_model.alpha_lapse_ramp_tau = -0.1,
+        |c| c.memory_model.alpha_lapse_ramp_tau = 100.1,
+        |c| c.memory_model.alpha_lapse_ramp_tau = f64::NAN,
     ];
     for (i, m) in mutators.iter().enumerate() {
         let mut c = AMASConfig::default();
@@ -284,11 +287,15 @@ fn memory_model_invalid_fields_fail() {
 
 #[test]
 fn alpha_ramp_tau_valid_boundaries_pass() {
-    // [0,100] 闭区间：0.0（默认关闭）与 100.0 均合法
+    // [0,100] 闭区间：0.0（默认关闭）与 100.0 均合法，双腿同域
     for v in [0.0, 100.0] {
         let mut c = AMASConfig::default();
         c.memory_model.alpha_ramp_tau = v;
-        assert!(c.validate().is_ok(), "tau {v}");
+        assert!(c.validate().is_ok(), "tau_s {v}");
+
+        let mut c = AMASConfig::default();
+        c.memory_model.alpha_lapse_ramp_tau = v;
+        assert!(c.validate().is_ok(), "tau_f {v}");
     }
 }
 
