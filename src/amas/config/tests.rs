@@ -801,12 +801,30 @@ fn curve_helpers_clamp_decay_to_safe_domain() {
 }
 
 #[test]
-fn repo_root_amas_config_loads_validates_and_pins_d5_knobs() {
-    // 2026-06-12 D5 写回门禁：仓库根 amas_config.toml 必须可加载且过校验，
-    // 双腿信任调度船值钉死 dual(3.0, 6.0)（预注册闸门胜者）
+fn repo_root_amas_config_loads_validates_and_pins_v5_gsp_ship_knobs() {
+    // 2026-06-13 v5 GSP 写回门禁：仓库根 amas_config.toml 必须可加载且过校验，
+    // F1 船值钉死（val Borda 30，三数据集 rank 1，seed-robust strict #1）。
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/amas_config.toml");
     let cfg = AMASConfig::load_from_toml(path).expect("load repo-root amas_config.toml");
     cfg.validate().expect("repo-root amas_config.toml must validate");
-    assert_eq!(cfg.memory_model.alpha_ramp_tau, 3.0);
-    assert_eq!(cfg.memory_model.alpha_lapse_ramp_tau, 6.0);
+    let m = &cfg.memory_model;
+    // 未平滑 FSRS-6 核心：alpha 钉死 1.0，双腿 ramp 关闭
+    assert_eq!(m.alpha_scale, 1.0);
+    assert_eq!(m.alpha_min, 1.0);
+    assert_eq!(m.alpha_max, 1.0);
+    assert_eq!(m.alpha_ramp_tau, 0.0);
+    assert_eq!(m.alpha_lapse_ramp_tau, 0.0);
+    assert_eq!(m.base_desired_retention, 0.85);
+    // GSP 调度策略头 F1 船值
+    assert_eq!(m.gsp_success_grade, 4);
+    assert_eq!(m.gsp_interval_cap_days, 40.0);
+    assert_eq!(m.gsp_graduation_streak, 2);
+    assert_eq!(m.gsp_graduation_floor_days, 30.0);
+    assert_eq!(m.gsp_young_retention, 0.86);
+    assert_eq!(m.gsp_mature_retention, 0.92);
+    assert_eq!(m.gsp_maturity_band_days, 14.0);
+    assert_eq!(m.gsp_interval_fuzz, 0.0);
+    // FSRS-6 公版 w（grade=4 共拟合）：首权重 w[0]=0.212、w[20]=0.1542
+    assert!((m.w[0] - 0.212).abs() < 1e-12);
+    assert!((m.w[20] - 0.1542).abs() < 1e-12);
 }

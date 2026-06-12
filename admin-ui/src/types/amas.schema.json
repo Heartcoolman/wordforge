@@ -217,6 +217,14 @@
         "forgettingCurveFactor": 0.2345679012345679,
         "forgettingCurveFloor": 0.0,
         "forgettingThreshold": 0.2,
+        "gspGraduationFloorDays": 30.0,
+        "gspGraduationStreak": 0,
+        "gspIntervalCapDays": 0.0,
+        "gspIntervalFuzz": 0.0,
+        "gspMatureRetention": 0.0,
+        "gspMaturityBandDays": 0.0,
+        "gspSuccessGrade": 3,
+        "gspYoungRetention": 0.0,
         "halfLifeBaseEpsilon": 0.3,
         "halfLifePower": 1.5,
         "halfLifeTimeUnitSecs": 1296000.0,
@@ -1160,6 +1168,56 @@
         },
         "forgettingThreshold": {
           "default": 0.2,
+          "type": "number",
+          "format": "double"
+        },
+        "gspGraduationFloorDays": {
+          "description": "毕业下限（天）。在 scale 之后、cap 之前施加 max(interval, floor)（随 streak 关闭而失效）。",
+          "default": 30.0,
+          "type": "number",
+          "format": "double"
+        },
+        "gspGraduationStreak": {
+          "description": "毕业连击阈值 k。0=关闭。当词的 correct_streak >= k 时，调度区间获得 floor 下限。",
+          "default": 0,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "gspIntervalCapDays": {
+          "description": "调度区间硬帽（天）。0=关闭。作用于 interval_scale 之后，与既有 90 天硬帽复合 min(90, cap)。",
+          "default": 0.0,
+          "type": "number",
+          "format": "double"
+        },
+        "gspIntervalFuzz": {
+          "description": "复习负载平滑：确定性区间抖动幅度。0=关闭。>0 时在 cap 之后施加 days·(1+fuzz·u)， u∈[-1,1) 由 stability/review_count 派生（见 GSP_SPEC §7），错峰削平同步复习波。",
+          "default": 0.0,
+          "type": "number",
+          "format": "double"
+        },
+        "gspMatureRetention": {
+          "description": "成熟卡（stability >= band）目标保持率（随 band 关闭而失效）。",
+          "default": 0.0,
+          "type": "number",
+          "format": "double"
+        },
+        "gspMaturityBandDays": {
+          "description": "成熟度分带阈值（天，按 stability）。0=关闭。>0 时 interval 求解的目标保持率由 young/mature 替换自适应 desired_retention（仅区间求解口径，预测/recall 路径不受影响）。",
+          "default": 0.0,
+          "type": "number",
+          "format": "double"
+        },
+        "gspSuccessGrade": {
+          "description": "二元成功复习映射的 FSRS grade：3=Good（旧默认，首评 S0=w[2]，bit-exact legacy）； 4=Easy（首评 S0=w[3] + 成功复习带 w[16] easy_bonus + 进入 FSRS-6 faithful 状态路径， 见 mdm.rs §3.5）。FSRS-6 公版 21 维 w 与 grade=4 共拟合 → 候选用 4 恢复预测腿校准。 入口 clamp：非 {3,4} 一律夹回 3。失败恒映射 1=Again。",
+          "default": 3,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "gspYoungRetention": {
+          "description": "年轻卡（stability < band）目标保持率（随 band 关闭而失效）。",
+          "default": 0.0,
           "type": "number",
           "format": "double"
         },

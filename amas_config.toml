@@ -153,7 +153,8 @@ halfLifeTimeUnitSecs = 1296000.0
 halfLifePower = 1.5
 recallRiskBonus = 0.2
 recallRiskThreshold = 0.55
-baseDesiredRetention = 0.9
+# 2026-06-13 v5 GSP 船值：F1 冠军 desired_retention（val Borda 30，三数据集 rank 1）
+baseDesiredRetention = 0.85
 passiveDecayHalfLifeDays = 30.0
 passiveDecayPower = 0.3
 masteryWindowSize = 20
@@ -162,22 +163,22 @@ stabilityBaseDays = 20.0
 # FSRS-6: 曲线 factor/decay 由 w[20] 派生（forgettingCurveFactor/Decay 已废弃，不再写入）
 forgettingCurveFloor = 0.0
 # FSRS-6 21 维（w[19]=同日饱和指数, w[20]=曲线 decay）
-# 2026-06-11 镜像对齐后约束重搜胜者：w[0,2,8,9,10,20] 调优（DHP 守门镜像与 Rust 对拍 1e-9
-# 等价后重搜 224 trial，三腿全过且 targetCount 789 反超基线 762；test split 泛化
-# vs 公版 +38.1%、vs 上代胜者 +5.4%，ICI 改善 18% 主导），其余维保持 FSRS-6 公版
-# （14 维空间实搜证实难度 w[4-7]/遗忘 w[11-14] 公版值即守门约束下最优）
+# 2026-06-13 v5 GSP 船值：回归 FSRS-6 公版 21 维 w（py-fsrs DEFAULT_PARAMETERS）。
+# v5 架构关键修正：公版 w 与 gspSuccessGrade=4（Easy）共拟合 → 预测腿逐位 = amas6（G3 满余量），
+# 调度增益全部由 GSP 策略头（cap/floor/band）承载。w[0,2,8,9,10] 的 NM0 调优值在 grade=4
+# 下失守预测腿 ICI，故回退公版（见 MEMORY amas_fsrs6 / GSP_SPEC §3.5）。
 w = [
-    0.07978223679403902,
+    0.212,
     1.2931,
-    3.02498794640543,
+    2.3065,
     8.2956,
     6.4133,
     0.8334,
     3.0194,
     0.001,
-    1.6259347829476551,
-    0.2533678250394599,
-    1.1124862163489901,
+    1.8722,
+    0.1666,
+    0.796,
     1.4835,
     0.0614,
     0.2629,
@@ -187,15 +188,16 @@ w = [
     0.5425,
     0.0912,
     0.0658,
-    0.2632510019126722,
+    0.1542,
 ]
-alphaScale = 0.3
-alphaMin = 0.1
-alphaMax = 0.5
+# 2026-06-13 v5 GSP 船值：alpha 平滑钉死 alpha_eff=1（未平滑 FSRS-6 核心），双腿 ramp no-op。
+alphaScale = 1.0
+alphaMin = 1.0
+alphaMax = 1.0
 # 双腿信任调度：alphaRampTau=成功腿连击挂靠 τ_s，alphaLapseRampTau=失败腿累计 lapse 挂靠 τ_f
-# 2026-06-12 D5 选型写回：dual(3.0, 6.0)（预注册闸门胜者，val 3 种子；w 维持 NM0 不动）
-alphaRampTau = 3.0
-alphaLapseRampTau = 6.0
+# 2026-06-13 v5 GSP 船值：双腿关闭（alpha 已钉死 1.0，ramp 本为 no-op）。
+alphaRampTau = 0.0
+alphaLapseRampTau = 0.0
 forgettingThreshold = 0.2
 retentionMin = 0.75
 retentionMax = 0.95
@@ -207,6 +209,18 @@ highFatigueThreshold = 0.6
 highFatigueRetentionDrop = 0.05
 lowMotivationThreshold = -0.2
 lowMotivationRetentionDrop = 0.03
+# === GSP 调度策略头（Graduated Scheduling Policy；契约 benchmarks/maimemo/GSP_SPEC.md）===
+# 2026-06-13 v5 GSP 船值：F1 冠军（val Borda 30，三数据集 rank 1，seed-robust strict #1）。
+# gspSuccessGrade=4 进入 FSRS-6 faithful 状态路径（预测腿 = amas6）；cap40+streak2+floor30
+# 治理调度尾部，young/mature 分带（band 14 天）按成熟度调目标保持率；fuzz=0（F1 不开）。
+gspSuccessGrade = 4
+gspIntervalCapDays = 40.0
+gspGraduationStreak = 2
+gspGraduationFloorDays = 30.0
+gspYoungRetention = 0.86
+gspMatureRetention = 0.92
+gspMaturityBandDays = 14.0
+gspIntervalFuzz = 0.0
 
 [iad]
 interferencePenaltyFactor = 0.1

@@ -250,8 +250,10 @@ impl AMASConfig {
         {
             return Err("memory_model.alpha_min/alpha_max must be in [0,1]".to_string());
         }
-        if self.memory_model.alpha_min >= self.memory_model.alpha_max {
-            return Err("memory_model.alpha_min must be < alpha_max".to_string());
+        // alpha_min == alpha_max 合法（alpha 钉死，平滑退化为无；v5 GSP 船值 alpha_min=alpha_max=1.0
+        // 即未平滑 FSRS-6 核心）。仅拒 min > max（clamp 边界反转会 panic 学习热路径）。
+        if self.memory_model.alpha_min > self.memory_model.alpha_max {
+            return Err("memory_model.alpha_min must be <= alpha_max".to_string());
         }
         // 0=关闭；上限防极小 tau 误配（exp 下溢无 UB，纯域约束）；双腿同域
         if !(0.0..=100.0).contains(&self.memory_model.alpha_ramp_tau) {
@@ -262,6 +264,38 @@ impl AMASConfig {
         }
         if !(0.0..=1.0).contains(&self.memory_model.forgetting_threshold) {
             return Err("memory_model.forgetting_threshold must be in [0,1]".to_string());
+        }
+        // GSP 调度策略头（契约 benchmarks/maimemo/GSP_SPEC.md §1/§2；默认全关 = bit-exact legacy）。
+        // 成功成绩带仅开放二元成功语义 {3=Good, 4=Easy}；2=Hard 非成功语义，拒绝。
+        if !matches!(self.memory_model.gsp_success_grade, 3 | 4) {
+            return Err("memory_model.gsp_success_grade must be 3 (Good) or 4 (Easy)".to_string());
+        }
+        // 区间硬帽：0=关闭，否则 [0,365]（顶侧与 90 天硬帽复合 min(90,cap)）。
+        if !(0.0..=365.0).contains(&self.memory_model.gsp_interval_cap_days) {
+            return Err("memory_model.gsp_interval_cap_days must be in [0,365] (0=off)".to_string());
+        }
+        // 毕业下限：[1,90]（mastered 定义依赖 next_interval≥30，floor<1 无意义；>90 越硬帽）。
+        if !(1.0..=90.0).contains(&self.memory_model.gsp_graduation_floor_days) {
+            return Err("memory_model.gsp_graduation_floor_days must be in [1,90]".to_string());
+        }
+        // young/mature 目标保持率：0=关闭，否则须落曲线合法保持率域 [0.5,0.99]。
+        for (val, name) in [
+            (self.memory_model.gsp_young_retention, "gsp_young_retention"),
+            (self.memory_model.gsp_mature_retention, "gsp_mature_retention"),
+        ] {
+            if val != 0.0 && !(0.5..=0.99).contains(&val) {
+                return Err(format!(
+                    "memory_model.{name} must be 0 (off) or in [0.5,0.99]"
+                ));
+            }
+        }
+        // 成熟度分带阈值：0=关闭，否则 [0,365]（按 stability 天分带）。
+        if !(0.0..=365.0).contains(&self.memory_model.gsp_maturity_band_days) {
+            return Err("memory_model.gsp_maturity_band_days must be in [0,365] (0=off)".to_string());
+        }
+        // 区间抖动幅度：[0,1)；>=1 会令 (1+fuzz·u) 在 u→-1 时触及非正区间。
+        if !(0.0..1.0).contains(&self.memory_model.gsp_interval_fuzz) {
+            return Err("memory_model.gsp_interval_fuzz must be in [0,1)".to_string());
         }
         if !(0.0..=1.0).contains(&self.memory_model.retention_min)
             || !(0.0..=1.0).contains(&self.memory_model.retention_max)

@@ -70,6 +70,37 @@ pub struct MemoryModelConfig {
     pub alpha_lapse_ramp_tau: f64,
     #[serde(default = "default_forgetting_threshold")]
     pub forgetting_threshold: f64,
+    // === GSP 调度策略头（Graduated Scheduling Policy；契约 benchmarks/maimemo/GSP_SPEC.md）===
+    // 全部默认 = 关闭 = 与不带该键的旧配置/DB 快照逐位等价（bit-exact legacy）。
+    /// 二元成功复习映射的 FSRS grade：3=Good（旧默认，首评 S0=w[2]，bit-exact legacy）；
+    /// 4=Easy（首评 S0=w[3] + 成功复习带 w[16] easy_bonus + 进入 FSRS-6 faithful 状态路径，
+    /// 见 mdm.rs §3.5）。FSRS-6 公版 21 维 w 与 grade=4 共拟合 → 候选用 4 恢复预测腿校准。
+    /// 入口 clamp：非 {3,4} 一律夹回 3。失败恒映射 1=Again。
+    #[serde(default = "default_gsp_success_grade")]
+    pub gsp_success_grade: u32,
+    /// 调度区间硬帽（天）。0=关闭。作用于 interval_scale 之后，与既有 90 天硬帽复合 min(90, cap)。
+    #[serde(default = "default_gsp_interval_cap_days")]
+    pub gsp_interval_cap_days: f64,
+    /// 毕业连击阈值 k。0=关闭。当词的 correct_streak >= k 时，调度区间获得 floor 下限。
+    #[serde(default = "default_gsp_graduation_streak")]
+    pub gsp_graduation_streak: u32,
+    /// 毕业下限（天）。在 scale 之后、cap 之前施加 max(interval, floor)（随 streak 关闭而失效）。
+    #[serde(default = "default_gsp_graduation_floor_days")]
+    pub gsp_graduation_floor_days: f64,
+    /// 年轻卡（stability < band）目标保持率（随 band 关闭而失效）。
+    #[serde(default = "default_gsp_young_retention")]
+    pub gsp_young_retention: f64,
+    /// 成熟卡（stability >= band）目标保持率（随 band 关闭而失效）。
+    #[serde(default = "default_gsp_mature_retention")]
+    pub gsp_mature_retention: f64,
+    /// 成熟度分带阈值（天，按 stability）。0=关闭。>0 时 interval 求解的目标保持率由
+    /// young/mature 替换自适应 desired_retention（仅区间求解口径，预测/recall 路径不受影响）。
+    #[serde(default = "default_gsp_maturity_band_days")]
+    pub gsp_maturity_band_days: f64,
+    /// 复习负载平滑：确定性区间抖动幅度。0=关闭。>0 时在 cap 之后施加 days·(1+fuzz·u)，
+    /// u∈[-1,1) 由 stability/review_count 派生（见 GSP_SPEC §7），错峰削平同步复习波。
+    #[serde(default = "default_gsp_interval_fuzz")]
+    pub gsp_interval_fuzz: f64,
     // === 原 mdm.rs 模块级常量 ===
     #[serde(default = "default_retention_min")]
     pub retention_min: f64,
@@ -169,6 +200,33 @@ pub(crate) fn default_alpha_lapse_ramp_tau() -> f64 {
 }
 pub(crate) fn default_forgetting_threshold() -> f64 {
     0.2
+}
+// === GSP 调度策略头默认值（全部 = 关闭，bit-exact legacy）===
+pub(crate) fn default_gsp_success_grade() -> u32 {
+    // 默认 3=Good：与 benchmark_adapter SUCCESS_QUALITY=0.7 落 Good 带逐位等价
+    3
+}
+pub(crate) fn default_gsp_interval_cap_days() -> f64 {
+    // 0=关闭：未声明该旋钮的配置（含 DB 历史快照）反序列化为精确旧语义
+    0.0
+}
+pub(crate) fn default_gsp_graduation_streak() -> u32 {
+    0
+}
+pub(crate) fn default_gsp_graduation_floor_days() -> f64 {
+    30.0
+}
+pub(crate) fn default_gsp_young_retention() -> f64 {
+    0.0
+}
+pub(crate) fn default_gsp_mature_retention() -> f64 {
+    0.0
+}
+pub(crate) fn default_gsp_maturity_band_days() -> f64 {
+    0.0
+}
+pub(crate) fn default_gsp_interval_fuzz() -> f64 {
+    0.0
 }
 pub(crate) fn default_retention_min() -> f64 {
     // bench tuned v3：抬高下限防过度拉长间隔
@@ -283,6 +341,15 @@ impl Default for MemoryModelConfig {
             alpha_ramp_tau: 0.0,
             alpha_lapse_ramp_tau: 0.0,
             forgetting_threshold: 0.2,
+            // GSP 调度策略头默认全关（bit-exact legacy）
+            gsp_success_grade: 3,
+            gsp_interval_cap_days: 0.0,
+            gsp_graduation_streak: 0,
+            gsp_graduation_floor_days: 30.0,
+            gsp_young_retention: 0.0,
+            gsp_mature_retention: 0.0,
+            gsp_maturity_band_days: 0.0,
+            gsp_interval_fuzz: 0.0,
             retention_min: 0.75,
             retention_max: 0.95,
             max_interval_days: 90.0,

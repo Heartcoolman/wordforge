@@ -111,7 +111,7 @@ pub fn update_strength_with_evidence(
     let quality = quality.clamp(0.0, 1.0);
     let alpha = alpha.clamp(0.0, 1.0);
     // Map quality to FSRS grade
-    let grade: u32 = if quality <= 0.15 {
+    let mut grade: u32 = if quality <= 0.15 {
         1
     } else if quality <= 0.5 {
         2
@@ -120,6 +120,14 @@ pub fn update_strength_with_evidence(
     } else {
         4
     };
+    // GSP 成功成绩带（gsp_success_grade，契约 GSP_SPEC §3.5）：
+    // ==4 时二元成功映射到 Easy(4)，进入 FSRS-6 faithful 状态路径（D 先更新 / S 用新 D /
+    // 无同日特化）。失败（grade==1 Again）恒不变。==3（默认）逐位 legacy 不变。
+    // 仅在合法成功成绩域 {3,4} 生效；其余值（不应出现，validate 已拒）按 3 处理不重映射。
+    let fsrs6_faithful = config.gsp_success_grade == 4;
+    if fsrs6_faithful && grade >= 2 {
+        grade = 4;
+    }
 
     if state.review_count == 0 {
         // First review: initial stability from w0-w3
@@ -128,6 +136,42 @@ pub fn update_strength_with_evidence(
         // Initial difficulty: D0(G) = w4 - e^{w5*(G-1)} + 1
         state.difficulty =
             (config.w[4] - (config.w[5] * (grade as f64 - 1.0)).exp() + 1.0).clamp(1.0, 10.0);
+    } else if fsrs6_faithful {
+        // —— FSRS-6 faithful 状态路径（gsp_success_grade==4，契约 GSP_SPEC §3.5）——
+        // 逐位等价 Python FSRS6MirrorState / WordforgeMirrorState 的 success_grade==4 分支：
+        // ① 难度先更新：self.difficulty 先算出，S 公式用更新后的 D（而非 prev_D）；
+        // ② mean-reversion 锚 D0(Easy=4)（d_target 不预夹，仅最终 D 夹 [1,10]）；
+        // ③ 无同日特化分支（elapsed<1 仍走常规成功/遗忘公式）；
+        // ④ 无 alpha 平滑：直接赋值 target（v5 候选 alpha 钉死 1.0，平滑本为 no-op）。
+        let r = recall_probability(state, now_ms, config);
+        let prev_difficulty = state.difficulty;
+        // D 先更新（mean-reversion 目标锚 D0(Easy=4)）
+        let delta_d = -config.w[6] * (grade as f64 - 3.0);
+        let d_prime = prev_difficulty + delta_d * (10.0 - prev_difficulty) / 9.0;
+        let d_target = config.w[4] - (config.w[5] * (4.0 - 1.0)).exp() + 1.0;
+        state.difficulty =
+            (config.w[7] * d_target + (1.0 - config.w[7]) * d_prime).clamp(1.0, 10.0);
+        // S 公式使用更新后的 self.difficulty
+        let prev_stability = state.stability.max(0.01);
+        if grade >= 2 {
+            let hard_penalty = if grade == 2 { config.w[15] } else { 1.0 };
+            let easy_bonus = if grade == 4 { config.w[16] } else { 1.0 };
+            let s_inc = (config.w[8].exp()
+                * (11.0 - state.difficulty)
+                * prev_stability.powf(-config.w[9])
+                * ((config.w[10] * (1.0 - r)).exp() - 1.0)
+                * hard_penalty
+                * easy_bonus)
+                .max(0.0);
+            state.stability = (prev_stability * (s_inc + 1.0)).clamp(0.01, 36_500.0);
+        } else {
+            // post-lapse：S'_f = w11·D^{-w12}·((S+1)^w13−1)·e^{w14(1-R)}，夹至 [0.01, prev_S]
+            let s_lapse = config.w[11]
+                * state.difficulty.powf(-config.w[12])
+                * ((prev_stability + 1.0).powf(config.w[13]) - 1.0)
+                * (config.w[14] * (1.0 - r)).exp();
+            state.stability = s_lapse.clamp(0.01, prev_stability);
+        }
     } else {
         // Compute current R
         let r = recall_probability(state, now_ms, config);
@@ -285,6 +329,127 @@ pub fn compute_interval(
     let interval_secs = interval_days * 86400.0;
     ((interval_secs * interval_scale.max(0.1)).min(config.max_interval_days * 86400.0) as i64)
         .max(config.min_interval_secs)
+}
+
+/// GSP 调度策略头是否激活：任一旋钮非关闭值即激活。全关时生产走精确旧 compute_interval 路径
+/// （秒级管线，bit-exact legacy）；任一旋钮开启时切换到 GSP 天级 head（GSP_SPEC §3）。
+/// 注：gsp_success_grade 是 state-update 旋钮（影响 S/D），不影响调度 head 是否激活。
+pub fn gsp_schedule_active(config: &MemoryModelConfig) -> bool {
+    config.gsp_interval_cap_days > 0.0
+        || config.gsp_graduation_streak > 0
+        || config.gsp_maturity_band_days > 0.0
+        || config.gsp_interval_fuzz > 0.0
+}
+
+/// GSP base 区间（天，整数；契约 GSP_SPEC §3 步骤 1–2）：解曲线 R(t,S)=target_recall，
+/// 顶侧夹 max_interval_days(=90)，再 max(1, ceil)。逐位等价 Python
+/// `WordforgeMirrorState.interval_days()`（mdm.rs compute_interval 的天级、未乘 scale 形态）。
+/// target_recall 由调用方传入（band>0 时为 banded retention，否则 desired_retention）。
+pub fn compute_interval_base_days(
+    state: &MdmState,
+    target_recall: f64,
+    config: &MemoryModelConfig,
+) -> i64 {
+    let s = state.stability.max(0.01);
+    let floor = config.forgetting_curve_floor;
+    let adjusted_target = ((target_recall - floor) / (1.0 - floor).max(1e-9)).clamp(1e-6, 1.0);
+    let days = s / config.curve_factor()
+        * (adjusted_target.powf(-1.0 / config.curve_decay()) - 1.0);
+    let capped = days.min(config.max_interval_days);
+    (capped.ceil() as i64).max(1)
+}
+
+/// GSP 成熟度分带（契约 GSP_SPEC §3.1）：band>0 时返回替换 desired_retention 的目标保持率；
+/// 关闭时返回 None。按当前 stability 与 band 的关系选 young/mature（< band 用 young，
+/// >= band 用 mature），各自夹至曲线合法域 [1e-6, 1.0]。仅区间求解口径，预测/recall 不受影响。
+pub fn gsp_banded_retention(state: &MdmState, config: &MemoryModelConfig) -> Option<f64> {
+    if config.gsp_maturity_band_days <= 0.0 {
+        return None;
+    }
+    let target = if state.stability < config.gsp_maturity_band_days {
+        config.gsp_young_retention
+    } else {
+        config.gsp_mature_retention
+    };
+    Some(target.clamp(1e-6, 1.0))
+}
+
+/// GSP_SPEC §7.2 确定性抖动量 u ∈ [-1, 1)，由 in-state 量派生（时间不变、身份无关）：
+///   h = stability·12.9898 + review_count·78.233（先各自乘、再加，f64 同序）
+///   f = h − floor(h)；u = 2f − 1
+/// 常数取自经典 GLSL fract(sin(dot(...))) hash 家族但去 sin（保证 Python↔Rust 可移植）。
+fn gsp_fuzz_u(stability: f64, review_count: u32) -> f64 {
+    let h = stability * 12.9898 + review_count as f64 * 78.233;
+    let f = h - h.floor();
+    2.0 * f - 1.0
+}
+
+/// banker's rounding（round-half-to-even），对齐 Python 3 `round` 语义（GSP_SPEC §3 取整）。
+/// Rust `f64::round` 为 round-half-away-from-zero，会在 .5 边界与 Python 差 1。
+fn round_half_to_even(x: f64) -> f64 {
+    let r = x.round();
+    if (x - x.floor() - 0.5).abs() < f64::EPSILON {
+        // 恰好 .5：取最近偶数
+        let f = x.floor();
+        if (f as i64) % 2 == 0 {
+            f
+        } else {
+            f + 1.0
+        }
+    } else {
+        r
+    }
+}
+
+/// GSP 调度策略头（契约 GSP_SPEC §3 步骤 3–6 + §7）：在已含 banded-retention 求解的
+/// **整数 base 天**（ceil 后）之上，依次施加 interval_scale → 毕业下限 → 区间帽 → 抖动 → 取整。
+/// 全链路时间不变（仅读 correct_streak / stability / review_count，不读模拟日/视界）。
+/// 默认全关时（cap=0, streak=0, fuzz=0, band=0）逐位等价旧语义 base_days·scale 后取整。
+///
+/// 返回**天数**（>=1 整数）。调用方按需 ×86400 转秒（生产 next_review_interval_secs）。
+pub fn gsp_schedule_days(
+    base_days_int: i64,
+    interval_scale: f64,
+    correct_streak: u32,
+    state: &MdmState,
+    config: &MemoryModelConfig,
+) -> i64 {
+    // 步骤 3：ensemble interval_scale（保真对齐 ensemble.rs：.max(0.1)，无上界、无分带）
+    let mut scaled_days = (base_days_int as f64 * interval_scale.max(0.1)).max(1.0);
+
+    // 步骤 4：毕业下限（scale 之后、cap 之前）
+    let graduated = config.gsp_graduation_streak > 0
+        && correct_streak >= config.gsp_graduation_streak;
+    if graduated {
+        scaled_days = scaled_days.max(config.gsp_graduation_floor_days);
+    }
+
+    // 步骤 5：区间帽 min(90, gspCap)，与既有 90 天硬帽复合
+    let mut cap = config.max_interval_days;
+    if config.gsp_interval_cap_days > 0.0 {
+        cap = cap.min(config.gsp_interval_cap_days);
+    }
+    scaled_days = scaled_days.min(cap);
+
+    // 步骤 5.5：区间抖动（cap 之后、取整之前；默认关闭即 no-op）
+    if config.gsp_interval_fuzz > 0.0 {
+        let u = gsp_fuzz_u(state.stability, state.review_count);
+        let fuzzed = scaled_days * (1.0 + config.gsp_interval_fuzz * u);
+        // 顶侧夹 fuzz_cap = min(90, cap·(1+fuzz))：允许抖动把 cap-pinned 词推到 cap 之上错峰，
+        // 但绝不越 90 天硬帽。底侧夹 lo：毕业词夹 floor（不破 mastered 定义），非毕业词夹 1。
+        let fuzz_cap = config
+            .max_interval_days
+            .min(cap * (1.0 + config.gsp_interval_fuzz));
+        let lo = if graduated {
+            config.gsp_graduation_floor_days
+        } else {
+            1.0
+        };
+        scaled_days = fuzzed.clamp(lo, fuzz_cap);
+    }
+
+    // 步骤 6：取整 + 底侧夹（banker's rounding 对齐 Python round）
+    (round_half_to_even(scaled_days) as i64).max(1)
 }
 
 #[cfg(test)]
@@ -615,5 +780,189 @@ mod tests {
             update_strength_with_evidence(&mut ramped, quality, 0.3, 3, 0, now + 2 * DAY_MS, &ramped_config);
             assert_ne!(frozen.stability, ramped.stability, "quality {quality}");
         }
+    }
+
+    // ===== GSP 调度策略头（契约 GSP_SPEC）=====
+
+    fn gsp_config() -> MemoryModelConfig {
+        // FSRS-6 公版 w（与 amas_config.toml F1 船值一致），其余 default
+        let mut c = MemoryModelConfig::default();
+        c.w = crate::amas::config::default_w();
+        c.base_desired_retention = 0.85;
+        c
+    }
+
+    /// gsp_success_grade 默认 3：grade>=2 不重映射，逐位 = legacy 路径。
+    #[test]
+    fn gsp_success_grade_default_3_is_legacy() {
+        let config = gsp_config();
+        assert_eq!(config.gsp_success_grade, 3);
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut s = MdmState::default();
+        update_strength_with_evidence(&mut s, 0.7, 1.0, 1, 0, now, &config);
+        // grade=3 首评 → S0 = w[2]
+        assert!((s.stability - config.w[2]).abs() < 1e-12);
+    }
+
+    /// gsp_success_grade=4：二元成功映射 Easy(4)，首评 S0=w[3]，进入 FSRS-6 faithful 路径。
+    /// 逐位等价手算 FSRS6MirrorState（D 先更新 / S 用新 D / 无同日特化）。
+    #[test]
+    fn gsp_success_grade_4_fsrs6_faithful_matches_hand_calc() {
+        let mut config = gsp_config();
+        config.gsp_success_grade = 4;
+        config.alpha_min = 1.0;
+        config.alpha_max = 1.0;
+        let w = &config.w;
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut s = MdmState::default();
+        // 首评成功（grade→4）：S0=w[3]，D0=w4-exp(w5*3)+1
+        update_strength_with_evidence(&mut s, 0.7, 1.0, 1, 0, now, &config);
+        assert!((s.stability - w[3]).abs() < 1e-12, "S0 应取 w[3]（Easy）");
+        let d0 = (w[4] - (w[5] * 3.0).exp() + 1.0).clamp(1.0, 10.0);
+        assert!((s.difficulty - d0).abs() < 1e-12);
+
+        // 第二次成功（跨日）：手算 FSRS-6 faithful（D 先更新，S 用新 D）
+        let prev_s = s.stability;
+        let prev_d = s.difficulty;
+        let at = now + DAY_MS;
+        let r = recall_probability(&s, at, &config);
+        let delta_d = -w[6] * (4.0 - 3.0);
+        let d_prime = prev_d + delta_d * (10.0 - prev_d) / 9.0;
+        let d_target = w[4] - (w[5] * 3.0).exp() + 1.0;
+        let exp_d = (w[7] * d_target + (1.0 - w[7]) * d_prime).clamp(1.0, 10.0);
+        let s_inc = (w[8].exp()
+            * (11.0 - exp_d)
+            * prev_s.powf(-w[9])
+            * ((w[10] * (1.0 - r)).exp() - 1.0)
+            * w[16])
+            .max(0.0);
+        let exp_s = (prev_s * (s_inc + 1.0)).clamp(0.01, 36_500.0);
+        update_strength_with_evidence(&mut s, 0.7, 1.0, 2, 0, at, &config);
+        assert!((s.difficulty - exp_d).abs() < 1e-9, "D: {} vs {}", s.difficulty, exp_d);
+        assert!((s.stability - exp_s).abs() < 1e-9, "S: {} vs {}", s.stability, exp_s);
+    }
+
+    /// GSP 全关时调度 head 不激活，走旧 compute_interval 路径（bit-exact legacy）。
+    #[test]
+    fn gsp_off_not_active() {
+        let config = gsp_config();
+        assert!(!gsp_schedule_active(&config));
+    }
+
+    /// 任一 GSP 调度旋钮开启即激活；gsp_success_grade 不影响 head 激活（它是 state 旋钮）。
+    #[test]
+    fn gsp_schedule_active_gated_by_scheduling_knobs() {
+        let mut c = gsp_config();
+        c.gsp_success_grade = 4; // 仅 state 旋钮，不激活 head
+        assert!(!gsp_schedule_active(&c));
+        c.gsp_interval_cap_days = 40.0;
+        assert!(gsp_schedule_active(&c));
+        let mut c = gsp_config();
+        c.gsp_graduation_streak = 2;
+        assert!(gsp_schedule_active(&c));
+        let mut c = gsp_config();
+        c.gsp_maturity_band_days = 14.0;
+        assert!(gsp_schedule_active(&c));
+        let mut c = gsp_config();
+        c.gsp_interval_fuzz = 0.1;
+        assert!(gsp_schedule_active(&c));
+    }
+
+    /// 毕业下限：streak>=k 时区间弹到 floor；streak<k 时不施加。
+    #[test]
+    fn gsp_graduation_floor_triggers_at_k() {
+        let mut config = gsp_config();
+        config.gsp_graduation_streak = 3;
+        config.gsp_graduation_floor_days = 30.0;
+        let mut s = MdmState::default();
+        s.stability = 5.0; // 低 S → base 区间 < 30
+        s.review_count = 3;
+        s.last_review_at = Some(0);
+        let base = compute_interval_base_days(&s, 0.85, &config);
+        assert!(base < 30, "构造的 base 应 < 30，实际 {base}");
+        // streak=2 < k：不毕业，区间 = base
+        let d2 = gsp_schedule_days(base, 1.0, 2, &s, &config);
+        assert!(d2 < 30);
+        // streak=3 == k：毕业，区间弹到 >=30
+        let d3 = gsp_schedule_days(base, 1.0, 3, &s, &config);
+        assert!(d3 >= 30, "streak>=k 应弹到 floor，实际 {d3}");
+    }
+
+    /// 区间帽与 90 天硬帽复合 min(90, cap)。
+    #[test]
+    fn gsp_cap_composes_with_90() {
+        let mut config = gsp_config();
+        let mut s = MdmState::default();
+        s.stability = 500.0; // 高 S → base 撞 90
+        s.review_count = 10;
+        s.last_review_at = Some(0);
+        let base = compute_interval_base_days(&s, 0.85, &config);
+        assert_eq!(base, 90, "高 S 应撞 90 帽");
+        // cap=45：压到 45
+        config.gsp_interval_cap_days = 45.0;
+        assert_eq!(gsp_schedule_days(base, 1.0, 0, &s, &config), 45);
+        // cap=120 > 90：min(90,120)=90，no-op
+        config.gsp_interval_cap_days = 120.0;
+        assert_eq!(gsp_schedule_days(base, 1.0, 0, &s, &config), 90);
+    }
+
+    /// fuzz 确定性 + 同输入恒等 + u∈[-1,1)。
+    #[test]
+    fn gsp_fuzz_u_deterministic_and_bounded() {
+        for (stab, rc) in [(1.5, 3u32), (37.2, 10), (90.0, 25), (0.4, 1), (12.34, 7)] {
+            let u = gsp_fuzz_u(stab, rc);
+            assert_eq!(u, gsp_fuzz_u(stab, rc));
+            assert!((-1.0..1.0).contains(&u), "u 越界: {u}");
+        }
+    }
+
+    /// fuzz 不把已毕业词拉到 floor 之下（mastered 定义不破），不越 90 硬帽。
+    #[test]
+    fn gsp_fuzz_preserves_graduated_floor_and_90_cap() {
+        let mut config = gsp_config();
+        config.gsp_interval_cap_days = 40.0;
+        config.gsp_graduation_streak = 2;
+        config.gsp_graduation_floor_days = 30.0;
+        config.gsp_interval_fuzz = 0.20;
+        // 扫多组 state 使 u 可能为负，断言毕业词区间恒 >=30 且 <=90
+        for (stab, rc) in [(40.0, 5u32), (35.7, 8), (50.1, 12), (38.2, 3), (45.9, 20)] {
+            let mut s = MdmState::default();
+            s.stability = stab;
+            s.review_count = rc;
+            s.last_review_at = Some(0);
+            let base = compute_interval_base_days(&s, 0.85, &config);
+            let d = gsp_schedule_days(base, 1.0, 2, &s, &config); // streak=2 → 毕业
+            assert!(d >= 30, "毕业词被 fuzz 击穿 floor: {d}");
+            assert!(d <= 90, "fuzz 越 90 硬帽: {d}");
+        }
+    }
+
+    /// banded retention：S 跨 band 时目标保持率切换（< band → young，>= band → mature）。
+    #[test]
+    fn gsp_banded_retention_switches_at_band() {
+        let mut config = gsp_config();
+        config.gsp_maturity_band_days = 20.0;
+        config.gsp_young_retention = 0.95;
+        config.gsp_mature_retention = 0.80;
+        let mut s = MdmState::default();
+        s.stability = 19.999;
+        assert_eq!(gsp_banded_retention(&s, &config), Some(0.95));
+        s.stability = 20.001;
+        assert_eq!(gsp_banded_retention(&s, &config), Some(0.80));
+        // band=0：关闭 → None
+        config.gsp_maturity_band_days = 0.0;
+        assert_eq!(gsp_banded_retention(&s, &config), None);
+    }
+
+    /// round_half_to_even 对齐 Python banker's rounding（.5 取最近偶数）。
+    #[test]
+    fn gsp_round_half_to_even_matches_python() {
+        assert_eq!(round_half_to_even(0.5), 0.0);
+        assert_eq!(round_half_to_even(1.5), 2.0);
+        assert_eq!(round_half_to_even(2.5), 2.0);
+        assert_eq!(round_half_to_even(3.5), 4.0);
+        assert_eq!(round_half_to_even(40.0), 40.0);
+        assert_eq!(round_half_to_even(40.4), 40.0);
+        assert_eq!(round_half_to_even(40.6), 41.0);
     }
 }
