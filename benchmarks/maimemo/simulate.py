@@ -103,12 +103,14 @@ def _sample_users(
     max_words_per_user: int,
     seed: int,
     duckdb_threads: int = 4,
+    split: str = "test",
 ) -> pd.DataFrame:
-    """Return the most-recent prefix row per (user, word) from the test split.
+    """Return the most-recent prefix row per (user, word) from the given split.
 
     Sampling is pushed entirely into DuckDB to avoid loading the full dataset.
     If n_users == -1, all users are returned.
     """
+    assert split in ("train", "val", "test"), f"invalid split: {split!r}"
     import duckdb
     import math as _math
 
@@ -125,7 +127,7 @@ def _sample_users(
         bucket_counts = conn.execute(f"""
             SELECT user_bucket_100, COUNT(DISTINCT u) AS cnt
             FROM read_parquet('{parquet_path}')
-            WHERE split = 'test'
+            WHERE split = '{split}'
             GROUP BY user_bucket_100
             ORDER BY user_bucket_100
         """).fetch_df()
@@ -151,7 +153,7 @@ def _sample_users(
                 difficulty,
                 ROW_NUMBER() OVER (PARTITION BY u, w ORDER BY LENGTH(t_history) DESC) AS rn
             FROM read_parquet('{parquet_path}')
-            WHERE split = 'test'
+            WHERE split = '{split}'
               {user_filter}
         )
         SELECT user_id, word_id, t_history, r_history, difficulty
@@ -376,6 +378,7 @@ def simulate_strategies(
     oracle_batch_size: int = 4096,
     seed: int = 42,
     duckdb_threads: int = 4,
+    split: str = "test",
 ) -> Dict[str, Any]:
     """Run forward simulation and return a comparison report.
 
@@ -424,8 +427,8 @@ def simulate_strategies(
     # -----------------------------------------------------------------------
     # Sample users from test split
     # -----------------------------------------------------------------------
-    print(f"[simulate] sampling {n_users} users from test split …")
-    df = _sample_users(paths, n_users, max_words_per_user, seed, duckdb_threads)
+    print(f"[simulate] sampling {n_users} users from {split} split …")
+    df = _sample_users(paths, n_users, max_words_per_user, seed, duckdb_threads, split=split)
 
     if df.empty:
         raise RuntimeError(
@@ -508,6 +511,7 @@ def simulate_strategies(
             "max_words_per_user": max_words_per_user,
             "desired_retention": desired_retention,
             "seed": seed,
+            "split": split,
             "strategies": strategies,
         },
         "strategies": {
