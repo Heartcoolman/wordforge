@@ -1,0 +1,23 @@
+{
+ "scheduler": "amas",
+ "dataset": "duolingo_hlr",
+ "prediction": {
+  "logLoss": 0.3067892592817423,
+  "ici": 0.11769812398224332,
+  "auc": 0.5412476708466557,
+  "maeP": 0.1853674296298645
+ },
+ "dhp": {
+  "expectedMemoryFinal": 5072.4824,
+  "masteredCount": 7161,
+  "totalReviews": 185941,
+  "efficiency": 0.02728
+ },
+ "policy": {
+  "finalRecallRate": 0.2766,
+  "reviewsPerDay": 2066.011111111111,
+  "retentionStability": 0.8424614361620311
+ },
+ "runtime_seconds": 7.1,
+ "notes": "v5 GSP F1 ship TEST one-shot 2026-06-13"
+}

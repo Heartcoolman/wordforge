@@ -1,0 +1,23 @@
+{
+ "scheduler": "fsrs",
+ "dataset": "duolingo_hlr",
+ "prediction": {
+  "logLoss": 0.31178248881580284,
+  "ici": 0.12396650293888911,
+  "auc": 0.5404789192483506,
+  "maeP": 0.21204183186792824
+ },
+ "dhp": {
+  "expectedMemoryFinal": 7678.6507,
+  "masteredCount": 419,
+  "totalReviews": 266107,
+  "efficiency": 0.028856
+ },
+ "policy": {
+  "finalRecallRate": 0.1291,
+  "reviewsPerDay": 2956.7444444444445,
+  "retentionStability": 0.7617105858543384
+ },
+ "runtime_seconds": 7.07,
+ "notes": "v5 GSP F1 ship TEST one-shot 2026-06-13"
+}

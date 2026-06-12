@@ -1,0 +1,23 @@
+{
+ "scheduler": "dhp",
+ "dataset": "synthetic",
+ "prediction": {
+  "logLoss": 2.32802084610824,
+  "ici": 0.592007974019488,
+  "auc": 0.6319643800129182,
+  "maeP": 0.6397590555780996
+ },
+ "dhp": {
+  "expectedMemoryFinal": 27914.1134,
+  "masteredCount": 17561,
+  "totalReviews": 459674,
+  "efficiency": 0.060726
+ },
+ "policy": {
+  "finalRecallRate": 0.6672,
+  "reviewsPerDay": 5107.488888888889,
+  "retentionStability": 0.9155933431440505
+ },
+ "runtime_seconds": 10.31,
+ "notes": "v5 GSP F1 ship TEST one-shot 2026-06-13"
+}

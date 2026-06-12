@@ -1,0 +1,23 @@
+{
+ "scheduler": "fsrs45",
+ "dataset": "maimemo",
+ "prediction": {
+  "logLoss": 0.32302313263946547,
+  "ici": 0.04867364169936483,
+  "auc": 0.7814916433801542,
+  "maeP": 0.1562926427557619
+ },
+ "dhp": {
+  "expectedMemoryFinal": 11748.455,
+  "masteredCount": 15922,
+  "totalReviews": 72591,
+  "efficiency": 0.161845
+ },
+ "policy": {
+  "finalRecallRate": 0.455,
+  "reviewsPerDay": 806.5666666666667,
+  "retentionStability": 0.8637214574490898
+ },
+ "runtime_seconds": 15.98,
+ "notes": "v5 GSP F1 ship TEST one-shot 2026-06-13"
+}
