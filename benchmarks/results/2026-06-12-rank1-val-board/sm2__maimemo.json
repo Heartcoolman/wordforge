@@ -1,0 +1,24 @@
+{
+ "scheduler": "sm2",
+ "dataset": "maimemo",
+ "prediction": {
+  "logLoss": 0.3823520748164793,
+  "ici": 0.08732654814871472,
+  "auc": 0.5995578015532198,
+  "maeP": 0.20783312938501997
+ },
+ "dhp": {
+  "expectedMemoryFinal": 22165.2293,
+  "masteredCount": 12297,
+  "totalReviews": 245335,
+  "efficiency": 0.090347
+ },
+ "policy": {
+  "finalRecallRate": 0.8659,
+  "reviewsPerDay": 2725.9444444444443,
+  "retentionStability": 0.9018082005300541
+ },
+ "split": "val",
+ "runtime_seconds": 20.71,
+ "notes": "val baseline board; sim+pred both split=val; n_users=300 sim_days=90 budget=200 dr=0.85 seed=42"
+}

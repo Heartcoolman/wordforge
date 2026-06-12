@@ -80,42 +80,40 @@ DEFAULT_MEMORY_MODEL_CONFIG: Dict[str, Any] = {
     "halfLifePower": 1.5,
     "recallRiskBonus": 0.2,
     "recallRiskThreshold": 0.55,
-    "baseDesiredRetention": 0.92,
+    # 2026-06-13 v5 GSP 船值：F1 冠军 desired_retention（val Borda 30，三数据集 rank 1）
+    "baseDesiredRetention": 0.85,
     "passiveDecayHalfLifeDays": 30.0,
     "passiveDecayPower": 0.30,
     "masteryWindowSize": 20,
     "streakMinGapMs": 1800000,
     "stabilityBaseDays": 20.0,
-    # 连击动态 alpha（mastery.rs，与 amas_config.toml 同值；bench 重放 interval_scale 钉 1.0）
-    "alphaScale": 0.3,
-    "alphaMin": 0.1,
-    "alphaMax": 0.5,
-    # 双腿信任调度（与 amas_config.toml 同值）：
-    # alphaRampTau=成功腿连击挂靠 τ_s（语义替换旧 count 挂靠，旧语义从未发布 ON），
-    # alphaLapseRampTau=失败腿累计 lapse 挂靠 τ_f
-    # 2026-06-12 D5 选型写回：dual(3.0, 6.0)（预注册闸门胜者；FSRS_BASELINE 保持 0.0 隔离）
-    "alphaRampTau": 3.0,
-    "alphaLapseRampTau": 6.0,
+    # 2026-06-13 v5 GSP 船值：alpha 平滑钉死 alpha_eff=1（未平滑 FSRS-6 核心），双腿 ramp no-op
+    "alphaScale": 1.0,
+    "alphaMin": 1.0,
+    "alphaMax": 1.0,
+    # 双腿信任调度：2026-06-13 v5 GSP 船值关闭（alpha 已钉死 1.0，ramp 本为 no-op）
+    "alphaRampTau": 0.0,
+    "alphaLapseRampTau": 0.0,
     # FSRS-6：曲线参数由 w[20] 派生（这里写派生值，兜底未升级的消费方）
-    "forgettingCurveFactor": 0.9 ** (-1.0 / 0.2632510019126722) - 1.0,
-    "forgettingCurveDecay": -0.2632510019126722,
+    "forgettingCurveFactor": 0.9 ** (-1.0 / 0.1542) - 1.0,
+    "forgettingCurveDecay": -0.1542,
     "forgettingCurveFloor": 0.0,
     # FSRS-6 21 维（w[19]=同日饱和, w[20]=曲线 decay）。
-    # 2026-06-11 镜像对齐后约束重搜胜者：w[0,2,8,9,10,20] 调优（对拍等价镜像下三条
-    # 0.9x 守门腿全过，test split vs 公版 +38.1% / vs 上代 +5.4%），其余维 FSRS-6
-    # 公版（14 维实搜证实 w[4-7]/w[11-14] 公版即最优）—— 与生产 amas_config.toml 同步。
+    # 2026-06-13 v5 GSP 船值：回归 FSRS-6 公版 21 维 w（py-fsrs DEFAULT_PARAMETERS）。
+    # 公版 w 与 gspSuccessGrade=4（Easy）共拟合 → 预测腿逐位 = amas6（G3 满余量），
+    # 调度增益由 GSP 策略头承载（见 GSP_SPEC §3.5）—— 与生产 amas_config.toml 同步。
     "w": [
-        0.07978223679403902,
+        0.212,
         1.2931,
-        3.02498794640543,
+        2.3065,
         8.2956,
         6.4133,
         0.8334,
         3.0194,
         0.001,
-        1.6259347829476551,
-        0.2533678250394599,
-        1.1124862163489901,
+        1.8722,
+        0.1666,
+        0.796,
         1.4835,
         0.0614,
         0.2629,
@@ -125,8 +123,18 @@ DEFAULT_MEMORY_MODEL_CONFIG: Dict[str, Any] = {
         0.5425,
         0.0912,
         0.0658,
-        0.2632510019126722,
+        0.1542,
     ],
+    # === GSP 调度策略头 F1 船值（契约 benchmarks/maimemo/GSP_SPEC.md）===
+    # amas board 条目消费 DEFAULT；fsrs 已 rebind FSRS_BASELINE 故不泄漏。
+    "gspSuccessGrade": 4,
+    "gspIntervalCapDays": 40.0,
+    "gspGraduationStreak": 2,
+    "gspGraduationFloorDays": 30.0,
+    "gspYoungRetention": 0.86,
+    "gspMatureRetention": 0.92,
+    "gspMaturityBandDays": 14.0,
+    "gspIntervalFuzz": 0.0,
 }
 
 # fsrs 基线条目专用：保持 FSRS-5 语义（19 维官方 w + 固定曲线），不随 AMAS 升级漂移
@@ -139,6 +147,22 @@ FSRS_BASELINE_CONFIG: Dict[str, Any] = {
     # 竞品隔离：显式关闭双腿信任调度，DEFAULT 即便日后调参写回也不随动
     "alphaRampTau": 0.0,
     "alphaLapseRampTau": 0.0,
+    # 竞品隔离：显式关闭 GSP 调度策略头（成功成绩带/区间帽/毕业下限/成熟度分带保持率/抖动），
+    # 即便 amas 候选写回 DEFAULT（含 gspSuccessGrade=4、cap40 等 F1 船值），fsrs 基线也固定为
+    # FSRS-5 公版调度语义不随动（gspSuccessGrade=3=Good 旧默认；其余 gsp*=0=关闭）。
+    "gspSuccessGrade": 3,
+    "gspIntervalCapDays": 0.0,
+    "gspGraduationStreak": 0,
+    "gspGraduationFloorDays": 30.0,
+    "gspYoungRetention": 0.0,
+    "gspMatureRetention": 0.0,
+    "gspMaturityBandDays": 0.0,
+    "gspIntervalFuzz": 0.0,
+    # alphaMin/alphaMax/alphaScale 也须显式恢复旧合法值：DEFAULT 已写回 1.0/1.0/1.0（v5 钉死），
+    # 但 FSRS-5 公版调度需 0.3/0.1/0.5（连击动态 alpha 区间）。双腿信任已在上方显式归零。
+    "alphaScale": 0.3,
+    "alphaMin": 0.1,
+    "alphaMax": 0.5,
     "w": [
         0.40255, 1.18385, 3.173, 15.69105, 7.1949, 0.5345, 1.4604, 0.0046,
         1.54575, 0.1192, 1.01925, 1.9395, 0.11, 0.29605, 2.2698, 0.2315,

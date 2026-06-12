@@ -908,10 +908,11 @@ def _mutate_config(
 
 _STOCK_ANCHOR_PARAMS: Dict[str, float] = {
     **{name: float(DEFAULT_MEMORY_MODEL_CONFIG["w"][idx]) for name, idx in _W_INDEX.items()},
-    # 锚点 tau 程序化镜像 DEFAULT（2026-06-12 D5 写回后 =3.0，已在窗口 (1.5,4.0) 内），
+    # 锚点 tau 程序化镜像 DEFAULT（2026-06-13 v5 GSP 写回后 =0.0，落 D5 tau 窗口 (1.5,4.0) 外），
     # 保证 trial 0 配置与守门基线逐位相等，约束自检 (floor-1.0) 接线成立。
-    # optuna 4.8.0 对窗口外 fixed param 仅发 UserWarning 并 VERBATIM 透传——该行为
-    # pin 保留在 test_anchor_seed_out_of_window_passes_verbatim（防未来 DEFAULT 漂移）
+    # optuna 4.8.0 对窗口外 fixed param 仅发 UserWarning 并 VERBATIM 透传（锚点 tau 出窗即此路径，
+    # 由 test_anchor_seed_out_of_window_passes_verbatim 守护）——本管道是 D5 tau-search 历史
+    # harness，GSP campaign 为独立搜索不经此处；写回后锚点出窗是既定行为不再例外。
     "alphaRampTau": float(DEFAULT_MEMORY_MODEL_CONFIG["alphaRampTau"]),
 }
 # 2026-06-10 run 三个 near-miss 在 6 个存活维上的投影（钉死维回退 stock）——直接检验

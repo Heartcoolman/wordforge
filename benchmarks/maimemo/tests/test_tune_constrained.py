@@ -301,8 +301,10 @@ def test_tune_funnel_conclusive_negative(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 4. 种子全部在窗口内（enqueue 按 VERBATIM 透传，不做越界裁剪）
-#    2026-06-12 D5 写回后 DEFAULT tau=3.0 在窗口 (1.5,4.0) 内，锚点不再例外
+# 4. 种子键完整 + 窗口内（enqueue 按 VERBATIM 透传，不做越界裁剪）
+#    2026-06-13 v5 GSP 写回后 DEFAULT tau=0.0（未平滑核心，alpha 钉死），锚点 tau 落 D5 窗口
+#    (1.5,4.0) 外 —— 由 optuna VERBATIM 透传（test_anchor_seed_out_of_window_passes_verbatim）。
+#    GSP 为独立 campaign 不经此 D5 harness；w 维 + 性能/阶梯教师 tau 仍全在窗口内。
 # ---------------------------------------------------------------------------
 
 def test_seed_trials_inside_windows():
@@ -312,29 +314,32 @@ def test_seed_trials_inside_windows():
         assert set(seed) == set(SEARCH_WINDOWS)
         for name, value in seed.items():
             low, high = SEARCH_WINDOWS[name]
+            if name == "alphaRampTau":
+                # 锚点 tau=DEFAULT=0.0 落窗口外（v5 GSP 写回后）；其余 tau（性能/阶梯教师）在窗口内
+                continue
             assert low <= value <= high, f"seed {name}={value} outside [{low}, {high}]"
-    # stock 锚点必须程序化等于 DEFAULT（防字面漂移），tau=3.0 == D5 写回船值
+    # stock 锚点必须程序化等于 DEFAULT（防字面漂移），tau=0.0 == v5 GSP 写回船值（未平滑核心）
     stock = seeds[0]
     for name, idx in pipeline._W_INDEX.items():
         assert stock[name] == DEFAULT_MEMORY_MODEL_CONFIG["w"][idx]
-    assert stock["alphaRampTau"] == DEFAULT_MEMORY_MODEL_CONFIG["alphaRampTau"] == 3.0
-    # tau 阶梯教师 {2.5, 3.5} 在 stock w 上；锚点/性能教师统一 tau=3.0
+    assert stock["alphaRampTau"] == DEFAULT_MEMORY_MODEL_CONFIG["alphaRampTau"] == 0.0
+    # 锚点 tau=0.0（出窗，VERBATIM 透传）；性能教师统一 tau=3.0；tau 阶梯教师 {2.5, 3.5}
     taus = sorted({seed["alphaRampTau"] for seed in seeds})
-    assert taus == [2.5, 3.0, 3.5]
+    assert taus == [0.0, 2.5, 3.0, 3.5]
 
 
 def test_anchor_seed_out_of_window_passes_verbatim():
     """optuna 4.8.0 行为 pin：窗口外 fixed param 仅发 UserWarning 并逐字透传。
 
-    2026-06-12 D5 写回后锚点 tau=3.0 已在窗口内，锚点自检（trial 0 配置 ==
-    DEFAULT == 守门基线）不再依赖该语义；保留合成窗口外值 pin 防 optuna 升级
-    改为重采样（未来 DEFAULT 漂移仍可能复现窗口外锚点）。
+    2026-06-13 v5 GSP 写回后锚点 tau=DEFAULT=0.0 落 D5 窗口 (1.5,4.0) 外，VERBATIM 透传
+    路径再次实测覆盖（锚点 trial 0 配置 == DEFAULT == 守门基线仍成立，tau 分量恰为 floor-1.0
+    的合法 0.0）。第二个合成例显式 tau=0.0 同样出窗，双重 pin optuna 不重采样语义。
     """
     study = optuna.create_study(
         direction="maximize", sampler=_make_constrained_sampler(DEFAULT_RANDOM_SEED, 4)
     )
     anchor = _seed_trial_params()[0]
-    study.enqueue_trial(anchor)                            # 锚点（全维窗口内）
+    study.enqueue_trial(anchor)                            # 锚点（tau 出窗，VERBATIM 透传）
     study.enqueue_trial({**anchor, "alphaRampTau": 0.0})   # 合成窗口外值
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)

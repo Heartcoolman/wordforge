@@ -1,0 +1,24 @@
+{
+ "scheduler": "leitner",
+ "dataset": "maimemo",
+ "prediction": {
+  "logLoss": 0.4825345763717276,
+  "ici": 0.18458378196210995,
+  "auc": 0.29885473025318865,
+  "maeP": 0.3176518641468127
+ },
+ "dhp": {
+  "expectedMemoryFinal": 26528.7563,
+  "masteredCount": 0,
+  "totalReviews": 366953,
+  "efficiency": 0.072295
+ },
+ "policy": {
+  "finalRecallRate": 0.889,
+  "reviewsPerDay": 4077.2555555555555,
+  "retentionStability": 0.8963313269218817
+ },
+ "split": "val",
+ "runtime_seconds": 20.65,
+ "notes": "val baseline board; sim+pred both split=val; n_users=300 sim_days=90 budget=200 dr=0.85 seed=42"
+}

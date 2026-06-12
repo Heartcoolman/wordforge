@@ -16,8 +16,13 @@ import math
 import random
 from typing import List, Protocol, runtime_checkable
 
-from .config import DEFAULT_MEMORY_MODEL_CONFIG
-from .dhp_reference import DHPStudent, WordforgeMirrorState, _alpha_kwargs_from_config
+from .config import DEFAULT_MEMORY_MODEL_CONFIG, FSRS_BASELINE_CONFIG
+from .dhp_reference import (
+    DHPStudent,
+    WordforgeMirrorState,
+    _alpha_kwargs_from_config,
+    _gsp_band_kwargs_from_config,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -61,7 +66,9 @@ class FSRSScheduler:
         memory_config: dict | None = None,
         desired_retention: float | None = None,
     ) -> None:
-        cfg = memory_config or DEFAULT_MEMORY_MODEL_CONFIG
+        # 竞品隔离：fsrs 缺省回退 FSRS_BASELINE_CONFIG（FSRS-5 公版），
+        # 不再继承 DEFAULT（已是 FSRS-6+AMAS 旋钮）。显式传入的 memory_config 仍优先。
+        cfg = memory_config or FSRS_BASELINE_CONFIG
         self._cfg = cfg
         # CLI-supplied desired_retention overrides the config value.
         self._desired_retention = (
@@ -358,6 +365,23 @@ class AMASScheduler:
         d = (x - center) / sigma
         return math.exp(-0.5 * d * d)
 
+    @staticmethod
+    def _fuzz_u(stability: float, review_count: int) -> float:
+        """确定性伪随机抖动量 u ∈ [-1, 1)，由 in-state 量派生（GSP_SPEC §7）。
+
+        公式（运算次序固定，Rust 移植须逐位对齐）：
+            h = stability * 12.9898 + review_count * 78.233   # f64 乘加
+            f = h - floor(h)                                  # 小数部分 ∈ [0, 1)
+            u = 2.0 * f - 1.0                                 # 映射到 [-1, 1)
+
+        时间不变（不读模拟日/视界）、身份无关（仅读状态量 stability/review_count）。
+        constants 12.9898/78.233 取自经典 GLSL hash（fract(sin(...)) 家族），
+        此处去掉 sin 以保证 Python↔Rust 完全可移植（避免跨平台 sin 末位差）。
+        """
+        h = stability * 12.9898 + float(review_count) * 78.233
+        f = h - math.floor(h)
+        return 2.0 * f - 1.0
+
     def __init__(
         self,
         memory_config: dict | None = None,
@@ -378,6 +402,15 @@ class AMASScheduler:
 
         self._base_retention = desired_retention  # CLI arg takes priority
         self._retention      = self._base_retention
+        # GSP 调度策略头旋钮（生产新旋钮，默认全关 = 冻结旧语义）。
+        # 入口 clamp 镜像（bench adapter 不调 validate()）：cap/floor 夹至 [0, +inf)，
+        # streak 夹非负整数；banded retention 三参数由 _fresh_state 经 dhp 侧 helper 夹紧。
+        self._gsp_interval_cap_days  = max(0.0, float(cfg.get("gspIntervalCapDays", 0.0)))
+        self._gsp_graduation_streak  = max(0, int(cfg.get("gspGraduationStreak", 0)))
+        self._gsp_graduation_floor   = max(0.0, float(cfg.get("gspGraduationFloorDays", 30.0)))
+        # GSP review-load smoothing：确定性区间抖动（生产新旋钮，默认 0=关=bit-exact legacy）。
+        # 夹至 [0, 1)：负数 → 0（关闭）；>=1 会使 (1+fuzz·u) 触及非正区间，故顶侧夹至 1-eps。
+        self._gsp_interval_fuzz      = max(0.0, min(1.0 - 1e-9, float(cfg.get("gspIntervalFuzz", 0.0))))
         self._state          = self._fresh_state()
         self._window         = int(cfg.get("masteryWindowSize", 20))
 
@@ -408,6 +441,7 @@ class AMASScheduler:
             forgetting_curve_decay=self._decay_e,
             forgetting_curve_floor=self._floor,
             **_alpha_kwargs_from_config(self._cfg),
+            **_gsp_band_kwargs_from_config(self._cfg),
         )
 
     # ------------------------------------------------------------------
@@ -623,6 +657,7 @@ class AMASScheduler:
         # sufficient to prevent runaway intervals inside the 365-day window.
 
     def next_interval_days(self) -> int:
+        # base interval 已含 GSP banded-retention 求解（state.interval_days() 内）。
         base_days    = self._state.interval_days()
         ivl_scale    = self._ensemble_interval_scale()
 
@@ -631,8 +666,38 @@ class AMASScheduler:
         ivl_scale = max(0.1, ivl_scale)
 
         scaled_days = max(1.0, base_days * ivl_scale)
-        # AMAS engine hard cap: MAX_INTERVAL_DAYS = 90 (src/amas/memory/mdm.rs)
-        scaled_days = min(scaled_days, 90.0)
+
+        # GSP 毕业下限（scale 之后、cap 之前）：连击 ≥ k 且 k>0 时，间隔下限弹到 floor。
+        # 时间不变（仅读 correct_streak，不读模拟日/视界）。amas6 的 FSRS6MirrorState
+        # 不带 correct_streak，getattr 兜底 0 → 在无 GSP 配置时恒不触发。
+        graduated = False
+        if self._gsp_graduation_streak > 0:
+            streak = int(getattr(self._state, "correct_streak", 0))
+            if streak >= self._gsp_graduation_streak:
+                scaled_days = max(scaled_days, self._gsp_graduation_floor)
+                graduated = True
+
+        # 区间帽：min(90, gspCap)，与既有 90 天硬帽复合（mdm.rs MAX_INTERVAL_DAYS=90）。
+        cap = 90.0
+        if self._gsp_interval_cap_days > 0.0:
+            cap = min(cap, self._gsp_interval_cap_days)
+        scaled_days = min(scaled_days, cap)
+
+        # GSP review-load smoothing（cap 之后施加确定性区间抖动，错峰同步到 cap/floor 的复习波）。
+        # 时间不变 + 身份无关 + Rust 可移植（_fuzz_u 仅读 stability/review_count，公式见 GSP_SPEC §7）。
+        # 重夹纪律（GSP_SPEC §7）：
+        #   • 顶侧夹 fuzz_cap = min(90, cap·(1+fuzz))，使抖动可把 cap-pinned 词推到 cap 之上错峰，
+        #     但绝不越 90 天硬帽。
+        #   • 毕业词（graduated）底侧夹 graduationFloor：fuzz 不得把已毕业词拉到 floor 之下
+        #     （否则破坏 mastered 定义 next_interval≥30）；非毕业词底侧夹 1。
+        if self._gsp_interval_fuzz > 0.0:
+            u = self._fuzz_u(float(getattr(self._state, "stability", 0.0)),
+                             int(getattr(self._state, "review_count", 0)))
+            fuzzed = scaled_days * (1.0 + self._gsp_interval_fuzz * u)
+            fuzz_cap = min(90.0, cap * (1.0 + self._gsp_interval_fuzz))
+            lo = self._gsp_graduation_floor if graduated else 1.0
+            scaled_days = max(lo, min(fuzz_cap, fuzzed))
+
         return max(1, int(round(scaled_days)))
 
     def update(self, recalled: int, elapsed_days: float) -> None:
@@ -716,7 +781,9 @@ def build_scheduler(
         seed: RNG seed used by RandomScheduler.
     """
     if name == "fsrs":
-        return FSRSScheduler(memory_config=memory_config, desired_retention=desired_retention)
+        # 竞品隔离：fsrs 条目固定绑 FSRS_BASELINE_CONFIG（FSRS-5 公版 + 显式关 GSP/双腿信任），
+        # 忽略调参传入的 memory_config（candidate 仅作用于 amas），不随 DEFAULT/候选漂移。
+        return FSRSScheduler(memory_config=FSRS_BASELINE_CONFIG, desired_retention=desired_retention)
     if name == "amas":
         return AMASScheduler(memory_config=memory_config, desired_retention=desired_retention)
     if name == "dhp":
@@ -1310,6 +1377,11 @@ class AMAS6Scheduler(AMASScheduler):
 
         self._base_retention = float(desired_retention)
         self._retention = self._base_retention
+        # amas6 是公版隔离条目：GSP 旋钮硬关，永不从 config 继承（即便 config 误带 gsp* 键）。
+        self._gsp_interval_cap_days = 0.0
+        self._gsp_graduation_streak = 0
+        self._gsp_graduation_floor = 30.0
+        self._gsp_interval_fuzz = 0.0  # 公版隔离：fuzz 硬关，永不从 config 继承
         self._state = self._fresh_state()
         self._window = int(cfg.get("masteryWindowSize", 20))
 

@@ -137,6 +137,20 @@ class WordforgeMirrorState:
     # 失败腿 alphaLapseRampTau=τ_f 挂靠累计 lapse 数（首错 f=1 no-op，leech 加速压 S）
     alpha_ramp_tau: float = 0.0
     alpha_lapse_ramp_tau: float = 0.0
+    # GSP 成熟度分带保持率（生产新旋钮，默认 0.0=关闭=冻结旧语义）：
+    # gsp_maturity_band_days>0 时，interval 求解的目标保持率改为
+    #   stability < band → gsp_young_retention（年轻卡高保持率，密集巩固）
+    #   stability >= band → gsp_mature_retention（成熟卡低保持率，拉长间隔省复习量）
+    # 仅替换 interval 求解口径；recall()/预测路径完全不受影响。
+    gsp_young_retention: float = 0.0
+    gsp_mature_retention: float = 0.0
+    gsp_maturity_band_days: float = 0.0
+    # GSP 成功成绩带（生产新旋钮，默认 3=Good=bit-exact legacy=benchmark_adapter SUCCESS_QUALITY=0.7）：
+    # 二元成功复习映射到的 FSRS grade。3=Good（旧默认，首评 S0=w[2]）；4=Easy（首评 S0=w[3]，
+    # 且成功复习 S 增长带 w[16] easy_bonus）。FSRS-6 公版 w 与 grade=4 共拟合 → 候选用 4 恢复校准
+    # （amas6 = FSRS6MirrorState 即 grade=4）。失败恒映射 1=Again（FAIL_GRADE）。
+    # 时间不变（仅依赖成绩）；仅影响 update() 的 grade 选择，recall()/区间求解口径不变。
+    success_grade: int = SUCCESS_GRADE
     stability: float = 0.4
     difficulty: float = 5.0
     review_count: int = 0
@@ -159,7 +173,7 @@ class WordforgeMirrorState:
         alpha 镜像 mastery.rs:69-87 @ interval_scale=1.0：成功先推进连击（首评 gap 恒过、
         同日 delta_t=0 不加不清）、失败清零，再 base 夹 → ×(1+0.1·min(streak,5)) → 整体夹。
         """
-        grade = SUCCESS_GRADE if recalled == 1 else FAIL_GRADE
+        grade = self.success_grade if recalled == 1 else FAIL_GRADE
         w = self.weights
         if recalled == 1:
             gap_ok = self.review_count == 0 or elapsed_days >= self.streak_min_gap_days
@@ -184,6 +198,43 @@ class WordforgeMirrorState:
                 1.0,
                 min(10.0, w[4] - math.exp(w[5] * (grade - 1.0)) + 1.0),
             )
+        elif self.success_grade == 4:
+            # —— FSRS-6 faithful 模式（success_grade==4）——
+            # v5 架构：未平滑 FSRS-6 核心，逐位等价 FSRS6MirrorState（amas6 公版参考）。
+            # 与旧 mdm.rs 镜像的差异：① D 先更新、S 公式用更新后的 self.difficulty（FSRS-6 标准次序）；
+            # ② 无同日特化分支（FSRS-6 参考对 elapsed<1 仍走常规成功公式）。
+            # 此模式仅在显式 gspSuccessGrade=4 时启用；grade==3 默认路径逐位 legacy 不变。
+            # 已实证：grade=4 + 本次序 → 三数据集 pred 腿与 amas6 完全一致（G3 满余量过门）。
+            r = self.recall(elapsed_days)
+            # D 先更新（mean-reversion 目标锚 D0(Easy=4)）
+            delta_d = -w[6] * (grade - 3.0)
+            d_prime = self.difficulty + delta_d * (10.0 - self.difficulty) / 9.0
+            d_target = w[4] - math.exp(w[5] * (4.0 - 1.0)) + 1.0
+            self.difficulty = max(1.0, min(10.0, w[7] * d_target + (1.0 - w[7]) * d_prime))
+            if grade >= 2:
+                hard_penalty = w[15] if grade == 2 else 1.0
+                easy_bonus = w[16] if grade == 4 else 1.0
+                s_inc = max(
+                    math.exp(w[8])
+                    * (11.0 - self.difficulty)
+                    * math.pow(max(self.stability, 0.01), -w[9])
+                    * (math.exp(w[10] * (1.0 - r)) - 1.0)
+                    * hard_penalty
+                    * easy_bonus,
+                    0.0,
+                )
+                self.stability = max(0.01, min(STABILITY_CAP_DAYS, self.stability * (s_inc + 1.0)))
+            else:
+                self.stability = max(
+                    0.01,
+                    min(
+                        self.stability,
+                        w[11]
+                        * math.pow(self.difficulty, -w[12])
+                        * (math.pow(self.stability + 1.0, w[13]) - 1.0)
+                        * math.exp(w[14] * (1.0 - r)),
+                    ),
+                )
         else:
             # 顺序语义（mdm.rs:111-175）：先算 D/S 的 target，再对两者同步 alpha 平滑
             r = self.recall(elapsed_days)
@@ -284,9 +335,24 @@ class WordforgeMirrorState:
         )
         return min(days, self.max_interval_days)
 
+    def _gsp_banded_retention(self) -> float | None:
+        """GSP 成熟度分带：返回替换 desired_retention 的目标保持率；关闭时返回 None。
+
+        band>0 时按当前 stability 与 band 的关系选 young/mature 保持率（< band 用 young，
+        >= band 用 mature）。两个保持率分别 clamp 到曲线合法域 (1e-6, 1.0)。
+        """
+        if self.gsp_maturity_band_days <= 0.0:
+            return None
+        target = (
+            self.gsp_young_retention
+            if self.stability < self.gsp_maturity_band_days
+            else self.gsp_mature_retention
+        )
+        return max(1e-6, min(1.0, target))
+
     def interval_days(self) -> int:
         # 底侧 min_interval_secs=60s 在天粒度下与 max(1, ceil) 等价（mdm.rs:246-247）
-        return max(1, math.ceil(self._interval_days_raw()))
+        return max(1, math.ceil(self._interval_days_raw(self._gsp_banded_retention())))
 
 
 @dataclass
@@ -312,11 +378,36 @@ def _alpha_kwargs_from_config(memory_config: Dict[str, object]) -> Dict[str, flo
     }
 
 
+def _gsp_band_kwargs_from_config(memory_config: Dict[str, object]) -> Dict[str, float]:
+    """GSP 成熟度分带保持率三参数（缺省 0.0=关闭=冻结旧语义）。
+
+    镜像纪律：bench adapter 不调 validate()，故在入口对越界值夹紧——
+    band 夹 [0, +inf)（负数视为关闭）、young/mature 夹 [0, 1]。
+    """
+    band = float(memory_config.get("gspMaturityBandDays", 0.0))
+    band = max(0.0, band)
+    young = max(0.0, min(1.0, float(memory_config.get("gspYoungRetention", 0.0))))
+    mature = max(0.0, min(1.0, float(memory_config.get("gspMatureRetention", 0.0))))
+    # 成功成绩带：缺省 3=Good（bit-exact legacy）；候选可设 4=Easy 恢复 FSRS-6 公版 w 校准。
+    # 入口 clamp：非 {3,4} 一律夹回 3（合法成功成绩域；2=Hard 非二元成功语义，不开放）。
+    sg = int(memory_config.get("gspSuccessGrade", SUCCESS_GRADE))
+    sg = sg if sg in (3, 4) else SUCCESS_GRADE
+    return {
+        "gsp_maturity_band_days": band,
+        "gsp_young_retention": young,
+        "gsp_mature_retention": mature,
+        "success_grade": sg,
+    }
+
+
 def _mirror_from_config(memory_config: Dict[str, object]) -> WordforgeMirrorState:
     weights = list(memory_config["w"])
     # 顶侧间隔夹紧与 Rust default_max_interval_days() 同默认（90 天）
     max_interval_days = float(memory_config.get("maxIntervalDays", 90.0))
     alpha_kwargs = _alpha_kwargs_from_config(memory_config)
+    # success_grade（成功成绩带，缺省 3=bit-exact legacy）随 GSP band 入口 helper 夹紧后透传，
+    # 保证 _mirror_from_config 路径与 AMASScheduler._fresh_state 路径口径一致。
+    grade_kwargs = {"success_grade": _gsp_band_kwargs_from_config(memory_config)["success_grade"]}
     if len(weights) >= 21:
         # FSRS-6：曲线参数由 w[20] 派生（与 Rust MemoryModelConfig::curve_* 一致）
         decay = max(0.05, min(2.0, float(weights[20])))
@@ -330,6 +421,7 @@ def _mirror_from_config(memory_config: Dict[str, object]) -> WordforgeMirrorStat
             ),
             max_interval_days=max_interval_days,
             **alpha_kwargs,
+            **grade_kwargs,
         )
     return WordforgeMirrorState(
         weights=weights,
@@ -345,6 +437,7 @@ def _mirror_from_config(memory_config: Dict[str, object]) -> WordforgeMirrorStat
         ),
         max_interval_days=max_interval_days,
         **alpha_kwargs,
+        **grade_kwargs,
     )
 
 

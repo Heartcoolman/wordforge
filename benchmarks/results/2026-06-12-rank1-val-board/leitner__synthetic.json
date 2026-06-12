@@ -1,0 +1,24 @@
+{
+ "scheduler": "leitner",
+ "dataset": "synthetic",
+ "prediction": {
+  "logLoss": 1.465782441984958,
+  "ici": 0.47753303719492257,
+  "auc": 0.5066719230096692,
+  "maeP": 0.578562351547522
+ },
+ "dhp": {
+  "expectedMemoryFinal": 47509.1775,
+  "masteredCount": 0,
+  "totalReviews": 870427,
+  "efficiency": 0.054581
+ },
+ "policy": {
+  "finalRecallRate": 0.7828,
+  "reviewsPerDay": 9671.41111111111,
+  "retentionStability": 0.910557613484333
+ },
+ "split": "val",
+ "runtime_seconds": 17.8,
+ "notes": "val baseline board; sim+pred both split=val; n_users=300 sim_days=90 budget=200 dr=0.85 seed=42"
+}

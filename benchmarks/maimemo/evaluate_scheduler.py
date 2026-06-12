@@ -24,7 +24,7 @@ import duckdb
 import numpy as np
 import pandas as pd
 
-from .config import BenchPaths
+from .config import BenchPaths, FSRS_BASELINE_CONFIG
 from .dhp_reference import DHPStudent, ensure_reference_assets, load_dhp_params
 from .models import parse_history
 from .pipeline import StreamingPredictionAccumulator
@@ -42,12 +42,20 @@ from .schedulers import (
 )
 
 
-def _build_scheduler(name: str, dhp_student: DHPStudent | None, seed: int):
-    """工厂: 支持全部 8 个 scheduler (build_scheduler 只支持前 5 个)。"""
+def _build_scheduler(name: str, dhp_student: DHPStudent | None, seed: int, memory_config: dict | None = None):
+    """工厂: 支持全部 8 个 scheduler (build_scheduler 只支持前 5 个)。
+
+    memory_config（默认 None=算法中性，保持既有调用方语义不变）：仅当显式传入
+    且 name=='amas' 时，把候选 amas 配置注入预测腿——用于战役选型时让预测腿与闭环腿
+    共用同一份候选状态核心（GSP 旋钮不影响预测，但未平滑 w/alpha 影响）。竞品条目
+    （fsrs/fsrs45/fsrs6/amas6 等）一律忽略此参数，硬隔离不漂移。
+    """
     if name == "fsrs":
-        return FSRSScheduler(desired_retention=0.85)
+        # 竞品隔离：fsrs 条目绑回 FSRS_BASELINE_CONFIG（FSRS-5 公版 w + 显式关 GSP/双腿信任），
+        # 不再裸吃 DEFAULT（后者已是 FSRS-6+AMAS 旋钮，会与 amas 预测腿位逐位重合）。
+        return FSRSScheduler(memory_config=FSRS_BASELINE_CONFIG, desired_retention=0.85)
     if name == "amas":
-        return AMASScheduler(desired_retention=0.85)
+        return AMASScheduler(memory_config=memory_config, desired_retention=0.85)
     if name == "dhp":
         if dhp_student is None:
             raise ValueError("dhp_student is required for DHPScheduler")
@@ -75,8 +83,12 @@ def _sample_test_rows(
     max_words_per_user: int = 500,
     seed: int = 42,
     duckdb_threads: int = 4,
+    split: str = "test",
 ) -> pd.DataFrame:
-    """从 test split 采 n_users 的 (user, word, history, next_t, next_r) 行。
+    """从指定 split 采 n_users 的 (user, word, history, next_t, next_r) 行。
+
+    split 默认 'test'（既有调用方语义不变）；本战役 val 选型传 split='val'。
+    纯算法中立：仅切换 WHERE split 过滤，不依赖任何 scheduler 得分。
 
     每个 (user, word) 取最长 history (按 LENGTH(t_history) ARG_MAX)。
     注：DuckDB 1.5.1 在某些 parquet 上 ROW_NUMBER 触发 InternalException,
@@ -88,6 +100,7 @@ def _sample_test_rows(
     共用同一键，保证重复运行返回逐行相同的结果；纯算法中立（不依赖任何
     scheduler 的得分）。
     """
+    assert split in ("train", "val", "test"), f"invalid split: {split!r}"
     conn = duckdb.connect()
     conn.execute(f"PRAGMA threads={duckdb_threads}")
     parquet_path = (paths.parquet / "prefix_events.parquet").as_posix()
@@ -96,7 +109,7 @@ def _sample_test_rows(
     bucket_counts = conn.execute(f"""
         SELECT user_bucket_100, COUNT(DISTINCT u) AS cnt
         FROM read_parquet('{parquet_path}')
-        WHERE split = 'test'
+        WHERE split = '{split}'
         GROUP BY user_bucket_100
         ORDER BY user_bucket_100
     """).fetch_df()
@@ -122,7 +135,7 @@ def _sample_test_rows(
             ARG_MAX(next_t, {tie_key}) AS next_t,
             ARG_MAX(next_r, {tie_key}) AS next_r
         FROM read_parquet('{parquet_path}')
-        WHERE split = 'test'
+        WHERE split = '{split}'
           AND user_bucket_100 IN ({bucket_list})
           AND next_r IS NOT NULL
         GROUP BY u, w
@@ -182,9 +195,15 @@ def evaluate_scheduler_prediction(
     n_users: int = 300,
     max_words_per_user: int = 200,
     seed: int = 42,
+    split: str = "test",
+    memory_config: dict | None = None,
 ) -> Dict[str, float]:
-    """对单 scheduler 评估 prediction (logLoss / ICI / AUC / MAE)。"""
-    df = _sample_test_rows(paths, n_users, max_words_per_user, seed)
+    """对单 scheduler 评估 prediction (logLoss / ICI / AUC / MAE)。
+
+    memory_config（默认 None=算法中性）：仅对 amas 条目生效，注入候选状态核心；
+    其余 scheduler 忽略。见 _build_scheduler。
+    """
+    df = _sample_test_rows(paths, n_users, max_words_per_user, seed, split=split)
     if df.empty:
         return {"logLoss": float("nan"), "ici": float("nan"), "auc": float("nan"), "maeP": float("nan"), "n_samples": 0}
 
@@ -224,7 +243,7 @@ def evaluate_scheduler_prediction(
         elapsed = float(row.next_t) if row.next_t is not None else 0.0
         truth = int(row.next_r)
 
-        sched = _build_scheduler(scheduler_name, dhp_student, seed)
+        sched = _build_scheduler(scheduler_name, dhp_student, seed, memory_config=memory_config)
         try:
             sched.warm_start(t_hist, r_hist, diff)
         except Exception:
@@ -263,9 +282,10 @@ def evaluate_all_schedulers(
     n_users: int = 300,
     max_words_per_user: int = 200,
     seed: int = 42,
+    split: str = "test",
 ) -> Dict[str, Dict[str, float]]:
     """对一组 scheduler 跑 prediction 评估,共享同一份采样。"""
-    df = _sample_test_rows(paths, n_users, max_words_per_user, seed)
+    df = _sample_test_rows(paths, n_users, max_words_per_user, seed, split=split)
     if df.empty:
         return {name: {"logLoss": float("nan"), "ici": float("nan"), "auc": float("nan"), "maeP": float("nan"), "n_samples": 0} for name in scheduler_names}
 

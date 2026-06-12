@@ -1,0 +1,24 @@
+{
+ "scheduler": "amas",
+ "dataset": "maimemo",
+ "prediction": {
+  "logLoss": 0.33260707484815805,
+  "ici": 0.06852071277492829,
+  "auc": 0.785067367977735,
+  "maeP": 0.23384930352386815
+ },
+ "dhp": {
+  "expectedMemoryFinal": 20875.3533,
+  "masteredCount": 17172,
+  "totalReviews": 160591,
+  "efficiency": 0.129991
+ },
+ "policy": {
+  "finalRecallRate": 0.5931,
+  "reviewsPerDay": 1784.3444444444444,
+  "retentionStability": 0.9082826996090092
+ },
+ "split": "val",
+ "runtime_seconds": 22.44,
+ "notes": "val baseline board; sim+pred both split=val; n_users=300 sim_days=90 budget=200 dr=0.85 seed=42"
+}
