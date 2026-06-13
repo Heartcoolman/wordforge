@@ -1,0 +1,362 @@
+{
+ "protocol": "docs/amas-tuning-2026-06-13-hardening/00-protocol.md (commit db05fd8, frozen pre-run)",
+ "seeds": [
+  42,
+  7,
+  2026,
+  0,
+  1,
+  2,
+  3,
+  4,
+  5,
+  6
+ ],
+ "tier1_amas_only_whatif": {
+  "maimemo": {
+   "ranks": [
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1
+   ],
+   "rank1_count": 10,
+   "rank_pass": true,
+   "margins": [
+    0.070822,
+    0.09278,
+    0.049351,
+    0.074267,
+    0.04848,
+    0.10247,
+    0.089889,
+    0.026108,
+    0.052783,
+    0.10691
+   ],
+   "margin_mean": 0.071386,
+   "margin_std_ddof1": 0.026757,
+   "margin_pass": true
+  },
+  "duolingo_hlr": {
+   "ranks": [
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1
+   ],
+   "rank1_count": 10,
+   "rank_pass": true,
+   "margins": [
+    0.00511,
+    0.008761,
+    0.040068,
+    0.001762,
+    0.026346,
+    0.01126,
+    0.028314,
+    0.002893,
+    0.012756,
+    0.021837
+   ],
+   "margin_mean": 0.015911,
+   "margin_std_ddof1": 0.012695,
+   "margin_pass": false
+  },
+  "synthetic": {
+   "ranks": [
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1
+   ],
+   "rank1_count": 10,
+   "rank_pass": true,
+   "margins": [
+    0.026961,
+    0.026852,
+    0.026973,
+    0.027797,
+    0.026339,
+    0.027123,
+    0.02634,
+    0.027082,
+    0.027682,
+    0.026597
+   ],
+   "margin_mean": 0.026974,
+   "margin_std_ddof1": 0.000492,
+   "margin_pass": true
+  },
+  "borda_strict_first_count": 10
+ },
+ "tier2_full_board": {
+  "per_seed_raw": {
+   "42": {
+    "maimemo": {
+     "rank": 1,
+     "margin": 0.074528258600711
+    },
+    "duolingo_hlr": {
+     "rank": 2,
+     "margin": -0.0034840495877133115
+    },
+    "synthetic": {
+     "rank": 1,
+     "margin": 0.02635082414230827
+    }
+   },
+   "7": {
+    "maimemo": {
+     "rank": 1,
+     "margin": 0.08707829130269218
+    },
+    "duolingo_hlr": {
+     "rank": 1,
+     "margin": 0.008455906863343077
+    },
+    "synthetic": {
+     "rank": 1,
+     "margin": 0.028142637514786406
+    }
+   },
+   "2026": {
+    "maimemo": {
+     "rank": 1,
+     "margin": 0.07132672243827953
+    },
+    "duolingo_hlr": {
+     "rank": 1,
+     "margin": 0.02598733696133504
+    },
+    "synthetic": {
+     "rank": 1,
+     "margin": 0.03048046229129564
+    }
+   },
+   "0": {
+    "maimemo": {
+     "rank": 1,
+     "margin": 0.06838664581293141
+    },
+    "duolingo_hlr": {
+     "rank": 1,
+     "margin": 0.029905510808265423
+    },
+    "synthetic": {
+     "rank": 1,
+     "margin": 0.0286447307344857
+    }
+   },
+   "1": {
+    "maimemo": {
+     "rank": 1,
+     "margin": 0.07558716606419913
+    },
+    "duolingo_hlr": {
+     "rank": 1,
+     "margin": 0.012166791149704315
+    },
+    "synthetic": {
+     "rank": 1,
+     "margin": 0.03134685963743711
+    }
+   },
+   "2": {
+    "maimemo": {
+     "rank": 1,
+     "margin": 0.07320774619207127
+    },
+    "duolingo_hlr": {
+     "rank": 1,
+     "margin": 0.025814487404148823
+    },
+    "synthetic": {
+     "rank": 1,
+     "margin": 0.028902788074671393
+    }
+   },
+   "3": {
+    "maimemo": {
+     "rank": 1,
+     "margin": 0.0771046608798891
+    },
+    "duolingo_hlr": {
+     "rank": 1,
+     "margin": 0.012848260262136924
+    },
+    "synthetic": {
+     "rank": 1,
+     "margin": 0.029261435954012427
+    }
+   },
+   "4": {
+    "maimemo": {
+     "rank": 1,
+     "margin": 0.0743471739706939
+    },
+    "duolingo_hlr": {
+     "rank": 1,
+     "margin": 0.020753141134518316
+    },
+    "synthetic": {
+     "rank": 1,
+     "margin": 0.028984890530814766
+    }
+   },
+   "5": {
+    "maimemo": {
+     "rank": 1,
+     "margin": 0.07445641183872098
+    },
+    "duolingo_hlr": {
+     "rank": 1,
+     "margin": 0.020532901770726975
+    },
+    "synthetic": {
+     "rank": 1,
+     "margin": 0.02775900752353544
+    }
+   },
+   "6": {
+    "maimemo": {
+     "rank": 1,
+     "margin": 0.07134910427669061
+    },
+    "duolingo_hlr": {
+     "rank": 1,
+     "margin": 0.022018670151232045
+    },
+    "synthetic": {
+     "rank": 1,
+     "margin": 0.029911889826337967
+    }
+   }
+  },
+  "maimemo": {
+   "ranks": [
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1
+   ],
+   "rank1_count": 10,
+   "rank_pass": true,
+   "margins": [
+    0.074528,
+    0.087078,
+    0.071327,
+    0.068387,
+    0.075587,
+    0.073208,
+    0.077105,
+    0.074347,
+    0.074456,
+    0.071349
+   ],
+   "margin_mean": 0.074737,
+   "margin_std_ddof1": 0.004996,
+   "margin_pass": true
+  },
+  "duolingo_hlr": {
+   "ranks": [
+    2,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1
+   ],
+   "rank1_count": 9,
+   "rank_pass": false,
+   "margins": [
+    -0.003484,
+    0.008456,
+    0.025987,
+    0.029906,
+    0.012167,
+    0.025814,
+    0.012848,
+    0.020753,
+    0.020533,
+    0.022019
+   ],
+   "margin_mean": 0.0175,
+   "margin_std_ddof1": 0.010041,
+   "margin_pass": false
+  },
+  "synthetic": {
+   "ranks": [
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1
+   ],
+   "rank1_count": 10,
+   "rank_pass": true,
+   "margins": [
+    0.026351,
+    0.028143,
+    0.03048,
+    0.028645,
+    0.031347,
+    0.028903,
+    0.029261,
+    0.028985,
+    0.027759,
+    0.029912
+   ],
+   "margin_mean": 0.028979,
+   "margin_std_ddof1": 0.001415,
+   "margin_pass": true
+  },
+  "amas_borda_per_seed": [
+   29,
+   30,
+   30,
+   30,
+   30,
+   30,
+   30,
+   30,
+   30,
+   30
+  ],
+  "borda_strict_first_count": 10
+ },
+ "note": "tiers are different estimands (amas-only noise vs fully coupled board noise); never pooled"
+}

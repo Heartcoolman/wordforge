@@ -109,6 +109,10 @@ syn mastered 12512→**34664**（×2.8，超 fsrs45 的 31740）；duo 复习量
    对手）远超噪声带。
 8. **alpha_min<alpha_max 校验放宽为 <=**：装载 alpha 钉死配置所需的最小生产校验变更，
    不拒绝任何既有合法配置。
+9. **加固战役后记（2026-06-13）**：本清单 #1（TEST 二次观察）与 #2（mastered 自报口径）
+   经独立验证战役实证压缩——新鲜不相交队列全榜复现 Borda 30/30、oracle 真值口径双榜第一；
+   duo 胜出幅度确认在种子噪声内（名次多数稳健）。详见
+   [../amas-tuning-2026-06-13-hardening/01-report.md](../amas-tuning-2026-06-13-hardening/01-report.md)。
 
 ## 6. 产物索引
 

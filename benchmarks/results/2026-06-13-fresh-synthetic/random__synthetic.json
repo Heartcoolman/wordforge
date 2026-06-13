@@ -1,0 +1,23 @@
+{
+ "scheduler": "random",
+ "dataset": "synthetic",
+ "prediction": {
+  "logLoss": 1.1088599770258374,
+  "ici": 0.4207149641878265,
+  "auc": 0.4920497717959904,
+  "maeP": 0.5112239468753482
+ },
+ "dhp": {
+  "expectedMemoryFinal": 11502.5913,
+  "masteredCount": 0,
+  "totalReviews": 297500,
+  "efficiency": 0.038664
+ },
+ "policy": {
+  "finalRecallRate": 0.0,
+  "reviewsPerDay": 3305.5555555555557,
+  "retentionStability": 0.8414376324730382
+ },
+ "runtime_seconds": 10.86,
+ "notes": "hardening fresh synthetic universe seed=777; frozen seed-42 oracle+DHP cache copied"
+}

@@ -1,0 +1,24 @@
+{
+ "scheduler": "sm2",
+ "dataset": "maimemo",
+ "prediction": {
+  "logLoss": 0.3980290251315136,
+  "ici": 0.09699953125501541,
+  "auc": 0.5879885614115501,
+  "maeP": 0.2142939587987744
+ },
+ "dhp": {
+  "expectedMemoryFinal": 18750.5488,
+  "masteredCount": 10345,
+  "totalReviews": 206880,
+  "efficiency": 0.090635
+ },
+ "policy": {
+  "finalRecallRate": 0.8634,
+  "reviewsPerDay": 2298.6666666666665,
+  "retentionStability": 0.90084002121189
+ },
+ "split": "val",
+ "runtime_seconds": 28.23,
+ "notes": "G5X full-board val seed=4"
+}

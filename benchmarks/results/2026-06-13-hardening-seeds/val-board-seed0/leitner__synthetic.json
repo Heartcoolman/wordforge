@@ -1,0 +1,24 @@
+{
+ "scheduler": "leitner",
+ "dataset": "synthetic",
+ "prediction": {
+  "logLoss": 1.465782441984958,
+  "ici": 0.47753303719492257,
+  "auc": 0.5066719230096692,
+  "maeP": 0.578562351547522
+ },
+ "dhp": {
+  "expectedMemoryFinal": 47545.1366,
+  "masteredCount": 0,
+  "totalReviews": 872408,
+  "efficiency": 0.054499
+ },
+ "policy": {
+  "finalRecallRate": 0.7854,
+  "reviewsPerDay": 9693.422222222222,
+  "retentionStability": 0.910707467951399
+ },
+ "split": "val",
+ "runtime_seconds": 20.03,
+ "notes": "G5X full-board val seed=0"
+}

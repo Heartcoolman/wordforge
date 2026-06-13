@@ -1,0 +1,24 @@
+{
+ "scheduler": "amas",
+ "dataset": "synthetic",
+ "prediction": {
+  "logLoss": 0.5088066992932679,
+  "ici": 0.21927953942888206,
+  "auc": 0.6192606994645291,
+  "maeP": 0.37626516515342645
+ },
+ "dhp": {
+  "expectedMemoryFinal": 29564.058,
+  "masteredCount": 44722,
+  "totalReviews": 450434,
+  "efficiency": 0.065635
+ },
+ "policy": {
+  "finalRecallRate": 0.5224,
+  "reviewsPerDay": 5004.822222222222,
+  "retentionStability": 0.8939007651278793
+ },
+ "split": "val",
+ "runtime_seconds": 21.37,
+ "notes": "G5X full-board val seed=3"
+}
