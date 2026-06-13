@@ -43,6 +43,7 @@ def run_dataset(
     out_dir: Path,
     algos: List[str],
     notes: str = "",
+    exclude_users: list[str] | None = None,
 ) -> List[Path]:
     paths = BenchPaths.from_root(root)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -58,6 +59,7 @@ def run_dataset(
         daily_budget=200,
         desired_retention=0.85,
         seed=42,
+        exclude_users=exclude_users,
     )
     sim_secs = time.time() - t0
     sim_days = int(sim["meta"]["sim_days"])
@@ -67,7 +69,8 @@ def run_dataset(
         # 2) prediction 维度（每算法独立，test split 采样）
         t1 = time.time()
         pred = evaluate_scheduler_prediction(
-            paths, algo, n_users=300, max_words_per_user=200, seed=42
+            paths, algo, n_users=300, max_words_per_user=200, seed=42,
+            exclude_users=exclude_users,
         )
         strat = sim["strategies"][algo]
         daily = strat["daily"]
@@ -116,10 +119,25 @@ def main() -> None:
         help=f"Comma-separated algos (default: {','.join(AVAILABLE_SCHEDULERS)})",
     )
     parser.add_argument("--notes", default="", help="Notes embedded in each result JSON")
+    parser.add_argument(
+        "--exclude-users",
+        default=None,
+        help="newline-delimited user ids excluded from sampling (algorithm-neutral)",
+    )
     args = parser.parse_args()
 
     algos = [a.strip() for a in args.algos.split(",") if a.strip()]
-    run_dataset(Path(args.root).expanduser(), args.dataset, Path(args.out), algos, args.notes)
+    exclude_users: list[str] | None = None
+    if args.exclude_users:
+        exclude_users = [
+            line.strip()
+            for line in Path(args.exclude_users).read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+    run_dataset(
+        Path(args.root).expanduser(), args.dataset, Path(args.out), algos, args.notes,
+        exclude_users=exclude_users,
+    )
 
 
 if __name__ == "__main__":

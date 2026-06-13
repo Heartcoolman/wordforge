@@ -18,7 +18,7 @@ import math
 import random
 import time
 from pathlib import Path
-from typing import Dict, List
+from typing import Collection, Dict, List
 
 import duckdb
 import numpy as np
@@ -84,6 +84,7 @@ def _sample_test_rows(
     seed: int = 42,
     duckdb_threads: int = 4,
     split: str = "test",
+    exclude_users: Collection[str] | None = None,
 ) -> pd.DataFrame:
     """从指定 split 采 n_users 的 (user, word, history, next_t, next_r) 行。
 
@@ -99,10 +100,24 @@ def _sample_test_rows(
     内容序复合键（长度 → 历史串 → 结果串 → next_t/next_r），全部 ARG_MAX
     共用同一键，保证重复运行返回逐行相同的结果；纯算法中立（不依赖任何
     scheduler 的得分）。
+
+    exclude_users（算法中性，默认 None ⇒ 过滤串为空，结果与现状恒等）：
+    从候选池中排除指定用户 id；注入 bucket 计数查询与主查询两处，
+    使累计计数反映排除后的真实可用量（不足时自动拉入更多 bucket）。
     """
     assert split in ("train", "val", "test"), f"invalid split: {split!r}"
     conn = duckdb.connect()
     conn.execute(f"PRAGMA threads={duckdb_threads}")
+
+    if exclude_users:
+        conn.register(
+            "_excluded_users",
+            pd.DataFrame({"u": sorted(set(map(str, exclude_users)))}),
+        )
+        exclude_filter = "AND u NOT IN (SELECT u FROM _excluded_users)"
+    else:
+        exclude_filter = ""
+
     parquet_path = (paths.parquet / "prefix_events.parquet").as_posix()
 
     # 先估 bucket
@@ -110,6 +125,7 @@ def _sample_test_rows(
         SELECT user_bucket_100, COUNT(DISTINCT u) AS cnt
         FROM read_parquet('{parquet_path}')
         WHERE split = '{split}'
+          {exclude_filter}
         GROUP BY user_bucket_100
         ORDER BY user_bucket_100
     """).fetch_df()
@@ -138,6 +154,7 @@ def _sample_test_rows(
         WHERE split = '{split}'
           AND user_bucket_100 IN ({bucket_list})
           AND next_r IS NOT NULL
+          {exclude_filter}
         GROUP BY u, w
     """
     full = conn.execute(query).fetch_df()
@@ -150,6 +167,8 @@ def _sample_test_rows(
     rng = random.Random(seed)
     rng.shuffle(all_users)
     selected = all_users[:n_users]
+    assert not (set(selected) & set(exclude_users or ())), \
+        "exclude_users leaked into the selected cohort"
     df = full[full["user_id"].isin(selected)].copy()
 
     # 无条件排序：GROUP BY 输出序无保证，行序确定性不得依赖 max_words_per_user 路径
@@ -197,13 +216,14 @@ def evaluate_scheduler_prediction(
     seed: int = 42,
     split: str = "test",
     memory_config: dict | None = None,
+    exclude_users: Collection[str] | None = None,
 ) -> Dict[str, float]:
     """对单 scheduler 评估 prediction (logLoss / ICI / AUC / MAE)。
 
     memory_config（默认 None=算法中性）：仅对 amas 条目生效，注入候选状态核心；
     其余 scheduler 忽略。见 _build_scheduler。
     """
-    df = _sample_test_rows(paths, n_users, max_words_per_user, seed, split=split)
+    df = _sample_test_rows(paths, n_users, max_words_per_user, seed, split=split, exclude_users=exclude_users)
     if df.empty:
         return {"logLoss": float("nan"), "ici": float("nan"), "auc": float("nan"), "maeP": float("nan"), "n_samples": 0}
 

@@ -39,6 +39,7 @@ def run_dataset_val(
     algos: List[str],
     notes: str = "",
     split: str = "val",
+    seed: int = 42,
 ) -> List[Path]:
     paths = BenchPaths.from_root(root)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -53,7 +54,7 @@ def run_dataset_val(
         max_words_per_user=500,
         daily_budget=200,
         desired_retention=0.85,
-        seed=42,
+        seed=seed,
         split=split,
     )
     sim_secs = time.time() - t0
@@ -64,7 +65,7 @@ def run_dataset_val(
         # 2) prediction 维度（每算法独立，val split 采样）
         t1 = time.time()
         pred = evaluate_scheduler_prediction(
-            paths, algo, n_users=300, max_words_per_user=200, seed=42, split=split
+            paths, algo, n_users=300, max_words_per_user=200, seed=seed, split=split
         )
         strat = sim["strategies"][algo]
         daily = strat["daily"]
@@ -115,10 +116,11 @@ def main() -> None:
         help=f"Comma-separated algos (default: {','.join(AVAILABLE_SCHEDULERS)})",
     )
     parser.add_argument("--notes", default="", help="Notes embedded in each result JSON")
+    parser.add_argument("--seed", type=int, default=42, help="Shared RNG seed for sim + pred (default: 42)")
     args = parser.parse_args()
 
     algos = [a.strip() for a in args.algos.split(",") if a.strip()]
-    run_dataset_val(Path(args.root).expanduser(), args.dataset, Path(args.out), algos, args.notes, args.split)
+    run_dataset_val(Path(args.root).expanduser(), args.dataset, Path(args.out), algos, args.notes, args.split, args.seed)
 
 
 if __name__ == "__main__":

@@ -41,7 +41,7 @@ import random
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Collection, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -104,11 +104,16 @@ def _sample_users(
     seed: int,
     duckdb_threads: int = 4,
     split: str = "test",
+    exclude_users: Collection[str] | None = None,
 ) -> pd.DataFrame:
     """Return the most-recent prefix row per (user, word) from the given split.
 
     Sampling is pushed entirely into DuckDB to avoid loading the full dataset.
     If n_users == -1, all users are returned.
+
+    exclude_users（算法中性，默认 None ⇒ 过滤串为空，结果与现状恒等）：
+    从候选池中排除指定用户 id；注入 bucket 计数查询与主查询两处，
+    使累计计数反映排除后的真实可用量（不足时自动拉入更多 bucket）。
     """
     assert split in ("train", "val", "test"), f"invalid split: {split!r}"
     import duckdb
@@ -116,6 +121,15 @@ def _sample_users(
 
     conn = duckdb.connect()
     conn.execute(f"PRAGMA threads={duckdb_threads}")
+
+    if exclude_users:
+        conn.register(
+            "_excluded_users",
+            pd.DataFrame({"u": sorted(set(map(str, exclude_users)))}),
+        )
+        exclude_filter = "AND u NOT IN (SELECT u FROM _excluded_users)"
+    else:
+        exclude_filter = ""
 
     parquet_path = (paths.parquet / "prefix_events.parquet").as_posix()
 
@@ -128,6 +142,7 @@ def _sample_users(
             SELECT user_bucket_100, COUNT(DISTINCT u) AS cnt
             FROM read_parquet('{parquet_path}')
             WHERE split = '{split}'
+              {exclude_filter}
             GROUP BY user_bucket_100
             ORDER BY user_bucket_100
         """).fetch_df()
@@ -155,6 +170,7 @@ def _sample_users(
             FROM read_parquet('{parquet_path}')
             WHERE split = '{split}'
               {user_filter}
+              {exclude_filter}
         )
         SELECT user_id, word_id, t_history, r_history, difficulty
         FROM ranked
@@ -173,6 +189,8 @@ def _sample_users(
     rng = random.Random(seed)
     rng.shuffle(all_users)
     selected_users = all_users if n_users == -1 else all_users[:n_users]
+    assert not (set(selected_users) & set(exclude_users or ())), \
+        "exclude_users leaked into the selected cohort"
 
     df = full[full["user_id"].isin(selected_users)].copy()
 
@@ -379,6 +397,7 @@ def simulate_strategies(
     seed: int = 42,
     duckdb_threads: int = 4,
     split: str = "test",
+    exclude_users: Collection[str] | None = None,
 ) -> Dict[str, Any]:
     """Run forward simulation and return a comparison report.
 
@@ -428,7 +447,7 @@ def simulate_strategies(
     # Sample users from test split
     # -----------------------------------------------------------------------
     print(f"[simulate] sampling {n_users} users from {split} split …")
-    df = _sample_users(paths, n_users, max_words_per_user, seed, duckdb_threads, split=split)
+    df = _sample_users(paths, n_users, max_words_per_user, seed, duckdb_threads, split=split, exclude_users=exclude_users)
 
     if df.empty:
         raise RuntimeError(
