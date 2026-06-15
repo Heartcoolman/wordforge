@@ -6,6 +6,30 @@
 
 ---
 
+## [v1.1.5-beta.1] — 2026-06-15 · Beta · 遥测安全加固 + AMAS 算法整合
+
+首个 1.1.5 beta，整合 v1.1.4 以来的安全修复与 AMAS 算法研究成果。
+
+### 遥测系统安全修复（36 项确认缺陷，经 37-agent 对抗复验）
+- **P0** SSE 连接计数泄漏：CAS 自增后立即建 RAII guard，任何 `.await` 取消点对称释放，杜绝累积到上限后全站 SSE 拒服。
+- **P1** SSE per-user 配额 + 全局上限；设备总览 SUM 整数溢出改饱和聚合；离线设备 batch 致 admin SSE 挂起/broadcast 泄漏修复；遥测限频前置于设备写。
+- **P1** telemetry 两表保留期清理 worker（`TELEMETRY_RETENTION_DAYS`，默认 90 天）。
+- **P2** 告警分页（翻页覆盖全部未读）+ severity 入小时桶 dedup；采样规则 PATCH 白名单；`consume_confirm` 原子消费 + 纵深守卫；设备抢注格式校验 + 首占审计。
+
+### AMAS 算法
+- difficulty 缺值/默认 0.0 回落 no-op，消除 difflogit 对复习词的恒定 logit 偏置。
+- 移除已证伪的 IAD/MTP 辅助模块。
+- 含 GSP 毕业制调度头、difflogit/predLogit 预测读出层、benchmark 镜像。
+- 对抗性审查 50 项缺陷修复 + 7 个系统性根因收敛，及其衍生 9 项收口。
+
+### 客户端契约
+- 三仓联调（服务端 × 安卓 × iOS）服务端 3 项契约修复（A10/A11/A26）。
+
+### ⚠️ 生产语义变更（Beta 重点验证项）
+- GSP 区间帽 90→40 天（实际调度间隔行为改变）。
+- difflogit β=0.1 生产激活（依赖 `word.difficulty` 真实填充，当前默认 0.0）。
+- IAD/MTP 模块移除。
+
 ## [v1.1.4] — 2026-06-05 · Stable · 1.1.x Admin 运维面转正
 
 将经 Beta 阶段（v1.1.2-beta.1 ~ v1.1.4-beta.3）验证的 **1.1.x Admin 运维面大版本**转正为正式稳定版。这是自 v1.1.1 以来首个稳定版。
