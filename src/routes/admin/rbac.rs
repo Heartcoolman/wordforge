@@ -73,7 +73,7 @@ fn normalize_admin_role(raw: Option<&str>) -> Result<String, AppError> {
 }
 
 /// 特权守卫:仅 super_admin 可调用。校验调用方(而非目标)角色,非 super_admin 返回 403。
-async fn require_super_admin(state: &AppState, caller_admin_id: &str) -> Result<(), AppError> {
+pub(crate) async fn require_super_admin(state: &AppState, caller_admin_id: &str) -> Result<(), AppError> {
     let caller_id = caller_admin_id.to_string();
     let role = state
         .run_store_task("admin.rbac.require_super_admin", move |store| {

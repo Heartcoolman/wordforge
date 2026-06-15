@@ -302,11 +302,38 @@ async fn request_telemetry(
             is_operational: true,
         })?;
 
+    // P2: 下发前查该 device 当前 owner，只投递给 user_id == owner 的连接，
+    // 防 owner 变更后陈旧连接（旧用户）跨用户收到定向 telemetry_request。
+    // Some(Some(uid)) = 已认领归属；Some(None)/None = 无确定 owner → 不投递。
+    let device_for_owner = id.clone();
+    let owner = state
+        .run_store_task(
+            "admin.clients.request_telemetry.owner",
+            move |store| -> Result<_, AppError> {
+                Ok(store.get_client_device_owner(&device_for_owner)?.flatten())
+            },
+        )
+        .await??;
+    let owner = match owner.as_deref() {
+        Some(uid) => uid.to_string(),
+        None => {
+            return Err(AppError {
+                status: StatusCode::UNPROCESSABLE_ENTITY,
+                code: "DEVICE_OWNER_UNKNOWN".into(),
+                message: "设备无确定归属（未注册/未认领），不向陈旧连接下发遥测请求".into(),
+                is_operational: true,
+            });
+        }
+    };
+
     let request_id = uuid::Uuid::new_v4().to_string();
     let event = SseEvent::TelemetryRequest {
         request_id: request_id.clone(),
     };
     for conn in conns.value() {
+        if conn.user_id != owner {
+            continue;
+        }
         let _ = conn.tx.send(event.clone());
     }
 

@@ -24,16 +24,24 @@ export interface AdminAlert {
 export interface AdminAlertInbox {
   items: AdminAlert[];
   unreadCount: number;
+  /** 每页条数(后端 INBOX_LIMIT)。 */
+  limit: number;
+  /** 本次返回的分页偏移。offset + items.length < unreadCount(unread 视图)时仍有下一页。 */
+  offset: number;
 }
 
 export const notificationsApi = {
-  /** 收件箱列表 + 未读计数。unread=true 时仅返回未读。 */
-  list: (unread?: boolean) =>
-    api.get<AdminAlertInbox>(
+  /** 收件箱列表(分页) + 未读计数。unread=true 仅返回未读;offset 翻页覆盖全部未读。 */
+  list: (unread?: boolean, offset?: number) => {
+    const params: Record<string, string | number | boolean | undefined> = {};
+    if (unread) params.unread = true;
+    if (offset && offset > 0) params.offset = offset;
+    return api.get<AdminAlertInbox>(
       '/api/admin/notifications',
-      unread ? { unread: true } : undefined,
+      Object.keys(params).length ? params : undefined,
       { useAdminToken: true },
-    ),
+    );
+  },
   /** 标记单条已读(幂等),返回最新未读计数。 */
   markRead: (id: string) =>
     api.post<{ read: boolean; unreadCount: number }>(

@@ -111,6 +111,7 @@ async fn spawn_with_full_config_dual(
             .to_string_lossy()
             .to_string(),
         api_only: false,
+        telemetry_retention_days: 90,
         sqlite_busy_timeout_ms: 5000,
         // CI 上 ubuntu 磁盘 IO 较慢 + llvm-cov 插桩使建连更慢，并发测试时 pool 等连接易超时
         // panic Pool(Error(None))。历经 250→2000 仍在 coverage job 偶发，提到 10s 给足裕量（纯

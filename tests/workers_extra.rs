@@ -42,6 +42,7 @@ fn build_test_config(database_url: String) -> Config {
         log_dir: "./logs".to_string(),
         database_url,
         api_only: true,
+        telemetry_retention_days: 90,
         sqlite_busy_timeout_ms: 5000,
         sqlite_connection_timeout_ms: 250,
         sqlite_pool_size: 2,

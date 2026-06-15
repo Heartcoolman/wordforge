@@ -116,6 +116,15 @@ async fn submit_telemetry(
         .and_then(|v| v.to_str().ok())
         .ok_or_else(|| AppError::bad_request("MISSING_DEVICE_ID", "缺少 X-Device-Id 请求头"))?;
 
+    // P1:中间件对 /telemetry 跳过 device upsert/claim,故格式校验须在此自行执行(与中间件其它
+    // 端点口径一致),拒绝畸形/超长 x-device-id 进入下方 claim 路径(设备抢注的格式向量防御)。
+    if !crate::middleware::device::is_valid_device_id(device_id) {
+        return Err(AppError::bad_request(
+            "INVALID_DEVICE_ID",
+            "x-device-id 格式非法",
+        ));
+    }
+
     if body.event_type == "on_demand" && body.request_id.is_none() {
         return Err(AppError::bad_request(
             "INVALID_TELEMETRY",
@@ -201,6 +210,25 @@ async fn submit_telemetry(
         }
     }
 
+    // W3-1(P1 前移):遥测专项 per-user 限频闸门上移到任何 DB 操作之前(四要素硬校验 +
+    // strict-mode 内存校验已通过)。命中即软丢弃(received:true, throttled:true),不触发
+    // owner 查询、device upsert 等任何 DB 任务,杜绝单个噪声客户端用完整 upsert 写放大打满
+    // 全局 SQLite 写信号量挤占学习数据写入。与 sampledOut 早返回同位。
+    // 注:前移后被限流的请求不再刷新 device 活跃度(last_seen),以换取闸门前零 DB 写放大。
+    let throttle_key = format!("u:{}", auth.user_id);
+    let max_entries = state.config().limits.rate_limit_max_entries;
+    let telemetry_max = state.config().telemetry_rate_limit.max_requests;
+    let throttle = state
+        .telemetry_rate_limit()
+        .limiter
+        .check_with_max(&throttle_key, max_entries, telemetry_max)
+        .await;
+    if !throttle.allowed {
+        return Ok(ok(
+            serde_json::json!({ "received": true, "throttled": true }),
+        ));
+    }
+
     // m038 遥测硬识别:device 必须已注册且归属一致(三态)。中间件已对本端点跳过 upsert,
     // 故此处看到的是未被覆盖的真实 owner。
     let owner = state
@@ -226,12 +254,23 @@ async fn submit_telemetry(
                 is_operational: true,
             });
         }
-        // Some(None)=未认领→claim;Some(Some(me))=归属一致→放行
+        Some(None) => {
+            // P1 首占审计:遥测路径认领一个已注册但未归属(owner=NULL)的设备 —— 这是设备抢注的
+            // TOFU 向量(攻击者抢先认领受害者设备致其被锁)。记录以便检测;彻底封堵(claim 身份强绑定
+            // 或遥测不认领仅记录)需产品侧 device 归属语义决策,见 telemetry 安全 follow-up backlog。
+            tracing::info!(
+                device_id = %device_id,
+                user_id = %auth.user_id,
+                "telemetry first-claim of unowned device (TOFU squat-detection audit)"
+            );
+        }
+        // Some(Some(me))=归属一致→放行
         _ => {}
     }
 
     // 核验通过/claim:落库设备(平台/版本/型号/归属)并刷新 last_seen。中间件已对本端点
-    // 跳过 upsert,此处全权负责;采样丢弃也照常更新设备活跃度。
+    // 跳过 upsert,此处全权负责;采样丢弃也照常更新设备活跃度(限流命中已在上游早返回,
+    // 不会执行到此)。
     state
         .run_store_task("telemetry.upsert_device", {
             let device_id = device_id.to_string();
@@ -253,45 +292,51 @@ async fn submit_telemetry(
         })
         .await??;
 
-    // W3-1：遥测专项 per-user 限频（独立于通用 API 双轨预算的更紧配额）。device 活跃度
-    // (last_seen)已由上方 upsert 刷新；超额则软丢弃（received:true, throttled:true 不落库），
-    // 与 sampledOut 早返回同位，防单个噪声客户端打满全局 SQLite 写信号量挤占学习数据写入。
-    let throttle_key = format!("u:{}", auth.user_id);
-    let max_entries = state.config().limits.rate_limit_max_entries;
-    let telemetry_max = state.config().telemetry_rate_limit.max_requests;
-    let throttle = state
-        .telemetry_rate_limit()
-        .limiter
-        .check_with_max(&throttle_key, max_entries, telemetry_max)
-        .await;
-    if !throttle.allowed {
-        return Ok(ok(
-            serde_json::json!({ "received": true, "throttled": true }),
-        ));
-    }
-
+    // P2 数值校验:对客户端明确拒绝负数(422),覆盖 extract_summary 写库的全部 i64/f64
+    // 数值字段(顶层 + device/behavior 子对象)。非对象 payload 在此跳过(无字段可取),
+    // 由 extract_summary 内的 clamp 兜底——脏数据(负值/超界)绝不进 summary 表。
     if let Some(obj) = body.payload.as_object() {
-        for key in ["sessionDurationSecs", "errorCount"] {
-            if let Some(v) = obj.get(key).and_then(|v| v.as_i64()) {
+        let device_obj = obj.get("device").and_then(|v| v.as_object());
+        let behavior_obj = obj.get("behavior").and_then(|v| v.as_object());
+
+        let reject_neg = |name: &str| AppError {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            code: "INVALID_PAYLOAD".into(),
+            message: format!("{} 不能为负数", name),
+            is_operational: true,
+        };
+        // (字段名, 来源对象);i64 与 f64 各一轮,统一拒绝 < 0。覆盖 extract_summary
+        // 写库的全部数值字段(顶层 + device + behavior)。
+        type SrcObj<'a> = Option<&'a serde_json::Map<String, serde_json::Value>>;
+        let i64_fields: [(&str, SrcObj); 8] = [
+            ("sessionDurationSecs", Some(obj)),
+            ("errorCount", Some(obj)),
+            ("cpuCores", device_obj),
+            ("screenWidth", device_obj),
+            ("screenHeight", device_obj),
+            ("clickCount", behavior_obj),
+            ("visibilityChanges", behavior_obj),
+            ("routeChanges", behavior_obj),
+        ];
+        let f64_fields: [(&str, SrcObj); 5] = [
+            ("actionsPerMin", Some(obj)),
+            ("avgResponseTimeMs", Some(obj)),
+            ("memoryGb", device_obj),
+            ("pixelRatio", device_obj),
+            ("scrollDepthPct", behavior_obj),
+        ];
+
+        for (key, src) in i64_fields {
+            if let Some(v) = src.and_then(|o| o.get(key)).and_then(|v| v.as_i64()) {
                 if v < 0 {
-                    return Err(AppError {
-                        status: StatusCode::UNPROCESSABLE_ENTITY,
-                        code: "INVALID_PAYLOAD".into(),
-                        message: format!("{} 不能为负数", key),
-                        is_operational: true,
-                    });
+                    return Err(reject_neg(key));
                 }
             }
         }
-        for key in ["actionsPerMin", "avgResponseTimeMs"] {
-            if let Some(v) = obj.get(key).and_then(|v| v.as_f64()) {
+        for (key, src) in f64_fields {
+            if let Some(v) = src.and_then(|o| o.get(key)).and_then(|v| v.as_f64()) {
                 if v < 0.0 {
-                    return Err(AppError {
-                        status: StatusCode::UNPROCESSABLE_ENTITY,
-                        code: "INVALID_PAYLOAD".into(),
-                        message: format!("{} 不能为负数", key),
-                        is_operational: true,
-                    });
+                    return Err(reject_neg(key));
                 }
             }
         }
@@ -388,26 +433,62 @@ fn sampling_bucket(device_id: &str, id: &str) -> f64 {
     (hasher.finish() % 10_000) as f64 / 10_000.0
 }
 
+/// P2 数值兜底上界(合理量纲):计数/像素类 ≤ 1e9,时长(秒)≤ 1e9。
+/// 与负值拒绝(422)互补——即便绕过早返回(如非对象 payload 或未覆盖字段),
+/// clamp 也保证脏数据(负值/溢出)不进 summary 表。
+const NUM_MAX_I64: i64 = 1_000_000_000;
+const NUM_MAX_F64: f64 = 1_000_000_000.0;
+
+/// 把 Option<i64> clamp 到 [0, NUM_MAX_I64];None 透传。
+fn clamp_i64(v: Option<i64>) -> Option<i64> {
+    v.map(|n| n.clamp(0, NUM_MAX_I64))
+}
+
+/// 把 Option<f64> clamp 到 [0.0, NUM_MAX_F64];None 与 NaN(无 as_f64 命中即 None)透传/归零。
+fn clamp_f64(v: Option<f64>) -> Option<f64> {
+    v.map(|n| if n.is_finite() { n.clamp(0.0, NUM_MAX_F64) } else { 0.0 })
+}
+
+/// 顶层标量(写库 NOT NULL,缺省 0)i64:非有限/负值/溢出 → clamp 到 [0, NUM_MAX_I64]。
+fn clamp_i64_default(v: Option<i64>) -> i64 {
+    clamp_i64(v).unwrap_or(0)
+}
+
+/// 顶层标量 f64:同上,缺省 0.0。
+fn clamp_f64_default(v: Option<f64>) -> f64 {
+    clamp_f64(v).unwrap_or(0.0)
+}
+
 fn extract_summary(payload: &serde_json::Value) -> TelemetrySummaryInput {
     let device = payload.get("device");
     let behavior = payload.get("behavior");
 
     TelemetrySummaryInput {
-        cpu_cores: device
-            .and_then(|d| d.get("cpuCores"))
-            .and_then(|v| v.as_i64()),
-        memory_gb: device
-            .and_then(|d| d.get("memoryGb"))
-            .and_then(|v| v.as_f64()),
-        screen_width: device
-            .and_then(|d| d.get("screenWidth"))
-            .and_then(|v| v.as_i64()),
-        screen_height: device
-            .and_then(|d| d.get("screenHeight"))
-            .and_then(|v| v.as_i64()),
-        pixel_ratio: device
-            .and_then(|d| d.get("pixelRatio"))
-            .and_then(|v| v.as_f64()),
+        cpu_cores: clamp_i64(
+            device
+                .and_then(|d| d.get("cpuCores"))
+                .and_then(|v| v.as_i64()),
+        ),
+        memory_gb: clamp_f64(
+            device
+                .and_then(|d| d.get("memoryGb"))
+                .and_then(|v| v.as_f64()),
+        ),
+        screen_width: clamp_i64(
+            device
+                .and_then(|d| d.get("screenWidth"))
+                .and_then(|v| v.as_i64()),
+        ),
+        screen_height: clamp_i64(
+            device
+                .and_then(|d| d.get("screenHeight"))
+                .and_then(|v| v.as_i64()),
+        ),
+        pixel_ratio: clamp_f64(
+            device
+                .and_then(|d| d.get("pixelRatio"))
+                .and_then(|v| v.as_f64()),
+        ),
         os_name: device
             .and_then(|d| d.get("osName"))
             .and_then(|v| v.as_str())
@@ -434,41 +515,43 @@ fn extract_summary(payload: &serde_json::Value) -> TelemetrySummaryInput {
         online_status: device
             .and_then(|d| d.get("onlineStatus"))
             .and_then(|v| v.as_bool()),
-        session_duration_secs: payload
-            .get("sessionDurationSecs")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0),
-        actions_per_min: payload
-            .get("actionsPerMin")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0),
-        error_count: payload
-            .get("errorCount")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0),
-        avg_response_time_ms: payload
-            .get("avgResponseTimeMs")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0),
+        session_duration_secs: clamp_i64_default(
+            payload.get("sessionDurationSecs").and_then(|v| v.as_i64()),
+        ),
+        actions_per_min: clamp_f64_default(
+            payload.get("actionsPerMin").and_then(|v| v.as_f64()),
+        ),
+        error_count: clamp_i64_default(payload.get("errorCount").and_then(|v| v.as_i64())),
+        avg_response_time_ms: clamp_f64_default(
+            payload.get("avgResponseTimeMs").and_then(|v| v.as_f64()),
+        ),
         current_route: behavior
             .and_then(|b| b.get("currentRoute"))
             .and_then(|v| v.as_str())
             .map(str::to_string),
-        click_count: behavior
-            .and_then(|b| b.get("clickCount"))
-            .and_then(|v| v.as_i64()),
+        click_count: clamp_i64(
+            behavior
+                .and_then(|b| b.get("clickCount"))
+                .and_then(|v| v.as_i64()),
+        ),
         click_targets_json: behavior
             .and_then(|b| b.get("clickTargets"))
             .and_then(|v| serde_json::to_string(v).ok()),
-        scroll_depth_pct: behavior
-            .and_then(|b| b.get("scrollDepthPct"))
-            .and_then(|v| v.as_f64()),
-        visibility_changes: behavior
-            .and_then(|b| b.get("visibilityChanges"))
-            .and_then(|v| v.as_i64()),
-        route_changes: behavior
-            .and_then(|b| b.get("routeChanges"))
-            .and_then(|v| v.as_i64()),
+        scroll_depth_pct: clamp_f64(
+            behavior
+                .and_then(|b| b.get("scrollDepthPct"))
+                .and_then(|v| v.as_f64()),
+        ),
+        visibility_changes: clamp_i64(
+            behavior
+                .and_then(|b| b.get("visibilityChanges"))
+                .and_then(|v| v.as_i64()),
+        ),
+        route_changes: clamp_i64(
+            behavior
+                .and_then(|b| b.get("routeChanges"))
+                .and_then(|v| v.as_i64()),
+        ),
         feature_usage_json: payload
             .get("featureUsage")
             .and_then(|v| serde_json::to_string(v).ok())

@@ -340,9 +340,22 @@ impl Store {
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )?;
 
+        // 饱和聚合兜底:SUM(CAST(x AS REAL)) 求和不抛溢出,再钳到 i64 区间(历史脏行也不再 500)。
+        let saturate_i64 = |v: f64| -> i64 {
+            if !v.is_finite() {
+                0
+            } else if v >= i64::MAX as f64 {
+                i64::MAX
+            } else if v <= i64::MIN as f64 {
+                i64::MIN
+            } else {
+                v as i64
+            }
+        };
+
         let mut stmt = conn.prepare(
             "SELECT event_type, COUNT(*),
-                    AVG(session_duration_secs), SUM(error_count),
+                    AVG(session_duration_secs), SUM(CAST(error_count AS REAL)),
                     AVG(actions_per_min), AVG(avg_response_time_ms)
              FROM telemetry_summaries
              WHERE device_id = ?1
@@ -355,7 +368,7 @@ impl Store {
                     event_type: r.get(0)?,
                     count: r.get(1)?,
                     avg_duration_secs: r.get::<_, Option<f64>>(2)?.unwrap_or(0.0),
-                    total_errors: r.get::<_, Option<i64>>(3)?.unwrap_or(0),
+                    total_errors: saturate_i64(r.get::<_, Option<f64>>(3)?.unwrap_or(0.0)),
                     avg_actions_per_min: r.get::<_, Option<f64>>(4)?.unwrap_or(0.0),
                     avg_response_ms: r.get::<_, Option<f64>>(5)?.unwrap_or(0.0),
                 })
@@ -391,15 +404,21 @@ impl Store {
             .ok();
 
         // 累计标量 + 会话数(增量口径:click/error/duration 按心跳累加;会话=session_start 条数)。
-        let (total_clicks, total_errors, total_duration_secs, session_count): (i64, i64, i64, i64) =
-            conn.query_row(
-                "SELECT COALESCE(SUM(click_count),0), COALESCE(SUM(error_count),0),
-                        COALESCE(SUM(session_duration_secs),0),
+        // P1 纵深防御:SUM(整数列) 在脏数据(超大/负值)下会触发 i64 溢出致整端点永久 500。
+        // 设备级累计:SUM(CAST(... AS REAL)) 读为 f64(IEEE-754 不抛溢出),再饱和钳到 i64(复用上方 saturate_i64)。
+        let (sum_clicks, sum_errors, sum_duration, session_count): (f64, f64, f64, i64) = conn
+            .query_row(
+                "SELECT COALESCE(SUM(CAST(click_count AS REAL)),0.0),
+                        COALESCE(SUM(CAST(error_count AS REAL)),0.0),
+                        COALESCE(SUM(CAST(session_duration_secs AS REAL)),0.0),
                         COALESCE(SUM(CASE WHEN event_type='session_start' THEN 1 ELSE 0 END),0)
                  FROM telemetry_summaries WHERE device_id = ?1",
                 params![device_id],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )?;
+        let total_clicks = saturate_i64(sum_clicks);
+        let total_errors = saturate_i64(sum_errors);
+        let total_duration_secs = saturate_i64(sum_duration);
 
         // 访问页面:current_route 分组计数(去过哪些页面)。
         let mut route_stmt = conn.prepare(
@@ -413,14 +432,20 @@ impl Store {
             })?
             .collect::<Result<Vec<_>, _>>()?;
 
-        // featureUsage(map)+ clickTargets(array)需在 Rust 侧逐行合并。
+        // featureUsage(map)+ clickTargets(array)需在 Rust 侧逐行 JSON 解析合并。
+        // P2 全表扫描兜底:单设备无 LIMIT 逐行解析,极端膨胀(异常设备刷量)会拖垮端点。
+        // 加 ORDER BY server_ts DESC LIMIT K 上限,只聚合最近 K 行——featureUsage/clickTargets
+        // 是「近期用了什么/点了什么」概览,最近样本足够代表,无需扫全表。
+        // K=5000:覆盖正常设备全部历史(远超数月心跳),又对脏设备封顶。
+        const AGG_ROW_CAP: usize = 5000;
         let mut agg_stmt = conn.prepare(
             "SELECT feature_usage_json, click_targets_json
-             FROM telemetry_summaries WHERE device_id = ?1",
+             FROM telemetry_summaries WHERE device_id = ?1
+             ORDER BY server_ts DESC LIMIT ?2",
         )?;
         let mut feature_map: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
         let mut click_map: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
-        let agg_rows = agg_stmt.query_map(params![device_id], |r| {
+        let agg_rows = agg_stmt.query_map(params![device_id, AGG_ROW_CAP as i64], |r| {
             Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?))
         })?;
         for row in agg_rows {
@@ -430,8 +455,13 @@ impl Store {
                     serde_json::from_str::<serde_json::Value>(&s)
                 {
                     for (k, v) in map {
-                        if let Some(n) = v.as_i64() {
-                            *feature_map.entry(k).or_insert(0) += n;
+                        // P2 饱和累加:跳过非法/负值,saturating_add 防溢出回绕。
+                        match v.as_i64() {
+                            Some(n) if n >= 0 => {
+                                let e = feature_map.entry(k).or_insert(0);
+                                *e = e.saturating_add(n);
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -448,7 +478,8 @@ impl Store {
                             .unwrap_or("")
                             .trim();
                         if !label.is_empty() {
-                            *click_map.entry(label.to_string()).or_insert(0) += 1;
+                            let e = click_map.entry(label.to_string()).or_insert(0);
+                            *e = e.saturating_add(1);
                         }
                     }
                 }
@@ -513,6 +544,30 @@ impl Store {
             records.push(row?);
         }
         Ok((records, total))
+    }
+
+    /// retention 清理:删除 `server_ts < cutoff` 的 telemetry_events + telemetry_summaries
+    /// 两表行,返回两表总删除行数(retention-worker 按 telemetry_retention_days 调用)。
+    ///
+    /// 两表在单个 `BEGIN IMMEDIATE` 事务内删除,保证「事件 ⟺ 汇总」要么全删要么全留,
+    /// 不出现只清一表的撕裂状态。`server_ts` 由入库侧统一写 `datetime('now')`(`YYYY-MM-DD HH:MM:SS`
+    /// 空格格式),**`cutoff` 必须同格式**(见 telemetry_cleanup::retention_cutoff_str);只有两侧
+    /// 同格式时 TEXT 字典序才与时间序一致,`<` 比较才安全(RFC3339 的 'T'(0x54) 会错位于空格(0x20))。
+    ///
+    /// 返回类型与 `probe.rs::delete_probe_older_than` 对齐(`Result<u64, StoreError>`,
+    /// 返回 u64);契约文字写 usize,此处遵循本仓既有 Store 删除函数口径用 u64。
+    pub fn delete_telemetry_older_than(&self, cutoff: &str) -> Result<u64, StoreError> {
+        self.with_user_tx(|tx| {
+            let events = tx.execute(
+                "DELETE FROM telemetry_events WHERE server_ts < ?1",
+                params![cutoff],
+            )?;
+            let summaries = tx.execute(
+                "DELETE FROM telemetry_summaries WHERE server_ts < ?1",
+                params![cutoff],
+            )?;
+            Ok((events + summaries) as u64)
+        })
     }
 }
 
@@ -747,6 +802,75 @@ mod tests {
         assert!(s.behavior_summary.click_targets.is_none());
         assert!(s.feature_usage.is_object());
         assert!(s.feature_usage.as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn delete_telemetry_older_than_purges_both_tables_by_server_ts() {
+        let (_t, store) = test_store();
+        // 直接以显式 server_ts 写入(绕过 insert 的 datetime('now')),覆盖两表。
+        {
+            let conn = store.conn().unwrap();
+            // 旧行:events + summaries 各一条 server_ts=2026-01-01。
+            conn.execute(
+                "INSERT INTO telemetry_events (id, device_id, user_id, event_type, payload_json, client_ts, server_ts)
+                 VALUES ('e-old','d','u','periodic','{}','2026-01-01T00:00:00Z','2026-01-01 00:00:00')",
+                [],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO telemetry_summaries (id, device_id, user_id, event_type, server_ts, session_duration_secs, actions_per_min, error_count, avg_response_time_ms, feature_usage_json)
+                 VALUES ('s-old','d','u','periodic','2026-01-01 00:00:00',0,0,0,0,'{}')",
+                [],
+            ).unwrap();
+            // 新行:events + summaries 各一条 server_ts=2026-05-19。
+            conn.execute(
+                "INSERT INTO telemetry_events (id, device_id, user_id, event_type, payload_json, client_ts, server_ts)
+                 VALUES ('e-new','d','u','periodic','{}','2026-05-19T00:00:00Z','2026-05-19 00:00:00')",
+                [],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO telemetry_summaries (id, device_id, user_id, event_type, server_ts, session_duration_secs, actions_per_min, error_count, avg_response_time_ms, feature_usage_json)
+                 VALUES ('s-new','d','u','periodic','2026-05-19 00:00:00',0,0,0,0,'{}')",
+                [],
+            ).unwrap();
+        }
+
+        // cutoff 在两批之间(与生产 datetime('now') 同空格格式):应删旧行两条,保留新行两条。
+        let deleted = store
+            .delete_telemetry_older_than("2026-03-01 00:00:00")
+            .unwrap();
+        assert_eq!(deleted, 2);
+
+        let (evt, total_evt) = store.get_telemetry_by_device("d", 10, 0).unwrap();
+        assert_eq!(total_evt, 1);
+        assert_eq!(evt[0].id, "e-new");
+        let (_sums, total_sum) = store
+            .get_telemetry_summaries_by_device("d", "", 10, 0)
+            .unwrap();
+        assert_eq!(total_sum, 1);
+    }
+
+    #[test]
+    fn device_summary_survives_overflow_dirty_rows() {
+        let (_t, store) = test_store();
+        // 写入两条:一条正常,一条超大 click_count/error_count(脏数据,旧 SUM 会 i64 溢出 500)。
+        let mut ok = full_summary_input();
+        ok.click_count = Some(5);
+        ok.error_count = 1;
+        store
+            .insert_telemetry_and_summary("ok", "devO", "u", "periodic", None, "{}", "2026-05-01T12:00:00Z", &ok)
+            .unwrap();
+        let mut dirty = full_summary_input();
+        dirty.click_count = Some(i64::MAX);
+        dirty.error_count = i64::MAX;
+        store
+            .insert_telemetry_and_summary("dirty", "devO", "u", "periodic", None, "{}", "2026-05-01T12:01:00Z", &dirty)
+            .unwrap();
+
+        // 不再 500:返回 Ok,累计标量饱和到 i64::MAX 而非 panic/溢出。
+        let sum = store.get_telemetry_device_summary("devO").unwrap();
+        assert_eq!(sum.total, 2);
+        assert_eq!(sum.total_clicks, i64::MAX);
+        assert_eq!(sum.total_errors, i64::MAX);
     }
 
     #[test]

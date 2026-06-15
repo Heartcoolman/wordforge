@@ -142,9 +142,10 @@ async fn it_probe_telemetry_dashboard_full_flow() {
     assert_eq!(d["events24h"]["value"].as_i64().unwrap(), 4);
     // queueBacklog = 未完成 probe_executions = 1
     assert_eq!(d["queueBacklog"]["value"].as_i64().unwrap(), 1);
-    // collectErrorRate = SUM(error_count=3) / telemetry_events 24h(2) = 1.5
+    // collectErrorRate 新口径=有错误的 summary 行数(1: s-err-1) / telemetry_events 24h(2) = 0.5
+    // （旧口径 SUM(error_count=3)/2=1.5 会让比率 >1，已修为行计数分子，恒 ≤ 1.0）
     let rate = d["collectErrorRate"]["value"].as_f64().unwrap();
-    assert!((rate - 1.5).abs() < 1e-9, "rate={rate}");
+    assert!((rate - 0.5).abs() < 1e-9, "rate={rate}");
 
     // ---- GET /probes ----
     let resp = request(

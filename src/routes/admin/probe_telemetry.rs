@@ -165,9 +165,10 @@ async fn overview(
         None
     };
 
-    // 采集错误率 = SUM(error_count) / 总遥测事件数;无事件返回 0.0(不除零)
+    // 采集错误率 = 有错误的事件数 / 总遥测事件数,真 0~1 率;无事件返回 0.0(不除零)。
+    // 分子 ≤ 分母,前端 *100 不会超过 100%。
     let error_rate = if raw.telemetry_total > 0 {
-        raw.error_sum as f64 / raw.telemetry_total as f64
+        raw.error_events as f64 / raw.telemetry_total as f64
     } else {
         0.0
     };
@@ -198,12 +199,15 @@ async fn overview(
             value: raw.queue_backlog,
             total: None,
             delta_pct: None,
-            note: Some("probe_executions 未完成(completed_at IS NULL)".into()),
+            note: Some(
+                "probe_executions 未完成且未终态(completed_at IS NULL AND status IN pending/confirm_pending)"
+                    .into(),
+            ),
         },
         collect_error_rate: KpiRate {
             value: error_rate,
             note: Some(format!(
-                "SUM(error_count) / {win_label} telemetry_events 总数"
+                "有错误的事件数 / {win_label} telemetry_events 总数(真 0~1 率)"
             )),
         },
     }))
@@ -428,14 +432,24 @@ async fn patch_sampling(
     let et = event_type.clone();
     let rate = req.sample_rate;
     let enabled = req.enabled;
+    // require_exists=true:白名单——只允许修改已存在的采样规则行,禁止凭 PATCH 创建新行
+    // (防止任意 event_type 注入新配置行)。已存在行集合 = list_sampling_rules 返回项。
     let result = state
         .run_store_task("admin.probe_telemetry.patch_sampling", move |store| {
-            store.upsert_sampling_rule(&et, rate, enabled, Some(&admin_id))
+            store.upsert_sampling_rule(&et, rate, enabled, Some(&admin_id), true)
         })
         .await?;
 
     let rule = match result {
         Ok(r) => r,
+        Err(crate::store::StoreError::Validation(code)) if code == "SAMPLING_RULE_NOT_FOUND" => {
+            return Err(AppError {
+                status: axum::http::StatusCode::NOT_FOUND,
+                code: "SAMPLING_RULE_NOT_FOUND".to_string(),
+                message: "未知采样事件类型,仅允许修改已存在的采样规则".to_string(),
+                is_operational: true,
+            });
+        }
         Err(crate::store::StoreError::Validation(code)) if code == "SAMPLING_RULE_LOCKED" => {
             return Err(AppError::conflict(
                 "SAMPLING_RULE_LOCKED",

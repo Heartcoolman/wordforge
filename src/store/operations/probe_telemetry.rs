@@ -106,8 +106,8 @@ pub struct OverviewRaw {
     pub events_prev: i64,
     /// 队列积压:probe_executions WHERE completed_at IS NULL。
     pub queue_backlog: i64,
-    /// 24h telemetry_summaries 错误总和(分子)。
-    pub error_sum: i64,
+    /// 24h 内"有错误的事件数"(分子,= telemetry_summaries 中 error_count>0 的行数)。
+    pub error_events: i64,
     /// 24h 总遥测事件数(分母,= telemetry_events 24h count)。
     pub telemetry_total: i64,
 }
@@ -221,17 +221,23 @@ impl Store {
             |r| r.get(0),
         )?;
 
-        // 队列积压:未完成的 probe_executions(completed_at IS NULL)
+        // 队列积压:未完成且未终态的 probe_executions。
+        // 排除终态行:仅统计 pending / confirm_pending,避免离线行(completed_at 恒 NULL)
+        // 永久污染积压指标。
         let queue_backlog: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM probe_executions WHERE completed_at IS NULL",
+            "SELECT COUNT(*) FROM probe_executions
+             WHERE completed_at IS NULL
+               AND status IN ('pending', 'confirm_pending')",
             [],
             |r| r.get(0),
         )?;
 
-        // 采集错误率分子/分母(当前窗口)
-        let error_sum: i64 = conn.query_row(
-            "SELECT COALESCE(SUM(error_count), 0) FROM telemetry_summaries
-             WHERE datetime(server_ts) > datetime('now', ?1)",
+        // 采集错误率分子:当前窗口内"有错误的事件数"(error_count>0 的行计数),
+        // 而非 SUM(error_count)。这样分子 ≤ 分母,前端 *100 不会超过 100%。
+        let error_events: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM telemetry_summaries
+             WHERE error_count > 0
+               AND datetime(server_ts) > datetime('now', ?1)",
             params![cur_off],
             |r| r.get(0),
         )?;
@@ -240,7 +246,7 @@ impl Store {
             events_cur: lr_cur + te_cur,
             events_prev: lr_prev + te_prev,
             queue_backlog,
-            error_sum,
+            error_events,
             telemetry_total: te_cur,
         })
     }
@@ -309,39 +315,28 @@ impl Store {
     /// upsert 采样规则 + 写 audit。返回更新后的规则。
     ///
     /// 语义:
-    ///   - 行不存在 → 视为新增('add' audit),priority 默认 100、locked=0。
-    ///   - 行已存在且 locked=1 且本次试图改 sample_rate(与现值不同)→ 返回
-    ///     `StoreError::Validation("SAMPLING_RULE_LOCKED")`,路由层翻译成 409。
-    ///   - 否则更新('mod' audit;若仅 enabled 0→1/1→0 也记 'mod')。
+    ///   - 行不存在:
+    ///     * `require_exists=true` → 返回 `StoreError::Validation("SAMPLING_RULE_NOT_FOUND")`
+    ///       (路由层翻译成 404),禁止凭 PATCH 创建新行。
+    ///     * `require_exists=false` → 视为新增('add' audit),priority 默认 100、locked=0。
+    ///   - 行已存在且 locked=1 且本次试图改 sample_rate(与现值不同)**或** enabled(与现值不同)
+    ///     → 返回 `StoreError::Validation("SAMPLING_RULE_LOCKED")`(方案A:locked 行禁止任何
+    ///     enabled/rate 变更,路由层翻译成 409)。
+    ///   - 否则更新('mod' audit;若仅 enabled 0→1/1→0 记 'pause')。
     ///
     /// `new_rate` / `new_enabled` 任一为 None 表示该字段保持不变。
+    ///
+    /// 整个 SELECT + 校验 + INSERT/UPDATE 收进单条 `BEGIN IMMEDIATE` 事务(`with_user_tx`),
+    /// BEGIN 即取写锁,消除 DEFERRED 读后写的升级死锁 / 丢更新窗口。
     pub fn upsert_sampling_rule(
         &self,
         event_type: &str,
         new_rate: Option<f64>,
         new_enabled: Option<bool>,
         admin_id: Option<&str>,
+        require_exists: bool,
     ) -> Result<SamplingRule, StoreError> {
-        let mut conn = self.conn()?;
-        let tx = conn.transaction()?;
-
-        let existing: Option<(f64, bool, bool, i64)> = tx
-            .query_row(
-                "SELECT sample_rate, enabled, locked, priority
-                 FROM probe_sampling_config WHERE event_type = ?1",
-                params![event_type],
-                |r| {
-                    Ok((
-                        r.get::<_, f64>(0)?,
-                        r.get::<_, i64>(1)? != 0,
-                        r.get::<_, i64>(2)? != 0,
-                        r.get::<_, i64>(3)?,
-                    ))
-                },
-            )
-            .ok();
-
-        // rate 范围校验
+        // rate 范围校验(无须持锁,先做)。
         if let Some(rate) = new_rate {
             if !(0.0..=1.0).contains(&rate) {
                 return Err(StoreError::Validation(
@@ -350,81 +345,107 @@ impl Store {
             }
         }
 
-        let (old_rate, old_enabled, locked, priority, action) = match existing {
-            Some((r, e, l, p)) => (r, e, l, p, "mod"),
-            None => (1.0, true, false, 100, "add"),
-        };
+        self.with_user_tx(|tx| {
+            let existing: Option<(f64, bool, bool, i64)> = tx
+                .query_row(
+                    "SELECT sample_rate, enabled, locked, priority
+                     FROM probe_sampling_config WHERE event_type = ?1",
+                    params![event_type],
+                    |r| {
+                        Ok((
+                            r.get::<_, f64>(0)?,
+                            r.get::<_, i64>(1)? != 0,
+                            r.get::<_, i64>(2)? != 0,
+                            r.get::<_, i64>(3)?,
+                        ))
+                    },
+                )
+                .ok();
 
-        // locked 行禁改 rate(与现值不同时拒绝)。enabled 仍可改(用于 pause)。
-        if locked {
-            if let Some(rate) = new_rate {
-                if (rate - old_rate).abs() > f64::EPSILON {
+            // require_exists:禁止凭 PATCH 创建新行(白名单 / 仅改已存在行)。
+            if existing.is_none() && require_exists {
+                return Err(StoreError::Validation(
+                    "SAMPLING_RULE_NOT_FOUND".to_string(),
+                ));
+            }
+
+            let (old_rate, old_enabled, locked, priority, action) = match existing {
+                Some((r, e, l, p)) => (r, e, l, p, "mod"),
+                None => (1.0, true, false, 100, "add"),
+            };
+
+            // 方案A:locked 行禁止任何 enabled / rate 变更(与现值不同即拒绝),保持"locked
+            // 恒落库"语义不变(effective_sample_rate 对 locked 行恒返回 1.0)。
+            if locked {
+                let rate_changes = new_rate
+                    .map(|rate| (rate - old_rate).abs() > f64::EPSILON)
+                    .unwrap_or(false);
+                let enabled_changes = new_enabled.map(|e| e != old_enabled).unwrap_or(false);
+                if rate_changes || enabled_changes {
                     return Err(StoreError::Validation("SAMPLING_RULE_LOCKED".to_string()));
                 }
             }
-        }
 
-        let final_rate = new_rate.unwrap_or(old_rate);
-        let final_enabled = new_enabled.unwrap_or(old_enabled);
+            let final_rate = new_rate.unwrap_or(old_rate);
+            let final_enabled = new_enabled.unwrap_or(old_enabled);
 
-        let old_value = serde_json::json!({
-            "sampleRate": old_rate, "enabled": old_enabled
-        })
-        .to_string();
-        let new_value = serde_json::json!({
-            "sampleRate": final_rate, "enabled": final_enabled
-        })
-        .to_string();
+            let old_value = serde_json::json!({
+                "sampleRate": old_rate, "enabled": old_enabled
+            })
+            .to_string();
+            let new_value = serde_json::json!({
+                "sampleRate": final_rate, "enabled": final_enabled
+            })
+            .to_string();
 
-        tx.execute(
-            "INSERT INTO probe_sampling_config
-                (event_type, sample_rate, enabled, locked, priority, updated_at, updated_by)
-             VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'), ?6)
-             ON CONFLICT(event_type) DO UPDATE SET
-                sample_rate = ?2, enabled = ?3,
-                updated_at = datetime('now'), updated_by = ?6",
-            params![
-                event_type,
-                final_rate,
-                final_enabled as i64,
-                locked as i64,
+            tx.execute(
+                "INSERT INTO probe_sampling_config
+                    (event_type, sample_rate, enabled, locked, priority, updated_at, updated_by)
+                 VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'), ?6)
+                 ON CONFLICT(event_type) DO UPDATE SET
+                    sample_rate = ?2, enabled = ?3,
+                    updated_at = datetime('now'), updated_by = ?6",
+                params![
+                    event_type,
+                    final_rate,
+                    final_enabled as i64,
+                    locked as i64,
+                    priority,
+                    admin_id,
+                ],
+            )?;
+
+            // audit:enabled 0->1/1->0 且无 rate 变化时记 'pause' 更贴切;否则 add/mod。
+            let audit_action = if action == "mod"
+                && new_rate.is_none()
+                && new_enabled.is_some()
+                && final_enabled != old_enabled
+            {
+                "pause"
+            } else {
+                action
+            };
+            tx.execute(
+                "INSERT INTO probe_sampling_audit
+                    (event_type, action, old_value, new_value, admin_id, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    event_type,
+                    audit_action,
+                    old_value,
+                    new_value,
+                    admin_id,
+                    chrono::Utc::now().to_rfc3339(),
+                ],
+            )?;
+
+            Ok(SamplingRule {
+                event_type: event_type.to_string(),
+                sample_rate: final_rate,
+                enabled: final_enabled,
+                locked,
                 priority,
-                admin_id,
-            ],
-        )?;
-
-        // audit:enabled 0->1/1->0 且无 rate 变化时记 'pause' 更贴切;否则 add/mod。
-        let audit_action = if action == "mod"
-            && new_rate.is_none()
-            && new_enabled.is_some()
-            && final_enabled != old_enabled
-        {
-            "pause"
-        } else {
-            action
-        };
-        tx.execute(
-            "INSERT INTO probe_sampling_audit
-                (event_type, action, old_value, new_value, admin_id, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                event_type,
-                audit_action,
-                old_value,
-                new_value,
-                admin_id,
-                chrono::Utc::now().to_rfc3339(),
-            ],
-        )?;
-
-        tx.commit()?;
-
-        Ok(SamplingRule {
-            event_type: event_type.to_string(),
-            sample_rate: final_rate,
-            enabled: final_enabled,
-            locked,
-            priority,
+            })
         })
     }
 
@@ -729,4 +750,185 @@ fn parse_lag_secs(ts: &str) -> Option<i64> {
     chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%d %H:%M:%S")
         .ok()
         .map(|naive| naive.and_utc().timestamp())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::params;
+
+    fn test_store() -> Store {
+        // Store::open(":memory:") 跑全量 schema + seed(含 probe_sampling_config 四行)。
+        Store::open(":memory:", 5000, 1).unwrap()
+    }
+
+    fn validation_code(err: StoreError) -> String {
+        match err {
+            StoreError::Validation(c) => c,
+            other => panic!("expected Validation error, got {other:?}"),
+        }
+    }
+
+    // --- 方案A:locked 行禁止任何 enabled / rate 变更 -----------------------
+
+    #[test]
+    fn locked_row_rejects_enabled_change() {
+        let store = test_store();
+        // on_demand 为 seed 的 locked 行(enabled=1)。试图 pause(enabled=false)→ 拒绝。
+        let err = store
+            .upsert_sampling_rule("on_demand", None, Some(false), Some("a1"), false)
+            .unwrap_err();
+        assert_eq!(validation_code(err), "SAMPLING_RULE_LOCKED");
+
+        // 确认未落库:行仍 enabled=1。
+        let rule = store.get_sampling_rule("on_demand").unwrap().unwrap();
+        assert!(rule.enabled, "locked 行 enabled 不应被改动");
+        assert!(rule.locked);
+    }
+
+    #[test]
+    fn locked_row_rejects_rate_change() {
+        let store = test_store();
+        let err = store
+            .upsert_sampling_rule("session_start", Some(0.5), None, Some("a1"), false)
+            .unwrap_err();
+        assert_eq!(validation_code(err), "SAMPLING_RULE_LOCKED");
+    }
+
+    #[test]
+    fn locked_row_noop_same_values_ok() {
+        let store = test_store();
+        // 与现值一致(rate=1.0, enabled=true)→ 不算变更,允许通过(幂等)。
+        let rule = store
+            .upsert_sampling_rule("on_demand", Some(1.0), Some(true), Some("a1"), false)
+            .unwrap();
+        assert!(rule.locked);
+        assert!(rule.enabled);
+        assert_eq!(rule.sample_rate, 1.0);
+    }
+
+    // --- require_exists 白名单:禁止凭 PATCH 创建新行 -----------------------
+
+    #[test]
+    fn require_exists_blocks_unknown_event_type() {
+        let store = test_store();
+        let err = store
+            .upsert_sampling_rule("totally_unknown", Some(0.3), None, Some("a1"), true)
+            .unwrap_err();
+        assert_eq!(validation_code(err), "SAMPLING_RULE_NOT_FOUND");
+        // 确认未创建该行。
+        assert!(store.get_sampling_rule("totally_unknown").unwrap().is_none());
+    }
+
+    #[test]
+    fn require_exists_false_allows_create() {
+        let store = test_store();
+        let rule = store
+            .upsert_sampling_rule("new_evt", Some(0.3), None, Some("a1"), false)
+            .unwrap();
+        assert_eq!(rule.event_type, "new_evt");
+        assert_eq!(rule.sample_rate, 0.3);
+        assert!(!rule.locked);
+    }
+
+    // --- 非 locked 行正常改 rate / enabled -----------------------------------
+
+    #[test]
+    fn unlocked_row_updates_rate_and_enabled() {
+        let store = test_store();
+        // periodic 为 seed 的非 locked 行。
+        let rule = store
+            .upsert_sampling_rule("periodic", Some(0.25), Some(false), Some("a1"), true)
+            .unwrap();
+        assert_eq!(rule.sample_rate, 0.25);
+        assert!(!rule.enabled);
+        // 落库核验。
+        let reread = store.get_sampling_rule("periodic").unwrap().unwrap();
+        assert_eq!(reread.sample_rate, 0.25);
+        assert!(!reread.enabled);
+    }
+
+    #[test]
+    fn rate_out_of_range_rejected() {
+        let store = test_store();
+        let err = store
+            .upsert_sampling_rule("periodic", Some(1.5), None, Some("a1"), true)
+            .unwrap_err();
+        assert_eq!(validation_code(err), "SAMPLING_RATE_OUT_OF_RANGE");
+    }
+
+    // --- 错误率分子口径:有错误的事件数(行计数),而非 SUM(error_count) ------
+
+    #[test]
+    fn error_rate_numerator_counts_rows_not_sum() {
+        let store = test_store();
+        {
+            let conn = store.conn().unwrap();
+            // telemetry_events 分母:3 行(window 内)。
+            for i in 0..3 {
+                conn.execute(
+                    "INSERT INTO telemetry_events (id, device_id, event_type, server_ts, client_ts, payload_json)
+                     VALUES (?1, 'd1', 'periodic', datetime('now', '-1 hour'), datetime('now', '-1 hour'), '{}')",
+                    params![format!("te{i}")],
+                )
+                .unwrap();
+            }
+            // telemetry_summaries:2 行有错误(error_count=5,10),1 行无错误(0)。
+            // 旧口径 SUM=15 会让 rate=15/3=5.0(>1);新口径分子=有错误行数=2。
+            for (i, ec) in [5_i64, 10, 0].into_iter().enumerate() {
+                conn.execute(
+                    "INSERT INTO telemetry_summaries
+                        (id, device_id, event_type, server_ts, error_count)
+                     VALUES (?1, 'd1', 'periodic', datetime('now', '-1 hour'), ?2)",
+                    params![format!("ts{i}"), ec],
+                )
+                .unwrap();
+            }
+        }
+        let raw = store.overview_kpis(1).unwrap();
+        assert_eq!(raw.error_events, 2, "分子应为有错误的事件数(行计数)");
+        assert_eq!(raw.telemetry_total, 3, "分母应为 telemetry_events 行数");
+        // rate = 2/3 ≤ 1.0
+        let rate = raw.error_events as f64 / raw.telemetry_total as f64;
+        assert!(rate <= 1.0);
+    }
+
+    // --- queue_backlog 排除终态行 -------------------------------------------
+
+    #[test]
+    fn queue_backlog_excludes_terminal_rows() {
+        let store = test_store();
+        {
+            let conn = store.conn().unwrap();
+            // status / completed_at 组合:
+            //   pending(NULL)        → 计入
+            //   confirm_pending(NULL)→ 计入
+            //   ok(NULL,离线/异常态)→ 不计入(非 pending/confirm_pending)
+            //   error(已完成)       → 不计入
+            //   offline(NULL)        → 不计入(终态,曾永久污染积压)
+            let rows = [
+                ("e1", "pending", None::<&str>),
+                ("e2", "confirm_pending", None),
+                ("e3", "ok", None),
+                ("e4", "error", Some("2026-06-14 00:00:00")),
+                ("e5", "offline", None),
+            ];
+            for (id, status, completed) in rows {
+                conn.execute(
+                    "INSERT INTO probe_executions
+                        (id, batch_id, device_id, admin_id, admin_username, script_body,
+                         script_sha256, timeout_ms, status, dispatched_at, completed_at)
+                     VALUES (?1, 'b1', 'd1', 'a1', 'a@x', 'noop', 'sha', 1000, ?2,
+                             '2026-06-14 00:00:00', ?3)",
+                    params![id, status, completed],
+                )
+                .unwrap();
+            }
+        }
+        let raw = store.overview_kpis(1).unwrap();
+        assert_eq!(
+            raw.queue_backlog, 2,
+            "仅 pending / confirm_pending 计入,offline 等终态不污染"
+        );
+    }
 }

@@ -136,7 +136,7 @@ export function KpiStrip(props: { days: () => number }) {
                     <StatusPill h={er()} />
                     <TechTip label="采集错误率口径" width="290px" align="right">
                       <b>技术口径</b>
-                      <span class="tip-mono">{d().collectErrorRate.note ?? 'SUM(error_count) / telemetry_events 总数'}</span>
+                      <span class="tip-mono">{d().collectErrorRate.note ?? '有错误的事件数 / 事件总数'}</span>
                     </TechTip>
                   </div>
                   <div class="v">{(d().collectErrorRate.value * 100).toFixed(2)}<span class="unit">%</span></div>
