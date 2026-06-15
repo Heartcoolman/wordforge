@@ -48,10 +48,6 @@ pub struct AMASConfig {
     #[serde(default)]
     pub memory_model: MemoryModelConfig,
     #[serde(default)]
-    pub iad: IadConfig,
-    #[serde(default)]
-    pub mtp: MtpConfig,
-    #[serde(default)]
     pub word_selector: WordSelectorConfig,
     #[serde(default)]
     pub intervention: InterventionConfig,

@@ -4,8 +4,6 @@ heuristicEnabled = true
 igeEnabled = true
 swdEnabled = true
 mdmEnabled = true
-iadEnabled = false
-mtpEnabled = false
 sspEnabled = false
 
 [ensemble]
@@ -221,22 +219,29 @@ gspYoungRetention = 0.86
 gspMatureRetention = 0.92
 gspMaturityBandDays = 14.0
 gspIntervalFuzz = 0.0
+# v6 预测层：per-word difficulty logit 加性项（生产现状 = v6 ship，保留启用）。
+# recall 读出 logit 域加 β·(REF−词难度[1,10])：难词降 p/易词升 p。仅作用 recall_probability_predicted
+# 读出路径（预测/urgency/analytics），不入 S/D 更新。生产收益取决于 words.difficulty 是否真实填充。
+difficultyLogitWeight = 0.1
+difficultyLogitRef = 5.0
+# v7 预测读出层：logit 重校准 + 复习次数残差（difflogit 的推广，capability 已落地，默认关闭）。
+#   logit(p) = predLogitBaseScale·logit(p_fsrs) + predLogitIntercept
+#            + difficultyLogitWeight·(REF−词难度) + predLogitReviewCountWeight·ln(1+review_count)
+# 默认 1.0/0.0/0.0 = no-op（退化为纯 difflogit；再设 difficultyLogitWeight=0 → bit-exact 纯 FSRS-6）。
+# ⚠️ 默认关闭原因：maimemo held-out 验证为「边际但稳健的校准改善」（vs 纯 FSRS-6 logLoss−0.0084/AUC+0.0116/
+#    ECE 0.022→0.016，5/5 seed；但 vs 现 ship difflogit 净增量仅 dlogLoss≈−0.0022、AUC 持平、价值在 ECE）。
+#    系数域特异、按部署拟合（benchmarks/maimemo/pred_calib.py），不跨域迁移（synthetic 会退化）。
+# 启用前置（缺一不可）：① 用 prod_replay 在 WordForge 自有 review log 复算 held-out 增益非负且 ECE 不退化；
+#    ② 评估 mastered 门控(0.7)两侧 active→mastered 翻转率（防低召回老词被错判停复习）；
+#    ③ 核实 words.difficulty 真实填充率 + 口径对齐（缺值回落中性 REF 而非默认 0.0→D=1 强上推）。
+# maimemo-fit 推荐起点（prod_replay 通过后灰度：先 base_scale/intercept 重校准 → 再难度项 → nrev 视稳健性，nrev=0.252 系数脆弱可设 0）：
+#   predLogitBaseScale = 0.9683 / predLogitIntercept = -0.3131 / predLogitReviewCountWeight = 0.252（difficultyLogitWeight 同拟合为 0.1452）
+predLogitBaseScale = 1.0
+predLogitIntercept = 0.0
+predLogitReviewCountWeight = 0.0
 
-[iad]
-interferencePenaltyFactor = 0.1
-interferencePenaltyCap = 0.3
-maxConfusionPairs = 20
-newConfusionInitialScore = 0.2
-confusionUpdateIncrement = 0.2
-intervalShorteningFactor = 0.5
-confusionDecayRate = 0.05
-
-[mtp]
-morphemeTransferCoeff = 0.15
-morphemeBonusCap = 0.3
-knownMorphemeDecay = 0.9
-newMorphemeInitialCoeff = 0.5
-maxKnownMorphemes = 500
+# [iad] / [mtp] 段已移除（2026-06-13）：IAD 混淆干扰 / MTP 词素迁移算法删除。
+# confused_with API 字段保留为「接受但忽略」；word_morphemes 表 + /api/content/morphemes 端点保留（词根展示）。
 
 [wordSelector]
 reviewUcbWeight = 0.12

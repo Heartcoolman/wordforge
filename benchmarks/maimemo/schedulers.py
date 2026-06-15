@@ -12,6 +12,7 @@ Callers must invoke warm_start() before the first update().
 """
 from __future__ import annotations
 
+import bisect
 import math
 import random
 from typing import List, Protocol, runtime_checkable
@@ -176,6 +177,59 @@ class DHPScheduler:
 
     def current_halflife(self) -> float:
         return max(1e-6, self._halflife)
+
+
+class SSPMMCScheduler(DHPScheduler):
+    """忠实 SSP-MMC（Stochastic Shortest Path - Minimize Memorization Cost，叶峻峣等 KDD'22）。
+
+    记忆模型与 DHPScheduler 同源（继承 DHPStudent 的 halflife/difficulty 状态机 +
+    warm_start/update/current_halflife），但调度不走朴素 ceil(halflife·-log2(R)) 规则，
+    而是查 maimemo 官方 DP solver 预计算的**最优策略表**：给定当前 (halflife, difficulty)
+    → 在 152 点对数 halflife 网格上找最近箱 → 读出 ivl-{difficulty}.csv 第 2 列的 DP 最优
+    下一间隔。这是榜上**唯一消费 SSP-MMC 最优策略表**的算法，区别于 dhp 代理。
+
+    预测 recall 与 dhp 同口径（无 _recall → fallback 2^(-Δt/halflife)），故 prediction
+    维度与 dhp 逐位相同，差异**纯在调度（DHP/Policy 维度）**——正好隔离"最优策略表 vs
+    朴素固定保持率规则"的净价值。
+
+    重要 caveat：策略表是在 **DHP 记忆模型**上 DP 求解的（非 FSRS-6），故对位 amas 仍是
+    "SSP-MMC-on-DHP vs AMAS-on-FSRS6" 的跨记忆模型对比；且仍是 300 用户离线 forward-sim，
+    非墨墨真实生产部署（详见 docs/algo-bench-2026-06-13-ultracode/00 §4.1）。
+    """
+
+    name = "ssp_mmc"
+    # 吸收态（halflife≥目标 → 永久记忆）：策略表给间隔 0（仅最高 halflife 箱）→ 映射长程维护间隔。
+    _ABSORBING_INTERVAL = 365
+
+    def __init__(
+        self,
+        student: DHPStudent,
+        policy: "dict",
+        desired_retention: float = 0.85,
+    ) -> None:
+        super().__init__(student=student, desired_retention=desired_retention)
+        # policy: Dict[int_difficulty, (halflives_grid_asc, optimal_intervals)]
+        self._policy = policy
+
+    def next_interval_days(self) -> int:
+        # 当前 DHP 难度（1-18，失败腿每次 +2 上限 18）
+        diff = self._state[1] if self._state else self._difficulty
+        diff = max(1, min(18, int(round(diff))))
+        halflives, intervals = self._policy[diff]
+        hl = max(1e-6, self._halflife)
+        # 在升序 halflife 网格上找最近箱（DP 状态离散化口径）
+        idx = bisect.bisect_left(halflives, hl)
+        if idx <= 0:
+            idx = 0
+        elif idx >= len(halflives):
+            idx = len(halflives) - 1
+        elif (halflives[idx] - hl) > (hl - halflives[idx - 1]):
+            idx = idx - 1
+        ivl = intervals[idx]
+        # 间隔 0 = 吸收态（永久记忆，无需复习）→ 长程维护间隔
+        if ivl <= 0:
+            return self._ABSORBING_INTERVAL
+        return max(1, ivl)
 
 
 # ---------------------------------------------------------------------------
@@ -400,6 +454,24 @@ class AMASScheduler:
             self._decay_e = float(cfg.get("forgettingCurveDecay",  -0.5))
             self._floor   = float(cfg.get("forgettingCurveFloor",   0.0))
 
+        # per-word difficulty logit 加性项（amas 专属预测层特征；竞品忽略 memory_config → 天然 de-tie）。
+        # 预测期 recall 在 logit 域加 β·(D_REF - external_difficulty)：难词降 p、易词升 p，
+        # 修正 FSRS 二元映射下「预测随难度扁平」的区分度/校准残差（见 pred_diagnose / pred_search）。
+        # β=0（缺省）时 guard 跳过 → bit-exact no-op；仅作用于预测/urgency，不反馈 S/D 动力学。
+        self._diff_logit_weight = max(0.0, float(cfg.get("difficultyLogitWeight", 0.0)))
+        self._diff_logit_ref    = float(cfg.get("difficultyLogitRef", 5.0))
+        # 突破战役 C01：difflogit 用模型内生难度（self._state.difficulty，FSRS-6 演化 D）
+        # 替代外部 word.difficulty 标签——synthetic 上外部标签是写死 start_difficulty 噪声、与真实
+        # 可记忆性弱正相关致反伤；内生 D 随复习历史漂移、与 halflife 同源。仍用 has_ext 作 amas
+        # de-tie 标识（amas6 无 external_difficulty → 跳过），仅替换取值，保持 amas-only。
+        self._diff_logit_intrinsic = bool(cfg.get("difflogitUseIntrinsicDifficulty", False))
+        # v7 预测读出层重校准 + 复习次数残差（difflogit 的推广，镜像 mdm.rs::recall_probability_predicted）。
+        # logit(p)=base_scale·logit(p_fsrs)+intercept+β_diff·(REF−D)+β_nrev·ln(1+review_count)。
+        # 默认 1/0/0 → 退化为纯 difflogit；系数按部署拟合（pred_calib.py），不跨域迁移。
+        self._pred_logit_base_scale  = float(cfg.get("predLogitBaseScale", 1.0))
+        self._pred_logit_intercept   = float(cfg.get("predLogitIntercept", 0.0))
+        self._pred_logit_nrev_weight = float(cfg.get("predLogitReviewCountWeight", 0.0))
+
         self._base_retention = desired_retention  # CLI arg takes priority
         self._retention      = self._base_retention
         # GSP 调度策略头旋钮（生产新旋钮，默认全关 = 冻结旧语义）。
@@ -408,6 +480,12 @@ class AMASScheduler:
         self._gsp_interval_cap_days  = max(0.0, float(cfg.get("gspIntervalCapDays", 0.0)))
         self._gsp_graduation_streak  = max(0, int(cfg.get("gspGraduationStreak", 0)))
         self._gsp_graduation_floor   = max(0.0, float(cfg.get("gspGraduationFloorDays", 30.0)))
+        # 突破战役：退役（retirement）——自信过学词（review_count≥K 且已毕业）冻结到长间隔、
+        # 越过 90 天硬帽 → sim 窗口内不再到期 → 砍 reviewsPerDay 且不制造 lapse（保 retentionStability）。
+        # gspRetireAfterReviews=0 关闭（默认）。仅读 review_count/correct_streak/stability，时间不变可移植。
+        self._gsp_retire_after_reviews = max(0, int(cfg.get("gspRetireAfterReviews", 0)))
+        self._gsp_retire_interval_days = float(cfg.get("gspRetireIntervalDays", 365.0))
+        self._gsp_retire_min_stability = float(cfg.get("gspRetireMinStability", 0.0))
         # GSP review-load smoothing：确定性区间抖动（生产新旋钮，默认 0=关=bit-exact legacy）。
         # 夹至 [0, 1)：负数 → 0（关闭）；>=1 会使 (1+fuzz·u) 触及非正区间，故顶侧夹至 1-eps。
         self._gsp_interval_fuzz      = max(0.0, min(1.0 - 1e-9, float(cfg.get("gspIntervalFuzz", 0.0))))
@@ -449,9 +527,38 @@ class AMASScheduler:
     # ------------------------------------------------------------------
     def _recall(self, elapsed_days: float) -> float:
         s = max(1e-6, float(self._state.stability))
-        return self._floor + (1 - self._floor) * math.pow(
+        p = self._floor + (1 - self._floor) * math.pow(
             max(0.0, 1.0 + self._factor * elapsed_days / s), self._decay_e
         )
+        # cold-start guard（镜像 mdm.rs:333 `last_review_at.is_none() → 纯 recall`）：
+        # 未复习过的词不施加读出层（否则 intercept/base_scale 会污染冷启动预测，与 Rust 分歧）。
+        if int(getattr(self._state, "review_count", 0)) == 0:
+            return p
+        # v7 预测读出层（镜像 mdm.rs::recall_probability_predicted，逐位对齐）：
+        #   logit(p)=base_scale·logit(p_fsrs)+intercept+β_diff·(REF−D)+β_nrev·ln(1+review_count)
+        # 仅 WordforgeMirrorState(amas) 有 external_difficulty；amas6 无 → diff 项守卫跳过。
+        has_ext = hasattr(self._state, "external_difficulty")
+        diff_active = self._diff_logit_weight > 0.0 and has_ext
+        scale = self._pred_logit_base_scale
+        intercept = self._pred_logit_intercept
+        w_nrev = self._pred_logit_nrev_weight
+        # no-op 快路径：与 Rust 一致，base_scale=1∧intercept=0∧β_nrev=0∧diff 未激活 → 纯 recall
+        if scale == 1.0 and intercept == 0.0 and w_nrev == 0.0 and not diff_active:
+            return p
+        pc = min(1.0 - 1e-9, max(1e-9, p))
+        logit = scale * math.log(pc / (1.0 - pc)) + intercept
+        if diff_active:
+            if self._diff_logit_intrinsic:
+                ext = float(getattr(self._state, "difficulty", self._diff_logit_ref))
+            else:
+                ext = float(getattr(self._state, "external_difficulty", self._diff_logit_ref))
+            ext = min(10.0, max(1.0, ext))
+            logit += self._diff_logit_weight * (self._diff_logit_ref - ext)
+        if w_nrev != 0.0:
+            rc = int(getattr(self._state, "review_count", 0))
+            logit += w_nrev * math.log(1.0 + rc)
+        p = 1.0 / (1.0 + math.exp(-logit))
+        return p
 
     # ------------------------------------------------------------------
     # Fatigue update (engine.rs update_modeling)
@@ -625,7 +732,7 @@ class AMASScheduler:
         self,
         t_history: List[int],
         r_history: List[int],
-        difficulty: float,  # noqa: ARG002
+        difficulty: float,
     ) -> None:
         self._retention      = self._base_retention
         self._recent_results = []
@@ -636,6 +743,12 @@ class AMASScheduler:
         self._attempts       = 0
         self._population     = max(10, len(t_history))   # warm estimate
         self._state          = self._fresh_state()
+        # per-word difficulty 先验：仅 WordforgeMirrorState(amas) 有此字段；amas6 的
+        # FSRS6MirrorState 带 __slots__ 无此属性 → hasattr 守卫跳过，保持 bit-identical。
+        # NaN（缺标注）回落 5.0=中性 D，混入后等价轻微拉向中点，不引入偏置。
+        if hasattr(self._state, "external_difficulty"):
+            d = float(difficulty)
+            self._state.external_difficulty = 5.0 if math.isnan(d) else max(1.0, min(10.0, d))
 
         for i, (delta_t, result) in enumerate(zip(t_history, r_history)):
             elapsed = float(delta_t) if i > 0 else 0.0
@@ -676,6 +789,13 @@ class AMASScheduler:
             if streak >= self._gsp_graduation_streak:
                 scaled_days = max(scaled_days, self._gsp_graduation_floor)
                 graduated = True
+
+        # 退役：过学词冻结到长间隔、越过 90 帽（在 cap/fuzz 之前 return）。
+        if self._gsp_retire_after_reviews > 0 and graduated:
+            rc = int(getattr(self._state, "review_count", 0))
+            stab = float(getattr(self._state, "stability", 0.0))
+            if rc >= self._gsp_retire_after_reviews and stab >= self._gsp_retire_min_stability:
+                return max(1, int(round(self._gsp_retire_interval_days)))
 
         # 区间帽：min(90, gspCap)，与既有 90 天硬帽复合（mdm.rs MAX_INTERVAL_DAYS=90）。
         cap = 90.0
@@ -770,15 +890,17 @@ def build_scheduler(
     memory_config: dict | None = None,
     desired_retention: float = 0.85,
     seed: int = 42,
+    ssp_policy: dict | None = None,
 ) -> Scheduler:
     """Return a fresh Scheduler instance by name.
 
     Args:
         name: one of 'fsrs', 'amas', 'dhp', 'leitner', 'random'.
-        dhp_student: required when name == 'dhp'.
+        dhp_student: required when name == 'dhp' / 'ssp_mmc'.
         memory_config: optional override for FSRS/AMAS weights.
         desired_retention: target recall probability for interval computation.
         seed: RNG seed used by RandomScheduler.
+        ssp_policy: SSP-MMC DP 最优策略表（load_policy_grids），required when name == 'ssp_mmc'.
     """
     if name == "fsrs":
         # 竞品隔离：fsrs 条目固定绑 FSRS_BASELINE_CONFIG（FSRS-5 公版 + 显式关 GSP/双腿信任），
@@ -790,6 +912,10 @@ def build_scheduler(
         if dhp_student is None:
             raise ValueError("dhp_student is required for DHPScheduler")
         return DHPScheduler(student=dhp_student, desired_retention=desired_retention)
+    if name == "ssp_mmc":
+        if dhp_student is None or ssp_policy is None:
+            raise ValueError("dhp_student and ssp_policy are required for SSPMMCScheduler")
+        return SSPMMCScheduler(student=dhp_student, policy=ssp_policy, desired_retention=desired_retention)
     if name == "leitner":
         return LeitnerScheduler(desired_retention=desired_retention)
     if name == "random":
@@ -807,7 +933,7 @@ def build_scheduler(
     raise ValueError(f"unknown scheduler name: {name!r}; choose from {AVAILABLE_SCHEDULERS}")
 
 
-AVAILABLE_SCHEDULERS = ["fsrs", "amas", "dhp", "leitner", "random", "sm2", "hlr", "fsrs45", "fsrs6", "amas6"]
+AVAILABLE_SCHEDULERS = ["fsrs", "amas", "dhp", "ssp_mmc", "leitner", "random", "sm2", "hlr", "fsrs45", "fsrs6", "amas6"]
 
 
 # ---------------------------------------------------------------------------

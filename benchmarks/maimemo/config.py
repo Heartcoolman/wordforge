@@ -135,6 +135,14 @@ DEFAULT_MEMORY_MODEL_CONFIG: Dict[str, Any] = {
     "gspMatureRetention": 0.92,
     "gspMaturityBandDays": 14.0,
     "gspIntervalFuzz": 0.0,
+    # === per-word difficulty logit 加性项（v6 预测层船值，amas 专属）===
+    # 预测期 recall 在 logit 域加 β·(REF - external_difficulty)：难词降 p、易词升 p，
+    # 补 FSRS 二元映射下「预测随难度扁平」的区分度/校准残差。β=0.1 由 maimemo+duolingo val
+    # 选型、test 多 seed(42/123/777) 验证：vs amas6/fsrs6 logLoss-0.005~-0.012、AUC+0.0005~+0.015，
+    # 且在 maimemo AUC 反超 dhp(墨墨)。仅作用于 AMASScheduler._recall（预测+urgency），不入 S/D 动力学。
+    # 竞品（fsrs/fsrs6/amas6）忽略此键 → 天然 de-tie。详见 pred_diagnose/pred_search/pred_test_eval。
+    "difficultyLogitWeight": 0.1,
+    "difficultyLogitRef": 5.0,
 }
 
 # fsrs 基线条目专用：保持 FSRS-5 语义（19 维官方 w + 固定曲线），不随 AMAS 升级漂移

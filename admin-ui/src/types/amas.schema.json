@@ -126,22 +126,6 @@
         }
       ]
     },
-    "iad": {
-      "default": {
-        "confusionDecayRate": 0.05,
-        "confusionUpdateIncrement": 0.2,
-        "interferencePenaltyCap": 0.3,
-        "interferencePenaltyFactor": 0.1,
-        "intervalShorteningFactor": 0.5,
-        "maxConfusionPairs": 20,
-        "newConfusionInitialScore": 0.2
-      },
-      "allOf": [
-        {
-          "$ref": "#/definitions/IadConfig"
-        }
-      ]
-    },
     "ige": {
       "default": {
         "batchSize": 10,
@@ -213,6 +197,8 @@
         "compositeWeightShort": 0.2,
         "consolidationBonus": 1.5,
         "consolidationRateScale": 0.25,
+        "difficultyLogitRef": 5.0,
+        "difficultyLogitWeight": 0.0,
         "forgettingCurveDecay": -0.5,
         "forgettingCurveFactor": 0.2345679012345679,
         "forgettingCurveFloor": 0.0,
@@ -244,6 +230,9 @@
         "minIntervalSecs": 60,
         "passiveDecayHalfLifeDays": 30.0,
         "passiveDecayPower": 0.3,
+        "predLogitBaseScale": 1.0,
+        "predLogitIntercept": 0.0,
+        "predLogitReviewCountWeight": 0.0,
         "recallRiskBonus": 0.2,
         "recallRiskThreshold": 0.55,
         "retentionMax": 0.95,
@@ -287,20 +276,6 @@
     },
     "monitoring": {
       "$ref": "#/definitions/MonitoringConfig"
-    },
-    "mtp": {
-      "default": {
-        "knownMorphemeDecay": 0.9,
-        "maxKnownMorphemes": 500,
-        "morphemeBonusCap": 0.3,
-        "morphemeTransferCoeff": 0.15,
-        "newMorphemeInitialCoeff": 0.5
-      },
-      "allOf": [
-        {
-          "$ref": "#/definitions/MtpConfig"
-        }
-      ]
     },
     "objectiveWeights": {
       "$ref": "#/definitions/ObjectiveWeights"
@@ -740,20 +715,10 @@
         "heuristicEnabled": {
           "type": "boolean"
         },
-        "iadEnabled": {
-          "description": "B38: Interference Aware Decay - 混淆词对干扰衰减",
-          "default": false,
-          "type": "boolean"
-        },
         "igeEnabled": {
           "type": "boolean"
         },
         "mdmEnabled": {
-          "type": "boolean"
-        },
-        "mtpEnabled": {
-          "description": "B37: Morpheme Transfer Prediction - 词素迁移预测",
-          "default": false,
           "type": "boolean"
         },
         "sspEnabled": {
@@ -838,49 +803,6 @@
           "type": "integer",
           "format": "uint32",
           "minimum": 0.0
-        }
-      }
-    },
-    "IadConfig": {
-      "type": "object",
-      "required": [
-        "confusionUpdateIncrement",
-        "interferencePenaltyCap",
-        "interferencePenaltyFactor",
-        "intervalShorteningFactor",
-        "maxConfusionPairs",
-        "newConfusionInitialScore"
-      ],
-      "properties": {
-        "confusionDecayRate": {
-          "default": 0.05,
-          "type": "number",
-          "format": "double"
-        },
-        "confusionUpdateIncrement": {
-          "type": "number",
-          "format": "double"
-        },
-        "interferencePenaltyCap": {
-          "type": "number",
-          "format": "double"
-        },
-        "interferencePenaltyFactor": {
-          "type": "number",
-          "format": "double"
-        },
-        "intervalShorteningFactor": {
-          "type": "number",
-          "format": "double"
-        },
-        "maxConfusionPairs": {
-          "type": "integer",
-          "format": "uint",
-          "minimum": 0.0
-        },
-        "newConfusionInitialScore": {
-          "type": "number",
-          "format": "double"
         }
       }
     },
@@ -1148,6 +1070,18 @@
           "type": "number",
           "format": "double"
         },
+        "difficultyLogitRef": {
+          "description": "difficulty logit 项参考点（[1,10] 标度）：word_difficulty==REF 时位移为 0。默认 5.0。",
+          "default": 5.0,
+          "type": "number",
+          "format": "double"
+        },
+        "difficultyLogitWeight": {
+          "description": "预测/调度 recall **读出**在 logit 域加 `β·(REF − word_difficulty[1,10])`：难词降 p、易词升 p， 补 FSRS 二元映射下「预测随难度扁平」的区分度/校准残差（maimemo TEST: AUC+0.015 反超 dhp、 logLoss−0.005）。仅作用于 `recall_probability_predicted` 读出路径，**不入内部 S/D 更新** （update_strength 的 r 仍用纯 recall_probability）。0.0=关闭（bit-exact legacy）； 无每词难度的调用点传 None → 自然 no-op。",
+          "default": 0.0,
+          "type": "number",
+          "format": "double"
+        },
         "forgettingCurveDecay": {
           "description": "DEPRECATED（FSRS-6 起）：遗忘曲线 decay 即 trainable 参数 `w[20]`（`curve_decay()`）， 本字段仅为旧配置/DB 快照反序列化兼容保留，运行时不再读取。",
           "default": -0.5,
@@ -1308,6 +1242,22 @@
         },
         "passiveDecayPower": {
           "default": 0.5,
+          "type": "number",
+          "format": "double"
+        },
+        "predLogitBaseScale": {
+          "description": "读出 recall 在 logit 域施加：`logit(p) = base_scale·logit(p_fsrs) + intercept + β_diff·(REF−D) + β_nrev·ln(1+review_count)`。前两项是 Platt/温度重校准（FSRS-6 在真实 词汇数据上略过自信），β_nrev 补复习次数残差（stability 未完全吸收）。系数**按部署离线拟合** （benchmarks/maimemo/pred_calib.py，maimemo held-out: AUC+0.0116/logLoss−0.0084/ECE 0.022→0.016， 5/5 seed），**不跨域迁移**（synthetic 退化，须 prod_replay 复核）。仅作用 `recall_probability_predicted` 读出路径，不入 S/D 更新。默认 base_scale=1/intercept=0/β_nrev=0 → 退化为纯 difficulty_logit。",
+          "default": 1.0,
+          "type": "number",
+          "format": "double"
+        },
+        "predLogitIntercept": {
+          "default": 0.0,
+          "type": "number",
+          "format": "double"
+        },
+        "predLogitReviewCountWeight": {
+          "default": 0.0,
           "type": "number",
           "format": "double"
         },
@@ -1498,39 +1448,6 @@
           "minimum": 0.0
         },
         "sampleRate": {
-          "type": "number",
-          "format": "double"
-        }
-      }
-    },
-    "MtpConfig": {
-      "type": "object",
-      "required": [
-        "knownMorphemeDecay",
-        "maxKnownMorphemes",
-        "morphemeBonusCap",
-        "morphemeTransferCoeff",
-        "newMorphemeInitialCoeff"
-      ],
-      "properties": {
-        "knownMorphemeDecay": {
-          "type": "number",
-          "format": "double"
-        },
-        "maxKnownMorphemes": {
-          "type": "integer",
-          "format": "uint",
-          "minimum": 0.0
-        },
-        "morphemeBonusCap": {
-          "type": "number",
-          "format": "double"
-        },
-        "morphemeTransferCoeff": {
-          "type": "number",
-          "format": "double"
-        },
-        "newMorphemeInitialCoeff": {
           "type": "number",
           "format": "double"
         }

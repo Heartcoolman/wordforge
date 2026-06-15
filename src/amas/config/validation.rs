@@ -342,6 +342,37 @@ impl AMASConfig {
                     .to_string(),
             );
         }
+        // 预测读出层 logit 系数守卫（v7）：base_scale<=0 会反转/抹平 recall 排序（最该复习的词被当 mastered
+        // 压制），是单点配置错配即崩坏调度的最高危旋钮 → 硬约束 >0。其余项夹有限 + 合理量级。
+        if !self.memory_model.pred_logit_base_scale.is_finite()
+            || self.memory_model.pred_logit_base_scale <= 0.0
+        {
+            return Err(
+                "memory_model.pred_logit_base_scale must be finite and > 0 (<=0 inverts/flattens recall ranking)"
+                    .to_string(),
+            );
+        }
+        if !self.memory_model.pred_logit_intercept.is_finite()
+            || self.memory_model.pred_logit_intercept.abs() > 10.0
+        {
+            return Err("memory_model.pred_logit_intercept must be finite and |x| <= 10".to_string());
+        }
+        if !self.memory_model.pred_logit_review_count_weight.is_finite()
+            || !(0.0..=2.0).contains(&self.memory_model.pred_logit_review_count_weight)
+        {
+            return Err(
+                "memory_model.pred_logit_review_count_weight must be in [0,2] (negative would pull down well-reviewed words)"
+                    .to_string(),
+            );
+        }
+        if !self.memory_model.difficulty_logit_weight.is_finite()
+            || self.memory_model.difficulty_logit_weight < 0.0
+        {
+            return Err("memory_model.difficulty_logit_weight must be finite and >= 0".to_string());
+        }
+        if !(1.0..=10.0).contains(&self.memory_model.difficulty_logit_ref) {
+            return Err("memory_model.difficulty_logit_ref must be in [1,10]".to_string());
+        }
         // FSRS-6 w[] 权重：w[8]/w[11] 等经 .exp() 消费，非有限或过大会 overflow 为 Inf，
         // 进而污染 stability 并以 JSON null 落库；逐元素拒绝非有限及越界值。
         if self
@@ -380,28 +411,6 @@ impl AMASConfig {
         }
         if self.evm.diversity_growth_rate <= 0.0 {
             return Err("evm.diversity_growth_rate must be > 0".to_string());
-        }
-
-        // IadConfig
-        if !(0.0..=1.0).contains(&self.iad.interference_penalty_factor) {
-            return Err("iad.interference_penalty_factor must be in [0,1]".to_string());
-        }
-        if !(0.0..=1.0).contains(&self.iad.interference_penalty_cap) {
-            return Err("iad.interference_penalty_cap must be in [0,1]".to_string());
-        }
-
-        // MtpConfig
-        if !(0.0..=1.0).contains(&self.mtp.morpheme_transfer_coeff) {
-            return Err("mtp.morpheme_transfer_coeff must be in [0,1]".to_string());
-        }
-        if !(0.0..=1.0).contains(&self.mtp.morpheme_bonus_cap) {
-            return Err("mtp.morpheme_bonus_cap must be in [0,1]".to_string());
-        }
-        if !(0.0..=1.0).contains(&self.mtp.known_morpheme_decay) {
-            return Err("mtp.known_morpheme_decay must be in [0,1]".to_string());
-        }
-        if !(0.0..=1.0).contains(&self.mtp.new_morpheme_initial_coeff) {
-            return Err("mtp.new_morpheme_initial_coeff must be in [0,1]".to_string());
         }
 
         // WordSelectorConfig

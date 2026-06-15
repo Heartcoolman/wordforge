@@ -314,6 +314,48 @@ pub fn recall_probability(state: &MdmState, now_ms: i64, config: &MemoryModelCon
     }
 }
 
+/// 预测/调度**读出**口径的 recall：纯 FSRS recall + per-word difficulty logit 加性项。
+/// = `recall_probability(...)` 后在 logit 域加 `β·(REF − word_difficulty)`，β=`difficulty_logit_weight`。
+/// `word_difficulty` 为词的内在难度（[1,10] 标度，调用方负责映射）；None 或 β≤0 或未复习过时
+/// 退化为纯 recall（bit-exact no-op）。
+///
+/// **仅用于读出路径**（engine 决策回报 / word_selector urgency / mastery / analytics）。内部
+/// S/D 更新（update_strength 的 `r`）仍调纯 `recall_probability`，保持 FSRS 动力学不被难度项污染
+/// —— 与 benchmark Python 镜像（AMASScheduler._recall vs WordforgeMirrorState.recall）一致。
+pub fn recall_probability_predicted(
+    state: &MdmState,
+    now_ms: i64,
+    config: &MemoryModelConfig,
+    word_difficulty: Option<f64>,
+) -> f64 {
+    let p = recall_probability(state, now_ms, config);
+    // 未复习过 → 纯 recall（与 difficulty_logit 旧 guard 一致，预测层不作用于冷启动）
+    if state.last_review_at.is_none() {
+        return p;
+    }
+    let beta = config.difficulty_logit_weight;
+    let scale = config.pred_logit_base_scale;
+    let intercept = config.pred_logit_intercept;
+    let w_nrev = config.pred_logit_review_count_weight;
+    let diff_active = beta > 0.0 && word_difficulty.is_some();
+    // no-op 快路径：base_scale=1 ∧ intercept=0 ∧ β_nrev=0 ∧ difficulty 项未激活
+    // → 逐位返回纯 FSRS recall（保持 legacy bit-exact，旧 difficulty_logit-only 配置仍命中通用路径）。
+    if scale == 1.0 && intercept == 0.0 && w_nrev == 0.0 && !diff_active {
+        return p;
+    }
+    let pc = p.clamp(1e-9, 1.0 - 1e-9);
+    // logit(p) = base_scale·logit(p_fsrs) + intercept + β_diff·(REF−D) + β_nrev·ln(1+review_count)
+    let mut logit = scale * (pc / (1.0 - pc)).ln() + intercept;
+    if diff_active {
+        let ext = word_difficulty.unwrap().clamp(1.0, 10.0);
+        logit += beta * (config.difficulty_logit_ref - ext);
+    }
+    if w_nrev != 0.0 {
+        logit += w_nrev * (1.0 + state.review_count as f64).ln();
+    }
+    1.0 / (1.0 + (-logit).exp())
+}
+
 /// Interval: solve R = floor + (1-floor) * (1 + factor*t/S)^(-decay) for t
 pub fn compute_interval(
     state: &MdmState,
@@ -469,6 +511,73 @@ mod tests {
         assert!((0.0..=1.0).contains(&p1));
         assert!((0.0..=1.0).contains(&p2));
         assert!(p2 <= p1);
+    }
+
+    #[test]
+    fn difficulty_logit_term_matches_python_and_is_noop_when_disabled() {
+        // β=0（默认）或 word_difficulty=None → 与纯 recall bit-exact（no-op 安全保证）。
+        let mut config = MemoryModelConfig::default();
+        let mut state = MdmState::default();
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        update_strength(&mut state, 0.8, 0.3, now_ms, &config);
+        let at = state.last_review_at.unwrap() + 3 * 86_400_000;
+        let pure = recall_probability(&state, at, &config);
+        assert_eq!(recall_probability_predicted(&state, at, &config, Some(8.0)), pure,
+            "β=0 必须 no-op");
+        config.difficulty_logit_weight = 0.1;
+        config.difficulty_logit_ref = 5.0;
+        assert_eq!(recall_probability_predicted(&state, at, &config, None), pure,
+            "word_difficulty=None 必须 no-op");
+
+        // β>0 + 难词(d=9>REF) 必须降 p；易词(d=2<REF) 必须升 p；且逐位等于 Python logit 公式。
+        for (d, dir) in [(9.0_f64, -1.0_f64), (2.0_f64, 1.0_f64)] {
+            let got = recall_probability_predicted(&state, at, &config, Some(d));
+            let pc = pure.clamp(1e-9, 1.0 - 1e-9);
+            let logit = (pc / (1.0 - pc)).ln() + 0.1 * (5.0 - d);
+            let want = 1.0 / (1.0 + (-logit).exp());
+            assert!((got - want).abs() < 1e-12, "d={d} logit 公式对齐: got={got} want={want}");
+            assert!((got - pure) * dir > 0.0, "d={d} 方向: 难词降 p / 易词升 p");
+        }
+    }
+
+    #[test]
+    fn pred_logit_recalibration_and_review_count_match_python_formula() {
+        // v7 广义预测层：logit(p)=base_scale·logit(p_fsrs)+intercept+β·(REF−D)+β_nrev·ln(1+review_count)。
+        let mut config = MemoryModelConfig::default();
+        let mut state = MdmState::default();
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        // 复习数次让 review_count>0
+        update_strength(&mut state, 0.8, 0.3, now_ms, &config);
+        update_strength(&mut state, 0.9, 0.3, now_ms + 86_400_000, &config);
+        let at = state.last_review_at.unwrap() + 3 * 86_400_000;
+        let pure = recall_probability(&state, at, &config);
+
+        // 全默认（scale=1/int=0/β=0/β_nrev=0）→ no-op
+        assert_eq!(recall_probability_predicted(&state, at, &config, Some(8.0)), pure,
+            "全默认必须 no-op");
+
+        // maimemo-fit 系数：逐位等于闭式公式
+        config.pred_logit_base_scale = 0.9683;
+        config.pred_logit_intercept = -0.3131;
+        config.difficulty_logit_weight = 0.1452;
+        config.difficulty_logit_ref = 5.0;
+        config.pred_logit_review_count_weight = 0.252;
+        let d = 7.0_f64;
+        let got = recall_probability_predicted(&state, at, &config, Some(d));
+        let pc = pure.clamp(1e-9, 1.0 - 1e-9);
+        let logit = 0.9683 * (pc / (1.0 - pc)).ln() - 0.3131
+            + 0.1452 * (5.0 - d)
+            + 0.252 * (1.0 + state.review_count as f64).ln();
+        let want = 1.0 / (1.0 + (-logit).exp());
+        assert!((got - want).abs() < 1e-12, "广义 logit 公式逐位对齐: got={got} want={want}");
+        assert!((0.0..=1.0).contains(&got));
+
+        // base_scale 单独生效（intercept=0/β=0/β_nrev=0，difficulty=None）：纯温度缩放
+        let mut c2 = MemoryModelConfig::default();
+        c2.pred_logit_base_scale = 0.8;
+        let got2 = recall_probability_predicted(&state, at, &c2, None);
+        let want2 = 1.0 / (1.0 + (-(0.8 * (pc / (1.0 - pc)).ln())).exp());
+        assert!((got2 - want2).abs() < 1e-12, "纯 base_scale 温度缩放对齐");
     }
 
     #[test]

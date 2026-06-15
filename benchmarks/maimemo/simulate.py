@@ -47,7 +47,7 @@ import numpy as np
 import pandas as pd
 
 from .config import BenchPaths, resolve_bench_root
-from .dhp_reference import DHPStudent, ensure_reference_assets, load_dhp_params
+from .dhp_reference import DHPStudent, ensure_reference_assets, load_dhp_params, load_policy_grids
 from .models import GRUHLROracle, parse_history
 from .schedulers import AVAILABLE_SCHEDULERS, Scheduler, build_scheduler
 
@@ -213,6 +213,7 @@ def _build_word_states(
     memory_config: Optional[dict],
     desired_retention: float,
     seed: int,
+    ssp_policy: Optional[dict] = None,
 ) -> List[WordState]:
     """Instantiate WordState for every (user, word) row, warm-starting the scheduler."""
     states: List[WordState] = []
@@ -228,6 +229,7 @@ def _build_word_states(
             memory_config=memory_config,
             desired_retention=desired_retention,
             seed=seed,
+            ssp_policy=ssp_policy,
         )
         sched.warm_start(t_hist, r_hist, diff)
 
@@ -439,9 +441,12 @@ def simulate_strategies(
     # Load DHP student (needed for dhp strategy)
     # -----------------------------------------------------------------------
     dhp_student: Optional[DHPStudent] = None
-    if "dhp" in strategies:
+    ssp_policy: Optional[dict] = None
+    if "dhp" in strategies or "ssp_mmc" in strategies:
         assets = ensure_reference_assets(paths.cache / "maimemo_reference")
         dhp_student = DHPStudent(**load_dhp_params(assets["parameters"]))
+        if "ssp_mmc" in strategies:
+            ssp_policy = load_policy_grids(assets["policy_dir"])
 
     # -----------------------------------------------------------------------
     # Sample users from test split
@@ -481,6 +486,7 @@ def simulate_strategies(
             memory_config=memory_config,
             desired_retention=desired_retention,
             seed=strategy_seed,
+            ssp_policy=ssp_policy,
         )
 
         result = StrategyResult(name=strategy_name)

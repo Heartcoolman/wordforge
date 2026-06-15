@@ -63,6 +63,32 @@ def load_policy_tables(policy_dir: Path) -> Dict[int, List[int]]:
     return tables
 
 
+_POLICY_GRIDS_CACHE: Dict[str, Dict[int, "tuple[List[float], List[int]]"]] = {}
+
+
+def load_policy_grids(policy_dir: Path) -> Dict[int, "tuple[List[float], List[int]]"]:
+    """加载 SSP-MMC DP 最优策略表，保留 halflife 网格用于状态查表。
+
+    与 load_policy_tables（只读最优间隔列）不同：本函数返回 难度 →
+    (halflife 网格升序, 对应最优下一间隔)，供 SSPMMCScheduler 按当前 halflife
+    在 152 点对数网格上找最近箱、读出 maimemo 官方 DP solver 解出的最优间隔。
+    模块级缓存按 policy_dir 复用（per-trial/per-user 高频构造，避免重复解析 18×152 行）。
+    """
+    key = str(policy_dir)
+    if key not in _POLICY_GRIDS_CACHE:
+        grids: Dict[int, "tuple[List[float], List[int]]"] = {}
+        for difficulty in range(1, 19):
+            halflives: List[float] = []
+            intervals: List[int] = []
+            with (policy_dir / f"ivl-{difficulty}.csv").open("r", encoding="utf-8") as handle:
+                for row in csv.reader(handle):
+                    halflives.append(float(row[0]))
+                    intervals.append(int(float(row[1])))
+            grids[difficulty] = (halflives, intervals)
+        _POLICY_GRIDS_CACHE[key] = grids
+    return _POLICY_GRIDS_CACHE[key]
+
+
 @dataclass
 class DHPStudent:
     ra: float
@@ -156,6 +182,10 @@ class WordforgeMirrorState:
     review_count: int = 0
     correct_streak: int = 0
     lapse_count: int = 0
+    # per-word difficulty 先验（amas 专属预测层特征；FSRS6MirrorState 无此字段 → 天然 de-tie）。
+    # 仅作为「外部每词难度」的载体由 warm_start 写入；预测期在 AMASScheduler._recall 以
+    # logit 加性项消费（见该处）。不参与 S/D 更新（保持 FSRS 动力学纯净）。
+    external_difficulty: float = 5.0
 
     def recall(self, elapsed_days: float) -> float:
         power = math.pow(

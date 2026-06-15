@@ -51,6 +51,28 @@ fn modeling_out_of_range_fields_each_fail() {
 }
 
 #[test]
+fn pred_logit_layer_out_of_range_fields_each_fail() {
+    // v7 预测读出层守卫：base_scale<=0（反转排序，最高危）、intercept 超界、nrev 负/超界、
+    // difficulty_logit_weight 负、ref 越界 —— 逐条须被 validate 拒绝。
+    let bad: [fn(&mut AMASConfig); 7] = [
+        |c| c.memory_model.pred_logit_base_scale = 0.0,
+        |c| c.memory_model.pred_logit_base_scale = -0.5,
+        |c| c.memory_model.pred_logit_intercept = 50.0,
+        |c| c.memory_model.pred_logit_review_count_weight = -0.1,
+        |c| c.memory_model.pred_logit_review_count_weight = 3.0,
+        |c| c.memory_model.difficulty_logit_weight = -0.1,
+        |c| c.memory_model.difficulty_logit_ref = 0.5,
+    ];
+    for (i, mutate) in bad.iter().enumerate() {
+        let mut c = AMASConfig::default();
+        mutate(&mut c);
+        assert!(c.validate().is_err(), "pred_logit case {i} should fail");
+    }
+    // no-op 默认（1.0/0.0/0.0 + difflogit 默认）必须通过
+    assert!(AMASConfig::default().validate().is_ok());
+}
+
+#[test]
 fn constraint_thresholds_invalid_combinations_fail() {
     let cases = [
         |c: &mut AMASConfig| c.constraints.high_fatigue_threshold = 2.0,
@@ -330,32 +352,6 @@ fn evm_invalid_fields_fail() {
 }
 
 #[test]
-fn iad_invalid_fields_fail() {
-    let mut c = AMASConfig::default();
-    c.iad.interference_penalty_factor = 1.5;
-    assert!(c.validate().is_err());
-
-    let mut c = AMASConfig::default();
-    c.iad.interference_penalty_cap = -0.1;
-    assert!(c.validate().is_err());
-}
-
-#[test]
-fn mtp_invalid_fields_fail() {
-    let mutators: [fn(&mut AMASConfig); 4] = [
-        |c| c.mtp.morpheme_transfer_coeff = 1.5,
-        |c| c.mtp.morpheme_bonus_cap = -0.1,
-        |c| c.mtp.known_morpheme_decay = 2.0,
-        |c| c.mtp.new_morpheme_initial_coeff = -0.5,
-    ];
-    for (i, m) in mutators.iter().enumerate() {
-        let mut c = AMASConfig::default();
-        m(&mut c);
-        assert!(c.validate().is_err(), "case {i}");
-    }
-}
-
-#[test]
 fn word_selector_invalid_fields_fail() {
     let mut c = AMASConfig::default();
     c.word_selector.review_ucb_weight = -0.1;
@@ -628,8 +624,6 @@ frustration = 0.15
     assert!(cfg.ige.ucb_confidence_coeff > 0.0);
     assert!(cfg.swd.max_history_size > 0);
     assert!(cfg.memory_model.short_term_learning_rate > 0.0);
-    assert!(cfg.iad.interference_penalty_factor >= 0.0);
-    assert!(cfg.mtp.morpheme_transfer_coeff >= 0.0);
     assert!(cfg.word_selector.review_ucb_weight >= 0.0);
     assert!(cfg.intervention.fatigue_alert_threshold >= 0.0);
     assert!(cfg.learning_strategy.cross_session_high_accuracy >= 0.0);
@@ -742,8 +736,6 @@ fn subconfig_default_impls_construct_valid_values() {
     let _ = SwdConfig::default();
     let _ = MemoryModelConfig::default();
     let _ = EvmConfig::default();
-    let _ = IadConfig::default();
-    let _ = MtpConfig::default();
     let _ = WordSelectorConfig::default();
     let _ = InterventionConfig::default();
     let _ = LearningStrategyConfig::default();

@@ -101,6 +101,30 @@ pub struct MemoryModelConfig {
     /// u∈[-1,1) 由 stability/review_count 派生（见 GSP_SPEC §7），错峰削平同步复习波。
     #[serde(default = "default_gsp_interval_fuzz")]
     pub gsp_interval_fuzz: f64,
+    // === per-word difficulty logit 加性项（v6 预测层；契约见 benchmarks/maimemo pred_*.py）===
+    /// 预测/调度 recall **读出**在 logit 域加 `β·(REF − word_difficulty[1,10])`：难词降 p、易词升 p，
+    /// 补 FSRS 二元映射下「预测随难度扁平」的区分度/校准残差（maimemo TEST: AUC+0.015 反超 dhp、
+    /// logLoss−0.005）。仅作用于 `recall_probability_predicted` 读出路径，**不入内部 S/D 更新**
+    /// （update_strength 的 r 仍用纯 recall_probability）。0.0=关闭（bit-exact legacy）；
+    /// 无每词难度的调用点传 None → 自然 no-op。
+    #[serde(default = "default_difficulty_logit_weight")]
+    pub difficulty_logit_weight: f64,
+    /// difficulty logit 项参考点（[1,10] 标度）：word_difficulty==REF 时位移为 0。默认 5.0。
+    #[serde(default = "default_difficulty_logit_ref")]
+    pub difficulty_logit_ref: f64,
+    // === 预测读出层 logit 重校准 + 复习次数残差（v7；difficulty_logit 的推广）===
+    /// 读出 recall 在 logit 域施加：`logit(p) = base_scale·logit(p_fsrs) + intercept
+    /// + β_diff·(REF−D) + β_nrev·ln(1+review_count)`。前两项是 Platt/温度重校准（FSRS-6 在真实
+    /// 词汇数据上略过自信），β_nrev 补复习次数残差（stability 未完全吸收）。系数**按部署离线拟合**
+    /// （benchmarks/maimemo/pred_calib.py，maimemo held-out: AUC+0.0116/logLoss−0.0084/ECE 0.022→0.016，
+    /// 5/5 seed），**不跨域迁移**（synthetic 退化，须 prod_replay 复核）。仅作用 `recall_probability_predicted`
+    /// 读出路径，不入 S/D 更新。默认 base_scale=1/intercept=0/β_nrev=0 → 退化为纯 difficulty_logit。
+    #[serde(default = "default_pred_logit_base_scale")]
+    pub pred_logit_base_scale: f64,
+    #[serde(default = "default_pred_logit_intercept")]
+    pub pred_logit_intercept: f64,
+    #[serde(default = "default_pred_logit_review_count_weight")]
+    pub pred_logit_review_count_weight: f64,
     // === 原 mdm.rs 模块级常量 ===
     #[serde(default = "default_retention_min")]
     pub retention_min: f64,
@@ -228,6 +252,21 @@ pub(crate) fn default_gsp_maturity_band_days() -> f64 {
 pub(crate) fn default_gsp_interval_fuzz() -> f64 {
     0.0
 }
+pub(crate) fn default_difficulty_logit_weight() -> f64 {
+    0.0
+}
+pub(crate) fn default_difficulty_logit_ref() -> f64 {
+    5.0
+}
+pub(crate) fn default_pred_logit_base_scale() -> f64 {
+    1.0
+}
+pub(crate) fn default_pred_logit_intercept() -> f64 {
+    0.0
+}
+pub(crate) fn default_pred_logit_review_count_weight() -> f64 {
+    0.0
+}
 pub(crate) fn default_retention_min() -> f64 {
     // bench tuned v3：抬高下限防过度拉长间隔
     0.75
@@ -350,6 +389,11 @@ impl Default for MemoryModelConfig {
             gsp_mature_retention: 0.0,
             gsp_maturity_band_days: 0.0,
             gsp_interval_fuzz: 0.0,
+            difficulty_logit_weight: 0.0,
+            difficulty_logit_ref: 5.0,
+            pred_logit_base_scale: 1.0,
+            pred_logit_intercept: 0.0,
+            pred_logit_review_count_weight: 0.0,
             retention_min: 0.75,
             retention_max: 0.95,
             max_interval_days: 90.0,
@@ -395,55 +439,3 @@ impl Default for EvmConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct IadConfig {
-    pub interference_penalty_factor: f64,
-    pub interference_penalty_cap: f64,
-    pub max_confusion_pairs: usize,
-    pub new_confusion_initial_score: f64,
-    pub confusion_update_increment: f64,
-    pub interval_shortening_factor: f64,
-    #[serde(default = "default_confusion_decay_rate")]
-    pub confusion_decay_rate: f64,
-}
-
-pub(crate) fn default_confusion_decay_rate() -> f64 {
-    0.05
-}
-
-impl Default for IadConfig {
-    fn default() -> Self {
-        Self {
-            interference_penalty_factor: 0.1,
-            interference_penalty_cap: 0.3,
-            max_confusion_pairs: 20,
-            new_confusion_initial_score: 0.2,
-            confusion_update_increment: 0.2,
-            interval_shortening_factor: 0.5,
-            confusion_decay_rate: 0.05,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct MtpConfig {
-    pub morpheme_transfer_coeff: f64,
-    pub morpheme_bonus_cap: f64,
-    pub known_morpheme_decay: f64,
-    pub new_morpheme_initial_coeff: f64,
-    pub max_known_morphemes: usize,
-}
-
-impl Default for MtpConfig {
-    fn default() -> Self {
-        Self {
-            morpheme_transfer_coeff: 0.15,
-            morpheme_bonus_cap: 0.3,
-            known_morpheme_decay: 0.9,
-            new_morpheme_initial_coeff: 0.5,
-            max_known_morphemes: 500,
-        }
-    }
-}

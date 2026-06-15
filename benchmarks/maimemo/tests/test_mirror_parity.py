@@ -58,6 +58,8 @@ _F1_SHIP_KEYS = {
     "gspMatureRetention": 0.92,
     "gspMaturityBandDays": 14.0,
     "gspIntervalFuzz": 0.0,
+    "difficultyLogitWeight": 0.1,
+    "difficultyLogitRef": 5.0,
     "w": list(_FSRS6_W),
     "baseDesiredRetention": 0.85,
     "forgettingCurveDecay": -0.1542,

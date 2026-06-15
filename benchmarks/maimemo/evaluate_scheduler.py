@@ -25,7 +25,7 @@ import numpy as np
 import pandas as pd
 
 from .config import BenchPaths, FSRS_BASELINE_CONFIG
-from .dhp_reference import DHPStudent, ensure_reference_assets, load_dhp_params
+from .dhp_reference import DHPStudent, ensure_reference_assets, load_dhp_params, load_policy_grids
 from .models import parse_history
 from .pipeline import StreamingPredictionAccumulator
 from .schedulers import (
@@ -39,10 +39,11 @@ from .schedulers import (
     LeitnerScheduler,
     RandomScheduler,
     SM2Scheduler,
+    SSPMMCScheduler,
 )
 
 
-def _build_scheduler(name: str, dhp_student: DHPStudent | None, seed: int, memory_config: dict | None = None):
+def _build_scheduler(name: str, dhp_student: DHPStudent | None, seed: int, memory_config: dict | None = None, ssp_policy: dict | None = None):
     """工厂: 支持全部 8 个 scheduler (build_scheduler 只支持前 5 个)。
 
     memory_config（默认 None=算法中性，保持既有调用方语义不变）：仅当显式传入
@@ -60,6 +61,10 @@ def _build_scheduler(name: str, dhp_student: DHPStudent | None, seed: int, memor
         if dhp_student is None:
             raise ValueError("dhp_student is required for DHPScheduler")
         return DHPScheduler(student=dhp_student, desired_retention=0.85)
+    if name == "ssp_mmc":
+        if dhp_student is None or ssp_policy is None:
+            raise ValueError("dhp_student and ssp_policy are required for SSPMMCScheduler")
+        return SSPMMCScheduler(student=dhp_student, policy=ssp_policy, desired_retention=0.85)
     if name == "leitner":
         return LeitnerScheduler(desired_retention=0.85)
     if name == "random":
@@ -227,11 +232,14 @@ def evaluate_scheduler_prediction(
     if df.empty:
         return {"logLoss": float("nan"), "ici": float("nan"), "auc": float("nan"), "maeP": float("nan"), "n_samples": 0}
 
-    # DHP 需要 student
+    # DHP / SSP-MMC 需要 student（SSP-MMC 还需 DP 最优策略表）
     dhp_student: DHPStudent | None = None
-    if scheduler_name == "dhp":
+    ssp_policy: dict | None = None
+    if scheduler_name in ("dhp", "ssp_mmc"):
         assets = ensure_reference_assets(paths.cache / "maimemo_reference")
         dhp_student = DHPStudent(**load_dhp_params(assets["parameters"]))
+        if scheduler_name == "ssp_mmc":
+            ssp_policy = load_policy_grids(assets["policy_dir"])
 
     acc = StreamingPredictionAccumulator()
 
@@ -263,7 +271,7 @@ def evaluate_scheduler_prediction(
         elapsed = float(row.next_t) if row.next_t is not None else 0.0
         truth = int(row.next_r)
 
-        sched = _build_scheduler(scheduler_name, dhp_student, seed, memory_config=memory_config)
+        sched = _build_scheduler(scheduler_name, dhp_student, seed, memory_config=memory_config, ssp_policy=ssp_policy)
         try:
             sched.warm_start(t_hist, r_hist, diff)
         except Exception:
@@ -310,9 +318,12 @@ def evaluate_all_schedulers(
         return {name: {"logLoss": float("nan"), "ici": float("nan"), "auc": float("nan"), "maeP": float("nan"), "n_samples": 0} for name in scheduler_names}
 
     dhp_student: DHPStudent | None = None
-    if "dhp" in scheduler_names:
+    ssp_policy: dict | None = None
+    if "dhp" in scheduler_names or "ssp_mmc" in scheduler_names:
         assets = ensure_reference_assets(paths.cache / "maimemo_reference")
         dhp_student = DHPStudent(**load_dhp_params(assets["parameters"]))
+        if "ssp_mmc" in scheduler_names:
+            ssp_policy = load_policy_grids(assets["policy_dir"])
 
     # 预解析 history (避免重复 parse)
     parsed_rows = []
@@ -350,7 +361,7 @@ def evaluate_all_schedulers(
             true_hl_buf.clear()
 
         for t_hist, r_hist, diff, elapsed, truth in parsed_rows:
-            sched = _build_scheduler(name, dhp_student, seed)
+            sched = _build_scheduler(name, dhp_student, seed, ssp_policy=ssp_policy)
             try:
                 sched.warm_start(t_hist, r_hist, diff)
             except Exception:
