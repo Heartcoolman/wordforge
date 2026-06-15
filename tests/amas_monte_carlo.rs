@@ -7,18 +7,12 @@
 //! 运行: cargo test --test amas_monte_carlo --release -- --nocapture
 
 use learning_backend::amas::config::{
-    EloConfig, IadConfig, MemoryModelConfig, MtpConfig, WordSelectorConfig,
+    EloConfig, MemoryModelConfig, WordSelectorConfig,
 };
 use learning_backend::amas::elo::{update_elo, zpd_priority, EloRating};
-use learning_backend::amas::memory::iad::{
-    interference_penalty, interval_extension_factor, record_confusion, IadState,
-};
 use learning_backend::amas::memory::mastery::{update_mastery, WordMasteryState};
 use learning_backend::amas::memory::mdm::{
     composite_strength, compute_interval, recall_probability, update_strength, MdmState,
-};
-use learning_backend::amas::memory::mtp::{
-    morpheme_transfer_bonus, update_known_morphemes, MtpState,
 };
 use learning_backend::amas::types::MasteryLevel;
 
@@ -1721,178 +1715,6 @@ fn monte_carlo_mastery_progression() {
     assert_eq!(
         window_correct_count, num_trials,
         "window size incorrect in some trials"
-    );
-}
-
-// ============================================================================
-// 测试 5: IAD 混淆干扰验证
-// ============================================================================
-
-#[test]
-fn monte_carlo_iad_interference() {
-    let config = IadConfig::default();
-    let num_trials = 30;
-    let mut penalty_positive_count = 0;
-    let mut factor_below_one_count = 0;
-    let mut decay_reduces_count = 0;
-
-    for trial in 0..num_trials {
-        let mut iad_state = IadState::default();
-
-        // 无混淆时 penalty 应为 0
-        let penalty_before = interference_penalty("word-a", &iad_state, &config);
-        assert!(
-            penalty_before < 1e-9,
-            "trial {}: penalty before confusion should be 0, got {}",
-            trial,
-            penalty_before
-        );
-
-        // 记录混淆
-        record_confusion(
-            &mut iad_state,
-            "word-a",
-            "word-b",
-            config.confusion_decay_rate,
-            &config,
-        );
-
-        let penalty_after = interference_penalty("word-a", &iad_state, &config);
-        if penalty_after > 0.0 {
-            penalty_positive_count += 1;
-        }
-
-        let factor = interval_extension_factor(penalty_after, &config);
-        if factor < 1.0 {
-            factor_below_one_count += 1;
-        }
-
-        // 多次衰减后 penalty 应降低
-        let penalty_first = penalty_after;
-        for _ in 0..10 {
-            record_confusion(
-                &mut iad_state,
-                "word-c",
-                "word-d", // 不同的词对，触发全局衰减
-                config.confusion_decay_rate,
-                &config,
-            );
-        }
-        let penalty_decayed = interference_penalty("word-a", &iad_state, &config);
-        if penalty_decayed <= penalty_first {
-            decay_reduces_count += 1;
-        }
-    }
-
-    println!("\n=== IAD 混淆干扰验证 ({} trials) ===", num_trials);
-    println!(
-        "  混淆后 penalty > 0: {}/{}",
-        penalty_positive_count, num_trials
-    );
-    println!(
-        "  interval factor < 1.0: {}/{}",
-        factor_below_one_count, num_trials
-    );
-    println!(
-        "  衰减后 penalty 降低: {}/{}",
-        decay_reduces_count, num_trials
-    );
-
-    assert_eq!(
-        penalty_positive_count, num_trials,
-        "penalty should be positive after confusion"
-    );
-    assert_eq!(
-        factor_below_one_count, num_trials,
-        "interval factor should be < 1.0 after confusion"
-    );
-    assert!(
-        decay_reduces_count >= (num_trials as f64 * 0.8) as usize,
-        "decay should reduce penalty in most trials: {}/{}",
-        decay_reduces_count,
-        num_trials
-    );
-}
-
-// ============================================================================
-// 测试 6: MTP 词素迁移验证
-// ============================================================================
-
-#[test]
-fn monte_carlo_mtp_transfer() {
-    let config = MtpConfig::default();
-    let num_trials = 30;
-    let mut shared_bonus_positive = 0;
-    let mut no_shared_bonus_zero = 0;
-    let mut accumulation_works = 0;
-
-    for _trial in 0..num_trials {
-        let mut mtp_state = MtpState::default();
-
-        // 学习包含 "un-" 的词
-        let morphemes_undo = vec!["un".to_string(), "do".to_string()];
-        update_known_morphemes(&mut mtp_state, &morphemes_undo, 0.9, &config);
-
-        // 共享 "un-" 词素的新词应获得正 bonus
-        let morphemes_unhappy = vec!["un".to_string(), "happy".to_string()];
-        let bonus =
-            morpheme_transfer_bonus(&morphemes_unhappy, &mtp_state.known_morphemes, &config);
-        if bonus > 0.0 {
-            shared_bonus_positive += 1;
-        }
-
-        // 无共享词素的词 bonus 应为 0
-        let morphemes_novel = vec!["xyz".to_string()];
-        let no_bonus =
-            morpheme_transfer_bonus(&morphemes_novel, &mtp_state.known_morphemes, &config);
-        if no_bonus < 1e-9 {
-            no_shared_bonus_zero += 1;
-        }
-
-        // 累计学习多个含 "un-" 的词 → familiarity 增加 → bonus 应增加或保持
-        update_known_morphemes(
-            &mut mtp_state,
-            &["un".to_string(), "lock".to_string()],
-            0.95,
-            &config,
-        );
-        let bonus_after = morpheme_transfer_bonus(
-            &["un".to_string(), "wrap".to_string()],
-            &mtp_state.known_morphemes,
-            &config,
-        );
-        if bonus_after >= bonus {
-            accumulation_works += 1;
-        }
-    }
-
-    println!("\n=== MTP 词素迁移验证 ({} trials) ===", num_trials);
-    println!(
-        "  共享词素 bonus > 0: {}/{}",
-        shared_bonus_positive, num_trials
-    );
-    println!(
-        "  无共享词素 bonus ≈ 0: {}/{}",
-        no_shared_bonus_zero, num_trials
-    );
-    println!(
-        "  累计学习增强 bonus: {}/{}",
-        accumulation_works, num_trials
-    );
-
-    assert_eq!(
-        shared_bonus_positive, num_trials,
-        "shared morpheme bonus should be positive"
-    );
-    assert_eq!(
-        no_shared_bonus_zero, num_trials,
-        "no shared morpheme bonus should be zero"
-    );
-    assert!(
-        accumulation_works >= (num_trials as f64 * 0.8) as usize,
-        "accumulation should work: {}/{}",
-        accumulation_works,
-        num_trials
     );
 }
 

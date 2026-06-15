@@ -6,7 +6,7 @@ use tokio::sync::broadcast;
 
 use learning_backend::amas::config::AMASConfig;
 use learning_backend::amas::engine::AMASEngine;
-use learning_backend::amas::memory::{evm, iad, mtp};
+use learning_backend::amas::memory::evm;
 use learning_backend::amas::metrics::MetricsRegistry;
 use learning_backend::amas::types::AlgorithmId;
 use learning_backend::store::operations::records::{LearningRecord, RecordType};
@@ -464,43 +464,7 @@ fn it_exercises_memory_models_and_metrics_registry() {
     assert!(evm_bonus <= 0.3);
     assert!(evm::interval_modifier(&evm_state, &evm_cfg) >= 1.0);
 
-    let mut iad_state = iad::IadState::default();
-    let iad_config = learning_backend::amas::config::IadConfig::default();
-    iad::record_confusion(&mut iad_state, "word-a", "word-b", 0.1, &iad_config);
-    iad::record_confusion(&mut iad_state, "word-a", "word-b", 0.0, &iad_config);
-    let penalty = iad::interference_penalty("word-b", &iad_state, &iad_config);
-    assert!(penalty > 0.0);
-    let empty_iad_state = iad::IadState::default();
-    assert_eq!(
-        iad::interference_penalty("word-x", &empty_iad_state, &iad_config),
-        0.0
-    );
-    assert!(iad::interval_extension_factor(penalty, &iad_config) < 1.0);
-
-    let mut mtp_state = mtp::MtpState::default();
-    let mtp_config = learning_backend::amas::config::MtpConfig::default();
-    let morphemes = vec!["pre".to_string(), "dict".to_string()];
-    mtp::update_known_morphemes(&mut mtp_state, &morphemes, 0.8, &mtp_config);
-    let mtp_bonus =
-        mtp::morpheme_transfer_bonus(&morphemes, &mtp_state.known_morphemes, &mtp_config);
-    assert!(mtp_bonus > 0.0);
-    assert_eq!(
-        mtp::morpheme_transfer_bonus(&[], &mtp_state.known_morphemes, &mtp_config),
-        0.0
-    );
-
-    let mut large_mtp_state = mtp::MtpState {
-        known_morphemes: (0..501)
-            .map(|idx| (format!("m-{idx}"), idx as f64 / 500.0))
-            .collect(),
-    };
-    mtp::update_known_morphemes(
-        &mut large_mtp_state,
-        &["core".to_string()],
-        0.9,
-        &mtp_config,
-    );
-    assert!(large_mtp_state.known_morphemes.len() <= 500);
+    // IAD / MTP 辅助模块已删除(预测维证伪),对应覆盖断言随模块移除;EVM 保留(见上)。
 
     let registry = MetricsRegistry::new();
     registry.record_call(AlgorithmId::Swd, 100, false);
