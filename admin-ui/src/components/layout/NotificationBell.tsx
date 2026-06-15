@@ -24,6 +24,11 @@ export function NotificationBell() {
   const [items, setItems] = createSignal<AdminAlert[]>([]);
   const [loading, setLoading] = createSignal(false);
   const [marking, setMarking] = createSignal<string | null>(null);
+  // 分页:offset/limit 翻页覆盖全部告警(防未读 >INBOX_LIMIT 被截断无法标记已读)。
+  const [offset, setOffset] = createSignal(0);
+  const [limit, setLimit] = createSignal(100);
+  const [hasMore, setHasMore] = createSignal(false);
+  const [loadingMore, setLoadingMore] = createSignal(false);
   let pollTimer: ReturnType<typeof setInterval> | undefined;
   let rootRef: HTMLDivElement | undefined;
 
@@ -37,13 +42,34 @@ export function NotificationBell() {
   const loadInbox = async () => {
     setLoading(true);
     try {
-      const inbox = await notificationsApi.list(false);
+      const inbox = await notificationsApi.list(false, 0);
       setItems(inbox.items);
       setUnread(inbox.unreadCount);
+      setLimit(inbox.limit);
+      setOffset(0);
+      // 返回满一页 → 可能还有下一页。
+      setHasMore(inbox.items.length >= inbox.limit);
     } catch {
       uiStore.toast.error('加载通知失败');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const loadMore = async () => {
+    if (loadingMore() || !hasMore()) return;
+    setLoadingMore(true);
+    try {
+      const next = offset() + limit();
+      const inbox = await notificationsApi.list(false, next);
+      setItems((prev) => [...prev, ...inbox.items]);
+      setUnread(inbox.unreadCount);
+      setOffset(next);
+      setHasMore(inbox.items.length >= inbox.limit);
+    } catch {
+      uiStore.toast.error('加载更多失败');
+    } finally {
+      setLoadingMore(false);
     }
   };
 
@@ -195,6 +221,16 @@ export function NotificationBell() {
                     </span>
                   </button>
                 )}</For>
+                <Show when={hasMore()}>
+                  <button
+                    type="button"
+                    onClick={loadMore}
+                    disabled={loadingMore()}
+                    class="w-full px-4 py-2.5 text-center text-[12px] text-accent hover:bg-surface-secondary disabled:opacity-50 cursor-pointer border-t border-border-hairline/60"
+                  >
+                    {loadingMore() ? '加载中…' : '加载更多'}
+                  </button>
+                </Show>
               </Show>
             </Show>
           </div>

@@ -1,0 +1,24 @@
+{
+ "scheduler": "hlr",
+ "dataset": "synthetic",
+ "prediction": {
+  "logLoss": 11.463404177793441,
+  "ici": 0.8661494849853022,
+  "auc": 0.51852040545927,
+  "maeP": 0.8661518578977916
+ },
+ "dhp": {
+  "expectedMemoryFinal": 53564.4931,
+  "masteredCount": 0,
+  "totalReviews": 1958000,
+  "efficiency": 0.027357
+ },
+ "policy": {
+  "finalRecallRate": 0.8889,
+  "reviewsPerDay": 21755.555555555555,
+  "retentionStability": 0.9029785747628073
+ },
+ "split": "val",
+ "runtime_seconds": 17.83,
+ "notes": "val baseline board; sim+pred both split=val; n_users=300 sim_days=90 budget=200 dr=0.85 seed=42"
+}

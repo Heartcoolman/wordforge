@@ -1,0 +1,24 @@
+{
+ "scheduler": "amas",
+ "dataset": "synthetic",
+ "prediction": {
+  "logLoss": 0.7403106678179225,
+  "ici": 0.36685407496938677,
+  "auc": 0.5263426157828234,
+  "maeP": 0.4950593694582582
+ },
+ "dhp": {
+  "expectedMemoryFinal": 40651.404,
+  "masteredCount": 16243,
+  "totalReviews": 680771,
+  "efficiency": 0.059714
+ },
+ "policy": {
+  "finalRecallRate": 0.4285,
+  "reviewsPerDay": 7564.122222222222,
+  "retentionStability": 0.8941154654744831
+ },
+ "split": "val",
+ "runtime_seconds": 18.2,
+ "notes": "val baseline board; sim+pred both split=val; n_users=300 sim_days=90 budget=200 dr=0.85 seed=42"
+}

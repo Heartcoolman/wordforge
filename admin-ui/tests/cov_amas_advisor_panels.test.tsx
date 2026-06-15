@@ -49,7 +49,7 @@ describe('MetricsDashboard — option() builder executes', () => {
 
   async function renderPanel() {
     const { MetricsDashboard } = await import('@/pages/amas/MetricsDashboard');
-    return renderWithProviders(() => <MetricsDashboard />);
+    return renderWithProviders(() => <MetricsDashboard days={() => 30} />);
   }
 
   it.skip('builds latency + error series for multiple algorithms / dates (covers grouped + option)', async () => {

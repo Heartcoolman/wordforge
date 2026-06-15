@@ -13,14 +13,13 @@ describe('TierAPanel(三层运维视角重构)', () => {
   it('renders preset cards + flag block + quick knobs + Tier-A 11 grid', () => {
     render(() => <TierAPanel config={{}} errors={[]} onChange={() => {}} />);
     // 4 preset 卡(至少 2 项真实)
-    expect(screen.getByText('已调优 2026-05-15')).toBeInTheDocument();
-    expect(screen.getByText('出厂默认')).toBeInTheDocument();
+    expect(screen.getByText('出厂默认 (FSRS-6)')).toBeInTheDocument();
     // 算法 flag block 标题
     expect(screen.getByText(/算法 flag.*featureFlags 一层开关/)).toBeInTheDocument();
     // 核心 4 旋钮 block 标题
     expect(screen.getByText(/核心 4 旋钮/)).toBeInTheDocument();
     // Tier-A 11 维 block 标题
-    expect(screen.getByText(/Tier-A 11 维.*已调优精雕项/)).toBeInTheDocument();
+    expect(screen.getByText(/Tier-A 12 维.*高杠杆精雕项/)).toBeInTheDocument();
     // Tier-A 11 维参数标签
     expect(screen.getAllByText('目标长期留存率').length).toBeGreaterThan(0);
   });

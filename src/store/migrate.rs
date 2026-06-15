@@ -117,6 +117,10 @@ fn migrations() -> Vec<(&'static str, MigrationFn)> {
             "051_suggestion_status_in_canary",
             m051_suggestion_status_in_canary,
         ),
+        (
+            "052_whitelist_add_w20_decay",
+            m052_whitelist_add_w20_decay,
+        ),
     ]
 }
 
@@ -228,6 +232,10 @@ fn migrations_down() -> Vec<(&'static str, MigrationFn)> {
         (
             "051_suggestion_status_in_canary",
             m051_suggestion_status_in_canary_down,
+        ),
+        (
+            "052_whitelist_add_w20_decay",
+            m052_whitelist_add_w20_decay_down,
         ),
     ]
 }
@@ -2615,6 +2623,34 @@ fn m051_suggestion_status_in_canary_down(store: &Store) -> Result<(), StoreError
             ON amas_tuning_suggestions(status, created_at DESC);",
     )?;
     tx.commit()?;
+    Ok(())
+}
+
+/// m052:FSRS-6 升级——LLM 调参白名单补 `memoryModel.w[20]`（遗忘曲线 decay）。
+/// 已部署库的 amas_tuning_whitelist 在首次启动时 seed 过 11 条,不会再吸收 const 新增条目;
+/// 表非空时幂等补行(表空留给启动 seed 全量插入 12 条)。
+fn m052_whitelist_add_w20_decay(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute(
+        "INSERT INTO amas_tuning_whitelist (path, min_safe, max_safe, created_at, created_by)
+         SELECT 'memoryModel.w[20]', 0.1, 0.8, ?1, 'migration:m052'
+         WHERE EXISTS (SELECT 1 FROM amas_tuning_whitelist)
+           AND NOT EXISTS (
+               SELECT 1 FROM amas_tuning_whitelist WHERE path = 'memoryModel.w[20]'
+           );",
+        rusqlite::params![chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
+/// m052 down:仅移除本迁移补的行。仅 dev/test。
+fn m052_whitelist_add_w20_decay_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute(
+        "DELETE FROM amas_tuning_whitelist
+          WHERE path = 'memoryModel.w[20]' AND created_by = 'migration:m052';",
+        [],
+    )?;
     Ok(())
 }
 

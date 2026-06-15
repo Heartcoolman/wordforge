@@ -16,31 +16,53 @@ pub(crate) static SSE_CONNECTION_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 struct SseGuard {
     state: AppState,
+    /// 仅当本连接成功登记进 active_sse（归属核验通过）后才置 Some(did)；
+    /// 在那之前保持 None，使核验 .await 被取消时 Drop 不会误删他人条目。
     device_id: Option<String>,
     conn_id: String,
+    /// 本连接所属 user_id。P0：CAS 自增成功后立即随 guard 记录，保证任何 .await
+    /// 取消点 drop 都能对称释放全局计数与 per-user 计数。
+    user_id: String,
+    /// P1：per-user 配额是否已占用（try_acquire 成功才置 true，Drop 时据此释放）。
+    user_sse_acquired: bool,
 }
 
 impl Drop for SseGuard {
     fn drop(&mut self) {
+        // P0：无条件解扣全局 SSE 计数（CAS 自增后 guard 即建立，故取消安全）。
         let _ = SSE_CONNECTION_COUNT.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
             count.checked_sub(1)
         });
+        // P1：对称释放 per-user 配额；仅当这是该用户最后一条 SSE 连接时才清缓存，
+        // 否则兄弟连接下次 tick 会 cache miss 多查一次库（P2 自愈优化）。
+        if self.user_sse_acquired && self.state.release_user_sse(&self.user_id) {
+            self.state.evict_sse_user_state(&self.user_id);
+        }
+
         if let Some(ref did) = self.device_id {
-            let should_remove_device = if let Some(mut conns) = self.state.active_sse().get_mut(did)
-            {
+            // 从该 device 的连接列表移除本连接；移除后若列表空则原子删除整个条目。
+            let removed_entry = if let Some(mut conns) = self.state.active_sse().get_mut(did) {
                 conns.retain(|c| c.conn_id != self.conn_id);
-                conns.is_empty()
+                if conns.is_empty() {
+                    drop(conns);
+                    // remove_if 仅在仍为空时删除：若期间新连接 push 进来则非空、不删，
+                    // 此时心跳条目归新连接所有，不应清理。
+                    self.state
+                        .active_sse()
+                        .remove_if(did, |_, conns| conns.is_empty())
+                        .is_some()
+                } else {
+                    false
+                }
             } else {
                 false
             };
 
-            if should_remove_device
-                && self
-                    .state
-                    .active_sse()
-                    .remove_if(did, |_, conns| conns.is_empty())
-                    .is_some()
-            {
+            // P2：跨 map 清理心跳前再次确认该 did 已无 active 连接条目。即使上面成功
+            // remove_if 删除了空条目，仍可能有新连接在删除后瞬间用同一 did 重建条目并
+            // 写入新的 last_heartbeat/miss_count；此时跳过清理，避免误删新连接的心跳基线
+            // 导致 watchdog 误报 DataCorrupted。
+            if removed_entry && self.state.active_sse().get(did).is_none() {
                 self.state.last_heartbeat().remove(did);
                 self.state.heartbeat_miss_count().remove(did);
             }
@@ -73,6 +95,26 @@ pub async fn sse_handler(
             Err(_) => continue,
         }
     }
+
+    // P0：CAS 自增成功后**立即**构造 SseGuard（device_id=None，user_sse 未占）。此后任何
+    // .await 取消点（per-user 限额、归属核验）被 drop 都能解扣全局计数，杜绝永久泄漏。
+    let conn_id = uuid::Uuid::new_v4().to_string();
+    let mut guard = SseGuard {
+        state: state.clone(),
+        device_id: None,
+        conn_id: conn_id.clone(),
+        user_id: auth.user_id.clone(),
+        user_sse_acquired: false,
+    };
+
+    // P1：per-user 并发上限。auth 必经 AuthUser 提取器，故无匿名连接需处理（user_id 恒
+    // 非空）；超限返回 429，沿用全局上限的 too_many_requests 文案风格。占用成功记入 guard，
+    // Drop 时对称释放。
+    let max_per_user = state.config().limits.max_sse_connections_per_user;
+    if !state.try_acquire_user_sse(&auth.user_id, max_per_user) {
+        return Err(AppError::too_many_requests("SSE连接数过多"));
+    }
+    guard.user_sse_acquired = true;
 
     let device_id = headers
         .get("x-device-id")
@@ -115,14 +157,7 @@ pub async fn sse_handler(
         None => None,
     };
 
-    let conn_id = uuid::Uuid::new_v4().to_string();
     let (per_conn_tx, mut per_conn_rx) = tokio::sync::mpsc::unbounded_channel();
-
-    let guard = SseGuard {
-        state: state.clone(),
-        device_id: device_id.clone(),
-        conn_id: conn_id.clone(),
-    };
 
     if let Some(ref did) = device_id {
         let info = SseClientInfo {
@@ -140,6 +175,9 @@ pub async fn sse_handler(
         // Initialize heartbeat timestamp to prevent cold-start miss accumulation
         state.last_heartbeat().insert(did.clone(), Instant::now());
         state.heartbeat_miss_count().insert(did.clone(), 0);
+        // P0：核验通过且登记完成后才把 did 交给 guard，确保此前取消路径不会触及 active_sse。
+        // 此处至 stream 起始之间均为同步操作，无 .await，故安全。
+        guard.device_id = Some(did.clone());
     }
 
     let mut shutdown_rx = state.shutdown_rx();
@@ -152,15 +190,40 @@ pub async fn sse_handler(
 
         let mut interval = tokio::time::interval(Duration::from_secs(5));
         let mut last_event_count: u64 = 0;
+        // P1：进程级短 TTL 缓存窗口。略短于 5s 轮询周期，使同一 user 的并发连接在窗口内
+        // 共享首个连接的查库结果，避免每连接每 5s 各打一次库饱和 BLOCKING_SEMAPHORE。
+        // 降级语义保留：未命中即回落查库并回填。完整事件驱动推送为后续项。
+        const SSE_STATE_TTL: Duration = Duration::from_millis(4500);
 
-        if let Ok(user_state) = state.amas().get_user_state_async(&user_id).await {
+        // 缓存优先读：命中未过期缓存免查库，否则查库并回填。
+        let initial_state = match state.get_sse_user_state_cached(&user_id, SSE_STATE_TTL) {
+            Some(s) => Some(s),
+            None => match state.amas().get_user_state_async(&user_id).await {
+                Ok(s) => {
+                    state.put_sse_user_state(&user_id, s.clone());
+                    Some(s)
+                }
+                Err(_) => None,
+            },
+        };
+        if let Some(user_state) = initial_state {
             last_event_count = user_state.total_event_count;
         }
 
         loop {
             tokio::select! {
                 _ = interval.tick() => {
-                    if let Ok(user_state) = state.amas().get_user_state_async(&user_id).await {
+                    let polled = match state.get_sse_user_state_cached(&user_id, SSE_STATE_TTL) {
+                        Some(s) => Some(s),
+                        None => match state.amas().get_user_state_async(&user_id).await {
+                            Ok(s) => {
+                                state.put_sse_user_state(&user_id, s.clone());
+                                Some(s)
+                            }
+                            Err(_) => None,
+                        },
+                    };
+                    if let Some(user_state) = polled {
                         if user_state.total_event_count > last_event_count {
                             let event_data = serde_json::json!({
                                 "type": "state_change",
@@ -322,6 +385,7 @@ mod tests {
             strict_mode: Default::default(),
             probe: Default::default(),
             limits: Default::default(),
+            telemetry_retention_days: 90,
         };
         let store = Arc::new(
             Store::open(
@@ -363,6 +427,8 @@ mod tests {
             state: state.clone(),
             device_id: Some(device_id.clone()),
             conn_id,
+            user_id: "user-1".to_string(),
+            user_sse_acquired: false,
         };
         drop(guard);
 
@@ -370,5 +436,90 @@ mod tests {
         assert!(state.active_sse().get(&device_id).is_none());
         assert!(state.last_heartbeat().get(&device_id).is_none());
         assert!(state.heartbeat_miss_count().get(&device_id).is_none());
+    }
+
+    // P2：Drop 清理心跳前若同一 did 已被新连接重建条目，必须跳过清理，避免误删
+    // 新连接的心跳基线导致 watchdog 误报 DataCorrupted。
+    #[test]
+    fn sse_guard_drop_skips_heartbeat_cleanup_when_device_reconnected() {
+        let state = test_state();
+        let device_id = "device-reconnect".to_string();
+        let old_conn = "conn-old".to_string();
+        let new_conn = "conn-new".to_string();
+        let (tx_new, _) = tokio::sync::mpsc::unbounded_channel();
+
+        // 模拟：旧连接已从列表移除（列表当前只剩新连接），新连接刚写入心跳基线。
+        state.active_sse().insert(
+            device_id.clone(),
+            vec![SseClientInfo {
+                conn_id: new_conn.clone(),
+                user_id: "user-1".to_string(),
+                platform: "test".to_string(),
+                connected_at: Instant::now(),
+                tx: tx_new,
+            }],
+        );
+        let new_hb = Instant::now();
+        state.last_heartbeat().insert(device_id.clone(), new_hb);
+        state.heartbeat_miss_count().insert(device_id.clone(), 0);
+
+        // 旧连接的 guard drop：retain 后列表仍非空（新连接在），不应删除条目或心跳。
+        let guard = SseGuard {
+            state: state.clone(),
+            device_id: Some(device_id.clone()),
+            conn_id: old_conn,
+            user_id: "user-1".to_string(),
+            user_sse_acquired: false,
+        };
+        drop(guard);
+
+        assert!(
+            state.active_sse().get(&device_id).is_some(),
+            "新连接条目应保留"
+        );
+        assert!(
+            state.last_heartbeat().get(&device_id).is_some(),
+            "新连接心跳基线不应被误删"
+        );
+        assert!(state.heartbeat_miss_count().get(&device_id).is_some());
+    }
+
+    // P1：per-user 上限到达后拒绝，释放后恢复；Drop 对称释放配额。
+    #[test]
+    fn per_user_sse_limit_acquire_release() {
+        let state = test_state();
+        let uid = "user-limit";
+        assert!(state.try_acquire_user_sse(uid, 2));
+        assert!(state.try_acquire_user_sse(uid, 2));
+        assert!(!state.try_acquire_user_sse(uid, 2), "第三个应超限");
+
+        state.release_user_sse(uid);
+        assert!(
+            state.try_acquire_user_sse(uid, 2),
+            "释放一个后应可再次占用"
+        );
+
+        // Drop 释放：guard.user_sse_acquired=true 时归还配额。
+        state.release_user_sse(uid);
+        let guard = SseGuard {
+            state: state.clone(),
+            device_id: None,
+            conn_id: "c".to_string(),
+            user_id: uid.to_string(),
+            user_sse_acquired: true,
+        };
+        // 当前占用 1（上一轮 acquire 后未释放）；drop 后归还，应能再占到上限。
+        drop(guard);
+        assert!(state.try_acquire_user_sse(uid, 1));
+    }
+
+    // P1：max=0 视为不限额。
+    #[test]
+    fn per_user_sse_limit_zero_is_unlimited() {
+        let state = test_state();
+        let uid = "user-unlimited";
+        for _ in 0..10 {
+            assert!(state.try_acquire_user_sse(uid, 0));
+        }
     }
 }

@@ -622,7 +622,10 @@ async fn alert_events(
             "tsMs": ts_ms,
             "severity": a.severity,
             "title": a.title,
-            "desc": format!("近 {hours}h 内 {} 次 · 首次 {}", a.count, a.first_seen_at),
+            "desc": format!(
+                "累计 {} 次 · 首次 {} · 最近 {}",
+                a.count, a.first_seen_at, a.last_seen_at
+            ),
         }));
     }
 

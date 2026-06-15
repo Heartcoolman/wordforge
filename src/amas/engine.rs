@@ -7,7 +7,7 @@ use parking_lot::{Mutex, RwLock};
 use crate::amas::config::AMASConfig;
 use crate::amas::constants::{SIGNAL_THRESHOLD, TREND_BASELINE, USER_LOCK_CLEANUP_THRESHOLD};
 use crate::amas::decision::{ensemble, heuristic, ige, swd};
-use crate::amas::memory::{evm, iad, mastery, mdm, mtp, ssp};
+use crate::amas::memory::{evm, mastery, mdm, ssp};
 use crate::amas::metrics;
 use crate::amas::monitoring;
 use crate::amas::types::*;
@@ -1243,90 +1243,11 @@ impl AMASEngine {
             None => mastery::WordMasteryState::new(&raw_event.word_id),
         };
 
-        // B38: IAD - 计算混淆干扰惩罚，调整 interval_scale
+        // 调度间隔缩放基线（下方 EVM 调制）。
+        // IAD(B38 混淆干扰) / MTP(B37 词素迁移) 算法已移除（2026-06-13）：经法证确认二者 flag 默认关、
+        // 对预测维度残差零贡献、生产从未启用 → 当前算法零贡献。confused_with API 字段保留为「接受但忽略」
+        // （iOS 仍上报，契约不破）；word_morphemes 表 + /api/content/morphemes 端点保留（词根展示在用）。
         let mut adjusted_interval_scale = strategy.interval_scale;
-        if config.feature_flags.iad_enabled {
-            let iad_key = "iad";
-            let mut iad_state: iad::IadState = self
-                .store
-                .get_engine_algo_state(user_id, iad_key)
-                .map_err(|e| AppError::internal(&e.to_string()))?
-                .and_then(|v| serde_json::from_value(v).ok())
-                .unwrap_or_default();
-
-            let penalty = iad::interference_penalty(&raw_event.word_id, &iad_state, &config.iad);
-            let factor = iad::interval_extension_factor(penalty, &config.iad);
-            adjusted_interval_scale *= factor;
-
-            // 记录混淆词对
-            if let Some(confused_with) = &raw_event.confused_with {
-                if !confused_with.is_empty() {
-                    iad::record_confusion(
-                        &mut iad_state,
-                        &raw_event.word_id,
-                        confused_with,
-                        config.iad.confusion_decay_rate,
-                        &config.iad,
-                    );
-                    if let Ok(val) = serde_json::to_value(&iad_state) {
-                        pending_algo.push((iad_key.to_string(), val));
-                    }
-                }
-            }
-        }
-
-        // B37: MTP - 计算词素迁移加成
-        if config.feature_flags.mtp_enabled {
-            let mtp_key = "mtp";
-            let mut mtp_state: mtp::MtpState = self
-                .store
-                .get_engine_algo_state(user_id, mtp_key)
-                .map_err(|e| AppError::internal(&e.to_string()))?
-                .and_then(|v| serde_json::from_value(v).ok())
-                .unwrap_or_default();
-
-            // 获取当前词的词素列表
-            let word_morphemes: Vec<String> = self
-                .store
-                .get_word_morphemes(&raw_event.word_id)
-                .ok()
-                .flatten()
-                .and_then(|data| {
-                    data.as_array().map(|arr| {
-                        arr.iter()
-                            .filter_map(|v| {
-                                v.get("text").and_then(|t| t.as_str()).map(String::from)
-                            })
-                            .collect()
-                    })
-                })
-                .unwrap_or_default();
-
-            if !word_morphemes.is_empty() {
-                // 计算词素迁移加成并应用到 interval_scale
-                let bonus = mtp::morpheme_transfer_bonus(
-                    &word_morphemes,
-                    &mtp_state.known_morphemes,
-                    &config.mtp,
-                );
-                if bonus > 0.0 {
-                    adjusted_interval_scale *= 1.0 + bonus;
-                }
-
-                // 成功学习时更新已知词素
-                if raw_event.is_correct {
-                    mtp::update_known_morphemes(
-                        &mut mtp_state,
-                        &word_morphemes,
-                        feature.quality,
-                        &config.mtp,
-                    );
-                    if let Ok(val) = serde_json::to_value(&mtp_state) {
-                        pending_algo.push((mtp_key.to_string(), val));
-                    }
-                }
-            }
-        }
 
         // B39: EVM - Encoding Variability Model
         {
@@ -2577,16 +2498,15 @@ mod tests {
     // ---- update_memory with feature flags on ----
 
     #[tokio::test]
-    async fn process_event_with_iad_and_mtp_and_evm_enabled() {
-        let mut cfg = AMASConfig::default();
-        cfg.feature_flags.iad_enabled = true;
-        cfg.feature_flags.mtp_enabled = true;
-        let engine = test_engine(cfg);
+    async fn process_event_with_evm_and_ignored_confused_with() {
+        // IAD/MTP 算法已移除（2026-06-13）。EVM 无 flag 恒运行（session_id 驱动）；
+        // confused_with 字段保留为「接受但忽略」（不再被任何算法消费，不得致错）。
+        let engine = test_engine(AMASConfig::default());
         let r = engine
             .process_event(
                 "u-flags",
                 RawEvent {
-                    word_id: "w-iad".to_string(),
+                    word_id: "w-evm".to_string(),
                     is_correct: true,
                     response_time_ms: 400,
                     confused_with: Some("w-confused".to_string()),

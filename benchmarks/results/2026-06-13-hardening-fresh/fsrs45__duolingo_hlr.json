@@ -1,0 +1,23 @@
+{
+ "scheduler": "fsrs45",
+ "dataset": "duolingo_hlr",
+ "prediction": {
+  "logLoss": 0.3607217192428101,
+  "ici": 0.1303811023401542,
+  "auc": 0.5313216013873427,
+  "maeP": 0.189448764443803
+ },
+ "dhp": {
+  "expectedMemoryFinal": 2497.6997,
+  "masteredCount": 5297,
+  "totalReviews": 84594,
+  "efficiency": 0.029526
+ },
+ "policy": {
+  "finalRecallRate": 0.1656,
+  "reviewsPerDay": 939.9333333333333,
+  "retentionStability": 0.8129540477190988
+ },
+ "runtime_seconds": 13.2,
+ "notes": "hardening fresh disjoint TEST cohort 2026-06-13 (seed=42, ship cohort excluded)"
+}

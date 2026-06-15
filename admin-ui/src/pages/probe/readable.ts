@@ -61,7 +61,8 @@ export function queueHealth(value: number): KpiHealth {
   return { level: 'abnormal', meaning: `积压 ${value} 条，可能处理跟不上`, hint: '需排查消费端 / 扩容' };
 }
 
-/** 采集错误率：<0.5% 正常；≤2% 注意；>2% 异常。入参为 0~1 小数。 */
+/** 采集错误率：<0.5% 正常；≤2% 注意；>2% 异常。
+ *  入参为 0~1 小数（后端口径＝有错误的事件数 / 事件总数，恒 ≤1）。 */
 export function errorRateHealth(rate: number): KpiHealth {
   const pct = rate * 100;
   const level: HealthLevel = pct < 0.5 ? 'normal' : pct <= 2 ? 'attention' : 'abnormal';

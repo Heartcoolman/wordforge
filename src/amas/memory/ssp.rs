@@ -169,21 +169,21 @@ fn cost_modulation(s: f64, difficulty: f64, coeff_s: f64, coeff_d: f64) -> f64 {
     }
 }
 
-/// 从 (S, R) 计算间隔天数（FSRS-5 幂律遗忘曲线的反函数）
-fn fsrs5_next_interval(s: f64, r: f64, config: &crate::amas::config::MemoryModelConfig) -> f64 {
-    let factor = config.forgetting_curve_factor;
-    let decay = config.forgetting_curve_decay;
+/// 从 (S, R) 计算间隔天数（FSRS-6 幂律遗忘曲线的反函数，decay=w[20]）
+fn fsrs6_next_interval(s: f64, r: f64, config: &crate::amas::config::MemoryModelConfig) -> f64 {
+    let factor = config.curve_factor();
+    let decay = config.curve_decay();
     let floor = config.forgetting_curve_floor;
     // 与 mdm::compute_interval 一致：先把目标保持率反楼层化 (r-floor)/(1-floor) 再反演幂律。漏掉此项
-    // 时 floor>0 下本函数不再是 fsrs5_recall 的反函数（fsrs5_recall = floor+(1-floor)*power_law），
-    // 导致 SSP 策略表的目标 R 与实际产出间隔系统性错配（默认 floor 0.1 起即偏移）。
+    // 时 floor>0 下本函数不再是 fsrs6_recall 的反函数（fsrs6_recall = floor+(1-floor)*power_law），
+    // 导致 SSP 策略表的目标 R 与实际产出间隔系统性错配。
     let adjusted = ((r - floor) / (1.0 - floor).max(1e-9)).clamp(1e-6, 1.0);
-    let ivl = s / factor * (adjusted.powf(1.0 / decay) - 1.0);
+    let ivl = s / factor * (adjusted.powf(-1.0 / decay) - 1.0);
     ivl.max(1.0).floor()
 }
 
-/// 评分后的新难度（FSRS-5 mean reversion 公式）
-fn fsrs5_next_difficulty(
+/// 评分后的新难度（FSRS-6 mean reversion 公式）
+fn fsrs6_next_difficulty(
     d: f64,
     grade: u32,
     config: &crate::amas::config::MemoryModelConfig,
@@ -282,31 +282,31 @@ pub fn precompute(
                 let c_forget = config.forget_cost * forget_mod;
 
                 for &r in &r_values {
-                    let interval = fsrs5_next_interval(s, r, memory_config);
-                    let p = fsrs5_recall(interval, s, memory_config).clamp(0.01, 0.99);
+                    let interval = fsrs6_next_interval(s, r, memory_config);
+                    let p = fsrs6_recall(interval, s, memory_config).clamp(0.01, 0.99);
 
                     // Again: 遗忘
                     let s_again = fsrs5_stability_after_lapse(s, difficulty, p, memory_config);
-                    let d_again = fsrs5_next_difficulty(difficulty, 1, memory_config);
+                    let d_again = fsrs6_next_difficulty(difficulty, 1, memory_config);
                     let si_again = s_to_idx(s_again);
                     let di_again = ((d_again.round() as i32).clamp(1, 10) - 1) as usize;
                     let v_again = value[di_again][si_again];
 
                     // Hard (grade=2)
-                    let s_hard = fsrs5_stability_after_recall(s, difficulty, p, 2, memory_config);
-                    let d_hard = fsrs5_next_difficulty(difficulty, 2, memory_config);
+                    let s_hard = fsrs6_stability_after_recall(s, difficulty, p, 2, memory_config);
+                    let d_hard = fsrs6_next_difficulty(difficulty, 2, memory_config);
                     let v_hard = value[((d_hard.round() as i32).clamp(1, 10) - 1) as usize]
                         [s_to_idx(s_hard)];
 
                     // Good (grade=3)
-                    let s_good = fsrs5_stability_after_recall(s, difficulty, p, 3, memory_config);
-                    let d_good = fsrs5_next_difficulty(difficulty, 3, memory_config);
+                    let s_good = fsrs6_stability_after_recall(s, difficulty, p, 3, memory_config);
+                    let d_good = fsrs6_next_difficulty(difficulty, 3, memory_config);
                     let v_good = value[((d_good.round() as i32).clamp(1, 10) - 1) as usize]
                         [s_to_idx(s_good)];
 
                     // Easy (grade=4)
-                    let s_easy = fsrs5_stability_after_recall(s, difficulty, p, 4, memory_config);
-                    let d_easy = fsrs5_next_difficulty(difficulty, 4, memory_config);
+                    let s_easy = fsrs6_stability_after_recall(s, difficulty, p, 4, memory_config);
+                    let d_easy = fsrs6_next_difficulty(difficulty, 4, memory_config);
                     let v_easy = value[((d_easy.round() as i32).clamp(1, 10) - 1) as usize]
                         [s_to_idx(s_easy)];
 
@@ -339,7 +339,7 @@ pub fn precompute(
                 .map(|s_idx| {
                     let s = stability_list[s_idx];
                     let r = optimal_r[d_idx][s_idx];
-                    fsrs5_next_interval(s, r, memory_config).max(1.0)
+                    fsrs6_next_interval(s, r, memory_config).max(1.0)
                 })
                 .collect()
         })
@@ -374,21 +374,20 @@ pub fn export_tables(tables: &[Vec<f64>], dir: &Path, config: &SspConfig) -> Res
     Ok(())
 }
 
-// --- FSRS-5 公式（纯函数，与 mdm.rs 保持一致）---
+// --- FSRS-6 公式（纯函数，与 mdm.rs 保持一致）---
 
-fn fsrs5_recall(
+fn fsrs6_recall(
     elapsed_days: f64,
     stability: f64,
     config: &crate::amas::config::MemoryModelConfig,
 ) -> f64 {
     let s = stability.max(0.01);
-    let power_law = (1.0 + config.forgetting_curve_factor * elapsed_days / s)
-        .powf(config.forgetting_curve_decay);
+    let power_law = (1.0 + config.curve_factor() * elapsed_days / s).powf(-config.curve_decay());
     let floor = config.forgetting_curve_floor;
     (floor + (1.0 - floor) * power_law).clamp(0.0, 1.0)
 }
 
-fn fsrs5_stability_after_recall(
+fn fsrs6_stability_after_recall(
     s: f64,
     d: f64,
     r: f64,

@@ -32,6 +32,8 @@ pub struct Config {
     /// W3-1：遥测专用 per-user 限频（独立于通用 API 双轨预算），更紧配额防噪声客户端
     /// 打满 SQLite 写路径挤占学习数据写入。
     pub telemetry_rate_limit: AuthRateLimitConfig,
+    /// 遥测数据保留天数，超期由清理任务删除。
+    pub telemetry_retention_days: u64,
     pub worker: WorkerConfig,
     pub amas: AMASEnvConfig,
     pub amas_config_file: Option<String>,
@@ -98,6 +100,8 @@ impl Default for PaginationConfig {
 pub struct LimitsConfig {
     pub max_batch_size: usize,
     pub max_sse_connections: usize,
+    /// 单用户并发 SSE 连接上限，防单账号占满全局连接池。
+    pub max_sse_connections_per_user: usize,
     pub max_exclude_word_ids: usize,
     pub max_word_fetch: usize,
     pub max_import_words: usize,
@@ -114,6 +118,7 @@ impl Default for LimitsConfig {
             max_batch_size: 500,
             // v1.1-P2.4：1000 → 5000，配合心跳 15→10s 提供更敏锐的死连接回收
             max_sse_connections: 5000,
+            max_sse_connections_per_user: 5,
             max_exclude_word_ids: 1000,
             max_word_fetch: 500,
             max_import_words: 5000,
@@ -366,6 +371,7 @@ impl Config {
                 window_secs: env_or_parse("RATE_LIMIT_TELEMETRY_WINDOW_SECS", 60_u64),
                 max_requests: env_or_parse("RATE_LIMIT_TELEMETRY_MAX", 120_u64),
             },
+            telemetry_retention_days: env_or_parse("TELEMETRY_RETENTION_DAYS", 90_u64),
             worker: WorkerConfig {
                 is_leader: env_or_bool("WORKER_LEADER", true),
                 enable_llm_advisor: env_or_bool("ENABLE_LLM_ADVISOR_WORKER", false),
@@ -435,6 +441,10 @@ impl Config {
             limits: LimitsConfig {
                 max_batch_size: env_or_parse("LIMITS_MAX_BATCH_SIZE", 500_usize),
                 max_sse_connections: env_or_parse("LIMITS_MAX_SSE_CONNECTIONS", 5000_usize),
+                max_sse_connections_per_user: env_or_parse(
+                    "LIMITS_MAX_SSE_CONNECTIONS_PER_USER",
+                    5_usize,
+                ),
                 max_exclude_word_ids: env_or_parse("LIMITS_MAX_EXCLUDE_WORD_IDS", 1000_usize),
                 max_word_fetch: env_or_parse("LIMITS_MAX_WORD_FETCH", 500_usize),
                 max_import_words: env_or_parse("LIMITS_MAX_IMPORT_WORDS", 5000_usize),
@@ -869,6 +879,7 @@ mod tests {
             },
             auth_rate_limit: AuthRateLimitConfig::default(),
             telemetry_rate_limit: AuthRateLimitConfig::default(),
+            telemetry_retention_days: 90,
             worker: WorkerConfig {
                 is_leader: false,
                 enable_llm_advisor: false,

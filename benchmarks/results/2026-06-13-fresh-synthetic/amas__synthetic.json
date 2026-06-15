@@ -1,0 +1,23 @@
+{
+ "scheduler": "amas",
+ "dataset": "synthetic",
+ "prediction": {
+  "logLoss": 0.5067521372690016,
+  "ici": 0.2185627496761215,
+  "auc": 0.6224310920781512,
+  "maeP": 0.3747793042841733
+ },
+ "dhp": {
+  "expectedMemoryFinal": 22942.8436,
+  "masteredCount": 34326,
+  "totalReviews": 345076,
+  "efficiency": 0.066486
+ },
+ "policy": {
+  "finalRecallRate": 0.5173,
+  "reviewsPerDay": 3834.177777777778,
+  "retentionStability": 0.8929089583998211
+ },
+ "runtime_seconds": 11.07,
+ "notes": "hardening fresh synthetic universe seed=777; frozen seed-42 oracle+DHP cache copied"
+}

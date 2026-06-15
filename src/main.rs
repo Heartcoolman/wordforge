@@ -321,6 +321,13 @@ async fn main() {
         shutdown_tx.subscribe(),
     ));
 
+    // 遥测两表（telemetry_events / telemetry_summaries）24h retention 清理。
+    // 清理非幂等，仅 leader 执行（守卫在 sweep_once 内部），避免多实例并发删同一批行。
+    tokio::spawn(learning_backend::workers::telemetry_cleanup::run(
+        state.clone(),
+        shutdown_tx.subscribe(),
+    ));
+
     // m042/D2:定时广播下发 worker（每 60s 扫到期 scheduled_broadcasts 并 fan-out）。
     // fan-out 非幂等，多实例会重复下发，仅 leader 跑。
     if config.worker.is_leader {

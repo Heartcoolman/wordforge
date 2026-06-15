@@ -1,13 +1,9 @@
-use learning_backend::amas::config::{EloConfig, IadConfig, MemoryModelConfig, MtpConfig};
+use learning_backend::amas::config::{EloConfig, MemoryModelConfig};
 use learning_backend::amas::elo::{update_elo, zpd_priority, EloRating};
-use learning_backend::amas::memory::iad::{interference_penalty, record_confusion, IadState};
 use learning_backend::amas::memory::mastery::{update_mastery, WordMasteryState};
 use learning_backend::amas::memory::mdm::{
     adaptive_desired_retention, composite_strength, compute_interval, recall_probability,
     update_strength, MdmState,
-};
-use learning_backend::amas::memory::mtp::{
-    morpheme_transfer_bonus, update_known_morphemes, MtpState,
 };
 use learning_backend::amas::types::MasteryLevel;
 
@@ -337,70 +333,8 @@ fn test_elo_convergence_and_zpd() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// 9. IAD: confusion pairs produce interference penalty
-// ---------------------------------------------------------------------------
-#[test]
-fn test_iad_confusion_penalty() {
-    let config = IadConfig::default();
-    let mut iad_state = IadState::default();
-
-    // Before confusion: no penalty
-    let penalty_before = interference_penalty("word-a", &iad_state, &config);
-    assert!(
-        penalty_before < 1e-9,
-        "expected zero penalty before confusion, got {penalty_before}"
-    );
-
-    // Record confusion between word-a and word-b
-    record_confusion(
-        &mut iad_state,
-        "word-a",
-        "word-b",
-        config.confusion_decay_rate,
-        &config,
-    );
-
-    let penalty_after = interference_penalty("word-a", &iad_state, &config);
-    assert!(
-        penalty_after > 0.0,
-        "expected positive penalty after confusion, got {penalty_after}"
-    );
-    assert!(
-        penalty_after <= config.interference_penalty_cap,
-        "penalty {penalty_after} exceeds cap {}",
-        config.interference_penalty_cap
-    );
-}
-
-// ---------------------------------------------------------------------------
-// 10. MTP: morpheme transfer boosts learning
-// ---------------------------------------------------------------------------
-#[test]
-fn test_morpheme_transfer_bonus_effect() {
-    let config = MtpConfig::default();
-    let mut mtp_state = MtpState::default();
-
-    // Learn a word containing "un-"
-    let morphemes_undo = vec!["un".to_string(), "do".to_string()];
-    update_known_morphemes(&mut mtp_state, &morphemes_undo, 0.9, &config);
-
-    // New word "unhappy" shares "un-" morpheme
-    let morphemes_unhappy = vec!["un".to_string(), "happy".to_string()];
-    let bonus = morpheme_transfer_bonus(&morphemes_unhappy, &mtp_state.known_morphemes, &config);
-    assert!(
-        bonus > 0.0,
-        "morpheme transfer bonus should be positive, got {bonus}"
-    );
-
-    // Word without shared morphemes gets no bonus
-    let morphemes_novel = vec!["xyz".to_string()];
-    let no_bonus = morpheme_transfer_bonus(&morphemes_novel, &mtp_state.known_morphemes, &config);
-    assert!(
-        no_bonus < 1e-9,
-        "no morpheme overlap should yield zero bonus, got {no_bonus}"
-    );
-}
+// IAD / MTP 辅助模块已删除(预测维证伪),对应 test_iad_confusion_penalty /
+// test_morpheme_transfer_bonus_effect 随模块移除。
 
 // ---------------------------------------------------------------------------
 // 11. Consolidation grows with repeated high-quality reviews

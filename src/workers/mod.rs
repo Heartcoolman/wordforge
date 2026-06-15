@@ -22,6 +22,7 @@ pub mod probe_confirm_sweeper;
 pub mod scheduled_broadcast;
 pub mod scheduler_health_watchdog;
 pub mod session_cleanup;
+pub mod telemetry_cleanup;
 pub mod update_checker;
 pub mod weekly_report;
 

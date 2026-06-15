@@ -1,0 +1,24 @@
+{
+ "scheduler": "amas",
+ "dataset": "duolingo_hlr",
+ "prediction": {
+  "logLoss": 0.3303113324598915,
+  "ici": 0.11895961556326443,
+  "auc": 0.5249094620952408,
+  "maeP": 0.19294274458330865
+ },
+ "dhp": {
+  "expectedMemoryFinal": 4524.9201,
+  "masteredCount": 6544,
+  "totalReviews": 169875,
+  "efficiency": 0.026637
+ },
+ "policy": {
+  "finalRecallRate": 0.2763,
+  "reviewsPerDay": 1887.5,
+  "retentionStability": 0.8422975475757456
+ },
+ "split": "val",
+ "runtime_seconds": 8.99,
+ "notes": "G5X full-board val seed=2"
+}

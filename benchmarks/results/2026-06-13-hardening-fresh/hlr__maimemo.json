@@ -1,0 +1,23 @@
+{
+ "scheduler": "hlr",
+ "dataset": "maimemo",
+ "prediction": {
+  "logLoss": 10.19010959495641,
+  "ici": 0.868919792103211,
+  "auc": 0.30429993153232904,
+  "maeP": 0.8709996591480369
+ },
+ "dhp": {
+  "expectedMemoryFinal": 32274.7882,
+  "masteredCount": 0,
+  "totalReviews": 2596994,
+  "efficiency": 0.012428
+ },
+ "policy": {
+  "finalRecallRate": 0.9705,
+  "reviewsPerDay": 28855.48888888889,
+  "retentionStability": 0.8967778570617765
+ },
+ "runtime_seconds": 34.89,
+ "notes": "hardening fresh disjoint TEST cohort 2026-06-13 (seed=42, ship cohort excluded)"
+}

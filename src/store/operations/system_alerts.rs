@@ -79,30 +79,46 @@ impl Store {
     }
 
     /// m041:admin 收件箱列表(最新在前)。`unread_only` 时仅返回 read_at IS NULL。
-    /// `limit` 限制条数(收件箱无需分页,取最近 N 条)。
+    /// `limit` 限制条数。等价于 `list_admin_alerts_paged(unread_only, limit, 0)`,
+    /// 保留原签名供既有调用方使用。
     pub fn list_admin_alerts(
         &self,
         unread_only: bool,
         limit: i64,
     ) -> Result<Vec<SystemAlert>, StoreError> {
+        self.list_admin_alerts_paged(unread_only, limit, 0)
+    }
+
+    /// P2 修复:admin 收件箱列表分页版(最新在前)。`unread_only` 时仅返回 read_at IS NULL。
+    /// `limit`/`offset` 提供分页,使调用方可翻页覆盖**全部**未读告警 —— 修复未读超
+    /// INBOX_LIMIT 时被截断项无法单条标记已读、导致 unread 计数与列表割裂的缺陷。
+    /// `mark_all_system_alerts_read` 仍作兜底。`offset` 取负数按 0 处理。
+    pub fn list_admin_alerts_paged(
+        &self,
+        unread_only: bool,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<SystemAlert>, StoreError> {
+        let offset = offset.max(0);
         let conn = self.conn()?;
+        // LIMIT ?1 OFFSET ?2:列序与 row_to_alert 一致。
         let sql = if unread_only {
             "SELECT id, source, kind, severity, title, message, count,
                     first_seen_at, last_seen_at, read_at, acked_by
              FROM system_alerts
              WHERE read_at IS NULL
              ORDER BY last_seen_at DESC
-             LIMIT ?1"
+             LIMIT ?1 OFFSET ?2"
         } else {
             "SELECT id, source, kind, severity, title, message, count,
                     first_seen_at, last_seen_at, read_at, acked_by
              FROM system_alerts
              ORDER BY last_seen_at DESC
-             LIMIT ?1"
+             LIMIT ?1 OFFSET ?2"
         };
         let mut stmt = conn.prepare(sql)?;
         let rows = stmt
-            .query_map(params![limit], row_to_alert)?
+            .query_map(params![limit, offset], row_to_alert)?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
@@ -318,5 +334,56 @@ mod tests {
     fn mark_read_missing_id_returns_false() {
         let store = test_store();
         assert!(!store.mark_system_alert_read("nope", "admin-x").unwrap());
+    }
+
+    /// P2 修复:分页可覆盖被 limit 截断的未读告警,使其能被逐条标记已读。
+    #[test]
+    fn paged_unread_covers_truncated_alerts() {
+        let store = test_store();
+        // 造 5 条全未读告警(不同 source/kind,避免 dedup 合并)。
+        for i in 0..5 {
+            store
+                .record_system_alert(
+                    &format!("s{i}"),
+                    &format!("k{i}"),
+                    "error",
+                    "t",
+                    "m",
+                )
+                .unwrap();
+        }
+        assert_eq!(store.count_unread_system_alerts().unwrap(), 5);
+
+        // 第一页:limit=2 模拟 INBOX_LIMIT 截断。
+        let page0 = store.list_admin_alerts_paged(true, 2, 0).unwrap();
+        assert_eq!(page0.len(), 2);
+        // 翻页拿到第 3、4 条 —— 这些在旧实现里会被截断、无法单条标记。
+        let page1 = store.list_admin_alerts_paged(true, 2, 2).unwrap();
+        assert_eq!(page1.len(), 2);
+        let page2 = store.list_admin_alerts_paged(true, 2, 4).unwrap();
+        assert_eq!(page2.len(), 1);
+
+        // 三页 id 不重叠且并集=全部 5 条。
+        let mut ids: Vec<String> = page0
+            .iter()
+            .chain(page1.iter())
+            .chain(page2.iter())
+            .map(|a| a.id.clone())
+            .collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), 5, "分页应无重叠地覆盖全部未读");
+
+        // 逐条标记已读后未读归零(证明截断项可达)。
+        for id in &ids {
+            assert!(store.mark_system_alert_read(id, "admin-x").unwrap());
+        }
+        assert_eq!(store.count_unread_system_alerts().unwrap(), 0);
+
+        // 负 offset 当作 0;list_admin_alerts 等价于 offset=0。
+        assert_eq!(
+            store.list_admin_alerts_paged(false, 2, -1).unwrap().len(),
+            store.list_admin_alerts(false, 2).unwrap().len()
+        );
     }
 }

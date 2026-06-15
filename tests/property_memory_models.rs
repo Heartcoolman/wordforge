@@ -13,11 +13,13 @@ const DAY_MS: i64 = 86_400_000;
 fn c23_config() -> impl Strategy<Value = MemoryModelConfig> {
     (
         prop::array::uniform19(0.01f64..20.0),
-        0.10f64..0.35,
-        (-0.9f64)..(-0.2),
-        0.0f64..0.2,
+        0.0f64..1.0,  // w[19] 同日饱和指数（FSRS-6）
+        0.2f64..0.9,  // w[20] 遗忘曲线 decay（FSRS-6 trainable）
+        0.0f64..0.2,  // floor
     )
-        .prop_map(|(mut w, factor, decay, floor)| {
+        .prop_map(|(dims, w19, w20, floor)| {
+            let mut w = [0.0f64; 21];
+            w[..19].copy_from_slice(&dims);
             // Clamp w to C23 search bounds
             for i in 0..4 {
                 w[i] = w[i].clamp(0.1, 20.0);
@@ -34,11 +36,11 @@ fn c23_config() -> impl Strategy<Value = MemoryModelConfig> {
             w[16] = w[16].clamp(1.0, 5.0);
             w[17] = w[17].clamp(-1.0, 2.0);
             w[18] = w[18].clamp(-1.0, 2.0);
+            w[19] = w19;
+            w[20] = w20;
 
             let mut cfg = MemoryModelConfig::default();
             cfg.w = w;
-            cfg.forgetting_curve_factor = factor;
-            cfg.forgetting_curve_decay = decay;
             cfg.forgetting_curve_floor = floor;
             cfg
         })
@@ -98,15 +100,14 @@ proptest! {
         grade in 1u32..=4,
         n in 1usize..10,
     ) {
-        // 实现细节：mdm.rs::update_strength() 在 same-day 分支算出 target_stability = prev * k，
-        // 然后通过 alpha 线性插值得到 new_stability = prev + alpha * (target - prev)
-        //                                          = prev * (1 + alpha * (k - 1))。
-        // 因此 n 次同日复习后期望值 = s0 * (1 + alpha*(k-1))^n（仍依赖 last_review_at 更新维持递推）。
+        // 实现细节：mdm.rs::update_strength() 在 same-day 分支算出
+        //   target = max(prev · e^{w17·(G-3+w18)} · prev^{-w19}, 0.01)，G≥3 时再 max(prev)，
+        // 然后通过 alpha 线性插值 new = prev + alpha · (target - prev)。
+        // FSRS-6 的 S^{-w19} 饱和项使步进因子依赖当前 S，故期望值需逐步递推。
         let config = MemoryModelConfig::default();
         let alpha: f64 = 0.3;
         let grade_f = grade as f64;
         let k = (config.w[17] * (grade_f - 3.0 + config.w[18])).clamp(-20.0, 20.0).exp();
-        let step_factor = 1.0 + alpha * (k - 1.0);
 
         let now = 1_000_000_000_000i64;
         let mut state = MdmState::default();
@@ -116,12 +117,18 @@ proptest! {
         state.last_review_at = Some(now);
         state.memory_strength = s0;
 
+        let mut expected = s0;
         for _ in 0..n {
             let review_at = state.last_review_at.unwrap() + 3_600_000; // 1 hour later
             update_strength(&mut state, quality_for_grade(grade), alpha, review_at, &config);
+
+            let mut target = (expected * k * expected.powf(-config.w[19])).max(0.01);
+            if grade >= 3 {
+                target = target.max(expected);
+            }
+            expected = (expected + alpha * (target - expected)).clamp(0.01, 36_500.0);
         }
 
-        let expected = (s0 * step_factor.powi(n as i32)).max(0.01);
         let tolerance = expected.abs() * 1e-6 + 1e-9;
         prop_assert!(
             (state.stability - expected).abs() < tolerance,
@@ -240,46 +247,9 @@ proptest! {
         prop_assert!(result.is_finite(), "exp({}) = {} is not finite", clamped, result);
     }
 
-    #[test]
-    fn pt_sameday_commutativity(
-        s0 in 1.0f64..20.0,
-        g1 in 1u32..=4,
-        g2 in 1u32..=4,
-    ) {
-        let config = MemoryModelConfig::default();
-        let now = 1_000_000_000_000i64;
-
-        // Order 1: g1 then g2
-        let mut state_a = MdmState::default();
-        state_a.stability = s0;
-        state_a.difficulty = 5.0;
-        state_a.review_count = 1;
-        state_a.last_review_at = Some(now);
-        state_a.memory_strength = s0;
-        update_strength(&mut state_a, quality_for_grade(g1), 0.3, now + 1_800_000, &config);
-        update_strength(&mut state_a, quality_for_grade(g2), 0.3, now + 3_600_000, &config);
-
-        // Order 2: g2 then g1
-        let mut state_b = MdmState::default();
-        state_b.stability = s0;
-        state_b.difficulty = 5.0;
-        state_b.review_count = 1;
-        state_b.last_review_at = Some(now);
-        state_b.memory_strength = s0;
-        update_strength(&mut state_b, quality_for_grade(g2), 0.3, now + 1_800_000, &config);
-        update_strength(&mut state_b, quality_for_grade(g1), 0.3, now + 3_600_000, &config);
-
-        // Stability should be order-independent when above floor
-        if state_a.stability > 0.011 && state_b.stability > 0.011 {
-            let tolerance = state_a.stability.abs() * 1e-6 + 1e-9;
-            prop_assert!(
-                (state_a.stability - state_b.stability).abs() < tolerance,
-                "Commutativity: {} vs {} diff={}",
-                state_a.stability, state_b.stability,
-                (state_a.stability - state_b.stability).abs()
-            );
-        }
-    }
+    // 注：FSRS-5 时代的 pt_sameday_commutativity 已删除——FSRS-6 同日公式的
+    // S^{-w19} 饱和项与 G≥3 不降 S 约束使同日更新依赖当前 S，数学上不再可交换
+    // （官方 FSRS-6 亦如此），交换律不再是算法不变量。
 
     #[test]
     fn pt_cross_branch_safety(

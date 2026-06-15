@@ -76,6 +76,10 @@ check AUTH_RATE_LIMIT_WINDOW_SECS   "60"
 check AUTH_RATE_LIMIT_MAX           "10"
 check RATE_LIMIT_TELEMETRY_WINDOW_SECS "60"
 check RATE_LIMIT_TELEMETRY_MAX      "120"
+check TELEMETRY_RETENTION_DAYS      "90"
+
+# --- Limits ---
+check LIMITS_MAX_SSE_CONNECTIONS_PER_USER "5"
 
 # --- Worker ---
 check WORKER_LEADER                 "true"

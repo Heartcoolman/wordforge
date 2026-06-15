@@ -1,0 +1,24 @@
+{
+ "scheduler": "fsrs",
+ "dataset": "maimemo",
+ "prediction": {
+  "logLoss": 0.36044843654619096,
+  "ici": 0.06427258402451952,
+  "auc": 0.6834071870041879,
+  "maeP": 0.2362406243562549
+ },
+ "dhp": {
+  "expectedMemoryFinal": 19799.4205,
+  "masteredCount": 17504,
+  "totalReviews": 158282,
+  "efficiency": 0.12509
+ },
+ "policy": {
+  "finalRecallRate": 0.4522,
+  "reviewsPerDay": 1758.6888888888889,
+  "retentionStability": 0.8896588220085117
+ },
+ "split": "val",
+ "runtime_seconds": 23.58,
+ "notes": "val baseline board; sim+pred both split=val; n_users=300 sim_days=90 budget=200 dr=0.85 seed=42"
+}

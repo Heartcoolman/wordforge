@@ -11,6 +11,17 @@ const HINT_REQUIRED: &str = "required";
 const HINT_SUGGESTED: &str = "suggested";
 const HINT_NONE: &str = "none";
 
+/// P1:x-device-id 格式+长度校验。拒绝空串、超长(>128)、含控制字符 / 空白的畸形 id。
+/// 允许 UUID / 设备指纹常见字符集(字母数字与 `-_.:`),保守接受不破坏现有客户端取值。
+/// `pub(crate)`:`/telemetry` 端点中间件跳过 upsert,需在 `submit_telemetry` claim 路径直接复用本校验。
+pub(crate) fn is_valid_device_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':'))
+}
+
 /// m027:从 headers 提取 client IP。同 routes/auth.rs 实现,本仓库目前仅两处用,
 /// 不抽公共模块避免跨 mod 引用扩散。
 fn extract_client_ip(headers: &axum::http::HeaderMap) -> Option<String> {
@@ -82,10 +93,15 @@ pub async fn device_middleware(
     let skip_telemetry_upsert =
         tele_path == "/telemetry" || tele_path.starts_with("/telemetry/");
 
+    // P1 设备抢注硬化(可落地部分):对 x-device-id 做格式+长度校验,拒绝畸形/超长串。
+    // 完整的不可伪造强绑定(登录签发设备绑定令牌 / 挑战-应答)为后续 follow-up,本轮不实现。
+    // 校验通过的 id 才进入 ban 检查 / claim 写入;非法 id 视同"无设备头"静默放行(不阻断业务),
+    // 仅不参与设备归属逻辑——避免畸形 id 污染 client_devices。
     let device_id = req
         .headers()
         .get("x-device-id")
         .and_then(|v| v.to_str().ok())
+        .filter(|s| is_valid_device_id(s))
         .map(String::from);
 
     let mut upgrade_hint: Option<&'static str> = None;
@@ -100,6 +116,9 @@ pub async fn device_middleware(
                 .await
         };
 
+        // P2 语义边界说明:此处封禁的粒度是"设备"(x-device-id),不是账号。被封用户只需
+        // 轮换 / 伪造 x-device-id 即可绕过(轮换头绕过),这是"仅封设备"的固有局限。主修复在
+        // UI 提示侧;此处不擅自把设备封禁联动封号(那是越权改产品语义),仅留此注释标注边界。
         match banned_check {
             Ok(Ok(true)) => {
                 return (
@@ -112,11 +131,29 @@ pub async fn device_middleware(
                     .into_response();
             }
             Ok(Ok(false)) => {}
+            // P2 fail-closed:ban 查询出错时不得放行——否则被封设备可借 DB 抖动绕过封禁。
+            // 仅"查询出错"返 503;正常"未封禁"(上面 Ok(Ok(false)))仍放行。
             Ok(Err(e)) => {
                 tracing::error!(error = %e, device_id = %did, "Failed to check device ban");
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    axum::Json(serde_json::json!({
+                        "code": "BAN_CHECK_UNAVAILABLE",
+                        "message": "设备状态校验暂不可用，请稍后重试"
+                    })),
+                )
+                    .into_response();
             }
             Err(e) => {
                 tracing::error!(error = %e, device_id = %did, "Device ban task failed");
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    axum::Json(serde_json::json!({
+                        "code": "BAN_CHECK_UNAVAILABLE",
+                        "message": "设备状态校验暂不可用，请稍后重试"
+                    })),
+                )
+                    .into_response();
             }
         }
 
@@ -182,7 +219,18 @@ pub async fn device_middleware(
             };
 
             match upsert {
-                Ok(Ok(())) => {}
+                Ok(Ok(())) => {
+                    // P1 首占审计:upsert 的 owner claim 沿用现有 CASE 语义(owner NULL→当前用户),
+                    // 行为不变;此处补审计日志,留痕设备首次被某用户占用,便于事后排查抢注。
+                    // 注:CASE 仅在 owner 为 NULL 时写入,故已有 owner 的设备此日志不代表改写归属。
+                    // 强凭证绑定(令牌 / 挑战-应答)为后续 follow-up。
+                    tracing::info!(
+                        device_id = %did,
+                        user_id = %uid,
+                        ts = %chrono::Utc::now().to_rfc3339(),
+                        "device claim upsert (first-claim audit)"
+                    );
+                }
                 Ok(Err(e)) => {
                     tracing::error!(error = %e, "Failed to upsert client device");
                 }

@@ -1,0 +1,549 @@
+{
+  "gate": "G5 seed-stability",
+  "seeds": [
+    42,
+    7,
+    2026
+  ],
+  "seed_threading": "simulate_strategies(seed=) -> rng_master=np.random.default_rng(seed); per-strategy strategy_seed=rng_master.integers(0,2**31) drawn in strategy-list order. Single-['amas'] runs give amas the first draw deterministically; identical isolation path used for seed=42 baseline board, val board, and all 3 G5 seeds. Verified bit-exact reproduction: fresh G5_verify_F1_seed7 sim legs == cached S3_F1_seed7 (mai 23312, syn 44635, duo 6660).",
+  "pred_protocol": "Each G5 cell re-ran pred FRESH at its own seed (no --pred-legs reuse) so every seed is fully self-consistent. NOTE: cached S3_F* rows had reused seed=42 pred legs; these G5 numbers supersede them.",
+  "noise_band_pct_reference": 0.7,
+  "finalists": {
+    "F1": {
+      "name": "F1 cap40/y86/m92/b14 (Borda-30 champion)",
+      "config": {
+        "alphaScale": 1.0,
+        "alphaMin": 1.0,
+        "alphaMax": 1.0,
+        "alphaRampTau": 0.0,
+        "alphaLapseRampTau": 0.0,
+        "gspSuccessGrade": 4,
+        "gspIntervalCapDays": 40,
+        "gspGraduationStreak": 2,
+        "gspGraduationFloorDays": 30,
+        "gspYoungRetention": 0.86,
+        "gspMatureRetention": 0.92,
+        "gspMaturityBandDays": 14
+      },
+      "per_seed": {
+        "42": {
+          "label": "G5_F1_seed42",
+          "borda": 30,
+          "overall_rank": 1,
+          "per_dataset_rank": {
+            "duolingo_hlr": 1,
+            "maimemo": 1,
+            "synthetic": 1
+          },
+          "won_datasets": [
+            "maimemo",
+            "duolingo_hlr",
+            "synthetic"
+          ],
+          "g1_pass": true,
+          "borda_strict_gap": 4,
+          "mai_mastered": 20807.0,
+          "margins_to_next": {
+            "maimemo": 0.07082199981372095,
+            "duolingo_hlr": 0.005109737354665245,
+            "synthetic": 0.02696086112273033
+          },
+          "pred_legs": {
+            "maimemo": {
+              "logLoss": 0.30778136125805494,
+              "ici": 0.024513601889848302,
+              "auc": 0.7984091308649669
+            },
+            "duolingo_hlr": {
+              "logLoss": 0.32284568051512325,
+              "ici": 0.12279161190541506,
+              "auc": 0.5244075317779221
+            },
+            "synthetic": {
+              "logLoss": 0.5088066992932679,
+              "ici": 0.21927953942888206,
+              "auc": 0.6192606994645291
+            }
+          }
+        },
+        "7": {
+          "label": "G5_verify_F1_seed7",
+          "borda": 30,
+          "overall_rank": 1,
+          "per_dataset_rank": {
+            "duolingo_hlr": 1,
+            "maimemo": 1,
+            "synthetic": 1
+          },
+          "won_datasets": [
+            "maimemo",
+            "duolingo_hlr",
+            "synthetic"
+          ],
+          "g1_pass": true,
+          "borda_strict_gap": 4,
+          "mai_mastered": 23312.0,
+          "margins_to_next": {
+            "maimemo": 0.09277963072886708,
+            "duolingo_hlr": 0.00876114445095022,
+            "synthetic": 0.026851528759875842
+          },
+          "pred_legs": {
+            "maimemo": {
+              "logLoss": 0.30176882464857807,
+              "ici": 0.019234891810373064,
+              "auc": 0.7689025948456591
+            },
+            "duolingo_hlr": {
+              "logLoss": 0.3396086048053476,
+              "ici": 0.12671618439904145,
+              "auc": 0.5103418300625286
+            },
+            "synthetic": {
+              "logLoss": 0.5088066992932679,
+              "ici": 0.21927953942888206,
+              "auc": 0.6192606994645291
+            }
+          }
+        },
+        "2026": {
+          "label": "G5_F1_seed2026",
+          "borda": 30,
+          "overall_rank": 1,
+          "per_dataset_rank": {
+            "duolingo_hlr": 1,
+            "maimemo": 1,
+            "synthetic": 1
+          },
+          "won_datasets": [
+            "maimemo",
+            "duolingo_hlr",
+            "synthetic"
+          ],
+          "g1_pass": true,
+          "borda_strict_gap": 4,
+          "mai_mastered": 18507.0,
+          "margins_to_next": {
+            "maimemo": 0.0493511529585583,
+            "duolingo_hlr": 0.040067951094609366,
+            "synthetic": 0.026972523770586898
+          },
+          "pred_legs": {
+            "maimemo": {
+              "logLoss": 0.2897067842211412,
+              "ici": 0.028151550018210514,
+              "auc": 0.8249855986760414
+            },
+            "duolingo_hlr": {
+              "logLoss": 0.3485733255853549,
+              "ici": 0.1257814293283115,
+              "auc": 0.5080267235514946
+            },
+            "synthetic": {
+              "logLoss": 0.5088066992932679,
+              "ici": 0.21927953942888206,
+              "auc": 0.6192606994645291
+            }
+          }
+        }
+      },
+      "borda_per_seed": [
+        30,
+        30,
+        30
+      ],
+      "borda_strict_gap_per_seed": [
+        4,
+        4,
+        4
+      ],
+      "borda_strict_first_all_seeds": true,
+      "g1_pass_all_seeds": true,
+      "won_datasets_per_seed": {
+        "42": [
+          "duolingo_hlr",
+          "maimemo",
+          "synthetic"
+        ],
+        "7": [
+          "duolingo_hlr",
+          "maimemo",
+          "synthetic"
+        ],
+        "2026": [
+          "duolingo_hlr",
+          "maimemo",
+          "synthetic"
+        ]
+      },
+      "stable_won_datasets": [
+        "duolingo_hlr",
+        "maimemo",
+        "synthetic"
+      ],
+      "any_won_datasets": [
+        "duolingo_hlr",
+        "maimemo",
+        "synthetic"
+      ],
+      "won_set_seed_stable": true,
+      "per_dataset": {
+        "maimemo": {
+          "ranks_per_seed": [
+            1,
+            1,
+            1
+          ],
+          "win_margins": [
+            0.07082199981372095,
+            0.09277963072886708,
+            0.0493511529585583
+          ],
+          "margin_mean": 0.07098426116704877,
+          "margin_std": 0.021714693571902848,
+          "two_std": 0.043429387143805696,
+          "margin_mean_ge_2std": true,
+          "is_stable_contributor": true,
+          "mastered_per_seed": [
+            20807,
+            23312,
+            18507
+          ],
+          "mastered_mean": 20875.333333333332,
+          "mastered_std": 2403.2287309645194,
+          "mastered_std_pct": 11.512,
+          "mastered_within_noise_band": false
+        },
+        "duolingo_hlr": {
+          "ranks_per_seed": [
+            1,
+            1,
+            1
+          ],
+          "win_margins": [
+            0.005109737354665245,
+            0.00876114445095022,
+            0.040067951094609366
+          ],
+          "margin_mean": 0.01797961096674161,
+          "margin_std": 0.019215989973170255,
+          "two_std": 0.03843197994634051,
+          "margin_mean_ge_2std": false,
+          "is_stable_contributor": true,
+          "mastered_per_seed": [
+            6434,
+            6660,
+            7573
+          ],
+          "mastered_mean": 6889.0,
+          "mastered_std": 603.0431162031451,
+          "mastered_std_pct": 8.754,
+          "mastered_within_noise_band": false
+        },
+        "synthetic": {
+          "ranks_per_seed": [
+            1,
+            1,
+            1
+          ],
+          "win_margins": [
+            0.02696086112273033,
+            0.026851528759875842,
+            0.026972523770586898
+          ],
+          "margin_mean": 0.026928304551064357,
+          "margin_std": 6.674500672876822e-05,
+          "two_std": 0.00013349001345753643,
+          "margin_mean_ge_2std": true,
+          "is_stable_contributor": true,
+          "mastered_per_seed": [
+            44644,
+            44635,
+            44615
+          ],
+          "mastered_mean": 44631.333333333336,
+          "mastered_std": 14.843629385474879,
+          "mastered_std_pct": 0.033,
+          "mastered_within_noise_band": true
+        }
+      },
+      "g5_dataset_verdicts": {
+        "maimemo": "PASS",
+        "duolingo_hlr": "FAIL",
+        "synthetic": "PASS"
+      },
+      "g5_pass": false
+    },
+    "F2": {
+      "name": "F2 cap45/y83/m93/b10 (closest-to-G4)",
+      "config": {
+        "alphaScale": 1.0,
+        "alphaMin": 1.0,
+        "alphaMax": 1.0,
+        "alphaRampTau": 0.0,
+        "alphaLapseRampTau": 0.0,
+        "gspSuccessGrade": 4,
+        "gspIntervalCapDays": 45,
+        "gspGraduationStreak": 2,
+        "gspGraduationFloorDays": 30,
+        "gspYoungRetention": 0.83,
+        "gspMatureRetention": 0.93,
+        "gspMaturityBandDays": 10
+      },
+      "per_seed": {
+        "42": {
+          "label": "G5_F2_seed42",
+          "borda": 28,
+          "overall_rank": 1,
+          "per_dataset_rank": {
+            "duolingo_hlr": 2,
+            "maimemo": 1,
+            "synthetic": 2
+          },
+          "won_datasets": [
+            "maimemo"
+          ],
+          "g1_pass": true,
+          "borda_strict_gap": 1,
+          "mai_mastered": 20489.0,
+          "margins_to_next": {
+            "maimemo": 0.07001163203193117,
+            "duolingo_hlr": 0.017701816172707274,
+            "synthetic": 0.02509044741260269
+          },
+          "pred_legs": {
+            "maimemo": {
+              "logLoss": 0.30778136125805494,
+              "ici": 0.024513601889848302,
+              "auc": 0.7984091308649669
+            },
+            "duolingo_hlr": {
+              "logLoss": 0.32284568051512325,
+              "ici": 0.12279161190541506,
+              "auc": 0.5244075317779221
+            },
+            "synthetic": {
+              "logLoss": 0.5088066992932679,
+              "ici": 0.21927953942888206,
+              "auc": 0.6192606994645291
+            }
+          }
+        },
+        "7": {
+          "label": "G5_F2_seed7",
+          "borda": 28,
+          "overall_rank": 1,
+          "per_dataset_rank": {
+            "duolingo_hlr": 2,
+            "maimemo": 1,
+            "synthetic": 2
+          },
+          "won_datasets": [
+            "maimemo"
+          ],
+          "g1_pass": true,
+          "borda_strict_gap": 1,
+          "mai_mastered": 22945.0,
+          "margins_to_next": {
+            "maimemo": 0.09306698603924601,
+            "duolingo_hlr": 0.012997291259393084,
+            "synthetic": 0.026732484498093845
+          },
+          "pred_legs": {
+            "maimemo": {
+              "logLoss": 0.30176882464857807,
+              "ici": 0.019234891810373064,
+              "auc": 0.7689025948456591
+            },
+            "duolingo_hlr": {
+              "logLoss": 0.3396086048053476,
+              "ici": 0.12671618439904145,
+              "auc": 0.5103418300625286
+            },
+            "synthetic": {
+              "logLoss": 0.5088066992932679,
+              "ici": 0.21927953942888206,
+              "auc": 0.6192606994645291
+            }
+          }
+        },
+        "2026": {
+          "label": "G5_F2_seed2026",
+          "borda": 29,
+          "overall_rank": 1,
+          "per_dataset_rank": {
+            "duolingo_hlr": 1,
+            "maimemo": 1,
+            "synthetic": 2
+          },
+          "won_datasets": [
+            "maimemo",
+            "duolingo_hlr"
+          ],
+          "g1_pass": false,
+          "borda_strict_gap": 2,
+          "mai_mastered": 18822.0,
+          "margins_to_next": {
+            "maimemo": 0.05781662928533848,
+            "duolingo_hlr": 0.002655556274481219,
+            "synthetic": 0.027362224133671398
+          },
+          "pred_legs": {
+            "maimemo": {
+              "logLoss": 0.2897067842211412,
+              "ici": 0.028151550018210514,
+              "auc": 0.8249855986760414
+            },
+            "duolingo_hlr": {
+              "logLoss": 0.3485733255853549,
+              "ici": 0.1257814293283115,
+              "auc": 0.5080267235514946
+            },
+            "synthetic": {
+              "logLoss": 0.5088066992932679,
+              "ici": 0.21927953942888206,
+              "auc": 0.6192606994645291
+            }
+          }
+        }
+      },
+      "borda_per_seed": [
+        28,
+        28,
+        29
+      ],
+      "borda_strict_gap_per_seed": [
+        1,
+        1,
+        2
+      ],
+      "borda_strict_first_all_seeds": true,
+      "g1_pass_all_seeds": false,
+      "won_datasets_per_seed": {
+        "42": [
+          "maimemo"
+        ],
+        "7": [
+          "maimemo"
+        ],
+        "2026": [
+          "duolingo_hlr",
+          "maimemo"
+        ]
+      },
+      "stable_won_datasets": [
+        "maimemo"
+      ],
+      "any_won_datasets": [
+        "duolingo_hlr",
+        "maimemo"
+      ],
+      "won_set_seed_stable": false,
+      "per_dataset": {
+        "maimemo": {
+          "ranks_per_seed": [
+            1,
+            1,
+            1
+          ],
+          "win_margins": [
+            0.07001163203193117,
+            0.09306698603924601,
+            0.05781662928533848
+          ],
+          "margin_mean": 0.07363174911883856,
+          "margin_std": 0.01790183925220053,
+          "two_std": 0.03580367850440106,
+          "margin_mean_ge_2std": true,
+          "is_stable_contributor": true,
+          "mastered_per_seed": [
+            20489,
+            22945,
+            18822
+          ],
+          "mastered_mean": 20752.0,
+          "mastered_std": 2074.0441171778384,
+          "mastered_std_pct": 9.994,
+          "mastered_within_noise_band": false
+        },
+        "duolingo_hlr": {
+          "ranks_per_seed": [
+            2,
+            2,
+            1
+          ],
+          "win_margins": [
+            0.002655556274481219
+          ],
+          "margin_mean": 0.002655556274481219,
+          "margin_std": 0.0,
+          "two_std": 0.0,
+          "margin_mean_ge_2std": true,
+          "is_stable_contributor": false,
+          "mastered_per_seed": [
+            5910,
+            5953,
+            6822
+          ],
+          "mastered_mean": 6228.333333333333,
+          "mastered_std": 514.5797638202782,
+          "mastered_std_pct": 8.262,
+          "mastered_within_noise_band": false
+        },
+        "synthetic": {
+          "ranks_per_seed": [
+            2,
+            2,
+            2
+          ],
+          "win_margins": [],
+          "margin_mean": null,
+          "margin_std": null,
+          "two_std": null,
+          "margin_mean_ge_2std": null,
+          "is_stable_contributor": false,
+          "mastered_per_seed": [
+            38700,
+            38884,
+            39006
+          ],
+          "mastered_mean": 38863.333333333336,
+          "mastered_std": 154.04328396049382,
+          "mastered_std_pct": 0.396,
+          "mastered_within_noise_band": true
+        }
+      },
+      "g5_dataset_verdicts": {
+        "maimemo": "PASS"
+      },
+      "g5_pass": false
+    }
+  },
+  "verdict": {
+    "F1": {
+      "borda_strict_first_all_3_seeds": true,
+      "borda_strict_gap": [
+        4,
+        4,
+        4
+      ],
+      "g1_pass_all_seeds": true,
+      "g5_per_dataset": {
+        "maimemo": "PASS",
+        "duolingo_hlr": "FAIL",
+        "synthetic": "PASS"
+      },
+      "g5_pass": false,
+      "g5_blocker": "duolingo final_score margin: mean 0.01798 < 2*std 0.03843 (margins 0.00511/0.00876/0.04007). Borda RANK is stable (+4 gap all seeds) but final_score MARGIN fails 2std due to seed-volatile duo pred LL (std 0.013)."
+    },
+    "F2": {
+      "borda_strict_first_all_3_seeds": true,
+      "g1_pass_all_seeds": false,
+      "won_set_seed_stable": false,
+      "g5_pass": false,
+      "g5_blocker": "G1 FAILS at seed=2026 (duo ranked #1 but margin 0.00266 < 0.005 floor). Won-set seed-unstable (mai-only @42/7, mai+duo @2026). Strict-#1 carried by maimemo only."
+    }
+  },
+  "recommended_ship_candidate": "F1",
+  "recommendation_rationale": "F1 holds Borda strict-#1 (gap +4 over fsrs45) on ALL 3 seeds with G1 passing each seed; its strict-RANKING claim is seed-robust. F1 fails the LITERAL G5 final_score-margin-2std test ONLY on duolingo (thin, pred-seed-volatile margin) — but the Borda ranking it drives is stable. F2 is strictly worse: it FAILS G1 outright at seed=2026 and its won-set is seed-unstable. Neither passes G4 (mai retStab); G5 verdict here is independent of that known G4 blocker."
+}

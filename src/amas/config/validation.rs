@@ -250,11 +250,52 @@ impl AMASConfig {
         {
             return Err("memory_model.alpha_min/alpha_max must be in [0,1]".to_string());
         }
-        if self.memory_model.alpha_min >= self.memory_model.alpha_max {
-            return Err("memory_model.alpha_min must be < alpha_max".to_string());
+        // alpha_min == alpha_max 合法（alpha 钉死，平滑退化为无；v5 GSP 船值 alpha_min=alpha_max=1.0
+        // 即未平滑 FSRS-6 核心）。仅拒 min > max（clamp 边界反转会 panic 学习热路径）。
+        if self.memory_model.alpha_min > self.memory_model.alpha_max {
+            return Err("memory_model.alpha_min must be <= alpha_max".to_string());
+        }
+        // 0=关闭；上限防极小 tau 误配（exp 下溢无 UB，纯域约束）；双腿同域
+        if !(0.0..=100.0).contains(&self.memory_model.alpha_ramp_tau) {
+            return Err("memory_model.alpha_ramp_tau must be in [0,100]".to_string());
+        }
+        if !(0.0..=100.0).contains(&self.memory_model.alpha_lapse_ramp_tau) {
+            return Err("memory_model.alpha_lapse_ramp_tau must be in [0,100]".to_string());
         }
         if !(0.0..=1.0).contains(&self.memory_model.forgetting_threshold) {
             return Err("memory_model.forgetting_threshold must be in [0,1]".to_string());
+        }
+        // GSP 调度策略头（契约 benchmarks/maimemo/GSP_SPEC.md §1/§2；默认全关 = bit-exact legacy）。
+        // 成功成绩带仅开放二元成功语义 {3=Good, 4=Easy}；2=Hard 非成功语义，拒绝。
+        if !matches!(self.memory_model.gsp_success_grade, 3 | 4) {
+            return Err("memory_model.gsp_success_grade must be 3 (Good) or 4 (Easy)".to_string());
+        }
+        // 区间硬帽：0=关闭，否则 [0,365]（顶侧与 90 天硬帽复合 min(90,cap)）。
+        if !(0.0..=365.0).contains(&self.memory_model.gsp_interval_cap_days) {
+            return Err("memory_model.gsp_interval_cap_days must be in [0,365] (0=off)".to_string());
+        }
+        // 毕业下限：[1,90]（mastered 定义依赖 next_interval≥30，floor<1 无意义；>90 越硬帽）。
+        if !(1.0..=90.0).contains(&self.memory_model.gsp_graduation_floor_days) {
+            return Err("memory_model.gsp_graduation_floor_days must be in [1,90]".to_string());
+        }
+        // young/mature 目标保持率：0=关闭，否则须落曲线合法保持率域 [0.5,0.99]。
+        for (val, name) in [
+            (self.memory_model.gsp_young_retention, "gsp_young_retention"),
+            (self.memory_model.gsp_mature_retention, "gsp_mature_retention"),
+        ] {
+            if val != 0.0 && !(0.5..=0.99).contains(&val) {
+                return Err(format!(
+                    "memory_model.{name} must be 0 (off) or in [0.5,0.99]"
+                ));
+            }
+        }
+        // 成熟度分带阈值：0=关闭，否则 [0,365]（按 stability 天分带）。
+        if !(0.0..=365.0).contains(&self.memory_model.gsp_maturity_band_days) {
+            return Err("memory_model.gsp_maturity_band_days must be in [0,365] (0=off)".to_string());
+        }
+        // 区间抖动幅度：[0,1)；>=1 会令 (1+fuzz·u) 在 u→-1 时触及非正区间。
+        if !(0.0..1.0).contains(&self.memory_model.gsp_interval_fuzz) {
+            return Err("memory_model.gsp_interval_fuzz must be in [0,1)".to_string());
         }
         if !(0.0..=1.0).contains(&self.memory_model.retention_min)
             || !(0.0..=1.0).contains(&self.memory_model.retention_max)
@@ -301,7 +342,38 @@ impl AMASConfig {
                     .to_string(),
             );
         }
-        // FSRS-5 w[] 权重：w[8]/w[11] 等经 .exp() 消费，非有限或过大会 overflow 为 Inf，
+        // 预测读出层 logit 系数守卫（v7）：base_scale<=0 会反转/抹平 recall 排序（最该复习的词被当 mastered
+        // 压制），是单点配置错配即崩坏调度的最高危旋钮 → 硬约束 >0。其余项夹有限 + 合理量级。
+        if !self.memory_model.pred_logit_base_scale.is_finite()
+            || self.memory_model.pred_logit_base_scale <= 0.0
+        {
+            return Err(
+                "memory_model.pred_logit_base_scale must be finite and > 0 (<=0 inverts/flattens recall ranking)"
+                    .to_string(),
+            );
+        }
+        if !self.memory_model.pred_logit_intercept.is_finite()
+            || self.memory_model.pred_logit_intercept.abs() > 10.0
+        {
+            return Err("memory_model.pred_logit_intercept must be finite and |x| <= 10".to_string());
+        }
+        if !self.memory_model.pred_logit_review_count_weight.is_finite()
+            || !(0.0..=2.0).contains(&self.memory_model.pred_logit_review_count_weight)
+        {
+            return Err(
+                "memory_model.pred_logit_review_count_weight must be in [0,2] (negative would pull down well-reviewed words)"
+                    .to_string(),
+            );
+        }
+        if !self.memory_model.difficulty_logit_weight.is_finite()
+            || self.memory_model.difficulty_logit_weight < 0.0
+        {
+            return Err("memory_model.difficulty_logit_weight must be finite and >= 0".to_string());
+        }
+        if !(1.0..=10.0).contains(&self.memory_model.difficulty_logit_ref) {
+            return Err("memory_model.difficulty_logit_ref must be in [1,10]".to_string());
+        }
+        // FSRS-6 w[] 权重：w[8]/w[11] 等经 .exp() 消费，非有限或过大会 overflow 为 Inf，
         // 进而污染 stability 并以 JSON null 落库；逐元素拒绝非有限及越界值。
         if self
             .memory_model
@@ -311,6 +383,22 @@ impl AMASConfig {
         {
             return Err(
                 "memory_model.w[*] must all be finite and within [-100,100]".to_string(),
+            );
+        }
+        // FSRS-6 结构性约束：初始 stability w[0..4] 必须为正（S0 直接查表）
+        if self.memory_model.w[..4].iter().any(|&s0| s0 <= 0.0) {
+            return Err("memory_model.w[0..4] (initial stability) must be > 0".to_string());
+        }
+        // w[19] 同日饱和指数：负值会让大 S 同日复习爆增长；官方 clipper 域 [0,1]
+        if !(0.0..=1.0).contains(&self.memory_model.w[19]) {
+            return Err(
+                "memory_model.w[19] (same-day saturation) must be in [0,1]".to_string(),
+            );
+        }
+        // w[20] 遗忘曲线 decay：curve_decay() 运行时钳到 [0.05,2]，配置层拒绝域外值
+        if !(0.05..=2.0).contains(&self.memory_model.w[20]) {
+            return Err(
+                "memory_model.w[20] (forgetting curve decay) must be in [0.05,2.0]".to_string(),
             );
         }
 
@@ -323,28 +411,6 @@ impl AMASConfig {
         }
         if self.evm.diversity_growth_rate <= 0.0 {
             return Err("evm.diversity_growth_rate must be > 0".to_string());
-        }
-
-        // IadConfig
-        if !(0.0..=1.0).contains(&self.iad.interference_penalty_factor) {
-            return Err("iad.interference_penalty_factor must be in [0,1]".to_string());
-        }
-        if !(0.0..=1.0).contains(&self.iad.interference_penalty_cap) {
-            return Err("iad.interference_penalty_cap must be in [0,1]".to_string());
-        }
-
-        // MtpConfig
-        if !(0.0..=1.0).contains(&self.mtp.morpheme_transfer_coeff) {
-            return Err("mtp.morpheme_transfer_coeff must be in [0,1]".to_string());
-        }
-        if !(0.0..=1.0).contains(&self.mtp.morpheme_bonus_cap) {
-            return Err("mtp.morpheme_bonus_cap must be in [0,1]".to_string());
-        }
-        if !(0.0..=1.0).contains(&self.mtp.known_morpheme_decay) {
-            return Err("mtp.known_morpheme_decay must be in [0,1]".to_string());
-        }
-        if !(0.0..=1.0).contains(&self.mtp.new_morpheme_initial_coeff) {
-            return Err("mtp.new_morpheme_initial_coeff must be in [0,1]".to_string());
         }
 
         // WordSelectorConfig

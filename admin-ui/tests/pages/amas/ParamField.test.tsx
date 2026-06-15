@@ -21,7 +21,6 @@ const numMeta: ParamMeta = {
   type: 'number',
   min: 0, max: 1, step: 0.01,
   default: 0.5,
-  tuned_2026_05_15: 0.6,
   description_zh: '学习率',
   affects: ['retention', 'fatigue'],
   sensitivity: 'ultra',
@@ -51,7 +50,6 @@ describe('ParamField', () => {
     expect(screen.getByText('α')).toBeInTheDocument();
     expect(screen.getByText('学习率')).toBeInTheDocument();
     expect(screen.getByText(/默认/)).toBeInTheDocument();
-    expect(screen.getByText(/已调优/)).toBeInTheDocument();
     expect(screen.getByText(/影响/)).toBeInTheDocument();
   });
 
@@ -121,13 +119,6 @@ describe('ParamField', () => {
     render(() => <ParamField meta={numMeta} value={0.9} onChange={onChange} />);
     fireEvent.click(screen.getByTitle('恢复为出厂默认'));
     expect(onChange).toHaveBeenCalledWith(0.5);
-  });
-
-  it('clicking 已调优 applies tuned value', () => {
-    const onChange = vi.fn();
-    render(() => <ParamField meta={numMeta} value={0.5} onChange={onChange} />);
-    fireEvent.click(screen.getByTitle('应用 2026-05-15 已调优值'));
-    expect(onChange).toHaveBeenCalledWith(0.6);
   });
 
   it('shows changed dot when value differs from default', () => {

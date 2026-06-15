@@ -28,7 +28,7 @@ const TREE_GROUPS: TreeGroup[] = [
     label: 'algorithms',
     children: [
       { section: 'ensemble', label: 'ensemble' },
-      { section: 'memoryModel', label: 'memoryModel (FSRS-5)' },
+      { section: 'memoryModel', label: 'memoryModel (FSRS-6)' },
     ],
   },
   {

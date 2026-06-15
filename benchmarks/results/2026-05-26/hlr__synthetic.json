@@ -1,0 +1,23 @@
+{
+  "scheduler": "hlr",
+  "dataset": "synthetic",
+  "prediction": {
+    "logLoss": 11.5277026951774,
+    "ici": 0.8587465426216034,
+    "auc": 0.5325448841273424,
+    "maeP": 0.8587468251793625
+  },
+  "dhp": {
+    "expectedMemoryFinal": 40018.5896,
+    "masteredCount": 0,
+    "totalReviews": 1314747,
+    "efficiency": 0.030438
+  },
+  "policy": {
+    "finalRecallRate": 0.8947,
+    "reviewsPerDay": 14608.3,
+    "retentionStability": 0.941202
+  },
+  "runtime_seconds": 82.1,
+  "notes": ""
+}

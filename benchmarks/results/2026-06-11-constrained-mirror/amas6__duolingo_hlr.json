@@ -1,0 +1,23 @@
+{
+ "scheduler": "amas6",
+ "dataset": "duolingo_hlr",
+ "prediction": {
+  "logLoss": 0.3067892592817423,
+  "ici": 0.11769812398224332,
+  "auc": 0.5412476708466557,
+  "maeP": 0.1853674296298645
+ },
+ "dhp": {
+  "expectedMemoryFinal": 4362.9217,
+  "masteredCount": 6595,
+  "totalReviews": 163349,
+  "efficiency": 0.026709
+ },
+ "policy": {
+  "finalRecallRate": 0.2566,
+  "reviewsPerDay": 1814.9888888888888,
+  "retentionStability": 0.8433682258156256
+ },
+ "runtime_seconds": 7.69,
+ "notes": "constrained re-tune winner under parity-aligned DHP mirror (repaired NM0), production write-back 2026-06-11"
+}

@@ -91,13 +91,24 @@ fn is_review_candidate(mdm_state: Option<&MdmState>) -> bool {
     mdm_state.is_some_and(|state| state.review_count > 0 || state.last_review_at.is_some())
 }
 
+/// 词内在难度（DB [0,1]）→ FSRS [1,10] 标度，注入 difflogit 预测层 logit 项。
+/// DB 默认 0.0 = 未填充难度 → None（no-op，bit-exact 纯 FSRS），避免缺值被映射成 D=1（最易档）
+/// 对所有复习词恒定上推召回 β·(REF−1)（见 amas_config.toml difficultyLogit 注释③ 缺值回落中性）。
+fn word_difficulty_logit_scale(difficulty: f64) -> Option<f64> {
+    let d = difficulty.clamp(0.0, 1.0);
+    (d > 0.0).then(|| 1.0 + 9.0 * d)
+}
+
 fn score_review_word_prefetched(
     mdm_state: &MdmState,
     now_ms: i64,
     mm: &MemoryModelConfig,
     ws: &WordSelectorConfig,
+    word_difficulty: Option<f64>,
 ) -> ReviewWordScore {
-    let recall = crate::amas::memory::mdm::recall_probability(mdm_state, now_ms, mm);
+    // v6 预测层：urgency 用 difficulty-aware recall 读出（β=0 或无难度时退化为纯 recall）。
+    let recall =
+        crate::amas::memory::mdm::recall_probability_predicted(mdm_state, now_ms, mm, word_difficulty);
     if recall >= ws.recall_mastered_threshold {
         return ReviewWordScore {
             score: 0.001,
@@ -227,7 +238,12 @@ pub fn select_words(
         } else {
             // 复习词：回忆风险（利用） + UCB 探索项（探索）
             let mdm_state = mdm_state.expect("review candidates must have mastery state");
-            let review_score = score_review_word_prefetched(mdm_state, now_ms, mm, ws);
+            // v6：词内在难度（DB [0,1]）映射到 FSRS [1,10] 注入预测层 logit 项；
+            // 缺词 或 默认 0.0（未填充）→ None=no-op，避免 D=1 强上推召回。
+            let word_difficulty = words_by_id
+                .get(word_id)
+                .and_then(|w| word_difficulty_logit_scale(w.difficulty));
+            let review_score = score_review_word_prefetched(mdm_state, now_ms, mm, ws, word_difficulty);
             let mut score = review_score.score;
 
             if !review_score.suppress_extras {
@@ -321,6 +337,18 @@ mod tests {
     use crate::store::Store;
     use chrono::Utc;
 
+    #[test]
+    fn word_difficulty_logit_scale_treats_default_zero_as_missing() {
+        // DB 默认 0.0（未填充）→ None：避免 difflogit β·(REF−1) 对所有复习词恒定上推召回
+        assert_eq!(word_difficulty_logit_scale(0.0), None);
+        // 真实难度 → 映射到 FSRS [1,10]
+        assert_eq!(word_difficulty_logit_scale(1.0), Some(10.0));
+        assert_eq!(word_difficulty_logit_scale(0.5), Some(5.5));
+        // 越界钳制：负值视作未填充，>1 钳到 10
+        assert_eq!(word_difficulty_logit_scale(-0.3), None);
+        assert_eq!(word_difficulty_logit_scale(2.0), Some(10.0));
+    }
+
     fn review_state_for_recall(
         target_recall: f64,
         now_ms: i64,
@@ -329,8 +357,8 @@ mod tests {
         let stability = 10.0;
         let floor = mm.forgetting_curve_floor;
         let adjusted_target = ((target_recall - floor) / (1.0 - floor).max(1e-9)).clamp(1e-6, 1.0);
-        let elapsed_days = stability / mm.forgetting_curve_factor
-            * (adjusted_target.powf(1.0 / mm.forgetting_curve_decay) - 1.0);
+        let elapsed_days =
+            stability / mm.curve_factor() * (adjusted_target.powf(-1.0 / mm.curve_decay()) - 1.0);
 
         MdmState {
             stability,
@@ -493,8 +521,8 @@ mod tests {
         let recall_799 = review_state_for_recall(0.799, now_ms, &mm);
         let recall_801 = review_state_for_recall(0.801, now_ms, &mm);
 
-        let score_799 = score_review_word_prefetched(&recall_799, now_ms, &mm, &ws);
-        let score_801 = score_review_word_prefetched(&recall_801, now_ms, &mm, &ws);
+        let score_799 = score_review_word_prefetched(&recall_799, now_ms, &mm, &ws, None);
+        let score_801 = score_review_word_prefetched(&recall_801, now_ms, &mm, &ws, None);
 
         assert!((score_799.recall - 0.799).abs() < 0.002);
         assert!((score_801.recall - 0.801).abs() < 0.002);
@@ -509,8 +537,8 @@ mod tests {
         let mastered = review_state_for_recall(0.95, now_ms, &mm);
         let review_candidate = review_state_for_recall(0.4, now_ms, &mm);
 
-        let mastered_score = score_review_word_prefetched(&mastered, now_ms, &mm, &ws);
-        let review_score = score_review_word_prefetched(&review_candidate, now_ms, &mm, &ws);
+        let mastered_score = score_review_word_prefetched(&mastered, now_ms, &mm, &ws, None);
+        let review_score = score_review_word_prefetched(&review_candidate, now_ms, &mm, &ws, None);
 
         assert!(mastered_score.score < review_score.score);
         assert!(mastered_score.suppress_extras);

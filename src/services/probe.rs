@@ -107,20 +107,27 @@ impl ProbeService {
     /// 防止客户端误把别的 SSE 事件当作 confirm 处理。
     ///
     /// 通过则**消费**（remove）并返回 ticket；不通过返回 ConfirmError。
+    ///
+    /// 原子 check-and-take：先 `remove` 取得 owned ticket（DashMap 在分片锁内
+    /// 原子摘除，并发场景下只有一个调用能拿到 `Some`，其余拿到 `None` →
+    /// `NotFound`），再做过期/后缀校验。这保证任一 `request_id` 至多被成功
+    /// 消费一次，杜绝 get→remove 之间的 TOCTOU 双重消费。
+    ///
+    /// 后缀不匹配时把 ticket 原样 `insert` 回去，维持"失败不消费"语义，允许
+    /// admin 在 TTL 内重试；过期/后缀不匹配同 sweeper 语义保持一致。
     pub fn consume_confirm(
         &self,
         request_id: &str,
         provided_device_suffix: &str,
     ) -> Result<ConfirmTicket, ConfirmError> {
-        let entry = self
+        // 原子摘除：拿到 owned ticket 的调用独占消费权。
+        let (_rid, ticket) = self
             .pending_confirm
-            .get(request_id)
+            .remove(request_id)
             .ok_or(ConfirmError::NotFound)?;
-        let ticket = entry.value().clone();
-        drop(entry);
 
+        // 过期 → 已摘除，直接丢弃（无需写回，与 sweeper 语义一致）。
         if ticket.expires_at <= std::time::Instant::now() {
-            self.pending_confirm.remove(request_id);
             return Err(ConfirmError::Expired);
         }
         // 后 5 位匹配（device_id 长度不足 5 时取全部）。按字符计数取后缀，
@@ -131,11 +138,13 @@ impl ProbeService {
             chars[start..].iter().collect()
         };
         if !expected.eq_ignore_ascii_case(provided_device_suffix) {
+            // 后缀不匹配不算成功消费 → 写回 ticket，允许 TTL 内重试。
+            self.pending_confirm
+                .insert(request_id.to_string(), ticket);
             return Err(ConfirmError::SuffixMismatch);
         }
 
-        // 通过 → 消费 ticket
-        self.pending_confirm.remove(request_id);
+        // 通过 → ticket 已摘除，直接返回（已被消费）。
         Ok(ticket)
     }
 

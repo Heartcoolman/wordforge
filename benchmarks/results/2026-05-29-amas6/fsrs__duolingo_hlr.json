@@ -1,0 +1,23 @@
+{
+  "scheduler": "fsrs",
+  "dataset": "duolingo_hlr",
+  "prediction": {
+    "logLoss": 0.4222413096940627,
+    "ici": 0.20263807188500432,
+    "auc": 0.5403537768044023,
+    "maeP": 0.27401049126656307
+  },
+  "dhp": {
+    "expectedMemoryFinal": 7546.1824,
+    "masteredCount": 1145,
+    "totalReviews": 309658,
+    "efficiency": 0.024369
+  },
+  "policy": {
+    "finalRecallRate": 0.3254,
+    "reviewsPerDay": 3440.6444444444446,
+    "retentionStability": 0.8383327679225301
+  },
+  "runtime_seconds": 0.18,
+  "notes": "v0.9: 新增 amas6 (AMAS 全栈 + FSRS-6 底层)"
+}

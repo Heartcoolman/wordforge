@@ -51,6 +51,28 @@ fn modeling_out_of_range_fields_each_fail() {
 }
 
 #[test]
+fn pred_logit_layer_out_of_range_fields_each_fail() {
+    // v7 预测读出层守卫：base_scale<=0（反转排序，最高危）、intercept 超界、nrev 负/超界、
+    // difficulty_logit_weight 负、ref 越界 —— 逐条须被 validate 拒绝。
+    let bad: [fn(&mut AMASConfig); 7] = [
+        |c| c.memory_model.pred_logit_base_scale = 0.0,
+        |c| c.memory_model.pred_logit_base_scale = -0.5,
+        |c| c.memory_model.pred_logit_intercept = 50.0,
+        |c| c.memory_model.pred_logit_review_count_weight = -0.1,
+        |c| c.memory_model.pred_logit_review_count_weight = 3.0,
+        |c| c.memory_model.difficulty_logit_weight = -0.1,
+        |c| c.memory_model.difficulty_logit_ref = 0.5,
+    ];
+    for (i, mutate) in bad.iter().enumerate() {
+        let mut c = AMASConfig::default();
+        mutate(&mut c);
+        assert!(c.validate().is_err(), "pred_logit case {i} should fail");
+    }
+    // no-op 默认（1.0/0.0/0.0 + difflogit 默认）必须通过
+    assert!(AMASConfig::default().validate().is_ok());
+}
+
+#[test]
 fn constraint_thresholds_invalid_combinations_fail() {
     let cases = [
         |c: &mut AMASConfig| c.constraints.high_fatigue_threshold = 2.0,
@@ -242,7 +264,7 @@ fn swd_max_history_zero_fails() {
 
 #[test]
 fn memory_model_invalid_fields_fail() {
-    let mutators: [fn(&mut AMASConfig); 16] = [
+    let mutators: [fn(&mut AMASConfig); 22] = [
         |c| c.memory_model.short_term_learning_rate = 2.0,
         |c| c.memory_model.medium_term_learning_rate = -0.1,
         |c| c.memory_model.long_term_learning_rate = 1.5,
@@ -271,11 +293,31 @@ fn memory_model_invalid_fields_fail() {
             c.memory_model.retention_min = 0.9;
             c.memory_model.retention_max = 0.5;
         },
+        |c| c.memory_model.alpha_ramp_tau = -0.1,
+        |c| c.memory_model.alpha_ramp_tau = 100.1,
+        |c| c.memory_model.alpha_ramp_tau = f64::NAN,
+        |c| c.memory_model.alpha_lapse_ramp_tau = -0.1,
+        |c| c.memory_model.alpha_lapse_ramp_tau = 100.1,
+        |c| c.memory_model.alpha_lapse_ramp_tau = f64::NAN,
     ];
     for (i, m) in mutators.iter().enumerate() {
         let mut c = AMASConfig::default();
         m(&mut c);
         assert!(c.validate().is_err(), "case {i}");
+    }
+}
+
+#[test]
+fn alpha_ramp_tau_valid_boundaries_pass() {
+    // [0,100] 闭区间：0.0（默认关闭）与 100.0 均合法，双腿同域
+    for v in [0.0, 100.0] {
+        let mut c = AMASConfig::default();
+        c.memory_model.alpha_ramp_tau = v;
+        assert!(c.validate().is_ok(), "tau_s {v}");
+
+        let mut c = AMASConfig::default();
+        c.memory_model.alpha_lapse_ramp_tau = v;
+        assert!(c.validate().is_ok(), "tau_f {v}");
     }
 }
 
@@ -307,32 +349,6 @@ fn evm_invalid_fields_fail() {
     let mut c = AMASConfig::default();
     c.evm.diversity_growth_rate = 0.0;
     assert!(c.validate().is_err());
-}
-
-#[test]
-fn iad_invalid_fields_fail() {
-    let mut c = AMASConfig::default();
-    c.iad.interference_penalty_factor = 1.5;
-    assert!(c.validate().is_err());
-
-    let mut c = AMASConfig::default();
-    c.iad.interference_penalty_cap = -0.1;
-    assert!(c.validate().is_err());
-}
-
-#[test]
-fn mtp_invalid_fields_fail() {
-    let mutators: [fn(&mut AMASConfig); 4] = [
-        |c| c.mtp.morpheme_transfer_coeff = 1.5,
-        |c| c.mtp.morpheme_bonus_cap = -0.1,
-        |c| c.mtp.known_morpheme_decay = 2.0,
-        |c| c.mtp.new_morpheme_initial_coeff = -0.5,
-    ];
-    for (i, m) in mutators.iter().enumerate() {
-        let mut c = AMASConfig::default();
-        m(&mut c);
-        assert!(c.validate().is_err(), "case {i}");
-    }
 }
 
 #[test]
@@ -608,8 +624,6 @@ frustration = 0.15
     assert!(cfg.ige.ucb_confidence_coeff > 0.0);
     assert!(cfg.swd.max_history_size > 0);
     assert!(cfg.memory_model.short_term_learning_rate > 0.0);
-    assert!(cfg.iad.interference_penalty_factor >= 0.0);
-    assert!(cfg.mtp.morpheme_transfer_coeff >= 0.0);
     assert!(cfg.word_selector.review_ucb_weight >= 0.0);
     assert!(cfg.intervention.fatigue_alert_threshold >= 0.0);
     assert!(cfg.learning_strategy.cross_session_high_accuracy >= 0.0);
@@ -680,7 +694,8 @@ frustration = 0.15
 // 直接覆盖每个 default_xxx 函数（lib 层 unit-touch，确保覆盖区域 entry）
 #[test]
 fn all_default_fns_return_expected_constants() {
-    assert!((default_warmup_heuristic_boost() - 0.20).abs() < 1e-9);
+    // bench tuned v3 回写后的值
+    assert!((default_warmup_heuristic_boost() - 0.10).abs() < 1e-9);
     assert_eq!(default_response_speed_max_ms(), 10000.0);
     assert_eq!(default_fatigue_quit_increase(), 0.2);
     assert!(default_engagement_pause_penalty() > 0.0);
@@ -721,11 +736,87 @@ fn subconfig_default_impls_construct_valid_values() {
     let _ = SwdConfig::default();
     let _ = MemoryModelConfig::default();
     let _ = EvmConfig::default();
-    let _ = IadConfig::default();
-    let _ = MtpConfig::default();
     let _ = WordSelectorConfig::default();
     let _ = InterventionConfig::default();
     let _ = LearningStrategyConfig::default();
     let _ = SspCostParams::default();
     let _ = SspConfig::default();
+}
+
+// === FSRS-6 w 反序列化：21 维直取 / 19 维 FSRS-5 旧配置自动迁移 ===
+fn default_memory_json_with_w(w: &[f64]) -> serde_json::Value {
+    let mut v = serde_json::to_value(MemoryModelConfig::default()).expect("serialize default");
+    v["w"] = serde_json::json!(w);
+    v
+}
+
+#[test]
+fn memory_w_deserializes_21_dims_directly() {
+    let mut w: Vec<f64> = (0..21).map(|i| 0.1 + i as f64 * 0.01).collect();
+    w[20] = 0.3; // decay 须在 [0.05, 2.0]
+    let cfg: MemoryModelConfig =
+        serde_json::from_value(default_memory_json_with_w(&w)).expect("21-dim w must parse");
+    assert!((cfg.w[20] - 0.3).abs() < 1e-12);
+    assert!((cfg.w[0] - 0.1).abs() < 1e-12);
+}
+
+#[test]
+fn memory_w_migrates_legacy_19_dims() {
+    let w: Vec<f64> = (0..19).map(|i| 0.2 + i as f64 * 0.01).collect();
+    let cfg: MemoryModelConfig = serde_json::from_value(default_memory_json_with_w(&w))
+        .expect("legacy 19-dim w must parse");
+    // 前 19 维保留
+    assert!((cfg.w[0] - 0.2).abs() < 1e-12);
+    assert!((cfg.w[18] - 0.38).abs() < 1e-12);
+    // 迁移补位：w19=0（旧同日公式无饱和项）、w20=0.5（旧固定 |decay|）
+    assert_eq!(cfg.w[19], 0.0);
+    assert_eq!(cfg.w[20], 0.5);
+    // 迁移后的曲线 helper 行为：decay=0.5 → factor=0.9^(-2)-1
+    assert!((cfg.curve_decay() - 0.5).abs() < 1e-12);
+    assert!((cfg.curve_factor() - (0.9_f64.powf(-2.0) - 1.0)).abs() < 1e-12);
+}
+
+#[test]
+fn memory_w_rejects_other_lengths() {
+    let w = vec![1.0; 20];
+    assert!(serde_json::from_value::<MemoryModelConfig>(default_memory_json_with_w(&w)).is_err());
+}
+
+#[test]
+fn curve_helpers_clamp_decay_to_safe_domain() {
+    let mut cfg = MemoryModelConfig::default();
+    cfg.w[20] = 0.0; // 越界小
+    assert!((cfg.curve_decay() - 0.05).abs() < 1e-12);
+    cfg.w[20] = 10.0; // 越界大
+    assert!((cfg.curve_decay() - 2.0).abs() < 1e-12);
+    assert!(cfg.curve_factor().is_finite());
+}
+
+#[test]
+fn repo_root_amas_config_loads_validates_and_pins_v5_gsp_ship_knobs() {
+    // 2026-06-13 v5 GSP 写回门禁：仓库根 amas_config.toml 必须可加载且过校验，
+    // F1 船值钉死（val Borda 30，三数据集 rank 1，seed-robust strict #1）。
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/amas_config.toml");
+    let cfg = AMASConfig::load_from_toml(path).expect("load repo-root amas_config.toml");
+    cfg.validate().expect("repo-root amas_config.toml must validate");
+    let m = &cfg.memory_model;
+    // 未平滑 FSRS-6 核心：alpha 钉死 1.0，双腿 ramp 关闭
+    assert_eq!(m.alpha_scale, 1.0);
+    assert_eq!(m.alpha_min, 1.0);
+    assert_eq!(m.alpha_max, 1.0);
+    assert_eq!(m.alpha_ramp_tau, 0.0);
+    assert_eq!(m.alpha_lapse_ramp_tau, 0.0);
+    assert_eq!(m.base_desired_retention, 0.85);
+    // GSP 调度策略头 F1 船值
+    assert_eq!(m.gsp_success_grade, 4);
+    assert_eq!(m.gsp_interval_cap_days, 40.0);
+    assert_eq!(m.gsp_graduation_streak, 2);
+    assert_eq!(m.gsp_graduation_floor_days, 30.0);
+    assert_eq!(m.gsp_young_retention, 0.86);
+    assert_eq!(m.gsp_mature_retention, 0.92);
+    assert_eq!(m.gsp_maturity_band_days, 14.0);
+    assert_eq!(m.gsp_interval_fuzz, 0.0);
+    // FSRS-6 公版 w（grade=4 共拟合）：首权重 w[0]=0.212、w[20]=0.1542
+    assert!((m.w[0] - 0.212).abs() < 1e-12);
+    assert!((m.w[20] - 0.1542).abs() < 1e-12);
 }

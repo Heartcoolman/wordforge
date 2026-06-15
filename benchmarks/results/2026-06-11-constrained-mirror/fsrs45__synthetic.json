@@ -1,0 +1,23 @@
+{
+ "scheduler": "fsrs45",
+ "dataset": "synthetic",
+ "prediction": {
+  "logLoss": 0.7102408347242434,
+  "ici": 0.2241322134354324,
+  "auc": 0.554540292867003,
+  "maeP": 0.38690028508668983
+ },
+ "dhp": {
+  "expectedMemoryFinal": 7587.6593,
+  "masteredCount": 31740,
+  "totalReviews": 239374,
+  "efficiency": 0.031698
+ },
+ "policy": {
+  "finalRecallRate": 0.2805,
+  "reviewsPerDay": 2659.711111111111,
+  "retentionStability": 0.9141323220160982
+ },
+ "runtime_seconds": 11.44,
+ "notes": "constrained re-tune winner under parity-aligned DHP mirror (repaired NM0), production write-back 2026-06-11"
+}

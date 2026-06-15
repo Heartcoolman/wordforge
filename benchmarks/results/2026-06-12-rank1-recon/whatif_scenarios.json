@@ -1,0 +1,1122 @@
+{
+  "baseline_verified": true,
+  "baseline_borda": {
+    "fsrs45": 28,
+    "amas6": 25,
+    "amas": 24,
+    "fsrs6": 21,
+    "fsrs": 20,
+    "dhp": 13,
+    "sm2": 13,
+    "random": 11,
+    "leitner": 7,
+    "hlr": 3
+  },
+  "baseline_table": [
+    {
+      "algo": "fsrs45",
+      "borda": 28,
+      "overall_rank": 1,
+      "final_mean": 0.943,
+      "ranks": {
+        "duolingo_hlr": 2,
+        "maimemo": 2,
+        "synthetic": 1
+      }
+    },
+    {
+      "algo": "amas6",
+      "borda": 25,
+      "overall_rank": 2,
+      "final_mean": 0.9216,
+      "ranks": {
+        "duolingo_hlr": 1,
+        "maimemo": 5,
+        "synthetic": 2
+      }
+    },
+    {
+      "algo": "amas",
+      "borda": 24,
+      "overall_rank": 3,
+      "final_mean": 0.7466,
+      "ranks": {
+        "duolingo_hlr": 4,
+        "maimemo": 1,
+        "synthetic": 4
+      }
+    },
+    {
+      "algo": "fsrs6",
+      "borda": 21,
+      "overall_rank": 4,
+      "final_mean": 0.8665,
+      "ranks": {
+        "duolingo_hlr": 3,
+        "maimemo": 6,
+        "synthetic": 3
+      }
+    },
+    {
+      "algo": "fsrs",
+      "borda": 20,
+      "overall_rank": 5,
+      "final_mean": 0.7335,
+      "ranks": {
+        "duolingo_hlr": 5,
+        "maimemo": 3,
+        "synthetic": 5
+      }
+    },
+    {
+      "algo": "dhp",
+      "borda": 13,
+      "overall_rank": 6,
+      "final_mean": 0.6494,
+      "ranks": {
+        "duolingo_hlr": 8,
+        "maimemo": 4,
+        "synthetic": 8
+      }
+    },
+    {
+      "algo": "sm2",
+      "borda": 13,
+      "overall_rank": 7,
+      "final_mean": 0.6224,
+      "ranks": {
+        "duolingo_hlr": 7,
+        "maimemo": 7,
+        "synthetic": 6
+      }
+    },
+    {
+      "algo": "random",
+      "borda": 11,
+      "overall_rank": 8,
+      "final_mean": 0.474,
+      "ranks": {
+        "duolingo_hlr": 6,
+        "maimemo": 9,
+        "synthetic": 7
+      }
+    },
+    {
+      "algo": "leitner",
+      "borda": 7,
+      "overall_rank": 9,
+      "final_mean": 0.4206,
+      "ranks": {
+        "duolingo_hlr": 9,
+        "maimemo": 8,
+        "synthetic": 9
+      }
+    },
+    {
+      "algo": "hlr",
+      "borda": 3,
+      "overall_rank": 10,
+      "final_mean": 0.0009,
+      "ranks": {
+        "duolingo_hlr": 10,
+        "maimemo": 10,
+        "synthetic": 10
+      }
+    }
+  ],
+  "S1": {
+    "note": "amas legs := amas6 全腿全数据集(full adoption)",
+    "table": [
+      {
+        "algo": "fsrs45",
+        "borda": 28,
+        "overall_rank": 1,
+        "final_mean": 0.9484,
+        "ranks": {
+          "duolingo_hlr": 3,
+          "maimemo": 1,
+          "synthetic": 1
+        }
+      },
+      {
+        "algo": "amas6",
+        "borda": 26,
+        "overall_rank": 2,
+        "final_mean": 0.9255,
+        "ranks": {
+          "duolingo_hlr": 1,
+          "maimemo": 4,
+          "synthetic": 2
+        }
+      },
+      {
+        "algo": "amas",
+        "borda": 23,
+        "overall_rank": 3,
+        "final_mean": 0.9255,
+        "ranks": {
+          "duolingo_hlr": 2,
+          "maimemo": 5,
+          "synthetic": 3
+        }
+      },
+      {
+        "algo": "fsrs",
+        "borda": 21,
+        "overall_rank": 4,
+        "final_mean": 0.7389,
+        "ranks": {
+          "duolingo_hlr": 5,
+          "maimemo": 2,
+          "synthetic": 5
+        }
+      },
+      {
+        "algo": "fsrs6",
+        "borda": 19,
+        "overall_rank": 5,
+        "final_mean": 0.8698,
+        "ranks": {
+          "duolingo_hlr": 4,
+          "maimemo": 6,
+          "synthetic": 4
+        }
+      },
+      {
+        "algo": "dhp",
+        "borda": 14,
+        "overall_rank": 6,
+        "final_mean": 0.6545,
+        "ranks": {
+          "duolingo_hlr": 8,
+          "maimemo": 3,
+          "synthetic": 8
+        }
+      },
+      {
+        "algo": "sm2",
+        "borda": 13,
+        "overall_rank": 7,
+        "final_mean": 0.6264,
+        "ranks": {
+          "duolingo_hlr": 7,
+          "maimemo": 7,
+          "synthetic": 6
+        }
+      },
+      {
+        "algo": "random",
+        "borda": 11,
+        "overall_rank": 8,
+        "final_mean": 0.4741,
+        "ranks": {
+          "duolingo_hlr": 6,
+          "maimemo": 9,
+          "synthetic": 7
+        }
+      },
+      {
+        "algo": "leitner",
+        "borda": 7,
+        "overall_rank": 9,
+        "final_mean": 0.4207,
+        "ranks": {
+          "duolingo_hlr": 9,
+          "maimemo": 8,
+          "synthetic": 9
+        }
+      },
+      {
+        "algo": "hlr",
+        "borda": 3,
+        "overall_rank": 10,
+        "final_mean": 0.0009,
+        "ranks": {
+          "duolingo_hlr": 10,
+          "maimemo": 10,
+          "synthetic": 10
+        }
+      }
+    ],
+    "amas_borda": 23,
+    "amas_strictly_first": false,
+    "best_competitor": "fsrs45",
+    "competitor_borda": 28
+  },
+  "S2": {
+    "note": "amas pred legs := amas6 pred; sim 不变(纯双头 pred 升级)",
+    "table": [
+      {
+        "algo": "fsrs45",
+        "borda": 28,
+        "overall_rank": 1,
+        "final_mean": 0.943,
+        "ranks": {
+          "duolingo_hlr": 2,
+          "maimemo": 2,
+          "synthetic": 1
+        }
+      },
+      {
+        "algo": "amas6",
+        "borda": 25,
+        "overall_rank": 2,
+        "final_mean": 0.9216,
+        "ranks": {
+          "duolingo_hlr": 1,
+          "maimemo": 5,
+          "synthetic": 2
+        }
+      },
+      {
+        "algo": "amas",
+        "borda": 24,
+        "overall_rank": 3,
+        "final_mean": 0.7987,
+        "ranks": {
+          "duolingo_hlr": 4,
+          "maimemo": 1,
+          "synthetic": 4
+        }
+      },
+      {
+        "algo": "fsrs6",
+        "borda": 21,
+        "overall_rank": 4,
+        "final_mean": 0.8665,
+        "ranks": {
+          "duolingo_hlr": 3,
+          "maimemo": 6,
+          "synthetic": 3
+        }
+      },
+      {
+        "algo": "fsrs",
+        "borda": 20,
+        "overall_rank": 5,
+        "final_mean": 0.7335,
+        "ranks": {
+          "duolingo_hlr": 5,
+          "maimemo": 3,
+          "synthetic": 5
+        }
+      },
+      {
+        "algo": "dhp",
+        "borda": 13,
+        "overall_rank": 6,
+        "final_mean": 0.6494,
+        "ranks": {
+          "duolingo_hlr": 8,
+          "maimemo": 4,
+          "synthetic": 8
+        }
+      },
+      {
+        "algo": "sm2",
+        "borda": 13,
+        "overall_rank": 7,
+        "final_mean": 0.6224,
+        "ranks": {
+          "duolingo_hlr": 7,
+          "maimemo": 7,
+          "synthetic": 6
+        }
+      },
+      {
+        "algo": "random",
+        "borda": 11,
+        "overall_rank": 8,
+        "final_mean": 0.474,
+        "ranks": {
+          "duolingo_hlr": 6,
+          "maimemo": 9,
+          "synthetic": 7
+        }
+      },
+      {
+        "algo": "leitner",
+        "borda": 7,
+        "overall_rank": 9,
+        "final_mean": 0.4206,
+        "ranks": {
+          "duolingo_hlr": 9,
+          "maimemo": 8,
+          "synthetic": 9
+        }
+      },
+      {
+        "algo": "hlr",
+        "borda": 3,
+        "overall_rank": 10,
+        "final_mean": 0.0009,
+        "ranks": {
+          "duolingo_hlr": 10,
+          "maimemo": 10,
+          "synthetic": 10
+        }
+      }
+    ],
+    "amas_borda": 24,
+    "amas_strictly_first": false,
+    "best_competitor": "fsrs45",
+    "competitor_borda": 28
+  },
+  "S3": {
+    "note": "S2 + duo sim := amas6 duo sim",
+    "table": [
+      {
+        "algo": "fsrs45",
+        "borda": 27,
+        "overall_rank": 1,
+        "final_mean": 0.943,
+        "ranks": {
+          "duolingo_hlr": 3,
+          "maimemo": 2,
+          "synthetic": 1
+        }
+      },
+      {
+        "algo": "amas",
+        "borda": 26,
+        "overall_rank": 2,
+        "final_mean": 0.8808,
+        "ranks": {
+          "duolingo_hlr": 2,
+          "maimemo": 1,
+          "synthetic": 4
+        }
+      },
+      {
+        "algo": "amas6",
+        "borda": 25,
+        "overall_rank": 3,
+        "final_mean": 0.9216,
+        "ranks": {
+          "duolingo_hlr": 1,
+          "maimemo": 5,
+          "synthetic": 2
+        }
+      },
+      {
+        "algo": "fsrs",
+        "borda": 20,
+        "overall_rank": 4,
+        "final_mean": 0.7335,
+        "ranks": {
+          "duolingo_hlr": 5,
+          "maimemo": 3,
+          "synthetic": 5
+        }
+      },
+      {
+        "algo": "fsrs6",
+        "borda": 20,
+        "overall_rank": 5,
+        "final_mean": 0.8665,
+        "ranks": {
+          "duolingo_hlr": 4,
+          "maimemo": 6,
+          "synthetic": 3
+        }
+      },
+      {
+        "algo": "dhp",
+        "borda": 13,
+        "overall_rank": 6,
+        "final_mean": 0.6494,
+        "ranks": {
+          "duolingo_hlr": 8,
+          "maimemo": 4,
+          "synthetic": 8
+        }
+      },
+      {
+        "algo": "sm2",
+        "borda": 13,
+        "overall_rank": 7,
+        "final_mean": 0.6224,
+        "ranks": {
+          "duolingo_hlr": 7,
+          "maimemo": 7,
+          "synthetic": 6
+        }
+      },
+      {
+        "algo": "random",
+        "borda": 11,
+        "overall_rank": 8,
+        "final_mean": 0.474,
+        "ranks": {
+          "duolingo_hlr": 6,
+          "maimemo": 9,
+          "synthetic": 7
+        }
+      },
+      {
+        "algo": "leitner",
+        "borda": 7,
+        "overall_rank": 9,
+        "final_mean": 0.4206,
+        "ranks": {
+          "duolingo_hlr": 9,
+          "maimemo": 8,
+          "synthetic": 9
+        }
+      },
+      {
+        "algo": "hlr",
+        "borda": 3,
+        "overall_rank": 10,
+        "final_mean": 0.0009,
+        "ranks": {
+          "duolingo_hlr": 10,
+          "maimemo": 10,
+          "synthetic": 10
+        }
+      }
+    ],
+    "amas_borda": 26,
+    "amas_strictly_first": false,
+    "best_competitor": "fsrs45",
+    "competitor_borda": 27
+  },
+  "S4": {
+    "note": "S3 + syn sim := amas6 syn sim",
+    "table": [
+      {
+        "algo": "amas",
+        "borda": 27,
+        "overall_rank": 1,
+        "final_mean": 0.9527,
+        "ranks": {
+          "duolingo_hlr": 2,
+          "maimemo": 1,
+          "synthetic": 3
+        }
+      },
+      {
+        "algo": "fsrs45",
+        "borda": 27,
+        "overall_rank": 2,
+        "final_mean": 0.943,
+        "ranks": {
+          "duolingo_hlr": 3,
+          "maimemo": 2,
+          "synthetic": 1
+        }
+      },
+      {
+        "algo": "amas6",
+        "borda": 25,
+        "overall_rank": 3,
+        "final_mean": 0.9216,
+        "ranks": {
+          "duolingo_hlr": 1,
+          "maimemo": 5,
+          "synthetic": 2
+        }
+      },
+      {
+        "algo": "fsrs",
+        "borda": 20,
+        "overall_rank": 4,
+        "final_mean": 0.7335,
+        "ranks": {
+          "duolingo_hlr": 5,
+          "maimemo": 3,
+          "synthetic": 5
+        }
+      },
+      {
+        "algo": "fsrs6",
+        "borda": 19,
+        "overall_rank": 5,
+        "final_mean": 0.8665,
+        "ranks": {
+          "duolingo_hlr": 4,
+          "maimemo": 6,
+          "synthetic": 4
+        }
+      },
+      {
+        "algo": "dhp",
+        "borda": 13,
+        "overall_rank": 6,
+        "final_mean": 0.6494,
+        "ranks": {
+          "duolingo_hlr": 8,
+          "maimemo": 4,
+          "synthetic": 8
+        }
+      },
+      {
+        "algo": "sm2",
+        "borda": 13,
+        "overall_rank": 7,
+        "final_mean": 0.6224,
+        "ranks": {
+          "duolingo_hlr": 7,
+          "maimemo": 7,
+          "synthetic": 6
+        }
+      },
+      {
+        "algo": "random",
+        "borda": 11,
+        "overall_rank": 8,
+        "final_mean": 0.474,
+        "ranks": {
+          "duolingo_hlr": 6,
+          "maimemo": 9,
+          "synthetic": 7
+        }
+      },
+      {
+        "algo": "leitner",
+        "borda": 7,
+        "overall_rank": 9,
+        "final_mean": 0.4206,
+        "ranks": {
+          "duolingo_hlr": 9,
+          "maimemo": 8,
+          "synthetic": 9
+        }
+      },
+      {
+        "algo": "hlr",
+        "borda": 3,
+        "overall_rank": 10,
+        "final_mean": 0.0009,
+        "ranks": {
+          "duolingo_hlr": 10,
+          "maimemo": 10,
+          "synthetic": 10
+        }
+      }
+    ],
+    "amas_borda": 27,
+    "amas_strictly_first": false,
+    "best_competitor": "fsrs45",
+    "competitor_borda": 27
+  },
+  "S5": {
+    "note": "S4 + duo mastered=6700(略高于 amas6 6597) + syn mastered=32000(略高于 fsrs45 31740)",
+    "table": [
+      {
+        "algo": "amas",
+        "borda": 30,
+        "overall_rank": 1,
+        "final_mean": 0.9715,
+        "ranks": {
+          "duolingo_hlr": 1,
+          "maimemo": 1,
+          "synthetic": 1
+        }
+      },
+      {
+        "algo": "fsrs45",
+        "borda": 26,
+        "overall_rank": 2,
+        "final_mean": 0.9401,
+        "ranks": {
+          "duolingo_hlr": 3,
+          "maimemo": 2,
+          "synthetic": 2
+        }
+      },
+      {
+        "algo": "amas6",
+        "borda": 23,
+        "overall_rank": 3,
+        "final_mean": 0.9187,
+        "ranks": {
+          "duolingo_hlr": 2,
+          "maimemo": 5,
+          "synthetic": 3
+        }
+      },
+      {
+        "algo": "fsrs",
+        "borda": 20,
+        "overall_rank": 4,
+        "final_mean": 0.7323,
+        "ranks": {
+          "duolingo_hlr": 5,
+          "maimemo": 3,
+          "synthetic": 5
+        }
+      },
+      {
+        "algo": "fsrs6",
+        "borda": 19,
+        "overall_rank": 5,
+        "final_mean": 0.8642,
+        "ranks": {
+          "duolingo_hlr": 4,
+          "maimemo": 6,
+          "synthetic": 4
+        }
+      },
+      {
+        "algo": "dhp",
+        "borda": 13,
+        "overall_rank": 6,
+        "final_mean": 0.6484,
+        "ranks": {
+          "duolingo_hlr": 8,
+          "maimemo": 4,
+          "synthetic": 8
+        }
+      },
+      {
+        "algo": "sm2",
+        "borda": 13,
+        "overall_rank": 7,
+        "final_mean": 0.6218,
+        "ranks": {
+          "duolingo_hlr": 7,
+          "maimemo": 7,
+          "synthetic": 6
+        }
+      },
+      {
+        "algo": "random",
+        "borda": 11,
+        "overall_rank": 8,
+        "final_mean": 0.474,
+        "ranks": {
+          "duolingo_hlr": 6,
+          "maimemo": 9,
+          "synthetic": 7
+        }
+      },
+      {
+        "algo": "leitner",
+        "borda": 7,
+        "overall_rank": 9,
+        "final_mean": 0.4206,
+        "ranks": {
+          "duolingo_hlr": 9,
+          "maimemo": 8,
+          "synthetic": 9
+        }
+      },
+      {
+        "algo": "hlr",
+        "borda": 3,
+        "overall_rank": 10,
+        "final_mean": 0.0009,
+        "ranks": {
+          "duolingo_hlr": 10,
+          "maimemo": 10,
+          "synthetic": 10
+        }
+      }
+    ],
+    "amas_borda": 30,
+    "amas_strictly_first": true,
+    "best_competitor": "fsrs45",
+    "competitor_borda": 26
+  },
+  "S6": {
+    "note": "从 S5 出发，mai 其它 sim 腿=amas baseline，仅扫 mai mastered",
+    "mai_rank1_floor": 16133,
+    "mai_rank1_lost_at_or_below": 16132,
+    "explanation": "mai mastered>=16133 时 amas 保持 mai rank1；降到 16132 即失守",
+    "mai_mastered_12000": {
+      "mai_rank": 5,
+      "amas_strictly_first": false,
+      "amas_borda": 26,
+      "mai_ranks_top": {
+        "amas": 5,
+        "fsrs45": 1,
+        "amas6": 4,
+        "fsrs": 2
+      }
+    }
+  },
+  "S7": {
+    "note": "pred=amas6 全数据集; 非 mastered sim=amas6 全数据集; bisect 最小 (duo_mast, syn_mast) 使 amas 严格 Borda#1",
+    "mai_16999": {
+      "min_total_point": {
+        "duo_mastered": 6597,
+        "syn_mastered": 26545,
+        "total": 33142
+      },
+      "amas6_duo_baseline": 6597,
+      "fsrs45_syn_baseline": 31740,
+      "amas6_syn_baseline": 26544,
+      "at_frontier": {
+        "amas_borda": 28,
+        "binding_competitor": "fsrs45",
+        "competitor_borda": 27,
+        "strict": true,
+        "ranks": {
+          "maimemo": 1,
+          "duolingo_hlr": 2,
+          "synthetic": 2
+        }
+      },
+      "syn_minus1_loses": true,
+      "pareto_curve": [
+        {
+          "duo": 6597,
+          "min_syn": 26545,
+          "total": 33142
+        },
+        {
+          "duo": 8597,
+          "min_syn": 26544,
+          "total": 35141
+        },
+        {
+          "duo": 10597,
+          "min_syn": 26544,
+          "total": 37141
+        },
+        {
+          "duo": 12597,
+          "min_syn": 26544,
+          "total": 39141
+        },
+        {
+          "duo": 14597,
+          "min_syn": 26544,
+          "total": 41141
+        },
+        {
+          "duo": 16597,
+          "min_syn": 26544,
+          "total": 43141
+        },
+        {
+          "duo": 18597,
+          "min_syn": 26544,
+          "total": 45141
+        },
+        {
+          "duo": 20597,
+          "min_syn": 26544,
+          "total": 47141
+        },
+        {
+          "duo": 22597,
+          "min_syn": 26544,
+          "total": 49141
+        },
+        {
+          "duo": 24597,
+          "min_syn": 26544,
+          "total": 51141
+        },
+        {
+          "duo": 26597,
+          "min_syn": 26544,
+          "total": 53141
+        },
+        {
+          "duo": 28597,
+          "min_syn": 26544,
+          "total": 55141
+        },
+        {
+          "duo": 30597,
+          "min_syn": 26544,
+          "total": 57141
+        },
+        {
+          "duo": 32597,
+          "min_syn": 26544,
+          "total": 59141
+        },
+        {
+          "duo": 34597,
+          "min_syn": 26544,
+          "total": 61141
+        },
+        {
+          "duo": 36597,
+          "min_syn": 26544,
+          "total": 63141
+        },
+        {
+          "duo": 38597,
+          "min_syn": 26544,
+          "total": 65141
+        },
+        {
+          "duo": 40597,
+          "min_syn": 26544,
+          "total": 67141
+        },
+        {
+          "duo": 42597,
+          "min_syn": 26544,
+          "total": 69141
+        },
+        {
+          "duo": 44597,
+          "min_syn": 26544,
+          "total": 71141
+        },
+        {
+          "duo": 46597,
+          "min_syn": 26544,
+          "total": 73141
+        },
+        {
+          "duo": 48597,
+          "min_syn": 26544,
+          "total": 75141
+        },
+        {
+          "duo": 50597,
+          "min_syn": 26544,
+          "total": 77141
+        },
+        {
+          "duo": 52597,
+          "min_syn": 26544,
+          "total": 79141
+        },
+        {
+          "duo": 54597,
+          "min_syn": 26544,
+          "total": 81141
+        }
+      ]
+    },
+    "mai_14000": {
+      "min_total_point": {
+        "duo_mastered": 6847,
+        "syn_mastered": 63397,
+        "total": 70244
+      },
+      "amas6_duo_baseline": 6597,
+      "fsrs45_syn_baseline": 31740,
+      "amas6_syn_baseline": 26544,
+      "at_frontier": {
+        "amas_borda": 27,
+        "binding_competitor": "fsrs45",
+        "competitor_borda": 26,
+        "strict": true,
+        "ranks": {
+          "maimemo": 4,
+          "duolingo_hlr": 1,
+          "synthetic": 1
+        }
+      },
+      "syn_minus1_loses": true,
+      "pareto_curve": [
+        {
+          "duo": 6597,
+          "min_syn": 137277,
+          "total": 143874
+        },
+        {
+          "duo": 8597,
+          "min_syn": 63397,
+          "total": 71994
+        },
+        {
+          "duo": 10597,
+          "min_syn": 63397,
+          "total": 73994
+        },
+        {
+          "duo": 12597,
+          "min_syn": 63397,
+          "total": 75994
+        },
+        {
+          "duo": 14597,
+          "min_syn": 63397,
+          "total": 77994
+        },
+        {
+          "duo": 16597,
+          "min_syn": 63397,
+          "total": 79994
+        },
+        {
+          "duo": 18597,
+          "min_syn": 63397,
+          "total": 81994
+        },
+        {
+          "duo": 20597,
+          "min_syn": 63397,
+          "total": 83994
+        },
+        {
+          "duo": 22597,
+          "min_syn": 63397,
+          "total": 85994
+        },
+        {
+          "duo": 24597,
+          "min_syn": 63397,
+          "total": 87994
+        },
+        {
+          "duo": 26597,
+          "min_syn": 63397,
+          "total": 89994
+        },
+        {
+          "duo": 28597,
+          "min_syn": 63397,
+          "total": 91994
+        },
+        {
+          "duo": 30597,
+          "min_syn": 63397,
+          "total": 93994
+        },
+        {
+          "duo": 32597,
+          "min_syn": 63397,
+          "total": 95994
+        },
+        {
+          "duo": 34597,
+          "min_syn": 63397,
+          "total": 97994
+        },
+        {
+          "duo": 36597,
+          "min_syn": 63397,
+          "total": 99994
+        },
+        {
+          "duo": 38597,
+          "min_syn": 63397,
+          "total": 101994
+        },
+        {
+          "duo": 40597,
+          "min_syn": 63397,
+          "total": 103994
+        },
+        {
+          "duo": 42597,
+          "min_syn": 63397,
+          "total": 105994
+        },
+        {
+          "duo": 44597,
+          "min_syn": 63397,
+          "total": 107994
+        },
+        {
+          "duo": 46597,
+          "min_syn": 29095,
+          "total": 75692
+        },
+        {
+          "duo": 48597,
+          "min_syn": 29095,
+          "total": 77692
+        },
+        {
+          "duo": 50597,
+          "min_syn": 29095,
+          "total": 79692
+        },
+        {
+          "duo": 52597,
+          "min_syn": 29095,
+          "total": 81692
+        },
+        {
+          "duo": 54597,
+          "min_syn": 29095,
+          "total": 83692
+        }
+      ]
+    }
+  },
+  "S8": {
+    "note": "S7 frontier 基础上，把 duo/syn totalReviews 砍到 fsrs45 水平(降 rpd 提 policy, 升 efficiency), 看最小 mastered 是否变",
+    "amas6_duo_totrev": 163302.0,
+    "fsrs45_duo_totrev": 95205.0,
+    "amas6_syn_totrev": 335345.0,
+    "fsrs45_syn_totrev": 239374.0,
+    "mai_16999_fsrs45_totrev": {
+      "duo_mastered_min": 6597,
+      "syn_mastered_min": 26544,
+      "total": 33141,
+      "at_frontier": {
+        "amas_borda": 30,
+        "binding_competitor": "fsrs45",
+        "competitor_borda": 26,
+        "strict": true,
+        "ranks": {
+          "maimemo": 1,
+          "duolingo_hlr": 1,
+          "synthetic": 1
+        }
+      },
+      "delta_vs_S7_min_total": {
+        "duo_mastered": 0,
+        "syn_mastered": -1,
+        "total": -1
+      }
+    },
+    "mai_14000_fsrs45_totrev": {
+      "duo_mastered_min": 6597,
+      "syn_mastered_min": 63304,
+      "total": 69901,
+      "at_frontier": {
+        "amas_borda": 27,
+        "binding_competitor": "fsrs45",
+        "competitor_borda": 26,
+        "strict": true,
+        "ranks": {
+          "maimemo": 4,
+          "duolingo_hlr": 1,
+          "synthetic": 1
+        }
+      },
+      "delta_vs_S7_min_total": {
+        "duo_mastered": -250,
+        "syn_mastered": -93,
+        "total": -343
+      }
+    },
+    "free_promotion_at_S7_mintotal": {
+      "note": "同 mastered(mai16999,duo6597,syn26545)下，把 duo/syn totalReviews 砍到 fsrs45 水平，amas 从 Borda28 升到 30(duo/syn rank 2->1)。降 totalReviews 同时升 efficiency(dhp)+降 rpd(policy)，是免费增益。",
+      "amas6_totrev": {
+        "strict": true,
+        "amas_borda": 28,
+        "binding": "fsrs45",
+        "binding_borda": 27,
+        "amas_ranks": {
+          "duolingo_hlr": 2,
+          "maimemo": 1,
+          "synthetic": 2
+        }
+      },
+      "fsrs45_totrev": {
+        "strict": true,
+        "amas_borda": 30,
+        "binding": "fsrs45",
+        "binding_borda": 26,
+        "amas_ranks": {
+          "duolingo_hlr": 1,
+          "maimemo": 1,
+          "synthetic": 1
+        }
+      }
+    }
+  },
+  "tie_semantics": {
+    "dataset_level": "sort_values('final_score',ascending=False) 默认 quicksort，在 pandas 3.0.1 上对相等键保持输入行序(等价稳定)；并列得连续 rank N/N+1 拆分 Borda，绝不共享 rank。输入行序来自 _load_results 的 sorted(glob('*.json'))=文件名字母序(amas6__ < amas__，因 '6'(0x36) < '_'(0x5f))。",
+    "aggregate_level": "aggregate_borda 先 groupby('algo')(字母序索引: amas<amas6<...<fsrs45)，再 sort_values('borda_total',desc) 默认 quicksort，相等保持该字母序。故 borda 总分并列时，字母序靠前者得更高 overall_rank(amas 在 amas6/fsrs45 之前)。",
+    "consequence": "amas 恰好等于 amas6 不会真并列共享名次——会被字母序/行序拆开。这使任何依赖'打平'的 #1 都是脆弱的。本报告 S7 前沿一律要求 Borda 严格大于全部竞争者(open region)，不依赖该拆分。",
+    "exact_match_example": {
+      "note": "syn=26544 时 amas 与 amas6 的 dhp_raw 完全相等(18742.09)、final_score 相等(0.914325)；amas6 占 syn rank2、amas 被挤到 rank3(行序 amas6 在前)。+1 syn mastered 即把 amas dhp_raw 抬高 0.7 翻到 rank2。"
+    }
+  }
+}

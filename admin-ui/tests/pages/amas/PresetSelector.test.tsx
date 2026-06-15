@@ -6,12 +6,11 @@ describe('PresetSelector', () => {
   it('renders preset buttons', () => {
     render(() => <PresetSelector config={{}} onApply={() => {}} />);
     expect(screen.getByText('出厂默认')).toBeInTheDocument();
-    expect(screen.getByText('已调优（2026-05-15）')).toBeInTheDocument();
   });
 
   it('opens preview when clicking a preset and shows diff rows', () => {
     render(() => <PresetSelector config={{ memoryModel: { baseDesiredRetention: 0.5 } }} onApply={() => {}} />);
-    fireEvent.click(screen.getByText('已调优（2026-05-15）'));
+    fireEvent.click(screen.getByText('出厂默认'));
     expect(screen.getByText(/应用 Preset/)).toBeInTheDocument();
     expect(screen.getByText('目标长期留存率')).toBeInTheDocument();
   });

@@ -1,0 +1,23 @@
+{
+  "scheduler": "random",
+  "dataset": "synthetic",
+  "prediction": {
+    "logLoss": 1.0658097623685812,
+    "ici": 0.3987096454990131,
+    "auc": 0.507953475914021,
+    "maeP": 0.49865296899133926
+  },
+  "dhp": {
+    "expectedMemoryFinal": 20780.5938,
+    "masteredCount": 0,
+    "totalReviews": 297500,
+    "efficiency": 0.069851
+  },
+  "policy": {
+    "finalRecallRate": 0.0,
+    "reviewsPerDay": 3305.5555555555557,
+    "retentionStability": 0.8078363762255657
+  },
+  "runtime_seconds": 0.24,
+  "notes": "v0.6: HLR theta=paper(0.5,-1.0,-0.3); oracle 跨数据集复用"
+}

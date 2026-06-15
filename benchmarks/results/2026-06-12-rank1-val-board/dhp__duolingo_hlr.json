@@ -1,0 +1,24 @@
+{
+ "scheduler": "dhp",
+ "dataset": "duolingo_hlr",
+ "prediction": {
+  "logLoss": 0.42366894754337314,
+  "ici": 0.1702120850040712,
+  "auc": 0.5142547889917424,
+  "maeP": 0.24813913859580508
+ },
+ "dhp": {
+  "expectedMemoryFinal": 7790.1051,
+  "masteredCount": 692,
+  "totalReviews": 298126,
+  "efficiency": 0.02613
+ },
+ "policy": {
+  "finalRecallRate": 0.3216,
+  "reviewsPerDay": 3312.511111111111,
+  "retentionStability": 0.8437546143063361
+ },
+ "split": "val",
+ "runtime_seconds": 9.2,
+ "notes": "val baseline board; sim+pred both split=val; n_users=300 sim_days=90 budget=200 dr=0.85 seed=42"
+}

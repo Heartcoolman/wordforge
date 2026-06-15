@@ -1,0 +1,23 @@
+{
+ "scheduler": "amas",
+ "dataset": "maimemo",
+ "prediction": {
+  "logLoss": 0.3071683397906374,
+  "ici": 0.01636962622237037,
+  "auc": 0.7830531399588149,
+  "maeP": 0.1841614255082575
+ },
+ "dhp": {
+  "expectedMemoryFinal": 13827.8029,
+  "masteredCount": 17376,
+  "totalReviews": 96130,
+  "efficiency": 0.143845
+ },
+ "policy": {
+  "finalRecallRate": 0.4603,
+  "reviewsPerDay": 1068.111111111111,
+  "retentionStability": 0.8705796201988838
+ },
+ "runtime_seconds": 15.86,
+ "notes": "constrained-tune winner (repaired NM2), production write-back 2026-06-10"
+}

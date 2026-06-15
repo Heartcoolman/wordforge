@@ -23,10 +23,10 @@ describe('schema', () => {
       }
     });
 
-    it('PRESETS has factory_default and tuned', () => {
+    it('PRESETS has factory_default only (tuned preset removed with FSRS-6)', () => {
       const ids = PRESETS.map((p) => p.id);
       expect(ids).toContain('factory_default');
-      expect(ids).toContain('tuned_2026_05_15');
+      expect(ids).toHaveLength(1);
     });
   });
 
@@ -148,13 +148,8 @@ describe('schema', () => {
   describe('applyPreset / diffKnown', () => {
     it('applyPreset factory uses defaults', () => {
       const out = applyPreset({}, 'factory_default');
-      expect(getByPath(out, 'memoryModel.baseDesiredRetention')).toBe(0.92);
-    });
-
-    it('applyPreset tuned uses tuned values when defined', () => {
-      const out = applyPreset({}, 'tuned_2026_05_15');
-      // baseDesiredRetention has tuned 0.849021
-      expect(getByPath(out, 'memoryModel.baseDesiredRetention')).toBeCloseTo(0.849021, 5);
+      // FSRS-6 起出厂默认 = FSRS 官方 desired_retention 0.9
+      expect(getByPath(out, 'memoryModel.baseDesiredRetention')).toBe(0.9);
     });
 
     it('diffKnown returns entries that differ', () => {

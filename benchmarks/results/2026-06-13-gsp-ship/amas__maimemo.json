@@ -1,0 +1,23 @@
+{
+ "scheduler": "amas",
+ "dataset": "maimemo",
+ "prediction": {
+  "logLoss": 0.30254351180878747,
+  "ici": 0.02524733830506093,
+  "auc": 0.8072173868293632,
+  "maeP": 0.1758903014053947
+ },
+ "dhp": {
+  "expectedMemoryFinal": 19710.5894,
+  "masteredCount": 20257,
+  "totalReviews": 160181,
+  "efficiency": 0.123052
+ },
+ "policy": {
+  "finalRecallRate": 0.7789,
+  "reviewsPerDay": 1779.7888888888888,
+  "retentionStability": 0.8851438448937422
+ },
+ "runtime_seconds": 16.23,
+ "notes": "v5 GSP F1 ship TEST one-shot 2026-06-13"
+}

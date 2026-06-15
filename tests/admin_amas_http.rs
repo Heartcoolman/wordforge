@@ -773,7 +773,7 @@ async fn it_amas_advisor_whitelist_crud() {
     let app = spawn_test_server().await;
     let token = setup_amas_admin_token(&app).await;
 
-    // GET → seed 后应有 11 条
+    // GET → seed 后应有 12 条（FSRS-6 起含 w[20] 曲线 decay）
     let list = request(
         &app.app,
         Method::GET,
@@ -784,7 +784,7 @@ async fn it_amas_advisor_whitelist_crud() {
     .await;
     let (s, _, body) = response_json(list).await;
     assert_eq!(s, StatusCode::OK);
-    assert_eq!(body["data"].as_array().unwrap().len(), 11);
+    assert_eq!(body["data"].as_array().unwrap().len(), 12);
 
     // POST 新增一条合法 path
     let add = request(

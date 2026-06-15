@@ -2,7 +2,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::amas::config::MemoryModelConfig;
 
-use super::mdm::{compute_interval, recall_probability, update_strength, MdmState};
+use super::mdm::{
+    compute_interval, compute_interval_base_days, gsp_banded_retention, gsp_schedule_active,
+    gsp_schedule_days, recall_probability, update_strength_with_evidence, MdmState,
+};
 
 const DAY_MS: i64 = 86_400_000;
 /// 二元 recall（1=记住）按 FSRS 二元拟合惯例映射到 Good(3)，而非 Easy(4)。
@@ -87,6 +90,13 @@ pub struct BenchmarkAdapterResult {
     pub review_count: u32,
     pub predicted_recall: Option<f64>,
     pub intervals: Vec<RetentionInterval>,
+    /// 重放终态的 correct_streak（GSP 毕业下限判定依赖；Python↔Rust 对拍可读）。
+    pub correct_streak: u32,
+    /// GSP 调度策略头产出的最终调度区间（天，整数）。仅在 GSP 任一旋钮激活时为 Some，
+    /// 全关时为 None（生产走旧 compute_interval 路径，无 head）。base 用 baseDesiredRetention
+    /// （band>0 时由 banded retention 替换），契约 GSP_SPEC §3 全 op-order。供 Python↔Rust
+    /// 区间 parity 对拍（cap/floor/fuzz/banded 同序逐位）。
+    pub scheduled_interval_days: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,7 +111,7 @@ pub fn evaluate_batch(
     let mut results = Vec::with_capacity(request.items.len());
 
     for item in request.items {
-        let state = replay_history(&item, &request.config)?;
+        let (state, correct_streak) = replay_history_with_streak(&item, &request.config)?;
         let now_ms = state.last_review_at.unwrap_or(0);
         let predicted_recall = item.next_t_days.map(|days| {
             recall_probability(
@@ -123,22 +133,51 @@ pub fn evaluate_batch(
             })
             .collect();
 
+        // GSP 调度策略头产出的最终调度区间（仅 GSP 激活时；契约 GSP_SPEC §3 全 op-order）。
+        // base 用 baseDesiredRetention（band>0 时由 banded retention 替换），与 mastery.rs 同序。
+        let scheduled_interval_days = if gsp_schedule_active(&request.config) {
+            let target_recall = gsp_banded_retention(&state, &request.config)
+                .unwrap_or(request.config.base_desired_retention);
+            let base_days_int =
+                compute_interval_base_days(&state, target_recall, &request.config);
+            Some(gsp_schedule_days(
+                base_days_int,
+                item.interval_scale,
+                correct_streak,
+                &state,
+                &request.config,
+            ))
+        } else {
+            None
+        };
+
         results.push(BenchmarkAdapterResult {
             stability: state.stability,
             difficulty: state.difficulty,
             review_count: state.review_count,
             predicted_recall,
             intervals,
+            correct_streak,
+            scheduled_interval_days,
         });
     }
 
     Ok(BenchmarkAdapterResponse { items: results })
 }
 
+/// 仅返回终态（向后兼容入口；丢弃 streak）。
 pub fn replay_history(
     item: &BenchmarkHistoryItem,
     config: &MemoryModelConfig,
 ) -> Result<MdmState, String> {
+    replay_history_with_streak(item, config).map(|(state, _)| state)
+}
+
+/// 重放历史并返回 (终态, 终态 correct_streak)。streak 供 GSP 毕业下限判定。
+pub fn replay_history_with_streak(
+    item: &BenchmarkHistoryItem,
+    config: &MemoryModelConfig,
+) -> Result<(MdmState, u32), String> {
     let t_history = item.resolve_t_history();
     let r_history = item.resolve_r_history();
 
@@ -152,6 +191,12 @@ pub fn replay_history(
 
     let mut state = MdmState::default();
     let mut now_ms = 0i64;
+    // 忠实重放 mastery.rs:69-99 的连击动态 alpha（先推进连击、失败清零、首评 gap 恒过）
+    // 与双腿信任调度证据（advance-before-update：streak=记账后连击，lapses 含本次失败）。
+    // interval_scale 钉死 1.0：生产 adjusted_interval_scale ~0.95-1.08，base alpha 偏差 ≤8%，
+    // 耦合会破坏 Rust↔Python 对拍可测性，作为已接受的残余保真缺口记录。
+    let mut streak: u32 = 0;
+    let mut lapses: u32 = 0;
 
     for (&delta_t, &result) in t_history.iter().zip(r_history.iter()) {
         if delta_t < 0 {
@@ -163,10 +208,23 @@ pub fn replay_history(
         } else {
             SUCCESS_QUALITY
         };
-        update_strength(&mut state, quality, 0.3, now_ms, config);
+        if result != 0 {
+            let gap_ok = state.review_count == 0 || delta_t * DAY_MS >= config.streak_min_gap_ms;
+            if gap_ok {
+                streak += 1;
+            }
+        } else {
+            streak = 0;
+            // 累计 lapse 在更新前自增（生产 lapses = total_attempts - total_correct 含本次失败）
+            lapses += 1;
+        }
+        let base_alpha = (1.0 * config.alpha_scale).clamp(config.alpha_min, config.alpha_max);
+        let streak_bonus = 1.0 + (streak.min(5) as f64) * 0.1;
+        let alpha = (base_alpha * streak_bonus).clamp(config.alpha_min, config.alpha_max);
+        update_strength_with_evidence(&mut state, quality, alpha, streak, lapses, now_ms, config);
     }
 
-    Ok(state)
+    Ok((state, streak))
 }
 
 #[cfg(test)]

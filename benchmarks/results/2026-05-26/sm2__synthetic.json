@@ -1,0 +1,23 @@
+{
+  "scheduler": "sm2",
+  "dataset": "synthetic",
+  "prediction": {
+    "logLoss": 1.2231612249978634,
+    "ici": 0.4308074325574646,
+    "auc": 0.5039704922972025,
+    "maeP": 0.5359391021625385
+  },
+  "dhp": {
+    "expectedMemoryFinal": 32313.667,
+    "masteredCount": 14584,
+    "totalReviews": 528912,
+    "efficiency": 0.061095
+  },
+  "policy": {
+    "finalRecallRate": 0.8244,
+    "reviewsPerDay": 5876.8,
+    "retentionStability": 0.96191
+  },
+  "runtime_seconds": 82.1,
+  "notes": ""
+}

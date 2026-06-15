@@ -1,0 +1,23 @@
+{
+  "scheduler": "amas",
+  "dataset": "maimemo",
+  "prediction": {
+    "logLoss": 0.3290407702109953,
+    "ici": 0.07037562293059778,
+    "auc": 0.7899447770886949,
+    "maeP": 0.22738474902867833
+  },
+  "dhp": {
+    "expectedMemoryFinal": 17570.1688,
+    "masteredCount": 17317,
+    "totalReviews": 174384,
+    "efficiency": 0.100756
+  },
+  "policy": {
+    "finalRecallRate": 0.7582,
+    "reviewsPerDay": 1937.6,
+    "retentionStability": 0.9073205521639991
+  },
+  "runtime_seconds": 4.06,
+  "notes": "v0.6: HLR theta=paper(0.5,-1.0,-0.3); oracle 跨数据集复用"
+}

@@ -10,8 +10,9 @@ import { LockIcon, ratePct } from './util';
 import { eventTypeLabel } from './readable';
 
 /** 采样规则卡：真实 telemetry event_type 规则，按 priority 升序。
- *  per-row 行内编辑：可调行改采样率(0~100%)、所有行可暂停/启用，写 PATCH /sampling/:event_type。
- *  locked 行（核心数据强制）禁止改采样率（后端 409），仅允许暂停/启用。
+ *  per-row 行内编辑：可调行改采样率(0~100%)、可调行可暂停/启用，写 PATCH /sampling/:event_type。
+ *  locked 行（核心数据强制）：禁止改采样率，且禁止暂停/启用——后端方案A 对 locked 行任何 enabled 变更
+ *  返回 SAMPLING_RULE_LOCKED 409，故前端直接禁用 Switch（disabled + 锁标），避免点了被拒的割裂体验。
  *  「新增规则」：后端无 create 端点 —— 规则集随迁移预置，故按钮禁用并标注，不伪造能力。 */
 export function SamplingRulesPanel() {
   const [data, { refetch }] = createResource(() => probeTelemetryApi.sampling());
@@ -37,7 +38,7 @@ export function SamplingRulesPanel() {
       .finally(() => setSaving(false));
   };
 
-  // 暂停 / 启用（含 locked 行）
+  // 暂停 / 启用（仅可调行；locked 行 Switch 已 disabled，方案A 下后端会 409）
   const toggleEnabled = (r: SamplingRule, enabled: boolean) => {
     probeTelemetryApi
       .updateSamplingRule(r.eventType, { enabled })
@@ -114,9 +115,10 @@ export function SamplingRulesPanel() {
                         when={isEditing()}
                         fallback={
                           <div class="pb-rule-actions">
-                            <span title={rule.enabled ? '点击暂停采集' : '点击恢复采集'}>
+                            <span title={rule.locked ? '核心数据强制采集，不可暂停' : rule.enabled ? '点击暂停采集' : '点击恢复采集'}>
                               <Switch
                                 checked={rule.enabled}
+                                disabled={rule.locked}
                                 onChange={(v: boolean) => toggleEnabled(rule, v)}
                               />
                             </span>

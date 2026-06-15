@@ -1,0 +1,23 @@
+{
+ "scheduler": "amas",
+ "dataset": "synthetic",
+ "prediction": {
+  "logLoss": 0.6278758708705771,
+  "ici": 0.2506462936020951,
+  "auc": 0.5704190706319573,
+  "maeP": 0.4126560767164784
+ },
+ "dhp": {
+  "expectedMemoryFinal": 11106.8564,
+  "masteredCount": 30634,
+  "totalReviews": 269890,
+  "efficiency": 0.041153
+ },
+ "policy": {
+  "finalRecallRate": 0.4929,
+  "reviewsPerDay": 2998.777777777778,
+  "retentionStability": 0.9072637223640996
+ },
+ "runtime_seconds": 10.45,
+ "notes": "constrained-tune winner (repaired NM2), production write-back 2026-06-10"
+}

@@ -1,0 +1,23 @@
+{
+  "scheduler": "fsrs",
+  "dataset": "synthetic",
+  "prediction": {
+    "logLoss": 0.9355619113514937,
+    "ici": 0.45900670037122693,
+    "auc": 0.6481810154816116,
+    "maeP": 0.5453522348766707
+  },
+  "dhp": {
+    "expectedMemoryFinal": 26307.4035,
+    "masteredCount": 25000,
+    "totalReviews": 409345,
+    "efficiency": 0.064267
+  },
+  "policy": {
+    "finalRecallRate": 0.7292,
+    "reviewsPerDay": 4548.277777777777,
+    "retentionStability": 0.915850313642252
+  },
+  "runtime_seconds": 0.23,
+  "notes": "v0.6: HLR theta=paper(0.5,-1.0,-0.3); oracle 跨数据集复用"
+}

@@ -91,3 +91,4 @@ admin后端/
 # 本地开发空库 / workflow 临时脚本(不入仓)
 wordforge.db
 .claude/wf/
+.ace-tool/

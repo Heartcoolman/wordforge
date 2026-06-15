@@ -8,8 +8,9 @@ use serde_json::json;
 use crate::state::AppState;
 
 /// 发一条数据告警。`affected_user` 有值时额外给该 user 发应用内通知,
-/// 用确定性 id(`amas_sync_fail:{user}:{小时桶}`)+ INSERT OR IGNORE 做小时级 dedup,
-/// 防客户端批量重试把通知刷爆。
+/// 用确定性 id(`amas_sync_fail:{user}:{severity}:{小时桶}`)+ INSERT OR IGNORE 做小时级 dedup,
+/// 防客户端批量重试把通知刷爆。severity 纳入 dedup 键,使同小时内不同严重度各保留一条——
+/// 否则较早的低严重度告警会把后续更严重告警静默吞掉。
 pub async fn raise_data_alert(
     state: &AppState,
     source: &'static str,
@@ -39,7 +40,7 @@ pub async fn raise_data_alert(
     if let Some(uid) = affected_user {
         let hour = chrono::Utc::now().format("%Y-%m-%d-%H").to_string();
         let notification = json!({
-            "id": format!("amas_sync_fail:{uid}:{hour}"),
+            "id": format!("amas_sync_fail:{uid}:{severity}:{hour}"),
             "userId": uid,
             "type": "system",
             "title": title,

@@ -84,7 +84,18 @@ pub fn update_mastery_at(
     let streak_bonus = 1.0 + (state.correct_streak.min(5) as f64) * 0.1;
     let alpha = (base_alpha * streak_bonus).clamp(config.alpha_min, config.alpha_max);
 
-    super::mdm::update_strength(&mut state.mdm, quality, alpha, now, config);
+    // 双腿信任调度证据（advance-before-update）：streak=本次记账后的 correct_streak；
+    // lapses=total_attempts-total_correct（total_attempts 已自增，失败时含本次）
+    let lapse_count = state.total_attempts - state.total_correct;
+    super::mdm::update_strength_with_evidence(
+        &mut state.mdm,
+        quality,
+        alpha,
+        state.correct_streak,
+        lapse_count,
+        now,
+        config,
+    );
 
     state.recent_results.push(is_correct);
     let window = config.mastery_window_size as usize;
@@ -96,7 +107,29 @@ pub fn update_mastery_at(
     state.mastery_level = determine_level(state, now, config);
 
     let recall = super::mdm::recall_probability(&state.mdm, now, config);
-    let interval = if let Some(policy) = ssp_policy {
+    let interval = if super::mdm::gsp_schedule_active(config) {
+        // GSP 调度策略头（契约 GSP_SPEC §3）：banded retention 求解 base 整数天 → interval_scale
+        // → 毕业下限 → 区间帽 → 抖动 → 取整。SSP/MDM 两后端均经 head 收口（post-SSP 施加），
+        // 使策略头无论底层求解器为何都统一治理。banded retention 仅替换区间求解目标保持率口径。
+        let target_recall =
+            super::mdm::gsp_banded_retention(&state.mdm, config).unwrap_or(desired_retention);
+        let base_days_int = if let Some(policy) = ssp_policy {
+            // SSP 后端：base 取 policy 最优天（顶侧夹 90 + ceil + 底侧 1），与 banded 无关
+            let optimal_days =
+                policy.optimal_interval(state.mdm.stability, state.mdm.difficulty);
+            (optimal_days.min(config.max_interval_days).ceil() as i64).max(1)
+        } else {
+            super::mdm::compute_interval_base_days(&state.mdm, target_recall, config)
+        };
+        let days = super::mdm::gsp_schedule_days(
+            base_days_int,
+            interval_scale,
+            state.correct_streak,
+            &state.mdm,
+            config,
+        );
+        (days * 86400).max(config.min_interval_secs)
+    } else if let Some(policy) = ssp_policy {
         let optimal_days = policy.optimal_interval(state.mdm.stability, state.mdm.difficulty);
         let secs = (optimal_days * 86400.0 * interval_scale).min(config.max_interval_days * 86400.0)
             as i64;
@@ -197,7 +230,10 @@ mod tests {
     #[test]
     fn incorrect_and_correct_answers_move_stability_in_opposite_directions() {
         let config = MemoryModelConfig::default();
-        let base = reviewed_state(&config);
+        let mut base = reviewed_state(&config);
+        // 隔 2 天走长期路径：FSRS-6 同日分支对已稳卡片 Good 复习是 S 持平（饱和+G≥3 下限），
+        // 本测试意图是长期方向性，需避开同日分支。
+        rewind_last_review(&mut base, 2 * 86_400_000);
         let mut correct_state = base.clone();
         let mut incorrect_state = base;
 

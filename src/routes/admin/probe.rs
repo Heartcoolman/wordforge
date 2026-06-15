@@ -89,6 +89,9 @@ async fn dispatch_probe(
         ));
     }
 
+    // P2: dispatch 是向客户端下发任意 ctx.cmd.* 脚本的受控写路径，仅 super_admin 可调用。
+    crate::routes::admin::rbac::require_super_admin(&state, &admin.admin_id).await?;
+
     // ── per-admin 限速 ──
     state
         .probe_service()
@@ -212,13 +215,49 @@ async fn dispatch_probe(
     .map_err(|e| AppError::internal(&format!("spawn_blocking: {e}")))?
     .map_err(|e| AppError::internal(&format!("insert_probe_executions: {e}")))?;
 
+    // P2: 下发前批量查各 device 当前 owner，只投递给 user_id == owner 的 SSE 连接，
+    // 防 owner 变更后陈旧连接（旧用户）跨用户收到定向 probe_request。
+    let online_device_ids: Vec<String> = pairs
+        .iter()
+        .filter(|p| p.online)
+        .map(|p| p.device_id.clone())
+        .collect();
+    let store_for_owner = state.store().clone();
+    let owner_by_device = tokio::task::spawn_blocking(move || {
+        let mut map = std::collections::HashMap::new();
+        for did in &online_device_ids {
+            // Some(Some(uid)) = 已认领归属；Some(None)/None = 无确定 owner → 不投递。
+            let owner = store_for_owner
+                .get_client_device_owner(did)?
+                .flatten();
+            map.insert(did.clone(), owner);
+        }
+        Ok::<_, crate::store::StoreError>(map)
+    })
+    .await
+    .map_err(|e| AppError::internal(&format!("spawn_blocking: {e}")))?
+    .map_err(|e| AppError::internal(&format!("get_client_device_owner: {e}")))?;
+
     // ── 对在线设备推 SSE ──
     for p in &pairs {
         if !p.online {
             continue;
         }
+        let owner = match owner_by_device.get(&p.device_id).and_then(|o| o.as_deref()) {
+            Some(uid) => uid,
+            None => {
+                tracing::warn!(
+                    device_id = %p.device_id,
+                    "probe_request 跳过：设备无确定 owner（未注册/未认领），不向陈旧连接投递"
+                );
+                continue;
+            }
+        };
         if let Some(conns) = state.active_sse().get(&p.device_id) {
             for conn in conns.value() {
+                if conn.user_id != owner {
+                    continue;
+                }
                 let _ = conn.tx.send(SseEvent::ProbeRequest {
                     request_id: p.request_id.clone(),
                     batch_id: batch_id.clone(),
@@ -333,6 +372,9 @@ async fn confirm_probe(
         ));
     }
 
+    // P2: confirm 触发客户端用同一 ctx 快照执行受控写动作，仅 super_admin 可调用。
+    crate::routes::admin::rbac::require_super_admin(&state, &admin.admin_id).await?;
+
     let ticket = state
         .probe_service()
         .consume_confirm(&request_id, &body.device_id_suffix)
@@ -354,25 +396,44 @@ async fn confirm_probe(
     let req_id_for_db = request_id.clone();
     let now = chrono::Utc::now().to_rfc3339();
     let store = state.store().clone();
-    tokio::task::spawn_blocking(move || {
+    let device_for_owner = ticket.device_id.clone();
+    // 同一次 spawn_blocking 内顺带查 owner（P2 定向过滤用），避免再起一次阻塞任务。
+    let owner = tokio::task::spawn_blocking(move || {
         let conn = store.conn()?;
+        // P2 纵深:仅当尚未确认时落库,与内存 DashMap 原子消费形成双层幂等,
+        // 杜绝 DB 侧 confirmed_at 被重复回写/覆盖(consume_confirm TOCTOU 兜底)。
         conn.execute(
-            "UPDATE probe_executions SET confirmed_at = ?2 WHERE id = ?1",
+            "UPDATE probe_executions SET confirmed_at = ?2 WHERE id = ?1 AND confirmed_at IS NULL",
             rusqlite::params![req_id_for_db, now],
         )?;
-        Ok::<_, crate::store::StoreError>(())
+        // Some(Some(uid)) = 已认领归属；Some(None)/None = 无确定 owner → 不投递。
+        let owner = store.get_client_device_owner(&device_for_owner)?.flatten();
+        Ok::<_, crate::store::StoreError>(owner)
     })
     .await
     .map_err(|e| AppError::internal(&format!("spawn_blocking: {e}")))?
     .map_err(|e| AppError::internal(&format!("confirmed_at update: {e}")))?;
 
-    // 推 SSE 让客户端用同一 ctx 快照重跑
-    if let Some(conns) = state.active_sse().get(&ticket.device_id) {
-        for conn in conns.value() {
-            let _ = conn.tx.send(SseEvent::ProbeConfirm {
-                request_id: request_id.clone(),
-                confirm_token: ticket.token.clone(),
-            });
+    // P2: 只向 user_id == owner 的连接推 probe_confirm，防 owner 变更后陈旧连接收到。
+    match owner.as_deref() {
+        Some(owner_uid) => {
+            if let Some(conns) = state.active_sse().get(&ticket.device_id) {
+                for conn in conns.value() {
+                    if conn.user_id != owner_uid {
+                        continue;
+                    }
+                    let _ = conn.tx.send(SseEvent::ProbeConfirm {
+                        request_id: request_id.clone(),
+                        confirm_token: ticket.token.clone(),
+                    });
+                }
+            }
+        }
+        None => {
+            tracing::warn!(
+                device_id = %ticket.device_id,
+                "probe_confirm 跳过：设备无确定 owner（未注册/未认领），不向陈旧连接投递"
+            );
         }
     }
 
@@ -456,22 +517,58 @@ async fn batch_stream(
             "远程探针未启用",
         ));
     }
+    // P1: expected 只统计会回传结果的在线行。count_probe_in_batch 含离线行（终态），
+    // 离线设备永不回传，若计入 expected，流将永远等不到 completed。count_probe_in_batch
+    // 不归本模块改，故在本文件用 status='offline' 的 filter 计出离线行数，
+    // expected = 总行数 - 离线行数。
     let batch_id_for_total = batch_id.clone();
     let store = state.store().clone();
-    let expected =
-        tokio::task::spawn_blocking(move || store.count_probe_in_batch(&batch_id_for_total))
-            .await
-            .map_err(|e| AppError::internal(&format!("spawn_blocking: {e}")))?
-            .map_err(|e| AppError::internal(&format!("count_probe_in_batch: {e}")))?;
+    let expected = tokio::task::spawn_blocking(move || {
+        let total = store.count_probe_in_batch(&batch_id_for_total)?;
+        let (_, offline) = store.list_probe_executions(
+            &ProbeListFilter {
+                batch_id: Some(batch_id_for_total.clone()),
+                device_id: None,
+                admin_id: None,
+                status: Some("offline".to_string()),
+            },
+            0,
+            0,
+        )?;
+        Ok::<_, crate::store::StoreError>(total.saturating_sub(offline))
+    })
+    .await
+    .map_err(|e| AppError::internal(&format!("spawn_blocking: {e}")))?
+    .map_err(|e| AppError::internal(&format!("count_probe_in_batch: {e}")))?;
     if expected == 0 {
-        return Err(AppError::not_found("batch 不存在或已过期"));
+        return Err(AppError::not_found("batch 不存在、已过期或目标全部离线"));
     }
 
     let mut rx = state.probe_service().subscribe_batch(&batch_id);
     let probe_service = state.probe_service().clone();
     let batch_for_cleanup = batch_id.clone();
 
+    // P1/P2: drop_batch 放进 RAII Drop 守卫，客户端断连（stream future 被 drop、
+    // loop 未走到正常 break）时也清理 result_tx，避免泄漏 broadcast sender。
+    struct BatchCleanupGuard {
+        probe_service: crate::services::probe::ProbeService,
+        batch_id: String,
+    }
+    impl Drop for BatchCleanupGuard {
+        fn drop(&mut self) {
+            self.probe_service.drop_batch(&self.batch_id);
+        }
+    }
+
+    // P2:守卫在 stream! 外构造并 move 进生成器状态 —— 即使 Sse 响应在首次 poll 前就被
+    // drop（axum/hyper 建立响应阶段中止），生成器析构仍会 drop 守卫 → drop_batch，
+    // 不依赖 body 是否被 poll，杜绝 result_tx broadcast sender 遗孤。
+    let guard = BatchCleanupGuard {
+        probe_service,
+        batch_id: batch_for_cleanup,
+    };
     let stream = async_stream::stream! {
+        let _guard = guard;
         let mut received: u64 = 0;
         loop {
             match rx.recv().await {
@@ -506,7 +603,7 @@ async fn batch_stream(
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
-        probe_service.drop_batch(&batch_for_cleanup);
+        // _guard 在此随 stream 结束被 drop → drop_batch；正常 break 与异常断连共用此路径。
     };
 
     Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))

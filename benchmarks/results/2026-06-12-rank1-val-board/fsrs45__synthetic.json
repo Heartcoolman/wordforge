@@ -1,0 +1,24 @@
+{
+ "scheduler": "fsrs45",
+ "dataset": "synthetic",
+ "prediction": {
+  "logLoss": 0.7101667305949695,
+  "ici": 0.22557080081608283,
+  "auc": 0.5509452500028414,
+  "maeP": 0.3862738982551441
+ },
+ "dhp": {
+  "expectedMemoryFinal": 9711.4892,
+  "masteredCount": 41395,
+  "totalReviews": 307684,
+  "efficiency": 0.031563
+ },
+ "policy": {
+  "finalRecallRate": 0.2827,
+  "reviewsPerDay": 3418.711111111111,
+  "retentionStability": 0.9143079209932774
+ },
+ "split": "val",
+ "runtime_seconds": 17.87,
+ "notes": "val baseline board; sim+pred both split=val; n_users=300 sim_days=90 budget=200 dr=0.85 seed=42"
+}

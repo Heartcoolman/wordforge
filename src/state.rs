@@ -186,6 +186,14 @@ pub struct AppState {
     active_sse: Arc<DashMap<String, Vec<SseClientInfo>>>,
     last_heartbeat: Arc<DashMap<String, Instant>>,
     heartbeat_miss_count: Arc<DashMap<String, u8>>,
+    /// P1：单用户并发 SSE 连接计数，防单账号占满全局连接池。键 = user_id（与
+    /// `AuthUser.user_id` / `SseClientInfo.user_id` 一致为 String，非 i64）。
+    /// 建连时 `try_acquire_user_sse` 自增，SseGuard Drop 时 `release_user_sse` 自减。
+    sse_per_user: Arc<DashMap<String, u32>>,
+    /// P1：SSE 轮询用户状态的进程级短 TTL 缓存（键 = user_id）。每连接每 5s 无条件
+    /// 查库会饱和 BLOCKING_SEMAPHORE；命中未过期缓存即跳过查库。TTL ≈ 一个轮询周期。
+    /// 降级语义保留：缓存过期或缺失时回落查库并回填。完整事件驱动推送为后续项。
+    sse_user_state_cache: Arc<DashMap<String, (Instant, crate::amas::types::UserState)>>,
     updater: Arc<RwLock<Option<Arc<crate::services::updater::Updater>>>>,
     /// v0.5.2 apply 后台 task 状态；sink 同步写、HTTP 同步读，故用 std::sync::Mutex
     apply_task: Arc<std::sync::Mutex<Option<ApplyTaskStatus>>>,
@@ -282,6 +290,8 @@ impl AppState {
             active_sse: Arc::new(DashMap::new()),
             last_heartbeat: Arc::new(DashMap::new()),
             heartbeat_miss_count: Arc::new(DashMap::new()),
+            sse_per_user: Arc::new(DashMap::new()),
+            sse_user_state_cache: Arc::new(DashMap::new()),
             updater: Arc::new(RwLock::new(None)),
             apply_task: Arc::new(std::sync::Mutex::new(None)),
             probe_service: Arc::new(crate::services::probe::ProbeService::new()),
@@ -597,6 +607,65 @@ impl AppState {
 
     pub fn heartbeat_miss_count(&self) -> &DashMap<String, u8> {
         &self.heartbeat_miss_count
+    }
+
+    /// P1：尝试为某 user 占用一个 SSE 连接配额。当前计数 < `max` 时自增并返回 true，
+    /// 否则不变返回 true 之外的 false（调用方应返回 429）。`entry` API 保证 CAS 原子性。
+    /// `max == 0` 视为不限额（直接放行）。
+    pub fn try_acquire_user_sse(&self, user_id: &str, max: usize) -> bool {
+        if max == 0 {
+            // 0 = 不限额：仍登记计数以便 Drop 对称释放。
+            *self.sse_per_user.entry(user_id.to_string()).or_insert(0) += 1;
+            return true;
+        }
+        let mut slot = self.sse_per_user.entry(user_id.to_string()).or_insert(0);
+        if (*slot as usize) >= max {
+            return false;
+        }
+        *slot += 1;
+        true
+    }
+
+    /// P1：释放某 user 的一个 SSE 连接配额（SseGuard Drop 调用）。计数归零时移除条目。
+    /// 释放一条 per-user SSE 配额；返回 true 表示这是该用户最后一条连接（计数归零）。
+    /// 调用方据此决定是否清理 user_state 轮询缓存（仍有兄弟连接时保留，避免其下次 tick 多查库）。
+    pub fn release_user_sse(&self, user_id: &str) -> bool {
+        if let Some(mut slot) = self.sse_per_user.get_mut(user_id) {
+            *slot = slot.saturating_sub(1);
+            if *slot == 0 {
+                drop(slot);
+                self.sse_per_user.remove_if(user_id, |_, &v| v == 0);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// P1：SSE 轮询读用户状态，命中进程级短 TTL 缓存即免查库（缓解 BLOCKING_SEMAPHORE
+    /// 饱和）。过期 / 缺失返回 None，调用方查库后用 `put_sse_user_state` 回填。
+    pub fn get_sse_user_state_cached(
+        &self,
+        user_id: &str,
+        ttl: std::time::Duration,
+    ) -> Option<crate::amas::types::UserState> {
+        if let Some(entry) = self.sse_user_state_cache.get(user_id) {
+            let (at, ref state) = *entry;
+            if at.elapsed() < ttl {
+                return Some(state.clone());
+            }
+        }
+        None
+    }
+
+    /// P1：回填 SSE 轮询用户状态缓存。
+    pub fn put_sse_user_state(&self, user_id: &str, state: crate::amas::types::UserState) {
+        self.sse_user_state_cache
+            .insert(user_id.to_string(), (Instant::now(), state));
+    }
+
+    /// P1：连接断开时清理 SSE 用户状态缓存条目（无活跃连接时无需保留）。
+    pub fn evict_sse_user_state(&self, user_id: &str) {
+        self.sse_user_state_cache.remove(user_id);
     }
 }
 

@@ -4,19 +4,18 @@ heuristicEnabled = true
 igeEnabled = true
 swdEnabled = true
 mdmEnabled = true
-iadEnabled = false
-mtpEnabled = false
 sspEnabled = false
 
 [ensemble]
-baseWeightHeuristic = 0.4
-baseWeightIge = 0.3
-baseWeightSwd = 0.3
+# bench tuned v3（真实数据 forward simulation 调优值回写）
+baseWeightHeuristic = 0.35
+baseWeightIge = 0.4
+baseWeightSwd = 0.25
 warmupSamples = 20
 blendScale = 100.0
 blendMax = 0.5
 minWeight = 0.15
-warmupHeuristicBoost = 0.2
+warmupHeuristicBoost = 0.1
 
 [modeling]
 attentionSmoothing = 0.3
@@ -116,15 +115,15 @@ lowAccuracyRatioDrop = 0.1
 lowMotivationDifficultyDrop = 0.1
 lowMotivationMaxBatch = 8
 confidenceBase = 0.7
-confidenceDecayCap = 0.5
+confidenceDecayCap = 0.3
 confidenceMin = 0.2
-confidenceDecayScale = 200.0
+confidenceDecayScale = 500.0
 
 [ige]
 batchSize = 10
 intervalScale = 1.0
 ucbConfidenceCoeff = 2.0
-defaultConfidence = 0.6
+defaultConfidence = 0.65
 difficultyBinCount = 20
 ratioBinCount = 16
 
@@ -152,66 +151,97 @@ halfLifeTimeUnitSecs = 1296000.0
 halfLifePower = 1.5
 recallRiskBonus = 0.2
 recallRiskThreshold = 0.55
-baseDesiredRetention = 0.849021
+# 2026-06-13 v5 GSP 船值：F1 冠军 desired_retention（val Borda 30，三数据集 rank 1）
+baseDesiredRetention = 0.85
 passiveDecayHalfLifeDays = 30.0
 passiveDecayPower = 0.3
 masteryWindowSize = 20
 streakMinGapMs = 1800000
 stabilityBaseDays = 20.0
-forgettingCurveFactor = 0.3
-forgettingCurveDecay = -0.5
-forgettingCurveFloor = 0.1
+# FSRS-6: 曲线 factor/decay 由 w[20] 派生（forgettingCurveFactor/Decay 已废弃，不再写入）
+forgettingCurveFloor = 0.0
+# FSRS-6 21 维（w[19]=同日饱和指数, w[20]=曲线 decay）
+# 2026-06-13 v5 GSP 船值：回归 FSRS-6 公版 21 维 w（py-fsrs DEFAULT_PARAMETERS）。
+# v5 架构关键修正：公版 w 与 gspSuccessGrade=4（Easy）共拟合 → 预测腿逐位 = amas6（G3 满余量），
+# 调度增益全部由 GSP 策略头（cap/floor/band）承载。w[0,2,8,9,10] 的 NM0 调优值在 grade=4
+# 下失守预测腿 ICI，故回退公版（见 MEMORY amas_fsrs6 / GSP_SPEC §3.5）。
 w = [
-    0.174453,
-    0.660618,
-    3.132149,
-    5.944611,
-    7.1949,
-    0.5345,
-    1.4604,
-    0.0046,
-    1.208657,
-    0.273007,
-    0.384712,
-    1.9395,
-    0.11,
-    0.29605,
-    2.2698,
-    0.165065,
-    4.340478,
-    0.51655,
-    0.6621,
+    0.212,
+    1.2931,
+    2.3065,
+    8.2956,
+    6.4133,
+    0.8334,
+    3.0194,
+    0.001,
+    1.8722,
+    0.1666,
+    0.796,
+    1.4835,
+    0.0614,
+    0.2629,
+    1.6483,
+    0.6014,
+    1.8729,
+    0.5425,
+    0.0912,
+    0.0658,
+    0.1542,
 ]
-alphaScale = 0.3
-alphaMin = 0.1
-alphaMax = 0.5
+# 2026-06-13 v5 GSP 船值：alpha 平滑钉死 alpha_eff=1（未平滑 FSRS-6 核心），双腿 ramp no-op。
+alphaScale = 1.0
+alphaMin = 1.0
+alphaMax = 1.0
+# 双腿信任调度：alphaRampTau=成功腿连击挂靠 τ_s，alphaLapseRampTau=失败腿累计 lapse 挂靠 τ_f
+# 2026-06-13 v5 GSP 船值：双腿关闭（alpha 已钉死 1.0，ramp 本为 no-op）。
+alphaRampTau = 0.0
+alphaLapseRampTau = 0.0
 forgettingThreshold = 0.2
-retentionMin = 0.7
+retentionMin = 0.75
 retentionMax = 0.95
-maxIntervalDays = 114.565366
+maxIntervalDays = 90.0
 minIntervalSecs = 60
 highAccuracyThreshold = 0.9
-highAccuracyRetentionBoost = 0.02
+highAccuracyRetentionBoost = 0.03
 highFatigueThreshold = 0.6
 highFatigueRetentionDrop = 0.05
 lowMotivationThreshold = -0.2
 lowMotivationRetentionDrop = 0.03
+# === GSP 调度策略头（Graduated Scheduling Policy；契约 benchmarks/maimemo/GSP_SPEC.md）===
+# 2026-06-13 v5 GSP 船值：F1 冠军（val Borda 30，三数据集 rank 1，seed-robust strict #1）。
+# gspSuccessGrade=4 进入 FSRS-6 faithful 状态路径（预测腿 = amas6）；cap40+streak2+floor30
+# 治理调度尾部，young/mature 分带（band 14 天）按成熟度调目标保持率；fuzz=0（F1 不开）。
+gspSuccessGrade = 4
+gspIntervalCapDays = 40.0
+gspGraduationStreak = 2
+gspGraduationFloorDays = 30.0
+gspYoungRetention = 0.86
+gspMatureRetention = 0.92
+gspMaturityBandDays = 14.0
+gspIntervalFuzz = 0.0
+# v6 预测层：per-word difficulty logit 加性项（生产现状 = v6 ship，保留启用）。
+# recall 读出 logit 域加 β·(REF−词难度[1,10])：难词降 p/易词升 p。仅作用 recall_probability_predicted
+# 读出路径（预测/urgency/analytics），不入 S/D 更新。生产收益取决于 words.difficulty 是否真实填充。
+difficultyLogitWeight = 0.1
+difficultyLogitRef = 5.0
+# v7 预测读出层：logit 重校准 + 复习次数残差（difflogit 的推广，capability 已落地，默认关闭）。
+#   logit(p) = predLogitBaseScale·logit(p_fsrs) + predLogitIntercept
+#            + difficultyLogitWeight·(REF−词难度) + predLogitReviewCountWeight·ln(1+review_count)
+# 默认 1.0/0.0/0.0 = no-op（退化为纯 difflogit；再设 difficultyLogitWeight=0 → bit-exact 纯 FSRS-6）。
+# ⚠️ 默认关闭原因：maimemo held-out 验证为「边际但稳健的校准改善」（vs 纯 FSRS-6 logLoss−0.0084/AUC+0.0116/
+#    ECE 0.022→0.016，5/5 seed；但 vs 现 ship difflogit 净增量仅 dlogLoss≈−0.0022、AUC 持平、价值在 ECE）。
+#    系数域特异、按部署拟合（benchmarks/maimemo/pred_calib.py），不跨域迁移（synthetic 会退化）。
+# 启用前置（缺一不可）：① 用 prod_replay 在 WordForge 自有 review log 复算 held-out 增益非负且 ECE 不退化；
+#    ② 评估 mastered 门控(0.7)两侧 active→mastered 翻转率（防低召回老词被错判停复习）；
+#    ③ 核实 words.difficulty 真实填充率 + 口径对齐（缺值回落中性 REF 而非默认 0.0→D=1 强上推）。
+# maimemo-fit 推荐起点（prod_replay 通过后灰度：先 base_scale/intercept 重校准 → 再难度项 → nrev 视稳健性，nrev=0.252 系数脆弱可设 0）：
+#   predLogitBaseScale = 0.9683 / predLogitIntercept = -0.3131 / predLogitReviewCountWeight = 0.252（difficultyLogitWeight 同拟合为 0.1452）
+predLogitBaseScale = 1.0
+predLogitIntercept = 0.0
+predLogitReviewCountWeight = 0.0
 
-[iad]
-interferencePenaltyFactor = 0.1
-interferencePenaltyCap = 0.3
-maxConfusionPairs = 20
-newConfusionInitialScore = 0.2
-confusionUpdateIncrement = 0.2
-intervalShorteningFactor = 0.5
-confusionDecayRate = 0.05
-
-[mtp]
-morphemeTransferCoeff = 0.15
-morphemeBonusCap = 0.3
-knownMorphemeDecay = 0.9
-newMorphemeInitialCoeff = 0.5
-maxKnownMorphemes = 500
+# [iad] / [mtp] 段已移除（2026-06-13）：IAD 混淆干扰 / MTP 词素迁移算法删除。
+# confused_with API 字段保留为「接受但忽略」；word_morphemes 表 + /api/content/morphemes 端点保留（词根展示）。
 
 [wordSelector]
 reviewUcbWeight = 0.12

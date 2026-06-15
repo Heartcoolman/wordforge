@@ -1,0 +1,23 @@
+{
+ "scheduler": "fsrs",
+ "dataset": "duolingo_hlr",
+ "prediction": {
+  "logLoss": 0.30276863676679056,
+  "ici": 0.11632426571082057,
+  "auc": 0.53892841865816,
+  "maeP": 0.1876683561532673
+ },
+ "dhp": {
+  "expectedMemoryFinal": 5371.9917,
+  "masteredCount": 3414,
+  "totalReviews": 163910,
+  "efficiency": 0.032774
+ },
+ "policy": {
+  "finalRecallRate": 0.2139,
+  "reviewsPerDay": 1821.2222222222222,
+  "retentionStability": 0.8178967875214547
+ },
+ "runtime_seconds": 6.84,
+ "notes": "v1.0-fsrs6: AMAS 生产内核升级 FSRS-6 (21w+trainable decay) + tuned v3 决策层回写"
+}

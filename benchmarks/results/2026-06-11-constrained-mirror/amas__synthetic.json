@@ -1,0 +1,23 @@
+{
+ "scheduler": "amas",
+ "dataset": "synthetic",
+ "prediction": {
+  "logLoss": 0.7282518683305363,
+  "ici": 0.33999320443036046,
+  "auc": 0.4783616408297079,
+  "maeP": 0.48607664343196144
+ },
+ "dhp": {
+  "expectedMemoryFinal": 28253.0181,
+  "masteredCount": 5102,
+  "totalReviews": 552107,
+  "efficiency": 0.051173
+ },
+ "policy": {
+  "finalRecallRate": 0.4026,
+  "reviewsPerDay": 6134.522222222222,
+  "retentionStability": 0.8513061495268237
+ },
+ "runtime_seconds": 11.62,
+ "notes": "constrained re-tune winner under parity-aligned DHP mirror (repaired NM0), production write-back 2026-06-11"
+}

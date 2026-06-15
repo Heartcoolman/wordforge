@@ -353,12 +353,13 @@ async fn patch_sampling_rate_out_of_range_400() {
 }
 
 #[tokio::test]
-async fn patch_sampling_add_new_rule_200() {
+async fn patch_sampling_unknown_rule_404() {
     let app = spawn_test_server().await;
     let admin = setup_admin_and_get_token(&app.app).await;
     let h = [("authorization", auth_header(&admin))];
 
-    // 未 seed 的全新 event_type → upsert 走 'add' 分支，priority 默认 100、locked=0
+    // P2 安全修复：PATCH 仅更新既有规则（require_exists=true），全新 event_type 不再隐式
+    // 'add' 落库，防止经 PATCH 注入任意未治理的采样规则行 → 返回 404 SAMPLING_RULE_NOT_FOUND。
     let (s, _, b) = response_json(
         request(
             &app.app,
@@ -370,10 +371,8 @@ async fn patch_sampling_add_new_rule_200() {
         .await,
     )
     .await;
-    assert_eq!(s, StatusCode::OK, "body={b}");
-    assert_eq!(b["data"]["eventType"], "brand_new_event");
-    assert!((b["data"]["sampleRate"].as_f64().unwrap() - 0.3).abs() < 1e-9);
-    assert!(!b["data"]["locked"].as_bool().unwrap());
+    assert_eq!(s, StatusCode::NOT_FOUND, "body={b}");
+    assert_eq!(b["code"], "SAMPLING_RULE_NOT_FOUND");
 }
 
 #[tokio::test]

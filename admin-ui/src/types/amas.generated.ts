@@ -1,5 +1,5 @@
 // AUTO-GENERATED — do not edit. Run: npm run gen:amas-types
-// Source: frontend/src/types/amas.schema.json (由后端 schemars 导出)
+// Source: admin-ui/src/types/amas.schema.json (由后端 schemars 导出)
 // 后端事实源：src/amas/config.rs (AMASConfig) + 全部子结构体
 
 export interface AMASConfig {
@@ -179,8 +179,16 @@ export interface LearningStrategyConfig {
   sprintNewRatio: number;
 }
 export interface MemoryModelConfig {
+  /**
+   * 双腿信任调度·失败腿时间常数 τ_f：失败（Again）时 alpha_eff(f)=1-(1-alpha)·e^{-(f-1)/tau}，f=含本次的累计 lapse 数 （首错 f=1 即 no-op = 偶发失误保护）；0.0=关闭（冻结语义）。
+   */
+  alphaLapseRampTau?: number;
   alphaMax?: number;
   alphaMin?: number;
+  /**
+   * 双腿信任调度·成功腿时间常数 τ_s：成功复习（grade≥2）时 alpha_eff(k)=1-(1-alpha)·e^{-(k-1)/tau}，k=本次记账后的 correct_streak （失败清零→阻尼重启）；0.0=关闭（冻结语义），DB 旧快照/未声明配置反序列化即得旧行为。
+   */
+  alphaRampTau?: number;
   alphaScale?: number;
   baseDesiredRetention?: number;
   compositeWeightLong: number;
@@ -188,10 +196,16 @@ export interface MemoryModelConfig {
   compositeWeightShort: number;
   consolidationBonus: number;
   consolidationRateScale: number;
+  /**
+   * DEPRECATED（FSRS-6 起）：遗忘曲线 decay 即 trainable 参数 `w[20]`（`curve_decay()`）， 本字段仅为旧配置/DB 快照反序列化兼容保留，运行时不再读取。
+   */
   forgettingCurveDecay?: number;
+  /**
+   * DEPRECATED（FSRS-6 起）：遗忘曲线 factor 由 `w[20]` 派生（`curve_factor()`）， 本字段仅为旧配置/DB 快照反序列化兼容保留，运行时不再读取。
+   */
   forgettingCurveFactor?: number;
   /**
-   * 2021 MaiMemo study: forgetting curve has non-zero asymptote R→floor (not 0)
+   * 2021 MaiMemo study: forgetting curve has non-zero asymptote R→floor (not 0) FSRS-6 标准曲线无渐近线，默认 0.0；保留为可调项。
    */
   forgettingCurveFloor?: number;
   forgettingThreshold?: number;
@@ -220,16 +234,17 @@ export interface MemoryModelConfig {
   retentionMin?: number;
   reviewingThreshold: number;
   shortTermLearningRate: number;
-  /**
-   * FSRS-style power-law forgetting curve: R = (1 + factor * t/S)^decay
-   */
   stabilityBaseDays?: number;
   streakMinGapMs?: number;
   /**
-   * @minItems 19
-   * @maxItems 19
+   * 反序列化兼容 19 维 FSRS-5 旧配置：自动迁移（w19=0 维持旧同日公式，w20=0.5 维持旧 decay）。
+   *
+   * @minItems 21
+   * @maxItems 21
    */
   w?: [
+    number,
+    number,
     number,
     number,
     number,

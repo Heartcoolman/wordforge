@@ -2046,6 +2046,9 @@ export default function DevicesPage() {
                 onInput={(e) => setBanReason(e.currentTarget.value)}
                 maxlength={500}
               />
+              <p class="mt-2 text-xs text-content-tertiary leading-relaxed">
+                设备封禁仅阻断该设备标识，用户可更换标识规避；如需阻断用户请封禁其账号。
+              </p>
             </Show>
           </ConfirmDialog>
         )}

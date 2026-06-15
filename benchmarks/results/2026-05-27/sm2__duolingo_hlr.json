@@ -1,0 +1,23 @@
+{
+  "scheduler": "sm2",
+  "dataset": "duolingo_hlr",
+  "prediction": {
+    "logLoss": 0.29113223988564507,
+    "ici": 0.0848207445047656,
+    "auc": 0.5403870528539351,
+    "maeP": 0.16607123800083803
+  },
+  "dhp": {
+    "expectedMemoryFinal": 8752.0663,
+    "masteredCount": 6247,
+    "totalReviews": 108378,
+    "efficiency": 0.080755
+  },
+  "policy": {
+    "finalRecallRate": 0.8044,
+    "reviewsPerDay": 1204.2,
+    "retentionStability": 0.8966206245863139
+  },
+  "runtime_seconds": 0.13,
+  "notes": "v0.6: HLR theta=paper(0.5,-1.0,-0.3); oracle 跨数据集复用"
+}

@@ -112,8 +112,8 @@
         "coldStartEventThreshold": 10,
         "coldStartNewRatio": 0.5,
         "confidenceBase": 0.7,
-        "confidenceDecayCap": 0.5,
-        "confidenceDecayScale": 200.0,
+        "confidenceDecayCap": 0.3,
+        "confidenceDecayScale": 500.0,
         "confidenceMin": 0.2,
         "lowAccuracyDifficultyDrop": 0.15,
         "lowAccuracyRatioDrop": 0.1,
@@ -126,26 +126,10 @@
         }
       ]
     },
-    "iad": {
-      "default": {
-        "confusionDecayRate": 0.05,
-        "confusionUpdateIncrement": 0.2,
-        "interferencePenaltyCap": 0.3,
-        "interferencePenaltyFactor": 0.1,
-        "intervalShorteningFactor": 0.5,
-        "maxConfusionPairs": 20,
-        "newConfusionInitialScore": 0.2
-      },
-      "allOf": [
-        {
-          "$ref": "#/definitions/IadConfig"
-        }
-      ]
-    },
     "ige": {
       "default": {
         "batchSize": 10,
-        "defaultConfidence": 0.6,
+        "defaultConfidence": 0.65,
         "difficultyBinCount": 20,
         "intervalScale": 1.0,
         "pretrainedDifficultyRewards": null,
@@ -202,23 +186,35 @@
     },
     "memoryModel": {
       "default": {
+        "alphaLapseRampTau": 0.0,
         "alphaMax": 0.5,
         "alphaMin": 0.1,
+        "alphaRampTau": 0.0,
         "alphaScale": 0.3,
-        "baseDesiredRetention": 0.92,
+        "baseDesiredRetention": 0.9,
         "compositeWeightLong": 0.5,
         "compositeWeightMedium": 0.3,
         "compositeWeightShort": 0.2,
         "consolidationBonus": 1.5,
         "consolidationRateScale": 0.25,
+        "difficultyLogitRef": 5.0,
+        "difficultyLogitWeight": 0.0,
         "forgettingCurveDecay": -0.5,
-        "forgettingCurveFactor": 0.3,
+        "forgettingCurveFactor": 0.2345679012345679,
         "forgettingCurveFloor": 0.0,
         "forgettingThreshold": 0.2,
+        "gspGraduationFloorDays": 30.0,
+        "gspGraduationStreak": 0,
+        "gspIntervalCapDays": 0.0,
+        "gspIntervalFuzz": 0.0,
+        "gspMatureRetention": 0.0,
+        "gspMaturityBandDays": 0.0,
+        "gspSuccessGrade": 3,
+        "gspYoungRetention": 0.0,
         "halfLifeBaseEpsilon": 0.3,
         "halfLifePower": 1.5,
         "halfLifeTimeUnitSecs": 1296000.0,
-        "highAccuracyRetentionBoost": 0.02,
+        "highAccuracyRetentionBoost": 0.03,
         "highAccuracyThreshold": 0.9,
         "highFatigueRetentionDrop": 0.05,
         "highFatigueThreshold": 0.6,
@@ -234,34 +230,39 @@
         "minIntervalSecs": 60,
         "passiveDecayHalfLifeDays": 30.0,
         "passiveDecayPower": 0.3,
+        "predLogitBaseScale": 1.0,
+        "predLogitIntercept": 0.0,
+        "predLogitReviewCountWeight": 0.0,
         "recallRiskBonus": 0.2,
         "recallRiskThreshold": 0.55,
         "retentionMax": 0.95,
-        "retentionMin": 0.7,
+        "retentionMin": 0.75,
         "reviewingThreshold": 0.4,
         "shortTermLearningRate": 0.85,
         "stabilityBaseDays": 20.0,
         "streakMinGapMs": 1800000,
         "w": [
-          0.4072,
-          1.1829,
-          3.1262,
-          15.4722,
-          7.1949,
-          0.5345,
-          1.4604,
-          0.0046,
-          1.54575,
-          0.1192,
-          1.01925,
-          1.9395,
-          0.11,
-          0.29605,
-          2.2698,
-          0.2315,
-          2.9898,
-          0.51655,
-          0.6621
+          0.212,
+          1.2931,
+          2.3065,
+          8.2956,
+          6.4133,
+          0.8334,
+          3.0194,
+          0.001,
+          1.8722,
+          0.1666,
+          0.796,
+          1.4835,
+          0.0614,
+          0.2629,
+          1.6483,
+          0.6014,
+          1.8729,
+          0.5425,
+          0.0912,
+          0.0658,
+          0.1542
         ]
       },
       "allOf": [
@@ -275,20 +276,6 @@
     },
     "monitoring": {
       "$ref": "#/definitions/MonitoringConfig"
-    },
-    "mtp": {
-      "default": {
-        "knownMorphemeDecay": 0.9,
-        "maxKnownMorphemes": 500,
-        "morphemeBonusCap": 0.3,
-        "morphemeTransferCoeff": 0.15,
-        "newMorphemeInitialCoeff": 0.5
-      },
-      "allOf": [
-        {
-          "$ref": "#/definitions/MtpConfig"
-        }
-      ]
     },
     "objectiveWeights": {
       "$ref": "#/definitions/ObjectiveWeights"
@@ -577,7 +564,7 @@
           "format": "double"
         },
         "warmupHeuristicBoost": {
-          "default": 0.2,
+          "default": 0.1,
           "type": "number",
           "format": "double"
         },
@@ -728,20 +715,10 @@
         "heuristicEnabled": {
           "type": "boolean"
         },
-        "iadEnabled": {
-          "description": "B38: Interference Aware Decay - 混淆词对干扰衰减",
-          "default": false,
-          "type": "boolean"
-        },
         "igeEnabled": {
           "type": "boolean"
         },
         "mdmEnabled": {
-          "type": "boolean"
-        },
-        "mtpEnabled": {
-          "description": "B37: Morpheme Transfer Prediction - 词素迁移预测",
-          "default": false,
           "type": "boolean"
         },
         "sspEnabled": {
@@ -826,49 +803,6 @@
           "type": "integer",
           "format": "uint32",
           "minimum": 0.0
-        }
-      }
-    },
-    "IadConfig": {
-      "type": "object",
-      "required": [
-        "confusionUpdateIncrement",
-        "interferencePenaltyCap",
-        "interferencePenaltyFactor",
-        "intervalShorteningFactor",
-        "maxConfusionPairs",
-        "newConfusionInitialScore"
-      ],
-      "properties": {
-        "confusionDecayRate": {
-          "default": 0.05,
-          "type": "number",
-          "format": "double"
-        },
-        "confusionUpdateIncrement": {
-          "type": "number",
-          "format": "double"
-        },
-        "interferencePenaltyCap": {
-          "type": "number",
-          "format": "double"
-        },
-        "interferencePenaltyFactor": {
-          "type": "number",
-          "format": "double"
-        },
-        "intervalShorteningFactor": {
-          "type": "number",
-          "format": "double"
-        },
-        "maxConfusionPairs": {
-          "type": "integer",
-          "format": "uint",
-          "minimum": 0.0
-        },
-        "newConfusionInitialScore": {
-          "type": "number",
-          "format": "double"
         }
       }
     },
@@ -1084,6 +1018,12 @@
         "shortTermLearningRate"
       ],
       "properties": {
+        "alphaLapseRampTau": {
+          "description": "双腿信任调度·失败腿时间常数 τ_f：失败（Again）时 alpha_eff(f)=1-(1-alpha)·e^{-(f-1)/tau}，f=含本次的累计 lapse 数 （首错 f=1 即 no-op = 偶发失误保护）；0.0=关闭（冻结语义）。",
+          "default": 0.0,
+          "type": "number",
+          "format": "double"
+        },
         "alphaMax": {
           "default": 0.5,
           "type": "number",
@@ -1091,6 +1031,12 @@
         },
         "alphaMin": {
           "default": 0.1,
+          "type": "number",
+          "format": "double"
+        },
+        "alphaRampTau": {
+          "description": "双腿信任调度·成功腿时间常数 τ_s：成功复习（grade≥2）时 alpha_eff(k)=1-(1-alpha)·e^{-(k-1)/tau}，k=本次记账后的 correct_streak （失败清零→阻尼重启）；0.0=关闭（冻结语义），DB 旧快照/未声明配置反序列化即得旧行为。",
+          "default": 0.0,
           "type": "number",
           "format": "double"
         },
@@ -1124,24 +1070,88 @@
           "type": "number",
           "format": "double"
         },
+        "difficultyLogitRef": {
+          "description": "difficulty logit 项参考点（[1,10] 标度）：word_difficulty==REF 时位移为 0。默认 5.0。",
+          "default": 5.0,
+          "type": "number",
+          "format": "double"
+        },
+        "difficultyLogitWeight": {
+          "description": "预测/调度 recall **读出**在 logit 域加 `β·(REF − word_difficulty[1,10])`：难词降 p、易词升 p， 补 FSRS 二元映射下「预测随难度扁平」的区分度/校准残差（maimemo TEST: AUC+0.015 反超 dhp、 logLoss−0.005）。仅作用于 `recall_probability_predicted` 读出路径，**不入内部 S/D 更新** （update_strength 的 r 仍用纯 recall_probability）。0.0=关闭（bit-exact legacy）； 无每词难度的调用点传 None → 自然 no-op。",
+          "default": 0.0,
+          "type": "number",
+          "format": "double"
+        },
         "forgettingCurveDecay": {
+          "description": "DEPRECATED（FSRS-6 起）：遗忘曲线 decay 即 trainable 参数 `w[20]`（`curve_decay()`）， 本字段仅为旧配置/DB 快照反序列化兼容保留，运行时不再读取。",
           "default": -0.5,
           "type": "number",
           "format": "double"
         },
         "forgettingCurveFactor": {
+          "description": "DEPRECATED（FSRS-6 起）：遗忘曲线 factor 由 `w[20]` 派生（`curve_factor()`）， 本字段仅为旧配置/DB 快照反序列化兼容保留，运行时不再读取。",
           "default": 0.2345679012345679,
           "type": "number",
           "format": "double"
         },
         "forgettingCurveFloor": {
-          "description": "2021 MaiMemo study: forgetting curve has non-zero asymptote R→floor (not 0)",
-          "default": 0.1,
+          "description": "2021 MaiMemo study: forgetting curve has non-zero asymptote R→floor (not 0) FSRS-6 标准曲线无渐近线，默认 0.0；保留为可调项。",
+          "default": 0.0,
           "type": "number",
           "format": "double"
         },
         "forgettingThreshold": {
           "default": 0.2,
+          "type": "number",
+          "format": "double"
+        },
+        "gspGraduationFloorDays": {
+          "description": "毕业下限（天）。在 scale 之后、cap 之前施加 max(interval, floor)（随 streak 关闭而失效）。",
+          "default": 30.0,
+          "type": "number",
+          "format": "double"
+        },
+        "gspGraduationStreak": {
+          "description": "毕业连击阈值 k。0=关闭。当词的 correct_streak >= k 时，调度区间获得 floor 下限。",
+          "default": 0,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "gspIntervalCapDays": {
+          "description": "调度区间硬帽（天）。0=关闭。作用于 interval_scale 之后，与既有 90 天硬帽复合 min(90, cap)。",
+          "default": 0.0,
+          "type": "number",
+          "format": "double"
+        },
+        "gspIntervalFuzz": {
+          "description": "复习负载平滑：确定性区间抖动幅度。0=关闭。>0 时在 cap 之后施加 days·(1+fuzz·u)， u∈[-1,1) 由 stability/review_count 派生（见 GSP_SPEC §7），错峰削平同步复习波。",
+          "default": 0.0,
+          "type": "number",
+          "format": "double"
+        },
+        "gspMatureRetention": {
+          "description": "成熟卡（stability >= band）目标保持率（随 band 关闭而失效）。",
+          "default": 0.0,
+          "type": "number",
+          "format": "double"
+        },
+        "gspMaturityBandDays": {
+          "description": "成熟度分带阈值（天，按 stability）。0=关闭。>0 时 interval 求解的目标保持率由 young/mature 替换自适应 desired_retention（仅区间求解口径，预测/recall 路径不受影响）。",
+          "default": 0.0,
+          "type": "number",
+          "format": "double"
+        },
+        "gspSuccessGrade": {
+          "description": "二元成功复习映射的 FSRS grade：3=Good（旧默认，首评 S0=w[2]，bit-exact legacy）； 4=Easy（首评 S0=w[3] + 成功复习带 w[16] easy_bonus + 进入 FSRS-6 faithful 状态路径， 见 mdm.rs §3.5）。FSRS-6 公版 21 维 w 与 grade=4 共拟合 → 候选用 4 恢复预测腿校准。 入口 clamp：非 {3,4} 一律夹回 3。失败恒映射 1=Again。",
+          "default": 3,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "gspYoungRetention": {
+          "description": "年轻卡（stability < band）目标保持率（随 band 关闭而失效）。",
+          "default": 0.0,
           "type": "number",
           "format": "double"
         },
@@ -1159,7 +1169,7 @@
           "format": "double"
         },
         "highAccuracyRetentionBoost": {
-          "default": 0.02,
+          "default": 0.03,
           "type": "number",
           "format": "double"
         },
@@ -1235,6 +1245,22 @@
           "type": "number",
           "format": "double"
         },
+        "predLogitBaseScale": {
+          "description": "读出 recall 在 logit 域施加：`logit(p) = base_scale·logit(p_fsrs) + intercept + β_diff·(REF−D) + β_nrev·ln(1+review_count)`。前两项是 Platt/温度重校准（FSRS-6 在真实 词汇数据上略过自信），β_nrev 补复习次数残差（stability 未完全吸收）。系数**按部署离线拟合** （benchmarks/maimemo/pred_calib.py，maimemo held-out: AUC+0.0116/logLoss−0.0084/ECE 0.022→0.016， 5/5 seed），**不跨域迁移**（synthetic 退化，须 prod_replay 复核）。仅作用 `recall_probability_predicted` 读出路径，不入 S/D 更新。默认 base_scale=1/intercept=0/β_nrev=0 → 退化为纯 difficulty_logit。",
+          "default": 1.0,
+          "type": "number",
+          "format": "double"
+        },
+        "predLogitIntercept": {
+          "default": 0.0,
+          "type": "number",
+          "format": "double"
+        },
+        "predLogitReviewCountWeight": {
+          "default": 0.0,
+          "type": "number",
+          "format": "double"
+        },
         "recallRiskBonus": {
           "type": "number",
           "format": "double"
@@ -1249,7 +1275,7 @@
           "format": "double"
         },
         "retentionMin": {
-          "default": 0.7,
+          "default": 0.75,
           "type": "number",
           "format": "double"
         },
@@ -1262,7 +1288,6 @@
           "format": "double"
         },
         "stabilityBaseDays": {
-          "description": "FSRS-style power-law forgetting curve: R = (1 + factor * t/S)^decay",
           "default": 20.0,
           "type": "number",
           "format": "double"
@@ -1273,34 +1298,37 @@
           "format": "int64"
         },
         "w": {
+          "description": "反序列化兼容 19 维 FSRS-5 旧配置：自动迁移（w19=0 维持旧同日公式，w20=0.5 维持旧 decay）。",
           "default": [
-            0.4072,
-            1.1829,
-            3.1262,
-            15.4722,
-            7.1949,
-            0.5345,
-            1.4604,
-            0.0046,
-            1.54575,
-            0.1192,
-            1.01925,
-            1.9395,
-            0.11,
-            0.29605,
-            2.2698,
-            0.2315,
-            2.9898,
-            0.51655,
-            0.6621
+            0.212,
+            1.2931,
+            2.3065,
+            8.2956,
+            6.4133,
+            0.8334,
+            3.0194,
+            0.001,
+            1.8722,
+            0.1666,
+            0.796,
+            1.4835,
+            0.0614,
+            0.2629,
+            1.6483,
+            0.6014,
+            1.8729,
+            0.5425,
+            0.0912,
+            0.0658,
+            0.1542
           ],
           "type": "array",
           "items": {
             "type": "number",
             "format": "double"
           },
-          "maxItems": 19,
-          "minItems": 19
+          "maxItems": 21,
+          "minItems": 21
         }
       }
     },
@@ -1420,39 +1448,6 @@
           "minimum": 0.0
         },
         "sampleRate": {
-          "type": "number",
-          "format": "double"
-        }
-      }
-    },
-    "MtpConfig": {
-      "type": "object",
-      "required": [
-        "knownMorphemeDecay",
-        "maxKnownMorphemes",
-        "morphemeBonusCap",
-        "morphemeTransferCoeff",
-        "newMorphemeInitialCoeff"
-      ],
-      "properties": {
-        "knownMorphemeDecay": {
-          "type": "number",
-          "format": "double"
-        },
-        "maxKnownMorphemes": {
-          "type": "integer",
-          "format": "uint",
-          "minimum": 0.0
-        },
-        "morphemeBonusCap": {
-          "type": "number",
-          "format": "double"
-        },
-        "morphemeTransferCoeff": {
-          "type": "number",
-          "format": "double"
-        },
-        "newMorphemeInitialCoeff": {
           "type": "number",
           "format": "double"
         }
