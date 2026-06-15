@@ -8,6 +8,7 @@ use serde::Deserialize;
 
 use crate::auth::AuthUser;
 use crate::response::{ok, AppError};
+use crate::routes::words::WordPublic;
 use crate::state::AppState;
 use crate::store::operations::study_configs::StudyMode;
 
@@ -148,7 +149,7 @@ async fn get_today_words(
                 let mut words = Vec::new();
                 for wid in &all_word_ids {
                     if let Some(word) = store.get_word(wid)? {
-                        words.push(word);
+                        words.push(WordPublic::from(&word));
                     }
                 }
 

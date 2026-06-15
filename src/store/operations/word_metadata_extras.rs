@@ -13,18 +13,17 @@ impl Store {
         keys::validate_id(word_id)?;
         let conn = self.conn()?;
         conn.query_row(
-            "SELECT word_id, word, etymology, roots_json, generated, source, generated_at
+            "SELECT word_id, word, etymology, roots_json, generated, source
              FROM etymologies WHERE word_id=?1",
             params![word_id],
             |r| {
                 Ok(serde_json::json!({
-                    "word_id": r.get::<_, String>(0)?,
+                    "wordId": r.get::<_, String>(0)?,
                     "word": r.get::<_, String>(1)?,
                     "etymology": r.get::<_, String>(2)?,
                     "roots": serde_json::from_str::<serde_json::Value>(&r.get::<_, String>(3)?).unwrap_or_default(),
                     "generated": r.get::<_, i64>(4)? != 0,
                     "source": r.get::<_, Option<String>>(5)?,
-                    "generated_at": r.get::<_, Option<String>>(6)?,
                 }))
             },
         )

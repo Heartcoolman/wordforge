@@ -304,7 +304,7 @@ async fn login(
 
     // 检查账户是否因多次登录失败而被锁定
     if is_locked {
-        return Err(AppError::too_many_requests(
+        return Err(AppError::account_locked(
             "账户因多次登录失败已被临时锁定，请稍后再试",
         ));
     }

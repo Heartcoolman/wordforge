@@ -92,6 +92,16 @@ impl AppError {
         }
     }
 
+    /// 账户因多次登录失败被临时锁定（HTTP 429），与普通限流区分以便客户端呈现具体语义
+    pub fn account_locked(message: &str) -> Self {
+        Self {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            code: "ACCOUNT_LOCKED".to_string(),
+            message: message.to_string(),
+            is_operational: true,
+        }
+    }
+
     pub fn payload_too_large(message: &str) -> Self {
         Self {
             status: StatusCode::PAYLOAD_TOO_LARGE,
