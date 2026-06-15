@@ -4,6 +4,14 @@
 
 Self-hosted, single-binary, SQLite-backed — no Redis, no queues. Real-time word scheduling that adjusts on every answer event.
 
+## 关联仓库
+
+| 端 | 仓库 | 技术栈 |
+|---|---|---|
+| 后端 + Admin（契约权威） | [Heartcoolman/wordforge](https://github.com/Heartcoolman/wordforge) | Rust · Axum + SolidJS |
+| iOS 客户端 | [Heartcoolman/WordForge-App](https://github.com/Heartcoolman/WordForge-App) | SwiftUI |
+| Android 客户端 | [Heartcoolman/WordForge-Android](https://github.com/Heartcoolman/WordForge-Android) | Kotlin · Jetpack Compose |
+
 ---
 
 ## WordForge 是什么

@@ -6,6 +6,26 @@
 
 ---
 
+## [v1.2.0-beta.1] — 2026-06-15 · Beta · 三仓联调 + 版本统一
+
+服务端 × iOS × Android 三仓联调收口：以服务端契约为准补齐客户端缺失功能与遥测，三端 marketing 版本统一为 **1.2.0**（服务端 core 1.2.0，保留 `-beta.1` 发布通道标记）。本条目记录客户端侧补齐，服务端仅版本号变更（核心 1.1.5-beta.1 → 1.2.0-beta.1），无破坏性变更。
+
+### 版本统一
+- 三端 marketing 版本统一为 **1.2.0**：服务端 `Cargo.toml` → `1.2.0-beta.1`（core 1.2.0 + beta 通道；`docs/openapi.yaml` 同步重生成）；iOS `MARKETING_VERSION` 1.2 → 1.2.0、build 2 → 3；Android `appVersionName` 0.2.0 → 1.2.0、`versionCode` 2 → 3。均满足后端 strict-mode User-Agent 的 3 段 semver 约束。
+
+### 客户端遥测补齐（以服务端摄取 schema 为准）
+- Android 补齐 `payload.featureUsage`、`behavior.{clickCount,routeChanges,visibilityChanges,scrollDepthPct,clickTargets}`；session 指标（actionsPerMin/errorCount/avgResponseTimeMs）改 nullable 省略，不再发送伪零；`device.{geoLat,geoLng,geoCountry}` 仅在定位已授权时填充、永不弹窗。
+- Android 学习记录补齐 7 项 AMAS 行为信号（dwellTimeMs / pauseCount / switchCount / retryCount / focusLossDurationMs / interactionDensity / pausedTimeMs），与 iOS 对齐喂入 AMAS。
+- Android 崩溃/错误上报：上传前对 message/stack 做 PII 与密钥脱敏、`url` 由线程名改为当前路由、新增 60s 去重环与非致命错误镜像通道。
+- Android probe 结果 DTO 补齐 `resultJson` / `confirmToken`（契约对齐；真实 JS 沙箱执行延后，保持 `unsupported_ctx_version` 语义）。
+
+### 客户端功能补齐（以 iOS 为参照达成跨端对等）
+- Android 新增：主屏 Glance 小组件、应用快捷方式、学习日历热力图、收藏夹独立页、学习数据 CSV/JSON 导出、首启合规同意门、root/调试器检测遥测、OkHttp 证书绑定（明文 HTTP 期空 pin）、离线队列同步 UI。
+- iOS 新增：quick-practice AMAS 校准热身屏、独立 session 反馈/总结屏。
+
+### 客户端契约
+- iOS `SyncProgressRequest` / `CompleteSessionRequest` 补齐 `events: [SessionEvent]`，经服务端 session 事件幂等摄取路径上报作答事件（与 Android 对齐）。
+
 ## [v1.1.5-beta.1] — 2026-06-15 · Beta · 遥测安全加固 + AMAS 算法整合
 
 首个 1.1.5 beta，整合 v1.1.4 以来的安全修复与 AMAS 算法研究成果。
