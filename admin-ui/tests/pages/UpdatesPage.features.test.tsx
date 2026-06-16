@@ -94,12 +94,14 @@ describe('UpdatesPage — 升级流水线、检查、升级', () => {
     await waitFor(() => expect(screen.getByText('修复若干 bug')).toBeInTheDocument());
   });
 
-  it('stable 通道为 null 时升级按钮回退展示当前版本且禁用', async () => {
+  it('stable 通道为 null 时不回退展示当前版本，按钮显示「暂无可用版本」且禁用', async () => {
     mockApi.updatesStatus.mockResolvedValue({ ...baseStatus, stable: null, lastCheckedAt: null });
     await renderPage();
-    // stable=null → 升级按钮文案回退到当前版本，且因 canApply 缺失而禁用
-    const btn = await screen.findByRole('button', { name: /一键升级到 1\.0\.0/ });
+    // stable=null（缓存未填充 / 尚无对应 release）→ 绝不把当前 beta 版当作「最新 稳定」回显；
+    // 升级按钮显示「暂无可用版本」且禁用，避免误导（修复「最新 stable 显示成当前 beta」）
+    const btn = await screen.findByRole('button', { name: '暂无可用版本' });
     expect(btn).toBeDisabled();
+    expect(screen.queryByText(/一键升级到 1\.0\.0/)).toBeNull();
   });
 
   it('canApply 为 false 时升级按钮禁用（架构不匹配）', async () => {

@@ -402,7 +402,7 @@ impl Config {
                 // docs/superpowers/specs/2026-05-20-admin-beta-channel-design.md
                 api_url: env_or(
                     "UPDATE_CHECK_API_URL",
-                    "https://api.github.com/repos/Heartcoolman/wordforge/releases?per_page=10",
+                    "https://api.github.com/repos/Heartcoolman/wordforge/releases?per_page=30",
                 ),
                 cache_ttl_secs: env_or_parse("UPDATE_CHECK_CACHE_TTL_SECS", 3600_u64),
                 worker_enabled: env_or_bool("ENABLE_UPDATE_CHECKER_WORKER", true),

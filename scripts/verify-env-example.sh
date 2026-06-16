@@ -118,7 +118,7 @@ check LLM_TIMEOUT_SECS              "30"
 # --- Update check ---
 # 必须使用 list 端点，不能是 /releases/latest（会跳过 prerelease）
 check UPDATE_CHECK_API_URL \
-    "https://api.github.com/repos/Heartcoolman/wordforge/releases?per_page=10"
+    "https://api.github.com/repos/Heartcoolman/wordforge/releases?per_page=30"
 check UPDATE_CHECK_CACHE_TTL_SECS   "3600"
 check ENABLE_UPDATE_CHECKER_WORKER  "true"
 check UPDATE_CHECKER_INTERVAL_SECS  "3600"

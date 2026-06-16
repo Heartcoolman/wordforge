@@ -145,8 +145,9 @@ pub struct ChannelStatus {
 
 /// 暴露给前端的版本视图，三个 admin updates API 都返回它。
 ///
-/// v0.6.0-beta.3 起 stable / beta 双通道；后端单次 `/releases?per_page=10`
+/// v0.6.0-beta.3 起 stable / beta 双通道；后端单次 `/releases?per_page=N`
 /// 调用分流出两个 latest，前端 admin 后台同时展示 + 可分别一键升级。
+/// per_page 需足够大（默认 30），使持续发布 beta 期间「上一个 stable」仍落在窗口内。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateStatus {
@@ -359,7 +360,7 @@ impl Updater {
                 "api_url is empty; cannot fetch release by tag".into(),
             ));
         }
-        // 把 list URL("https://api.github.com/.../releases?per_page=10")
+        // 把 list URL("https://api.github.com/.../releases?per_page=N")
         // 改写为 single tag URL("https://api.github.com/.../releases/tags/{tag}")
         let base = self.api_url.split('?').next().unwrap_or(&self.api_url);
         let tag_url = format!("{}/tags/{}", base.trim_end_matches('/'), target_tag);

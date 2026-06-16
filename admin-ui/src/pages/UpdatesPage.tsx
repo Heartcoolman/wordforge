@@ -364,7 +364,9 @@ export default function UpdatesPage() {
                   <div style={sx({ textAlign: 'center' })}>
                     <div class="muted-3" style={sx({ fontSize: 11 })}>最新 {channel()}</div>
                     <div class="mono" style={sx({ fontSize: 19, fontWeight: 800, color: 'var(--accent)' })}>
-                      {targetVersion() ?? s().currentVersion}
+                      {/* 该通道无可用版本（缓存未填充 / 尚未检查 / 该通道暂无对应 release）时显示「—」，
+                          绝不回退成当前版本——否则在 beta 构建上「最新 稳定」会误显示为当前 beta。 */}
+                      {targetVersion() ?? '—'}
                     </div>
                   </div>
                   <Show when={chStatus()?.hasUpdate}>
@@ -407,7 +409,7 @@ export default function UpdatesPage() {
                     disabled={!chStatus()?.canApply || busy()}
                     style={sx({ flex: 1 })}
                   >
-                    一键升级到 {targetVersion() ?? s().currentVersion}
+                    {targetVersion() ? `一键升级到 ${targetVersion()}` : '暂无可用版本'}
                   </Btn>
                 </div>
 
