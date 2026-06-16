@@ -391,6 +391,8 @@ export interface AdminUpdateStatus {
   installedAt: string | null;
   /// 进程运行时长（秒）
   uptimeSecs: number;
+  /// v1.2.0-beta.8：有本地 DB 备份、可安全回滚的版本 tag 列表（回滚会恢复其数据快照）。
+  rollbackTargets?: string[];
 }
 
 /// CHANGELOG 单条 commit（GitHub compare API 分类后）。

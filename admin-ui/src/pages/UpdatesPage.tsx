@@ -553,7 +553,11 @@ export default function UpdatesPage() {
                       {(h) => {
                         const isRollback = h.action === 'rollback' || h.outcome === 'rolled_back';
                         const dur = auditDurSecs(h);
-                        const canRollback = !!h.fromVersion && h.fromVersion !== status()?.currentVersion;
+                        // v1.2.0-beta.8：仅当目标版本有本地 DB 备份（在 rollbackTargets 中）才允许回滚，
+                        // 从源头拦住回滚到不兼容旧版本导致崩溃循环。
+                        const canRollback = !!h.fromVersion
+                          && h.fromVersion !== status()?.currentVersion
+                          && (status()?.rollbackTargets ?? []).includes(h.fromVersion);
                         return (
                           <tr>
                             <td><Badge variant={isRollback ? 'warning' : 'accent'}>{isRollback ? '回滚' : '升级'}</Badge></td>
@@ -695,7 +699,7 @@ export default function UpdatesPage() {
               <span class="mono">{rollbackTarget() ?? previousEntry()?.fromVersion ?? '—'}</span>。
             </p>
             <p style={sx({ fontSize: 12, color: 'var(--warning)' })}>
-              ⚠ 走 /rollback 端点，跳过 semver 上升校验，从 GitHub 拉 target tag 的 release metadata 再走标准 apply 流程（sha256 校验 / DB 备份 / fork-exec 自重启）。如目标 tag 在 GitHub 已删除会失败。
+              ⚠ 回滚会把<b>数据库一并恢复到该版本的快照</b>——升级到当前版本之后写入的数据将丢失（回滚前会先自动备份当前库）。仅可回滚到有本地 DB 备份的近期版本；若新版本启动健康检查不过，会自动回滚回当前版本。
             </p>
           </div>
         }

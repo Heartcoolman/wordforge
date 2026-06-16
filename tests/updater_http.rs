@@ -125,6 +125,7 @@ fn noop_ctx(channel: Channel, tag: &str) -> ApplyContext {
         task_id: "test-task-id".to_string(),
         audit_db_path: std::path::PathBuf::from(":memory:"),
         allow_downgrade: false,
+        rollback_db_backup: None,
     }
 }
 

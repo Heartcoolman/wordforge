@@ -110,6 +110,10 @@ async fn main() {
     // Validate LLM config at startup (panics if enabled=true, mock=false)
     LlmProvider::validate_config(&config.llm);
 
+    // v1.2.0-beta.8 最强回滚落地：若上次回滚 apply 暂存了目标版本 DB（<db>.rollback-pending），
+    // 在打开库之前、无任何连接持库的此刻把它落地为现役库，规避 WAL 串扰。须在 Store::open 之前。
+    learning_backend::services::updater::apply_pending_rollback_db(&config.database_url);
+
     let store = Arc::new(
         Store::open_with_connection_timeout(
             &config.database_url,
@@ -127,6 +131,11 @@ async fn main() {
         Ok(_) => {}
         Err(e) => tracing::warn!(error = %e, "升级审计对账失败"),
     }
+
+    // v1.2.0-beta.8 启动自愈：若 static/ 缺失（被打断的 swap / 级联回滚残留），从最近的
+    // static.<tag> 备份恢复，避免 admin UI 根路径 404、后台彻底打不开。仅在 static/index.html
+    // 不存在时触发；优先非 .failed 备份，按 mtime 取最新。
+    heal_missing_static_dir(std::path::Path::new("static"));
 
     // m036:把持久化的运行时热更设置(live-ratelimit/limits/auth)覆盖到 env 构造的 config 上，
     // 使 admin 在系统设置改过的限流/配额/令牌 TTL 跨重启保留（AppState 持其热替换快照）。
@@ -563,6 +572,54 @@ async fn bind_listener_with_retry(
     }
     Err(last_err
         .unwrap_or_else(|| std::io::Error::new(std::io::ErrorKind::AddrInUse, "address in use")))
+}
+
+/// v1.2.0-beta.8 启动自愈：`static/` 缺失（被打断的 swap / 级联回滚消耗了备份）时，
+/// 从最近的 `static.<tag>` 备份目录 rename 就位，避免 admin UI 根路径 404、后台打不开。
+/// 仅在 `static/index.html` 不存在时触发；优先非 `.failed` 备份、按 mtime 取最新。
+/// 消耗一个 static 备份无碍——回滚 apply 会从 tarball 重新解出 static。失败仅 warn 不阻断启动。
+fn heal_missing_static_dir(static_path: &std::path::Path) {
+    if static_path.join("index.html").is_file() {
+        return;
+    }
+    let dir = static_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let prefix = format!(
+        "{}.",
+        static_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("static")
+    );
+    let mut candidates: Vec<(std::time::SystemTime, bool, std::path::PathBuf)> =
+        std::fs::read_dir(&dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|e| {
+                let p = e.path();
+                let name = e.file_name().to_string_lossy().into_owned();
+                if !p.is_dir() || !name.starts_with(&prefix) || !p.join("index.html").is_file() {
+                    return None;
+                }
+                let mtime = e.metadata().ok()?.modified().ok()?;
+                Some((mtime, name.ends_with(".failed"), p))
+            })
+            .collect();
+    if candidates.is_empty() {
+        tracing::warn!("static/ 缺失且无可用 static.<tag> 备份，admin UI 将不可用");
+        return;
+    }
+    // 非 .failed 优先（false<true），同类按 mtime 新→旧
+    candidates.sort_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0)));
+    let src = candidates[0].2.clone();
+    match std::fs::rename(&src, static_path) {
+        Ok(()) => tracing::info!(restored_from = ?src, "启动自愈：从备份恢复缺失的 static/"),
+        Err(e) => tracing::error!(error = %e, src = ?src, "启动自愈恢复 static/ 失败"),
+    }
 }
 
 fn loopback_addr_for(addr: SocketAddr) -> SocketAddr {

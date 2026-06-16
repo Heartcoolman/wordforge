@@ -82,6 +82,12 @@ async fn get_status(
             .and_then(|m| m.modified().ok())
             .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339());
         map.insert("installedAt".into(), json!(installed));
+        // v1.2.0-beta.8：有本地 DB 备份的版本 = 可安全回滚目标（回滚会恢复其数据快照）。
+        // UI 据此限定回滚选项，避免回滚到不兼容旧版本。
+        let rollback_targets = data_dir(&state)
+            .map(|d| available_rollback_targets(&d))
+            .unwrap_or_default();
+        map.insert("rollbackTargets".into(), json!(rollback_targets));
     }
     Ok(ok(payload))
 }
@@ -241,6 +247,8 @@ async fn apply(
             task_id: task_id.clone(),
             audit_db_path: bg_audit_db_path,
             allow_downgrade: false,
+            // 升级走前向迁移,不回退 DB
+            rollback_db_backup: None,
         };
         match bg_updater.apply(ctx, backup_cb, sink).await {
             Ok(()) => {
@@ -373,6 +381,31 @@ async fn rollback(
         ));
     }
 
+    // v1.2.0-beta.8 最强回滚守卫:目标版本必须有本地 DB 备份(`learning-<target>.backup.db`)
+    // 才放行——回滚会把它原子换为现役库,保证回滚后 binary/DB 严格一致。无备份则拒绝并列出
+    // 可回滚目标,从源头拦住「回滚到不兼容旧版本→崩溃循环」(本次事故的诱因)。
+    let rollback_db_backup = {
+        let dir = data_dir(&state).ok_or_else(|| {
+            AppError::bad_request(
+                "ROLLBACK_NO_DATADIR",
+                "内存库 / 无落盘数据目录，不支持带 DB 回滚",
+            )
+        })?;
+        let p = dir.join(format!("learning-{}.backup.db", req.target_version));
+        if !p.is_file() {
+            let avail = available_rollback_targets(&dir);
+            return Err(AppError::bad_request(
+                "ROLLBACK_NO_DB_BACKUP",
+                &format!(
+                    "目标版本 {} 无本地 DB 备份，无法安全回滚（回滚需恢复该版本的数据快照以保证一致）。可回滚目标：{}",
+                    req.target_version,
+                    if avail.is_empty() { "无".to_string() } else { avail.join("、") }
+                ),
+            ));
+        }
+        p
+    };
+
     // 关键一步:把 target_version 的 release 元数据从 GitHub 拉到 cache,
     // 否则 apply 会在 "channel latest != target_tag" 校验失败。
     updater
@@ -478,6 +511,8 @@ async fn rollback(
             task_id: task_id.clone(),
             audit_db_path: bg_audit_db_path,
             allow_downgrade: true,
+            // 最强回滚:把目标版本 DB 备份原子换为现役库,保证 binary/DB 一致
+            rollback_db_backup: Some(rollback_db_backup),
         };
         match bg_updater.apply(ctx, backup_cb, sink).await {
             Ok(()) => {
@@ -594,6 +629,20 @@ fn upgrade_backup_version(name: &str) -> Option<String> {
         .and_then(|s| s.strip_suffix(".backup.db"))
         .filter(|s| !s.is_empty())
         .map(str::to_owned)
+}
+
+/// v1.2.0-beta.8：扫描 data 目录，列出有 `learning-<tag>.backup.db` 的版本 tag——
+/// 即「可安全回滚目标」（带 DB 快照）。供回滚守卫报错提示 + 状态接口下发给 UI。
+fn available_rollback_targets(data_dir: &std::path::Path) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(data_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| upgrade_backup_version(&e.file_name().to_string_lossy()))
+        .collect();
+    v.sort();
+    v.dedup();
+    v
 }
 
 fn entry_from_path(
@@ -922,4 +971,42 @@ async fn download_backup(
         )
         .body(Body::from(bytes))
         .map_err(|e| AppError::internal(&e.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn upgrade_backup_version_parsing() {
+        assert_eq!(
+            upgrade_backup_version("learning-v1.2.0-beta.5.backup.db").as_deref(),
+            Some("v1.2.0-beta.5")
+        );
+        assert_eq!(upgrade_backup_version("learning-.backup.db"), None);
+        assert_eq!(upgrade_backup_version("backup-daily-20260610.db"), None);
+        assert_eq!(upgrade_backup_version("learning.db"), None);
+    }
+
+    /// 可回滚目标 = data 目录里有 learning-<tag>.backup.db 的版本，排序去重，
+    /// 忽略 daily/manual 等非升级备份与 live 库本身。
+    #[test]
+    fn available_rollback_targets_lists_backed_up_versions() {
+        let dir = tempfile::tempdir().unwrap();
+        for f in [
+            "learning-v1.2.0-beta.5.backup.db",
+            "learning-v1.2.0-beta.4.backup.db",
+            "learning.db",                    // 现役库，非目标
+            "backups/backup-daily-20260610.db", // daily，非目标（且在子目录）
+            "learning.manual-bak.db",         // 手动备份，非 learning-<tag> 形态
+        ] {
+            let p = dir.path().join(f);
+            if let Some(parent) = p.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(&p, b"x").unwrap();
+        }
+        let got = available_rollback_targets(dir.path());
+        assert_eq!(got, vec!["v1.2.0-beta.4", "v1.2.0-beta.5"]);
+    }
 }

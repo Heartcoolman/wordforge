@@ -34,6 +34,9 @@ const PHASE_TIMEOUT_SECS: u64 = 300; // 5 分钟
 /// M0-R4：maintenance 模式持久化 flag 文件名（install_dir 下）。
 /// 新进程启动时若发现此文件，说明上次自更新途中崩溃，应立即清理 maintenance。
 pub const MAINTENANCE_FLAG: &str = ".maintenance.flag";
+/// v1.2.0-beta.8 最强回滚:暂存待落地的目标版本 DB 的后缀（拼在现役库路径后）。
+/// 新进程在 `Store::open` 之前若发现 `<db>.rollback-pending`，将其落地为现役库（见 main）。
+pub const ROLLBACK_PENDING_SUFFIX: &str = ".rollback-pending";
 const STAGING_DIR: &str = ".update-staging";
 const TMP_DIR: &str = ".update-tmp";
 const LOCK_FILE: &str = ".update.lock";
@@ -236,6 +239,11 @@ pub struct ApplyContext {
     /// 允许把当前版本 swap 成更低的 target_tag。默认 false 即沿用 Updater struct
     /// 的 `allow_downgrade` 全局开关(env 配置)。
     pub allow_downgrade: bool,
+    /// v1.2.0-beta.8 最强回滚:目标版本的 DB 备份路径(`learning-<target>.backup.db`)。
+    /// Some 时 apply 在 swap 阶段（binary/static 之后、作为最后一步）把它原子换为现役库,
+    /// 使回滚后 binary 与 DB 严格一致、避免旧二进制撞上新 schema 崩溃循环。仅 rollback
+    /// handler 在备份存在时设置;升级路径恒 None（升级走前向迁移,不回退 DB）。
+    pub rollback_db_backup: Option<PathBuf>,
 }
 
 #[derive(Default)]
@@ -548,6 +556,7 @@ impl Updater {
             task_id,
             audit_db_path,
             allow_downgrade: ctx_allow_downgrade,
+            rollback_db_backup,
         } = ctx;
         let latest = {
             let cache = self.cache.read().await;
@@ -617,6 +626,7 @@ impl Updater {
                 on_maintenance,
                 &task_id,
                 &audit_db_path,
+                rollback_db_backup.as_deref(),
             )
             .await;
         // 失败时锁随 file drop 自动释放；成功时进程 exit 也会自动释放
@@ -637,6 +647,7 @@ impl Updater {
         on_maintenance: impl Fn(bool) + Send + 'static,
         task_id: &str,
         audit_db_path: &Path,
+        rollback_db_backup: Option<&Path>,
     ) -> Result<(), UpdaterError>
     where
         F: FnOnce(&Path) -> Result<(), UpdaterError> + Send,
@@ -790,6 +801,18 @@ impl Updater {
                 return Err(UpdaterError::RolledBack(format!(
                     "install new static failed: {e}"
                 )));
+            }
+
+            // v1.2.0-beta.8 最强回滚:作为 swap 最后一步,把目标版本 DB 备份暂存为
+            // <db>.rollback-pending(不在此刻覆盖现役库,避免 WAL 串扰)。新进程启动时落地。
+            // 仅 rollback_db_backup=Some(回滚)时执行;失败则 undo binary/static、现役库无损。
+            if let Some(src) = rollback_db_backup {
+                if let Err(e) = stage_rollback_db(src, audit_db_path) {
+                    rollback(steps_done);
+                    return Err(UpdaterError::RolledBack(format!(
+                        "rollback db stage failed: {e}"
+                    )));
+                }
             }
 
             let _ = std::fs::remove_dir_all(&staging_dir);
@@ -1644,24 +1667,43 @@ fn watcher_rollback(args: &WatcherArgs) {
     //    会导致回滚换好文件却杀不掉坏进程（systemd 不重启，回滚不生效）。
     let victims = find_pids_running_exe(&args.bin_path);
 
-    // 1. binary：失败版本标 .failed 保留（forensics），备份 → 现役
-    let failed_bin = args
-        .install_dir
-        .join(format!("wordforge.{}.failed", args.target_tag));
-    let _ = std::fs::remove_file(&failed_bin);
-    let _ = std::fs::rename(&args.bin_path, &failed_bin);
+    // 1. binary：仅当备份存在、可替换时，才把坏版本归档 .failed 并恢复备份。
+    //    v1.2.0-beta.8：备份缺失（级联回滚已消耗）时**保留当前 binary**，绝不把现役改名走
+    //    后无东西可恢复——否则现役二进制缺失、systemd 无法拉起。
     if args.bin_backup.exists() {
-        let _ = std::fs::rename(&args.bin_backup, &args.bin_path);
+        let failed_bin = args
+            .install_dir
+            .join(format!("wordforge.{}.failed", args.target_tag));
+        let _ = std::fs::remove_file(&failed_bin);
+        let _ = std::fs::rename(&args.bin_path, &failed_bin);
+        if let Err(e) = std::fs::rename(&args.bin_backup, &args.bin_path) {
+            tracing::error!("watcher 回滚恢复 binary 失败: {e}，搬回坏版本占位以保证可启动");
+            let _ = std::fs::rename(&failed_bin, &args.bin_path);
+        }
+    } else {
+        tracing::warn!(
+            "watcher 回滚:bin_backup {:?} 不存在,保留当前 binary 避免现役缺失",
+            args.bin_backup
+        );
     }
 
-    // 2. static：失败版本标 .failed 保留，备份 → 现役
-    let failed_static = args
-        .install_dir
-        .join(format!("static.{}.failed", args.target_tag));
-    let _ = std::fs::remove_dir_all(&failed_static);
-    let _ = std::fs::rename(&args.static_path, &failed_static);
+    // 2. static：同 binary。v1.2.0-beta.8：备份缺失时**保留当前 static**，绝不留下空 static/
+    //    （否则 admin UI 根路径 404、后台彻底打不开——本次事故的直接 brick 点）。
     if args.static_backup.exists() {
-        let _ = std::fs::rename(&args.static_backup, &args.static_path);
+        let failed_static = args
+            .install_dir
+            .join(format!("static.{}.failed", args.target_tag));
+        let _ = std::fs::remove_dir_all(&failed_static);
+        let _ = std::fs::rename(&args.static_path, &failed_static);
+        if let Err(e) = std::fs::rename(&args.static_backup, &args.static_path) {
+            tracing::error!("watcher 回滚恢复 static 失败: {e}，搬回归档占位");
+            let _ = std::fs::rename(&failed_static, &args.static_path);
+        }
+    } else {
+        tracing::warn!(
+            "watcher 回滚:static_backup {:?} 不存在,保留当前 static 避免 admin UI 缺失(404)",
+            args.static_backup
+        );
     }
 
     // 3. 清 maintenance flag（M0-R4：新进程启动时也会清，双保险）
@@ -1689,6 +1731,56 @@ fn watcher_rollback(args: &WatcherArgs) {
                 parent_pid = args.parent_pid,
                 "watcher 回滚：未按 exe 匹配到运行中的主进程，回退 kill parent_pid（可能已失效）"
             );
+        }
+    }
+}
+
+/// v1.2.0-beta.8 最强回滚:把目标版本 DB 备份 `src` **暂存**为 `<live_db>.rollback-pending`。
+/// 不在此刻覆盖现役库——因为旧进程仍持有现役库且处于 WAL 模式,直接换库会让新进程把 stale WAL
+/// 叠加到换入的库上致脏。真正落地交由新进程在 `Store::open` 之前、无任何连接持库时执行
+/// (见 main 的 apply_pending_rollback_db)。先 copy 到 `.tmp` 再原子 rename 到 pending 名,
+/// 避免中途崩溃留下半截 pending 文件被误用。
+fn stage_rollback_db(src: &Path, live_db: &Path) -> std::io::Result<()> {
+    let mut pending_os = live_db.as_os_str().to_owned();
+    pending_os.push(ROLLBACK_PENDING_SUFFIX);
+    let pending = PathBuf::from(pending_os);
+    let mut tmp_os = pending.as_os_str().to_owned();
+    tmp_os.push(".tmp");
+    let tmp = PathBuf::from(tmp_os);
+    let _ = std::fs::remove_file(&tmp);
+    std::fs::copy(src, &tmp)?;
+    std::fs::rename(&tmp, &pending)?;
+    Ok(())
+}
+
+/// v1.2.0-beta.8 最强回滚落地：新进程在 `Store::open` 之前调用。若 `<database_url>.rollback-pending`
+/// （回滚 apply 暂存的目标版本 DB 快照）存在，则在无连接持库的此刻把它落地为现役库——删现役库 +
+/// `-wal`/`-shm` 再 rename pending 就位，彻底规避 stale WAL 串扰。返回是否落地（true=已换库）。
+/// 仅落盘库适用（`:memory:` / 空跳过）；rename 失败仅 error、沿用现役库，不 panic。
+pub fn apply_pending_rollback_db(database_url: &str) -> bool {
+    if database_url == ":memory:" || database_url.is_empty() {
+        return false;
+    }
+    let live = Path::new(database_url);
+    let mut pending_os = live.as_os_str().to_owned();
+    pending_os.push(ROLLBACK_PENDING_SUFFIX);
+    let pending = PathBuf::from(pending_os);
+    if !pending.is_file() {
+        return false;
+    }
+    for suffix in ["", "-wal", "-shm"] {
+        let mut p = live.as_os_str().to_owned();
+        p.push(suffix);
+        let _ = std::fs::remove_file(PathBuf::from(p));
+    }
+    match std::fs::rename(&pending, live) {
+        Ok(()) => {
+            tracing::warn!(db = %database_url, "最强回滚：已落地目标版本 DB 快照为现役库");
+            true
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "最强回滚落地 DB 失败，沿用现役库");
+            false
         }
     }
 }
@@ -1767,6 +1859,64 @@ fn watcher_update_audit_outcome(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 最强回滚 staging:把目标备份暂存为 <db>.rollback-pending,不动现役库,保留源备份,
+    /// 不残留中转 .tmp。真正落地由新进程在 open 前执行。
+    #[test]
+    fn stage_rollback_db_creates_pending_without_touching_live() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = dir.path().join("learning.db");
+        let src = dir.path().join("learning-vX.backup.db");
+        std::fs::write(&live, b"OLD-DB-CONTENT").unwrap();
+        std::fs::write(&src, b"TARGET-DB-CONTENT").unwrap();
+
+        stage_rollback_db(&src, &live).unwrap();
+
+        let pending = dir.path().join("learning.db.rollback-pending");
+        assert_eq!(
+            std::fs::read(&pending).unwrap(),
+            b"TARGET-DB-CONTENT",
+            "pending 应是目标备份内容"
+        );
+        assert_eq!(
+            std::fs::read(&live).unwrap(),
+            b"OLD-DB-CONTENT",
+            "现役库此刻不应被改动(由新进程落地)"
+        );
+        assert!(src.is_file(), "源备份应保留(copy 而非 move)");
+        assert!(
+            !dir.path().join("learning.db.rollback-pending.tmp").exists(),
+            "中转 .tmp 应已 rename 消失"
+        );
+    }
+
+    /// 最强回滚落地：stage→apply 全链路。落地后现役库=目标内容、pending 消失、stale wal/shm 清除。
+    #[test]
+    fn stage_then_apply_pending_rollback_db_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = dir.path().join("learning.db");
+        let src = dir.path().join("learning-vT.backup.db");
+        std::fs::write(&live, b"CURRENT").unwrap();
+        std::fs::write(dir.path().join("learning.db-wal"), b"stale").unwrap();
+        std::fs::write(dir.path().join("learning.db-shm"), b"stale").unwrap();
+        std::fs::write(&src, b"TARGET").unwrap();
+
+        stage_rollback_db(&src, &live).unwrap();
+        let did = apply_pending_rollback_db(&live.to_string_lossy());
+
+        assert!(did, "应报告已落地");
+        assert_eq!(std::fs::read(&live).unwrap(), b"TARGET", "现役库应=目标内容");
+        assert!(
+            !dir.path().join("learning.db.rollback-pending").exists(),
+            "pending 应被消费"
+        );
+        assert!(!dir.path().join("learning.db-wal").exists(), "stale wal 应被清");
+        assert!(!dir.path().join("learning.db-shm").exists(), "stale shm 应被清");
+        // 无 pending 时再调为 no-op
+        assert!(!apply_pending_rollback_db(&live.to_string_lossy()));
+        // :memory: 跳过
+        assert!(!apply_pending_rollback_db(":memory:"));
+    }
 
     /// watcher 回滚靠 exe 匹配定位当前主进程：Linux 上须能定位到自身 pid；
     /// 非 Linux（macOS CI 无 /proc）须优雅返回空、不 panic。
