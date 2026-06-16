@@ -33,17 +33,51 @@ const SECTION_LABEL: Record<string, string> = {
   backup: '备份策略',
   'backup-policy': '备份策略',
   limits: '资源配额',
+  // 运行时热更 section（保存即时生效，见后端 runtime_settings.rs）
+  'live-ratelimit': '速率限制',
+  'live-limits': '请求配额',
+  'live-auth': '认证 · 令牌',
 };
 const sectionLabel = (sec: string) => SECTION_LABEL[sec] ?? sec;
 
+// 运行时热更 section：镜像真实 Config，保存即时生效、无需重启。
+const LIVE_SECTIONS = new Set(['live-ratelimit', 'live-limits', 'live-auth']);
+
+// live section 字段 → 中文标签（含单位），提升运维可读性。键为后端扁平字段名。
+const FIELD_LABEL: Record<string, string> = {
+  apiWindowSecs: '通用 API 限流窗口（秒）',
+  apiAnonMaxRequests: '匿名 · 每窗口请求上限',
+  apiAuthedMaxRequests: '登录用户 · 每窗口请求上限',
+  authWindowSecs: '认证接口限流窗口（秒）',
+  authMaxRequests: '认证接口 · 每窗口请求上限',
+  telemetryWindowSecs: '遥测上报限流窗口（秒）',
+  telemetryMaxRequests: '遥测 · 每窗口请求上限',
+  maxBatchSize: '批量操作最大条数',
+  maxImportWords: '单次导入单词上限',
+  maxRecordsFetch: '记录拉取上限',
+  maxStatsRecords: '统计扫描记录上限',
+  maxExcludeWordIds: '排除词 ID 上限',
+  maxSseConnections: '全局 SSE 连接上限',
+  maxSseConnectionsPerUser: '单用户 SSE 连接上限',
+  candidateWordPoolSize: '候选词池大小',
+  rateLimitMaxEntries: '限流器最大键数',
+  defaultPageSize: '默认分页大小',
+  maxPageSize: '最大分页大小',
+  accessTokenHours: '访问令牌有效期（小时）',
+  refreshTokenHours: '刷新令牌有效期（小时）',
+  adminTokenHours: '管理员令牌有效期（小时）',
+};
+const fieldLabel = (k: string) => FIELD_LABEL[k] ?? k;
+
 // 把 sections 分组到左侧导航（按后端实际返回的 section 动态归组）
 const GROUP_OF: Record<string, string> = {
+  'live-ratelimit': '运行时 · 即时生效', 'live-limits': '运行时 · 即时生效', 'live-auth': '运行时 · 即时生效',
   site: '站点',
   auth: '认证 · 安全', ratelimit: '认证 · 安全', roles: '认证 · 安全',
   audit: '审计 · 备份', 'audit-config': '审计 · 备份', backup: '审计 · 备份', 'backup-policy': '审计 · 备份',
   limits: '配额',
 };
-const GROUP_ORDER = ['站点', '认证 · 安全', '审计 · 备份', '配额', '其他'];
+const GROUP_ORDER = ['运行时 · 即时生效', '站点', '认证 · 安全', '审计 · 备份', '配额', '其他'];
 const groupOf = (sec: string) => GROUP_OF[sec] ?? '其他';
 
 // 仅存配置、无运行期消费者的 section（后端 settings_sections.rs 自述 store-only，
@@ -220,6 +254,7 @@ export default function SettingsPage() {
 function SectionEditor(props: { section: SettingsSection; onSaved: () => void }) {
   const [draft, setDraft] = createSignal<Record<string, unknown>>({ ...props.section.json });
   const [busy, setBusy] = createSignal(false);
+  const isLive = () => LIVE_SECTIONS.has(props.section.section);
 
   // section 切换时重置草稿
   createEffect(() => {
@@ -258,7 +293,10 @@ function SectionEditor(props: { section: SettingsSection; onSaved: () => void })
     <Card>
       <div style={sx({ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 })}>
         <div>
-          <h2 class="section-title">{sectionLabel(props.section.section)} 配置</h2>
+          <div style={sx({ display: 'flex', alignItems: 'center', gap: 8 })}>
+            <h2 class="section-title">{sectionLabel(props.section.section)} 配置</h2>
+            <Show when={isLive()}><Badge variant="success" dot>即时生效</Badge></Show>
+          </div>
           <div class="muted-3 mono" style={sx({ fontSize: 11, marginTop: 3 })}>
             section: {props.section.section}
             <Show when={props.section.updatedAt}> · 更新于 {fmtAgo(props.section.updatedAt)}</Show>
@@ -266,6 +304,12 @@ function SectionEditor(props: { section: SettingsSection; onSaved: () => void })
         </div>
         <Show when={dirty()}><Badge variant="warning" dot>未保存</Badge></Show>
       </div>
+
+      <Show when={isLive()}>
+        <p class="muted" style={sx({ fontSize: 12.5, margin: '0 0 14px', padding: '9px 12px', borderRadius: 9, background: 'var(--accent-soft)' })}>
+          保存后立即对后续请求生效，无需重启服务；设置已持久化，重启后保留。
+        </p>
+      </Show>
 
       <Show
         when={entries().length}
@@ -279,7 +323,7 @@ function SectionEditor(props: { section: SettingsSection; onSaved: () => void })
               return (
                 <div style={sx({ display: 'grid', gridTemplateColumns: '210px 1fr', gap: 14, alignItems: 'center' })}>
                   <div>
-                    <div style={sx({ fontSize: 13, fontWeight: 600 })}>{k}</div>
+                    <div style={sx({ fontSize: 13, fontWeight: 600 })}>{fieldLabel(k)}</div>
                     <Show when={masked}><div class="muted-3" style={sx({ fontSize: 10.5 })}>已脱敏</div></Show>
                   </div>
                   {opts ? (

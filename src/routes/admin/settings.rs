@@ -10,9 +10,11 @@ use crate::auth::AdminAuthUser;
 use crate::response::{ok, AppError};
 use crate::state::AppState;
 
+use super::runtime_settings::{apply_live_section, is_live_section, live_section_json, LIVE_SECTIONS};
 use super::settings_sections::{
     mask_secrets, parse_typed_section, preserve_secrets, TYPED_SECTIONS,
 };
+use crate::store::operations::settings_config::SettingsSection;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -51,6 +53,10 @@ const KNOWN_SECTIONS: &[&str] = &[
     "ratelimit",
     "audit-config",
     "backup-policy",
+    // m036:运行时热更 section（镜像 Config，保存即时生效，见 runtime_settings.rs）
+    "live-ratelimit",
+    "live-limits",
+    "live-auth",
 ];
 
 /// 导出 TOML 时永不写出的敏感 section(安全:绝不导出密钥/凭据)。
@@ -467,15 +473,35 @@ async fn get_settings_config(
     _admin: AdminAuthUser,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let mut sections = state
+    let mut stored = state
         .run_store_task("admin.settings.list_config", |store| {
             store.list_settings_config()
         })
         .await??;
-    // m035:GET 时遮蔽各 section 的敏感字段(SMTP/SMS/存储/DB 密钥),绝不回显明文。
-    for s in &mut sections {
+
+    // m036:live section 永远从运行时 Config 投影下发——反映真实生效值，且 DB 空也不空页。
+    // 持久化行只用于取 updatedAt（展示"更新于"），不直接回显其 json（避免与运行时值漂移）。
+    let cfg = state.config();
+    let mut sections: Vec<SettingsSection> = LIVE_SECTIONS
+        .iter()
+        .map(|&sec| SettingsSection {
+            section: sec.to_string(),
+            json: live_section_json(&cfg, sec),
+            updated_at: stored
+                .iter()
+                .find(|s| s.section == sec)
+                .map(|s| s.updated_at.clone())
+                .unwrap_or_default(),
+        })
+        .collect();
+
+    // 其余 legacy section 维持原样并遮蔽密钥；live key 的持久化行已由上方投影覆盖，剔除避免重复。
+    stored.retain(|s| !is_live_section(&s.section));
+    for s in &mut stored {
         s.json = mask_secrets(&s.section, &s.json);
     }
+    sections.append(&mut stored);
+
     Ok(ok(serde_json::json!({ "sections": sections })))
 }
 
@@ -495,6 +521,32 @@ async fn put_settings_config(
             "INVALID_SECTION_BODY",
             "section 配置体必须是 JSON 对象",
         ));
+    }
+
+    // m036:运行时热更 section —— 校验→应用到 Config 克隆→热替换(即时生效)→
+    // 持久化归一化投影(跨重启保留,启动时 overlay 回灌)。不走下方 typed/passthrough 路径。
+    if is_live_section(&section) {
+        let map = body.as_object().expect("body.is_object 已校验");
+        let cfg = state.config();
+        let new_config = apply_live_section(&cfg, &section, map)?;
+        let normalized = live_section_json(&new_config, &section);
+        state.swap_config(new_config);
+
+        let section_for_task = section.clone();
+        let normalized_for_task = normalized.clone();
+        let saved = state
+            .run_store_task("admin.settings.upsert_live_config", move |store| {
+                store.upsert_settings_config(&section_for_task, &normalized_for_task)
+            })
+            .await??;
+        tracing::info!(
+            admin_id = %admin.admin_id,
+            action = "update_settings_config",
+            section = %section,
+            live = true,
+            "管理员更新运行时设置(即时生效)"
+        );
+        return Ok(ok(saved));
     }
 
     // 强类型 section:serde 解析 + 字段校验,通过后归一化再持久化。

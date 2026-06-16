@@ -72,6 +72,22 @@ function parseReleaseNotes(md: string): { intro: string; sections: ReleaseNoteSe
   return { intro, sections: sections.filter((s) => s.items.length > 0) };
 }
 
+// 升级 / 回滚触发后端 fork-exec 自重启：轮询 /api/status 探活，服务回来再整页重载，
+// 避免在重启窗口内硬重载撞 502（旧裸 setTimeout 重载的问题）。超时兜底仍重载。
+function reloadWhenBack(maxWaitMs = 60_000) {
+  const start = Date.now();
+  const schedule = () => {
+    if (Date.now() - start < maxWaitMs) setTimeout(tick, 1500);
+    else window.location.reload();
+  };
+  const tick = () => {
+    fetch('/api/status', { cache: 'no-store' })
+      .then((r) => { if (r.ok) window.location.reload(); else schedule(); })
+      .catch(schedule);
+  };
+  setTimeout(tick, 1200); // 给重启一个起步窗口
+}
+
 // 备份种类 → 中文短标
 const BACKUP_KIND_LABEL: Record<string, string> = {
   upgrade: '升级',
@@ -185,8 +201,8 @@ export default function UpdatesPage() {
     if (failed || done) {
       stopPoll();
       if (done) {
-        toast.success('升级成功', '1.5 秒后自动刷新页面…');
-        setTimeout(() => window.location.reload(), 1500);
+        toast.success('升级成功', '服务重启完成后自动刷新…');
+        reloadWhenBack();
       } else {
         toast.error('升级失败', t.error ?? '后端 apply task 报错');
       }
@@ -243,9 +259,9 @@ export default function UpdatesPage() {
     try {
       await adminApi.updatesRollback(resolveRollbackChannel(target), target, s.currentVersion);
       setConfirm(null);
-      toast.success(`已下发回滚到 ${target}`, '等待重启…');
+      toast.success(`已下发回滚到 ${target}`, '服务重启完成后自动刷新…');
       void refetchHistory();
-      setTimeout(() => window.location.reload(), 2000);
+      reloadWhenBack();
     } catch (e) {
       toast.error('回滚失败', e instanceof Error ? e.message : '未知错误');
     } finally {
@@ -367,7 +383,16 @@ export default function UpdatesPage() {
                 {/* 当前版本元信息 */}
                 <div style={sx({ display: 'flex', flexWrap: 'wrap', gap: 8, fontSize: 11.5 })}>
                   <span class="muted-3">
-                    安装于 {s().installedAt ? fmtTime(s().installedAt!).slice(0, 10) : '未知'} · tarball{' '}
+                    {/* 当前只有一个二进制，它只属于一个通道（版本含 '-' 预发布标记 → beta，否则 stable）；
+                        「安装于」是该二进制的安装时间，仅在所选通道与其所属通道一致时才显示，
+                        避免在另一通道下误显示成「该通道已安装于同一时间」。 */}
+                    <Show
+                      when={channel() === ((s().currentVersion || '').includes('-') ? 'beta' : 'stable')}
+                      fallback={<>当前未安装此通道版本</>}
+                    >
+                      安装于 {s().installedAt ? fmtTime(s().installedAt!).slice(0, 10) : '未知'}
+                    </Show>
+                    {' · '}tarball{' '}
                     <span class="mono">{chStatus() ? fmtBytes(chStatus()!.tarballSize) : '—'}</span> · SHA{' '}
                     <span class="mono">{shortSha(chStatus()?.sha256)}</span>
                   </span>

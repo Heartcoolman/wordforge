@@ -47,22 +47,66 @@ function PageSpinner() {
   );
 }
 
+// 加载类错误判定：懒加载 chunk 失败 / 模块脚本失败 / 网关 502·503·504。
+// 多见于服务端升级重启——旧 SPA 引用的旧 hash chunk 已被新构建替换、或重启窗口内反代 502。
+// 此时 reset() 只重渲染会重取同一旧 chunk，无效；须轮询服务端，恢复后整页重载取新 manifest。
+function isLoadError(err: unknown): boolean {
+  const m = err instanceof Error ? (err.message || '') : String(err ?? '');
+  return /dynamically imported module|module script|Loading chunk|chunk load|Failed to fetch|Bad Gateway|50[234]\b/i.test(m);
+}
+
+// 升级 / 重启导致的加载失败：保留 admin 壳层，轮询 /api/status，服务端回来即整页重载。
+function ReloadOnRecover() {
+  let timer: ReturnType<typeof setInterval> | undefined;
+  const reloadGuarded = () => {
+    try {
+      const now = Date.now();
+      const recent = (JSON.parse(sessionStorage.getItem('wf_reload_guard') || '[]') as number[]).filter((t) => now - t < 60_000);
+      if (recent.length >= 3) return; // 1 分钟内已重载 3 次则停手，避免重载循环，保留手动按钮（冷却后可再恢复）
+      recent.push(now);
+      sessionStorage.setItem('wf_reload_guard', JSON.stringify(recent));
+    } catch { /* sessionStorage 不可用时直接重载 */ }
+    window.location.reload();
+  };
+  onMount(() => {
+    timer = setInterval(() => {
+      api.get('/api/status').then(reloadGuarded).catch(() => { /* 仍在重启，继续轮询 */ });
+    }, 3000);
+  });
+  onCleanup(() => { if (timer) clearInterval(timer); });
+  return (
+    <div class="flex items-center justify-center min-h-[60vh] p-4">
+      <Card variant="elevated" class="max-w-md w-full">
+        <Empty
+          title="页面更新中"
+          description="服务正在重启或已发布新版本，正在自动重连…"
+          action={<Button onClick={() => window.location.reload()}>立即重试</Button>}
+        />
+      </Card>
+    </div>
+  );
+}
+
 // 路由级错误边界：单页资源请求失败时只降级该页内容区，不冒泡到全局 AppErrorBoundary
-// 把整个 admin 壳（侧栏/导航）替换掉。参照 pages/amas/PanelBoundary.tsx，用通用样式。
+// 把整个 admin 壳（侧栏/导航）替换掉。加载类错误（升级重启 / chunk 失效）走自动重连恢复。
 function RouteBoundary(props: { children: JSX.Element }) {
   return (
     <ErrorBoundary
-      fallback={(err, reset) => (
-        <div class="flex items-center justify-center min-h-[60vh] p-4">
-          <Card variant="elevated" class="max-w-md w-full">
-            <Empty
-              title="该页面加载失败"
-              description={err?.message ? String(err.message) : String(err)}
-              action={<Button onClick={reset}>重试</Button>}
-            />
-          </Card>
-        </div>
-      )}
+      fallback={(err, reset) =>
+        isLoadError(err) ? (
+          <ReloadOnRecover />
+        ) : (
+          <div class="flex items-center justify-center min-h-[60vh] p-4">
+            <Card variant="elevated" class="max-w-md w-full">
+              <Empty
+                title="该页面加载失败"
+                description={err?.message ? String(err.message) : String(err)}
+                action={<Button onClick={reset}>重试</Button>}
+              />
+            </Card>
+          </div>
+        )
+      }
     >
       {props.children}
     </ErrorBoundary>

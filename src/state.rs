@@ -176,7 +176,10 @@ pub struct AppState {
     /// W3-1：遥测专用 per-user 限频器。独立实例（非复用 rate_limit），避免与业务流量
     /// 串味、cleanup 周期互相污染。
     telemetry_rate_limit: Arc<RateLimitState>,
-    config: Arc<Config>,
+    /// 运行时配置快照。RwLock<Arc<Config>> 支持热替换：admin 在系统设置改限流 /
+    /// 配额 / 令牌 TTL 等「运行期每请求读取」的配置后 `swap_config` 即时生效，无需重启。
+    /// `config()` 返回当时不可变 Arc 快照（读锁瞬时释放），既有 116 处读取点零感知。
+    config: Arc<std::sync::RwLock<Arc<Config>>>,
     shutdown_tx: broadcast::Sender<()>,
     started_at: Instant,
     update_cache: Arc<RwLock<Option<(Instant, serde_json::Value)>>>,
@@ -280,7 +283,7 @@ impl AppState {
             rate_limit,
             auth_rate_limit,
             telemetry_rate_limit,
-            config: Arc::new(config.clone()),
+            config: Arc::new(std::sync::RwLock::new(Arc::new(config.clone()))),
             shutdown_tx,
             started_at: Instant::now(),
             update_cache: Arc::new(RwLock::new(None)),
@@ -324,12 +327,13 @@ impl AppState {
     /// admin 写端点改动后调此方法实现「即时生效」；同时供 TTL 过期时 lazy reload。
     /// settings.min_client_version 优先，回落 env（config.strict_mode.min_client_version）。
     pub fn refresh_version_gate(&self) -> VersionGate {
+        let cfg = self.config();
         let gate = match self.store.get_system_settings() {
             Ok(s) => {
                 let min = s
                     .min_client_version
                     .filter(|v| !v.is_empty())
-                    .or_else(|| self.config.strict_mode.min_client_version.clone());
+                    .or_else(|| cfg.strict_mode.min_client_version.clone());
                 VersionGate {
                     enabled: s.version_gate_enabled,
                     min_client_version: min,
@@ -537,8 +541,31 @@ impl AppState {
         &self.telemetry_rate_limit
     }
 
-    pub fn config(&self) -> &Config {
-        &self.config
+    /// 当前运行时配置快照。返回不可变 `Arc<Config>`（读锁瞬时释放后即用 Arc 引用计数
+    /// 持有），既有读取点 `state.config().field` 经 Deref 透明工作。
+    pub fn config(&self) -> Arc<Config> {
+        self.config
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    /// 热替换运行时配置（admin 保存「即时生效」设置后调用）。除替换 Arc 快照外，
+    /// 还同步 3 个限流器的窗口秒数——窗口烘焙在 `RateLimiter` 内（非每请求读 config），
+    /// 不同步则 windowSecs 字段会变成"假生效"。配额 / 令牌 TTL / 连接上限等字段由各读取点
+    /// 每请求读 `config()`，替换后自动生效。
+    pub fn swap_config(&self, new_config: Config) {
+        self.rate_limit
+            .limiter
+            .set_window_secs(new_config.rate_limit.window_secs);
+        self.auth_rate_limit
+            .limiter
+            .set_window_secs(new_config.auth_rate_limit.window_secs);
+        self.telemetry_rate_limit
+            .limiter
+            .set_window_secs(new_config.telemetry_rate_limit.window_secs);
+        let mut guard = self.config.write().unwrap_or_else(|p| p.into_inner());
+        *guard = Arc::new(new_config);
     }
 
     pub fn shutdown_rx(&self) -> broadcast::Receiver<()> {

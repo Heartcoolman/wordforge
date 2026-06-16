@@ -21,7 +21,8 @@ fn startup_instant() -> &'static Instant {
 /// sqlite 主库 + -wal + -shm 三个文件的磁盘占用之和（字节）。
 /// 读取失败（路径缺失/`:memory:`/权限）返回 None，调用方应诚实展示为空，不伪造。
 fn db_on_disk_size_bytes(state: &AppState) -> Option<u64> {
-    let main = std::path::Path::new(&state.config().database_url);
+    let config = state.config();
+    let main = std::path::Path::new(&config.database_url);
     let mut total = std::fs::metadata(main).ok()?.len();
     // sqlite WAL 模式下旁路文件 -wal / -shm 也计入实际占用
     let file_name = main.file_name().and_then(|n| n.to_str())?;

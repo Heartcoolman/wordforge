@@ -121,6 +121,19 @@ async fn main() {
     );
     store.run_migrations().expect("Failed to run migrations");
 
+    // 启动期对账升级审计：成功的自更新 / 回滚因 exit(0) 重启来不及收尾，残留 in_progress → 标 success。
+    match store.reconcile_stale_update_audits() {
+        Ok(n) if n > 0 => tracing::info!(count = n, "对账：残留 in_progress 升级审计收尾为 success"),
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, "升级审计对账失败"),
+    }
+
+    // m036:把持久化的运行时热更设置(live-ratelimit/limits/auth)覆盖到 env 构造的 config 上，
+    // 使 admin 在系统设置改过的限流/配额/令牌 TTL 跨重启保留（AppState 持其热替换快照）。
+    let config = learning_backend::routes::admin::runtime_settings::overlay_persisted_live_sections(
+        config, &store,
+    );
+
     // D3：回灌持久化的可用率小时桶，恢复跨重启的 SLO 30d 窗口（失败仅 warn 不阻断启动）。
     {
         let now_hour = std::time::SystemTime::now()

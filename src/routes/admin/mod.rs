@@ -10,6 +10,7 @@ pub mod probe;
 pub mod probe_telemetry;
 pub mod rbac;
 pub mod resource_packs;
+pub mod runtime_settings;
 pub mod settings;
 pub mod settings_sections;
 pub mod updates;

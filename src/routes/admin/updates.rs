@@ -519,7 +519,8 @@ async fn get_history(
 
 /// config.database_url 的父目录；`:memory:` 等无落盘库返回 None。
 fn data_dir(state: &AppState) -> Option<PathBuf> {
-    let db_path = &state.config().database_url;
+    let config = state.config();
+    let db_path = &config.database_url;
     if db_path == ":memory:" {
         return None;
     }

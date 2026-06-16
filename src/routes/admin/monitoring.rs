@@ -169,7 +169,8 @@ async fn check_update(
 
     let git_version = env!("GIT_VERSION");
     let current_version = git_version.trim_start_matches('v');
-    let api_url = state.config().update_check.api_url.trim();
+    let config = state.config();
+    let api_url = config.update_check.api_url.trim();
 
     if api_url.is_empty() {
         let fallback = update_check_fallback(git_version, current_version);

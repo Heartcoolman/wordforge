@@ -38,7 +38,9 @@ struct Shard {
 
 #[derive(Debug)]
 pub struct RateLimiter {
-    window_secs: u64,
+    /// 窗口秒数。用 AtomicU64 以支持运行时热更：admin 在系统设置改限流窗口后
+    /// `set_window_secs` 即时生效，无需重启（计数分片保留，不清空）。
+    window_secs: std::sync::atomic::AtomicU64,
     /// 默认（fallback）配额，当 `check` 不显式传 max_requests 时使用。
     max_requests: u64,
     shards: Vec<Shard>,
@@ -76,10 +78,21 @@ impl RateLimiter {
             })
             .collect();
         Self {
-            window_secs,
+            window_secs: std::sync::atomic::AtomicU64::new(window_secs),
             max_requests,
             shards,
         }
+    }
+
+    /// 当前窗口秒数（热更安全读取）。
+    pub fn window_secs(&self) -> u64 {
+        self.window_secs.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// 运行时热更窗口秒数（admin 保存限流配置时调用，已累计的计数分片保留）。
+    pub fn set_window_secs(&self, secs: u64) {
+        self.window_secs
+            .store(secs, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// 兼容旧调用：按 IP 限流，使用构造时的默认 max_requests。
@@ -102,7 +115,7 @@ impl RateLimiter {
         let per_shard_max = max_entries / NUM_SHARDS + 1;
 
         if map.len() >= per_shard_max && !map.contains_key(key) {
-            map.retain(|_, v| now.duration_since(v.window_start).as_secs() < self.window_secs);
+            map.retain(|_, v| now.duration_since(v.window_start).as_secs() < self.window_secs());
             if map.len() >= per_shard_max {
                 return RateLimitResult {
                     allowed: false,
@@ -112,7 +125,7 @@ impl RateLimiter {
                         .duration_since(UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_secs()
-                        + self.window_secs,
+                        + self.window_secs(),
                 };
             }
         }
@@ -122,7 +135,7 @@ impl RateLimiter {
             window_start: now,
         });
 
-        if now.duration_since(entry.window_start).as_secs() >= self.window_secs {
+        if now.duration_since(entry.window_start).as_secs() >= self.window_secs() {
             entry.count = 0;
             entry.window_start = now;
         }
@@ -134,7 +147,7 @@ impl RateLimiter {
 
         let remaining = max_requests.saturating_sub(entry.count);
         let elapsed = now.duration_since(entry.window_start).as_secs();
-        let reset_after = self.window_secs.saturating_sub(elapsed);
+        let reset_after = self.window_secs().saturating_sub(elapsed);
         let reset_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -154,7 +167,7 @@ impl RateLimiter {
         for shard in &self.shards {
             let mut map = shard.map.lock().await;
             map.retain(|_, value| {
-                now.duration_since(value.window_start).as_secs() <= self.window_secs * 2
+                now.duration_since(value.window_start).as_secs() <= self.window_secs() * 2
             });
         }
     }
@@ -262,7 +275,8 @@ pub async fn rate_limit_middleware(
             )
                 .into_response();
             apply_rate_limit_headers(&mut response, &result);
-            if let Ok(v) = cfg.rate_limit.window_secs.to_string().parse() {
+            // retry-after 读限流器实时窗口（与限流判定同源 AtomicU64），避免与热替换 config 撕裂。
+            if let Ok(v) = state.rate_limit().limiter.window_secs().to_string().parse() {
                 response.headers_mut().insert("retry-after", v);
             }
             return Ok(response);
@@ -310,7 +324,8 @@ pub async fn rate_limit_middleware(
             .into_response();
 
         apply_rate_limit_headers(&mut response, &result);
-        if let Ok(v) = state.config().rate_limit.window_secs.to_string().parse() {
+        // retry-after 读限流器实时窗口（与限流判定同源 AtomicU64），避免与热替换 config 撕裂。
+        if let Ok(v) = state.rate_limit().limiter.window_secs().to_string().parse() {
             response.headers_mut().insert("retry-after", v);
         }
         return Ok(response);
@@ -471,10 +486,17 @@ pub async fn auth_rate_limit_middleware(
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map(|ci| ci.0.ip());
-    let ip = extract_client_ip(req.headers(), state.config().trust_proxy, connect_ip);
-    let max_entries = state.config().limits.rate_limit_max_entries;
+    let cfg = state.config();
+    let ip = extract_client_ip(req.headers(), cfg.trust_proxy, connect_ip);
+    let max_entries = cfg.limits.rate_limit_max_entries;
     // 认证端点（登录/注册）天然是匿名前置场景，永远按 IP 限流。
-    let result = state.auth_rate_limit().limiter.check(ip, max_entries).await;
+    // 用 check_with_max 显式传 config 的 max_requests（每请求读，热替换即时生效），与通用 /
+    // 遥测限流器一致；不走 check() 的烘焙 self.max_requests（那样 authMaxRequests 改了不生效）。
+    let result = state
+        .auth_rate_limit()
+        .limiter
+        .check_with_max(&ip_key(ip), max_entries, cfg.auth_rate_limit.max_requests)
+        .await;
 
     if !result.allowed {
         let mut response = (
@@ -489,10 +511,11 @@ pub async fn auth_rate_limit_middleware(
             .into_response();
 
         apply_rate_limit_headers(&mut response, &result);
+        // retry-after 读限流器实时窗口（与限流判定同源 AtomicU64），避免与热替换 config 撕裂。
         if let Ok(v) = state
-            .config()
-            .auth_rate_limit
-            .window_secs
+            .auth_rate_limit()
+            .limiter
+            .window_secs()
             .to_string()
             .parse()
         {
@@ -919,8 +942,8 @@ mod tests {
     #[test]
     fn rate_limit_state_constructors_work() {
         let s = RateLimitState::new(60, 100);
-        assert_eq!(s.limiter.window_secs, 60);
+        assert_eq!(s.limiter.window_secs(), 60);
         let a = AuthRateLimitState::new(30, 10);
-        assert_eq!(a.limiter.window_secs, 30);
+        assert_eq!(a.limiter.window_secs(), 30);
     }
 }

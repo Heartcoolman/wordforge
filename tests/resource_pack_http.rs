@@ -480,26 +480,15 @@ async fn admin_resource_pack_handlers_write_audit_log() {
     )
     .await;
 
-    // 反查 history
-    let resp = request(
-        &app.app,
-        Method::GET,
-        "/api/admin/updates/history",
-        None,
-        &[("authorization", auth_header(&admin))],
-    )
-    .await;
-    let (status, _, body) = response_json(resp).await;
-    assert_eq!(status, StatusCode::OK);
-    let entries = body["data"]["entries"].as_array().expect("entries");
-    let pack_entries: Vec<&serde_json::Value> = entries
-        .iter()
-        .filter(|e| e["targetType"] == "resource_pack")
-        .collect();
-    let actions: Vec<&str> = pack_entries
-        .iter()
-        .filter_map(|e| e["action"].as_str())
-        .collect();
+    // 反查审计：resource_pack 目标审计经 list_admin_audit_for_target 落库。/updates/history 自
+    // beta.3 起仅含升级/回滚（self_update/rollback），不再混入资源包等 admin 操作，故此处直查
+    // store（与实际审计查询路径一致），而非已收窄的升级历史端点。
+    let audits = app
+        .state
+        .store()
+        .list_admin_audit_for_target("resource_pack", "wordbook-core", 50)
+        .expect("list resource_pack audit");
+    let actions: Vec<&str> = audits.iter().map(|e| e.action.as_str()).collect();
     assert!(
         actions.contains(&"resource_pack.upload"),
         "缺 upload audit：{actions:?}"
@@ -513,12 +502,11 @@ async fn admin_resource_pack_handlers_write_audit_log() {
         "缺 deactivate audit：{actions:?}"
     );
 
-    // 任意 resource_pack 条目都应 targetId=wordbook-core / outcome=success
-    for e in &pack_entries {
-        assert_eq!(e["targetId"], "wordbook-core");
-        assert_eq!(e["outcome"], "success");
-        // metadata 序列化为字符串列，应能反解出原 JSON
-        let m = e["metadataJson"].as_str().expect("metadataJson 字符串");
+    // 任意 resource_pack 条目都应 targetId=wordbook-core / outcome=success，metadata 可反解
+    for e in &audits {
+        assert_eq!(e.target_id.as_deref(), Some("wordbook-core"));
+        assert_eq!(e.outcome, "success");
+        let m = e.metadata_json.as_deref().expect("metadataJson");
         let _: serde_json::Value = serde_json::from_str(m).expect("metadata 必须合法 JSON");
     }
 }

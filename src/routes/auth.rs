@@ -99,16 +99,19 @@ const MAX_SESSIONS_PER_USER: usize = 10;
 /// Issue an access + refresh token pair and persist the access session.
 async fn issue_token_pair(user_id: &str, state: &AppState) -> Result<(String, String), AppError> {
     let user_id = user_id.to_string();
+    // 单快照：令牌 exp 与会话 expires_at 用同一 config，避免并发 swap_config 期间二者被撕裂
+    // （热改 TTL 时签出的令牌 exp 与落库会话有效期不一致）。
+    let config = state.config();
     let access_token = sign_jwt_for_user(
         &user_id,
-        &state.config().jwt_secret,
-        state.config().jwt_expires_in_hours,
+        &config.jwt_secret,
+        config.jwt_expires_in_hours,
     )?;
 
     let refresh_token = sign_refresh_token_for_user(
         &user_id,
-        &state.config().refresh_jwt_secret,
-        state.config().refresh_token_expires_in_hours,
+        &config.refresh_jwt_secret,
+        config.refresh_token_expires_in_hours,
     )?;
 
     let access_session = Session {
@@ -116,7 +119,7 @@ async fn issue_token_pair(user_id: &str, state: &AppState) -> Result<(String, St
         user_id: user_id.clone(),
         token_type: "user".to_string(),
         created_at: Utc::now(),
-        expires_at: Utc::now() + Duration::hours(state.config().jwt_expires_in_hours as i64),
+        expires_at: Utc::now() + Duration::hours(config.jwt_expires_in_hours as i64),
         revoked: false,
     };
 
@@ -125,8 +128,7 @@ async fn issue_token_pair(user_id: &str, state: &AppState) -> Result<(String, St
         user_id: user_id.clone(),
         token_type: "refresh".to_string(),
         created_at: Utc::now(),
-        expires_at: Utc::now()
-            + Duration::hours(state.config().refresh_token_expires_in_hours as i64),
+        expires_at: Utc::now() + Duration::hours(config.refresh_token_expires_in_hours as i64),
         revoked: false,
     };
 

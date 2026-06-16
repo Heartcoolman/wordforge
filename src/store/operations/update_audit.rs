@@ -98,6 +98,22 @@ impl Store {
         Ok(())
     }
 
+    /// 启动期对账：自更新 / 回滚成功后进程通过 `std::process::exit(0)` 重启，
+    /// `complete_update_audit` 来不及执行，审计会卡在 `in_progress`；而失败的升级因
+    /// `apply` 返回 Err、进程不退出，已被标 `failed`。故启动时残留的 in_progress
+    /// 自更新 / 回滚审计实为「已成功但未记录」，批量收尾为 success。返回收尾行数。
+    pub fn reconcile_stale_update_audits(&self) -> Result<usize, StoreError> {
+        let conn = self.conn()?;
+        let now = chrono::Utc::now().to_rfc3339();
+        let n = conn.execute(
+            "UPDATE update_audit_log
+             SET outcome = 'success', completed_at = COALESCE(completed_at, ?1)
+             WHERE outcome = 'in_progress' AND action IN ('self_update', 'rollback')",
+            params![now],
+        )?;
+        Ok(n)
+    }
+
     /// v1.1-P2.10：写入一条 admin 敏感操作审计记录，一次写入即终态。
     ///
     /// 失败时只 log 警告、不抛错（调用方都用 `let _ = ...` 包），避免审计写入失败
@@ -335,5 +351,29 @@ mod tests {
         let list = s.list_update_audit(10).unwrap();
         assert_eq!(list.len(), 1, "admin 审计不应出现在升级历史");
         assert_eq!(list[0].action, "self_update");
+    }
+
+    /// 启动对账：残留 in_progress 的自更新/回滚收尾为 success；已终态 / 非升级行不动。
+    #[test]
+    fn reconcile_marks_stale_in_progress_success() {
+        let s = store();
+        s.insert_update_audit("up-1", "a", "v1.0.0", "v1.1.0", "stable")
+            .unwrap(); // in_progress
+        s.insert_update_audit_with_action("rb-1", "a", "v1.1.0", "v1.0.0", "stable", "rollback")
+            .unwrap(); // in_progress
+        // 已终态(failed)不应被改回
+        s.insert_update_audit("up-2", "a", "v1.1.0", "v1.2.0", "stable")
+            .unwrap();
+        s.complete_update_audit("up-2", "failed", Some("x")).unwrap();
+
+        let n = s.reconcile_stale_update_audits().unwrap();
+        assert_eq!(n, 2, "仅 2 条 in_progress 自更新/回滚被收尾");
+
+        let list = s.list_update_audit(10).unwrap();
+        let by = |id: &str| list.iter().find(|e| e.id == id).unwrap().outcome.clone();
+        assert_eq!(by("up-1"), "success");
+        assert_eq!(by("rb-1"), "success");
+        assert_eq!(by("up-2"), "failed", "已 failed 的不应被改");
+        assert!(list.iter().find(|e| e.id == "up-1").unwrap().completed_at.is_some());
     }
 }

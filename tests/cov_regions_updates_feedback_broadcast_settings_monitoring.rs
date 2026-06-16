@@ -892,6 +892,70 @@ async fn settings_config_put_known_passthrough_section_ok() {
 }
 
 #[tokio::test]
+async fn settings_config_live_sections_always_present() {
+    // m036:运行时热更 section 由 Config 投影下发，即使从未 PUT 过也不空（修复"配置板块"空页）。
+    let app = spawn_test_server().await;
+    let token = setup_admin_and_get_token(&app.app).await;
+    let resp = request(&app.app, Method::GET, &format!("{ST}/config"), None, &h(&token)).await;
+    let (status, _, body) = response_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "body={body}");
+    let sections = body["data"]["sections"].as_array().expect("sections array");
+    for key in ["live-ratelimit", "live-limits", "live-auth"] {
+        assert!(
+            sections.iter().any(|s| s["section"] == key),
+            "缺少 live section {key}，body={body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn settings_config_put_live_section_reflects_in_get() {
+    // m036:PUT live section → 校验+热替换+持久化；GET 投影应反映新值。
+    let app = spawn_test_server().await;
+    let token = setup_admin_and_get_token(&app.app).await;
+    let resp = request(
+        &app.app,
+        Method::PUT,
+        &format!("{ST}/config/live-limits"),
+        Some(serde_json::json!({ "maxBatchSize": 123, "defaultPageSize": 25, "maxPageSize": 250 })),
+        &h(&token),
+    )
+    .await;
+    let (status, _, body) = response_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "body={body}");
+    assert_eq!(body["data"]["json"]["maxBatchSize"], 123);
+
+    let resp = request(&app.app, Method::GET, &format!("{ST}/config"), None, &h(&token)).await;
+    let (status, _, body) = response_json(resp).await;
+    assert_eq!(status, StatusCode::OK);
+    let sections = body["data"]["sections"].as_array().expect("sections array");
+    let live = sections
+        .iter()
+        .find(|s| s["section"] == "live-limits")
+        .expect("live-limits present");
+    assert_eq!(live["json"]["maxBatchSize"], 123);
+    assert_eq!(live["json"]["defaultPageSize"], 25);
+}
+
+#[tokio::test]
+async fn settings_config_put_live_section_out_of_range_returns_400() {
+    // m036:0 配额越界（下界 1，防锁死全站）→ 400 FIELD_OUT_OF_RANGE。
+    let app = spawn_test_server().await;
+    let token = setup_admin_and_get_token(&app.app).await;
+    let resp = request(
+        &app.app,
+        Method::PUT,
+        &format!("{ST}/config/live-ratelimit"),
+        Some(serde_json::json!({ "apiAnonMaxRequests": 0 })),
+        &h(&token),
+    )
+    .await;
+    let (status, _, body) = response_json(resp).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={body}");
+    assert_eq!(body["code"], "FIELD_OUT_OF_RANGE");
+}
+
+#[tokio::test]
 async fn settings_snapshot_label_too_long_returns_400() {
     let app = spawn_test_server().await;
     let token = setup_admin_and_get_token(&app.app).await;
