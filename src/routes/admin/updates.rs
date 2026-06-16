@@ -197,7 +197,9 @@ async fn apply(
     let target = req.target_version.clone();
     let channel = req.channel;
     // M0-R3：构造子进程健康自检 URL
-    let health_url = format!("http://127.0.0.1:{}/health", state.config().port);
+    // v1.2.0-beta.9：watcher 探针用 /health/live（存活探针，不受维护模式 503 影响）。
+    // 升级换包会短暂开维护模式，若探 /health 会拿到 503 而误判新版本不健康 → 误回滚。
+    let health_url = format!("http://127.0.0.1:{}/health/live", state.config().port);
     // watcher 子进程 finalize audit 用的真实 DB 路径（= 运行时 database_url，绝对化以防 watcher CWD 不同）。
     let bg_audit_db_path = {
         let p = state.config().database_url.clone();
@@ -465,7 +467,9 @@ async fn rollback(
     let bg_store = state.store().clone();
     let target = req.target_version.clone();
     let channel = req.channel;
-    let health_url = format!("http://127.0.0.1:{}/health", state.config().port);
+    // v1.2.0-beta.9：watcher 探针用 /health/live（存活探针，不受维护模式 503 影响）。
+    // 升级换包会短暂开维护模式，若探 /health 会拿到 503 而误判新版本不健康 → 误回滚。
+    let health_url = format!("http://127.0.0.1:{}/health/live", state.config().port);
     let bg_audit_db_path = {
         let p = state.config().database_url.clone();
         std::fs::canonicalize(&p).unwrap_or_else(|_| std::path::PathBuf::from(p))

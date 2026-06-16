@@ -1589,13 +1589,23 @@ fn spawn_watcher_then_exit_parent(args: WatcherArgs) -> ! {
         // child = watcher
         unsafe {
             libc::setsid();
+            // v1.2.0-beta.9 关键修复:关闭从父进程继承的所有 fd——**尤其是监听 socket**。
+            // KillMode=process 让 watcher 存活后,它继承的 listening socket fd 会一直占着端口,
+            // systemd 重启的新版本无法 bind(AddrInUse)→ 健康探测失败 → 每次升级都被误回滚。
+            // close() 是 async-signal-safe;监听 socket / 连接池 fd 均为低位,8192 上限足够覆盖。
+            // run_watcher 只用 curl 子进程 + 新开 sqlite 连接 + 文件操作,不依赖任何继承 fd。
+            for fd in 3..8192 {
+                libc::close(fd);
+            }
             // 关 stdio：避免 watcher 的输出污染 systemd journal 接管的新主进程
             let null = libc::open(c"/dev/null".as_ptr(), libc::O_RDWR);
             if null >= 0 {
                 libc::dup2(null, 0);
                 libc::dup2(null, 1);
                 libc::dup2(null, 2);
-                libc::close(null);
+                if null > 2 {
+                    libc::close(null);
+                }
             }
         }
         run_watcher(&args);
