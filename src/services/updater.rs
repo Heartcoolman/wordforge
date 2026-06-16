@@ -829,8 +829,13 @@ impl Updater {
         //   3. watcher 独立 sleep 10s 给 systemd + binary 启动留时间
         //   4. watcher 60s loop 探 /health：
         //      - 通过 → watcher 用 rusqlite 直接 UPDATE audit outcome=success → watcher exit
-        //      - 60s 超时 → watcher rename bin/static 回滚 v1.0 + kill 当前 main pid
+        //      - 60s 超时 → watcher rename bin/static 回滚 v1.0 + kill 当前 main pid（按 exe 锁定）
         //                  → systemd Restart 起 rolled-back v1.0 → watcher UPDATE outcome=rolled_back → exit
+        //
+        // ⚠ 存活前提（v1.2.0-beta.7）：unit 须 KillMode=process。默认 control-group 会在 parent
+        //   exit(0) 触发 restart 时把 watcher 一并杀掉，使其永远写不到终态（outcome 停在
+        //   applied_pending_watcher，升级历史显示「进行中」，且坏升级无自动回滚）。启动期
+        //   reconcile_stale_update_audits 仅兜底「显示」，回滚安全网仍依赖 watcher 真正存活。
         progress(UpdatePhase::Restarting);
         progress(UpdatePhase::HealthChecking);
         let watcher_args = WatcherArgs {
@@ -1633,6 +1638,12 @@ fn watcher_probe_health(url: &str) -> bool {
 /// 回滚 binary + static + 清 maintenance flag + kill 当前 wordforge 主进程
 /// 让 systemd Restart=always 接管起 rolled-back binary。
 fn watcher_rollback(args: &WatcherArgs) {
+    // 0. 先按 /proc/<pid>/exe 锁定「当前正在运行 bin_path 的进程」（即 systemd 重启后的
+    //    新主进程，待回滚的坏版本）。必须在改名前抓，改名后其 exe 会指向 .failed 路径而漏判。
+    //    旧实现 kill 的是 fork 前捕获的父 pid——父早已 exit(0)，该 pid 失效甚至被回收，
+    //    会导致回滚换好文件却杀不掉坏进程（systemd 不重启，回滚不生效）。
+    let victims = find_pids_running_exe(&args.bin_path);
+
     // 1. binary：失败版本标 .failed 保留（forensics），备份 → 现役
     let failed_bin = args
         .install_dir
@@ -1656,13 +1667,58 @@ fn watcher_rollback(args: &WatcherArgs) {
     // 3. 清 maintenance flag（M0-R4：新进程启动时也会清，双保险）
     let _ = std::fs::remove_file(&args.flag_path);
 
-    // 4. kill fork 前捕获的主进程 PID，让 systemd Restart=always 起 rolled-back
+    // 4. kill 步骤 0 锁定的当前主进程，让 systemd Restart=always 起 rolled-back binary。
+    //    KillMode=process 下 systemd 只对主进程发信号，本 watcher 不在杀戮范围、可存活到写终态。
     #[cfg(unix)]
-    if args.parent_pid > 0 {
-        unsafe {
-            libc::kill(args.parent_pid, libc::SIGTERM);
+    {
+        let self_pid = unsafe { libc::getpid() };
+        let mut killed = 0;
+        for pid in &victims {
+            if *pid != self_pid && *pid > 0 {
+                unsafe { libc::kill(*pid, libc::SIGTERM) };
+                killed += 1;
+            }
+        }
+        if killed == 0 {
+            // 兜底：exe 匹配为空（异常）才退回旧的 parent_pid，但其多半已失效。
+            if args.parent_pid > 0 {
+                unsafe { libc::kill(args.parent_pid, libc::SIGTERM) };
+            }
+            tracing::warn!(
+                bin_path = ?args.bin_path,
+                parent_pid = args.parent_pid,
+                "watcher 回滚：未按 exe 匹配到运行中的主进程，回退 kill parent_pid（可能已失效）"
+            );
         }
     }
+}
+
+/// 扫描 /proc，返回 `/proc/<pid>/exe` 解析后等于 `exe_path` 的所有进程 pid（Linux）。
+/// 用于 watcher 回滚时精确定位「当前运行该二进制」的主进程，避免依赖已失效的旧 pid
+/// 或脆弱的命令行子串匹配。非 Linux 返回空（回滚退回 parent_pid 兜底）。
+#[cfg(unix)]
+fn find_pids_running_exe(exe_path: &Path) -> Vec<i32> {
+    let target = std::fs::canonicalize(exe_path).unwrap_or_else(|_| exe_path.to_path_buf());
+    let mut pids = Vec::new();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return pids;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Ok(pid) = name.parse::<i32>() else {
+            continue;
+        };
+        let exe_link = format!("/proc/{pid}/exe");
+        if let Ok(resolved) = std::fs::read_link(&exe_link) {
+            // 现役二进制未被删除，read_link 直接等于 bin_path；canonicalize 兜底符号链接差异。
+            let resolved = std::fs::canonicalize(&resolved).unwrap_or(resolved);
+            if resolved == target {
+                pids.push(pid);
+            }
+        }
+    }
+    pids
 }
 
 /// rusqlite 直接 UPDATE audit_log。失败静默：watcher 不应因写 audit_log 失败导致回滚流程失败。
@@ -1711,6 +1767,21 @@ fn watcher_update_audit_outcome(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// watcher 回滚靠 exe 匹配定位当前主进程：Linux 上须能定位到自身 pid；
+    /// 非 Linux（macOS CI 无 /proc）须优雅返回空、不 panic。
+    #[cfg(unix)]
+    #[test]
+    fn find_pids_running_exe_locates_self_or_empty() {
+        let me = std::env::current_exe().expect("current_exe");
+        let pids = find_pids_running_exe(&me);
+        if std::path::Path::new("/proc/self/exe").exists() {
+            let self_pid = unsafe { libc::getpid() };
+            assert!(pids.contains(&self_pid), "Linux 应定位到自身 pid");
+        } else {
+            assert!(pids.is_empty(), "无 /proc 时应返回空");
+        }
+    }
 
     #[test]
     fn is_strictly_newer_basic() {

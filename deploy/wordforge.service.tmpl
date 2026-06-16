@@ -25,6 +25,12 @@ Environment=MALLOC_ARENA_MAX=2
 Restart=always
 RestartSec=5
 TimeoutStopSec=15
+# v1.2.0-beta.7：自更新的 watcher 子进程做 60s 健康监督 + 失败自动回滚。默认
+# KillMode=control-group 会在父进程 exit(0) 触发 restart 时连同整个 cgroup 杀掉
+# watcher，使其永远来不及写终态 / 执行回滚（升级历史卡「进行中」，坏升级无安全网）。
+# process 模式只对主进程发信号、保留子进程，watcher 得以跨重启存活完成职责。
+# 主进程是单进程多线程，无其它常驻子进程，故不影响正常 stop/restart。
+KillMode=process
 User={{SVC_USER}}
 Group={{SVC_USER}}
 NoNewPrivileges=true

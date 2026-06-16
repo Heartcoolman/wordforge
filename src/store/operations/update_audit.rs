@@ -98,17 +98,23 @@ impl Store {
         Ok(())
     }
 
-    /// 启动期对账：自更新 / 回滚成功后进程通过 `std::process::exit(0)` 重启，
-    /// `complete_update_audit` 来不及执行，审计会卡在 `in_progress`；而失败的升级因
-    /// `apply` 返回 Err、进程不退出，已被标 `failed`。故启动时残留的 in_progress
-    /// 自更新 / 回滚审计实为「已成功但未记录」，批量收尾为 success。返回收尾行数。
+    /// 启动期对账：自更新 / 回滚成功后进程通过 `std::process::exit(0)` 重启，终态由
+    /// watcher 子进程异步写入。两个非终态会被遗留：
+    ///   - `in_progress`：apply 在换二进制前就 exit（极少）。
+    ///   - `applied_pending_watcher`：apply 已换好二进制、待 watcher 健康确认即写的中间态。
+    ///     而 watcher 是 parent 的 detached 子进程，systemd 默认 `KillMode=control-group`，
+    ///     parent exit(0) 触发 restart 时整个 cgroup 被清，watcher 往往在写 success/rolled_back
+    ///     前即被杀 → 审计永久停在该中间态（升级历史显示「进行中」）。
+    /// 失败的升级因 `apply` 返回 Err、进程不退出，已被标 `failed`，不在此列。故启动时
+    /// 残留的这两类自更新 / 回滚审计实为「已成功但未记录」，批量收尾为 success。返回收尾行数。
     pub fn reconcile_stale_update_audits(&self) -> Result<usize, StoreError> {
         let conn = self.conn()?;
         let now = chrono::Utc::now().to_rfc3339();
         let n = conn.execute(
             "UPDATE update_audit_log
              SET outcome = 'success', completed_at = COALESCE(completed_at, ?1)
-             WHERE outcome = 'in_progress' AND action IN ('self_update', 'rollback')",
+             WHERE outcome IN ('in_progress', 'applied_pending_watcher')
+               AND action IN ('self_update', 'rollback')",
             params![now],
         )?;
         Ok(n)
@@ -353,7 +359,8 @@ mod tests {
         assert_eq!(list[0].action, "self_update");
     }
 
-    /// 启动对账：残留 in_progress 的自更新/回滚收尾为 success；已终态 / 非升级行不动。
+    /// 启动对账：残留 in_progress / applied_pending_watcher 的自更新/回滚收尾为 success；
+    /// 已终态 / 非升级行不动。
     #[test]
     fn reconcile_marks_stale_in_progress_success() {
         let s = store();
@@ -361,18 +368,24 @@ mod tests {
             .unwrap(); // in_progress
         s.insert_update_audit_with_action("rb-1", "a", "v1.1.0", "v1.0.0", "stable", "rollback")
             .unwrap(); // in_progress
+        // watcher 被 cgroup 杀掉、停在中间态的真实卡死场景
+        s.insert_update_audit("up-pw", "a", "v1.1.0", "v1.2.0", "stable")
+            .unwrap();
+        s.complete_update_audit("up-pw", "applied_pending_watcher", None)
+            .unwrap();
         // 已终态(failed)不应被改回
         s.insert_update_audit("up-2", "a", "v1.1.0", "v1.2.0", "stable")
             .unwrap();
         s.complete_update_audit("up-2", "failed", Some("x")).unwrap();
 
         let n = s.reconcile_stale_update_audits().unwrap();
-        assert_eq!(n, 2, "仅 2 条 in_progress 自更新/回滚被收尾");
+        assert_eq!(n, 3, "in_progress×2 + applied_pending_watcher×1 被收尾");
 
         let list = s.list_update_audit(10).unwrap();
         let by = |id: &str| list.iter().find(|e| e.id == id).unwrap().outcome.clone();
         assert_eq!(by("up-1"), "success");
         assert_eq!(by("rb-1"), "success");
+        assert_eq!(by("up-pw"), "success", "applied_pending_watcher 应被收尾");
         assert_eq!(by("up-2"), "failed", "已 failed 的不应被改");
         assert!(list.iter().find(|e| e.id == "up-1").unwrap().completed_at.is_some());
     }
