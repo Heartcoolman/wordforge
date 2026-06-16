@@ -104,7 +104,7 @@ check STRICT_MODE_HARD_BLOCK        "false"
 check RECORDS_OUTBOX_ASYNC          "false"
 
 # --- Probe ---
-check PROBE_ENABLED                 "false"
+check PROBE_ENABLED                 "true"
 check PROBE_RATE_LIMIT_PER_MIN      "10"
 check PROBE_MAX_TIMEOUT_MS          "10000"
 check PROBE_DEFAULT_TIMEOUT_MS      "3000"
