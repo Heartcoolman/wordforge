@@ -1,962 +1,921 @@
-import { createSignal, createResource, createMemo, createEffect, Show, For, onMount } from 'solid-js';
-import { Modal } from '@/components/ui/Modal';
-import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
-import { Input } from '@/components/ui/Input';
-import { Empty } from '@/components/ui/Empty';
-import { Spinner } from '@/components/ui/Spinner';
-import { uiStore } from '@/stores/ui';
+import { createSignal, createResource, createEffect, createMemo, Show, For, type JSX } from 'solid-js';
+import {
+  Btn, IconBtn, Badge, Card, Field, Tabs, Empty, Skel, Loading, Spinner,
+  Modal, Confirm, Progress, PageHead, Icon, fmtNum, fmtAgo, sx, toast,
+} from '@/components/wf';
 import { adminApi } from '@/api/admin';
 import type {
-  WordbookSummary, WordbookType, WordbookTypeFilter, WordbookSortKey,
-  WordEntrySort, WordbookExport,
+  WordbookSummary, WordbookType, WordbookSortKey, WordbookTypeFilter, WordEntrySort,
+  WordbookListResponse, WordbookStats, WordEntriesPage, WordbookHeatmap,
+  WordbookUserDistribution, WordbookAuditPage, WordbookExport,
 } from '@/types/adminWordbooks';
-import type { BrowseItem, WordbookPreview, UpdateInfo } from '@/types/wordbookCenter';
-import './wordbookCenter.css';
+import type { BrowseItem, UpdateInfo, WordbookPreview } from '@/types/wordbookCenter';
 
-type DetailTab = 'words' | 'heatmap' | 'distribution' | 'history';
+/* ---------- helpers (ported from handoff MetricBox / SimpleList) ---------- */
 
-const COVER_CLASSES = ['c-1', 'c-2', 'c-3', 'c-4', 'c-5', 'c-6'];
-function coverClass(id: string): string {
-  let h = 0;
-  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
-  return COVER_CLASSES[h % COVER_CLASSES.length];
+function MetricBox(props: { label: string; value: JSX.Element | string | number }) {
+  return (
+    <div style={sx({ padding: '11px 12px', borderRadius: 11, background: 'var(--surface-sunken)', border: '1px solid var(--hairline)' })}>
+      <div class="muted-3" style={sx({ fontSize: 10.5 })}>{props.label}</div>
+      <div class="tnum" style={sx({ fontSize: 18, fontWeight: 700, marginTop: 2 })}>{props.value}</div>
+    </div>
+  );
 }
-function coverText(name: string): string {
-  const t = name.trim();
-  if (!t) return '#';
-  // 中文取首字;英文取前 4 字符大写
-  return /[a-zA-Z0-9]/.test(t[0]) ? t.slice(0, 4).toUpperCase() : t.slice(0, 2);
-}
-function fmtNum(n: number): string {
-  return n.toLocaleString('en-US');
-}
-function relTime(iso: string): string {
-  const t = Date.parse(iso);
-  if (Number.isNaN(t)) return iso;
-  const d = (Date.now() - t) / 1000;
-  if (d < 60) return '刚刚';
-  if (d < 3600) return `${Math.floor(d / 60)} 分钟前`;
-  if (d < 86400) return `${Math.floor(d / 3600)} 小时前`;
-  if (d < 86400 * 30) return `${Math.floor(d / 86400)} 天前`;
-  return new Date(t).toLocaleDateString('zh-CN');
-}
-function fmtDate(iso: string): string {
-  const t = Date.parse(iso);
-  return Number.isNaN(t) ? iso : new Date(t).toLocaleDateString('zh-CN');
-}
-function accClass(acc?: number | null): string {
-  if (acc == null) return '';
-  if (acc >= 0.6) return 'acc-good';
-  if (acc >= 0.45) return 'acc-mid';
-  return 'acc-bad';
-}
+
 const ACTION_LABEL: Record<string, string> = {
   create: '创建', update: '编辑', delete: '删除', add_word: '添加词条',
   remove_word: '移除词条', import: '导入', sync: '同步',
 };
 
-const PER_PAGE_WORDS = 20;
+const DETAIL_TABS = [
+  { value: 'words', label: '词条' },
+  { value: 'heatmap', label: '掌握热图' },
+  { value: 'distrib', label: '用户分布' },
+  { value: 'history', label: '变更记录' },
+];
+
+const PER_PAGE_WORDS = 30;
+
+const CSV_TEMPLATE = `word,pos,ipa,gloss_zh,example
+tenacious,adj.,/tɪˈneɪʃəs/,坚韧的,She was tenacious…
+ephemeral,adj.,/ɪˈfɛmərəl/,短暂的,Fame can be…`;
+
+/* ---------- page ---------- */
 
 export default function WordbookCenterPage() {
-  // ── 左列表筛选 ──
+  const [selected, setSelected] = createSignal<WordbookSummary | null>(null);
+  const [tab, setTab] = createSignal<string>('words');
   const [search, setSearch] = createSignal('');
   const [typeFilter, setTypeFilter] = createSignal<WordbookTypeFilter>('all');
   const [sort, setSort] = createSignal<WordbookSortKey>('hottest');
-  const [selectedId, setSelectedId] = createSignal<string | null>(null);
 
-  const [listRes, { refetch: refetchList }] = createResource(
-    () => ({ search: search().trim(), type: typeFilter(), sort: sort() }),
-    (q) => adminApi.adminWordbooksList({ ...q, perPage: 200 }).catch(() => ({
-      items: [], total: 0, page: 1, perPage: 200, totalPages: 1,
-      counts: { all: 0, system: 0, user: 0, totalEntries: 0 },
-    })),
-  );
-
-  const items = () => listRes()?.items ?? [];
-  const counts = () => listRes()?.counts;
-  const selected = createMemo(() => items().find((w) => w.id === selectedId()) ?? null);
-
-  // 列表加载后自动选中第一项
-  createEffect(() => {
-    const list = items();
-    if (list.length > 0 && !list.some((w) => w.id === selectedId())) {
-      setSelectedId(list[0].id);
-    }
-  });
-
-  // ── 右侧详情数据源(随 selectedId 变化拉取) ──
-  const [statsRes] = createResource(selectedId, (id) => adminApi.adminWordbookStats(id).catch(() => null));
-
-  const [detailTab, setDetailTab] = createSignal<DetailTab>('words');
-
-  // 词条 tab 过滤 + 分页
-  const [wordSearch, setWordSearch] = createSignal('');
-  const [wordSort, setWordSort] = createSignal<WordEntrySort>('frequency');
-  const [wordPos, setWordPos] = createSignal('');
-  const [wordPage, setWordPage] = createSignal(1);
-
-  const [wordsRes] = createResource(
-    () => {
-      const id = selectedId();
-      if (!id) return null;
-      return { id, search: wordSearch().trim(), sort: wordSort(), pos: wordPos(), page: wordPage() };
-    },
-    (q) => adminApi.adminWordbookWords(q.id, {
-      search: q.search || undefined, sort: q.sort, pos: q.pos || undefined,
-      page: q.page, perPage: PER_PAGE_WORDS,
-    }).catch(() => null),
-  );
-
-  const [heatmapRes] = createResource(
-    () => (detailTab() === 'heatmap' ? selectedId() : null),
-    (id) => adminApi.adminWordbookHeatmap(id).catch(() => null),
-  );
-  const [distRes] = createResource(
-    () => (detailTab() === 'distribution' ? selectedId() : null),
-    (id) => adminApi.adminWordbookDistribution(id).catch(() => null),
-  );
-  const [historyRes] = createResource(
-    () => (detailTab() === 'history' ? selectedId() : null),
-    (id) => adminApi.adminWordbookHistory(id, { perPage: 100 }).catch(() => null),
-  );
-
-  // 选中切换 → 重置词条 tab 状态
-  function selectWordbook(id: string) {
-    if (id === selectedId()) return;
-    setSelectedId(id);
-    setDetailTab('words');
-    setWordSearch('');
-    setWordPos('');
-    setWordSort('frequency');
-    setWordPage(1);
-  }
-
-  // ── 新建 / 编辑 / 删除 / 添加词条 modal ──
   const [createOpen, setCreateOpen] = createSignal(false);
-  const [createDraft, setCreateDraft] = createSignal<{ name: string; description: string; type: WordbookType }>(
-    { name: '', description: '', type: 'system' },
-  );
-  const [createBusy, setCreateBusy] = createSignal(false);
-
   const [editOpen, setEditOpen] = createSignal(false);
-  const [editDraft, setEditDraft] = createSignal({ name: '', description: '' });
-  const [editBusy, setEditBusy] = createSignal(false);
+  const [delTarget, setDelTarget] = createSignal<WordbookSummary | null>(null);
+  const [delBusy, setDelBusy] = createSignal(false);
+  const [showRemote, setShowRemote] = createSignal(false);
 
-  const [deleteTarget, setDeleteTarget] = createSignal<WordbookSummary | null>(null);
-  const [deleteBusy, setDeleteBusy] = createSignal(false);
+  const [list, { refetch: reloadList }] = createResource(
+    () => ({ search: search().trim(), type: typeFilter(), sort: sort() }),
+    (q): Promise<WordbookListResponse> =>
+      adminApi.adminWordbooksList({ ...q, perPage: 200 }).catch(() => ({
+        items: [], total: 0, page: 1, perPage: 200, totalPages: 1,
+        counts: { all: 0, system: 0, user: 0, totalEntries: 0 },
+      })),
+  );
 
-  const [addWordOpen, setAddWordOpen] = createSignal(false);
-  const [addWordDraft, setAddWordDraft] = createSignal({
-    text: '', pronunciation: '', partOfSpeech: '', meaning: '', examples: '',
+  const items = () => list()?.items ?? [];
+  const counts = () => list()?.counts;
+
+  // 列表加载后自动选中第一项;选中项随刷新保持引用同步
+  createEffect(() => {
+    const arr = items();
+    const cur = selected();
+    if (arr.length === 0) { if (cur) setSelected(null); return; }
+    if (!cur) { setSelected(arr[0]); return; }
+    const fresh = arr.find((w) => w.id === cur.id);
+    if (fresh) { if (fresh !== cur) setSelected(fresh); }
+    else setSelected(arr[0]);
   });
-  const [addWordBusy, setAddWordBusy] = createSignal(false);
 
-  const [removeWordTarget, setRemoveWordTarget] = createSignal<{ id: string; text: string } | null>(null);
-  const [exporting, setExporting] = createSignal(false);
-
-  async function submitCreate() {
-    const d = createDraft();
-    if (!d.name.trim()) { uiStore.toast.error('词库名称必填'); return; }
-    setCreateBusy(true);
-    try {
-      const wb = await adminApi.adminWordbookCreate({
-        name: d.name.trim(), description: d.description.trim() || undefined, type: d.type,
-      });
-      uiStore.toast.success(`已创建「${wb.name}」`);
-      setCreateOpen(false);
-      setCreateDraft({ name: '', description: '', type: 'system' });
-      await refetchList();
-      setSelectedId(wb.id);
-    } catch (err: unknown) {
-      uiStore.toast.error('创建失败', err instanceof Error ? err.message : '');
-    } finally {
-      setCreateBusy(false);
-    }
-  }
-
-  function openEdit() {
-    const w = selected();
-    if (!w) return;
-    setEditDraft({ name: w.name, description: w.description });
-    setEditOpen(true);
-  }
-  async function submitEdit() {
-    const w = selected();
-    const d = editDraft();
-    if (!w) return;
-    if (!d.name.trim()) { uiStore.toast.error('词库名称必填'); return; }
-    setEditBusy(true);
-    try {
-      await adminApi.adminWordbookUpdate(w.id, { name: d.name.trim(), description: d.description.trim() });
-      uiStore.toast.success('已保存');
-      setEditOpen(false);
-      await refetchList();
-    } catch (err: unknown) {
-      uiStore.toast.error('保存失败', err instanceof Error ? err.message : '');
-    } finally {
-      setEditBusy(false);
-    }
+  function selectWb(wb: WordbookSummary) {
+    if (selected()?.id === wb.id) { setSelected(wb); return; }
+    setSelected(wb);
+    setTab('words');
   }
 
   async function confirmDelete() {
-    const w = deleteTarget();
-    if (!w) return;
-    setDeleteBusy(true);
+    const wb = delTarget();
+    if (!wb) return;
+    setDelBusy(true);
     try {
-      await adminApi.adminWordbookDelete(w.id);
-      uiStore.toast.success(`已删除「${w.name}」`);
-      setDeleteTarget(null);
-      if (selectedId() === w.id) setSelectedId(null);
-      await refetchList();
+      await adminApi.adminWordbookDelete(wb.id);
+      toast.success('已删除词库', wb.name);
+      if (selected()?.id === wb.id) setSelected(null);
+      setDelTarget(null);
+      await reloadList();
     } catch (err: unknown) {
-      uiStore.toast.error('删除失败', err instanceof Error ? err.message : '');
+      toast.error('删除失败', err instanceof Error ? err.message : '');
     } finally {
-      setDeleteBusy(false);
+      setDelBusy(false);
     }
   }
-
-  async function submitAddWord() {
-    const w = selected();
-    const d = addWordDraft();
-    if (!w) return;
-    if (!d.text.trim() || !d.meaning.trim()) { uiStore.toast.error('单词与释义必填'); return; }
-    setAddWordBusy(true);
-    try {
-      await adminApi.adminWordbookAddWord(w.id, {
-        text: d.text.trim(),
-        pronunciation: d.pronunciation.trim() || undefined,
-        partOfSpeech: d.partOfSpeech.trim() || undefined,
-        meaning: d.meaning.trim(),
-        examples: d.examples.trim() ? d.examples.split('\n').map((s) => s.trim()).filter(Boolean) : undefined,
-      });
-      uiStore.toast.success(`已添加「${d.text.trim()}」`);
-      setAddWordOpen(false);
-      setAddWordDraft({ text: '', pronunciation: '', partOfSpeech: '', meaning: '', examples: '' });
-      setWordPage(1);
-      await refetchList();
-    } catch (err: unknown) {
-      uiStore.toast.error('添加失败', err instanceof Error ? err.message : '');
-    } finally {
-      setAddWordBusy(false);
-    }
-  }
-
-  async function confirmRemoveWord() {
-    const w = selected();
-    const target = removeWordTarget();
-    if (!w || !target) return;
-    try {
-      await adminApi.adminWordbookRemoveWord(w.id, target.id);
-      uiStore.toast.success(`已移除「${target.text}」`);
-      setRemoveWordTarget(null);
-      await refetchList();
-    } catch (err: unknown) {
-      uiStore.toast.error('移除失败', err instanceof Error ? err.message : '');
-    }
-  }
-
-  async function exportWordbook() {
-    const w = selected();
-    if (!w) return;
-    setExporting(true);
-    try {
-      const data: WordbookExport = await adminApi.adminWordbookExport(w.id);
-      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `${w.name || w.id}.json`;
-      a.click();
-      URL.revokeObjectURL(url);
-      uiStore.toast.success(`已导出「${w.name}」(${data.words.length} 词)`);
-    } catch (err: unknown) {
-      uiStore.toast.error('导出失败', err instanceof Error ? err.message : '');
-    } finally {
-      setExporting(false);
-    }
-  }
-
-  // ── 副标题:用 counts 拼 ──
-  const subtitle = createMemo(() => {
-    const c = counts();
-    if (!c) return '加载中…';
-    return `官方词库 ${fmtNum(c.system)} 套 · 用户自建 ${fmtNum(c.user)} 套 · 共 ${fmtNum(c.totalEntries)} 条词条。可批量编辑词义 / IPA / 例句，预览答题词频热图，导入 CSV / JSON。`;
-  });
-
-  // 词频热图:把 cells 映射成 l-0..l-5 等级
-  const heatLevel = (count: number, max: number): number => {
-    if (max <= 0 || count <= 0) return 0;
-    const r = count / max;
-    if (r > 0.8) return 5;
-    if (r > 0.6) return 4;
-    if (r > 0.4) return 3;
-    if (r > 0.2) return 2;
-    if (r > 0) return 1;
-    return 0;
-  };
-
-  const wordsTotalPages = () => wordsRes()?.totalPages ?? 1;
 
   return (
-    <div class="wbc">
-      {/* ── 页头 ── */}
-      <div class="page-header">
-        <div class="row spread wrap" style="gap:12px">
-          <div>
-            <h1 class="page-title">词库中心</h1>
-            <p class="page-desc">{subtitle()}</p>
-          </div>
-          <div class="row gap-2">
-            <button class="btn btn-secondary" disabled={!selected() || exporting()} onClick={exportWordbook}>
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-              导出
-            </button>
-            <button class="btn btn-primary" onClick={() => setCreateOpen(true)}>
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-              新建词库
-            </button>
-          </div>
-        </div>
-      </div>
+    <div>
+      <PageHead
+        title="词库中心"
+        desc="管理系统与用户词库、词条、掌握度热图，导入远程词库目录或上传本地词库。"
+        right={
+          <>
+            <Btn variant="secondary" icon="remote" onClick={() => setShowRemote((s) => !s)}>
+              {showRemote() ? '隐藏远程目录' : '远程目录'}
+            </Btn>
+            <Btn variant="primary" icon="plus" onClick={() => setCreateOpen(true)}>新建词库</Btn>
+          </>
+        }
+      />
 
-      {/* ── 主体:左列表 + 右详情 ── */}
-      <div class="wb-grid">
-        {/* LEFT */}
-        <div class="wb-list">
-          <div class="wb-list-search">
-            <div class="row gap-2">
-              <div class="input-wrap" style="flex:1">
-                <svg class="icon-leading" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
-                <input
-                  class="input has-leading"
-                  placeholder="搜索词库名 / 标签…"
-                  value={search()}
-                  onInput={(e) => setSearch(e.currentTarget.value)}
-                />
-              </div>
+      <Show when={showRemote()}>
+        <RemoteCatalog onImported={() => { void reloadList(); }} />
+      </Show>
+
+      <div style={sx({ display: 'grid', gridTemplateColumns: '300px 1fr', gap: 16 })} class="grid-collapse">
+        {/* LEFT — list */}
+        <Card pad={false} style={sx({ overflow: 'hidden', alignSelf: 'start' })}>
+          <div style={sx({ padding: '12px 14px', borderBottom: '1px solid var(--hairline)' })}>
+            <div style={sx({ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 })}>
+              <span style={sx({ fontWeight: 700, fontSize: 13 })}>
+                全部词库 <Show when={counts()}><span class="muted-3 mono" style={sx({ fontWeight: 400 })}>{counts()!.all}</span></Show>
+              </span>
             </div>
-            <div class="row gap-1 mt-2 wrap">
-              <button
-                class={`chip ${typeFilter() === 'all' ? 'chip-accent' : ''}`}
-                style="cursor:pointer"
-                onClick={() => setTypeFilter('all')}
-              >
-                全部 <span style="opacity:0.7;margin-left:2px;font-family:var(--font-mono);font-size:10.5px">{counts()?.all ?? '—'}</span>
-              </button>
-              <button
-                class={`chip ${typeFilter() === 'system' ? 'chip-accent' : ''}`}
-                style="cursor:pointer"
-                onClick={() => setTypeFilter('system')}
-              >
-                官方 <span style="opacity:0.7;margin-left:2px;font-family:var(--font-mono);font-size:10.5px">{counts()?.system ?? '—'}</span>
-              </button>
-              <button
-                class={`chip ${typeFilter() === 'user' ? 'chip-accent' : ''}`}
-                style="cursor:pointer"
-                onClick={() => setTypeFilter('user')}
-              >
-                用户 <span style="opacity:0.7;margin-left:2px;font-family:var(--font-mono);font-size:10.5px">{counts()?.user ?? '—'}</span>
-              </button>
-              <button
-                class={`chip ${sort() === 'newest' ? 'chip-accent' : ''}`}
-                style="cursor:pointer"
-                onClick={() => setSort('newest')}
-              >最新</button>
-              <button
-                class={`chip ${sort() === 'hottest' ? 'chip-accent' : ''}`}
-                style="cursor:pointer"
-                onClick={() => setSort('hottest')}
-              >最热</button>
+            <div style={sx({ position: 'relative', marginTop: 10 })}>
+              <span style={sx({ position: 'absolute', left: 9, top: '50%', transform: 'translateY(-50%)', color: 'var(--text-3)', display: 'grid', placeItems: 'center' })}>
+                <Icon name="search" size={14} />
+              </span>
+              <input
+                class="input"
+                style={sx({ width: '100%', paddingLeft: 30 })}
+                placeholder="搜索词库名 / 标签…"
+                value={search()}
+                onInput={(e) => setSearch(e.currentTarget.value)}
+              />
+            </div>
+            <div style={sx({ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 10 })}>
+              <FilterChip active={typeFilter() === 'all'} onClick={() => setTypeFilter('all')}>全部</FilterChip>
+              <FilterChip active={typeFilter() === 'system'} onClick={() => setTypeFilter('system')}>官方</FilterChip>
+              <FilterChip active={typeFilter() === 'user'} onClick={() => setTypeFilter('user')}>用户</FilterChip>
+              <span style={sx({ width: 1, alignSelf: 'stretch', background: 'var(--hairline)', margin: '0 2px' })} />
+              <FilterChip active={sort() === 'newest'} onClick={() => setSort('newest')}>最新</FilterChip>
+              <FilterChip active={sort() === 'hottest'} onClick={() => setSort('hottest')}>最热</FilterChip>
             </div>
           </div>
-          <div class="wb-list-body">
+          <div style={sx({ maxHeight: 560, overflowY: 'auto' })}>
             <Show
-              when={!listRes.loading}
-              fallback={<div class="row" style="justify-content:center;padding:48px 0"><Spinner size="lg" /></div>}
+              when={list.state !== 'pending'}
+              fallback={<div style={sx({ padding: 14 })}><Skel h={50} /><div style={sx({ height: 10 })} /><Skel h={50} /></div>}
             >
               <Show
                 when={items().length > 0}
-                fallback={<Empty title="暂无词库" description="点击右上「新建词库」创建,或在下方导入远程词库" />}
+                fallback={<div style={sx({ padding: '8px 0' })}><Empty title="暂无词库" desc="点击右上「新建词库」创建,或从远程目录导入。" icon="book" /></div>}
               >
                 <For each={items()}>
-                  {(w) => (
+                  {(wb) => (
                     <button
-                      type="button"
-                      class={`wb-item ${selectedId() === w.id ? 'is-selected' : ''}`}
-                      onClick={() => selectWordbook(w.id)}
-                      aria-label={`选择词库 ${w.name}`}
+                      onClick={() => selectWb(wb)}
+                      style={sx({
+                        width: '100%', textAlign: 'left', padding: '12px 14px', border: 'none',
+                        borderBottom: '1px solid var(--hairline)', cursor: 'pointer',
+                        background: selected()?.id === wb.id ? 'var(--accent-soft)' : 'transparent',
+                      })}
                     >
-                      <div class={`cover ${coverClass(w.id)}`}>{coverText(w.name)}</div>
-                      <div class="info">
-                        <div class="name">{w.name}</div>
-                        <div class="meta">
-                          <span>{w.type === 'system' ? '官方' : '用户'}</span>
-                          <Show when={w.type === 'user' && w.ownerEmail}>
-                            <span class="dot" /><span>{w.ownerEmail}</span>
-                          </Show>
-                          <span class="dot" /><span>{fmtNum(w.wordCount)} 词</span>
-                          <span class="dot" /><span>{fmtNum(w.activeUsers)} 在用</span>
-                        </div>
+                      <div style={sx({ display: 'flex', alignItems: 'center', gap: 7 })}>
+                        <b style={sx({ fontSize: 13, color: selected()?.id === wb.id ? 'var(--accent)' : 'var(--text)' })}>{wb.name}</b>
+                        <Show when={wb.type === 'system'} fallback={<Badge variant="default">用户</Badge>}>
+                          <Badge variant="info">系统</Badge>
+                        </Show>
                       </div>
-                      <Show when={w.type === 'system'} fallback={<span class="chip" style="font-size:10px">用户</span>}>
-                        <span class="chip chip-info" style="font-size:10px">官方</span>
-                      </Show>
+                      <div class="muted-3" style={sx({ fontSize: 11, marginTop: 3 })}>
+                        {fmtNum(wb.wordCount)} 词 · {fmtNum(wb.activeUsers)} 在用
+                        <Show when={wb.type === 'user' && wb.ownerEmail}> · {wb.ownerEmail}</Show>
+                      </div>
                     </button>
                   )}
                 </For>
               </Show>
             </Show>
           </div>
-        </div>
+        </Card>
 
-        {/* RIGHT */}
-        <div class="wb-detail">
-          <Show
-            when={selected()}
-            fallback={<Empty class="py-24" title="未选择词库" description="从左侧列表选择一个词库查看详情" />}
-          >
-            {(w) => (
-              <>
-                <div class="wb-detail-head">
-                  <div class={`cover`}>{coverText(w().name)}</div>
-                  <div class="info">
-                    <h2>{w().name}</h2>
-                    <Show when={w().description}>
-                      <p class="desc">{w().description}</p>
-                    </Show>
-                    <div class="row gap-2 mt-2 wrap">
-                      <span class={`chip ${w().type === 'system' ? 'chip-info' : ''}`}>{w().type === 'system' ? '官方' : '用户'}</span>
-                      <span class="chip chip-outline">{fmtDate(w().createdAt)}</span>
-                      <For each={w().tags}>
-                        {(tag) => <span class="chip chip-outline">{tag}</span>}
-                      </For>
-                    </div>
-                  </div>
-                  <div class="actions">
-                    <button class="btn btn-secondary" disabled={exporting()} onClick={exportWordbook}>
-                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                      导出
-                    </button>
-                    <button class="btn btn-secondary" onClick={openEdit}>
-                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
-                      编辑
-                    </button>
-                    <button class="btn btn-secondary" onClick={() => setDeleteTarget(w())} style="color:var(--error-strong)">
-                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
-                      删除
-                    </button>
-                    <button class="btn btn-primary" onClick={() => setAddWordOpen(true)}>
-                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-                      添加词条
-                    </button>
-                  </div>
-                </div>
-
-                {/* KPI */}
-                <div class="wb-stats">
-                  <div><div class="l">总词条</div><div class="v">{statsRes.loading ? '—' : fmtNum(statsRes()?.totalWords ?? 0)}</div></div>
-                  <div><div class="l">在用用户</div><div class="v">{statsRes.loading ? '—' : fmtNum(statsRes()?.activeUsers ?? 0)}</div></div>
-                  <div><div class="l">平均掌握度</div><div class="v">{statsRes.loading ? '—' : Math.round((statsRes()?.avgMastery ?? 0) * 100)}<span class="unit">%</span></div></div>
-                  <div><div class="l">本周答题</div><div class="v">{statsRes.loading ? '—' : fmtNum(statsRes()?.weeklyAnswers ?? 0)}</div></div>
-                </div>
-
-                {/* Tabs */}
-                <div class="wb-tabs">
-                  <button class={`wb-tab ${detailTab() === 'words' ? 'is-active' : ''}`} onClick={() => setDetailTab('words')}>
-                    词条 <span class="count">{fmtNum(statsRes()?.totalWords ?? w().wordCount)}</span>
-                  </button>
-                  <button class={`wb-tab ${detailTab() === 'heatmap' ? 'is-active' : ''}`} onClick={() => setDetailTab('heatmap')}>
-                    词频热图
-                  </button>
-                  <button class={`wb-tab ${detailTab() === 'distribution' ? 'is-active' : ''}`} onClick={() => setDetailTab('distribution')}>
-                    用户分布
-                  </button>
-                  <button class={`wb-tab ${detailTab() === 'history' ? 'is-active' : ''}`} onClick={() => setDetailTab('history')}>
-                    变更历史
-                  </button>
-                </div>
-
-                {/* Tab: 词条 */}
-                <Show when={detailTab() === 'words'}>
-                  <div class="row gap-2 wrap" style="padding:14px 18px 6px">
-                    <div class="input-wrap" style="max-width:280px;flex:1">
-                      <svg class="icon-leading" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
-                      <input
-                        class="input has-leading"
-                        placeholder="搜索词条 / 释义"
-                        value={wordSearch()}
-                        onInput={(e) => { setWordSearch(e.currentTarget.value); setWordPage(1); }}
-                      />
-                    </div>
-                    <select
-                      class="select" style="max-width:140px"
-                      value={wordSort()}
-                      onChange={(e) => { setWordSort(e.currentTarget.value as WordEntrySort); setWordPage(1); }}
-                    >
-                      <option value="frequency">排序：词频</option>
-                      <option value="alpha">排序：字母</option>
-                      <option value="difficulty">排序：难度</option>
-                    </select>
-                    <select
-                      class="select" style="max-width:120px"
-                      value={wordPos()}
-                      onChange={(e) => { setWordPos(e.currentTarget.value); setWordPage(1); }}
-                    >
-                      <option value="">词性：全部</option>
-                      <option value="n.">名词</option>
-                      <option value="v.">动词</option>
-                      <option value="adj.">形容词</option>
-                      <option value="adv.">副词</option>
-                    </select>
-                  </div>
-
-                  <div class="word-list">
-                    <div class="word-row-2 head">
-                      <span>词 · 音标 · 词性</span>
-                      <span>主要释义</span>
-                      <span>例句 (示例)</span>
-                      <span class="num">出现次数</span>
-                      <span class="num">正确率</span>
-                    </div>
-                    <Show
-                      when={!wordsRes.loading}
-                      fallback={<div class="row" style="justify-content:center;padding:32px 0"><Spinner /></div>}
-                    >
-                      <Show
-                        when={(wordsRes()?.data.length ?? 0) > 0}
-                        fallback={<Empty title="暂无词条" description={wordSearch() ? '无匹配结果' : '点击「添加词条」录入第一个单词'} />}
-                      >
-                        <For each={wordsRes()?.data}>
-                          {(word) => (
-                            <div class="word-row-2">
-                              <span class="word">
-                                <strong>{word.text}</strong>
-                                <Show when={word.pronunciation}><span class="ipa">{word.pronunciation}</span></Show>
-                                <Show when={word.partOfSpeech}><span class="pos">{word.partOfSpeech}</span></Show>
-                              </span>
-                              <span class="gloss">{word.meaning}</span>
-                              <span class="gloss example">{word.examples[0] ?? '—'}</span>
-                              <span class="num">{fmtNum(word.appearCount)}</span>
-                              <span class={`num ${accClass(word.accuracy)}`}>
-                                {word.accuracy == null ? '—' : `${Math.round(word.accuracy * 100)}%`}
-                                <button
-                                  class="btn-icon"
-                                  style="margin-left:8px;width:22px;height:22px"
-                                  aria-label={`移除 ${word.text}`}
-                                  title="移除词条"
-                                  onClick={() => setRemoveWordTarget({ id: word.id, text: word.text })}
-                                >
-                                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:13px;height:13px"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg>
-                                </button>
-                              </span>
-                            </div>
-                          )}
-                        </For>
-                      </Show>
-                    </Show>
-                  </div>
-
-                  <div class="row spread" style="padding:14px 18px;border-top:1px solid var(--border-hairline)">
-                    <span class="text-small text-tertiary">
-                      共 {fmtNum(wordsRes()?.total ?? 0)} 条
-                    </span>
-                    <div class="row gap-2">
-                      <button class="btn btn-ghost btn-sm" disabled={wordPage() <= 1} onClick={() => setWordPage((p) => Math.max(1, p - 1))}>‹</button>
-                      <span class="text-small tnum">{wordPage()} / {wordsTotalPages()}</span>
-                      <button class="btn btn-ghost btn-sm" disabled={wordPage() >= wordsTotalPages()} onClick={() => setWordPage((p) => Math.min(wordsTotalPages(), p + 1))}>›</button>
-                    </div>
-                  </div>
-                </Show>
-
-                {/* Tab: 词频热图 */}
-                <Show when={detailTab() === 'heatmap'}>
-                  <Show
-                    when={!heatmapRes.loading}
-                    fallback={<div class="row" style="justify-content:center;padding:48px 0"><Spinner /></div>}
-                  >
-                    <Show
-                      when={(heatmapRes()?.cells.length ?? 0) > 0}
-                      fallback={<Empty title="暂无答题数据" description="该词库下的词暂无答题记录,无法生成热图" />}
-                    >
-                      <div class="freq-grid">
-                        <For each={heatmapRes()?.cells}>
-                          {(cell) => (
-                            <div
-                              class={`freq-cell l-${heatLevel(cell.count, heatmapRes()!.maxCount)}`}
-                              title={`${cell.text} · ${fmtNum(cell.count)} 次`}
-                            />
-                          )}
-                        </For>
-                      </div>
-                      <div class="row spread" style="padding:0 18px 14px">
-                        <span class="text-small text-tertiary">每格 = 1 个词 · 颜色越深答题越频繁 · 悬停查看单词</span>
-                        <div class="row gap-1" style="align-items:center">
-                          <span class="text-tertiary text-mono" style="font-size:10px">低</span>
-                          <span class="freq-cell l-0" style="width:14px;height:14px" />
-                          <span class="freq-cell l-1" style="width:14px;height:14px" />
-                          <span class="freq-cell l-2" style="width:14px;height:14px" />
-                          <span class="freq-cell l-3" style="width:14px;height:14px" />
-                          <span class="freq-cell l-4" style="width:14px;height:14px" />
-                          <span class="freq-cell l-5" style="width:14px;height:14px" />
-                          <span class="text-tertiary text-mono" style="font-size:10px">高</span>
-                        </div>
-                      </div>
-                    </Show>
-                  </Show>
-                </Show>
-
-                {/* Tab: 用户分布 */}
-                <Show when={detailTab() === 'distribution'}>
-                  <Show
-                    when={!distRes.loading}
-                    fallback={<div class="row" style="justify-content:center;padding:48px 0"><Spinner /></div>}
-                  >
-                    <Show
-                      when={(distRes()?.totalUsers ?? 0) > 0}
-                      fallback={<Empty title="暂无在用用户" description="该词库下暂无用户掌握度数据" />}
-                    >
-                      <div class="wb-dist">
-                        <For each={distRes()?.buckets}>
-                          {(b) => {
-                            const total = distRes()!.totalUsers || 1;
-                            const pct = (b.userCount / total) * 100;
-                            return (
-                              <div class="wb-dist-row">
-                                <span class="l">{b.label}</span>
-                                <div class="bar"><span style={`width:${pct.toFixed(1)}%`} /></div>
-                                <span class="n">{fmtNum(b.userCount)} · {pct.toFixed(0)}%</span>
-                              </div>
-                            );
-                          }}
-                        </For>
-                      </div>
-                    </Show>
-                  </Show>
-                </Show>
-
-                {/* Tab: 变更历史 */}
-                <Show when={detailTab() === 'history'}>
-                  <Show
-                    when={!historyRes.loading}
-                    fallback={<div class="row" style="justify-content:center;padding:48px 0"><Spinner /></div>}
-                  >
-                    <Show
-                      when={(historyRes()?.data.length ?? 0) > 0}
-                      fallback={<Empty title="暂无变更记录" description="对该词库的创建 / 编辑 / 导入等操作会记录在此" />}
-                    >
-                      <div class="wb-history">
-                        <For each={historyRes()?.data}>
-                          {(h) => (
-                            <div class="wb-history-item">
-                              <span class="chip chip-outline">{ACTION_LABEL[h.action] ?? h.action}</span>
-                              <span class="detail">{h.detail || <span>—</span>}</span>
-                              <span class="ts">{relTime(h.createdAt)}</span>
-                            </div>
-                          )}
-                        </For>
-                      </div>
-                    </Show>
-                  </Show>
-                </Show>
-              </>
-            )}
-          </Show>
-        </div>
+        {/* RIGHT — detail */}
+        <Show
+          when={selected()}
+          fallback={
+            <Card style={sx({ display: 'grid', placeItems: 'center', minHeight: 320 })}>
+              <Empty title="未选择词库" desc="从左侧选择一个词库查看详情。" icon="book" />
+            </Card>
+          }
+        >
+          {(wb) => (
+            <WordbookDetail
+              wb={wb()}
+              tab={tab()}
+              setTab={setTab}
+              onEdit={() => setEditOpen(true)}
+              onDelete={() => setDelTarget(wb())}
+              onChanged={() => { void reloadList(); }}
+            />
+          )}
+        </Show>
       </div>
 
-      {/* ── 底部:导入新词库(整合远程目录 + 文件上传) ── */}
-      <ImportSection onImported={refetchList} />
+      <CreateWordbookModal open={createOpen()} onClose={() => setCreateOpen(false)} onDone={() => { void reloadList(); }} />
 
-      {/* ── 新建 modal ── */}
-      <Modal open={createOpen()} onClose={() => setCreateOpen(false)} title="新建词库" size="md">
-        <div class="space-y-3">
-          <Input
-            label="词库名称"
-            placeholder="如 CET-6 高频"
-            value={createDraft().name}
-            onInput={(e) => setCreateDraft({ ...createDraft(), name: e.currentTarget.value })}
-          />
-          <Input
-            label="简介(可选)"
-            placeholder="一句话说明用途"
-            value={createDraft().description}
-            onInput={(e) => setCreateDraft({ ...createDraft(), description: e.currentTarget.value })}
-          />
-          <div>
-            <p class="text-sm font-medium text-content-secondary mb-1.5">类型</p>
-            <div class="flex gap-2">
-              <button
-                type="button"
-                class={`px-3 py-1.5 rounded-md text-sm border transition ${createDraft().type === 'system' ? 'border-accent text-accent bg-accent-light' : 'border-border-hairline text-content-secondary'}`}
-                onClick={() => setCreateDraft({ ...createDraft(), type: 'system' })}
-              >官方词库</button>
-              <button
-                type="button"
-                class={`px-3 py-1.5 rounded-md text-sm border transition ${createDraft().type === 'user' ? 'border-accent text-accent bg-accent-light' : 'border-border-hairline text-content-secondary'}`}
-                onClick={() => setCreateDraft({ ...createDraft(), type: 'user' })}
-              >用户词库</button>
-            </div>
-          </div>
-          <div class="flex justify-end gap-2 pt-1">
-            <button class="btn btn-ghost" onClick={() => setCreateOpen(false)}>取消</button>
-            <button class="btn btn-primary" disabled={createBusy()} onClick={submitCreate}>
-              <Show when={createBusy()}><Spinner size="sm" /></Show>创建
-            </button>
-          </div>
-        </div>
-      </Modal>
+      <EditWordbookModal
+        open={editOpen()}
+        wb={selected()}
+        onClose={() => setEditOpen(false)}
+        onDone={() => { void reloadList(); }}
+      />
 
-      {/* ── 编辑 modal ── */}
-      <Modal open={editOpen()} onClose={() => setEditOpen(false)} title="编辑词库" size="md">
-        <div class="space-y-3">
-          <Input
-            label="词库名称"
-            value={editDraft().name}
-            onInput={(e) => setEditDraft({ ...editDraft(), name: e.currentTarget.value })}
-          />
-          <Input
-            label="简介"
-            value={editDraft().description}
-            onInput={(e) => setEditDraft({ ...editDraft(), description: e.currentTarget.value })}
-          />
-          <div class="flex justify-end gap-2 pt-1">
-            <button class="btn btn-ghost" onClick={() => setEditOpen(false)}>取消</button>
-            <button class="btn btn-primary" disabled={editBusy()} onClick={submitEdit}>
-              <Show when={editBusy()}><Spinner size="sm" /></Show>保存
-            </button>
-          </div>
-        </div>
-      </Modal>
-
-      {/* ── 添加词条 modal ── */}
-      <Modal open={addWordOpen()} onClose={() => setAddWordOpen(false)} title="添加词条" size="lg">
-        <div class="space-y-3">
-          <div class="grid grid-cols-2 gap-3">
-            <Input
-              label="单词"
-              placeholder="如 tenacious"
-              value={addWordDraft().text}
-              onInput={(e) => setAddWordDraft({ ...addWordDraft(), text: e.currentTarget.value })}
-            />
-            <Input
-              label="音标(可选)"
-              placeholder="/tɪˈneɪʃəs/"
-              value={addWordDraft().pronunciation}
-              onInput={(e) => setAddWordDraft({ ...addWordDraft(), pronunciation: e.currentTarget.value })}
-            />
-          </div>
-          <div class="grid grid-cols-2 gap-3">
-            <Input
-              label="词性(可选)"
-              placeholder="adj."
-              value={addWordDraft().partOfSpeech}
-              onInput={(e) => setAddWordDraft({ ...addWordDraft(), partOfSpeech: e.currentTarget.value })}
-            />
-            <Input
-              label="释义"
-              placeholder="坚韧的 / 顽强的"
-              value={addWordDraft().meaning}
-              onInput={(e) => setAddWordDraft({ ...addWordDraft(), meaning: e.currentTarget.value })}
-            />
-          </div>
-          <div>
-            <p class="text-sm font-medium text-content-secondary mb-1.5">例句(可选,每行一条)</p>
-            <textarea
-              rows={3}
-              value={addWordDraft().examples}
-              onInput={(e) => setAddWordDraft({ ...addWordDraft(), examples: e.currentTarget.value })}
-              placeholder="She was tenacious in her pursuit of justice."
-              class="w-full px-3 py-2 rounded-md border border-border-hairline bg-surface text-sm focus:outline-none focus:border-accent"
-            />
-          </div>
-          <div class="flex justify-end gap-2 pt-1">
-            <button class="btn btn-ghost" onClick={() => setAddWordOpen(false)}>取消</button>
-            <button class="btn btn-primary" disabled={addWordBusy()} onClick={submitAddWord}>
-              <Show when={addWordBusy()}><Spinner size="sm" /></Show>添加
-            </button>
-          </div>
-        </div>
-      </Modal>
-
-      {/* ── 删除词库确认 ── */}
-      <ConfirmDialog
-        open={!!deleteTarget()}
+      <Confirm
+        open={!!delTarget()}
+        onClose={() => setDelTarget(null)}
+        onConfirm={confirmDelete}
+        danger
+        loading={delBusy()}
         title="删除词库"
-        message={
-          <Show when={deleteTarget()}>
+        confirmText="删除"
+        body={
+          <Show when={delTarget()}>
             {(t) => (
               <>
-                将永久删除「<span class="font-medium text-content">{t().name}</span>」及其全部词条关联({fmtNum(t().wordCount)} 词)。
-                <br />该操作不可撤销。
+                确认删除「<b style={sx({ color: 'var(--text)' })}>{t().name}</b>」及其全部词条关联（{fmtNum(t().wordCount)} 词）？
+                <br />该操作不可恢复。
               </>
             )}
           </Show>
         }
-        confirmText="确认删除"
-        variant="danger"
-        loading={deleteBusy()}
-        onConfirm={confirmDelete}
-        onCancel={() => setDeleteTarget(null)}
-      />
-
-      {/* ── 移除词条确认 ── */}
-      <ConfirmDialog
-        open={!!removeWordTarget()}
-        title="移除词条"
-        message={
-          <Show when={removeWordTarget()}>
-            {(t) => <>将从本词库移除「<span class="font-medium text-content">{t().text}</span>」(单词本身不删除)。</>}
-          </Show>
-        }
-        confirmText="确认移除"
-        variant="warning"
-        onConfirm={confirmRemoveWord}
-        onCancel={() => setRemoveWordTarget(null)}
       />
     </div>
   );
 }
 
-// ════════════ 底部「导入新词库」面板:整合远程目录浏览/导入/同步/检查更新/标签编辑 + 文件上传 ════════════
+function FilterChip(props: { active?: boolean; onClick: () => void; children: JSX.Element }) {
+  return (
+    <button
+      onClick={props.onClick}
+      class={props.active ? 'badge badge-accent' : 'badge badge-default'}
+      style={sx({ cursor: 'pointer', border: 'none' })}
+    >
+      {props.children}
+    </button>
+  );
+}
 
-const CSV_TEMPLATE = `word,pos,ipa,gloss_zh,example
-tenacious,adj.,/tɪˈneɪʃəs/,坚韧的,She was tenacious…
-ephemeral,adj.,/ɪˈfɛmərəl/,短暂的,Fame can be…`;
+/* ---------- detail panel ---------- */
 
-// 解析单行 CSV,处理双引号包裹与 "" 转义;返回去引号后的字段数组
-function parseCsvLine(line: string): string[] {
-  const out: string[] = [];
-  let cur = '';
-  let inQuotes = false;
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i];
-    if (inQuotes) {
-      if (ch === '"') {
-        if (line[i + 1] === '"') { cur += '"'; i++; } else { inQuotes = false; }
-      } else { cur += ch; }
-    } else if (ch === '"') {
-      inQuotes = true;
-    } else if (ch === ',') {
-      out.push(cur); cur = '';
-    } else { cur += ch; }
+function WordbookDetail(props: {
+  wb: WordbookSummary;
+  tab: string;
+  setTab: (v: string) => void;
+  onEdit: () => void;
+  onDelete: () => void;
+  onChanged: () => void;
+}) {
+  const [search, setSearch] = createSignal('');
+  const [wordSort, setWordSort] = createSignal<WordEntrySort>('frequency');
+  const [page, setPage] = createSignal(1);
+  const [addOpen, setAddOpen] = createSignal(false);
+  const [removeTarget, setRemoveTarget] = createSignal<{ id: string; text: string } | null>(null);
+  const [removeBusy, setRemoveBusy] = createSignal(false);
+  const [exporting, setExporting] = createSignal(false);
+
+  const wbId = () => props.wb.id;
+
+  // 切换词库时重置词条 tab 状态
+  createEffect(() => { wbId(); setSearch(''); setWordSort('frequency'); setPage(1); });
+
+  const [stats] = createResource(wbId, (id): Promise<WordbookStats | null> =>
+    adminApi.adminWordbookStats(id).catch(() => null));
+
+  const [words, { refetch: reloadWords }] = createResource(
+    () => (props.tab === 'words' ? { id: wbId(), s: wordSort(), p: page() } : null),
+    (q): Promise<WordEntriesPage | null> =>
+      adminApi.adminWordbookWords(q.id, { sort: q.s, page: q.p, perPage: PER_PAGE_WORDS }).catch(() => null),
+  );
+
+  const [heatmap] = createResource(
+    () => (props.tab === 'heatmap' ? wbId() : null),
+    (id): Promise<WordbookHeatmap | null> => adminApi.adminWordbookHeatmap(id).catch(() => null),
+  );
+  const [distrib] = createResource(
+    () => (props.tab === 'distrib' ? wbId() : null),
+    (id): Promise<WordbookUserDistribution | null> => adminApi.adminWordbookDistribution(id).catch(() => null),
+  );
+  const [history] = createResource(
+    () => (props.tab === 'history' ? wbId() : null),
+    (id): Promise<WordbookAuditPage | null> => adminApi.adminWordbookHistory(id, { perPage: 100 }).catch(() => null),
+  );
+
+  const rows = createMemo(() => {
+    const all = words()?.data ?? [];
+    const q = search().trim().toLowerCase();
+    return q ? all.filter((w) => w.text.toLowerCase().includes(q) || w.meaning.toLowerCase().includes(q)) : all;
+  });
+  const totalPages = () => words()?.totalPages ?? 1;
+
+  async function removeWord() {
+    const t = removeTarget();
+    if (!t) return;
+    setRemoveBusy(true);
+    try {
+      await adminApi.adminWordbookRemoveWord(wbId(), t.id);
+      toast.success('已移除', t.text);
+      setRemoveTarget(null);
+      await reloadWords();
+      props.onChanged();
+    } catch (err: unknown) {
+      toast.error('移除失败', err instanceof Error ? err.message : '');
+    } finally {
+      setRemoveBusy(false);
+    }
   }
-  out.push(cur);
-  return out.map((s) => s.trim());
+
+  async function doExport() {
+    setExporting(true);
+    try {
+      const data: WordbookExport = await adminApi.adminWordbookExport(wbId());
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${props.wb.name || props.wb.id}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      toast.success('已导出词库', `${props.wb.name} · ${data.words.length} 词`);
+    } catch (err: unknown) {
+      toast.error('导出失败', err instanceof Error ? err.message : '');
+    } finally {
+      setExporting(false);
+    }
+  }
+
+  const accColor = (acc?: number | null): string =>
+    acc == null ? 'var(--text-3)' : acc >= 0.6 ? 'var(--success)' : acc >= 0.45 ? 'var(--warning)' : 'var(--error)';
+
+  // 掌握度颜色:把 0..1 映射成 绿→红 渐变
+  const masteryColor = (v: number): string =>
+    `color-mix(in oklch, var(--success) ${Math.round(v * 100)}%, var(--error) ${Math.round((1 - v) * 60)}%)`;
+
+  return (
+    <Card pad={false} style={sx({ overflow: 'hidden' })}>
+      {/* header */}
+      <div style={sx({ padding: 16, borderBottom: '1px solid var(--hairline)' })}>
+        <div style={sx({ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 10, flexWrap: 'wrap' })}>
+          <div style={sx({ minWidth: 0 })}>
+            <div style={sx({ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' })}>
+              <h2 style={sx({ margin: 0, fontSize: 17, fontWeight: 700 })}>{props.wb.name}</h2>
+              <Show when={props.wb.type === 'system'} fallback={<Badge variant="default">用户</Badge>}>
+                <Badge variant="info">系统</Badge>
+              </Show>
+              <For each={props.wb.tags}>{(t) => <Badge variant="default">{t}</Badge>}</For>
+            </div>
+            <Show when={props.wb.description}>
+              <div class="muted" style={sx({ fontSize: 12.5, marginTop: 4 })}>{props.wb.description}</div>
+            </Show>
+          </div>
+          <div style={sx({ display: 'flex', gap: 7, flexWrap: 'wrap' })}>
+            <Btn size="sm" variant="secondary" icon="download" disabled={exporting()} onClick={doExport}>导出</Btn>
+            <Btn size="sm" variant="secondary" icon="edit" onClick={props.onEdit}>编辑</Btn>
+            <Btn size="sm" variant="danger" icon="trash" onClick={props.onDelete}>删除</Btn>
+            <Btn size="sm" variant="primary" icon="plus" onClick={() => setAddOpen(true)}>添加词条</Btn>
+          </div>
+        </div>
+        <div style={sx({ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(110px,1fr))', gap: 10, marginTop: 14 })}>
+          <Show when={stats.state !== 'pending'} fallback={<><Skel h={56} /><Skel h={56} /><Skel h={56} /><Skel h={56} /></>}>
+            <MetricBox label="词条数" value={fmtNum(stats()?.totalWords ?? props.wb.wordCount)} />
+            <MetricBox label="在用用户" value={fmtNum(stats()?.activeUsers ?? props.wb.activeUsers)} />
+            <MetricBox label="平均掌握" value={`${Math.round((stats()?.avgMastery ?? 0) * 100)}%`} />
+            <MetricBox label="本周答题" value={fmtNum(stats()?.weeklyAnswers ?? 0)} />
+          </Show>
+        </div>
+      </div>
+
+      {/* tabs + word toolbar */}
+      <div style={sx({ padding: '12px 16px', borderBottom: '1px solid var(--hairline)', display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' })}>
+        <Tabs
+          value={props.tab}
+          onChange={props.setTab}
+          tabs={DETAIL_TABS.map((t) => (t.value === 'words' ? { ...t, count: stats()?.totalWords ?? props.wb.wordCount } : t))}
+        />
+        <Show when={props.tab === 'words'}>
+          <div style={sx({ display: 'flex', gap: 8, marginLeft: 'auto', flexWrap: 'wrap' })}>
+            <input
+              class="input"
+              style={sx({ width: 160 })}
+              placeholder="搜索词条"
+              value={search()}
+              onInput={(e) => setSearch(e.currentTarget.value)}
+            />
+            <select
+              class="select"
+              style={sx({ width: 'auto' })}
+              value={wordSort()}
+              onChange={(e) => { setWordSort(e.currentTarget.value as WordEntrySort); setPage(1); }}
+            >
+              <option value="frequency">排序：词频</option>
+              <option value="alpha">排序：字母</option>
+              <option value="difficulty">排序：难度</option>
+            </select>
+            <Btn size="sm" variant="primary" icon="plus" onClick={() => setAddOpen(true)}>添加词条</Btn>
+          </div>
+        </Show>
+      </div>
+
+      {/* body */}
+      <div style={sx({ padding: 16 })}>
+        {/* WORDS */}
+        <Show when={props.tab === 'words'}>
+          <Show when={words.state !== 'pending'} fallback={<Loading h={220} />}>
+            <Show
+              when={rows().length > 0}
+              fallback={<Empty title="暂无词条" desc={search() ? '无匹配结果' : '点击「添加词条」录入第一个单词。'} icon="book" />}
+            >
+              <div style={sx({ overflowX: 'auto' })}>
+                <table class="tbl">
+                  <thead>
+                    <tr><th>拼写</th><th>音标</th><th>词性</th><th>释义</th><th>答题数</th><th>正确率</th><th /></tr>
+                  </thead>
+                  <tbody>
+                    <For each={rows()}>
+                      {(w) => (
+                        <tr>
+                          <td><b>{w.text}</b></td>
+                          <td class="mono muted">{w.pronunciation ?? '—'}</td>
+                          <td class="muted">{w.partOfSpeech ?? '—'}</td>
+                          <td class="muted" style={sx({ fontSize: 12.5 })}>{w.meaning || '—'}</td>
+                          <td class="mono">{fmtNum(w.appearCount)}</td>
+                          <td class="mono" style={sx({ color: accColor(w.accuracy) })}>
+                            {w.accuracy == null ? '—' : `${Math.round(w.accuracy * 100)}%`}
+                          </td>
+                          <td><IconBtn name="trash" title="移除" size={15} onClick={() => setRemoveTarget({ id: w.id, text: w.text })} /></td>
+                        </tr>
+                      )}
+                    </For>
+                  </tbody>
+                </table>
+              </div>
+              <div style={sx({ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 14 })}>
+                <span class="muted-3" style={sx({ fontSize: 12 })}>共 {fmtNum(words()?.total ?? 0)} 条</span>
+                <div style={sx({ display: 'flex', alignItems: 'center', gap: 6 })}>
+                  <Btn size="sm" variant="ghost" disabled={page() <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}>上一页</Btn>
+                  <span class="mono muted" style={sx({ fontSize: 12.5, padding: '0 6px' })}>{page()} / {totalPages()}</span>
+                  <Btn size="sm" variant="ghost" disabled={page() >= totalPages()} onClick={() => setPage((p) => Math.min(totalPages(), p + 1))}>下一页</Btn>
+                </div>
+              </div>
+            </Show>
+          </Show>
+        </Show>
+
+        {/* HEATMAP */}
+        <Show when={props.tab === 'heatmap'}>
+          <Show when={heatmap.state !== 'pending'} fallback={<Loading h={220} />}>
+            <Show
+              when={(heatmap()?.cells.length ?? 0) > 0}
+              fallback={<Empty title="暂无答题数据" desc="该词库下的词暂无答题记录，无法生成热图。" icon="inbox" />}
+            >
+              <div class="muted-3" style={sx({ fontSize: 12, marginBottom: 10 })}>
+                每格代表一个词条的答题频次（颜色越深答题越频繁）。
+              </div>
+              <div style={sx({ display: 'grid', gridTemplateColumns: 'repeat(40, 1fr)', gap: 2 })}>
+                <For each={heatmap()!.cells.slice(0, 400)}>
+                  {(cell) => {
+                    const max = heatmap()!.maxCount || 1;
+                    const r = Math.max(0, Math.min(1, cell.count / max));
+                    return (
+                      <div
+                        title={`${cell.text} · ${fmtNum(cell.count)} 次`}
+                        style={sx({
+                          aspectRatio: '1', borderRadius: 2,
+                          background: `color-mix(in oklch, var(--accent) ${Math.round(r * 90 + 6)}%, transparent)`,
+                        })}
+                      />
+                    );
+                  }}
+                </For>
+              </div>
+              <div style={sx({ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 12 })}>
+                <span class="muted-3" style={sx({ fontSize: 11 })}>显示前 {Math.min(400, heatmap()!.cells.length)} / {fmtNum(heatmap()!.cells.length)} 词 · 悬停查看单词</span>
+                <div style={sx({ display: 'flex', alignItems: 'center', gap: 4 })}>
+                  <span class="mono muted-3" style={sx({ fontSize: 10 })}>低</span>
+                  <For each={[0.1, 0.3, 0.5, 0.7, 0.9]}>
+                    {(r) => <span style={sx({ width: 14, height: 14, borderRadius: 3, background: `color-mix(in oklch, var(--accent) ${Math.round(r * 90 + 6)}%, transparent)` })} />}
+                  </For>
+                  <span class="mono muted-3" style={sx({ fontSize: 10 })}>高</span>
+                </div>
+              </div>
+            </Show>
+          </Show>
+        </Show>
+
+        {/* DISTRIBUTION */}
+        <Show when={props.tab === 'distrib'}>
+          <Show when={distrib.state !== 'pending'} fallback={<Loading h={220} />}>
+            <Show
+              when={(distrib()?.totalUsers ?? 0) > 0}
+              fallback={<Empty title="暂无在用用户" desc="该词库下暂无用户掌握度数据。" icon="users" />}
+            >
+              <div style={sx({ display: 'flex', flexDirection: 'column', gap: 14 })}>
+                <For each={distrib()!.buckets}>
+                  {(b) => {
+                    const total = distrib()!.totalUsers || 1;
+                    const pct = (b.userCount / total) * 100;
+                    return (
+                      <div>
+                        <div style={sx({ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 5 })}>
+                          <span style={sx({ fontWeight: 600 })}>{b.label}</span>
+                          <span class="mono">{fmtNum(b.userCount)} 人 · {pct.toFixed(0)}%</span>
+                        </div>
+                        <Progress value={pct} tone="accent" height={9} />
+                      </div>
+                    );
+                  }}
+                </For>
+              </div>
+            </Show>
+          </Show>
+        </Show>
+
+        {/* HISTORY */}
+        <Show when={props.tab === 'history'}>
+          <Show when={history.state !== 'pending'} fallback={<Loading h={220} />}>
+            <Show
+              when={(history()?.data.length ?? 0) > 0}
+              fallback={<Empty title="暂无变更记录" desc="对该词库的创建 / 编辑 / 导入等操作会记录在此。" icon="inbox" />}
+            >
+              <div style={sx({ display: 'flex', flexDirection: 'column' })}>
+                <For each={history()!.data}>
+                  {(h) => (
+                    <div style={sx({ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 0', borderBottom: '1px solid var(--hairline)' })}>
+                      <div style={sx({ minWidth: 0, flex: 1 })}>
+                        <div style={sx({ fontWeight: 600, fontSize: 13 })}>{h.detail || '—'}</div>
+                        <div class="muted-3" style={sx({ fontSize: 11.5, marginTop: 2 })}>
+                          <Show when={h.adminId}>{h.adminId} · </Show>{fmtAgo(h.createdAt)}
+                        </div>
+                      </div>
+                      <Badge variant="accent">{ACTION_LABEL[h.action] ?? h.action}</Badge>
+                    </div>
+                  )}
+                </For>
+              </div>
+            </Show>
+          </Show>
+        </Show>
+      </div>
+
+      <AddWordModal open={addOpen()} onClose={() => setAddOpen(false)} wbId={wbId()} onDone={() => { void reloadWords(); props.onChanged(); }} />
+
+      <Confirm
+        open={!!removeTarget()}
+        onClose={() => setRemoveTarget(null)}
+        onConfirm={removeWord}
+        danger
+        loading={removeBusy()}
+        title="移除词条"
+        confirmText="移除"
+        body={
+          <Show when={removeTarget()}>
+            {(t) => <>将从本词库移除「<b style={sx({ color: 'var(--text)' })}>{t().text}</b>」（单词本身不删除）。</>}
+          </Show>
+        }
+      />
+    </Card>
+  );
 }
 
-// 按表头列名(大小写不敏感)定位列下标,兼容模板 5 列(word/pos/ipa/gloss_zh/example)与旧 3 列(spelling/phonetic/meaning)
-function csvColumnMap(header: string[]): { spelling: number; phonetic: number; meaning: number; example: number } {
-  const idx = (...names: string[]) => header.findIndex((h) => names.includes(h.trim().toLowerCase()));
-  return {
-    spelling: idx('word', 'spelling'),
-    phonetic: idx('ipa', 'phonetic'),
-    meaning: idx('gloss_zh', 'meaning', 'meanings'),
-    example: idx('example', 'examples'),
-  };
-}
+/* ---------- remote catalog ---------- */
 
-function ImportSection(props: { onImported: () => void }) {
-  const [configured, setConfigured] = createSignal(false);
-  const [remoteItems, setRemoteItems] = createSignal<BrowseItem[]>([]);
-  const [remoteLoading, setRemoteLoading] = createSignal(false);
-  const [updates, setUpdates] = createSignal<UpdateInfo[]>([]);
-  const [checking, setChecking] = createSignal(false);
+function RemoteCatalog(props: { onImported: () => void }) {
+  const [configured, setConfigured] = createSignal(true);
   const [importing, setImporting] = createSignal<string | null>(null);
   const [syncing, setSyncing] = createSignal<string | null>(null);
   const [importTarget, setImportTarget] = createSignal<BrowseItem | null>(null);
-
-  // 文件上传 modal
-  const [uploadOpen, setUploadOpen] = createSignal(false);
-  const [uploadDraft, setUploadDraft] = createSignal({ id: '', name: '', description: '', wordsJson: '[]' });
-  const [uploadBusy, setUploadBusy] = createSignal(false);
-  const [dragOver, setDragOver] = createSignal(false);
-
-  // 预览 modal
   const [preview, setPreview] = createSignal<WordbookPreview | null>(null);
+  const [uploadOpen, setUploadOpen] = createSignal(false);
 
-  // 标签编辑 modal
-  const [tagsTarget, setTagsTarget] = createSignal<BrowseItem | null>(null);
-  const [tagsDraft, setTagsDraft] = createSignal<string[]>([]);
-  const [tagInput, setTagInput] = createSignal('');
-  const [tagsBusy, setTagsBusy] = createSignal(false);
-
-  const mutating = () => importing() !== null || syncing() !== null;
-
-  async function loadRemote() {
-    setRemoteLoading(true);
+  const [browse, { refetch: reloadBrowse }] = createResource(async (): Promise<BrowseItem[]> => {
     try {
       const settings = await adminApi.getSettings();
-      if (!settings.wordbookCenterUrl) {
-        setConfigured(false);
-        setRemoteItems([]);
-        return;
-      }
+      if (!settings.wordbookCenterUrl) { setConfigured(false); return []; }
       setConfigured(true);
-      try {
-        setRemoteItems(await adminApi.wbCenterBrowse());
-      } catch (err: unknown) {
-        setRemoteItems([]);
-        uiStore.toast.error('加载远程词库目录失败', err instanceof Error ? err.message : '');
-      }
+      return await adminApi.wbCenterBrowse();
     } catch (err: unknown) {
       setConfigured(false);
-      uiStore.toast.error('读取设置失败', err instanceof Error ? err.message : '');
-    } finally {
-      setRemoteLoading(false);
+      toast.error('加载远程词库目录失败', err instanceof Error ? err.message : '');
+      return [];
     }
-  }
+  });
 
-  onMount(loadRemote);
+  const [updates, { refetch: reloadUpdates }] = createResource((): Promise<UpdateInfo[]> =>
+    adminApi.wbCenterUpdates().catch(() => []));
 
-  async function checkUpdates() {
-    setChecking(true);
-    try {
-      const data = await adminApi.wbCenterUpdates();
-      setUpdates(data);
-      if (data.length === 0) uiStore.toast.success('所有词书均为最新');
-    } catch (err: unknown) {
-      uiStore.toast.error('检查更新失败', err instanceof Error ? err.message : '');
-    } finally {
-      setChecking(false);
-    }
-  }
-
-  async function handleImport(item: BrowseItem) {
+  async function doImport(item: BrowseItem) {
     setImporting(item.id);
     try {
       const res = await adminApi.wbCenterImport(item.id);
-      uiStore.toast.success(`已导入「${res.wordbook.name}」(${res.wordsImported} 词)`);
-      await loadRemote();
+      toast.success('已导入', `${res.wordbook.name} · ${res.wordsImported} 词`);
+      await reloadBrowse();
       props.onImported();
     } catch (err: unknown) {
-      uiStore.toast.error(`导入「${item.name}」失败`, err instanceof Error ? err.message : '');
+      toast.error(`导入「${item.name}」失败`, err instanceof Error ? err.message : '');
     } finally {
       setImporting(null);
     }
   }
 
-  async function handleSync(id: string, name?: string) {
+  async function doSync(id: string, name: string) {
     setSyncing(id);
     try {
       const res = await adminApi.wbCenterSync(id);
-      uiStore.toast.success(`同步完成：新增 ${res.wordsAdded}，更新 ${res.wordsUpdated}，移除 ${res.wordsRemoved}`);
-      setUpdates((prev) => prev.filter((u) => u.remoteId !== id));
-      await loadRemote();
+      toast.success(`已同步 ${name}`, `新增 ${res.wordsAdded} · 更新 ${res.wordsUpdated} · 移除 ${res.wordsRemoved}`);
+      await Promise.all([reloadBrowse(), reloadUpdates()]);
       props.onImported();
     } catch (err: unknown) {
-      uiStore.toast.error(name ? `同步「${name}」失败` : '同步失败', err instanceof Error ? err.message : '');
+      toast.error(`同步「${name}」失败`, err instanceof Error ? err.message : '');
     } finally {
       setSyncing(null);
     }
   }
 
-  async function handlePreview(id: string) {
+  async function doPreview(id: string) {
     try {
       setPreview(await adminApi.wbCenterPreview(id, { perPage: 20 }));
     } catch (err: unknown) {
-      uiStore.toast.error('预览失败', err instanceof Error ? err.message : '');
+      toast.error('预览失败', err instanceof Error ? err.message : '');
     }
   }
+
+  const busy = () => importing() !== null || syncing() !== null;
+
+  return (
+    <Card style={sx({ marginBottom: 16 })}>
+      <div style={sx({ display: 'grid', gridTemplateColumns: '1.4fr 1fr', gap: 20 })} class="grid-collapse">
+        {/* catalog */}
+        <div>
+          <div class="eyebrow" style={sx({ marginBottom: 10 })}>远程词库目录 · 词书中心</div>
+          <Show
+            when={configured()}
+            fallback={<Empty title="尚未配置词书中心 URL" desc="请前往「系统设置」配置全局词书中心地址后再使用远程导入。" icon="remote" />}
+          >
+            <Show when={browse.state !== 'pending'} fallback={<Loading h={140} />}>
+              <Show when={browse()!.length > 0} fallback={<Empty title="远程目录为空" desc="远程源中没有可用的词书。" icon="inbox" />}>
+                <div style={sx({ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(180px,1fr))', gap: 10 })}>
+                  <For each={browse()}>
+                    {(it) => (
+                      <div style={sx({ padding: 12, borderRadius: 11, border: '1px solid var(--hairline)' })}>
+                        <div style={sx({ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 6 })}>
+                          <b style={sx({ fontSize: 13 })}>{it.name}</b>
+                          <Show when={it.imported}>
+                            <Badge variant={it.hasUpdate ? 'warning' : 'success'}>{it.hasUpdate ? '有更新' : '已导入'}</Badge>
+                          </Show>
+                        </div>
+                        <div class="muted-3" style={sx({ fontSize: 11, margin: '4px 0 9px' })}>
+                          {fmtNum(it.wordCount)} 词<Show when={it.version}> · v{it.version}</Show><Show when={it.author}> · {it.author}</Show>
+                        </div>
+                        <div style={sx({ display: 'flex', flexWrap: 'wrap', gap: 6 })}>
+                          <Btn size="sm" variant="ghost" onClick={() => void doPreview(it.id)}>预览</Btn>
+                          <Show when={!it.imported}>
+                            <Btn size="sm" variant="primary" icon="download" disabled={busy()} onClick={() => setImportTarget(it)}>
+                              {importing() === it.id ? '导入中…' : '导入'}
+                            </Btn>
+                          </Show>
+                          <Show when={it.imported && it.hasUpdate}>
+                            <Btn size="sm" variant="secondary" icon="refresh" disabled={busy()} onClick={() => void doSync(it.id, it.name)}>
+                              {syncing() === it.id ? '同步中…' : '同步'}
+                            </Btn>
+                          </Show>
+                        </div>
+                      </div>
+                    )}
+                  </For>
+                </div>
+              </Show>
+            </Show>
+          </Show>
+        </div>
+
+        {/* updates + upload */}
+        <div>
+          <div class="eyebrow" style={sx({ marginBottom: 10 })}>可同步更新</div>
+          <Show when={updates.state !== 'pending'} fallback={<Loading h={120} />}>
+            <Show
+              when={(updates()?.length ?? 0) > 0}
+              fallback={<Empty title="均为最新" desc="所有已导入词书均为最新版本。" icon="check" />}
+            >
+              <For each={updates()}>
+                {(u) => (
+                  <div style={sx({ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 0', borderBottom: '1px solid var(--hairline)' })}>
+                    <div style={sx({ minWidth: 0 })}>
+                      <b style={sx({ fontSize: 13 })}>{u.name}</b>
+                      <div class="muted-3" style={sx({ fontSize: 11 })}>v{u.localVersion} → v{u.remoteVersion}</div>
+                    </div>
+                    <Btn size="sm" variant="secondary" icon="refresh" disabled={busy()} onClick={() => void doSync(u.remoteId, u.name)}>
+                      {syncing() === u.remoteId ? '同步中…' : '同步'}
+                    </Btn>
+                  </div>
+                )}
+              </For>
+            </Show>
+          </Show>
+          <div style={sx({ marginTop: 14 })}>
+            <Btn variant="outline" icon="upload" onClick={() => setUploadOpen(true)}>上传本地词库</Btn>
+          </div>
+        </div>
+      </div>
+
+      {/* import confirm */}
+      <Confirm
+        open={!!importTarget()}
+        onClose={() => setImportTarget(null)}
+        onConfirm={() => { const it = importTarget(); setImportTarget(null); if (it) void doImport(it); }}
+        title="确认导入词库"
+        confirmText="导入"
+        body={
+          <Show when={importTarget()}>
+            {(it) => (
+              <>
+                将把「<b style={sx({ color: 'var(--text)' })}>{it().name}</b>」导入为系统词书（共 <span class="mono">{fmtNum(it().wordCount)}</span> 词）。
+                <br />导入后系统词库将新增 / 合并对应单词。
+              </>
+            )}
+          </Show>
+        }
+      />
+
+      {/* preview modal */}
+      <Modal open={preview() !== null} onClose={() => setPreview(null)} title={preview()?.name ?? '词书预览'} size="lg">
+        <Show when={preview()}>
+          {(p) => (
+            <div style={sx({ display: 'flex', flexDirection: 'column', gap: 14, fontSize: 13 })}>
+              <Show when={p().description}><p class="muted" style={sx({ lineHeight: 1.6 })}>{p().description}</p></Show>
+              <div style={sx({ display: 'flex', gap: 16 })} class="muted">
+                <span>词条 <span class="mono" style={sx({ color: 'var(--text)' })}>{fmtNum(p().wordCount)}</span></span>
+                <Show when={p().version}><span>版本 <span class="mono" style={sx({ color: 'var(--text)' })}>v{p().version}</span></span></Show>
+                <Show when={p().author}><span>作者 <span style={sx({ color: 'var(--text)' })}>{p().author}</span></span></Show>
+              </div>
+              <div>
+                <div class="eyebrow" style={sx({ marginBottom: 8 })}>词条预览 · 前 {p().words.data.length} / {fmtNum(p().words.total)} 词</div>
+                <div style={sx({ display: 'flex', flexDirection: 'column', gap: 8 })}>
+                  <For each={p().words.data}>
+                    {(w) => (
+                      <div style={sx({ padding: '8px 12px', borderRadius: 9, background: 'var(--surface-sunken)' })}>
+                        <div style={sx({ display: 'flex', alignItems: 'center', gap: 8 })}>
+                          <span style={sx({ fontWeight: 600 })}>{w.spelling}</span>
+                          <Show when={w.phonetic}><span class="mono muted-3" style={sx({ fontSize: 11.5 })}>{w.phonetic}</span></Show>
+                        </div>
+                        <Show when={w.meanings.length > 0}>
+                          <p class="muted" style={sx({ marginTop: 4, fontSize: 12.5, lineHeight: 1.5 })}>{w.meanings.join('；')}</p>
+                        </Show>
+                      </div>
+                    )}
+                  </For>
+                </div>
+              </div>
+            </div>
+          )}
+        </Show>
+      </Modal>
+
+      <UploadWordbookModal open={uploadOpen()} onClose={() => setUploadOpen(false)} onDone={() => { void reloadBrowse(); props.onImported(); }} />
+    </Card>
+  );
+}
+
+/* ---------- modals ---------- */
+
+function CreateWordbookModal(props: { open: boolean; onClose: () => void; onDone: (wb?: WordbookSummary) => void }) {
+  const [name, setName] = createSignal('');
+  const [desc, setDesc] = createSignal('');
+  const [type, setType] = createSignal<WordbookType>('system');
+  const [busy, setBusy] = createSignal(false);
+
+  createEffect(() => { if (props.open) { setName(''); setDesc(''); setType('system'); } });
+
+  async function submit() {
+    if (!name().trim()) { toast.warning('请填写名称'); return; }
+    setBusy(true);
+    try {
+      const wb = await adminApi.adminWordbookCreate({ name: name().trim(), description: desc().trim() || undefined, type: type() });
+      toast.success('已创建词库', wb.name);
+      props.onClose();
+      props.onDone();
+    } catch (err: unknown) {
+      toast.error('创建失败', err instanceof Error ? err.message : '');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal
+      open={props.open} onClose={props.onClose} title="新建词库" size="sm"
+      footer={<><Btn variant="ghost" onClick={props.onClose}>取消</Btn><Btn variant="primary" disabled={busy()} onClick={submit}>{busy() ? '创建中…' : '创建'}</Btn></>}
+    >
+      <div style={sx({ display: 'flex', flexDirection: 'column', gap: 13 })}>
+        <Field label="词库名称"><input class="input" placeholder="如 CET-6 高频" value={name()} onInput={(e) => setName(e.currentTarget.value)} /></Field>
+        <Field label="描述"><textarea class="textarea" rows={3} value={desc()} onInput={(e) => setDesc(e.currentTarget.value)} /></Field>
+        <Field label="类型">
+          <div style={sx({ display: 'flex', gap: 8 })}>
+            <Btn variant={type() === 'system' ? 'primary' : 'secondary'} size="sm" onClick={() => setType('system')}>官方词库</Btn>
+            <Btn variant={type() === 'user' ? 'primary' : 'secondary'} size="sm" onClick={() => setType('user')}>用户词库</Btn>
+          </div>
+        </Field>
+      </div>
+    </Modal>
+  );
+}
+
+function EditWordbookModal(props: { open: boolean; wb: WordbookSummary | null; onClose: () => void; onDone: () => void }) {
+  const [name, setName] = createSignal('');
+  const [desc, setDesc] = createSignal('');
+  const [busy, setBusy] = createSignal(false);
+
+  createEffect(() => {
+    if (props.open && props.wb) { setName(props.wb.name); setDesc(props.wb.description); }
+  });
+
+  async function submit() {
+    const wb = props.wb;
+    if (!wb) return;
+    if (!name().trim()) { toast.warning('请填写名称'); return; }
+    setBusy(true);
+    try {
+      await adminApi.adminWordbookUpdate(wb.id, { name: name().trim(), description: desc().trim() });
+      toast.success('已保存');
+      props.onClose();
+      props.onDone();
+    } catch (err: unknown) {
+      toast.error('保存失败', err instanceof Error ? err.message : '');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal
+      open={props.open} onClose={props.onClose} title="编辑词库" size="sm"
+      footer={<><Btn variant="ghost" onClick={props.onClose}>取消</Btn><Btn variant="primary" disabled={busy()} onClick={submit}>{busy() ? '保存中…' : '保存'}</Btn></>}
+    >
+      <div style={sx({ display: 'flex', flexDirection: 'column', gap: 13 })}>
+        <Field label="词库名称"><input class="input" value={name()} onInput={(e) => setName(e.currentTarget.value)} /></Field>
+        <Field label="描述"><textarea class="textarea" rows={3} value={desc()} onInput={(e) => setDesc(e.currentTarget.value)} /></Field>
+      </div>
+    </Modal>
+  );
+}
+
+function AddWordModal(props: { open: boolean; onClose: () => void; onDone: () => void; wbId: string }) {
+  const [text, setText] = createSignal('');
+  const [pron, setPron] = createSignal('');
+  const [pos, setPos] = createSignal('');
+  const [meaning, setMeaning] = createSignal('');
+  const [examples, setExamples] = createSignal('');
+  const [busy, setBusy] = createSignal(false);
+
+  createEffect(() => { if (props.open) { setText(''); setPron(''); setPos(''); setMeaning(''); setExamples(''); } });
+
+  async function submit() {
+    if (!text().trim() || !meaning().trim()) { toast.warning('请填写单词与释义'); return; }
+    setBusy(true);
+    try {
+      await adminApi.adminWordbookAddWord(props.wbId, {
+        text: text().trim(),
+        pronunciation: pron().trim() || undefined,
+        partOfSpeech: pos().trim() || undefined,
+        meaning: meaning().trim(),
+        examples: examples().trim() ? examples().split('\n').map((s) => s.trim()).filter(Boolean) : undefined,
+      });
+      toast.success('已添加', text().trim());
+      props.onClose();
+      props.onDone();
+    } catch (err: unknown) {
+      toast.error('添加失败', err instanceof Error ? err.message : '');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal
+      open={props.open} onClose={props.onClose} title="添加词条" size="md"
+      footer={<><Btn variant="ghost" onClick={props.onClose}>取消</Btn><Btn variant="primary" disabled={busy()} onClick={submit}>{busy() ? '添加中…' : '添加'}</Btn></>}
+    >
+      <div style={sx({ display: 'flex', flexDirection: 'column', gap: 13 })}>
+        <div style={sx({ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 })}>
+          <Field label="单词"><input class="input" placeholder="如 tenacious" value={text()} onInput={(e) => setText(e.currentTarget.value)} /></Field>
+          <Field label="音标(可选)"><input class="input" placeholder="/tɪˈneɪʃəs/" value={pron()} onInput={(e) => setPron(e.currentTarget.value)} /></Field>
+        </div>
+        <div style={sx({ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 })}>
+          <Field label="词性(可选)"><input class="input" placeholder="adj." value={pos()} onInput={(e) => setPos(e.currentTarget.value)} /></Field>
+          <Field label="释义"><input class="input" placeholder="坚韧的 / 顽强的" value={meaning()} onInput={(e) => setMeaning(e.currentTarget.value)} /></Field>
+        </div>
+        <Field label="例句(可选,每行一条)">
+          <textarea class="textarea" rows={3} placeholder="She was tenacious in her pursuit of justice." value={examples()} onInput={(e) => setExamples(e.currentTarget.value)} />
+        </Field>
+      </div>
+    </Modal>
+  );
+}
+
+function UploadWordbookModal(props: { open: boolean; onClose: () => void; onDone: () => void }) {
+  const [id, setId] = createSignal('');
+  const [name, setName] = createSignal('');
+  const [desc, setDesc] = createSignal('');
+  const [wordsJson, setWordsJson] = createSignal('[]');
+  const [busy, setBusy] = createSignal(false);
+
+  createEffect(() => { if (props.open) { setId(''); setName(''); setDesc(''); setWordsJson('[]'); } });
 
   function handleFile(file: File) {
     const reader = new FileReader();
@@ -966,15 +925,15 @@ function ImportSection(props: { onImported: () => void }) {
       const baseId = file.name.replace(/\.(csv|json)$/i, '');
       if (file.name.toLowerCase().endsWith('.csv')) {
         const lines = txt.split(/\r?\n/).filter((l) => l.trim());
-        const col = csvColumnMap(parseCsvLine(lines[0] ?? ''));
-        // 表头识别到 word/spelling 列则按列名取值;否则回退按位置 spelling,phonetic,meaning
-        const byName = col.spelling >= 0;
-        const sp = byName ? col.spelling : 0;
-        const ph = byName ? col.phonetic : 1;
-        const me = byName ? col.meaning : 2;
-        const ex = byName ? col.example : -1;
+        const header = (lines[0] ?? '').split(',').map((h) => h.trim().toLowerCase());
+        const idxOf = (...names: string[]) => header.findIndex((h) => names.includes(h));
+        const byName = idxOf('word', 'spelling') >= 0;
+        const sp = byName ? idxOf('word', 'spelling') : 0;
+        const ph = byName ? idxOf('ipa', 'phonetic') : 1;
+        const me = byName ? idxOf('gloss_zh', 'meaning', 'meanings') : 2;
+        const ex = byName ? idxOf('example', 'examples') : -1;
         const words = lines.slice(1).map((line) => {
-          const f = parseCsvLine(line);
+          const f = line.split(',').map((s) => s.trim());
           const meaning = me >= 0 ? (f[me] ?? '') : '';
           const example = ex >= 0 ? (f[ex] ?? '') : '';
           return {
@@ -984,66 +943,16 @@ function ImportSection(props: { onImported: () => void }) {
             examples: example ? [example] : undefined,
           };
         }).filter((w) => w.spelling);
-        setUploadDraft({ ...uploadDraft(), id: uploadDraft().id || baseId, name: uploadDraft().name || baseId, wordsJson: JSON.stringify(words, null, 2) });
+        setId((v) => v || baseId);
+        setName((v) => v || baseId);
+        setWordsJson(JSON.stringify(words, null, 2));
       } else {
-        setUploadDraft({ ...uploadDraft(), id: uploadDraft().id || baseId, name: uploadDraft().name || baseId, wordsJson: txt });
+        setId((v) => v || baseId);
+        setName((v) => v || baseId);
+        setWordsJson(txt);
       }
-      setUploadOpen(true);
     };
     reader.readAsText(file);
-  }
-
-  async function submitUpload() {
-    const d = uploadDraft();
-    if (!d.id.trim() || !d.name.trim()) { uiStore.toast.error('ID 与名称必填'); return; }
-    let words: Array<{ spelling: string; phonetic?: string; meanings?: string[]; examples?: string[] }>;
-    try {
-      const parsed = JSON.parse(d.wordsJson);
-      if (!Array.isArray(parsed)) throw new Error('words 应为数组');
-      words = parsed;
-    } catch (e) {
-      uiStore.toast.error('JSON 解析失败', e instanceof Error ? e.message : '');
-      return;
-    }
-    setUploadBusy(true);
-    try {
-      const res = await adminApi.wbCenterUpload({
-        id: d.id.trim(), name: d.name.trim(),
-        description: d.description.trim() || undefined, words,
-      });
-      uiStore.toast.success(`已上传「${res.wordbook.name}」(${res.wordsImported} 词)`);
-      setUploadOpen(false);
-      setUploadDraft({ id: '', name: '', description: '', wordsJson: '[]' });
-      await loadRemote();
-      props.onImported();
-    } catch (err: unknown) {
-      uiStore.toast.error('上传失败', err instanceof Error ? err.message : '');
-    } finally {
-      setUploadBusy(false);
-    }
-  }
-
-  function openTagsEditor(item: BrowseItem) {
-    if (!item.localWordbookId) { uiStore.toast.error('该词书尚未导入,无法编辑本地标签'); return; }
-    setTagsTarget(item);
-    // 用本地标签预填(非远端 meta.tags),避免 replace 保存把远端标签污染进本地表
-    setTagsDraft([...(item.localTags ?? [])]);
-    setTagInput('');
-  }
-  async function saveTags() {
-    const t = tagsTarget();
-    if (!t || !t.localWordbookId) return;
-    setTagsBusy(true);
-    try {
-      const res = await adminApi.wbCenterPatchTags(t.localWordbookId, { replace: tagsDraft() });
-      uiStore.toast.success(`已更新标签(${res.tags.length} 个)`);
-      setTagsTarget(null);
-      await loadRemote();
-    } catch (err: unknown) {
-      uiStore.toast.error('标签保存失败', err instanceof Error ? err.message : '');
-    } finally {
-      setTagsBusy(false);
-    }
   }
 
   function downloadTemplate() {
@@ -1056,311 +965,65 @@ function ImportSection(props: { onImported: () => void }) {
     URL.revokeObjectURL(url);
   }
 
+  async function submit() {
+    if (!id().trim() || !name().trim()) { toast.warning('ID 与名称必填'); return; }
+    let words: Array<{ spelling: string; phonetic?: string; meanings?: string[]; examples?: string[] }>;
+    try {
+      const parsed = JSON.parse(wordsJson());
+      if (!Array.isArray(parsed)) throw new Error('words 应为数组');
+      words = parsed;
+    } catch (e) {
+      toast.error('JSON 解析失败', e instanceof Error ? e.message : '');
+      return;
+    }
+    setBusy(true);
+    try {
+      const res = await adminApi.wbCenterUpload({ id: id().trim(), name: name().trim(), description: desc().trim() || undefined, words });
+      toast.success('已上传', `${res.wordbook.name} · ${res.wordsImported} 词`);
+      props.onClose();
+      props.onDone();
+    } catch (err: unknown) {
+      toast.error('上传失败', err instanceof Error ? err.message : '');
+    } finally {
+      setBusy(false);
+    }
+  }
+
   let fileInput: HTMLInputElement | undefined;
 
   return (
-    <div class="grid cols-12" style="margin-top:16px">
-      {/* 远程目录浏览 */}
-      <div class="panel" style="grid-column: span 7">
-        <div class="panel-header">
-          <h3>远程词库目录</h3>
-          <span class="text-mono text-small text-tertiary">从配置的词书中心拉取 · 可导入为系统词库</span>
-          <div class="aside">
-            <Show when={configured()}>
-              <button class="btn btn-secondary btn-sm" disabled={checking()} onClick={checkUpdates}>
-                <Show when={checking()}><Spinner size="sm" /></Show>检查更新
-              </button>
-            </Show>
-          </div>
+    <Modal
+      open={props.open} onClose={props.onClose} title="上传本地词库" size="lg"
+      footer={<><Btn variant="ghost" onClick={props.onClose}>取消</Btn><Btn variant="primary" disabled={busy()} onClick={submit}>{busy() ? '上传中…' : '上传'}</Btn></>}
+    >
+      <div style={sx({ display: 'flex', flexDirection: 'column', gap: 13 })}>
+        <div style={sx({ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 })}>
+          <Field label="词书 ID"><input class="input" placeholder="如 cet4-core" value={id()} onInput={(e) => setId(e.currentTarget.value)} /></Field>
+          <Field label="词书名称"><input class="input" placeholder="如 CET-4 核心词汇" value={name()} onInput={(e) => setName(e.currentTarget.value)} /></Field>
         </div>
-        <div class="panel-body">
-          {/* 更新提示 */}
-          <Show when={updates().length > 0}>
-            <div class="row spread wrap" style="padding:10px 12px;border-radius:var(--radius-md);background:var(--accent-light);margin-bottom:12px;gap:8px">
-              <span class="text-small" style="color:var(--accent)">{updates().length} 本词书有更新：{updates().map((u) => u.name).join('、')}</span>
-              <div class="row gap-1 wrap">
-                <For each={updates()}>
-                  {(u) => (
-                    <button class="btn btn-secondary btn-sm" disabled={mutating()} onClick={() => handleSync(u.remoteId, u.name)}>
-                      <Show when={syncing() === u.remoteId}><Spinner size="sm" /></Show>同步「{u.name}」
-                    </button>
-                  )}
-                </For>
-              </div>
-            </div>
-          </Show>
-
-          <Show
-            when={configured()}
-            fallback={
-              <Show when={!remoteLoading()}>
-                <Empty title="尚未配置词书中心 URL" description="请前往「系统设置」配置全局词书中心地址后再使用远程导入" />
-              </Show>
-            }
-          >
-            <Show
-              when={!remoteLoading()}
-              fallback={<div class="row" style="justify-content:center;padding:32px 0"><Spinner size="lg" /></div>}
-            >
-              <Show
-                when={remoteItems().length > 0}
-                fallback={<Empty title="远程目录为空" description="远程源中没有可用的词书" />}
-              >
-                <div class="remote-grid">
-                  <For each={remoteItems()}>
-                    {(item) => (
-                      <div class="remote-card">
-                        <div class="row spread" style="align-items:flex-start;gap:6px">
-                          <span class="name">{item.name}</span>
-                          <Show when={item.imported}>
-                            <span class={`chip ${item.hasUpdate ? 'chip-warning' : 'chip-success'}`} style="font-size:10px">
-                              {item.hasUpdate ? '有更新' : '已导入'}
-                            </span>
-                          </Show>
-                        </div>
-                        <Show when={item.description}><span class="desc">{item.description}</span></Show>
-                        <div class="meta">
-                          <span>{fmtNum(item.wordCount)} 词</span>
-                          <Show when={item.version}><span>v{item.version}</span></Show>
-                          <Show when={item.author}><span>{item.author}</span></Show>
-                        </div>
-                        <Show when={item.imported && (item.localTags?.length ?? 0) > 0}>
-                          <div class="row gap-1 wrap" style="margin-top:2px">
-                            <For each={item.localTags}>
-                              {(tag) => <span class="chip chip-outline" style="font-size:10px">{tag}</span>}
-                            </For>
-                          </div>
-                        </Show>
-                        <div class="row gap-1 wrap" style="margin-top:2px">
-                          <button class="btn btn-ghost btn-sm" onClick={() => handlePreview(item.id)}>预览</button>
-                          <Show when={!item.imported}>
-                            <button class="btn btn-primary btn-sm" disabled={mutating()} onClick={() => setImportTarget(item)}>
-                              <Show when={importing() === item.id}><Spinner size="sm" /></Show>导入
-                            </button>
-                          </Show>
-                          <Show when={item.imported && item.hasUpdate}>
-                            <button class="btn btn-secondary btn-sm" disabled={mutating()} onClick={() => handleSync(item.id, item.name)}>
-                              <Show when={syncing() === item.id}><Spinner size="sm" /></Show>同步更新
-                            </button>
-                          </Show>
-                          <Show when={item.imported && item.localWordbookId}>
-                            <button class="btn btn-ghost btn-sm" onClick={() => openTagsEditor(item)}>编辑标签</button>
-                          </Show>
-                        </div>
-                      </div>
-                    )}
-                  </For>
-                </div>
-              </Show>
-            </Show>
-          </Show>
-        </div>
-      </div>
-
-      {/* 文件导入 */}
-      <div class="panel" style="grid-column: span 5">
-        <div class="panel-header">
-          <h3>导入新词库</h3>
-          <span class="text-mono text-small text-tertiary">CSV / JSON</span>
-        </div>
-        <div class="panel-body">
-          <div
-            class={`import-zone ${dragOver() ? 'is-drag' : ''}`}
-            role="button"
-            tabindex="0"
-            onClick={() => fileInput?.click()}
-            onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileInput?.click(); } }}
-            onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
-            onDragLeave={() => setDragOver(false)}
-            onDrop={(e) => {
-              e.preventDefault();
-              setDragOver(false);
-              const f = e.dataTransfer?.files?.[0];
-              if (f) handleFile(f);
-            }}
-          >
-            <div class="ic">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-            </div>
-            <strong>拖拽文件到此处</strong>
-            <span class="text-small text-secondary mt-2" style="display:block">或 <span class="text-accent">点击浏览</span> · 支持 CSV / JSON</span>
+        <Field label="简介(可选)"><input class="input" placeholder="一句话说明用途" value={desc()} onInput={(e) => setDesc(e.currentTarget.value)} /></Field>
+        <Field label="Words JSON 数组" hint="CSV 格式：word,pos,ipa,gloss_zh,example(首行表头),按列名解析、客户端自动转 JSON">
+          <div style={sx({ display: 'flex', gap: 8, marginBottom: 6 })}>
+            <Btn size="sm" variant="secondary" icon="download" onClick={downloadTemplate}>下载模板</Btn>
+            <Btn size="sm" variant="ghost" icon="upload" onClick={() => fileInput?.click()}>选择 .json/.csv 文件</Btn>
             <input
               ref={fileInput}
               type="file"
               accept=".json,.csv,application/json,text/csv"
-              class="hidden"
+              style={sx({ display: 'none' })}
               onChange={(e) => { const f = e.currentTarget.files?.[0]; if (f) handleFile(f); e.currentTarget.value = ''; }}
             />
           </div>
-          <div class="divider" />
-          <h4 style="font:600 12px/1.3 var(--font-display);margin-bottom:8px;color:var(--content-secondary);letter-spacing:0.02em;text-transform:uppercase">CSV 模板</h4>
-          <div class="code-block">{CSV_TEMPLATE}</div>
-          <div class="row gap-2 mt-3">
-            <button class="btn btn-secondary btn-sm" onClick={downloadTemplate}>下载完整模板</button>
-            <button class="btn btn-ghost btn-sm" onClick={() => setUploadOpen(true)}>手动粘贴 JSON</button>
-          </div>
-        </div>
-      </div>
-
-      {/* 导入确认 */}
-      <ConfirmDialog
-        open={!!importTarget()}
-        title="确认导入词库"
-        message={
-          <Show when={importTarget()}>
-            {(item) => (
-              <>
-                将把「<span class="font-medium text-content">{item().name}</span>」导入为系统词书(共 <span class="tabular-nums font-mono">{fmtNum(item().wordCount)}</span> 词)。
-                <br />导入后系统词库将新增 / 合并对应单词,操作不可一键回滚。
-              </>
-            )}
-          </Show>
-        }
-        confirmText="确认导入"
-        variant="warning"
-        onConfirm={() => { const it = importTarget(); setImportTarget(null); if (it) void handleImport(it); }}
-        onCancel={() => setImportTarget(null)}
-      />
-
-      {/* 上传 modal */}
-      <Modal open={uploadOpen()} onClose={() => setUploadOpen(false)} title="上传本地词库" size="lg">
-        <div class="space-y-3">
-          <div class="grid grid-cols-2 gap-3">
-            <Input
-              label="词书 ID"
-              placeholder="如 cet4-core"
-              value={uploadDraft().id}
-              onInput={(e) => setUploadDraft({ ...uploadDraft(), id: e.currentTarget.value })}
-            />
-            <Input
-              label="词书名称"
-              placeholder="如 CET-4 核心词汇"
-              value={uploadDraft().name}
-              onInput={(e) => setUploadDraft({ ...uploadDraft(), name: e.currentTarget.value })}
-            />
-          </div>
-          <Input
-            label="简介(可选)"
-            placeholder="一句话说明用途"
-            value={uploadDraft().description}
-            onInput={(e) => setUploadDraft({ ...uploadDraft(), description: e.currentTarget.value })}
+          <textarea
+            class="textarea mono"
+            rows={9}
+            style={sx({ fontSize: 12 })}
+            placeholder={'[{"spelling": "apple", "phonetic": "/ˈæpəl/", "meanings": ["苹果"]}]'}
+            value={wordsJson()}
+            onInput={(e) => setWordsJson(e.currentTarget.value)}
           />
-          <div>
-            <div class="flex items-baseline justify-between mb-1">
-              <p class="text-sm font-medium text-content-secondary">Words JSON 数组</p>
-              <label class="text-[11.5px] text-accent cursor-pointer hover:underline">
-                选择 .json/.csv 文件
-                <input
-                  type="file"
-                  accept=".json,.csv,application/json,text/csv"
-                  class="hidden"
-                  onChange={(e) => { const f = e.currentTarget.files?.[0]; if (f) handleFile(f); e.currentTarget.value = ''; }}
-                />
-              </label>
-            </div>
-            <textarea
-              rows={10}
-              value={uploadDraft().wordsJson}
-              onInput={(e) => setUploadDraft({ ...uploadDraft(), wordsJson: e.currentTarget.value })}
-              placeholder={'[{"spelling": "apple", "phonetic": "/ˈæpəl/", "meanings": ["苹果"]}]'}
-              class="w-full px-3 py-2 rounded-md border border-border-hairline bg-surface text-[12px] font-mono focus:outline-none focus:border-accent"
-            />
-            <p class="text-[10.5px] text-content-tertiary mt-1">CSV 格式：<code class="font-mono">word,pos,ipa,gloss_zh,example</code>(首行表头),按列名解析、客户端自动转 JSON</p>
-          </div>
-          <div class="flex justify-end gap-2 pt-1">
-            <button class="btn btn-ghost" onClick={() => setUploadOpen(false)}>取消</button>
-            <button class="btn btn-primary" disabled={uploadBusy()} onClick={submitUpload}>
-              <Show when={uploadBusy()}><Spinner size="sm" /></Show>上传
-            </button>
-          </div>
-        </div>
-      </Modal>
-
-      {/* 预览 modal */}
-      <Modal open={preview() !== null} onClose={() => setPreview(null)} title={preview()?.name ?? '词书预览'} size="lg">
-        <Show when={preview()}>
-          {(p) => (
-            <div class="space-y-4 text-[13px]">
-              <Show when={p().description}><p class="text-content-secondary leading-relaxed">{p().description}</p></Show>
-              <div class="flex gap-4 text-content-secondary text-[12.5px]">
-                <span>词条 <span class="font-mono text-content">{fmtNum(p().wordCount)}</span></span>
-                <Show when={p().version}><span>版本 <span class="font-mono text-content">v{p().version}</span></span></Show>
-                <Show when={p().author}><span>作者 <span class="text-content">{p().author}</span></span></Show>
-              </div>
-              <div>
-                <p class="text-[11.5px] uppercase tracking-wide text-content-tertiary mb-1.5">词条预览 · 显示前 {p().words.data.length} / {fmtNum(p().words.total)} 词</p>
-                <ul class="space-y-2">
-                  <For each={p().words.data}>
-                    {(word) => (
-                      <li class="px-3 py-2 rounded-md bg-surface-secondary">
-                        <div class="flex items-center gap-2">
-                          <span class="font-medium text-content">{word.spelling}</span>
-                          <Show when={word.phonetic}><span class="font-mono text-[11.5px] text-content-tertiary">{word.phonetic}</span></Show>
-                        </div>
-                        <Show when={word.meanings.length > 0}>
-                          <p class="text-content-secondary mt-1 text-[12.5px] leading-snug">{word.meanings.join('; ')}</p>
-                        </Show>
-                      </li>
-                    )}
-                  </For>
-                </ul>
-              </div>
-            </div>
-          )}
-        </Show>
-      </Modal>
-
-      {/* 标签编辑 modal */}
-      <Modal open={!!tagsTarget()} onClose={() => setTagsTarget(null)} title="编辑词书标签" size="md">
-        <Show when={tagsTarget()}>
-          {(t) => (
-            <div class="space-y-3">
-              <p class="text-sm text-content-secondary">
-                正在编辑「<span class="font-medium text-content">{t().name}</span>」的本地标签。
-                <br /><span class="text-[11.5px] text-content-tertiary">这只影响本地 wordbook_local_tags 表,远程词书原 tags 不受影响。</span>
-              </p>
-              <div class="flex flex-wrap gap-1.5 min-h-[32px] p-2 rounded-md border border-border-hairline bg-surface-secondary">
-                <Show when={tagsDraft().length > 0} fallback={<span class="text-[11.5px] text-content-tertiary">暂无标签</span>}>
-                  <For each={tagsDraft()}>
-                    {(tag) => (
-                      <span class="inline-flex items-center gap-1 px-2 py-0.5 bg-accent text-accent-content rounded-full text-xs">
-                        {tag}
-                        <button type="button" class="hover:opacity-70" onClick={() => setTagsDraft(tagsDraft().filter((x) => x !== tag))} aria-label={`移除标签 ${tag}`}>×</button>
-                      </span>
-                    )}
-                  </For>
-                </Show>
-              </div>
-              <div class="flex gap-2">
-                <Input
-                  placeholder="输入新标签按 Enter 添加"
-                  value={tagInput()}
-                  onInput={(e) => setTagInput(e.currentTarget.value)}
-                  onKeyDown={(e: KeyboardEvent) => {
-                    if (e.key === 'Enter') {
-                      e.preventDefault();
-                      const v = tagInput().trim();
-                      if (v && !tagsDraft().includes(v)) setTagsDraft([...tagsDraft(), v]);
-                      setTagInput('');
-                    }
-                  }}
-                />
-                <button class="btn btn-secondary btn-sm" onClick={() => {
-                  const v = tagInput().trim();
-                  if (v && !tagsDraft().includes(v)) setTagsDraft([...tagsDraft(), v]);
-                  setTagInput('');
-                }}>添加</button>
-              </div>
-              <div class="flex justify-end gap-2 pt-1">
-                <button class="btn btn-ghost" onClick={() => setTagsTarget(null)}>取消</button>
-                <button class="btn btn-primary" disabled={tagsBusy()} onClick={saveTags}>
-                  <Show when={tagsBusy()}><Spinner size="sm" /></Show>保存
-                </button>
-              </div>
-            </div>
-          )}
-        </Show>
-      </Modal>
-    </div>
+        </Field>
+      </div>
+    </Modal>
   );
 }

@@ -1,20 +1,26 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { screen, waitFor } from '@solidjs/testing-library';
+import userEvent from '@testing-library/user-event';
 import { renderWithProviders } from '../helpers/render';
 
-// 重设计后的系统设置页:section 化(site/auth/…)+ RBAC + API 密钥 + 快照/回滚/导出。
-// 旧版「基本设置 / AMAS 调参 / 广播迁出」表单已不存在,本套测试针对新设计契约。
+// 重设计后的系统设置页:PageHead「系统设置」+ Tabs(配置板块 / RBAC / API 密钥 / 快照 / 维护·备份)。
+// 配置板块为默认 tab,左侧分组 rail + 右侧 SectionEditor;维护·备份 tab 含维护模式开关 + 版本门控 + 备份状态。
+// 旧版「基本设置 / 维护模式横幅 / .st-skeleton」已不存在,本套测试针对新设计契约。
 vi.mock('@/api/admin', () => ({
   adminApi: {
     settingsConfig: vi.fn(),
-    getSettings: vi.fn(),
-    putSettingsSection: vi.fn(),
     settingsSnapshots: vi.fn(),
-    createSettingsSnapshot: vi.fn(),
-    restoreSettingsSnapshot: vi.fn(),
-    setMaintenance: vi.fn(),
     rbacAdmins: vi.fn(),
     apiKeys: vi.fn(),
+    getSettings: vi.fn(),
+    setMaintenance: vi.fn(),
+    getBackupStatus: vi.fn(),
+    getVersionGate: vi.fn(),
+    setVersionGate: vi.fn(),
+    putSettingsSection: vi.fn(),
+    createSettingsSnapshot: vi.fn(),
+    restoreSettingsSnapshot: vi.fn(),
+    exportSettingsToml: vi.fn(),
   },
 }));
 vi.mock('@/stores/ui', () => ({
@@ -53,9 +59,13 @@ export function mockSections() {
 
 function defaults() {
   mockApi.settingsConfig.mockResolvedValue(mockSections());
-  mockApi.getSettings.mockResolvedValue({ maintenanceMode: false });
+  mockApi.settingsSnapshots.mockResolvedValue({ snapshots: [] });
   mockApi.rbacAdmins.mockResolvedValue({ admins: [] });
   mockApi.apiKeys.mockResolvedValue({ keys: [] });
+  mockApi.getSettings.mockResolvedValue({ maintenanceMode: false });
+  mockApi.setMaintenance.mockResolvedValue({ active: true });
+  mockApi.getBackupStatus.mockResolvedValue({ targets: [] });
+  mockApi.getVersionGate.mockResolvedValue({ enabled: false, strictModeEnabled: false });
 }
 
 async function renderPage() {
@@ -71,28 +81,41 @@ describe('SettingsPage — 新设计结构', () => {
     expect(screen.getByText('系统设置')).toBeInTheDocument();
   });
 
-  it('加载中展示 skeleton 占位', async () => {
+  it('配置加载中展示 spinner 占位', async () => {
     mockApi.settingsConfig.mockReturnValue(new Promise(() => {}));
     await renderPage();
-    expect(document.querySelectorAll('.st-skeleton').length).toBeGreaterThanOrEqual(1);
+    expect(document.querySelectorAll('.spinner').length).toBeGreaterThanOrEqual(1);
   });
 
   it('加载后展示站点/认证板块标题', async () => {
     await renderPage();
-    // 「站点与外观」在 rail 与 section card 各出现一次 → getAllByText
+    // 「站点与外观」在左侧 rail 与 SectionEditor 卡片各出现一次 → getAllByText
     await waitFor(() => expect(screen.getAllByText('站点与外观').length).toBeGreaterThanOrEqual(1));
     expect(screen.getAllByText('认证与登录').length).toBeGreaterThanOrEqual(1);
   });
 
-  it('展示维护模式横幅', async () => {
+  it('切到「维护 · 备份」tab 可切换维护模式并调用 setMaintenance', async () => {
+    const user = userEvent.setup();
     await renderPage();
-    await waitFor(() => expect(screen.getByText('系统运行中 · 维护模式已关闭')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getAllByText('站点与外观').length).toBeGreaterThanOrEqual(1));
+
+    await user.click(screen.getByRole('button', { name: '维护 · 备份' }));
+    // 维护模式面板渲染
+    await waitFor(() => expect(screen.getAllByText('维护模式').length).toBeGreaterThanOrEqual(1));
+
+    // getSettings 解析后开关启用,第一个 checkbox 即维护模式开关
+    let toggle!: HTMLInputElement;
+    await waitFor(() => {
+      toggle = screen.getAllByRole('checkbox')[0] as HTMLInputElement;
+      expect(toggle.disabled).toBe(false);
+    });
+    await user.click(toggle);
+    await waitFor(() => expect(mockApi.setMaintenance).toHaveBeenCalledWith(true));
   });
 
-  it('settingsConfig 失败时弹错误 toast', async () => {
+  it('settingsConfig 失败时展示「加载配置失败」空态', async () => {
     mockApi.settingsConfig.mockRejectedValue(new Error('load fail'));
-    const { uiStore } = await import('@/stores/ui');
     await renderPage();
-    await waitFor(() => expect((uiStore.toast.error as ReturnType<typeof vi.fn>)).toHaveBeenCalled());
+    await waitFor(() => expect(screen.getByText('加载配置失败')).toBeInTheDocument());
   });
 });

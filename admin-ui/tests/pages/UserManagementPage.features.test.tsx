@@ -2,43 +2,33 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { screen, waitFor, fireEvent } from '@solidjs/testing-library';
 import { renderWithProviders } from '../helpers/render';
 
-// m024:UserManagementPage 大改 —— 顶部 KPI / chip filter / 9 列 / 添加用户 / 角色变更。
-// 新依赖:getStats / getEngagement / userProfile / userSessions / usersBulkBan
-// / usersBulkUnban / createUser / patchUserRole / usersBulkRole / userDevices /
-// userAuditLog。默认 resolve 空值,具体用例可 override。
+// 用户管理页重设计后:PageHead + facet chip + 9 列表格 + 行内「详情/封禁」按钮
+// + 批量栏(Confirm) + 添加用户 Modal + 详情 Drawer(重置密码→密钥 Modal)。
+// 行级封禁/解封改为直接调用(无确认弹窗);重置密码迁移到 Drawer footer,
+// 返回一次性密钥 + 复制密钥。下方默认 resolve 安全值,具体用例可 override。
 vi.mock('@/api/admin', () => ({
   adminApi: {
     getUsers: vi.fn(),
-    banUser: vi.fn(),
-    unbanUser: vi.fn(),
-    setUserPassword: vi.fn(),
-    resetUserPassword: vi.fn(),
-    getStats: vi.fn(() => Promise.resolve({ users: 100, words: 0, records: 0, trend: { users: { value: 5, label: '较昨日' } } })),
-    getEngagement: vi.fn(() => Promise.resolve({ totalUsers: 100, activeToday: 12, retentionRate: 0.12 })),
-    // m027:header "本周新增" 取近 7 天 daily-active-users 的 registered 求和
-    getDailyActiveUsers: vi.fn(() => Promise.resolve([{ date: '2026-05-30', active: 10, registered: 3 }])),
-    // m027:筛选 chip 逐项计数 GET /users/facets
-    userFacets: vi.fn(() => Promise.resolve({ total: 100, active: 80, inactive7d: 12, banned: 5, admins: 3 })),
-    userProfile: vi.fn(() => Promise.resolve({ userId: 'x', totalRecords: 0, correctRecords: 0, accuracy: null, sessionCount: 0, wordbookDistribution: [] })),
-    userSessions: vi.fn(() => Promise.resolve({ sessions: [] })),
-    usersBulkBan: vi.fn(),
-    usersBulkUnban: vi.fn(),
+    userFacets: vi.fn(() => Promise.resolve({ total: 0, active: 0, inactive7d: 0, banned: 0, admins: 0 })),
+    banUser: vi.fn(() => Promise.resolve({ banned: true, userId: '1' })),
+    unbanUser: vi.fn(() => Promise.resolve({ banned: false, userId: '2' })),
+    resetUserPassword: vi.fn(() => Promise.resolve({ resetKey: 'KEY', expiresInHours: 24 })),
     createUser: vi.fn(),
-    patchUserRole: vi.fn(),
-    usersBulkRole: vi.fn(),
+    patchUserRole: vi.fn(() => Promise.resolve({})),
+    usersBulkBan: vi.fn(() => Promise.resolve({ total: 1, succeeded: 1, failed: 0, results: [] })),
+    usersBulkUnban: vi.fn(() => Promise.resolve({ total: 1, succeeded: 1, failed: 0, results: [] })),
+    usersBulkResetPassword: vi.fn(() => Promise.resolve({ total: 1, succeeded: 1, failed: 0, results: [] })),
+    usersBulkDelete: vi.fn(() => Promise.resolve({ total: 1, succeeded: 1, failed: 0, results: [] })),
+    // 详情 Drawer 数据源(默认空)
+    userProfile: vi.fn(() => Promise.resolve({
+      userId: 'x', totalRecords: 0, correctRecords: 0, accuracy: null,
+      avgResponseTimeMs: null, sessionCount: 0, wordbookDistribution: [],
+    })),
+    userExtras: vi.fn(() => Promise.resolve(null)),
+    userSessions: vi.fn(() => Promise.resolve({ sessions: [] })),
     userDevices: vi.fn(() => Promise.resolve({ devices: [] })),
     userAuditLog: vi.fn(() => Promise.resolve({ entries: [] })),
-    // m025:Drawer 4 tab 深化数据源(默认空)
-    userExtras: vi.fn(() => Promise.resolve({
-      preferences: null, elo: null, habit: null, streakDays: 0,
-      latestStrategy: null, latestDevice: null,
-      metrics7d: { records: 0, correct: 0, accuracy: null, fatigueAlertCount: 0 },
-    })),
     userActivityLog: vi.fn(() => Promise.resolve({ entries: [] })),
-    // m026:批量重置/删除/设备封禁
-    usersBulkResetPassword: vi.fn(),
-    usersBulkDelete: vi.fn(),
-    banUserDevice: vi.fn(),
   },
 }));
 vi.mock('@/stores/ui', () => ({
@@ -50,7 +40,6 @@ import { uiStore } from '@/stores/ui';
 const mockApi = adminApi as unknown as Record<string, ReturnType<typeof vi.fn>>;
 const mockToast = uiStore.toast as unknown as Record<string, ReturnType<typeof vi.fn>>;
 
-// m024:AdminUser 字段扩展;id 仍为 string
 const baseUser = {
   failedLoginCount: 0,
   lockedUntil: null,
@@ -59,198 +48,177 @@ const baseUser = {
   role: 'user' as const,
   status: 'active' as const,
   lastLoginAt: null,
+  referrerSource: null,
 };
 const user1 = { ...baseUser, id: '1', username: 'alice', email: 'alice@example.com', isBanned: false };
 const user2 = { ...baseUser, id: '2', username: 'bob', email: 'bob@example.com', isBanned: true, status: 'suspended' as const };
+
+const emptyFacets = { total: 0, active: 0, inactive7d: 0, banned: 0, admins: 0 };
+
+function page<T extends object>(data: T[], total = data.length, totalPages = 1) {
+  return { data, total, page: 1, perPage: 12, totalPages };
+}
 
 async function renderPage() {
   const { default: Page } = await import('@/pages/UserManagementPage');
   return renderWithProviders(() => <Page />);
 }
 
-/** m026:行级操作由 inline 按钮迁到三点菜单 → 触发操作前先打开该行菜单 */
-function openRowMenu(username: string) {
-  fireEvent.click(screen.getByLabelText(`${username} 更多操作`));
+/** facet chip(全部 / 活跃 / 7 天未登录 / 已封禁 / 管理员)是 .badge button —— "管理员"
+ *  文案同时出现在角色 select 的 option 里,故取首个(chip)。 */
+function clickChip(label: string) {
+  const matches = screen.getAllByText(label).filter((el) => el.tagName === 'BUTTON');
+  fireEvent.click(matches[0]);
 }
 
 describe('UserManagementPage — list, ban, reset password, pagination', () => {
   beforeEach(() => vi.clearAllMocks());
 
   it('lists users after loading', async () => {
-    mockApi.getUsers.mockResolvedValue({ data: [user1, user2], total: 2 });
+    mockApi.getUsers.mockResolvedValue(page([user1, user2], 2));
     await renderPage();
     await waitFor(() => expect(screen.getByText('alice')).toBeInTheDocument());
     expect(screen.getByText('bob')).toBeInTheDocument();
   });
 
   it('shows empty state when no users', async () => {
-    mockApi.getUsers.mockResolvedValue({ data: [], total: 0 });
+    mockApi.getUsers.mockResolvedValue(page([], 0));
     await renderPage();
     await waitFor(() => expect(screen.getByText('暂无用户')).toBeInTheDocument());
   });
 
-  it('shows load failure toast', async () => {
+  it('renders page head and stays alive when list load fails', async () => {
+    // 列表用 createResource(无 catch),失败时不渲染数据/空态,但页面骨架仍在 —— 验证不崩。
     mockApi.getUsers.mockRejectedValue(new Error('500'));
     await renderPage();
-    await waitFor(() => expect(mockToast.error).toHaveBeenCalled());
+    await waitFor(() => expect(screen.getByText('用户管理')).toBeInTheDocument());
+    expect(screen.queryByText('alice')).not.toBeInTheDocument();
   });
 
-  it('opens ban confirm and bans user', async () => {
-    mockApi.getUsers.mockResolvedValue({ data: [user1], total: 1 });
-    mockApi.banUser.mockResolvedValue(undefined);
+  it('bans a user via inline action button', async () => {
+    mockApi.getUsers.mockResolvedValue(page([user1], 1));
     await renderPage();
-    await waitFor(() => expect(screen.getByLabelText('alice 更多操作')).toBeInTheDocument());
-    openRowMenu('alice');
-    fireEvent.click(await screen.findByText('封禁'));
-    await waitFor(() => expect(screen.getAllByText('确认封禁').length).toBeGreaterThanOrEqual(2));
-    fireEvent.click(screen.getAllByText('确认封禁')[1]);
+    await waitFor(() => expect(screen.getByText('alice')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('封禁'));
     await waitFor(() => expect(mockApi.banUser).toHaveBeenCalledWith('1'));
+    expect(mockToast.success).toHaveBeenCalled();
   });
 
-  it('cancels ban dialog', async () => {
-    mockApi.getUsers.mockResolvedValue({ data: [user1], total: 1 });
+  it('opens detail drawer and closes it', async () => {
+    mockApi.getUsers.mockResolvedValue(page([user1], 1));
     await renderPage();
-    await waitFor(() => expect(screen.getByLabelText('alice 更多操作')).toBeInTheDocument());
-    openRowMenu('alice');
-    fireEvent.click(await screen.findByText('封禁'));
-    await waitFor(() => expect(screen.getAllByText('确认封禁').length).toBeGreaterThanOrEqual(2));
-    fireEvent.click(screen.getByText('取消'));
-    await waitFor(() => expect(screen.queryByText('确认封禁')).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('alice')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('详情'));
+    // Drawer 内有角色变更 select(含「设为管理员」option)
+    await waitFor(() => expect(screen.getByText('设为管理员')).toBeInTheDocument());
+    fireEvent.click(screen.getByLabelText('关闭'));
+    await waitFor(() => expect(screen.queryByText('设为管理员')).not.toBeInTheDocument());
   });
 
   it('handles ban failure', async () => {
-    mockApi.getUsers.mockResolvedValue({ data: [user1], total: 1 });
+    mockApi.getUsers.mockResolvedValue(page([user1], 1));
     mockApi.banUser.mockRejectedValue(new Error('boom'));
     await renderPage();
-    await waitFor(() => expect(screen.getByLabelText('alice 更多操作')).toBeInTheDocument());
-    openRowMenu('alice');
-    fireEvent.click(await screen.findByText('封禁'));
-    fireEvent.click(screen.getAllByText('确认封禁')[1]);
+    await waitFor(() => expect(screen.getByText('alice')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('封禁'));
     await waitFor(() => expect(mockToast.error).toHaveBeenCalled());
   });
 
-  it('unbans a banned user', async () => {
-    mockApi.getUsers.mockResolvedValue({ data: [user2], total: 1 });
-    mockApi.unbanUser.mockResolvedValue(undefined);
+  it('unbans a banned user via inline action button', async () => {
+    mockApi.getUsers.mockResolvedValue(page([user2], 1));
     await renderPage();
-    await waitFor(() => expect(screen.getByLabelText('bob 更多操作')).toBeInTheDocument());
-    openRowMenu('bob');
-    fireEvent.click(await screen.findByText('解封'));
-    await waitFor(() => expect(screen.getAllByText('确认解封').length).toBeGreaterThanOrEqual(2));
-    fireEvent.click(screen.getAllByText('确认解封')[1]);
+    await waitFor(() => expect(screen.getByText('bob')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('解封'));
     await waitFor(() => expect(mockApi.unbanUser).toHaveBeenCalledWith('2'));
   });
 
-  it('opens reset password modal', async () => {
-    mockApi.getUsers.mockResolvedValue({ data: [user1], total: 1 });
+  it('generates reset key from drawer and shows it', async () => {
+    mockApi.getUsers.mockResolvedValue(page([user1], 1));
+    mockApi.resetUserPassword.mockResolvedValue({ resetKey: 'abc-123', expiresInHours: 24 });
     await renderPage();
-    await waitFor(() => expect(screen.getByLabelText('alice 更多操作')).toBeInTheDocument());
-    openRowMenu('alice');
-    fireEvent.click(await screen.findByText('重置密码'));
-    await waitFor(() => expect(screen.getByText('直接重置密码')).toBeInTheDocument());
-    expect(screen.getByText('生成重置密钥')).toBeInTheDocument();
-  });
-
-  it('completes direct password reset', async () => {
-    mockApi.getUsers.mockResolvedValue({ data: [user1], total: 1 });
-    mockApi.setUserPassword.mockResolvedValue(undefined);
-    await renderPage();
-    await waitFor(() => expect(screen.getByLabelText('alice 更多操作')).toBeInTheDocument());
-    openRowMenu('alice');
-    fireEvent.click(await screen.findByText('重置密码'));
-    fireEvent.click(screen.getByText('直接重置密码'));
-    const pwInputs = document.querySelectorAll('input[type="password"]');
-    fireEvent.input(pwInputs[0], { target: { value: 'newpassword' } });
-    fireEvent.input(pwInputs[1], { target: { value: 'newpassword' } });
-    fireEvent.click(screen.getByText('确认重置'));
-    await waitFor(() => expect(mockApi.setUserPassword).toHaveBeenCalledWith('1', 'newpassword'));
-  });
-
-  it('shows error when direct reset password empty', async () => {
-    mockApi.getUsers.mockResolvedValue({ data: [user1], total: 1 });
-    await renderPage();
-    await waitFor(() => expect(screen.getByLabelText('alice 更多操作')).toBeInTheDocument());
-    openRowMenu('alice');
-    fireEvent.click(await screen.findByText('重置密码'));
-    fireEvent.click(screen.getByText('直接重置密码'));
-    fireEvent.click(screen.getByText('确认重置'));
-    await waitFor(() => expect(screen.getByText('请输入新密码')).toBeInTheDocument());
-  });
-
-  it('shows error when direct reset password mismatch', async () => {
-    mockApi.getUsers.mockResolvedValue({ data: [user1], total: 1 });
-    await renderPage();
-    await waitFor(() => expect(screen.getByLabelText('alice 更多操作')).toBeInTheDocument());
-    openRowMenu('alice');
-    fireEvent.click(await screen.findByText('重置密码'));
-    fireEvent.click(screen.getByText('直接重置密码'));
-    const pwInputs = document.querySelectorAll('input[type="password"]');
-    fireEvent.input(pwInputs[0], { target: { value: 'pw1' } });
-    fireEvent.input(pwInputs[1], { target: { value: 'pw2' } });
-    fireEvent.click(screen.getByText('确认重置'));
-    await waitFor(() => expect(screen.getByText('两次密码输入不一致')).toBeInTheDocument());
-  });
-
-  it('generates reset key', async () => {
-    mockApi.getUsers.mockResolvedValue({ data: [user1], total: 1 });
-    mockApi.resetUserPassword.mockResolvedValue({ resetKey: 'abc-123' });
-    await renderPage();
-    await waitFor(() => expect(screen.getByLabelText('alice 更多操作')).toBeInTheDocument());
-    openRowMenu('alice');
-    fireEvent.click(await screen.findByText('重置密码'));
-    fireEvent.click(screen.getByText('生成重置密钥'));
+    await waitFor(() => expect(screen.getByText('alice')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('详情'));
+    await waitFor(() => expect(screen.getAllByText('重置密码').length).toBeGreaterThan(0));
+    fireEvent.click(screen.getAllByText('重置密码')[0]);
     await waitFor(() => expect(screen.getByText('abc-123')).toBeInTheDocument());
+    expect(screen.getByText('密码重置密钥')).toBeInTheDocument();
+    expect(mockApi.resetUserPassword).toHaveBeenCalledWith('1');
   });
 
-  it('handles generate key failure', async () => {
-    mockApi.getUsers.mockResolvedValue({ data: [user1], total: 1 });
+  it('handles generate reset key failure', async () => {
+    mockApi.getUsers.mockResolvedValue(page([user1], 1));
     mockApi.resetUserPassword.mockRejectedValue(new Error('boom'));
     await renderPage();
-    await waitFor(() => expect(screen.getByLabelText('alice 更多操作')).toBeInTheDocument());
-    openRowMenu('alice');
-    fireEvent.click(await screen.findByText('重置密码'));
-    fireEvent.click(screen.getByText('生成重置密钥'));
+    await waitFor(() => expect(screen.getByText('alice')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('详情'));
+    await waitFor(() => expect(screen.getAllByText('重置密码').length).toBeGreaterThan(0));
+    fireEvent.click(screen.getAllByText('重置密码')[0]);
     await waitFor(() => expect(mockToast.error).toHaveBeenCalled());
   });
 
-  it('handles direct reset api failure', async () => {
-    mockApi.getUsers.mockResolvedValue({ data: [user1], total: 1 });
-    mockApi.setUserPassword.mockRejectedValue(new Error('api error'));
+  it('changes role from drawer select', async () => {
+    mockApi.getUsers.mockResolvedValue(page([user1], 1));
     await renderPage();
-    await waitFor(() => expect(screen.getByLabelText('alice 更多操作')).toBeInTheDocument());
-    openRowMenu('alice');
-    fireEvent.click(await screen.findByText('重置密码'));
-    fireEvent.click(screen.getByText('直接重置密码'));
-    const pwInputs = document.querySelectorAll('input[type="password"]');
-    fireEvent.input(pwInputs[0], { target: { value: 'newpw' } });
-    fireEvent.input(pwInputs[1], { target: { value: 'newpw' } });
-    fireEvent.click(screen.getByText('确认重置'));
-    await waitFor(() => expect(screen.getByText('api error')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('alice')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('详情'));
+    await waitFor(() => expect(screen.getByText('设为管理员')).toBeInTheDocument());
+    const roleSelect = screen.getByText('设为管理员').closest('select') as HTMLSelectElement;
+    fireEvent.change(roleSelect, { target: { value: 'admin' } });
+    await waitFor(() => expect(mockApi.patchUserRole).toHaveBeenCalledWith('1', 'admin'));
   });
 
-  it('changes pagination page', async () => {
-    const many = Array.from({ length: 50 }, (_, i) => ({ ...baseUser, id: String(i), username: `u${i}`, email: `${i}@x.com`, isBanned: false }));
-    mockApi.getUsers.mockResolvedValue({ data: many.slice(0, 20), total: 50 });
+  it('reloads list with role=user when role select changes', async () => {
+    mockApi.getUsers.mockResolvedValue(page([user1], 1));
     await renderPage();
-    await waitFor(() => expect(screen.getByLabelText('第 2 页')).toBeInTheDocument());
-    fireEvent.click(screen.getByLabelText('第 2 页'));
-    // m024:翻页时 query 形态变更,含 includeStats / search 等
+    await waitFor(() => expect(screen.getByText('alice')).toBeInTheDocument());
+    // toolbar 顶部「全部角色」select
+    const roleFilter = screen.getByText('全部角色').closest('select') as HTMLSelectElement;
+    fireEvent.change(roleFilter, { target: { value: 'user' } });
     await waitFor(() =>
       expect(mockApi.getUsers).toHaveBeenLastCalledWith(
-        expect.objectContaining({ page: 2, perPage: 20, includeStats: true }),
+        expect.objectContaining({ role: 'user', perPage: 12, includeStats: true }),
       ),
+    );
+  });
+
+  it('changes pagination page via 下一页', async () => {
+    const many = Array.from({ length: 12 }, (_, i) => ({ ...baseUser, id: String(i), username: `u${i}`, email: `${i}@x.com`, isBanned: false }));
+    mockApi.getUsers.mockResolvedValue(page(many, 50, 3));
+    await renderPage();
+    await waitFor(() => expect(screen.getByText('下一页')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('下一页'));
+    await waitFor(() =>
+      expect(mockApi.getUsers).toHaveBeenLastCalledWith(
+        expect.objectContaining({ page: 2, perPage: 12, includeStats: true }),
+      ),
+    );
+  });
+
+  it('passes search term into getUsers query (debounced)', async () => {
+    mockApi.getUsers.mockResolvedValue(page([user1], 1));
+    await renderPage();
+    await waitFor(() => expect(screen.getByText('alice')).toBeInTheDocument());
+    const searchInput = screen.getByPlaceholderText('搜索邮箱 / 用户名…');
+    fireEvent.input(searchInput, { target: { value: 'ali' } });
+    await waitFor(
+      () =>
+        expect(mockApi.getUsers).toHaveBeenLastCalledWith(
+          expect.objectContaining({ search: 'ali' }),
+        ),
+      { timeout: 1500 },
     );
   });
 });
 
-describe('UserManagementPage — m024 新功能', () => {
+describe('UserManagementPage — facet chips & create user', () => {
   beforeEach(() => vi.clearAllMocks());
 
   it('switches filter chip to "管理员" and re-loads with role=admin', async () => {
-    mockApi.getUsers.mockResolvedValue({ data: [user1], total: 1 });
+    mockApi.userFacets.mockResolvedValue({ total: 100, active: 80, inactive7d: 12, banned: 5, admins: 3 });
+    mockApi.getUsers.mockResolvedValue(page([user1], 1));
     await renderPage();
-    await waitFor(() => expect(screen.getByText('管理员')).toBeInTheDocument());
-    fireEvent.click(screen.getByText('管理员'));
+    await waitFor(() => expect(screen.getByText('alice')).toBeInTheDocument());
+    clickChip('管理员');
     await waitFor(() =>
       expect(mockApi.getUsers).toHaveBeenLastCalledWith(
         expect.objectContaining({ role: 'admin' }),
@@ -258,74 +226,108 @@ describe('UserManagementPage — m024 新功能', () => {
     );
   });
 
+  it('switches filter chip to "已封禁" and re-loads with banned=true', async () => {
+    mockApi.userFacets.mockResolvedValue({ total: 100, active: 80, inactive7d: 12, banned: 5, admins: 3 });
+    mockApi.getUsers.mockResolvedValue(page([user2], 1));
+    await renderPage();
+    await waitFor(() => expect(screen.getByText('bob')).toBeInTheDocument());
+    clickChip('已封禁');
+    await waitFor(() =>
+      expect(mockApi.getUsers).toHaveBeenLastCalledWith(
+        expect.objectContaining({ banned: true }),
+      ),
+    );
+  });
+
   it('opens create-user modal and submits', async () => {
-    mockApi.getUsers.mockResolvedValue({ data: [user1], total: 1 });
+    mockApi.getUsers.mockResolvedValue(page([user1], 1));
     mockApi.createUser.mockResolvedValue({ ...baseUser, id: '99', username: 'new', email: 'new@x.com', isBanned: false });
     await renderPage();
-    await waitFor(() => expect(screen.getByText('+ 添加用户')).toBeInTheDocument());
-    fireEvent.click(screen.getByText('+ 添加用户'));
     await waitFor(() => expect(screen.getByText('添加用户')).toBeInTheDocument());
-    const inputs = document.querySelectorAll('input');
-    // 0: 顶部搜索(可能不存在,如果 Modal 替换 focus 也 OK),所以按 type 找
-    const email = document.querySelector('input[type="email"]') as HTMLInputElement;
-    const pw = document.querySelectorAll('input[type="password"]');
-    // 用户名是普通 text input,在 modal 内取倒数(modal 后新增的 input)
-    const textInputs = Array.from(document.querySelectorAll('input[type="text"], input:not([type])')) as HTMLInputElement[];
-    const usernameInput = textInputs[textInputs.length - 1]; // modal 内最后一个 text input
-    expect(inputs.length).toBeGreaterThan(1);
+    // PageHead 上的「添加用户」按钮
+    fireEvent.click(screen.getByText('添加用户'));
+    // Modal 打开后,标题「添加用户」会出现两次(按钮 + Modal 标题)
+    await waitFor(() => expect(screen.getAllByText('添加用户').length).toBeGreaterThanOrEqual(2));
+    // Modal 内三个输入按 placeholder 精确定位(避免误中顶部搜索框)
+    const email = screen.getByPlaceholderText('user@example.com') as HTMLInputElement;
+    const usernameInput = screen.getByPlaceholderText('2-50 字符,字母数字下划线') as HTMLInputElement;
+    const pwInput = screen.getByPlaceholderText('至少 8 字符,含大小写字母 + 数字') as HTMLInputElement;
     fireEvent.input(email, { target: { value: 'new@x.com' } });
     fireEvent.input(usernameInput, { target: { value: 'newuser' } });
-    fireEvent.input(pw[0], { target: { value: 'NewPass123' } });
+    fireEvent.input(pwInput, { target: { value: 'NewPass123' } });
     fireEvent.click(screen.getByText('创建'));
-    await waitFor(() => expect(mockApi.createUser).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(mockApi.createUser).toHaveBeenCalledWith(
+        expect.objectContaining({ email: 'new@x.com', username: 'newuser', password: 'NewPass123' }),
+      ),
+    );
+  });
+
+  it('warns when create-user form incomplete', async () => {
+    mockApi.getUsers.mockResolvedValue(page([user1], 1));
+    await renderPage();
+    await waitFor(() => expect(screen.getByText('添加用户')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('添加用户'));
+    await waitFor(() => expect(screen.getAllByText('添加用户').length).toBeGreaterThanOrEqual(2));
+    fireEvent.click(screen.getByText('创建'));
+    await waitFor(() => expect(mockToast.warning).toHaveBeenCalled());
+    expect(mockApi.createUser).not.toHaveBeenCalled();
   });
 });
 
-describe('UserManagementPage — reset key copy & navigation', () => {
+describe('UserManagementPage — bulk actions & reset-key copy', () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it('direct-reset 返回 button goes back to choose mode', async () => {
-    mockApi.getUsers.mockResolvedValue({ data: [user1], total: 1 });
+  it('selecting a row reveals the bulk bar and bulk-bans via confirm', async () => {
+    mockApi.getUsers.mockResolvedValue(page([user1], 1));
     await renderPage();
-    await waitFor(() => expect(screen.getByLabelText('alice 更多操作')).toBeInTheDocument());
-    openRowMenu('alice');
-    fireEvent.click(await screen.findByText('重置密码'));
-    fireEvent.click(screen.getByText('直接重置密码'));
-    await waitFor(() => expect(screen.getByText('确认重置')).toBeInTheDocument());
-    fireEvent.click(screen.getByText('返回'));
-    await waitFor(() => expect(screen.getByText('生成重置密钥')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('alice')).toBeInTheDocument());
+    const checkboxes = document.querySelectorAll('input[type="checkbox"]');
+    // [0] = 全选, [1] = 第一行
+    fireEvent.change(checkboxes[1], { target: { checked: true } });
+    await waitFor(() => expect(screen.getByText('已选 1 个')).toBeInTheDocument());
+    // bulk bar 「封禁」是 btn-secondary(行内封禁是 btn-danger)—— 取批量栏那个
+    const bulkBan = screen.getAllByText('封禁').find((b) => b.className.includes('btn-secondary'))!;
+    fireEvent.click(bulkBan);
+    // Confirm 弹窗
+    await waitFor(() => expect(screen.getByText('批量封禁 1 个用户')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('确认'));
+    await waitFor(() => expect(mockApi.usersBulkBan).toHaveBeenCalledWith(['1']));
   });
 
-  it('copy button on reset-key result calls clipboard.writeText', async () => {
-    mockApi.getUsers.mockResolvedValue({ data: [user1], total: 1 });
-    mockApi.resetUserPassword.mockResolvedValue({ resetKey: 'XYZ-789' });
+  it('cancels the bulk confirm dialog', async () => {
+    mockApi.getUsers.mockResolvedValue(page([user1], 1));
+    await renderPage();
+    await waitFor(() => expect(screen.getByText('alice')).toBeInTheDocument());
+    const checkboxes = document.querySelectorAll('input[type="checkbox"]');
+    fireEvent.change(checkboxes[1], { target: { checked: true } });
+    await waitFor(() => expect(screen.getByText('已选 1 个')).toBeInTheDocument());
+    const bulkBan = screen.getAllByText('封禁').find((b) => b.className.includes('btn-secondary'))!;
+    fireEvent.click(bulkBan);
+    await waitFor(() => expect(screen.getByText('批量封禁 1 个用户')).toBeInTheDocument());
+    // 「取消」同时存在于批量栏与 Confirm footer —— 取 Confirm 弹窗(.card.scale-in)内的那个
+    const confirmCard = screen.getByText('批量封禁 1 个用户').closest('.card') as HTMLElement;
+    const cancelBtn = Array.from(confirmCard.querySelectorAll('button')).find(
+      (b) => b.textContent?.trim() === '取消',
+    )!;
+    fireEvent.click(cancelBtn);
+    await waitFor(() => expect(screen.queryByText('批量封禁 1 个用户')).not.toBeInTheDocument());
+    expect(mockApi.usersBulkBan).not.toHaveBeenCalled();
+  });
+
+  it('copy button on reset-key modal calls clipboard.writeText', async () => {
+    mockApi.getUsers.mockResolvedValue(page([user1], 1));
+    mockApi.resetUserPassword.mockResolvedValue({ resetKey: 'XYZ-789', expiresInHours: 24 });
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
     await renderPage();
-    await waitFor(() => expect(screen.getByLabelText('alice 更多操作')).toBeInTheDocument());
-    openRowMenu('alice');
-    fireEvent.click(await screen.findByText('重置密码'));
-    fireEvent.click(screen.getByText('生成重置密钥'));
+    await waitFor(() => expect(screen.getByText('alice')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('详情'));
+    await waitFor(() => expect(screen.getAllByText('重置密码').length).toBeGreaterThan(0));
+    fireEvent.click(screen.getAllByText('重置密码')[0]);
     await waitFor(() => expect(screen.getByText('XYZ-789')).toBeInTheDocument());
-    fireEvent.click(screen.getByText('复制'));
+    fireEvent.click(screen.getByText('复制密钥'));
     await waitFor(() => expect(writeText).toHaveBeenCalledWith('XYZ-789'));
-    expect(mockToast.success).toHaveBeenCalledWith('已复制到剪贴板');
-  });
-
-  it('copy button falls back to error toast on clipboard failure', async () => {
-    mockApi.getUsers.mockResolvedValue({ data: [user1], total: 1 });
-    mockApi.resetUserPassword.mockResolvedValue({ resetKey: 'KEY-FAIL' });
-    Object.defineProperty(navigator, 'clipboard', {
-      configurable: true,
-      value: { writeText: vi.fn().mockRejectedValue(new Error('no perm')) },
-    });
-    await renderPage();
-    await waitFor(() => expect(screen.getByLabelText('alice 更多操作')).toBeInTheDocument());
-    openRowMenu('alice');
-    fireEvent.click(await screen.findByText('重置密码'));
-    fireEvent.click(screen.getByText('生成重置密钥'));
-    await waitFor(() => expect(screen.getByText('KEY-FAIL')).toBeInTheDocument());
-    fireEvent.click(screen.getByText('复制'));
-    await waitFor(() => expect(mockToast.error).toHaveBeenCalledWith('复制失败', '请手动选择并复制'));
+    expect(mockToast.success).toHaveBeenCalledWith('已复制');
   });
 });

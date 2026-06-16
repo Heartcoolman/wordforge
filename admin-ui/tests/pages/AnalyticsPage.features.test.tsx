@@ -11,6 +11,7 @@ vi.mock('@/api/admin', () => ({
     analyticsHourly: vi.fn(),
     analyticsWordFrequency: vi.fn(),
     analyticsInsights: vi.fn(),
+    analyticsWordbookRank: vi.fn(),
   },
 }));
 const toast = { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() };
@@ -34,8 +35,9 @@ const mockFunnel = {
 const mockMatrix = { generatedAt: '', weeks: 7, cohorts: [{ cohortStart: '2025-10-07', size: 412, cells: [1, 0.63, 0.48, 0.41, 0.34, 0.29, 0.26] }] };
 const mockDist = { generatedAt: '', days: 7, totalRecords: 184329, questionTypes: [{ key: 'w2m', label: '单词 → 释义', count: 77418, pct: 0.42 }], difficultyBins: [{ label: '≤ 1000', min: null, max: 1000, count: 12903, pct: 0.07 }] };
 const mockHourly = { generatedAt: '', days: 7, matrix: Array.from({ length: 7 }, () => Array.from({ length: 24 }, (_, c) => c)), total: 184329 };
-const mockWords = { generatedAt: '', days: 7, limit: 10, sort: 'count', rows: [{ rank: 1, wordId: 'w1', spelling: 'tenacious', pos: 'adj.', recordCount: 3142, accuracy: 0.62, elo: 1584 }] };
+const mockWords = { generatedAt: '', days: 7, limit: 12, sort: 'count', rows: [{ rank: 1, wordId: 'w1', spelling: 'tenacious', pos: 'adj.', recordCount: 3142, accuracy: 0.62, elo: 1584, mastery: 0.71 }] };
 const mockInsights = { generatedAt: '', days: 7, items: [{ tone: 'info' as const, title: '周末 14:00 新峰', body: '连续 3 周。' }] };
+const mockWbRank = { generatedAt: '', days: 7, limit: 10, rows: [{ wordbookId: 'wb1', name: 'CET-6 核心', learnerCount: 312, recordCount: 88421, correctCount: 60123, accuracy: 0.68 }] };
 
 function primeAll() {
   mockApi.analyticsKpiSummary.mockResolvedValue(mockKpi);
@@ -45,6 +47,7 @@ function primeAll() {
   mockApi.analyticsHourly.mockResolvedValue(mockHourly);
   mockApi.analyticsWordFrequency.mockResolvedValue(mockWords);
   mockApi.analyticsInsights.mockResolvedValue(mockInsights);
+  mockApi.analyticsWordbookRank.mockResolvedValue(mockWbRank);
 }
 
 async function renderPage() {
@@ -52,54 +55,45 @@ async function renderPage() {
   return renderWithProviders(() => <Page />);
 }
 
-describe('AnalyticsPage — 自定义区间 / 导出 / 占位', () => {
+describe('AnalyticsPage — 区间分段 / 导出 / 占位', () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it('renders KPI placeholder while kpi promise pending', async () => {
+  it('renders KPI skeleton placeholders while kpi promise pending', async () => {
     primeAll();
     mockApi.analyticsKpiSummary.mockReturnValue(new Promise(() => {}));
-    await renderPage();
+    const { container } = await renderPage();
     await waitFor(() => expect(screen.getByText('数据分析')).toBeInTheDocument());
-    // 占位 4 格
-    expect(screen.getAllByText('加载中').length).toBeGreaterThan(0);
+    // KPI 区在 kpi 未就绪时以 4 块 Skel 占位（class="skel"）
+    await waitFor(() => expect(container.querySelectorAll('.skel').length).toBeGreaterThan(0));
   });
 
-  it('opens custom range popover and applies from/to which drives fetch', async () => {
+  it('drives funnel fetch with the default 7-day window on initial load', async () => {
     primeAll();
     await renderPage();
     await waitFor(() => expect(screen.getByText('数据分析')).toBeInTheDocument());
-
-    const rangeBtn = screen.getByText('自定义区间');
-    fireEvent.click(rangeBtn);
-    await waitFor(() => expect(screen.getByLabelText('起 (from)')).toBeInTheDocument());
-
-    fireEvent.input(screen.getByLabelText('起 (from)'), { target: { value: '2026-05-01' } });
-    fireEvent.input(screen.getByLabelText('止 (to)'), { target: { value: '2026-05-20' } });
-    fireEvent.click(screen.getByText('应用'));
-
+    // 各聚合端点用当前窗口参数拉取；漏斗以 { days: 7 } 默认窗口请求
     await waitFor(() =>
-      expect(mockApi.analyticsFunnel).toHaveBeenCalledWith({ from: '2026-05-01', to: '2026-05-20' }),
+      expect(mockApi.analyticsFunnel).toHaveBeenCalledWith({ days: 7 }),
+    );
+    // 词库排行端点（新页面新增）也被调用
+    await waitFor(() =>
+      expect(mockApi.analyticsWordbookRank).toHaveBeenCalledWith({ days: 7 }),
     );
   });
 
-  it('export CSV builds rows and toasts success', async () => {
+  it('export builds CSV rows and toasts success', async () => {
     primeAll();
-    // jsdom 缺 createObjectURL
-    const origCreate = URL.createObjectURL;
-    const origRevoke = URL.revokeObjectURL;
-    URL.createObjectURL = vi.fn(() => 'blob:mock');
-    URL.revokeObjectURL = vi.fn();
+    // happy-dom 缺 createObjectURL
+    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: vi.fn(() => 'blob:mock') });
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: vi.fn() });
     await renderPage();
     await waitFor(() => expect(screen.getByText('tenacious')).toBeInTheDocument());
 
-    fireEvent.click(screen.getByText('导出全部 CSV'));
+    fireEvent.click(screen.getByText('导出'));
     await waitFor(() => expect(toast.success).toHaveBeenCalled());
-
-    URL.createObjectURL = origCreate;
-    URL.revokeObjectURL = origRevoke;
   });
 
-  it('switches days segmented to 14 and refetches', async () => {
+  it('switches days segmented to 14 天 and refetches distribution', async () => {
     primeAll();
     await renderPage();
     await waitFor(() => expect(screen.getByText('数据分析')).toBeInTheDocument());

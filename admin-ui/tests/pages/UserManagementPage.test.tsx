@@ -1,44 +1,43 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { screen, waitFor } from '@solidjs/testing-library';
+import { screen, waitFor, fireEvent } from '@solidjs/testing-library';
 import { renderWithProviders } from '../helpers/render';
 
-// m024:UserManagementPage 现在拉 getStats + getEngagement(顶部 KPI 行),getUsers
-// 走 ?includeStats=true。Drawer 拉 userProfile / userSessions。批量操作端点
-// usersBulkBan / usersBulkUnban / usersBulkRole。新增 createUser/patchUserRole
-// /userDevices/userAuditLog 7 个 method。mock 默认 resolve 空值,具体用例可 override。
+// 重设计后的 UserManagementPage 调用:
+//   - userFacets()        chip 分面计数
+//   - getUsers(query)     列表(includeStats=true)
+//   - banUser / unbanUser 行内封禁/解封
+//   - createUser          添加用户 modal
+//   - patchUserRole       Drawer 内角色变更
+//   - resetUserPassword   重置密码
+//   - usersBulkBan/Unban/ResetPassword/Delete  批量操作
+//   - Drawer 数据源:userProfile / userExtras / userSessions / userDevices /
+//     userAuditLog / userActivityLog
+// 全部 mock 给安全默认值,避免 unhandled rejection。
 vi.mock('@/api/admin', () => ({
   adminApi: {
-    getUsers: vi.fn(),
-    banUser: vi.fn(),
-    unbanUser: vi.fn(),
-    setUserPassword: vi.fn(),
-    resetUserPassword: vi.fn(),
-    getStats: vi.fn(() => Promise.resolve({ users: 100, words: 0, records: 0, trend: { users: { value: 5, label: '较昨日' } } })),
-    getEngagement: vi.fn(() => Promise.resolve({ totalUsers: 100, activeToday: 12, retentionRate: 0.12 })),
-    // header "本周新增" 数据源(近 7 天 daily-active-users 的 registered 求和)
-    getDailyActiveUsers: vi.fn(() => Promise.resolve([])),
-    // chip 分面计数(GET /users/facets)
-    userFacets: vi.fn(() => Promise.resolve({ total: 100, active: 12, inactive7d: 8, banned: 1, admins: 2 })),
-    userProfile: vi.fn(() => Promise.resolve({ userId: 'x', totalRecords: 0, correctRecords: 0, accuracy: null, sessionCount: 0, wordbookDistribution: [] })),
-    userSessions: vi.fn(() => Promise.resolve({ sessions: [] })),
-    usersBulkBan: vi.fn(),
-    usersBulkUnban: vi.fn(),
-    createUser: vi.fn(),
-    patchUserRole: vi.fn(),
-    usersBulkRole: vi.fn(),
-    userDevices: vi.fn(() => Promise.resolve({ devices: [] })),
-    userAuditLog: vi.fn(() => Promise.resolve({ entries: [] })),
-    // m025:Drawer 资料/答题/设备/日志 4 tab 深化数据源(默认空)
+    userFacets: vi.fn(() => Promise.resolve({ total: 2, active: 1, inactive7d: 0, banned: 1, admins: 0 })),
+    getUsers: vi.fn(() => Promise.resolve({ data: [], total: 0, page: 1, perPage: 12, totalPages: 1 })),
+    createUser: vi.fn(() => Promise.resolve({ id: 'new' })),
+    banUser: vi.fn(() => Promise.resolve({ banned: true, userId: '1' })),
+    unbanUser: vi.fn(() => Promise.resolve({ banned: false, userId: '2' })),
+    resetUserPassword: vi.fn(() => Promise.resolve({ resetKey: 'k', expiresInHours: 24 })),
+    patchUserRole: vi.fn(() => Promise.resolve({})),
+    usersBulkBan: vi.fn(() => Promise.resolve({ succeeded: 1, failed: 0 })),
+    usersBulkUnban: vi.fn(() => Promise.resolve({ succeeded: 1, failed: 0 })),
+    usersBulkResetPassword: vi.fn(() => Promise.resolve({ succeeded: 1, failed: 0 })),
+    usersBulkDelete: vi.fn(() => Promise.resolve({ succeeded: 1, failed: 0 })),
+    usersBulkRole: vi.fn(() => Promise.resolve({ succeeded: 1, failed: 0 })),
+    userProfile: vi.fn(() => Promise.resolve({ userId: 'x', totalRecords: 0, correctRecords: 0, accuracy: null, sessionCount: 0, avgResponseTimeMs: null, wordbookDistribution: [] })),
     userExtras: vi.fn(() => Promise.resolve({
       preferences: null, elo: null, habit: null, streakDays: 0,
       latestStrategy: null, latestDevice: null,
       metrics7d: { records: 0, correct: 0, accuracy: null, fatigueAlertCount: 0 },
     })),
+    userSessions: vi.fn(() => Promise.resolve({ sessions: [] })),
+    userDevices: vi.fn(() => Promise.resolve({ devices: [] })),
+    userAuditLog: vi.fn(() => Promise.resolve({ entries: [] })),
     userActivityLog: vi.fn(() => Promise.resolve({ entries: [] })),
-    // m026:批量重置/删除/设备封禁
-    usersBulkResetPassword: vi.fn(),
-    usersBulkDelete: vi.fn(),
-    banUserDevice: vi.fn(),
+    banUserDevice: vi.fn(() => Promise.resolve({})),
   },
 }));
 
@@ -50,7 +49,6 @@ import { adminApi } from '@/api/admin';
 
 const mockAdminApi = adminApi as unknown as Record<string, ReturnType<typeof vi.fn>>;
 
-// m024:AdminUser 扩展字段 role/status/lastLoginAt/stats
 const baseUser = {
   failedLoginCount: 0,
   lockedUntil: null,
@@ -59,6 +57,7 @@ const baseUser = {
   role: 'user' as const,
   status: 'active' as const,
   lastLoginAt: null,
+  referrerSource: null,
 };
 const mockUsers = {
   data: [
@@ -67,13 +66,27 @@ const mockUsers = {
   ],
   total: 2,
   page: 1,
-  perPage: 20,
+  perPage: 12,
   totalPages: 1,
 };
 
 describe('UserManagementPage', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // clearAllMocks 也清掉了 mock 实现,这里重置回安全默认值
+    mockAdminApi.userFacets.mockResolvedValue({ total: 2, active: 1, inactive7d: 0, banned: 1, admins: 0 });
+    mockAdminApi.getUsers.mockResolvedValue({ data: [], total: 0, page: 1, perPage: 12, totalPages: 1 });
+    mockAdminApi.banUser.mockResolvedValue({ banned: true, userId: '1' });
+    mockAdminApi.unbanUser.mockResolvedValue({ banned: false, userId: '2' });
+    mockAdminApi.createUser.mockResolvedValue({ id: 'new' });
+    mockAdminApi.resetUserPassword.mockResolvedValue({ resetKey: 'k', expiresInHours: 24 });
+    mockAdminApi.patchUserRole.mockResolvedValue({});
+    mockAdminApi.userProfile.mockResolvedValue({ userId: 'x', totalRecords: 0, correctRecords: 0, accuracy: null, sessionCount: 0, avgResponseTimeMs: null, wordbookDistribution: [] });
+    mockAdminApi.userExtras.mockResolvedValue({ preferences: null, elo: null, habit: null, streakDays: 0, latestStrategy: null, latestDevice: null, metrics7d: { records: 0, correct: 0, accuracy: null, fatigueAlertCount: 0 } });
+    mockAdminApi.userSessions.mockResolvedValue({ sessions: [] });
+    mockAdminApi.userDevices.mockResolvedValue({ devices: [] });
+    mockAdminApi.userAuditLog.mockResolvedValue({ entries: [] });
+    mockAdminApi.userActivityLog.mockResolvedValue({ entries: [] });
   });
 
   async function renderPage() {
@@ -81,17 +94,19 @@ describe('UserManagementPage', () => {
     return renderWithProviders(() => <UserManagementPage />);
   }
 
-  it('renders 9-column table after loading', async () => {
+  it('renders table header after loading', async () => {
     mockAdminApi.getUsers.mockResolvedValue(mockUsers);
     await renderPage();
-    // m024:9 列 redesign,'用户' 替代 '用户名',加 '角色' / '注册' / '最近活跃' / '答题数' / '正确率' / '最近 20 题'
-    await waitFor(() => expect(screen.getByText('用户')).toBeInTheDocument());
+    // 列头 '用户' 替代旧 '用户名'
+    await waitFor(() => expect(screen.getByRole('columnheader', { name: '用户' })).toBeInTheDocument());
   });
 
-  it('shows loading spinner initially', async () => {
+  it('shows skeleton rows while loading', async () => {
+    // getUsers 永不 resolve,断言列表区处于加载态(渲染 skel 占位行而非真实用户)
     mockAdminApi.getUsers.mockReturnValue(new Promise(() => {}));
-    await renderPage();
-    expect(screen.getByRole('status')).toBeInTheDocument();
+    const { container } = await renderPage();
+    await waitFor(() => expect(container.querySelector('.skel')).toBeTruthy());
+    expect(screen.queryByText('alice')).not.toBeInTheDocument();
   });
 
   it('shows user rows after loading', async () => {
@@ -99,54 +114,58 @@ describe('UserManagementPage', () => {
     await renderPage();
     await waitFor(() => expect(screen.getByText('alice')).toBeInTheDocument());
     expect(screen.getByText('bob')).toBeInTheDocument();
+    expect(screen.getByText('alice@test.com')).toBeInTheDocument();
   });
 
   it('shows new column headers', async () => {
     mockAdminApi.getUsers.mockResolvedValue(mockUsers);
     await renderPage();
-    await waitFor(() => expect(screen.getByText('用户')).toBeInTheDocument());
-    expect(screen.getByText('角色')).toBeInTheDocument();
-    expect(screen.getByText('注册')).toBeInTheDocument();
-    expect(screen.getByText('最近活跃')).toBeInTheDocument();
-    expect(screen.getByText('答题数')).toBeInTheDocument();
-    expect(screen.getByText('正确率')).toBeInTheDocument();
-    expect(screen.getByText('最近 20 题')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole('columnheader', { name: '用户' })).toBeInTheDocument());
+    expect(screen.getByRole('columnheader', { name: '角色' })).toBeInTheDocument();
+    expect(screen.getByRole('columnheader', { name: '状态' })).toBeInTheDocument();
+    expect(screen.getByRole('columnheader', { name: '答题数' })).toBeInTheDocument();
+    expect(screen.getByRole('columnheader', { name: '正确率' })).toBeInTheDocument();
+    expect(screen.getByRole('columnheader', { name: '最后登录' })).toBeInTheDocument();
+    expect(screen.getByRole('columnheader', { name: '注册时间' })).toBeInTheDocument();
   });
 
-  it('shows "封禁" option in row menu for active users', async () => {
+  it('shows "封禁" inline action for active users and calls banUser', async () => {
     mockAdminApi.getUsers.mockResolvedValue(mockUsers);
     await renderPage();
-    // m026:inline 操作改为三点菜单,先打开行菜单再断言
-    await waitFor(() => expect(screen.getByLabelText('alice 更多操作')).toBeInTheDocument());
-    const { fireEvent } = await import('@solidjs/testing-library');
-    fireEvent.click(screen.getByLabelText('alice 更多操作'));
-    await waitFor(() => expect(screen.getByText('封禁')).toBeInTheDocument());
+    // alice 未封禁 => 行内显示 '封禁' 按钮
+    await waitFor(() => expect(screen.getByText('alice')).toBeInTheDocument());
+    const banBtn = screen.getByRole('button', { name: '封禁' });
+    expect(banBtn).toBeInTheDocument();
+    fireEvent.click(banBtn);
+    await waitFor(() => expect(mockAdminApi.banUser).toHaveBeenCalledWith('1'));
   });
 
-  it('shows "解封" option in row menu for banned users', async () => {
+  it('shows "解封" inline action for banned users and calls unbanUser', async () => {
     mockAdminApi.getUsers.mockResolvedValue(mockUsers);
     await renderPage();
-    await waitFor(() => expect(screen.getByLabelText('bob 更多操作')).toBeInTheDocument());
-    const { fireEvent } = await import('@solidjs/testing-library');
-    fireEvent.click(screen.getByLabelText('bob 更多操作'));
-    await waitFor(() => expect(screen.getByText('解封')).toBeInTheDocument());
+    // bob 已封禁 => 行内显示 '解封' 按钮
+    await waitFor(() => expect(screen.getByText('bob')).toBeInTheDocument());
+    const unbanBtn = screen.getByRole('button', { name: '解封' });
+    expect(unbanBtn).toBeInTheDocument();
+    fireEvent.click(unbanBtn);
+    await waitFor(() => expect(mockAdminApi.unbanUser).toHaveBeenCalledWith('2'));
   });
 
   it('shows status badges for users', async () => {
     mockAdminApi.getUsers.mockResolvedValue(mockUsers);
     await renderPage();
-    // m024:active 用户显示"活跃"(也存在于 chip filter,用 getAllByText),banned 用户显示"已封禁"
-    await waitFor(() => expect(screen.getAllByText('活跃').length).toBeGreaterThan(0));
-    expect(screen.getByText('已封禁')).toBeInTheDocument();
+    // active 用户显示 '正常',banned 用户显示 '已封禁'(也出现在 chip,用 getAllByText)
+    await waitFor(() => expect(screen.getByText('正常')).toBeInTheDocument());
+    expect(screen.getAllByText('已封禁').length).toBeGreaterThan(0);
   });
 
-  it('shows role chips for users', async () => {
+  it('shows role badges for users', async () => {
     mockAdminApi.getUsers.mockResolvedValue(mockUsers);
     await renderPage();
-    // m024:role chip 显示中文 label '普通'(mockUsers 全是 role:user)
+    // 两个 mock 用户均为 role:user => badge 文案 '普通用户'
     await waitFor(() => {
-      const normalChips = screen.getAllByText('普通');
-      expect(normalChips.length).toBeGreaterThan(0);
+      const chips = screen.getAllByText('普通用户');
+      expect(chips.length).toBeGreaterThan(0);
     });
   });
 
@@ -155,12 +174,19 @@ describe('UserManagementPage', () => {
     await renderPage();
     await waitFor(() => expect(screen.getByText('全部')).toBeInTheDocument());
     expect(screen.getByText('7 天未登录')).toBeInTheDocument();
-    expect(screen.getByText('管理员')).toBeInTheDocument();
+    // '管理员' 同时出现在 chip 与 role 下拉,用 getAllByText
+    expect(screen.getAllByText('管理员').length).toBeGreaterThan(0);
   });
 
-  it('shows "添加用户" button in header', async () => {
+  it('shows "添加用户" button in header and opens create modal', async () => {
     mockAdminApi.getUsers.mockResolvedValue(mockUsers);
     await renderPage();
-    await waitFor(() => expect(screen.getByText('+ 添加用户')).toBeInTheDocument());
+    const addBtn = await screen.findByRole('button', { name: '添加用户' });
+    expect(addBtn).toBeInTheDocument();
+    fireEvent.click(addBtn);
+    // modal 打开 => 出现表单字段
+    await waitFor(() => expect(screen.getByText('邮箱')).toBeInTheDocument());
+    expect(screen.getByText('用户名')).toBeInTheDocument();
+    expect(screen.getByText('初始密码')).toBeInTheDocument();
   });
 });

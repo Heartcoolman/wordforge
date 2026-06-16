@@ -89,7 +89,17 @@ function pack(over: Partial<Record<string, unknown>> = {}) {
 describe('ResourcePacksPage', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // 给每个 mock 安全默认值，避免 createResource / 交互触发 unhandled rejection
     mockApi.summary.mockResolvedValue(SUMMARY);
+    mockApi.list.mockResolvedValue([]);
+    mockApi.uploadVersion.mockResolvedValue({
+      packId: 'wordbook-en-gre', version: '9.9.9', sha256: 'x', signature: 's', sizeBytes: 1, channel: 'beta',
+    });
+    mockApi.setActive.mockResolvedValue({
+      packId: 'wordbook-en-gre', channel: 'stable', version: '3.1.4', activated: true, audienceClients: 284,
+    });
+    mockApi.deactivateVersion.mockResolvedValue({ deactivated: true });
+    mockApi.stats.mockResolvedValue({ packId: 'wordbook-en-gre', stats: [] });
   });
 
   async function renderPage() {
@@ -106,7 +116,7 @@ describe('ResourcePacksPage', () => {
   });
 
   it('renders KPI stat cards from summary', async () => {
-    // 重设计后 KPI 卡来自 summary 端点（资源包总数 / 版本总数 / 今日下载 / 失败率）。
+    // 重设计后 KPI 卡来自 summary 端点（资源包总数 / 版本总数 / 今日下载 / 失败率 (7d)）。
     mockApi.list.mockResolvedValue([pack()]);
     await renderPage();
     await waitFor(() => {
@@ -115,9 +125,9 @@ describe('ResourcePacksPage', () => {
       expect(screen.getByText('今日下载')).toBeInTheDocument();
       expect(screen.getByText('失败率 (7d)')).toBeInTheDocument();
     });
-    // 失败率 1.8%（summary 异步落定后）
+    // 失败率 1.8%（summary 异步落定后）—— StatCard 渲染为 .card 容器
     await waitFor(() => {
-      const failCard = screen.getByText('失败率 (7d)').closest('.rp-stat-card')!;
+      const failCard = screen.getByText('失败率 (7d)').closest('.card')!;
       expect(failCard).toHaveTextContent('1.8');
     });
   });
@@ -128,27 +138,28 @@ describe('ResourcePacksPage', () => {
     await waitFor(() => expect(screen.getByText('暂无资源包')).toBeInTheDocument());
   });
 
-  it('renders pack card with description and packId, expanded by default', async () => {
-    // 重设计：pack 以可展开卡片呈现。卡头按钮含 description + packId，首个 pack 默认展开。
+  it('renders pack card with description and packId, version table inline', async () => {
+    // 重设计：pack 以卡片呈现，卡头含 description + packId，版本表内联渲染全部三态版本。
     mockApi.list.mockResolvedValue([pack()]);
     await renderPage();
-    await waitFor(() =>
-      expect(screen.getByRole('button', { name: /wordbook-en-gre/ })).toBeInTheDocument(),
-    );
-    // 默认展开 → 版本表渲染全部三态版本
+    await waitFor(() => expect(screen.getByText('英文 GRE 高频词库')).toBeInTheDocument());
+    // packId 出现在卡头副标题（与总下载同一行）
+    expect(screen.getByText(/wordbook-en-gre/)).toBeInTheDocument();
+    // 版本表渲染全部三态版本（td.mono 内为精确版本号文本）
     expect(screen.getByText('3.3.0-beta.2')).toBeInTheDocument();
     expect(screen.getByText('3.2.0')).toBeInTheDocument();
     expect(screen.getByText('3.1.4')).toBeInTheDocument();
   });
 
   it('renders channel filter tabs (全部/Stable/Beta/Internal)', async () => {
+    // 重设计：Tabs 渲染为 <button class="tab">（非 role=tab）。
     mockApi.list.mockResolvedValue([pack()]);
     await renderPage();
     await waitFor(() => {
-      expect(screen.getByRole('tab', { name: /全部/ })).toBeInTheDocument();
-      expect(screen.getByRole('tab', { name: /Stable/ })).toBeInTheDocument();
-      expect(screen.getByRole('tab', { name: /Beta/ })).toBeInTheDocument();
-      expect(screen.getByRole('tab', { name: /Internal/ })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /全部/ })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /Stable/ })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /Beta/ })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /Internal/ })).toBeInTheDocument();
     });
   });
 
@@ -164,30 +175,29 @@ describe('ResourcePacksPage', () => {
     });
     mockApi.list.mockResolvedValue([pack(), onlyStable]);
     await renderPage();
-    await waitFor(() =>
-      expect(screen.getByRole('button', { name: /wordbook-en-gre/ })).toBeInTheDocument(),
-    );
-    expect(screen.getByRole('button', { name: /amas-presets-default/ })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText('英文 GRE 高频词库')).toBeInTheDocument());
+    expect(screen.getByText('AMAS 默认参数预设包')).toBeInTheDocument();
 
     // 切到 Beta：只有 wordbook-en-gre（有 beta 激活）保留，amas（无 beta）被过滤
-    fireEvent.click(screen.getByRole('tab', { name: /Beta/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Beta/ }));
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: /wordbook-en-gre/ })).toBeInTheDocument();
-      expect(screen.queryByRole('button', { name: /amas-presets-default/ })).not.toBeInTheDocument();
+      expect(screen.getByText('英文 GRE 高频词库')).toBeInTheDocument();
+      expect(screen.queryByText('AMAS 默认参数预设包')).not.toBeInTheDocument();
     });
   });
 
-  it('opens upload drawer with version field and submit button', async () => {
-    // 重设计：上传由抽屉完成，含 pack_id / 版本号 输入 + 「上传并签名」按钮（真实 XHR 进度）。
+  it('opens upload modal with version field and submit button', async () => {
+    // 重设计：上传由弹窗完成，含 pack_id / 版本号 输入 + 「上传并签名」按钮（真实 XHR 进度）。
     mockApi.list.mockResolvedValue([pack()]);
     await renderPage();
+    // 页头与每张 pack 卡片都有「上传新版」按钮 → 取第一个（页头）触发
     await waitFor(() =>
-      expect(screen.getByRole('button', { name: '上传新版' })).toBeInTheDocument(),
+      expect(screen.getAllByRole('button', { name: '上传新版' }).length).toBeGreaterThan(0),
     );
-    fireEvent.click(screen.getByRole('button', { name: '上传新版' }));
+    fireEvent.click(screen.getAllByRole('button', { name: '上传新版' })[0]);
 
     await waitFor(() => {
-      expect(screen.getByRole('heading', { name: '上传新版' })).toBeInTheDocument();
+      expect(screen.getByRole('heading', { name: '上传新版资源包' })).toBeInTheDocument();
       expect(screen.getByText(/版本号/)).toBeInTheDocument();
       expect(screen.getByRole('button', { name: /上传并签名/ })).toBeInTheDocument();
     });
@@ -206,7 +216,7 @@ describe('ResourcePacksPage', () => {
     expect(screen.queryByText('size_too_large')).not.toBeInTheDocument();
   });
 
-  it('opens activation modal with audience client count and confirms broadcast', async () => {
+  it('opens activation modal with online client audience and confirms broadcast', async () => {
     mockApi.list.mockResolvedValue([pack()]);
     mockApi.setActive.mockResolvedValue({
       packId: 'wordbook-en-gre', channel: 'stable', version: '3.1.4', activated: true, audienceClients: 284,
@@ -217,8 +227,8 @@ describe('ResourcePacksPage', () => {
 
     const activateBtns = screen.getAllByRole('button', { name: '激活' });
     fireEvent.click(activateBtns[0]);
-    await waitFor(() => expect(screen.getByText('切换激活版本？')).toBeInTheDocument());
-    // 受众展示在线客户端数（onlineClients）
+    await waitFor(() => expect(screen.getByRole('heading', { name: '切换激活版本？' })).toBeInTheDocument());
+    // 受众展示在线客户端数（summary.onlineClients）
     expect(screen.getByText('284')).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: /切换并广播/ }));
@@ -244,13 +254,14 @@ describe('ResourcePacksPage', () => {
     await waitFor(() => expect(screen.getByText('1,200')).toBeInTheDocument());
   });
 
-  it('triggers soft-delete confirm on 删除', async () => {
+  it('triggers soft-delete confirm on 停用', async () => {
+    // 重设计：行内软删除按钮文案为「停用」，确认弹窗标题「确认停用版本？」，确认按钮「确认停用」。
     mockApi.list.mockResolvedValue([pack()]);
     mockApi.deactivateVersion.mockResolvedValue({ deactivated: true });
     await renderPage();
-    await waitFor(() => expect(screen.getAllByText('删除').length).toBeGreaterThan(0));
-    fireEvent.click(screen.getAllByRole('button', { name: '删除' })[0]);
-    await waitFor(() => expect(screen.getByText('确认停用版本？')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getAllByText('停用').length).toBeGreaterThan(0));
+    fireEvent.click(screen.getAllByRole('button', { name: '停用' })[0]);
+    await waitFor(() => expect(screen.getByRole('heading', { name: '确认停用版本？' })).toBeInTheDocument());
     fireEvent.click(screen.getByRole('button', { name: '确认停用' }));
     await waitFor(() => expect(mockApi.deactivateVersion).toHaveBeenCalled());
   });

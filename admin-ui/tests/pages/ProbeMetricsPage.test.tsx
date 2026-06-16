@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { screen, waitFor, fireEvent } from '@solidjs/testing-library';
+import userEvent from '@testing-library/user-event';
 import { renderWithProviders } from '../helpers/render';
 
 // ---- mock api client（全方法）----
@@ -31,7 +32,7 @@ vi.mock('@/stores/ui', () => ({
   uiStore: { toast: { success: (...a: unknown[]) => toastSuccess(...a), error: (...a: unknown[]) => toastError(...a), warning: vi.fn(), info: vi.fn() } },
 }));
 
-// ---- 默认 mock 数据 ----
+// ---- 默认 mock 数据（与 @/types/probeTelemetry 契约对齐）----
 const OVERVIEW = {
   generatedAt: '2026-05-29T12:00:00Z',
   activeProbes: { value: 3, total: 4, note: '有数据' },
@@ -131,114 +132,114 @@ describe('ProbeMetricsPage', () => {
     return renderWithProviders(() => <Page />);
   }
 
-  it('renders compact header with default 24h segment', async () => {
+  it('renders page header with default 24h window segment active', async () => {
     await renderPage();
-    expect(screen.getByRole('heading', { name: '数据探针' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 1, name: '数据探针' })).toBeInTheDocument();
+    // 时间窗 Seg：24h / 7d / 30d，默认 24h 高亮（active class）
     const seg24h = screen.getByRole('button', { name: '24h' });
-    expect(seg24h).toHaveAttribute('aria-pressed', 'true');
+    expect(seg24h.className).toContain('active');
+    expect(screen.getByRole('button', { name: '7d' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '30d' })).toBeInTheDocument();
   });
 
-  it('renders four real KPI cards with real values', async () => {
+  it('renders KPI strip with real derived metrics', async () => {
     await renderPage();
-    await waitFor(() => expect(screen.getByText('活跃探针')).toBeInTheDocument());
-    expect(screen.getByText('24h 上报事件')).toBeInTheDocument();
-    expect(screen.getByText('队列积压')).toBeInTheDocument();
+    // KPI 卡片标签（新版派生指标）
+    await waitFor(() => expect(screen.getByText('事件/秒')).toBeInTheDocument());
     expect(screen.getByText('采集错误率')).toBeInTheDocument();
-    // 活跃探针 3 / 4
-    expect(screen.getByText('3')).toBeInTheDocument();
-    expect(screen.getByText('/ 4')).toBeInTheDocument();
-    // 24h 事件缩写 14.7k
-    expect(screen.getByText('14.7k')).toBeInTheDocument();
+    expect(screen.getByText('活跃规则')).toBeInTheDocument();
+    expect(screen.getByText('丢弃率')).toBeInTheDocument();
+    expect(screen.getByText('Sink 延迟')).toBeInTheDocument();
+    // 活跃规则 = 4 条 enabled 且 sampleRate>0
+    expect(screen.getByText('4')).toBeInTheDocument();
+    // 丢弃率 = (1 - globalDefault 0.2) * 100 = 80.0
+    expect(screen.getByText('80.0')).toBeInTheDocument();
+    // 采集错误率 0.0003 * 100 = 0.03
+    expect(screen.getByText('0.03')).toBeInTheDocument();
   });
 
-  it('renders three probe groups', async () => {
+  it('renders three probe groups with their probe labels', async () => {
     await renderPage();
     await waitFor(() => expect(screen.getByText('用户行为')).toBeInTheDocument());
     expect(screen.getByText('学习事件')).toBeInTheDocument();
     expect(screen.getByText('性能与错误')).toBeInTheDocument();
-    // 探针行名称：可读化后 strong 显示中文 label（原 key 降级进 ⓘ title）
-    expect(screen.getAllByText('点击行为').length).toBeGreaterThan(0);
-    expect(screen.getAllByText('单词作答').length).toBeGreaterThan(0);
+    // 探针行可读化中文 label
+    expect(screen.getByText('点击行为')).toBeInTheDocument();
+    expect(screen.getByText('单词作答')).toBeInTheDocument();
+    expect(screen.getByText('前端错误')).toBeInTheDocument();
   });
 
-  it('locked probe slider is disabled, adjustable slider is enabled', async () => {
-    await renderPage();
-    await waitFor(() => expect(screen.getByLabelText('点击行为 采样率')).toBeInTheDocument());
-    const clickSlider = screen.getByLabelText('点击行为 采样率') as HTMLInputElement;
-    expect(clickSlider.disabled).toBe(false);
-    const lockedSlider = screen.getByLabelText('单词作答 采样率') as HTMLInputElement;
-    expect(lockedSlider.disabled).toBe(true);
-  });
+  it('group switch: behavior toggleable (PATCH periodic), learn/perf locked disabled', async () => {
+    const { container } = await renderPage();
+    await waitFor(() => expect(screen.getByText('用户行为')).toBeInTheDocument());
 
-  it('dragging adjustable slider debounces then calls updateSamplingRule + toast', async () => {
-    await renderPage();
-    await waitFor(() => expect(screen.getByLabelText('点击行为 采样率')).toBeInTheDocument());
-    const clickSlider = screen.getByLabelText('点击行为 采样率') as HTMLInputElement;
-    fireEvent.input(clickSlider, { target: { value: '50' } });
-    // debounce 未触发前不调用
-    expect(updateSamplingRule).not.toHaveBeenCalled();
-    vi.advanceTimersByTime(350);
-    expect(updateSamplingRule).toHaveBeenCalledWith('periodic', { sampleRate: 0.5 });
+    // 找到三个采样组卡片头部内的 Switch checkbox。
+    // GroupCard 头部 .switch input 顺序：behavior / learn / perf。
+    const groupSwitches = (): HTMLInputElement[] => {
+      const titles = ['用户行为', '学习事件', '性能与错误'];
+      return titles.map((t) => {
+        const span = Array.from(container.querySelectorAll('span')).find((s) => s.textContent === t)!;
+        // 组卡片 = 标题向上找到带 border 的根；Switch 在同卡片头部内
+        const card = span.closest('div[style*="border-radius"]') ?? span.parentElement!.parentElement!.parentElement!;
+        return card.querySelector('label.switch input[type="checkbox"]') as HTMLInputElement;
+      });
+    };
+    const [behavior, learn, perf] = groupSwitches();
+    expect(behavior.disabled).toBe(false);
+    expect(learn.disabled).toBe(true);
+    expect(perf.disabled).toBe(true);
+
+    // 切换 behavior 组开关 → PATCH 绑定的 periodic enabled=false
+    fireEvent.change(behavior, { target: { checked: false } });
+    await waitFor(() => expect(updateSamplingRule).toHaveBeenCalledWith('periodic', { enabled: false }));
     await waitFor(() => expect(toastSuccess).toHaveBeenCalled());
   });
 
-  it('renders sampling rules, sinks, audit', async () => {
+  it('renders sampling cascade rules, sinks and audit trail', async () => {
     await renderPage();
     await waitFor(() => expect(screen.getByRole('heading', { name: '采样级联规则' })).toBeInTheDocument());
-    // sink 显示永久/不限 retention
-    expect(screen.getAllByText(/永久\/不限/).length).toBeGreaterThan(0);
-    // 审计行动作（badge + 行内动词均中文"修改"）
+    expect(screen.getByRole('heading', { name: '写入 Sink' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '最近改动' })).toBeInTheDocument();
+    // sink 保留显示「永久/不限」
+    await waitFor(() => expect(screen.getAllByText(/永久\/不限/).length).toBeGreaterThan(0));
+    // 审计动作 mod → 中文「修改」（行内动词 + badge）
     await waitFor(() => expect(screen.getAllByText('修改').length).toBeGreaterThan(0));
   });
 
-  it('renders stream events and polls every 5s', async () => {
+  it('editing an unlocked sampling rule saves new rate via updateSamplingRule', async () => {
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
     await renderPage();
-    await waitFor(() => expect(screen.getByText('实时事件流')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole('heading', { name: '采样级联规则' })).toBeInTheDocument());
+
+    // periodic 规则未锁 → 行内有「编辑」按钮
+    const editBtns = await screen.findAllByRole('button', { name: '编辑' });
+    await user.click(editBtns[0]);
+
+    // 编辑态出现 number 输入框，aria-label="periodic 采样率"
+    const input = await screen.findByLabelText('periodic 采样率') as HTMLInputElement;
+    await user.clear(input);
+    await user.type(input, '50');
+
+    await user.click(screen.getByRole('button', { name: '保存' }));
+    await waitFor(() => expect(updateSamplingRule).toHaveBeenCalledWith('periodic', { sampleRate: 0.5 }));
+    await waitFor(() => expect(toastSuccess).toHaveBeenCalled());
+  });
+
+  it('renders live event stream humanized and polls every 3s', async () => {
+    await renderPage();
+    await waitFor(() => expect(screen.getByRole('heading', { name: '实时事件流' })).toBeInTheDocument());
     await waitFor(() => expect(stream).toHaveBeenCalledTimes(1));
-    // humanize 后渲染人话卡片：中文事件类型 + 设备在线 + 指标中文标签
-    // （'周期上报' 在事件流与采样规则面板都会出现，用 getAllByText）
+    // humanize：中文事件类型 + 设备在线 + 指标中文标签
     await waitFor(() => expect(screen.getAllByText('周期上报').length).toBeGreaterThan(0));
-    expect(screen.getByText('在线')).toBeInTheDocument();
-    expect(screen.getByText('每分钟操作')).toBeInTheDocument();
-    // 轮询
-    vi.advanceTimersByTime(5000);
+    // 设备在线状态与指标中文标签均与前缀/数值同 span，用 regex 匹配
+    expect(screen.getByText(/在线/)).toBeInTheDocument();
+    expect(screen.getByText(/每分钟操作/)).toBeInTheDocument();
+    // 轮询：3 秒后再拉一次
+    vi.advanceTimersByTime(3000);
     await waitFor(() => expect(stream).toHaveBeenCalledTimes(2));
   });
 
-  it('刷新复用未变行 DOM 节点（不重建/不重放动画/不归零滚动）', async () => {
-    const { container } = await renderPage();
-    await waitFor(() => expect(stream).toHaveBeenCalledTimes(1));
-    await waitFor(() => expect(container.querySelector('[data-eid="e1"]')).not.toBeNull());
-
-    const e1Before = container.querySelector('[data-eid="e1"]');
-    const e2Before = container.querySelector('[data-eid="e2"]');
-    expect(e1Before).not.toBeNull();
-
-    // 下一帧：新事件 e0 入顶，e1/e2 仍在但都是全新对象引用（模拟真实 refetch）。
-    stream.mockResolvedValue({
-      events: [
-        { id: 'e0', ts: '2026-05-29T12:00:00Z', type: 'periodic', deviceId: 'dev_new0001', metrics: [], payloadRaw: '{"n":0}' },
-        { id: 'e1', ts: '2026-05-29T11:59:50Z', type: 'periodic', deviceId: 'dev_abcdef1234', metrics: [], payloadRaw: '{"x":1}' },
-        { id: 'e2', ts: '2026-05-29T11:59:40Z', type: 'word_answer', deviceId: 'dev_zzz', metrics: [], payloadRaw: '{"correct":true}' },
-      ],
-    });
-
-    vi.advanceTimersByTime(5000);
-    await waitFor(() => expect(stream).toHaveBeenCalledTimes(2));
-    await waitFor(() => expect(container.querySelector('[data-eid="e0"]')).not.toBeNull());
-
-    // 关键：按 id 复用引用 → <For> 保留同一 DOM 节点，刷新既不重建也不重放 ev-in、滚动不归零。
-    expect(container.querySelector('[data-eid="e1"]')).toBe(e1Before);
-    expect(container.querySelector('[data-eid="e2"]')).toBe(e2Before);
-  });
-
-  it('schema empty state shows Empty when payload null', async () => {
-    schema.mockResolvedValue({ eventType: 'periodic', sampledAt: null, payload: null });
-    await renderPage();
-    await waitFor(() => expect(screen.getByText('暂无样本')).toBeInTheDocument());
-  });
-
-  it('stream Pause button stops polling, Resume resumes (真实暂停轮询)', async () => {
+  it('pause stops polling, resume immediately refetches', async () => {
     await renderPage();
     await waitFor(() => expect(stream).toHaveBeenCalledTimes(1));
     fireEvent.click(screen.getByRole('button', { name: /暂停/ }));
@@ -250,26 +251,33 @@ describe('ProbeMetricsPage', () => {
     await waitFor(() => expect(stream).toHaveBeenCalledTimes(2));
   });
 
-  it('row kebab opens probe detail drawer (接真实 /schema)', async () => {
+  it('event card raw toggle expands payload JSON', async () => {
     await renderPage();
-    await waitFor(() => expect(screen.getByLabelText('点击行为 详情')).toBeInTheDocument());
-    fireEvent.click(screen.getByLabelText('点击行为 详情'));
-    await waitFor(() => expect(screen.getByText('探针详情 · 点击行为')).toBeInTheDocument());
-    // 抽屉展示元数据 + 绑定的 telemetry event_type
-    expect(screen.getByText('采样 event_type')).toBeInTheDocument();
+    await waitFor(() => expect(stream).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.getAllByText('周期上报').length).toBeGreaterThan(0));
+    // 每条事件有「原始」展开按钮
+    const rawBtns = screen.getAllByRole('button', { name: '原始' });
+    expect(rawBtns.length).toBeGreaterThan(0);
+    fireEvent.click(rawBtns[0]);
+    // 展开后按钮变「收起」，并渲染 prettified payload
+    await waitFor(() => expect(screen.getAllByRole('button', { name: '收起' }).length).toBeGreaterThan(0));
+    expect(screen.getByText(/actionsPerMin/)).toBeInTheDocument();
   });
 
-  it('group enable toggle: behavior 可切真实生效, learn/perf 锁定 disabled', async () => {
+  it('schema drawer opens via 查看 Schema and renders sampled payload', async () => {
     await renderPage();
-    await waitFor(() => expect(screen.getByLabelText('用户行为 采集开关')).toBeInTheDocument());
-    const behavior = screen.getByLabelText('用户行为 采集开关') as HTMLInputElement;
-    const learn = screen.getByLabelText('学习事件 采集开关') as HTMLInputElement;
-    const perf = screen.getByLabelText('性能与错误 采集开关') as HTMLInputElement;
-    expect(behavior.disabled).toBe(false);
-    expect(learn.disabled).toBe(true);
-    expect(perf.disabled).toBe(true);
-    // 切换 behavior → PATCH periodic enabled
-    fireEvent.click(behavior);
-    await waitFor(() => expect(updateSamplingRule).toHaveBeenCalledWith('periodic', { enabled: false }));
+    await waitFor(() => expect(screen.getByRole('heading', { name: '数据样本' })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: /查看 Schema/ }));
+    // 抽屉标题：数据样本 · periodic
+    await waitFor(() => expect(screen.getByRole('heading', { name: '数据样本 · periodic' })).toBeInTheDocument());
+    await waitFor(() => expect(schema).toHaveBeenCalledWith('periodic'));
+  });
+
+  it('schema drawer shows empty state when payload is null', async () => {
+    schema.mockResolvedValue({ eventType: 'periodic', sampledAt: null, payload: null });
+    await renderPage();
+    await waitFor(() => expect(screen.getByRole('heading', { name: '数据样本' })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: /查看 Schema/ }));
+    await waitFor(() => expect(screen.getByText('暂无样本')).toBeInTheDocument());
   });
 });

@@ -377,11 +377,13 @@ describe('ConfirmDialog', () => {
 });
 
 // ═════════════════════════════════════════════════════════════════════════════
-// 5. ProbePage 页面
+// 5. ProbePage 页面（重设计后自包含：内置 ResultCard + wf <Modal> 二次确认，
+//    脚本编辑器为纯 <textarea>，模板为 badge 按钮，下发按钮文案「下发探针」）
 // ═════════════════════════════════════════════════════════════════════════════
 describe('ProbePage', () => {
   const dispatch = vi.fn();
   const list = vi.fn();
+  const confirm = vi.fn();
   const connectStream = vi.fn();
   const stopStream = vi.fn();
 
@@ -393,28 +395,26 @@ describe('ProbePage', () => {
 
   afterEach(() => {
     vi.doUnmock('@/api/probe');
-    vi.doUnmock('@/components/probe/ScriptEditor');
     vi.resetModules();
   });
 
   async function renderPage() {
-    // ScriptEditor（CodeMirror）替换为简单 textarea，规避 happy-dom 下的不确定行为
-    vi.doMock('@/components/probe/ScriptEditor', () => ({
-      default: (props: { value: string; onChange: (v: string) => void }) => (
-        <textarea
-          data-testid="script-editor"
-          value={props.value}
-          onInput={(e) => props.onChange((e.currentTarget as HTMLTextAreaElement).value)}
-        />
-      ),
-    }));
     vi.doMock('@/api/probe', () => ({
-      probeApi: { dispatch, list, confirm: vi.fn(), get: vi.fn() },
+      probeApi: { dispatch, list, confirm, get: vi.fn() },
       connectProbeBatchStream: connectStream,
     }));
     vi.resetModules();
     const { default: ProbePage } = await import('@/pages/ProbePage');
     return render(() => <ProbePage />);
+  }
+
+  // 脚本编辑器是「诊断脚本」Field 里唯一无 placeholder 的 textarea；
+  // 多设备 textarea 带 placeholder，据此区分（任意 mode 下都可定位）。
+  function scriptEditor(): HTMLTextAreaElement {
+    const tas = Array.from(document.querySelectorAll('textarea.textarea')) as HTMLTextAreaElement[];
+    const el = tas.find((t) => !t.placeholder);
+    if (!el) throw new Error('script editor textarea not found');
+    return el;
   }
 
   it('renders header and default sections', async () => {
@@ -423,8 +423,9 @@ describe('ProbePage', () => {
     expect(screen.getByText('下发')).toBeInTheDocument();
     expect(screen.getByText('结果')).toBeInTheDocument();
     expect(screen.getByText('尚无结果')).toBeInTheDocument();
-    // 默认 single 模式 → 设备 ID 输入框
+    // 默认 single 模式 → 设备 ID 输入框 + 下发按钮
     expect(screen.getByPlaceholderText('设备 ID')).toBeInTheDocument();
+    expect(screen.getByText('下发探针')).toBeInTheDocument();
   });
 
   it('shows "无历史" when loadRecent returns empty', async () => {
@@ -448,7 +449,7 @@ describe('ProbePage', () => {
   it('validates empty deviceId before dispatch', async () => {
     await renderPage();
     await screen.findByText('远程探针');
-    fireEvent.click(screen.getByText('发送'));
+    fireEvent.click(screen.getByText('下发探针'));
     await waitFor(() => expect(screen.getByText('请填写 deviceId')).toBeInTheDocument());
     expect(dispatch).not.toHaveBeenCalled();
   });
@@ -457,8 +458,8 @@ describe('ProbePage', () => {
     await renderPage();
     await screen.findByText('远程探针');
     fireEvent.input(screen.getByPlaceholderText('设备 ID'), { target: { value: 'd-1' } });
-    fireEvent.input(screen.getByTestId('script-editor'), { target: { value: '   ' } });
-    fireEvent.click(screen.getByText('发送'));
+    fireEvent.input(scriptEditor(), { target: { value: '   ' } });
+    fireEvent.click(screen.getByText('下发探针'));
     await waitFor(() => expect(screen.getByText('script 不能为空')).toBeInTheDocument());
     expect(dispatch).not.toHaveBeenCalled();
   });
@@ -472,7 +473,7 @@ describe('ProbePage', () => {
     await renderPage();
     await screen.findByText('远程探针');
     fireEvent.input(screen.getByPlaceholderText('设备 ID'), { target: { value: 'd-1' } });
-    fireEvent.click(screen.getByText('发送'));
+    fireEvent.click(screen.getByText('下发探针'));
     await waitFor(() => expect(dispatch).toHaveBeenCalled());
     await waitFor(() => expect(connectStream).toHaveBeenCalledWith('batch-9999', expect.any(Object)));
 
@@ -492,7 +493,7 @@ describe('ProbePage', () => {
     await renderPage();
     await screen.findByText('远程探针');
     fireEvent.input(screen.getByPlaceholderText('设备 ID'), { target: { value: 'd-9' } });
-    fireEvent.click(screen.getByText('发送'));
+    fireEvent.click(screen.getByText('下发探针'));
     await waitFor(() => expect(screen.getByText(/目标设备全部离线/)).toBeInTheDocument());
     expect(connectStream).not.toHaveBeenCalled();
   });
@@ -502,7 +503,7 @@ describe('ProbePage', () => {
     await renderPage();
     await screen.findByText('远程探针');
     fireEvent.input(screen.getByPlaceholderText('设备 ID'), { target: { value: 'd-1' } });
-    fireEvent.click(screen.getByText('发送'));
+    fireEvent.click(screen.getByText('下发探针'));
     await waitFor(() => expect(screen.getByText(/远程探针未启用/)).toBeInTheDocument());
   });
 
@@ -511,7 +512,7 @@ describe('ProbePage', () => {
     await renderPage();
     await screen.findByText('远程探针');
     fireEvent.input(screen.getByPlaceholderText('设备 ID'), { target: { value: 'd-1' } });
-    fireEvent.click(screen.getByText('发送'));
+    fireEvent.click(screen.getByText('下发探针'));
     await waitFor(() => expect(screen.getByText('内部错误 500')).toBeInTheDocument());
   });
 
@@ -522,7 +523,7 @@ describe('ProbePage', () => {
     fireEvent.click(screen.getByText('多设备'));
     const ta = await screen.findByPlaceholderText('多个 deviceId，用空格 / 逗号分隔');
     fireEvent.input(ta, { target: { value: 'a, b  c' } });
-    fireEvent.click(screen.getByText('发送'));
+    fireEvent.click(screen.getByText('下发探针'));
     await waitFor(() => expect(dispatch).toHaveBeenCalled());
     expect(dispatch.mock.calls[0][0].targets).toEqual({ deviceIds: ['a', 'b', 'c'] });
   });
@@ -531,7 +532,7 @@ describe('ProbePage', () => {
     await renderPage();
     await screen.findByText('远程探针');
     fireEvent.click(screen.getByText('多设备'));
-    fireEvent.click(screen.getByText('发送'));
+    fireEvent.click(screen.getByText('下发探针'));
     await waitFor(() => expect(screen.getByText('请填写 deviceId')).toBeInTheDocument());
   });
 
@@ -540,7 +541,7 @@ describe('ProbePage', () => {
     await renderPage();
     await screen.findByText('远程探针');
     fireEvent.click(screen.getByText('全部在线'));
-    fireEvent.click(screen.getByText('发送'));
+    fireEvent.click(screen.getByText('下发探针'));
     await waitFor(() => expect(dispatch).toHaveBeenCalled());
     expect(dispatch.mock.calls[0][0].targets).toEqual({ allOnline: true });
   });
@@ -552,20 +553,17 @@ describe('ProbePage', () => {
     fireEvent.input(screen.getByPlaceholderText('设备 ID'), { target: { value: 'd-1' } });
     const timeoutInput = document.querySelector('input[type="number"]') as HTMLInputElement;
     fireEvent.input(timeoutInput, { target: { value: '5' } });
-    fireEvent.click(screen.getByText('发送'));
+    fireEvent.click(screen.getByText('下发探针'));
     await waitFor(() => expect(dispatch).toHaveBeenCalled());
     expect(dispatch.mock.calls[0][0].timeoutMs).toBe(100);
   });
 
-  it('template select fills the script editor', async () => {
+  it('template button fills the script editor', async () => {
     await renderPage();
     await screen.findByText('远程探针');
-    const select = screen.getByLabelText('选择脚本模板') as HTMLSelectElement;
-    fireEvent.change(select, { target: { value: '设备指纹' } });
-    await waitFor(() => {
-      const ta = screen.getByTestId('script-editor') as HTMLTextAreaElement;
-      expect(ta.value).toContain('ctx.nav.ua');
-    });
+    // 模板现为 badge 按钮，点击「设备指纹」即把模板 body 填入脚本编辑器
+    fireEvent.click(screen.getByText('设备指纹'));
+    await waitFor(() => expect(scriptEditor().value).toContain('ctx.nav.ua'));
   });
 
   it('recent batches render and replay fills editor + note', async () => {
@@ -581,26 +579,24 @@ describe('ProbePage', () => {
       total: 1,
     });
     await renderPage();
-    await waitFor(() => expect(screen.getByText('回放此 script')).toBeInTheDocument());
-    expect(screen.getByText('排查 OOM')).toBeInTheDocument();
-    fireEvent.click(screen.getByText('回放此 script'));
-    await waitFor(() => {
-      const ta = screen.getByTestId('script-editor') as HTMLTextAreaElement;
-      expect(ta.value).toBe('return 7;');
-    });
+    // 最近 batch 表格：note + 「回放」操作按钮
+    await waitFor(() => expect(screen.getByText('排查 OOM')).toBeInTheDocument());
+    const replayBtn = screen.getByText('回放');
+    fireEvent.click(replayBtn);
+    await waitFor(() => expect(scriptEditor().value).toBe('return 7;'));
   });
 
   it('exportBatchJson triggers a blob download', async () => {
     dispatch.mockResolvedValue({ batchId: 'b-exp', dispatched: [{ deviceId: 'd', requestId: 'r' }], skippedOffline: [] });
     const createObjectURL = vi.fn(() => 'blob:fake');
     const revokeObjectURL = vi.fn();
-    (URL as any).createObjectURL = createObjectURL;
-    (URL as any).revokeObjectURL = revokeObjectURL;
+    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: createObjectURL });
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: revokeObjectURL });
     const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
     await renderPage();
     await screen.findByText('远程探针');
     fireEvent.input(screen.getByPlaceholderText('设备 ID'), { target: { value: 'd-1' } });
-    fireEvent.click(screen.getByText('发送'));
+    fireEvent.click(screen.getByText('下发探针'));
     await waitFor(() => expect(connectStream).toHaveBeenCalled());
     const cbs = connectStream.mock.calls[0][1];
     cbs.onResult({ deviceId: 'd', requestId: 'r', batchId: 'b-exp', status: 'ok', resultJson: { a: 1 } });
@@ -617,39 +613,47 @@ describe('ProbePage', () => {
     await renderPage();
     await screen.findByText('远程探针');
     fireEvent.input(screen.getByPlaceholderText('设备 ID'), { target: { value: 'd-1' } });
-    fireEvent.click(screen.getByText('发送'));
+    fireEvent.click(screen.getByText('下发探针'));
     await waitFor(() => expect(connectStream).toHaveBeenCalled());
     const cbs = connectStream.mock.calls[0][1];
     cbs.onResult({ deviceId: 'd', requestId: 'r', batchId: 'b-clr', status: 'ok', resultJson: { a: 1 } });
+    // onCompleted 将 sending 置回 false，否则清空后会落到 <Loading> 而非空态
+    cbs.onCompleted({ received: 1, expected: 1 });
     await waitFor(() => expect(screen.getByText('清空')).toBeInTheDocument());
     fireEvent.click(screen.getByText('清空'));
     await waitFor(() => expect(screen.getByText('尚无结果')).toBeInTheDocument());
   });
 
-  it('SSE onError surfaces an error message', async () => {
+  it('SSE onError falls back to polling and warns the user', async () => {
+    // 重设计：onError 不再渲染「SSE 错误」文案，而是 toast.warning + 切换轮询。
+    list.mockResolvedValue({ rows: [], total: 0 });
     dispatch.mockResolvedValue({ batchId: 'b-sse', dispatched: [{ deviceId: 'd', requestId: 'r' }], skippedOffline: [] });
     await renderPage();
     await screen.findByText('远程探针');
     fireEvent.input(screen.getByPlaceholderText('设备 ID'), { target: { value: 'd-1' } });
-    fireEvent.click(screen.getByText('发送'));
+    fireEvent.click(screen.getByText('下发探针'));
     await waitFor(() => expect(connectStream).toHaveBeenCalled());
     const cbs = connectStream.mock.calls[0][1];
-    cbs.onError('connection lost');
-    await waitFor(() => expect(screen.getByText(/SSE 错误/)).toBeInTheDocument());
+    cbs.onError(new Error('connection lost'));
+    // 轮询兜底会再次调用 probeApi.list（带 batchId）
+    await waitFor(() => expect(mockToast.warning).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(list.mock.calls.some((c) => c[0]?.batchId === 'b-sse')).toBe(true));
   });
 
-  it('confirm_required result opens ConfirmDialog', async () => {
+  it('confirm_required result opens the confirm modal', async () => {
     dispatch.mockResolvedValue({ batchId: 'b-cd', dispatched: [{ deviceId: 'dev-xyz999', requestId: 'r-cd' }], skippedOffline: [] });
     await renderPage();
     await screen.findByText('远程探针');
     fireEvent.input(screen.getByPlaceholderText('设备 ID'), { target: { value: 'dev-xyz999' } });
-    fireEvent.click(screen.getByText('发送'));
+    fireEvent.click(screen.getByText('下发探针'));
     await waitFor(() => expect(connectStream).toHaveBeenCalled());
     const cbs = connectStream.mock.calls[0][1];
     cbs.onResult({
       deviceId: 'dev-xyz999', requestId: 'r-cd', batchId: 'b-cd', status: 'confirm_required',
       resultJson: { _actions: [{ type: 'reload' }, { type: 'signOut' }] },
     });
+    // 结果卡片出现「确认执行」按钮 → 点击打开 wf <Modal>
     await waitFor(() => expect(screen.getByText('确认执行')).toBeInTheDocument());
     fireEvent.click(screen.getByText('确认执行'));
     await waitFor(() => expect(screen.getByText('确认远程受控写')).toBeInTheDocument());

@@ -5,7 +5,8 @@ import { renderWithProviders } from './helpers/render';
 // ─────────────────────────────────────────────────────────────────────────
 // big_pages 覆盖簇:AmasAdvisorPage / DashboardPage / UserManagementPage
 // 用 Proxy 兜底 mock 全部 adminApi / amasApi 方法(默认 resolve),再对真正影响
-// 渲染分支的方法 override。EChart stub 成占位 div。绝不真实网络。
+// 渲染分支的方法 override。重设计后 UI 全部走 @/components/wf,不再 mock EChart。
+// 绝不真实网络。
 // ─────────────────────────────────────────────────────────────────────────
 
 // 默认对象:既能当 paginated（含 data/total）又含 items/rows/workers 等兜底字段。
@@ -38,13 +39,7 @@ vi.mock('@/api/amas', () => ({
   }),
 }));
 
-// EChart stub —— 主动执行 option() 构建器（执行图表 builder 覆盖行），但不碰 echarts。
-vi.mock('@/components/ui/EChart', () => ({
-  EChart: (props: { option?: () => unknown }) => {
-    try { props.option?.(); } catch { /* 构建器抛错不阻塞测试 */ }
-    return <div data-testid="chart" />;
-  },
-}));
+// toast 经 @/components/wf 再导出 uiStore.toast,mock store 即覆盖。
 vi.mock('@/stores/ui', () => ({
   uiStore: { toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() } },
 }));
@@ -70,19 +65,19 @@ function resetCaches() {
 
 // ─────────────────────────── AmasAdvisorPage ───────────────────────────
 const COST = {
-  monthYuan: 4.21, monthCapYuan: 10, quotaPct: 42.1, forecastYuan: 6.84,
+  monthYuan: 4.21, monthCapYuan: 10, quotaPct: 0.421, forecastYuan: 6.84,
   avg7dCostYuan: 0.14, monthCalls: 31, acceptedCount: 47, rejectedCount: 6,
   acceptanceRate: 0.887, usdToCny: 7.2,
 };
 const CFG = {
-  model: 'deepseek-v2', pollCron: '0 */20 * * * *', apiKeyTail: 'f3a8', monthCapYuan: 10,
+  model: 'deepseek-v2', pollCron: '0 */20 * * * *', apiKeyTail: 'f3a8', monthCapYuan: 200,
   autoApplyEnabled: false, autoApplyMaxPerDay: 1, autoApplyMinConfidence: 0.8,
   grayscaleSteps: [20, 60, 100], advisorEnabled: true,
 };
 const SUGG = (id: number, status: string) => ({
   id, createdAt: `2026-06-0${id}T00:00:00Z`, basedOnVersionHash: 'abc123def456',
   patchJson: { 'wordSelector.alpha': 0.5 }, rationale: `调参建议 ${id}`,
-  evidenceJson: {}, status, decidedBy: null, decidedAt: null, decisionNote: null,
+  evidenceJson: { sampleSize: 1200, windowDays: 7 }, status, decidedBy: null, decidedAt: null, decisionNote: null,
   costUsd: 0.012, tokensInput: 100, tokensOutput: 50, confidence: 0.9,
   baseValuesJson: { 'wordSelector.alpha': 0.4 },
 });
@@ -98,14 +93,12 @@ function primeAdvisor() {
   api.amasAdvisorCostDaily.mockResolvedValue([{ date: '2026-06-01', costYuan: 0.1, calls: 2 }]);
   api.amasAdvisorConfig.mockResolvedValue(CFG);
   api.amasListWhitelist.mockResolvedValue([]);
-  // amasListSuggestions 按 status 分发:供 page + HistoryTable 共用,默认空数组
-  api.amasListSuggestions.mockImplementation((status?: string) => {
-    if (status === 'pending') return Promise.resolve([SUGG(1, 'pending')]);
-    if (status === 'approved') return Promise.resolve([SUGG(2, 'approved')]);
-    if (status === 'auto_applied') return Promise.resolve([]);
-    if (status === 'rejected') return Promise.resolve([SUGG(4, 'rejected')]);
-    return Promise.resolve([]); // HistoryTable(undefined status)
-  });
+  // 重设计后 advisor 拉全量(不带 status),前端按 status 分桶。返回各状态各一条。
+  api.amasListSuggestions.mockResolvedValue([
+    SUGG(1, 'pending'),
+    SUGG(2, 'approved'),
+    SUGG(4, 'rejected'),
+  ]);
   api.amasListCanaries.mockResolvedValue([CANARY]);
 }
 
@@ -120,12 +113,12 @@ describe('AmasAdvisorPage — tabs / decisions / header ops', () => {
   it('渲染标题 + 成本行 + 待审建议', async () => {
     await renderAdvisor();
     expect(await screen.findByText('LLM 调参顾问')).toBeInTheDocument();
-    await waitFor(() => expect(screen.getByText('¥4.21')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('¥4.2')).toBeInTheDocument());
     await waitFor(() => expect(screen.getByText('调参建议 1')).toBeInTheDocument());
   });
 
   it('批准建议触发 amasApproveSuggestion', async () => {
-    api.amasApproveSuggestion.mockResolvedValue({ versionHash: 'newhash1234' });
+    api.amasApproveSuggestion.mockResolvedValue({ updated: true, versionHash: 'newhash1234', versionId: 9 });
     await renderAdvisor();
     fireEvent.click(await screen.findByText('批准并应用'));
     await waitFor(() => expect(api.amasApproveSuggestion).toHaveBeenCalledWith(1));
@@ -136,14 +129,14 @@ describe('AmasAdvisorPage — tabs / decisions / header ops', () => {
     api.amasRejectSuggestion.mockResolvedValue(undefined);
     await renderAdvisor();
     fireEvent.click(await screen.findByText('拒绝'));
-    await waitFor(() => expect(api.amasRejectSuggestion).toHaveBeenCalledWith(1));
+    await waitFor(() => expect(api.amasRejectSuggestion).toHaveBeenCalledWith(1, '人工拒绝'));
   });
 
-  it('进灰度触发 amasCreateCanary', async () => {
-    api.amasCreateCanary.mockResolvedValue(undefined);
+  it('点击待审卡打开详情抽屉(含 LLM 解释/沙箱)', async () => {
     await renderAdvisor();
-    fireEvent.click(await screen.findByText('进灰度 20%'));
-    await waitFor(() => expect(api.amasCreateCanary).toHaveBeenCalledWith({ suggestionId: 1, percent: 20 }));
+    fireEvent.click(await screen.findByText('调参建议 1'));
+    await waitFor(() => expect(screen.getByText('LLM 解释')).toBeInTheDocument());
+    expect(screen.getByText('沙箱试运行')).toBeInTheDocument();
   });
 
   it('批准失败走错误 toast', async () => {
@@ -155,64 +148,68 @@ describe('AmasAdvisorPage — tabs / decisions / header ops', () => {
 
   it('切到灰度中 tab 显示 canary 卡', async () => {
     await renderAdvisor();
-    const canaryTab = await screen.findByRole('tab', { name: /灰度中/ });
-    fireEvent.click(canaryTab);
-    // PatchCanaryCard 渲染 "建议 #3 · cafebabe00" + "灰度 20%" + "回滚" 按钮
+    fireEvent.click(await screen.findByText('灰度中'));
+    // CanaryList 渲染 "建议 #3 · cafebabe00de" + "全量发布" + "回滚" 按钮
     await waitFor(() => expect(screen.getByText('回滚')).toBeInTheDocument());
-    expect(screen.getByText(/灰度 20%/)).toBeInTheDocument();
+    expect(screen.getByText(/建议 #3/)).toBeInTheDocument();
+    expect(screen.getByText('全量发布')).toBeInTheDocument();
   });
 
-  it('切到已生效 tab 显示 approved 建议', async () => {
+  it('切到历史 tab 显示被决策建议', async () => {
     await renderAdvisor();
-    const tab = await screen.findByRole('tab', { name: /已生效/ });
-    fireEvent.click(tab);
+    fireEvent.click(await screen.findByText('历史'));
+    // history = 非 pending(approved + rejected),表里出现理由文本
     await waitFor(() => expect(screen.getByText('调参建议 2')).toBeInTheDocument());
+    expect(screen.getByText('调参建议 4')).toBeInTheDocument();
   });
 
-  it('切到已拒绝 tab 显示 rejected 建议', async () => {
+  it('立即巡查 调用 amasAdvisorRun（有新建议）', async () => {
+    api.amasAdvisorRun.mockResolvedValue({ produced: true, suggestionId: 5 });
     await renderAdvisor();
-    const tab = await screen.findByRole('tab', { name: /已拒绝/ });
-    fireEvent.click(tab);
-    await waitFor(() => expect(screen.getByText('调参建议 4')).toBeInTheDocument());
-  });
-
-  it('立即触发巡查 调用 amasAdvisorRun（有新建议）', async () => {
-    api.amasAdvisorRun.mockResolvedValue({ produced: true });
-    await renderAdvisor();
-    fireEvent.click(await screen.findByText('立即触发巡查'));
+    fireEvent.click(await screen.findByText('立即巡查'));
     await waitFor(() => expect(api.amasAdvisorRun).toHaveBeenCalled());
-    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('巡查完成，产出新建议'));
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('已触发顾问巡查', '产出新建议'));
   });
 
-  it('立即触发巡查 失败走错误 toast', async () => {
+  it('立即巡查 失败走错误 toast', async () => {
     api.amasAdvisorRun.mockRejectedValue(new Error('x'));
     await renderAdvisor();
-    fireEvent.click(await screen.findByText('立即触发巡查'));
-    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('触发失败', 'x'));
+    fireEvent.click(await screen.findByText('立即巡查'));
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('巡查失败', 'x'));
   });
 
-  it('接受全部待审 调用 amasApproveAllSuggestions', async () => {
-    api.amasApproveAllSuggestions.mockResolvedValue({ results: [{ ok: true }, { ok: false }] });
+  it('批准全部待审 调用 amasApproveAllSuggestions', async () => {
+    api.amasApproveAllSuggestions.mockResolvedValue({ results: [{ id: 1, ok: true, error: null }, { id: 2, ok: false, error: 'e' }] });
     await renderAdvisor();
-    const btn = await screen.findByText(/接受全部待审/);
+    const btn = await screen.findByText('批准全部');
     fireEvent.click(btn);
     await waitFor(() => expect(api.amasApproveAllSuggestions).toHaveBeenCalled());
-    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('已批准 1/2 条'));
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('已批准全部待审建议', '1/2 条'));
   });
 
-  it('切换自动巡查开关 调用 amasUpdateAdvisorConfig', async () => {
+  it('顾问配置 tab 切换启用开关并保存 调用 amasUpdateAdvisorConfig', async () => {
     api.amasUpdateAdvisorConfig.mockResolvedValue(undefined);
     await renderAdvisor();
-    const sw = await screen.findByLabelText('自动巡查');
-    fireEvent.click(sw);
-    await waitFor(() => expect(api.amasUpdateAdvisorConfig).toHaveBeenCalledWith({ advisorEnabled: false }));
+    fireEvent.click(await screen.findByText('顾问配置'));
+    // 启用顾问 Switch — 取配置卡内首个 checkbox
+    const sw = await waitFor(() => {
+      const cb = document.querySelector('label.switch input[type="checkbox"]') as HTMLInputElement | null;
+      expect(cb).toBeTruthy();
+      return cb!;
+    });
+    fireEvent.click(sw); // advisorEnabled true → false,使 dirty 成立
+    const save = await screen.findByText('保存配置');
+    fireEvent.click(save);
+    await waitFor(() => expect(api.amasUpdateAdvisorConfig).toHaveBeenCalledWith(
+      expect.objectContaining({ advisorEnabled: false }),
+    ));
   });
 
-  it('成本接口失败时成本行降级而不整页崩', async () => {
+  it('成本接口失败时成本面板降级而不整页崩', async () => {
     api.amasAdvisorCost.mockRejectedValue(new Error('boom'));
     await renderAdvisor();
     expect(await screen.findByText('LLM 调参顾问')).toBeInTheDocument();
-    await waitFor(() => expect(screen.getByText(/成本信息加载失败/)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('成本信息加载失败')).toBeInTheDocument());
   });
 });
 
@@ -246,7 +243,7 @@ function primeDashboard() {
     ],
   });
   api.amasListSuggestions.mockResolvedValue([SUGG(1, 'pending')]);
-  api.listFeedback.mockResolvedValue({ data: [], total: 3, page: 1, perPage: 1, totalPages: 3 });
+  api.listFeedback.mockResolvedValue({ total: 3 });
   amas.getMonitoring.mockResolvedValue([{ eventType: 'error_x' }, { eventType: 'info_y' }]);
 }
 
@@ -258,12 +255,14 @@ async function renderDashboard() {
 describe('DashboardPage — KPI / rows / refresh / export', () => {
   beforeEach(() => { resetCaches(); primeDashboard(); });
 
-  it('渲染 KPI + worker 网格 + 待办事项', async () => {
+  it('渲染标题 + KPI + worker 心跳 + 待办事项', async () => {
     await renderDashboard();
     await waitFor(() => expect(screen.getByText('全局概览')).toBeInTheDocument());
+    // KPI 卡
+    await waitFor(() => expect(screen.getByText('注册用户')).toBeInTheDocument());
     // worker 心跳网格标题(2 个 tokio worker)
     await waitFor(() => expect(screen.getByText('Worker 心跳')).toBeInTheDocument());
-    // 待办:未处理反馈(total=3) + LLM 待审建议
+    // 待办:未处理反馈(total=3)
     await waitFor(() => expect(screen.getByText(/3 条未处理反馈/)).toBeInTheDocument());
   });
 
@@ -291,9 +290,7 @@ describe('DashboardPage — KPI / rows / refresh / export', () => {
   it('切换天窗口为 14 天重拉 study-overview', async () => {
     await renderDashboard();
     await waitFor(() => expect(screen.getByText('全局概览')).toBeInTheDocument());
-    const btn14 = screen.getAllByRole('radio').find((b) => b.textContent === '14天');
-    expect(btn14).toBeDefined();
-    fireEvent.click(btn14!);
+    fireEvent.click(screen.getByText('14 天'));
     await waitFor(() => expect(api.getStudyOverview).toHaveBeenCalledWith(14));
   });
 
@@ -319,9 +316,6 @@ const u1 = { ...baseUser, id: '1', username: 'alice', email: 'alice@example.com'
 const u2 = { ...baseUser, id: '2', username: 'bob', email: 'bob@example.com', isBanned: true, status: 'suspended' as const };
 
 function primeUsers() {
-  api.getStats.mockResolvedValue({ users: 100, words: 0, records: 0, trend: { users: { value: 5, label: '较昨日' } } });
-  api.getEngagement.mockResolvedValue({ totalUsers: 100, activeToday: 12, retentionRate: 0.12 });
-  api.getDailyActiveUsers.mockResolvedValue([{ date: '2026-05-30', count: 10, registered: 3 }]);
   api.userFacets.mockResolvedValue({ total: 100, active: 80, inactive7d: 12, banned: 5, admins: 3 });
   api.userProfile.mockResolvedValue({ userId: '1', totalRecords: 10, correctRecords: 8, accuracy: 0.8, avgResponseTimeMs: 1500, sessionCount: 5, wordbookDistribution: [{ name: 'CET4', recordCount: 5 }] });
   api.userSessions.mockResolvedValue({ sessions: [] });
@@ -332,7 +326,7 @@ function primeUsers() {
     selectedWordbooks: [], metrics7d: { records: 0, correct: 0, accuracy: null, fatigueAlertCount: 0 },
   });
   api.userActivityLog.mockResolvedValue({ entries: [] });
-  api.getUsers.mockResolvedValue({ data: [u1, u2], total: 2 });
+  api.getUsers.mockResolvedValue({ data: [u1, u2], total: 2, page: 1, perPage: 12, totalPages: 1 });
 }
 
 async function renderUsers() {
@@ -343,17 +337,19 @@ async function renderUsers() {
 describe('UserManagementPage — list / chips / drawer / create / bulk', () => {
   beforeEach(() => { resetCaches(); primeUsers(); });
 
-  it('渲染用户列表与 KPI header', async () => {
+  it('渲染用户列表与标题 / facet chips', async () => {
     await renderUsers();
     await waitFor(() => expect(screen.getByText('alice')).toBeInTheDocument());
     expect(screen.getByText('bob')).toBeInTheDocument();
-    await waitFor(() => expect(screen.getByText(/本周新增/)).toBeInTheDocument());
+    expect(screen.getByText('用户管理')).toBeInTheDocument();
+    // facet chip(button)到位 —— 「已封禁」既是 chip 也是 bob 状态徽章,用 role 收窄
+    await waitFor(() => expect(screen.getByRole('button', { name: /已封禁/ })).toBeInTheDocument());
   });
 
-  it('切 chip 到禁用 重拉 banned=true', async () => {
+  it('切 chip 到已封禁 重拉 banned=true', async () => {
     await renderUsers();
     await waitFor(() => expect(screen.getByText('alice')).toBeInTheDocument());
-    fireEvent.click(screen.getByText('禁用'));
+    fireEvent.click(screen.getByRole('button', { name: /已封禁/ }));
     await waitFor(() => expect(api.getUsers).toHaveBeenLastCalledWith(expect.objectContaining({ banned: true })));
   });
 
@@ -364,66 +360,96 @@ describe('UserManagementPage — list / chips / drawer / create / bulk', () => {
     await waitFor(() => expect(api.getUsers).toHaveBeenLastCalledWith(expect.objectContaining({ inactiveDays: 7 })));
   });
 
-  it('点行打开 Drawer 显示资料 tab', async () => {
+  it('点详情打开 Drawer 显示档案 tab', async () => {
     await renderUsers();
     await waitFor(() => expect(screen.getByText('alice')).toBeInTheDocument());
-    fireEvent.click(screen.getByText('alice'));
-    await waitFor(() => expect(screen.getByText('用户详情')).toBeInTheDocument());
-    expect(screen.getByText('答题档案')).toBeInTheDocument();
+    fireEvent.click(screen.getAllByText('详情')[0]);
+    // 抽屉脚部「重置密码」按钮唯一,确认抽屉已开;档案 tab 渲染「词库分布」eyebrow(表头无此字)
+    await waitFor(() => expect(screen.getByText('重置密码')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('词库分布')).toBeInTheDocument());
   });
 
-  it('Drawer 切到答题档案 tab 显示词书分布', async () => {
+  it('Drawer 档案 tab 显示词书分布', async () => {
     await renderUsers();
     await waitFor(() => expect(screen.getByText('alice')).toBeInTheDocument());
-    fireEvent.click(screen.getByText('alice'));
-    await waitFor(() => expect(screen.getByText('答题档案')).toBeInTheDocument());
-    fireEvent.click(screen.getByText('答题档案'));
+    fireEvent.click(screen.getAllByText('详情')[0]);
     await waitFor(() => expect(screen.getByText('CET4')).toBeInTheDocument());
   });
 
-  it('Drawer 切到设备会话 tab 显示设备并可封设备', async () => {
+  it('Drawer 切到设备 tab 显示设备', async () => {
     await renderUsers();
     await waitFor(() => expect(screen.getByText('alice')).toBeInTheDocument());
-    fireEvent.click(screen.getByText('alice'));
-    await waitFor(() => expect(screen.getByText('设备会话')).toBeInTheDocument());
-    fireEvent.click(screen.getByText('设备会话'));
-    await waitFor(() => expect(screen.getByText('封设备')).toBeInTheDocument());
-    fireEvent.click(screen.getByText('封设备'));
-    await waitFor(() => expect(screen.getByText('封禁设备')).toBeInTheDocument());
+    fireEvent.click(screen.getAllByText('详情')[0]);
+    await waitFor(() => expect(screen.getByText('重置密码')).toBeInTheDocument());
+    // Drawer tab「设备」为 tab 按钮(class=tab),用 role 收窄,避免命中行内「封设备」等
+    fireEvent.click(screen.getByRole('button', { name: '设备' }));
+    await waitFor(() => expect(screen.getByText(/Web · v1.0/)).toBeInTheDocument());
+  });
+
+  it('行内封禁按钮触发 banUser', async () => {
+    api.banUser.mockResolvedValue(undefined);
+    await renderUsers();
+    await waitFor(() => expect(screen.getByText('alice')).toBeInTheDocument());
+    // alice 未封禁 → 行内显示「封禁」
+    fireEvent.click(screen.getByText('封禁'));
+    await waitFor(() => expect(api.banUser).toHaveBeenCalledWith('1'));
+    await waitFor(() => expect(toast.success).toHaveBeenCalled());
   });
 
   it('打开添加用户 Modal 并提交 createUser', async () => {
     api.createUser.mockResolvedValue({ ...baseUser, id: '99', username: 'newuser', email: 'new@x.com', isBanned: false });
     await renderUsers();
-    await waitFor(() => expect(screen.getByText('+ 添加用户')).toBeInTheDocument());
-    fireEvent.click(screen.getByText('+ 添加用户'));
     await waitFor(() => expect(screen.getByText('添加用户')).toBeInTheDocument());
-    const email = document.querySelector('input[type="email"]') as HTMLInputElement;
-    const pw = document.querySelectorAll('input[type="password"]');
-    const textInputs = Array.from(document.querySelectorAll('input[type="text"], input:not([type])')) as HTMLInputElement[];
-    const usernameInput = textInputs[textInputs.length - 1];
+    fireEvent.click(screen.getByText('添加用户'));
+    // Modal 打开后出现邮箱输入
+    const email = await waitFor(() => {
+      const el = document.querySelector('input[type="email"]') as HTMLInputElement | null;
+      expect(el).toBeTruthy();
+      return el!;
+    });
+    // 限定在 Modal 卡片内按顺序取输入框:[0]邮箱(email) [1]用户名(无 type) [2]初始密码(text)
+    const modal = email.closest('.card') as HTMLElement;
+    const modalInputs = Array.from(modal.querySelectorAll('input.input')) as HTMLInputElement[];
+    const usernameInput = modalInputs[1];
+    const passwordInput = modalInputs[2];
     fireEvent.input(email, { target: { value: 'new@x.com' } });
     fireEvent.input(usernameInput, { target: { value: 'newuser' } });
-    fireEvent.input(pw[0], { target: { value: 'NewPass123' } });
+    fireEvent.input(passwordInput, { target: { value: 'NewPass123' } });
     fireEvent.click(screen.getByText('创建'));
     await waitFor(() => expect(api.createUser).toHaveBeenCalled());
   });
 
   it('添加用户必填校验', async () => {
     await renderUsers();
-    await waitFor(() => expect(screen.getByText('+ 添加用户')).toBeInTheDocument());
-    fireEvent.click(screen.getByText('+ 添加用户'));
     await waitFor(() => expect(screen.getByText('添加用户')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('添加用户'));
+    await waitFor(() => expect(screen.getByText('创建')).toBeInTheDocument());
     fireEvent.click(screen.getByText('创建'));
-    await waitFor(() => expect(screen.getByText('邮箱 / 用户名 / 密码均为必填')).toBeInTheDocument());
+    await waitFor(() => expect(toast.warning).toHaveBeenCalledWith('请填写完整'));
   });
+
+  // 全选后取批量操作栏(含「已选 N 个」)内的按钮,避开行内同名「封禁」按钮
+  async function bulkBarButton(label: string): Promise<HTMLElement> {
+    const tag = await waitFor(() => {
+      const el = screen.getByText(/已选 \d+ 个/);
+      return el;
+    });
+    const bar = tag.parentElement as HTMLElement;
+    const btn = Array.from(bar.querySelectorAll('button')).find((b) => b.textContent?.includes(label));
+    expect(btn).toBeTruthy();
+    return btn!;
+  }
 
   it('多选后批量封禁', async () => {
     api.usersBulkBan.mockResolvedValue({ succeeded: 2, failed: 0 });
     await renderUsers();
     await waitFor(() => expect(screen.getByText('alice')).toBeInTheDocument());
-    fireEvent.click(screen.getByLabelText('全选 / 全不选'));
-    fireEvent.click(await screen.findByText('批量封禁'));
+    // 全选 = thead 内首个 checkbox
+    const headerCb = document.querySelector('thead input[type="checkbox"]') as HTMLInputElement;
+    fireEvent.click(headerCb);
+    fireEvent.click(await bulkBarButton('封禁'));
+    // Confirm 弹窗的「确认」
+    fireEvent.click(await screen.findByText('确认'));
     await waitFor(() => expect(api.usersBulkBan).toHaveBeenCalled());
     await waitFor(() => expect(toast.success).toHaveBeenCalled());
   });
@@ -432,29 +458,23 @@ describe('UserManagementPage — list / chips / drawer / create / bulk', () => {
     api.usersBulkResetPassword.mockResolvedValue({ succeeded: 2, failed: 0 });
     await renderUsers();
     await waitFor(() => expect(screen.getByText('alice')).toBeInTheDocument());
-    fireEvent.click(screen.getByLabelText('全选 / 全不选'));
-    fireEvent.click(await screen.findByText('重置密码'));
+    const headerCb = document.querySelector('thead input[type="checkbox"]') as HTMLInputElement;
+    fireEvent.click(headerCb);
+    fireEvent.click(await bulkBarButton('重置密码'));
+    fireEvent.click(await screen.findByText('确认'));
     await waitFor(() => expect(api.usersBulkResetPassword).toHaveBeenCalled());
   });
 
-  it('导出 CSV 列表', async () => {
-    const createUrl = vi.fn(() => 'blob:x');
-    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: createUrl });
-    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: vi.fn() });
-    await renderUsers();
-    await waitFor(() => expect(screen.getByText('alice')).toBeInTheDocument());
-    fireEvent.click(screen.getByText('导出 CSV'));
-    await waitFor(() => expect(toast.success).toHaveBeenCalledWith(expect.stringContaining('已导出')));
-  });
-
-  it('加载失败走错误 toast', async () => {
+  it('加载失败时列表空,facet 仍渲染', async () => {
     api.getUsers.mockRejectedValue(new Error('500'));
     await renderUsers();
-    await waitFor(() => expect(toast.error).toHaveBeenCalled());
+    // 列表资源 error → rows 为空,但筛选 chip 区域仍可见
+    await waitFor(() => expect(screen.getByText('已封禁')).toBeInTheDocument());
+    expect(screen.queryByText('alice')).not.toBeInTheDocument();
   });
 
   it('空列表显示空态', async () => {
-    api.getUsers.mockResolvedValue({ data: [], total: 0 });
+    api.getUsers.mockResolvedValue({ data: [], total: 0, page: 1, perPage: 12, totalPages: 0 });
     await renderUsers();
     await waitFor(() => expect(screen.getByText('暂无用户')).toBeInTheDocument());
   });

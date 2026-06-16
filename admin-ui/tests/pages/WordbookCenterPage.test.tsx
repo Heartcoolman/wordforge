@@ -17,13 +17,14 @@ vi.mock('@/api/admin', () => ({
     adminWordbookAddWord: vi.fn(),
     adminWordbookRemoveWord: vi.fn(),
     adminWordbookExport: vi.fn(),
-    // 底部远程导入面板(/api/admin/wordbook-center/*)
+    // 远程目录面板(/api/admin/wordbook-center/*),默认折叠不渲染
     getSettings: vi.fn(),
     wbCenterBrowse: vi.fn(),
     wbCenterUpdates: vi.fn(),
     wbCenterImport: vi.fn(),
     wbCenterSync: vi.fn(),
     wbCenterPreview: vi.fn(),
+    wbCenterUpload: vi.fn(),
   },
 }));
 
@@ -64,14 +65,8 @@ const wordsResp = {
     { id: 'w-2', text: 'acquiesce', pronunciation: '/ˌækwiˈɛs/', partOfSpeech: 'v.', meaning: '默许', examples: [], appearCount: 2612, accuracy: 0.41 },
     { id: 'w-3', text: 'novel', meaning: '新颖的', examples: [], appearCount: 10, accuracy: null },
   ],
-  total: 3, page: 1, perPage: 20, totalPages: 1,
+  total: 3, page: 1, perPage: 30, totalPages: 1,
 };
-
-// ImportSection 默认未配置词书中心 → 不触发远程加载报错
-function stubImportSection() {
-  mockApi.getSettings.mockResolvedValue({ wordbookCenterUrl: '' });
-  mockApi.wbCenterBrowse.mockResolvedValue([]);
-}
 
 async function renderPage() {
   const { default: Page } = await import('@/pages/WordbookCenterPage');
@@ -81,50 +76,55 @@ async function renderPage() {
 describe('WordbookCenterPage — 主从布局 + 词条/统计', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    stubImportSection();
     mockApi.adminWordbookStats.mockResolvedValue(statsResp);
     mockApi.adminWordbookWords.mockResolvedValue(wordsResp);
   });
 
-  it('左列表渲染词库并按 counts 拼副标题', async () => {
+  it('左列表渲染词库并显示全部计数', async () => {
     mockApi.adminWordbooksList.mockResolvedValue(listResponse());
     await renderPage();
     // 自动选中第一项后名称同时出现在列表与详情,故用 getAllByText
     await waitFor(() => expect(screen.getAllByText('CET-6 高频').length).toBeGreaterThan(0));
     expect(screen.getByText('我的生词本')).toBeInTheDocument();
-    // 副标题用 counts
-    expect(screen.getByText(/官方词库 1 套/)).toBeInTheDocument();
-    expect(screen.getByText(/共 2,226 条词条/)).toBeInTheDocument();
+    // 左栏头部「全部词库 <all>」
+    expect(screen.getByText('全部词库')).toBeInTheDocument();
+    expect(screen.getByText('2')).toBeInTheDocument();
   });
 
   it('列表加载后自动选中第一项并拉取 stats + words', async () => {
     mockApi.adminWordbooksList.mockResolvedValue(listResponse());
     await renderPage();
     await waitFor(() => expect(mockApi.adminWordbookStats).toHaveBeenCalledWith('wb-sys'));
+    await waitFor(() =>
+      expect(mockApi.adminWordbookWords).toHaveBeenCalledWith('wb-sys', expect.objectContaining({ sort: 'frequency' })),
+    );
     await waitFor(() => expect(screen.getByText('tenacious')).toBeInTheDocument());
-    // KPI 卡:平均掌握度 0.63 → 63%
-    expect(screen.getByText('63')).toBeInTheDocument();
+    // KPI 卡:平均掌握 0.63 → 63%
+    expect(screen.getByText('63%')).toBeInTheDocument();
   });
 
-  it('词条正确率按高低着色(acc-good / acc-bad / 缺省—)', async () => {
+  it('词条正确率按高低着色(success / error / 缺省—)', async () => {
     mockApi.adminWordbooksList.mockResolvedValue(listResponse());
     await renderPage();
     await waitFor(() => expect(screen.getByText('tenacious')).toBeInTheDocument());
+    // 0.62 ≥ 0.6 → success 色
     const good = screen.getByText('62%');
-    expect(good.className).toContain('acc-good');
+    expect(good.getAttribute('style')).toContain('var(--success)');
+    // 0.41 < 0.45 → error 色
     const bad = screen.getByText('41%');
-    expect(bad.className).toContain('acc-bad');
+    expect(bad.getAttribute('style')).toContain('var(--error)');
     // accuracy=null → 显示 —
     expect(screen.getAllByText('—').length).toBeGreaterThan(0);
   });
 
-  it('点击类型筛选 chip 触发带 type 的列表重查', async () => {
+  it('点击「用户」类型筛选 chip 触发带 type 的列表重查', async () => {
     mockApi.adminWordbooksList.mockResolvedValue(listResponse());
     await renderPage();
     await waitFor(() => expect(screen.getAllByText('CET-6 高频').length).toBeGreaterThan(0));
-    // 过滤 chip 位于 .wb-list-search,文案带空格("用户 ");用 aria 无关的范围查找避开列表项里的"用户"角标
-    const userChip = Array.from(document.querySelectorAll('.wb-list-search .chip'))
-      .find((el) => el.textContent?.startsWith('用户')) as HTMLElement;
+    // 过滤 chip 是 .badge 按钮;文案精确等于"用户",避开列表项里"用户"角标(Badge 在右栏)
+    const userChip = Array.from(document.querySelectorAll('button.badge'))
+      .find((el) => el.textContent?.trim() === '用户') as HTMLElement;
+    expect(userChip).toBeTruthy();
     fireEvent.click(userChip);
     await waitFor(() =>
       expect(mockApi.adminWordbooksList).toHaveBeenCalledWith(expect.objectContaining({ type: 'user' })),
@@ -147,7 +147,7 @@ describe('WordbookCenterPage — 主从布局 + 词条/统计', () => {
     await waitFor(() => expect(screen.getByText('暂无词库')).toBeInTheDocument());
   });
 
-  it('切到词频热图 tab 拉取 heatmap', async () => {
+  it('切到掌握热图 tab 拉取 heatmap 并渲染格子', async () => {
     mockApi.adminWordbooksList.mockResolvedValue(listResponse());
     mockApi.adminWordbookHeatmap.mockResolvedValue({
       wordbookId: 'wb-sys', maxCount: 100,
@@ -155,9 +155,13 @@ describe('WordbookCenterPage — 主从布局 + 词条/统计', () => {
     });
     await renderPage();
     await waitFor(() => expect(screen.getAllByText('CET-6 高频').length).toBeGreaterThan(0));
-    fireEvent.click(screen.getByText('词频热图'));
+    fireEvent.click(screen.getByText('掌握热图'));
     await waitFor(() => expect(mockApi.adminWordbookHeatmap).toHaveBeenCalledWith('wb-sys'));
-    await waitFor(() => expect(document.querySelectorAll('.freq-grid .freq-cell').length).toBe(2));
+    // 每格 div 带 title="<word> · <count> 次";断言两格已渲染
+    await waitFor(() =>
+      expect(document.querySelectorAll('div[title*="tenacious"]').length).toBeGreaterThan(0),
+    );
+    expect(document.querySelectorAll('div[title*="acquiesce"]').length).toBeGreaterThan(0);
   });
 
   it('切到用户分布 tab 拉取 distribution 并渲染分桶', async () => {
@@ -177,7 +181,7 @@ describe('WordbookCenterPage — 主从布局 + 词条/统计', () => {
     expect(screen.getByText('80–100%')).toBeInTheDocument();
   });
 
-  it('切到变更历史 tab 拉取 history', async () => {
+  it('切到变更记录 tab 拉取 history 并中文化 action', async () => {
     mockApi.adminWordbooksList.mockResolvedValue(listResponse());
     mockApi.adminWordbookHistory.mockResolvedValue({
       data: [{ id: 'h-1', wordbookId: 'wb-sys', action: 'create', detail: '创建词库', createdAt: new Date().toISOString() }],
@@ -185,10 +189,10 @@ describe('WordbookCenterPage — 主从布局 + 词条/统计', () => {
     });
     await renderPage();
     await waitFor(() => expect(screen.getAllByText('CET-6 高频').length).toBeGreaterThan(0));
-    fireEvent.click(screen.getByText('变更历史'));
+    fireEvent.click(screen.getByText('变更记录'));
     await waitFor(() => expect(mockApi.adminWordbookHistory).toHaveBeenCalled());
     await waitFor(() => expect(screen.getByText('创建词库')).toBeInTheDocument());
-    // action 标签中文化
+    // action=create → ACTION_LABEL 中文化为"创建"
     expect(screen.getByText('创建')).toBeInTheDocument();
   });
 });
@@ -196,7 +200,6 @@ describe('WordbookCenterPage — 主从布局 + 词条/统计', () => {
 describe('WordbookCenterPage — 增删改/导出', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    stubImportSection();
     mockApi.adminWordbookStats.mockResolvedValue(statsResp);
     mockApi.adminWordbookWords.mockResolvedValue(wordsResp);
     mockApi.adminWordbooksList.mockResolvedValue(listResponse());
@@ -222,7 +225,7 @@ describe('WordbookCenterPage — 增删改/导出', () => {
     fireEvent.click(screen.getByText('新建词库'));
     await waitFor(() => expect(screen.getByText('创建')).toBeInTheDocument());
     fireEvent.click(screen.getByText('创建'));
-    await waitFor(() => expect(mockToast.error).toHaveBeenCalledWith('词库名称必填'));
+    await waitFor(() => expect(mockToast.warning).toHaveBeenCalledWith('请填写名称'));
     expect(mockApi.adminWordbookCreate).not.toHaveBeenCalled();
   });
 
@@ -230,9 +233,12 @@ describe('WordbookCenterPage — 增删改/导出', () => {
     mockApi.adminWordbookDelete.mockResolvedValue({ deleted: true });
     await renderPage();
     await waitFor(() => expect(screen.getAllByText('CET-6 高频').length).toBeGreaterThan(0));
+    // 详情头部「删除」按钮(此时唯一可见的删除文案)打开确认框
     fireEvent.click(screen.getByText('删除'));
-    await waitFor(() => expect(screen.getByText('确认删除')).toBeInTheDocument());
-    fireEvent.click(screen.getByText('确认删除'));
+    await waitFor(() => expect(screen.getByText('删除词库')).toBeInTheDocument());
+    // Confirm footer 的确认按钮文案为 confirmText="删除";取最后一个匹配项(modal 内的按钮)
+    const delButtons = screen.getAllByText('删除');
+    fireEvent.click(delButtons[delButtons.length - 1]);
     await waitFor(() => expect(mockApi.adminWordbookDelete).toHaveBeenCalledWith('wb-sys'));
   });
 
@@ -242,7 +248,8 @@ describe('WordbookCenterPage — 增删改/导出', () => {
     });
     await renderPage();
     await waitFor(() => expect(screen.getAllByText('CET-6 高频').length).toBeGreaterThan(0));
-    fireEvent.click(screen.getByText('添加词条'));
+    // 详情头部「添加词条」按钮(取首个)
+    fireEvent.click(screen.getAllByText('添加词条')[0]);
     await waitFor(() => expect(screen.getByPlaceholderText('如 tenacious')).toBeInTheDocument());
     fireEvent.input(screen.getByPlaceholderText('如 tenacious'), { target: { value: 'serene' } });
     fireEvent.input(screen.getByPlaceholderText('坚韧的 / 顽强的'), { target: { value: '宁静的' } });
@@ -256,12 +263,12 @@ describe('WordbookCenterPage — 增删改/导出', () => {
     mockApi.adminWordbookExport.mockResolvedValue({
       id: 'wb-sys', name: 'CET-6 高频', description: '', type: 'system', version: '', words: [],
     });
-    // jsdom 无 createObjectURL,打桩避免抛错
-    (URL as unknown as { createObjectURL: () => string }).createObjectURL = vi.fn(() => 'blob:x');
-    (URL as unknown as { revokeObjectURL: () => void }).revokeObjectURL = vi.fn();
+    // happy-dom 无 createObjectURL,打桩避免抛错
+    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: vi.fn(() => 'blob:x') });
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: vi.fn() });
     await renderPage();
     await waitFor(() => expect(screen.getAllByText('CET-6 高频').length).toBeGreaterThan(0));
-    // 页头导出按钮(第一个)
+    // 详情头部「导出」按钮
     fireEvent.click(screen.getAllByText('导出')[0]);
     await waitFor(() => expect(mockApi.adminWordbookExport).toHaveBeenCalledWith('wb-sys'));
   });

@@ -1,208 +1,188 @@
-import { createSignal, createMemo, createEffect, Show, For, onMount, onCleanup } from 'solid-js';
-import type { EChartsOption } from 'echarts';
-import { EChart } from '@/components/ui/EChart';
-import { Empty } from '@/components/ui/Empty';
-import { Spinner } from '@/components/ui/Spinner';
-import { Modal } from '@/components/ui/Modal';
-import { Button } from '@/components/ui/Button';
-import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
-import { adminApi, type AdvisorCostStats } from '@/api/admin';
+import { createSignal, createMemo, createEffect, onMount, onCleanup, For, Show } from 'solid-js';
+import {
+  Btn, Badge, Panel, StatCard, Progress, Empty, Loading, Skel, Modal, Confirm, Switch,
+  Seg, LineChart, PageHead, Icon, sx, toast, fmtNum, fmtBytes, fmtDur, fmtAgo,
+} from '@/components/wf';
+import { adminApi } from '@/api/admin';
 import { amasApi } from '@/api/amas';
-import type { RequestMetrics, LogLine, AlertEvent, SystemHealth, UpdateCheck, DeadLetterEntry } from '@/types/admin';
+import type {
+  RequestMetrics, LogLine, AlertEvent, SystemHealth, UpdateCheck, DeadLetterEntry,
+  WorkerStatusRow, DatabaseInfo,
+} from '@/types/admin';
+import type { AdvisorCostStats } from '@/api/admin';
 import type { AmasMetrics } from '@/types/amas';
-import { formatBytes } from '@/utils/formatters';
-import './monitoring.css';
 
 type WindowKey = '15m' | '1h' | '6h' | '24h' | '7d';
 const WINDOWS: WindowKey[] = ['15m', '1h', '6h', '24h', '7d'];
-const FAST_MS = 5_000; // 设计图「自动刷新 · 5s」：请求指标 / 日志 / 告警
-const SLOW_MS = 30_000; // 健康 / 资源 / worker / 顾问成本 / 更新检查
+const FAST_MS = 5_000;   // 请求指标 / 日志 / 告警
+const SLOW_MS = 30_000;  // 健康 / worker / 顾问成本 / 更新检查 / DB / 死信
 
-interface WorkerRow {
-  workerName: string;
-  lastRunAt: number | null;
-  lastDurationMs: number | null;
-  lastOutcome: string | null;
-  lastError: string | null;
-}
+const LOG_COLOR: Record<string, string> = {
+  ERROR: 'var(--error)', WARN: 'var(--warning)', INFO: 'var(--text-2)', DEBUG: 'var(--text-3)', TRACE: 'var(--text-3)',
+};
+const SEV_COLOR: Record<string, string> = {
+  error: 'var(--error)', warning: 'var(--warning)', info: 'var(--info)', resolved: 'var(--success)',
+};
+const WK_COLOR = { up: 'var(--success)', warn: 'var(--warning)', down: 'var(--error)' } as const;
 
-// ── 格式化 helpers ──
+const clamp = (n: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, n));
+
+/** HH:MM 标签（unix 秒） */
 function fmtHHMM(unixSecs: number): string {
   return new Date(unixSecs * 1000).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false });
 }
+/** HH:MM:SS 时钟（unix 毫秒） */
 function fmtClockMs(ms: number): string {
   return new Date(ms).toLocaleTimeString('zh-CN', { hour12: false });
 }
-function fmtAge(unixSecs: number | null): string {
-  if (unixSecs == null || unixSecs <= 0) return '—';
-  const d = Math.max(0, Date.now() / 1000 - unixSecs);
-  if (d < 60) return `${Math.floor(d)}s`;
-  if (d < 3600) return `${Math.floor(d / 60)}m`;
-  if (d < 86400) return `${Math.floor(d / 3600)}h`;
-  return `${Math.floor(d / 86400)}d`;
-}
-function fmtWindow(secs: number): string {
-  if (secs < 3600) return `${Math.round(secs / 60)} 分钟`;
-  if (secs < 86400) return `${(secs / 3600).toFixed(secs % 3600 === 0 ? 0 : 1)} 小时`;
-  return `${(secs / 86400).toFixed(secs % 86400 === 0 ? 0 : 1)} 天`;
-}
-const clamp = (n: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, n));
-
-/** 较低更优指标的 SLO 色调 */
-function toneLower(v: number, target: number): string {
-  if (v <= target) return 'is-ok';
-  if (v <= target * 2) return 'is-warn';
-  return 'is-bad';
-}
-/** 可用性色调（较高更优） */
-function toneAvail(v: number): string {
-  if (v >= 99.9) return 'is-ok';
-  if (v >= 99.0) return 'is-warn';
-  return 'is-bad';
+/** worker 心跳 outcome → 色调键 */
+function workerTone(w: WorkerStatusRow): 'up' | 'warn' | 'down' {
+  const o = (w.lastOutcome ?? '').toLowerCase();
+  if (w.lastError || o === 'error' || o === 'failed') return 'down';
+  if (['success', 'ok', 'completed', 'skipped', 'idle'].includes(o)) return 'up';
+  return 'warn';
 }
 
-const POLL_LOG_LIMIT = 200;
+/** 服务状态行 */
+function StatusRow(props: { label: string; ok: boolean; value: string }) {
+  return (
+    <div style={sx({ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 13 })}>
+      <span style={sx({ display: 'inline-flex', gap: 7, alignItems: 'center' })}>
+        <span class={props.ok ? '' : 'live-dot'} style={sx({ width: 8, height: 8, borderRadius: 50, background: props.ok ? 'var(--success)' : 'var(--error)' })} />
+        {props.label}
+      </span>
+      <span class="mono" style={sx({ fontSize: 12, color: props.ok ? 'var(--text-2)' : 'var(--error)' })}>{props.value}</span>
+    </div>
+  );
+}
+
+/** 资源占用条 */
+function ResBar(props: { label: string; value: string; pct: number; tone?: 'accent' | 'success' | 'warning' | 'error' | 'info' }) {
+  return (
+    <div>
+      <div style={sx({ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 })}>
+        <span class="muted" style={sx({ fontSize: 12 })}>{props.label}</span>
+        <strong class="mono" style={sx({ fontSize: 12 })}>{props.value}</strong>
+      </div>
+      <Progress value={clamp(props.pct, 0, 100)} tone={props.tone ?? 'accent'} height={6} />
+    </div>
+  );
+}
 
 export default function MonitoringPage() {
   const [requests, setRequests] = createSignal<RequestMetrics | null>(null);
   const [logs, setLogs] = createSignal<LogLine[]>([]);
   const [events, setEvents] = createSignal<AlertEvent[]>([]);
   const [health, setHealth] = createSignal<SystemHealth | null>(null);
-  const [workers, setWorkers] = createSignal<WorkerRow[]>([]);
+  const [database, setDatabase] = createSignal<DatabaseInfo | null>(null);
+  const [workers, setWorkers] = createSignal<WorkerStatusRow[]>([]);
   const [advisorCost, setAdvisorCost] = createSignal<AdvisorCostStats | null>(null);
   const [updateCheck, setUpdateCheck] = createSignal<UpdateCheck | null>(null);
   const [amasMetrics, setAmasMetrics] = createSignal<AmasMetrics | null>(null);
 
-  const [window, setWindow] = createSignal<WindowKey>('1h');
-  const [autoRefresh, setAutoRefresh] = createSignal(true);
+  const [win, setWin] = createSignal<WindowKey>('1h');
   const [logLevel, setLogLevel] = createSignal<'all' | 'INFO' | 'WARN' | 'ERROR'>('all');
-  const [logPaused, setLogPaused] = createSignal(false);
+  const [autoRefresh, setAutoRefresh] = createSignal(true);
   const [loading, setLoading] = createSignal(true);
   const [clock, setClock] = createSignal(new Date().toLocaleTimeString('zh-CN', { hour12: false }));
 
-  // W1-2:outbox 死信运维抽屉
+  // 死信运维
   const [dlOpen, setDlOpen] = createSignal(false);
   const [dlRows, setDlRows] = createSignal<DeadLetterEntry[]>([]);
   const [dlLoading, setDlLoading] = createSignal(false);
-  // 待确认的破坏性操作（重投 / 丢弃）
   const [dlPending, setDlPending] = createSignal<{ action: 'requeue' | 'purge'; id: number } | null>(null);
   const [dlBusy, setDlBusy] = createSignal(false);
-
-  async function loadDeadLetter() {
-    setDlLoading(true);
-    try {
-      setDlRows((await adminApi.monitoringDeadLetter(200)).entries);
-    } catch { /* keep last */ } finally {
-      setDlLoading(false);
-    }
-  }
-  function openDeadLetter() {
-    setDlOpen(true);
-    void loadDeadLetter();
-  }
-  async function confirmDlAction() {
-    const p = dlPending();
-    if (!p) return;
-    setDlBusy(true);
-    try {
-      if (p.action === 'requeue') await adminApi.monitoringDeadLetterRequeue(p.id);
-      else await adminApi.monitoringDeadLetterPurge(p.id);
-      setDlPending(null);
-      await loadDeadLetter();
-      try { setHealth(await adminApi.getHealth()); } catch { /* 角标刷新失败不阻断 */ }
-    } catch { /* 失败保留弹窗,允许重试 */ } finally {
-      setDlBusy(false);
-    }
-  }
 
   let logStreamRef: HTMLDivElement | undefined;
 
   // ── fetchers ──
   async function fetchRequests() {
-    try { setRequests(await adminApi.monitoringRequests(window())); } catch { /* keep last */ }
+    try { setRequests(await adminApi.monitoringRequests(win())); } catch { /* 保留上次 */ }
   }
   async function fetchLogs() {
-    if (logPaused()) return;
     try {
       const lvl = logLevel() === 'all' ? undefined : logLevel();
-      const res = await adminApi.monitoringLogs(POLL_LOG_LIMIT, lvl);
-      setLogs(res.logs ?? []);
-    } catch { /* keep last */ }
+      setLogs((await adminApi.monitoringLogs(200, lvl)).logs ?? []);
+    } catch { /* 保留上次 */ }
   }
   async function fetchEvents() {
-    try { setEvents((await adminApi.monitoringEvents(6)).events ?? []); } catch { /* keep last */ }
+    try { setEvents((await adminApi.monitoringEvents(6)).events ?? []); } catch { /* 保留上次 */ }
   }
   async function fetchSlow() {
-    const [h, w, c, u, m] = await Promise.allSettled([
+    const [h, w, c, u, m, db] = await Promise.allSettled([
       adminApi.getHealth(),
       adminApi.monitoringWorkers(),
       adminApi.amasAdvisorCost(),
       adminApi.checkUpdate(),
       amasApi.getMetrics(),
+      adminApi.getDatabase(),
     ]);
     if (h.status === 'fulfilled') setHealth(h.value);
-    if (w.status === 'fulfilled') {
-      setWorkers((w.value.workers ?? []).map((r) => ({
-        workerName: r.workerName,
-        lastRunAt: r.lastRunAt == null ? null : Number(r.lastRunAt),
-        lastDurationMs: r.lastDurationMs == null ? null : Number(r.lastDurationMs),
-        lastOutcome: r.lastOutcome,
-        lastError: r.lastError,
-      })));
-    }
+    if (w.status === 'fulfilled') setWorkers(w.value.workers ?? []);
     if (c.status === 'fulfilled') setAdvisorCost(c.value);
     if (u.status === 'fulfilled') setUpdateCheck(u.value);
     if (m.status === 'fulfilled') setAmasMetrics(m.value);
+    if (db.status === 'fulfilled') setDatabase(db.value);
   }
 
-  // 切换窗口立即重取请求指标
-  createEffect(() => { window(); void fetchRequests(); });
-  // 切换日志级别 / 取消暂停立即重取
-  createEffect(() => { logLevel(); if (!logPaused()) void fetchLogs(); });
+  async function loadDeadLetter() {
+    setDlLoading(true);
+    try { setDlRows((await adminApi.monitoringDeadLetter(100)).entries ?? []); } catch { /* 保留 */ } finally { setDlLoading(false); }
+  }
+  function openDeadLetter() { setDlOpen(true); void loadDeadLetter(); }
+  async function confirmDlAction() {
+    const p = dlPending();
+    if (!p) return;
+    setDlBusy(true);
+    try {
+      if (p.action === 'requeue') { await adminApi.monitoringDeadLetterRequeue(p.id); toast.success('已重投', `事件 #${p.id} 已写回 outbox`); }
+      else { await adminApi.monitoringDeadLetterPurge(p.id); toast.info('已丢弃', `事件 #${p.id} 已永久删除`); }
+      setDlPending(null);
+      await loadDeadLetter();
+      try { setHealth(await adminApi.getHealth()); } catch { /* 角标刷新失败不阻断 */ }
+    } catch (e) {
+      toast.error('操作失败', e instanceof Error ? e.message : String(e));
+    } finally {
+      setDlBusy(false);
+    }
+  }
 
-  // 日志更新后滚到底部（终端式 live tail）
-  createEffect(() => {
-    logs();
-    if (logStreamRef) logStreamRef.scrollTop = logStreamRef.scrollHeight;
-  });
+  // 切换窗口 / 日志级别立即重取
+  createEffect(() => { win(); void fetchRequests(); });
+  createEffect(() => { logLevel(); void fetchLogs(); });
+  // 日志更新后滚到底部
+  createEffect(() => { logs(); if (logStreamRef) logStreamRef.scrollTop = logStreamRef.scrollHeight; });
+
+  async function refreshAll() {
+    await Promise.allSettled([fetchSlow(), fetchRequests(), fetchLogs(), fetchEvents()]);
+  }
 
   onMount(async () => {
-    await Promise.allSettled([fetchSlow(), fetchRequests(), fetchLogs(), fetchEvents()]);
+    await refreshAll();
     setLoading(false);
-
     const clockTimer = setInterval(() => setClock(new Date().toLocaleTimeString('zh-CN', { hour12: false })), 1000);
     const fastTimer = setInterval(() => {
       if (!autoRefresh()) return;
-      void fetchRequests();
-      void fetchLogs();
-      void fetchEvents();
+      void fetchRequests(); void fetchLogs(); void fetchEvents();
     }, FAST_MS);
     const slowTimer = setInterval(() => { if (autoRefresh()) void fetchSlow(); }, SLOW_MS);
-
     onCleanup(() => { clearInterval(clockTimer); clearInterval(fastTimer); clearInterval(slowTimer); });
   });
 
   // ── 派生 ──
-  const workerByName = (names: string[]): WorkerRow | undefined =>
-    workers().find((w) => names.includes(w.workerName));
-  const workerTone = (w: WorkerRow): string => {
-    const o = (w.lastOutcome ?? '').toLowerCase();
-    if (w.lastError) return 'is-down';
-    if (['success', 'ok', 'completed', 'skipped', 'idle'].includes(o)) return 'is-up';
-    return 'is-warn';
-  };
+  const res = () => health()?.resources ?? null;
   const workerStats = createMemo(() => {
     const ws = workers();
-    const ok = ws.filter((w) => workerTone(w) === 'is-up').length;
-    const warn = ws.filter((w) => workerTone(w) === 'is-warn').length;
-    const down = ws.filter((w) => workerTone(w) === 'is-down').length;
-    return { total: ws.length, ok, warn, down };
+    return {
+      total: ws.length,
+      ok: ws.filter((w) => workerTone(w) === 'up').length,
+      warn: ws.filter((w) => workerTone(w) === 'warn').length,
+      down: ws.filter((w) => workerTone(w) === 'down').length,
+    };
   });
+  const wkErrCount = () => workerStats().down;
 
-  const res = () => health()?.resources ?? null;
-  const sse = () => health()?.services?.sse ?? null;
-
-  // AMAS 决策平均延迟(tick)= Σ totalLatencyUs / Σ callCount,由现有 amas metrics 真实推导
+  // AMAS 决策平均延迟（tick），由 metrics 真实推导
   const amasTickMs = createMemo(() => {
     const m = amasMetrics();
     if (!m) return null;
@@ -211,537 +191,302 @@ export default function MonitoringPage() {
     return calls > 0 ? lat / calls / 1000 : null;
   });
 
-  // P99 spike:窗口时序里的峰值点,显著高于均值或超目标才标注(真实来自 series)
-  const p99Spike = createMemo(() => {
-    const rq = requests();
-    const s = rq?.series ?? [];
-    if (!rq || s.length === 0) return null;
-    let max = s[0];
-    for (const p of s) if (p.p99Ms > max.p99Ms) max = p;
-    return max.p99Ms > Math.max(rq.p99Ms * 1.3, 400) ? max : null;
-  });
+  // 死信角标（来自 health.outbox 或已加载明细）
+  const deadLetterCount = () => health()?.outbox?.deadLetter ?? dlRows().length;
 
-  // 综合饱和度徽标:CPU 钉死 / 延迟 SLO 大幅突破 / in-flight 堆积 / nginx 上游积压。
-  // 解决"5xx=0 但系统被打挂时面板仍显绿"的盲区——这些信号不依赖 5xx。
-  const saturation = createMemo(() => {
-    const r = res();
-    const rq = requests();
-    const reasons: string[] = [];
-    let level = 0; // 0 健康 / 1 繁忙 / 2 过载降级
-    const bump = (n: number, reason: string) => { if (n > level) level = n; reasons.push(reason); };
-
-    const cpu = r?.cpuPct ?? null;
-    if (cpu != null) {
-      if (cpu >= 90) bump(2, `CPU ${cpu.toFixed(0)}%`);
-      else if (cpu >= 70) bump(1, `CPU ${cpu.toFixed(0)}%`);
-    }
-    const p99 = rq?.p99Ms ?? null;
-    if (p99 != null) {
-      if (p99 > 1200) bump(2, `P99 ${Math.round(p99)}ms`);
-      else if (p99 > 400) bump(1, `P99 ${Math.round(p99)}ms`);
-    }
-    const inflight = r?.inflightRequests ?? null;
-    const poolMax = r?.pool?.max ?? null;
-    if (inflight != null && poolMax) {
-      if (inflight > poolMax * 4) bump(2, `在途 ${inflight}`);
-      else if (inflight > poolMax) bump(1, `在途 ${inflight}`);
-    }
-    const writing = r?.nginxEdge?.writing ?? null;
-    if (writing != null && writing > 100) bump(2, `nginx 积压 ${writing}`);
-
-    return { level, reasons };
-  });
-
-  // ── 图表 option ──
-  const chartOption = (): EChartsOption => {
-    const s = requests()?.series ?? [];
-    const labels = s.map((p) => fmtHHMM(p.t));
-    return {
-      grid: { left: 46, right: 46, top: 18, bottom: 26 },
-      tooltip: {
-        trigger: 'axis',
-        valueFormatter: undefined,
-      },
-      xAxis: {
-        type: 'category',
-        data: labels,
-        boundaryGap: true,
-        axisLabel: { fontSize: 10, color: 'var(--content-tertiary)' },
-        axisTick: { show: false },
-      },
-      yAxis: [
-        { type: 'value', name: 'QPS', nameTextStyle: { fontSize: 10 }, axisLabel: { fontSize: 10 } },
-        { type: 'value', name: 'P99 ms', nameTextStyle: { fontSize: 10 }, position: 'right', splitLine: { show: false }, axisLabel: { fontSize: 10 } },
-      ],
-      series: [
-        {
-          name: 'QPS',
-          type: 'bar',
-          yAxisIndex: 0,
-          data: s.map((p) => Number(p.qps.toFixed(2))),
-          itemStyle: { color: '#6366f1', borderRadius: [3, 3, 0, 0] },
-          barMaxWidth: 18,
-        },
-        {
-          name: 'P99',
-          type: 'line',
-          yAxisIndex: 1,
-          data: s.map((p) => Math.round(p.p99Ms)),
-          smooth: true,
-          symbol: 'none',
-          lineStyle: { color: '#f59e0b', width: 2 },
-          itemStyle: { color: '#f59e0b' },
-          areaStyle: { color: 'rgba(245,158,11,0.08)' },
-        },
-      ],
-    };
-  };
+  // 请求指标图：QPS（accent）+ P99（error）双线，labels 取 HH:MM
+  const chartLabels = createMemo(() => (requests()?.series ?? []).map((p) => fmtHHMM(p.t)));
+  const qpsSeries = createMemo(() => (requests()?.series ?? []).map((p) => Number(p.qps.toFixed(2))));
+  const p99Series = createMemo(() => (requests()?.series ?? []).map((p) => Math.round(p.p99Ms)));
 
   return (
-    <div class="monitoring">
-      <Show when={!loading()} fallback={<div class="flex justify-center py-16"><Spinner size="lg" /></div>}>
-        <div class="stack">
-          {/* —— 页头 + 工具栏 —— */}
-          <div class="page-header">
-            <div class="row spread wrap">
-              <div>
-                <h1 class="page-title">系统监控</h1>
-                <p class="page-desc">
-                  服务健康 · SLO · {workerStats().total} 个 worker 心跳 · 实时请求与日志。
-                  指标随进程生命周期累积，重启清零。
-                </p>
-              </div>
-              <div class="row gap-2 wrap">
-                <span
-                  class={`chip ${saturation().level === 2 ? 'chip-error' : saturation().level === 1 ? 'chip-warning' : 'chip-success'}`}
-                  title={saturation().reasons.length ? `饱和信号:${saturation().reasons.join(' · ')}` : '各项饱和指标均在目标内'}
-                >
-                  {saturation().level === 2 ? '过载降级' : saturation().level === 1 ? '繁忙' : '健康'}
-                  <Show when={saturation().level > 0}>
-                    <span class="text-small" style={{ 'margin-left': '4px', opacity: 0.85 }}>· {saturation().reasons[0]}</span>
-                  </Show>
-                </span>
-                <span class="pill-time"><span class="dot" /> 实时 · {clock()}</span>
-                <div class="segmented">
-                  <For each={WINDOWS}>
-                    {(w) => (
-                      <button class={window() === w ? 'is-active' : ''} onClick={() => setWindow(w)}>{w}</button>
-                    )}
-                  </For>
-                </div>
-                <button
-                  class={`btn btn-secondary ${autoRefresh() ? 'is-on' : ''}`}
-                  onClick={() => setAutoRefresh((v) => !v)}
-                  title={autoRefresh() ? '点击暂停自动刷新' : '点击恢复自动刷新'}
-                >
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <polyline points="23 4 23 10 17 10" /><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
-                  </svg>
-                  {autoRefresh() ? '自动刷新 · 5s' : '已暂停'}
-                </button>
-              </div>
-            </div>
+    <div>
+      <PageHead
+        title="系统监控"
+        desc="后端可用性、SLO、请求指标、Worker 心跳、实时日志、告警时间线、领域事件死信与数据库占用。指标随进程生命周期累积，重启清零。"
+        right={
+          <div style={sx({ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' })}>
+            <span class="badge badge-default" style={sx({ display: 'inline-flex', alignItems: 'center', gap: 6 })}>
+              <span class="live-dot" style={sx({ width: 7, height: 7, borderRadius: 50, background: 'var(--success)' })} />
+              <span class="mono" style={sx({ fontSize: 11.5 })}>实时 · {clock()}</span>
+            </span>
+            <span style={sx({ display: 'inline-flex', alignItems: 'center', gap: 7 })}>
+              <span class="muted-3" style={sx({ fontSize: 12 })}>自动刷新 · 5s</span>
+              <Switch checked={autoRefresh()} onChange={setAutoRefresh} />
+            </span>
+            <Btn variant="secondary" icon="refresh" onClick={() => void refreshAll()}>刷新</Btn>
           </div>
+        }
+      />
 
-          {/* —— SLO 卡 ×4 —— */}
-          <Show when={requests()} fallback={<SloPlaceholder />}>
+      <Show when={!loading()} fallback={<Loading h={320} />}>
+        {/* —— SLO / KPI 卡 —— */}
+        <div style={sx({ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(200px,1fr))', gap: 16, marginBottom: 16 })}>
+          <Show when={requests()} fallback={<><Skel h={116} /><Skel h={116} /><Skel h={116} /><Skel h={116} /></>}>
             {(rq) => (
-              <div class="grid cols-4">
-                {/* 后端可用性:口径=到达后端的请求成功率,边缘失败(TCP/nginx/超时)不计入 */}
-                <div class={`slo-card ${toneAvail(rq().availabilityPct)}`}>
-                  <div class="l" title="仅统计到达后端的请求的非 5xx 比例;TCP 被拒 / nginx 502 / 客户端超时等边缘失败后端无感知,不计入。系统过载时请看右上角饱和徽标。">后端可用性 <span class="text-small" style={{ opacity: 0.6 }}>ⓘ</span></div>
-                  <div class="v">{rq().availabilityPct.toFixed(2)}<span class="unit">%</span></div>
-                  <div class="target">目标 ≥ 99.9% · 仅到达后端的请求 · 预算剩余 {Math.max(0, Math.floor(rq().totalRequests * 0.001) - rq().total5xx)} 次</div>
-                  <div class="bar"><span style={{ width: `${clamp(rq().availabilityPct, 0, 100)}%` }} /></div>
+              <>
+                <StatCard
+                  tone={rq().availabilityPct >= 99.9 ? 'success' : rq().availabilityPct >= 99 ? 'warning' : 'error'}
+                  label="后端可用性" icon="shield"
+                  value={rq().availabilityPct.toFixed(2)} unit="%"
+                  deltaLabel={`目标 ≥ 99.9% · 窗口 ${fmtDur(rq().effectiveSecs)}`}
+                />
+                <StatCard
+                  tone="accent" label="平均 RPS" icon="zap"
+                  value={rq().qpsAvg.toFixed(1)}
+                  deltaLabel={`${fmtNum(rq().totalRequests)} 次 · ${win()} 窗口`}
+                />
+                <StatCard
+                  tone={rq().p99Ms <= 400 ? 'info' : rq().p99Ms <= 800 ? 'warning' : 'error'}
+                  label="P99 延迟" icon="clock"
+                  value={Math.round(rq().p99Ms)} unit="ms"
+                  deltaLabel={`P50 ${Math.round(rq().p50Ms)}ms · 目标 ≤ 400ms`}
+                />
+                <StatCard
+                  tone={rq().errorRate * 100 <= 0.5 ? 'success' : rq().errorRate * 100 <= 1 ? 'warning' : 'error'}
+                  label="错误率" icon="alert"
+                  value={(rq().errorRate * 100).toFixed(2)} unit="%"
+                  deltaLabel={`${rq().total5xx} / ${fmtNum(rq().totalRequests)} 次 5xx`}
+                />
+              </>
+            )}
+          </Show>
+        </div>
+
+        {/* —— 请求指标图 + 服务状态 —— */}
+        <div class="grid-collapse" style={sx({ display: 'grid', gridTemplateColumns: 'minmax(0,1.5fr) minmax(0,1fr)', gap: 16, marginBottom: 16 })}>
+          <Panel
+            title="请求指标" sub="QPS / P99 延迟"
+            right={<Seg options={WINDOWS} value={win()} onChange={(v) => setWin(v as WindowKey)} />}
+          >
+            <Show when={(requests()?.series.length ?? 0) > 0} fallback={<Empty title="该窗口暂无请求样本" desc="窗口内尚无到达后端的请求记录。" icon="activity" />}>
+              <LineChart
+                height={250}
+                labels={chartLabels()}
+                series={[
+                  { name: 'QPS', data: qpsSeries(), color: 'var(--accent)' },
+                  { name: 'P99', data: p99Series(), color: 'var(--error)' },
+                ]}
+                area
+              />
+            </Show>
+          </Panel>
+
+          <Panel
+            title="服务状态"
+            right={deadLetterCount() > 0
+              ? <Btn size="sm" variant="warning" onClick={openDeadLetter}>死信 {deadLetterCount()}</Btn>
+              : <span class="muted-3 mono" style={sx({ fontSize: 11.5 })}>live</span>}
+          >
+            <Show when={health()} fallback={<Loading />}>
+              {(h) => (
+                <div style={sx({ display: 'flex', flexDirection: 'column', gap: 11 })}>
+                  <StatusRow label="HTTP 服务" ok={h().status !== 'down'} value={h().status === 'down' ? '不可用' : '运行正常'} />
+                  <StatusRow label="数据库" ok={h().storeProbeOk !== false} value={`${fmtBytes(h().dbSizeBytes)} · WAL`} />
+                  <StatusRow label="运行时间" ok value={fmtDur(h().uptimeSecs)} />
+                  <StatusRow label="AMAS 引擎" ok={h().services?.amas.healthy !== false}
+                    value={amasTickMs() != null ? `${amasTickMs()!.toFixed(amasTickMs()! < 10 ? 2 : 0)}ms tick` : (h().version || '—')} />
+                  <StatusRow label="Probe 探针" ok={h().services?.sse.healthy !== false}
+                    value={h().services?.sse ? `${h().services!.sse.activeDevices} 设备 · ${h().services!.sse.activeConnections} 连接` : '—'} />
+                  <StatusRow label="LLM 顾问"
+                    ok={advisorCost() ? advisorCost()!.quotaPct < 100 : true}
+                    value={advisorCost() ? `¥${advisorCost()!.monthYuan.toFixed(2)} / ${advisorCost()!.monthCapYuan.toFixed(2)}` : '—'} />
+                  <StatusRow label="版本检查"
+                    ok={!updateCheck()?.hasUpdate}
+                    value={updateCheck() ? `${updateCheck()!.latestVersion} ${updateCheck()!.hasUpdate ? '待安装' : '最新'}` : '—'} />
+                  <div class="hr" style={sx({ margin: '4px 0' })} />
+                  <ResBar label="CPU"
+                    value={res()?.cpuPct != null ? `${res()!.cpuPct!.toFixed(1)}%` : '—'}
+                    pct={res()?.cpuPct ?? 0}
+                    tone={res()?.cpuPct != null && res()!.cpuPct! > 90 ? 'error' : res()?.cpuPct != null && res()!.cpuPct! > 70 ? 'warning' : 'accent'} />
+                  <ResBar label="内存 RSS"
+                    value={res()?.memoryRssBytes != null ? `${fmtBytes(res()!.memoryRssBytes)}${res()?.memoryTotalBytes ? ` / ${fmtBytes(res()!.memoryTotalBytes)}` : ''}` : '—'}
+                    pct={res()?.memoryRssBytes != null && res()?.memoryTotalBytes ? (res()!.memoryRssBytes! / res()!.memoryTotalBytes!) * 100 : 0} />
+                  <ResBar label="DB 连接池"
+                    value={res()?.pool ? `${res()!.pool!.connections} / ${res()!.pool!.max}` : '—'}
+                    pct={res()?.pool ? (res()!.pool!.connections / Math.max(1, res()!.pool!.max)) * 100 : 0}
+                    tone="success" />
                 </div>
-                {/* P50 */}
-                <div class={`slo-card ${toneLower(rq().p50Ms, 80)}`}>
-                  <div class="l">P50 延迟</div>
-                  <div class="v">{Math.round(rq().p50Ms)}<span class="unit">ms</span></div>
-                  <div class="target">目标 ≤ 80ms · {window()} 窗口</div>
-                  <div class="bar"><span style={{ width: `${clamp((rq().p50Ms / 80) * 100, 3, 100)}%` }} /></div>
+              )}
+            </Show>
+          </Panel>
+        </div>
+
+        {/* —— Worker 心跳 —— */}
+        <Panel
+          title="Worker 心跳"
+          sub={`${workerStats().total} 个后台任务 · ${workerStats().ok} 正常${workerStats().warn ? ` · ${workerStats().warn} 警告` : ''}${wkErrCount() ? ` · ${wkErrCount()} 异常` : ''}`}
+          style={{ 'margin-bottom': '16px' }}
+        >
+          <Show when={workers().length > 0} fallback={<Empty title="暂无 worker 心跳" desc="worker_last_run 表尚无记录。" icon="cpu" />}>
+            <div style={sx({ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(160px,1fr))', gap: 9 })}>
+              <For each={workers()}>
+                {(w) => {
+                  const tone = workerTone(w);
+                  return (
+                    <div style={sx({
+                      padding: 11, borderRadius: 11, border: '1px solid var(--hairline)',
+                      background: tone === 'down' ? 'var(--error-soft)' : 'var(--surface-sunken)',
+                    })}>
+                      <div style={sx({ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 })}>
+                        <span class={tone === 'down' ? 'live-dot' : ''} style={sx({ width: 7, height: 7, borderRadius: 50, background: WK_COLOR[tone] })} />
+                        <span style={sx({ fontSize: 11.5, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' })}>{w.workerName}</span>
+                      </div>
+                      <div class="muted-3 mono" style={sx({ fontSize: 10.5 })}>
+                        {w.lastDurationMs != null ? `${w.lastDurationMs}ms · ` : ''}{w.lastRunAt ? fmtAgo(w.lastRunAt) : '未运行'}
+                      </div>
+                      <Show when={w.lastError}>
+                        <div style={sx({ fontSize: 10.5, color: 'var(--error)', marginTop: 4, lineHeight: 1.4 })}>{w.lastError}</div>
+                      </Show>
+                    </div>
+                  );
+                }}
+              </For>
+            </div>
+          </Show>
+        </Panel>
+
+        {/* —— 实时日志 + 告警时间线 —— */}
+        <div class="grid-collapse" style={sx({ display: 'grid', gridTemplateColumns: 'minmax(0,1.5fr) minmax(0,1fr)', gap: 16, marginBottom: 16 })}>
+          <Panel
+            title="实时日志" sub="ring buffer 尾部"
+            right={
+              <select
+                class="select" style={sx({ width: 'auto', padding: '5px 9px', fontSize: 12 })}
+                value={logLevel()} onChange={(e) => setLogLevel(e.currentTarget.value as 'all' | 'INFO' | 'WARN' | 'ERROR')}
+              >
+                <option value="all">全部级别</option>
+                <option value="ERROR">ERROR</option>
+                <option value="WARN">WARN</option>
+                <option value="INFO">INFO</option>
+              </select>
+            }
+          >
+            <div
+              ref={(el) => (logStreamRef = el)}
+              class="mono"
+              style={sx({ maxHeight: 320, overflowY: 'auto', fontSize: 11.5, lineHeight: 1.7, background: 'var(--surface-sunken)', borderRadius: 10, padding: 12 })}
+            >
+              <Show when={logs().length > 0} fallback={<div class="muted-3" style={sx({ padding: 8 })}>暂无日志（受日志级别过滤约束）</div>}>
+                <For each={logs()}>
+                  {(l) => (
+                    <div style={sx({ display: 'flex', gap: 8 })}>
+                      <span class="muted-3" style={sx({ flex: 'none' })}>{fmtClockMs(l.tsMs)}</span>
+                      <span style={sx({ color: LOG_COLOR[l.level] ?? 'var(--text-2)', fontWeight: 600, width: 44, flex: 'none' })}>{l.level}</span>
+                      <span class="muted-3" style={sx({ flex: 'none', width: 110, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' })}>{l.target}</span>
+                      <span style={sx({ minWidth: 0 })}>{l.message}</span>
+                    </div>
+                  )}
+                </For>
+              </Show>
+            </div>
+          </Panel>
+
+          <Panel title="告警时间线" sub="最近 6h">
+            <Show when={events().length > 0} fallback={<Empty title="暂无告警" desc="近 6h 无 worker 失败 / 版本更新 / AMAS 异常。" icon="bell" />}>
+              <div style={sx({ display: 'flex', flexDirection: 'column' })}>
+                <For each={events()}>
+                  {(e) => {
+                    const col = SEV_COLOR[e.severity] ?? 'var(--info)';
+                    return (
+                      <div style={sx({ display: 'flex', gap: 10, padding: '10px 0', borderBottom: '1px solid var(--hairline)' })}>
+                        <span style={sx({ width: 8, height: 8, borderRadius: 50, background: col, marginTop: 5, flex: 'none' })} />
+                        <div style={sx({ minWidth: 0 })}>
+                          <div style={sx({ fontSize: 12.5, fontWeight: 500 })}>{e.title}</div>
+                          <Show when={e.desc}><div class="muted" style={sx({ fontSize: 11.5, marginTop: 2 })}>{e.desc}</div></Show>
+                          <div class="muted-3 mono" style={sx({ fontSize: 10.5, marginTop: 2 })}>{fmtHHMM(e.tsMs / 1000)}</div>
+                        </div>
+                      </div>
+                    );
+                  }}
+                </For>
+              </div>
+            </Show>
+          </Panel>
+        </div>
+
+        {/* —— 数据库 —— */}
+        <Panel
+          title="数据库"
+          sub={database()
+            ? `${database()!.walEnabled ? 'WAL' : 'DELETE'} · ${fmtBytes(database()!.sizeOnDisk)} · ${database()!.tableCount} 张表${database()!.walSizeBytes != null ? ` · WAL ${fmtBytes(database()!.walSizeBytes)}` : ''}`
+            : ''}
+        >
+          <Show when={database()} fallback={<Loading />}>
+            {(db) => (
+              <div style={sx({ overflowX: 'auto' })}>
+                <div class="muted-3" style={sx({ fontSize: 12, marginBottom: 10 })}>
+                  页大小 {fmtBytes(db().pageSize)} · 页数 {fmtNum(db().pageCount)} · 占用 {fmtBytes(db().sizeOnDisk)}
                 </div>
-                {/* P99 */}
-                <div class={`slo-card ${toneLower(rq().p99Ms, 400)}`}>
-                  <div class="l">P99 延迟</div>
-                  <div class="v">{Math.round(rq().p99Ms)}<span class="unit">ms</span></div>
-                  <div class="target">目标 ≤ 400ms{p99Spike() ? ` · ★ ${fmtHHMM(p99Spike()!.t)} spike ${Math.round(p99Spike()!.p99Ms)}ms` : ` · ${window()} 窗口`}</div>
-                  <div class="bar"><span style={{ width: `${clamp((rq().p99Ms / 400) * 100, 3, 100)}%` }} /></div>
-                </div>
-                {/* 错误率 */}
-                <div class={`slo-card ${toneLower(rq().errorRate * 100, 0.5)}`}>
-                  <div class="l">错误率</div>
-                  <div class="v">{(rq().errorRate * 100).toFixed(2)}<span class="unit">%</span></div>
-                  <div class="target">目标 ≤ 0.5% · {rq().total5xx} / {rq().totalRequests} 次 5xx</div>
-                  <div class="bar"><span style={{ width: `${clamp((rq().errorRate * 100 / 0.5) * 100, 3, 100)}%` }} /></div>
-                </div>
+                <Show when={db().tables.length > 0} fallback={<Empty title="无表" icon="database" />}>
+                  <div style={sx({ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(180px,1fr))', gap: 8 })}>
+                    <For each={db().tables}>
+                      {(t) => (
+                        <div style={sx({ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 11px', borderRadius: 9, background: 'var(--surface-sunken)' })}>
+                          <Icon name="database" size={14} />
+                          <span class="mono" style={sx({ fontSize: 12, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' })}>{t}</span>
+                        </div>
+                      )}
+                    </For>
+                  </div>
+                </Show>
               </div>
             )}
           </Show>
-
-          {/* —— 服务状态 + worker 心跳 —— */}
-          <div class="grid cols-12">
-            <div class="panel" style={{ 'grid-column': 'span 5' }}>
-              <div class="panel-header">
-                <h3>服务状态</h3>
-                <span class="aside text-mono text-small">live</span>
-              </div>
-              <div class="panel-body" style={{ display: 'flex', 'flex-direction': 'column', gap: '8px' }}>
-                {/* axum Router */}
-                <div class="svc-row is-up">
-                  <span class="led" />
-                  <div class="name">axum Router <span>HTTP API · /api/* /admin/*</span></div>
-                  <div class="row gap-3">
-                    <span class="v">{requests() ? `${Math.round(requests()!.qpsAvg)} rps` : '—'}</span>
-                    <span class="v">P50 {requests() ? `${Math.round(requests()!.p50Ms)}ms` : '—'}</span>
-                    <span class="chip chip-success">healthy</span>
-                  </div>
-                </div>
-                {/* SQLite */}
-                <div class={`svc-row ${health()?.status === 'down' ? 'is-down' : 'is-up'}`}>
-                  <span class="led" />
-                  <div class="name">SQLite (WAL) <span>r2d2 池 · {res()?.pool ? `${res()!.pool!.connections} / ${res()!.pool!.max} 连接` : '—'}</span></div>
-                  <div class="row gap-3">
-                    <span class="v">{health() ? formatBytes(health()!.dbSizeBytes) : '—'}</span>
-                    <span class="v">WAL {res()?.walSizeBytes != null ? formatBytes(res()!.walSizeBytes!) : '—'}</span>
-                    <span class={`chip ${health()?.status === 'down' ? 'chip-error' : 'chip-success'}`}>
-                      {health()?.status === 'down' ? 'down' : 'healthy'}
-                    </span>
-                  </div>
-                </div>
-                {/* AMAS 引擎 */}
-                <div class={`svc-row ${health()?.services?.amas.healthy === false ? 'is-warn' : 'is-up'}`}>
-                  <span class="led" />
-                  <div class="name">AMAS 引擎 <span>config_watcher · llm_advisor · {workerStats().total} jobs</span></div>
-                  <div class="row gap-3">
-                    <span class="v">{amasTickMs() != null ? `${amasTickMs()!.toFixed(amasTickMs()! < 10 ? 2 : 0)}ms tick` : '—'}</span>
-                    <span class="v">{health()?.version ?? '—'}</span>
-                    <span class={`chip ${health()?.services?.amas.healthy === false ? 'chip-warning' : 'chip-success'}`}>
-                      {health()?.services?.amas.healthy === false ? 'degraded' : 'healthy'}
-                    </span>
-                  </div>
-                </div>
-                {/* S2-1:领域事件 outbox 异步消费（默认同步路径时恒 0；RECORDS_OUTBOX_ASYNC=true 后驱动） */}
-                <div class={`svc-row ${(health()?.outbox?.deadLetter ?? 0) > 0 ? 'is-warn' : 'is-up'}`}>
-                  <span class="led" />
-                  <div class="name">事件 outbox <span>records→AMAS 异步消费 · 重试退避 + 死信</span></div>
-                  <div class="row gap-3">
-                    <span class="v">{health()?.outbox ? `${health()!.outbox!.pending} 待处理` : '—'}</span>
-                    <span class="v">{health()?.outbox ? `lag ${health()!.outbox!.lagSecs}s` : '—'}</span>
-                    <button
-                      type="button"
-                      class={`chip ${(health()?.outbox?.deadLetter ?? 0) > 0 ? 'chip-error' : 'chip-success'}`}
-                      style={{ cursor: 'pointer', border: 'none' }}
-                      title="查看死信明细 / 人工重投 / 丢弃"
-                      onClick={openDeadLetter}
-                    >
-                      {(health()?.outbox?.deadLetter ?? 0) > 0 ? `${health()!.outbox!.deadLetter} 死信` : '无死信'}
-                    </button>
-                  </div>
-                </div>
-                {/* Probe 探针 */}
-                <div class={`svc-row ${sse()?.healthy === false ? 'is-warn' : 'is-up'}`}>
-                  <span class="led" />
-                  <div class="name">Probe 探针 <span>ring buffer · {sse() ? `${sse()!.activeConnections}/${sse()!.maxConnections ?? '∞'} 连接` : 'WebSocket SSE'}</span></div>
-                  <div class="row gap-3">
-                    <span class="v">{sse() ? `${sse()!.activeDevices} 设备` : '—'}</span>
-                    <span class="v">flush {fmtAge(workerByName(['probe_cleanup', 'probe_confirm_sweeper'])?.lastRunAt ?? null)}</span>
-                    <span class={`chip ${sse()?.healthy === false ? 'chip-warning' : 'chip-success'}`}>
-                      {sse()?.healthy === false ? '心跳延迟' : 'healthy'}
-                    </span>
-                  </div>
-                </div>
-                {/* DeepSeek LLM 顾问 */}
-                <div class="svc-row is-up">
-                  <span class="led" />
-                  <div class="name">DeepSeek (LLM 顾问) <span>定期巡查 · 白名单约束</span></div>
-                  <div class="row gap-3">
-                    <span class="v">
-                      {advisorCost() ? `¥${advisorCost()!.monthYuan.toFixed(2)} / ${advisorCost()!.monthCapYuan.toFixed(2)}` : '—'}
-                    </span>
-                    <span class="v">{fmtAge(workerByName(['llm_advisor'])?.lastRunAt ?? null)}</span>
-                    <span class="chip chip-success">ok</span>
-                  </div>
-                </div>
-                {/* GitHub Release Checker */}
-                <div class="svc-row is-up">
-                  <span class="led" />
-                  <div class="name">GitHub Release Checker <span>定期轮询 releases</span></div>
-                  <div class="row gap-3">
-                    <span class="v">
-                      {updateCheck() ? `${updateCheck()!.latestVersion} ${updateCheck()!.hasUpdate ? '待安装' : '最新'}` : '—'}
-                    </span>
-                    <span class="v">{fmtAge(workerByName(['update_checker'])?.lastRunAt ?? null)}</span>
-                    <span class={`chip ${updateCheck()?.hasUpdate ? 'chip-info' : 'chip-success'}`}>
-                      {updateCheck()?.hasUpdate ? '新版本' : '最新'}
-                    </span>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div class="panel" style={{ 'grid-column': 'span 7' }}>
-              <div class="panel-header">
-                <h3>Worker 心跳</h3>
-                <span class="aside text-mono text-small">
-                  {workerStats().total} jobs · {workerStats().ok} healthy
-                  {workerStats().warn > 0 ? ` · ${workerStats().warn} warning` : ''}
-                  {workerStats().down > 0 ? ` · ${workerStats().down} error` : ''}
-                </span>
-              </div>
-              <div class="panel-body">
-                <Show when={workers().length > 0} fallback={<Empty title="暂无 worker 心跳" description="worker_last_run 表尚无记录" />}>
-                  <div class="workers-grid">
-                    <For each={workers()}>
-                      {(w) => (
-                        <div class={`worker-cell ${workerTone(w)}`} title={w.lastError ?? w.lastOutcome ?? ''}>
-                          <span class="led" />
-                          <span class="label">{w.workerName}</span>
-                          <span class="age">{fmtAge(w.lastRunAt)}</span>
-                        </div>
-                      )}
-                    </For>
-                  </div>
-                </Show>
-              </div>
-            </div>
-          </div>
-
-          {/* —— 请求延迟图 + 资源条 —— */}
-          <div class="grid cols-12">
-            <div class="panel" style={{ 'grid-column': 'span 8' }}>
-              <div class="panel-header">
-                <h3>请求与延迟 · {window()}</h3>
-                <span class="text-mono text-small">QPS (bar) + P99 (line)</span>
-                <div class="aside">
-                  <span class="ministat" style={{ background: 'transparent', padding: '0', 'flex-direction': 'row', 'align-items': 'center', gap: '8px' }}>
-                    <span style={{ width: '8px', height: '8px', 'border-radius': '2px', background: '#6366f1' }} />
-                    <span class="label">QPS 均值</span>
-                    <strong class="tnum">{requests() ? Math.round(requests()!.qpsAvg) : '—'}</strong>
-                  </span>
-                  <span class="ministat" style={{ background: 'transparent', padding: '0', 'flex-direction': 'row', 'align-items': 'center', gap: '8px' }}>
-                    <span style={{ width: '8px', height: '8px', 'border-radius': '2px', background: '#f59e0b' }} />
-                    <span class="label">P99 均值</span>
-                    <strong class="tnum">{requests() ? `${Math.round(requests()!.p99Ms)}ms` : '—'}</strong>
-                  </span>
-                </div>
-              </div>
-              <div class="panel-body">
-                <div class="chart">
-                  <EChart
-                    option={chartOption}
-                    height="280px"
-                    empty={<div class="flex items-center justify-center h-full text-content-tertiary text-small">该窗口暂无请求样本</div>}
-                  />
-                </div>
-              </div>
-            </div>
-
-            <div class="panel" style={{ 'grid-column': 'span 4' }}>
-              <div class="panel-header"><h3>资源</h3><span class="aside text-mono text-small">{window()}</span></div>
-              <div class="panel-body stack">
-                <ResourceBar label="CPU" value={res()?.cpuPct != null ? `${res()!.cpuPct!.toFixed(1)}%` : '—'}
-                  pct={res()?.cpuPct ?? 0} tone={res()?.cpuPct != null && res()!.cpuPct! > 85 ? (res()!.cpuPct! > 95 ? 'is-error' : 'is-warning') : ''} />
-                <ResourceBar label="内存 RSS"
-                  value={res()?.memoryRssBytes != null ? `${formatBytes(res()!.memoryRssBytes!)}${res()?.memoryTotalBytes ? ` / ${formatBytes(res()!.memoryTotalBytes!)}` : ''}` : '—'}
-                  pct={res()?.memoryRssBytes != null && res()?.memoryTotalBytes ? (res()!.memoryRssBytes! / res()!.memoryTotalBytes!) * 100 : 0} tone="" />
-                <ResourceBar label="DB 连接池"
-                  value={res()?.pool ? `${res()!.pool!.connections} / ${res()!.pool!.max}` : '—'}
-                  pct={res()?.pool ? (res()!.pool!.connections / Math.max(1, res()!.pool!.max)) * 100 : 0} tone="is-success" />
-                <ResourceBar label="磁盘"
-                  value={res()?.diskTotalBytes && res()?.diskFreeBytes != null
-                    ? `${formatBytes(res()!.diskTotalBytes! - res()!.diskFreeBytes!)} / ${formatBytes(res()!.diskTotalBytes!)}` : '—'}
-                  pct={res()?.diskTotalBytes && res()?.diskFreeBytes != null
-                    ? ((res()!.diskTotalBytes! - res()!.diskFreeBytes!) / res()!.diskTotalBytes!) * 100 : 0} tone="" />
-                <ResourceBar label="SQLite WAL 大小"
-                  value={res()?.walSizeBytes != null ? formatBytes(res()!.walSizeBytes!) : '—'}
-                  pct={res()?.walSizeBytes != null && health()?.dbSizeBytes ? clamp((res()!.walSizeBytes! / health()!.dbSizeBytes) * 100, 0, 100) : 0}
-                  tone={res()?.walSizeBytes != null && health()?.dbSizeBytes && res()!.walSizeBytes! / health()!.dbSizeBytes > 0.5 ? 'is-warning' : ''} />
-                <ResourceBar label="入站带宽"
-                  value={requests() ? `${(requests()!.bandwidthInBps * 8 / 1e6).toFixed(2)} Mbps` : '—'}
-                  pct={requests() ? clamp((requests()!.bandwidthInBps * 8 / 1e6 / 100) * 100, 0, 100) : 0} tone="is-success" />
-                {/* 在途请求:过载饱和度直接信号(5xx=0 也能看出堆积) */}
-                <ResourceBar label="在途请求 (并发)"
-                  value={res()?.inflightRequests != null ? `${res()!.inflightRequests}${res()?.pool?.max ? ` · 池上限 ${res()!.pool!.max}` : ''}` : '—'}
-                  pct={res()?.inflightRequests != null && res()?.pool?.max ? clamp((res()!.inflightRequests! / (res()!.pool!.max * 4)) * 100, 0, 100) : 0}
-                  tone={res()?.inflightRequests != null && res()?.pool?.max
-                    ? (res()!.inflightRequests! > res()!.pool!.max * 4 ? 'is-error' : res()!.inflightRequests! > res()!.pool!.max ? 'is-warning' : '')
-                    : ''} />
-                {/* nginx 边缘(连接层)——唯一能反映"到达后端之前"的真实压力 */}
-                <Show when={res()?.nginxEdge}>
-                  {(edge) => (
-                    <>
-                      <div class="text-small text-content-tertiary" style={{ 'margin-top': '6px', 'border-top': '1px solid var(--border-subtle, #e5e7eb)', 'padding-top': '8px' }}>nginx 边缘 · 连接层</div>
-                      <ResourceBar label="活跃连接"
-                        value={`${edge().active}`}
-                        pct={clamp((edge().active / 1000) * 100, 0, 100)}
-                        tone={edge().active > 800 ? 'is-error' : edge().active > 500 ? 'is-warning' : ''} />
-                      <ResourceBar label="写中 / 等上游"
-                        value={`写 ${edge().writing ?? '—'} · 待 ${edge().waiting ?? '—'}`}
-                        pct={clamp(((edge().writing ?? 0) / 200) * 100, 0, 100)}
-                        tone={(edge().writing ?? 0) > 100 ? 'is-error' : (edge().writing ?? 0) > 50 ? 'is-warning' : ''} />
-                      <ResourceBar label="累计丢弃连接"
-                        value={`${edge().dropped}`}
-                        pct={edge().dropped > 0 ? 100 : 2}
-                        tone={edge().dropped > 0 ? 'is-error' : 'is-success'} />
-                    </>
-                  )}
-                </Show>
-              </div>
-            </div>
-          </div>
-
-          {/* —— 实时日志 + 告警时间线 —— */}
-          <div class="grid cols-12">
-            <div class="panel" style={{ 'grid-column': 'span 8' }}>
-              <div class="panel-header">
-                <h3>实时日志</h3>
-                <div class="aside">
-                  <div class="segmented">
-                    <For each={['all', 'INFO', 'WARN', 'ERROR'] as const}>
-                      {(lv) => (
-                        <button class={logLevel() === lv ? 'is-active' : ''} onClick={() => setLogLevel(lv)}>
-                          {lv === 'all' ? '全部' : lv}
-                        </button>
-                      )}
-                    </For>
-                  </div>
-                  <button class={`btn-icon ${logPaused() ? 'is-on' : ''}`} aria-label={logPaused() ? '恢复' : '暂停'}
-                    onClick={() => setLogPaused((v) => !v)}>
-                    <Show when={logPaused()} fallback={
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="4" width="4" height="16" /><rect x="14" y="4" width="4" height="16" /></svg>
-                    }>
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3" /></svg>
-                    </Show>
-                  </button>
-                  <button class="btn-icon" aria-label="清空" onClick={() => setLogs([])}>
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6" /><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" /></svg>
-                  </button>
-                </div>
-              </div>
-              <div class="panel-body" style={{ padding: '14px' }}>
-                <div class="log-stream" ref={(el) => (logStreamRef = el)}>
-                  <Show when={logs().length > 0} fallback={
-                    <div class="text-content-tertiary text-small" style={{ padding: '8px' }}>暂无日志（受日志级别过滤约束）</div>
-                  }>
-                    <For each={[...logs()].reverse()}>
-                      {(line) => (
-                        <div class={`log-line lvl-${line.level}`}>
-                          <span class="ts">{fmtClockMs(line.tsMs)}</span>
-                          <span class="lvl">{line.level}</span>
-                          <span class="msg">[{line.target}] {line.message}</span>
-                        </div>
-                      )}
-                    </For>
-                  </Show>
-                </div>
-              </div>
-            </div>
-
-            <div class="panel" style={{ 'grid-column': 'span 4' }}>
-              <div class="panel-header"><h3>告警时间线</h3><span class="aside text-mono text-small">最近 6h</span></div>
-              <div class="panel-body">
-                <Show when={events().length > 0} fallback={<Empty title="暂无告警" description="近 6h 无 worker 失败 / 版本更新 / AMAS 异常" />}>
-                  <div class="alert-timeline">
-                    <For each={events()}>
-                      {(e) => (
-                        <div class={`alert-item ${e.severity === 'error' ? 'is-error' : e.severity === 'warning' ? 'is-warn' : e.severity === 'resolved' ? 'is-resolved' : 'is-info'}`}>
-                          <span class="ts">{fmtHHMM(e.tsMs / 1000)}</span>
-                          <span class="marker"><span class="dot" /></span>
-                          <div class="body">
-                            <strong>{e.title}</strong>
-                            <div class="desc">{e.desc}</div>
-                          </div>
-                        </div>
-                      )}
-                    </For>
-                  </div>
-                </Show>
-              </div>
-            </div>
-          </div>
-        </div>
+        </Panel>
       </Show>
 
-      {/* W1-2:outbox 死信运维抽屉 —— 明细 + 人工重投 / 丢弃 */}
+      {/* —— 领域事件死信运维抽屉 —— */}
       <Modal open={dlOpen()} onClose={() => setDlOpen(false)} title="领域事件死信" size="xl">
-        <div class="text-sm text-content-secondary mb-4">
+        <div class="muted" style={sx({ fontSize: 12.5, marginBottom: 14, lineHeight: 1.6 })}>
           records→AMAS 异步消费重试耗尽 / 永久错误（毒丸）进入死信。可人工重投回 outbox（attempts 归零、立即重新消费）或永久丢弃。
           默认同步路径（RECORDS_OUTBOX_ASYNC=false）下死信恒空。
         </div>
-        <Show when={!dlLoading()} fallback={<div style={{ padding: '24px', 'text-align': 'center' }}><Spinner /></div>}>
-          <Show when={dlRows().length > 0} fallback={<Empty title="无死信" description="所有领域事件均已成功消费" />}>
-            <For each={dlRows()}>
-              {(r) => (
-                <div style={{
-                  display: 'flex', 'align-items': 'center', 'justify-content': 'space-between',
-                  gap: '12px', padding: '10px 0', 'border-bottom': '1px solid rgba(255,255,255,0.08)',
-                }}>
-                  <div style={{ 'min-width': '0', flex: '1' }}>
-                    <div class="row gap-3">
-                      <span class="chip chip-error">#{r.id}</span>
-                      <strong>{r.eventType}</strong>
-                      <span class="text-secondary">{r.userId ? `用户 ${r.userId}` : '用户未知'}</span>
-                      <span class="text-secondary">· 重试 {r.attempts} 次</span>
-                    </div>
-                    <div class="text-secondary" style={{ 'font-size': '12px', 'margin-top': '4px' }}>进死信 {r.deadAt}</div>
-                    <div style={{
-                      'font-size': '12px', 'margin-top': '4px', 'font-family': 'monospace',
-                      color: 'var(--color-danger, #f87171)', 'word-break': 'break-all',
-                    }}>{r.lastError}</div>
-                  </div>
-                  <div class="row gap-2" style={{ 'flex-shrink': '0' }}>
-                    <Button size="sm" variant="ghost" onClick={() => setDlPending({ action: 'requeue', id: r.id })}>重投</Button>
-                    <Button size="sm" variant="danger" onClick={() => setDlPending({ action: 'purge', id: r.id })}>丢弃</Button>
-                  </div>
-                </div>
-              )}
-            </For>
+        <Show when={!dlLoading()} fallback={<Loading h={160} />}>
+          <Show when={dlRows().length > 0} fallback={<Empty title="无死信" desc="所有领域事件均已成功消费。" icon="inbox" />}>
+            <div style={sx({ overflowX: 'auto' })}>
+              <table class="tbl">
+                <thead>
+                  <tr><th>ID</th><th>事件</th><th>用户</th><th>错误</th><th>重试</th><th>进死信</th><th style={sx({ textAlign: 'right' })}>操作</th></tr>
+                </thead>
+                <tbody>
+                  <For each={dlRows()}>
+                    {(r) => (
+                      <tr>
+                        <td class="mono">#{r.id}</td>
+                        <td class="mono" style={sx({ fontSize: 11.5 })}>{r.eventType}</td>
+                        <td class="muted-3" style={sx({ fontSize: 11.5 })}>{r.userId ? r.userId : '—'}</td>
+                        <td style={sx({ fontSize: 12, color: 'var(--error)', maxWidth: 280, wordBreak: 'break-all' })}>{r.lastError}</td>
+                        <td class="mono">{r.attempts}</td>
+                        <td class="muted-3" style={sx({ fontSize: 11.5 })}>{fmtAgo(r.deadAt)}</td>
+                        <td>
+                          <div style={sx({ display: 'flex', gap: 6, justifyContent: 'flex-end' })}>
+                            <Btn size="xs" variant="secondary" onClick={() => setDlPending({ action: 'requeue', id: r.id })}>重投</Btn>
+                            <Btn size="xs" variant="danger" onClick={() => setDlPending({ action: 'purge', id: r.id })}>丢弃</Btn>
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </For>
+                </tbody>
+              </table>
+            </div>
           </Show>
         </Show>
       </Modal>
 
-      <ConfirmDialog
+      <Confirm
         open={dlPending() !== null}
+        onClose={() => setDlPending(null)}
+        onConfirm={() => void confirmDlAction()}
         title={dlPending()?.action === 'requeue' ? '重投死信？' : '丢弃死信？'}
-        message={dlPending()?.action === 'requeue'
+        body={dlPending()?.action === 'requeue'
           ? `事件 #${dlPending()?.id} 将写回 outbox（attempts 归零、立即重新消费）。`
           : `事件 #${dlPending()?.id} 将被永久删除，无法恢复。`}
-        variant={dlPending()?.action === 'requeue' ? 'warning' : 'danger'}
+        danger={dlPending()?.action === 'purge'}
         confirmText={dlPending()?.action === 'requeue' ? '重投' : '丢弃'}
         loading={dlBusy()}
-        onConfirm={confirmDlAction}
-        onCancel={() => setDlPending(null)}
       />
-    </div>
-  );
-}
-
-// ── 子组件 ──
-function ResourceBar(props: { label: string; value: string; pct: number; tone: string }) {
-  return (
-    <div>
-      <div class="row spread"><span class="text-small text-secondary">{props.label}</span><strong class="text-mono">{props.value}</strong></div>
-      <div class={`progress ${props.tone}`} style={{ 'margin-top': '4px' }}>
-        <span style={{ width: `${clamp(props.pct, 0, 100)}%` }} />
-      </div>
-    </div>
-  );
-}
-
-function SloPlaceholder() {
-  return (
-    <div class="grid cols-4">
-      <For each={['可用性', 'P50 延迟', 'P99 延迟', '错误率']}>
-        {(l) => (
-          <div class="slo-card">
-            <div class="l">{l}</div>
-            <div class="v">—</div>
-            <div class="target">等待请求样本…</div>
-            <div class="bar"><span style={{ width: '0%' }} /></div>
-          </div>
-        )}
-      </For>
     </div>
   );
 }

@@ -2,19 +2,31 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { screen, waitFor, fireEvent } from '@solidjs/testing-library';
 import { renderWithProviders } from '../helpers/render';
 
-// 重设计后的系统设置页交互:典型 section 渲染(品牌预览 / 外观 seg / provider 卡片 /
-// 注册策略 seg / SIEM seg)、按 section 保存、连接测试、快照创建、维护模式切换。
+// 重设计后的系统设置页(SettingsPage)采用 Tabs + 通用 section 编辑器结构:
+// 配置板块(左侧分组导航 + 键值编辑器)/ 管理员 RBAC / API 密钥 / 快照 / 维护·备份。
+// 本测试覆盖:section 导航与编辑器渲染、按 section 保存(putSettingsSection)、
+// 快照创建(createSettingsSnapshot)、维护模式开关(setMaintenance)、TOML 导出。
 vi.mock('@/api/admin', () => ({
   adminApi: {
     settingsConfig: vi.fn(),
-    getSettings: vi.fn(),
-    putSettingsSection: vi.fn(),
     settingsSnapshots: vi.fn(),
-    createSettingsSnapshot: vi.fn(),
-    restoreSettingsSnapshot: vi.fn(),
-    setMaintenance: vi.fn(),
     rbacAdmins: vi.fn(),
     apiKeys: vi.fn(),
+    putSettingsSection: vi.fn(),
+    createSettingsSnapshot: vi.fn(),
+    restoreSettingsSnapshot: vi.fn(),
+    exportSettingsToml: vi.fn(),
+    createRbacAdmin: vi.fn(),
+    updateRbacAdminRole: vi.fn(),
+    deleteRbacAdmin: vi.fn(),
+    createApiKey: vi.fn(),
+    rotateApiKey: vi.fn(),
+    deleteApiKey: vi.fn(),
+    getBackupStatus: vi.fn(),
+    getVersionGate: vi.fn(),
+    setVersionGate: vi.fn(),
+    getSettings: vi.fn(),
+    setMaintenance: vi.fn(),
   },
 }));
 vi.mock('@/stores/ui', () => ({
@@ -28,17 +40,13 @@ const mockToast = uiStore.toast as unknown as Record<string, ReturnType<typeof v
 
 const siteJson = {
   brand: 'WordForge', subtitle: '单词锻造', logoUrl: '',
-  canonicalUrl: 'https://wordforge.app', adminUrl: 'https://admin.wordforge.app',
-  cdnUrl: 'https://cdn.wordforge.app', timezone: 'Asia/Shanghai', language: 'zh-CN',
-  theme: 'system', accent: '#5b6dff', seo: 'SEO',
+  canonicalUrl: 'https://wordforge.app', cdnUrl: 'https://cdn.wordforge.app',
+  timezone: 'Asia/Shanghai', language: 'zh-CN', theme: 'system',
 };
 const authJson = {
   jwt: { accessTtlMinutes: 30, refreshTtlDays: 30, rotation: false, algorithm: 'RS256' },
   oauth: { google: true, apple: false, wechat: true, qq: false, github: true, magicLink: true },
   registration: { policy: 'open', allowedDomains: [] },
-  twoFactor: { admin: 'required', paid: 'optional', regular: 'optional' },
-  lockout: { maxFailures: 5, windowMinutes: 10, lockMinutes: 30 },
-  password: { minLength: 10, minZxcvbnScore: 3, historyCount: 5 },
 };
 
 function sectionsResp() {
@@ -46,17 +54,23 @@ function sectionsResp() {
     sections: [
       { section: 'site', json: { ...siteJson }, updatedAt: '2026-05-30T10:00:00Z' },
       { section: 'auth', json: JSON.parse(JSON.stringify(authJson)), updatedAt: '2026-05-30T10:00:00Z' },
-      { section: 'audit-config', json: { retentionDays: 365, hashChain: true, siem: { target: 'datadog', url: 'https://intake' } }, updatedAt: '2026-05-30T10:00:00Z' },
-      { section: 'backup-policy', json: { fullCron: '0 3 * * 0', incrementalCron: '0 */6 * * *', walArchive: true, targets: [{ name: 'primary', uri: 's3://wf-backup', retentionDays: 30 }] }, updatedAt: '2026-05-30T10:00:00Z' },
+      { section: 'audit-config', json: { retentionDays: 365, hashChain: true }, updatedAt: '2026-05-30T10:00:00Z' },
+      { section: 'backup-policy', json: { fullCron: '0 3 * * 0', walArchive: true }, updatedAt: '2026-05-30T10:00:00Z' },
     ],
   };
 }
 
 function defaults() {
   mockApi.settingsConfig.mockResolvedValue(sectionsResp());
-  mockApi.getSettings.mockResolvedValue({ maintenanceMode: false });
+  mockApi.settingsSnapshots.mockResolvedValue({ snapshots: [] });
   mockApi.rbacAdmins.mockResolvedValue({ admins: [] });
   mockApi.apiKeys.mockResolvedValue({ keys: [] });
+  mockApi.getBackupStatus.mockResolvedValue({ targets: [] });
+  mockApi.getVersionGate.mockResolvedValue({ enabled: false, minClientVersion: null, strictModeEnabled: false });
+  mockApi.getSettings.mockResolvedValue({ maintenanceMode: false });
+  mockApi.setMaintenance.mockResolvedValue({ active: true });
+  mockApi.setVersionGate.mockResolvedValue(undefined);
+  mockApi.exportSettingsToml.mockResolvedValue('[site]\nbrand = "WordForge"\n');
 }
 
 async function renderPage() {
@@ -64,120 +78,129 @@ async function renderPage() {
   return renderWithProviders(() => <Page />);
 }
 
-describe('SettingsPage — 专属控件渲染', () => {
+describe('SettingsPage — 板块编辑器渲染', () => {
   beforeEach(() => { vi.clearAllMocks(); defaults(); });
 
-  it('site 板块渲染品牌预览 + 外观模式 seg + 主色调取色器', async () => {
+  it('页头与 Tabs 渲染:系统设置标题 + 五个分页', async () => {
     await renderPage();
-    await waitFor(() => expect(screen.getByText('外观模式')).toBeInTheDocument());
-    // 品牌预览
-    expect(screen.getByText('单词锻造')).toBeInTheDocument();
-    // 外观模式 seg 三档
-    expect(screen.getByRole('button', { name: '跟随系统' })).toBeInTheDocument();
-    // 取色器(input[type=color])
-    expect(document.querySelector('input[type="color"]')).toBeTruthy();
-    // 对比度 AA pill(#5b6dff 通过 AA)
-    expect(screen.getByText(/对比度/)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText('系统设置')).toBeInTheDocument());
+    expect(screen.getByRole('button', { name: '配置板块' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /管理员 RBAC/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /API 密钥/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /快照/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '维护 · 备份' })).toBeInTheDocument();
   });
 
-  it('auth 板块渲染第三方登录 provider 卡片网格(6 个)', async () => {
+  it('config 默认高亮首个 section(站点),编辑器显示「站点与外观 配置」', async () => {
     await renderPage();
-    await waitFor(() => expect(screen.getByText('第三方登录')).toBeInTheDocument());
-    expect(screen.getByText('Google')).toBeInTheDocument();
-    expect(screen.getByText('微信')).toBeInTheDocument();
-    expect(screen.getByText('魔法链接')).toBeInTheDocument();
-    expect(document.querySelectorAll('.prov-card').length).toBe(6);
-    // google 默认启用 → is-on;qq 未启用
-    const cards = Array.from(document.querySelectorAll('.prov-card')) as HTMLElement[];
-    const google = cards.find((c) => c.textContent?.includes('Google'))!;
-    expect(google.className).toContain('is-on');
+    await waitFor(() => expect(screen.getByText('站点与外观 配置')).toBeInTheDocument());
+    // 左侧分组导航出现各分组标签 + section 标签
+    expect(screen.getByText('站点')).toBeInTheDocument();
+    expect(screen.getByText('认证 · 安全')).toBeInTheDocument();
+    expect(screen.getByText('审计 · 备份')).toBeInTheDocument();
+    // section 元信息回显
+    expect(screen.getByText(/section: site/)).toBeInTheDocument();
   });
 
-  it('auth 注册策略以 seg 渲染,而非纯文本输入', async () => {
+  it('site 板块的 theme 字段以枚举下拉渲染(light/dark/system)', async () => {
     await renderPage();
-    await waitFor(() => expect(screen.getByText('注册策略')).toBeInTheDocument());
-    expect(screen.getByRole('button', { name: '开放注册' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '仅邀请码' })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText('站点与外观 配置')).toBeInTheDocument());
+    // theme 字段在 FIELD_ENUMS → 渲染为 select,当前值 system
+    const selects = Array.from(document.querySelectorAll('select.select')) as HTMLSelectElement[];
+    const themeSel = selects.find((s) => s.value === 'system');
+    expect(themeSel).toBeTruthy();
+    const optVals = Array.from(themeSel!.options).map((o) => o.value);
+    expect(optVals).toEqual(['light', 'dark', 'system']);
+    // brand 字段以文本输入渲染
+    expect(screen.getByText('brand')).toBeInTheDocument();
   });
 
-  it('audit SIEM 以 seg 渲染', async () => {
+  it('切换到 auth 板块,编辑器显示「认证与登录 配置」与 oauth 字段', async () => {
     await renderPage();
-    await waitFor(() => expect(screen.getByText('SIEM 转发')).toBeInTheDocument());
-    expect(screen.getByRole('button', { name: 'Datadog' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Splunk' })).toBeInTheDocument();
-  });
-
-  it('JWT 行不渲染 secret 轮换(诚实降级:密钥来自 env)', async () => {
-    await renderPage();
-    await waitFor(() => expect(screen.getByText('JWT 配置')).toBeInTheDocument());
-    expect(screen.queryByRole('button', { name: '轮换' })).not.toBeInTheDocument();
-    expect(screen.getByText(/JWT 签名密钥由部署期环境变量管理/)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText('站点与外观 配置')).toBeInTheDocument());
+    // 左侧 auth section 导航按钮(认证与登录)
+    fireEvent.click(screen.getByRole('button', { name: '认证与登录' }));
+    await waitFor(() => expect(screen.getByText('认证与登录 配置')).toBeInTheDocument());
+    expect(screen.getByText(/section: auth/)).toBeInTheDocument();
+    // auth.json 顶层键(对象值)以字段标签渲染
+    expect(screen.getByText('jwt')).toBeInTheDocument();
+    expect(screen.getByText('oauth')).toBeInTheDocument();
+    expect(screen.getByText('registration')).toBeInTheDocument();
   });
 });
 
 describe('SettingsPage — 交互与保存', () => {
   beforeEach(() => { vi.clearAllMocks(); defaults(); });
 
-  it('点击 provider 卡片切换 → 出现未保存,保存调用 putSettingsSection(auth)', async () => {
+  it('未改动时保存按钮禁用,改 theme 后启用并调用 putSettingsSection(site)', async () => {
     mockApi.putSettingsSection.mockImplementation((section: string, json: Record<string, unknown>) =>
       Promise.resolve({ section, json, updatedAt: '2026-05-30T11:00:00Z' }));
     await renderPage();
-    await waitFor(() => expect(document.querySelectorAll('.prov-card').length).toBe(6));
-    const cards = Array.from(document.querySelectorAll('.prov-card')) as HTMLElement[];
-    const qq = cards.find((c) => c.textContent?.includes('QQ'))!;
-    fireEvent.click(qq);
-    // 切换后 auth 板块标记未保存,等「全部保存」启用后再点击(disabled 按钮不触发 onClick)
-    await waitFor(() => expect(screen.getByText('全部保存')).not.toBeDisabled());
-    fireEvent.click(screen.getByText('全部保存'));
-    await new Promise((r) => setTimeout(r, 80));
-    expect(mockApi.putSettingsSection).toHaveBeenCalled();
-    const [section, body] = mockApi.putSettingsSection.mock.calls[0];
-    // typed section 别名:auth → auth;body 含完整 oauth 且 qq 翻转为 true
-    expect(section).toBe('auth');
-    expect((body as any).oauth.qq).toBe(true);
-    expect((body as any).jwt.algorithm).toBe('RS256');
-    expect(mockToast.success).toHaveBeenCalled();
-  });
-
-  it('site 改外观模式 seg 后保存,提交完整 site 体且 theme 翻转', async () => {
-    mockApi.putSettingsSection.mockImplementation((section: string, json: Record<string, unknown>) =>
-      Promise.resolve({ section, json, updatedAt: '2026-05-30T11:00:00Z' }));
-    await renderPage();
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Dark' })).toBeInTheDocument());
-    fireEvent.click(screen.getByRole('button', { name: 'Dark' }));
-    await waitFor(() => expect(screen.getByText('全部保存')).not.toBeDisabled());
-    fireEvent.click(screen.getByText('全部保存'));
+    await waitFor(() => expect(screen.getByText('站点与外观 配置')).toBeInTheDocument());
+    const saveBtn = screen.getByRole('button', { name: '保存配置' }) as HTMLButtonElement;
+    expect(saveBtn).toBeDisabled();
+    // 改 theme select system → dark
+    const selects = Array.from(document.querySelectorAll('select.select')) as HTMLSelectElement[];
+    const themeSel = selects.find((s) => s.value === 'system')!;
+    fireEvent.change(themeSel, { target: { value: 'dark' } });
+    // 出现未保存徽标 + 保存按钮启用
+    await waitFor(() => expect(screen.getByText('未保存')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole('button', { name: '保存配置' })).not.toBeDisabled());
+    fireEvent.click(screen.getByRole('button', { name: '保存配置' }));
     await waitFor(() => expect(mockApi.putSettingsSection).toHaveBeenCalledWith('site', expect.objectContaining({ theme: 'dark', brand: 'WordForge' })));
+    expect(mockToast.success).toHaveBeenCalled();
   });
 
   it('保存失败时弹错误 toast', async () => {
     mockApi.putSettingsSection.mockRejectedValue(new Error('save fail'));
     await renderPage();
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Dark' })).toBeInTheDocument());
-    fireEvent.click(screen.getByRole('button', { name: 'Dark' }));
-    await waitFor(() => expect(screen.getByText('全部保存')).not.toBeDisabled());
-    fireEvent.click(screen.getByText('全部保存'));
+    await waitFor(() => expect(screen.getByText('站点与外观 配置')).toBeInTheDocument());
+    const selects = Array.from(document.querySelectorAll('select.select')) as HTMLSelectElement[];
+    const themeSel = selects.find((s) => s.value === 'system')!;
+    fireEvent.change(themeSel, { target: { value: 'dark' } });
+    await waitFor(() => expect(screen.getByRole('button', { name: '保存配置' })).not.toBeDisabled());
+    fireEvent.click(screen.getByRole('button', { name: '保存配置' }));
     await waitFor(() => expect(mockToast.error).toHaveBeenCalled());
   });
 
-  it('创建快照调用 createSettingsSnapshot', async () => {
+  it('快照分页创建快照调用 createSettingsSnapshot', async () => {
     mockApi.createSettingsSnapshot.mockResolvedValue({ id: 7, label: null, createdAt: '2026-05-30T11:00:00Z' });
     await renderPage();
-    await waitFor(() => expect(screen.getByText('创建快照')).toBeInTheDocument());
-    fireEvent.click(screen.getByText('创建快照'));
+    await waitFor(() => expect(screen.getByText('系统设置')).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: /快照/ }));
+    // 快照面板的「创建快照」按钮
+    await waitFor(() => expect(screen.getByRole('button', { name: '创建快照' })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: '创建快照' }));
     await waitFor(() => expect(mockApi.createSettingsSnapshot).toHaveBeenCalled());
     expect(mockToast.success).toHaveBeenCalled();
   });
 
-  it('开启维护模式走二次确认后调用 setMaintenance(true)', async () => {
-    mockApi.setMaintenance.mockResolvedValue({ active: true });
+  it('维护分页切换维护开关调用 setMaintenance(true)', async () => {
     await renderPage();
-    await waitFor(() => expect(screen.getByText('进入维护模式')).toBeInTheDocument());
-    fireEvent.click(screen.getByText('进入维护模式'));
-    await waitFor(() => expect(screen.getByText('确认开启维护模式')).toBeInTheDocument());
-    // 横幅按钮 + 对话框确认按钮都叫「进入维护模式」,点对话框里那个(最后一个)
-    const confirmBtns = screen.getAllByText('进入维护模式');
-    fireEvent.click(confirmBtns[confirmBtns.length - 1]);
+    await waitFor(() => expect(screen.getByText('系统设置')).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: '维护 · 备份' }));
+    // 维护模式面板:等待 sub 文案渲染,确认面板已挂载
+    await waitFor(() => expect(screen.getByText('开启后非管理员将看到维护页')).toBeInTheDocument());
+    // 维护模式 Switch = 该面板内第一个 .switch checkbox;getSettings 初值加载后 disabled 解除
+    await waitFor(() => {
+      const sw = document.querySelector('.switch input[type="checkbox"]') as HTMLInputElement | null;
+      expect(sw).toBeTruthy();
+      expect(sw!.disabled).toBe(false);
+    });
+    const sw = document.querySelector('.switch input[type="checkbox"]') as HTMLInputElement;
+    fireEvent.change(sw, { target: { checked: true } });
     await waitFor(() => expect(mockApi.setMaintenance).toHaveBeenCalledWith(true));
+    expect(mockToast.warning).toHaveBeenCalled();
+  });
+
+  it('点「导出 TOML」调用 exportSettingsToml 并提示成功', async () => {
+    // 该路径会 URL.createObjectURL 触发下载,happy-dom 无此 API → 打桩
+    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: vi.fn(() => 'blob:x') });
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: vi.fn() });
+    await renderPage();
+    await waitFor(() => expect(screen.getByRole('button', { name: '导出 TOML' })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: '导出 TOML' }));
+    await waitFor(() => expect(mockApi.exportSettingsToml).toHaveBeenCalled());
+    expect(mockToast.success).toHaveBeenCalled();
   });
 });

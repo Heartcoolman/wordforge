@@ -11,7 +11,7 @@ vi.mock('@/api/admin', () => ({
     updatesHistory: vi.fn(() => Promise.resolve({ entries: [] })),
     getSettings: vi.fn(() => Promise.resolve({ maintenanceMode: false })),
     setMaintenance: vi.fn(),
-    // 版本页对齐设计稿新增 resource —— 全部给安全桩，避免 createResource 调 undefined
+    // 版本页对齐设计稿的 resource —— 全部给安全桩，避免 createResource 调 undefined
     getHealth: vi.fn(() => Promise.resolve({ status: 'healthy' })),
     updatesBackups: vi.fn(() => Promise.resolve({ backups: [], totalBytes: 0, thresholdBytes: 10_737_418_240 })),
     updatesChangelog: vi.fn(() => Promise.resolve({ available: false })),
@@ -22,8 +22,8 @@ vi.mock('@/api/admin', () => ({
   },
 }));
 
-// ApiError 是 client.ts 实现的 class；测试里需要 instanceof 校验，
-// 所以保留真 class，只 mock connectSseStream
+// ApiError 是 http.ts 实现的 class；测试里需要 instanceof 校验，
+// 保留真 class，只 mock connectSseStream
 vi.mock('@/api/http', async () => {
   const actual = await vi.importActual<typeof import('@/api/http')>('@/api/http');
   return {
@@ -32,6 +32,7 @@ vi.mock('@/api/http', async () => {
   };
 });
 
+// 新页面通过 @/components/wf 的 toast（= uiStore.toast）报错/提示
 vi.mock('@/stores/ui', () => ({
   uiStore: { toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() } },
 }));
@@ -40,7 +41,7 @@ import { adminApi } from '@/api/admin';
 
 const mockAdminApi = adminApi as unknown as Record<string, ReturnType<typeof vi.fn>>;
 
-/// v0.6.0-beta.3：UpdateStatus 拆双通道嵌套。stable 卡有更新 + beta=null 的典型 fixture。
+// stable 卡有更新 + beta=null 的典型 fixture（双通道嵌套）。canApply=true 让一键升级按钮可点。
 const mockStatusHasUpdate: AdminUpdateStatus = {
   currentVersion: 'v0.4.2',
   stable: {
@@ -84,43 +85,46 @@ describe('UpdatesPage', () => {
   it('shows current and stable-channel latest version after loading', async () => {
     mockAdminApi.updatesStatus.mockResolvedValue(mockStatusHasUpdate);
     await renderPage();
-    // 当前版本在版本卡 .v / .vv 多处出现，用 getAllByText 断言至少一处
+    // 当前版本 + 目标版本在升级流水线卡片渲染
     await waitFor(() => {
       expect(screen.getAllByText('v0.4.2').length).toBeGreaterThan(0);
     });
     expect(screen.getAllByText('v0.4.3').length).toBeGreaterThan(0);
   });
 
-  it('shows release notes label in stable channel detail', async () => {
+  it('renders the upgrade pipeline and CHANGELOG sections', async () => {
     mockAdminApi.updatesStatus.mockResolvedValue(mockStatusHasUpdate);
     await renderPage();
     await waitFor(() => {
-      expect(screen.getByText('Release Notes')).toBeInTheDocument();
+      expect(screen.getByText('升级流水线')).toBeInTheDocument();
     });
+    expect(screen.getByText('CHANGELOG')).toBeInTheDocument();
+    // changelog 不可用时回退渲染当前通道 releaseNotes
+    expect(screen.getByText(/bug fix/)).toBeInTheDocument();
   });
 
-  it('disables stable apply button when stable channel has no update', async () => {
+  it('disables the one-click upgrade button when stable channel has no update', async () => {
     mockAdminApi.updatesStatus.mockResolvedValue(mockStatusNoUpdate);
     await renderPage();
     await waitFor(() => {
-      const btn = screen.getByRole('button', { name: /已是最新/ });
+      const btn = screen.getByRole('button', { name: /一键升级到 v0\.4\.2/ });
       expect(btn).toBeDisabled();
     });
   });
 
-  it('opens confirm modal on hero upgrade click', async () => {
+  it('opens confirm modal on one-click upgrade click', async () => {
     mockAdminApi.updatesStatus.mockResolvedValue(mockStatusHasUpdate);
     await renderPage();
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: /立即升级到 v0\.4\.3/ })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /一键升级到 v0\.4\.3/ })).toBeInTheDocument();
     });
-    fireEvent.click(screen.getByRole('button', { name: /立即升级到 v0\.4\.3/ }));
+    fireEvent.click(screen.getByRole('button', { name: /一键升级到 v0\.4\.3/ }));
     await waitFor(() => {
       expect(screen.getByText('确认一键更新')).toBeInTheDocument();
     });
   });
 
-  it('shows server-side error toast when apply returns 422 SHA256_MISMATCH', async () => {
+  it('shows error toast when apply returns 422 SHA256_MISMATCH', async () => {
     mockAdminApi.updatesStatus.mockResolvedValue(mockStatusHasUpdate);
     const { ApiError } = await import('@/api/http');
     const uiStoreMod = await import('@/stores/ui');
@@ -129,28 +133,30 @@ describe('UpdatesPage', () => {
       new ApiError(422, 'SHA256_MISMATCH', 'sha256 mismatch: expected ... got ...'),
     );
     await renderPage();
-    await waitFor(() => expect(screen.getByRole('button', { name: /立即升级到 v0\.4\.3/ })).toBeInTheDocument());
-    fireEvent.click(screen.getByRole('button', { name: /立即升级到 v0\.4\.3/ }));
+    await waitFor(() => expect(screen.getByRole('button', { name: /一键升级到 v0\.4\.3/ })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: /一键升级到 v0\.4\.3/ }));
     await waitFor(() => expect(screen.getByText('确认一键更新')).toBeInTheDocument());
     fireEvent.click(screen.getByRole('button', { name: '开始升级' }));
     await waitFor(() => {
       expect(errMock).toHaveBeenCalled();
-      const calls = errMock.mock.calls;
-      const matched = calls.some(([title]) =>
-        typeof title === 'string' && title.includes('SHA256_MISMATCH'),
+      // doApply 的 ApiError 分支把 code 拼进 detail：`[SHA256_MISMATCH] ...`
+      const matched = errMock.mock.calls.some(([, detail]) =>
+        typeof detail === 'string' && detail.includes('SHA256_MISMATCH'),
       );
       expect(matched).toBe(true);
     });
-    // 4xx 时应停在 error 分支后的 refetch，不进 polling 循环（polling 会多次调 updatesStatus）
+    // 4xx 失败应停在 error 分支，不进 polling 循环（无 applyTask → createEffect 早退）
     expect(mockAdminApi.updatesStatus.mock.calls.length).toBeLessThanOrEqual(3);
   });
 
-  it('passes channel="stable" to updatesApply when applying from hero', async () => {
+  it('passes channel="stable" + versions to updatesApply when confirming', async () => {
     mockAdminApi.updatesStatus.mockResolvedValue(mockStatusHasUpdate);
-    mockAdminApi.updatesApply.mockResolvedValue({ taskId: 't1', phase: 'pending', percent: 0 });
+    mockAdminApi.updatesApply.mockResolvedValue({
+      taskId: 't1', phase: 'pending', percent: 0, targetVersion: 'v0.4.3', startedAt: '2026-05-17T16:06:00Z',
+    });
     await renderPage();
-    await waitFor(() => expect(screen.getByRole('button', { name: /立即升级到 v0\.4\.3/ })).toBeInTheDocument());
-    fireEvent.click(screen.getByRole('button', { name: /立即升级到 v0\.4\.3/ }));
+    await waitFor(() => expect(screen.getByRole('button', { name: /一键升级到 v0\.4\.3/ })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: /一键升级到 v0\.4\.3/ }));
     await waitFor(() => expect(screen.getByText('确认一键更新')).toBeInTheDocument());
     fireEvent.click(screen.getByRole('button', { name: '开始升级' }));
     await waitFor(() => {
@@ -158,14 +164,14 @@ describe('UpdatesPage', () => {
     });
   });
 
-  it('triggers updatesCheck on 立即检查 click', async () => {
+  it('triggers updatesCheck on 检查更新 click', async () => {
     mockAdminApi.updatesStatus.mockResolvedValue(mockStatusHasUpdate);
     mockAdminApi.updatesCheck.mockResolvedValue(mockStatusHasUpdate);
     await renderPage();
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: '立即检查' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: '检查更新' })).toBeInTheDocument();
     });
-    fireEvent.click(screen.getByRole('button', { name: '立即检查' }));
+    fireEvent.click(screen.getByRole('button', { name: '检查更新' }));
     await waitFor(() => {
       expect(mockAdminApi.updatesCheck).toHaveBeenCalled();
     });
@@ -184,8 +190,8 @@ describe('UpdatesPage', () => {
       name: 'backup-manual-x.db', kind: 'manual', sizeBytes: 1, createdAt: '2025-11-26T00:00:00Z', version: null,
     });
     await renderPage();
-    // "SQLite 备份" 在备份面板标题等多处出现，断言至少一处
-    await waitFor(() => expect(screen.getAllByText('SQLite 备份').length).toBeGreaterThan(0));
+    // 备份面板标题为「数据库备份」，列表渲染备份文件名
+    await waitFor(() => expect(screen.getByText('数据库备份')).toBeInTheDocument());
     expect(screen.getByText('backup-manual-20251125-214700.db')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '立即备份' }));
     await waitFor(() => expect(mockAdminApi.updatesCreateBackup).toHaveBeenCalled());

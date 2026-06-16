@@ -11,6 +11,7 @@ vi.mock('@/api/admin', () => ({
     analyticsHourly: vi.fn(),
     analyticsWordFrequency: vi.fn(),
     analyticsInsights: vi.fn(),
+    analyticsWordbookRank: vi.fn(),
   },
 }));
 
@@ -62,10 +63,10 @@ const mockHourly = {
   total: 184329,
 };
 const mockWords = {
-  generatedAt: '', days: 7, limit: 10, sort: 'count',
+  generatedAt: '', days: 7, limit: 12, sort: 'count',
   rows: [
-    { rank: 1, wordId: 'w1', spelling: 'tenacious', pos: 'adj.', recordCount: 3142, accuracy: 0.62, elo: 1584 },
-    { rank: 2, wordId: 'w2', spelling: 'acquiesce', pos: 'v.', recordCount: 2612, accuracy: 0.41, elo: 1712 },
+    { rank: 1, wordId: 'w1', spelling: 'tenacious', pos: 'adj.', recordCount: 3142, accuracy: 0.62, elo: 1584, mastery: 0.71 },
+    { rank: 2, wordId: 'w2', spelling: 'acquiesce', pos: 'v.', recordCount: 2612, accuracy: 0.41, elo: 1712, mastery: 0.38 },
   ],
 };
 const mockInsights = {
@@ -73,6 +74,13 @@ const mockInsights = {
   items: [
     { tone: 'success' as const, title: 'd7 留存连续两周回升', body: '归因 cold_start 阶段延长。' },
     { tone: 'warning' as const, title: 'acquiesce 正确率 < 50%', body: 'ELO 评分可能偏高。' },
+  ],
+};
+const mockWbRank = {
+  generatedAt: '', days: 7, limit: 12,
+  rows: [
+    { wordbookId: 'wb1', name: '雅思核心词', learnerCount: 1204, recordCount: 88321, correctCount: 60103, accuracy: 0.68 },
+    { wordbookId: 'wb2', name: '考研真题词', learnerCount: 802, recordCount: 51223, correctCount: 31044, accuracy: 0.61 },
   ],
 };
 
@@ -84,6 +92,7 @@ function primeMocks() {
   mockAdminApi.analyticsHourly.mockResolvedValue(mockHourly);
   mockAdminApi.analyticsWordFrequency.mockResolvedValue(mockWords);
   mockAdminApi.analyticsInsights.mockResolvedValue(mockInsights);
+  mockAdminApi.analyticsWordbookRank.mockResolvedValue(mockWbRank);
 }
 
 function primeEmpty() {
@@ -100,8 +109,9 @@ function primeEmpty() {
     generatedAt: '', days: 7, totalRecords: 0, questionTypes: [], difficultyBins: [],
   });
   mockAdminApi.analyticsHourly.mockResolvedValue({ generatedAt: '', days: 7, matrix: Array.from({ length: 7 }, () => Array(24).fill(0)), total: 0 });
-  mockAdminApi.analyticsWordFrequency.mockResolvedValue({ generatedAt: '', days: 7, limit: 10, sort: 'count', rows: [] });
+  mockAdminApi.analyticsWordFrequency.mockResolvedValue({ generatedAt: '', days: 7, limit: 12, sort: 'count', rows: [] });
   mockAdminApi.analyticsInsights.mockResolvedValue({ generatedAt: '', days: 7, items: [] });
+  mockAdminApi.analyticsWordbookRank.mockResolvedValue({ generatedAt: '', days: 7, limit: 12, rows: [] });
 }
 
 async function renderPage() {
@@ -123,34 +133,33 @@ describe('AnalyticsPage', () => {
   it('shows KPI cards after loading', async () => {
     primeMocks();
     await renderPage();
-    await waitFor(() => expect(screen.getByText('7 天新注册')).toBeInTheDocument());
-    expect(screen.getByText('7 天活跃 (DAU 平均)')).toBeInTheDocument();
-    expect(screen.getByText('d7 留存率')).toBeInTheDocument();
-    expect(screen.getByText('7 天累计学习时长')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText('新注册')).toBeInTheDocument());
+    expect(screen.getByText('日活均值')).toBeInTheDocument();
+    expect(screen.getByText('D7 留存')).toBeInTheDocument();
+    expect(screen.getByText('学习时长')).toBeInTheDocument();
   });
 
   it('renders funnel rows with biggest drop note', async () => {
     primeMocks();
     await renderPage();
-    await waitFor(() => expect(screen.getByText('注册到长期留存 · 漏斗')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('增长漏斗')).toBeInTheDocument());
     await waitFor(() => expect(screen.getByText('选择词库')).toBeInTheDocument());
-    expect(screen.getByText(/最大流失点/)).toBeInTheDocument();
+    expect(screen.getByText(/最大流失/)).toBeInTheDocument();
   });
 
   it('renders cohort retention matrix', async () => {
     primeMocks();
     await renderPage();
-    await waitFor(() => expect(screen.getByText('留存矩阵 · 7 周 cohort')).toBeInTheDocument());
-    // cohortStart 2025-10-07 → 显示 10-07
+    await waitFor(() => expect(screen.getByText('周 cohort 留存矩阵')).toBeInTheDocument());
+    // cohortStart 2025-10-07 → slice(5) → 10-07
     await waitFor(() => expect(screen.getByText('10-07')).toBeInTheDocument());
   });
 
   it('renders question distribution groups', async () => {
     primeMocks();
     await renderPage();
-    await waitFor(() => expect(screen.getByText('答题分布')).toBeInTheDocument());
-    expect(screen.getByText('题型')).toBeInTheDocument();
-    expect(screen.getByText('难度（ELO 分箱）')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText('题型分布')).toBeInTheDocument());
+    expect(screen.getByText('难度分箱（ELO）')).toBeInTheDocument();
     expect(screen.getByText('单词 → 释义')).toBeInTheDocument();
   });
 
@@ -158,15 +167,26 @@ describe('AnalyticsPage', () => {
     primeMocks();
     await renderPage();
     await waitFor(() => expect(screen.getByText('学习时段热图 · 7d × 24h')).toBeInTheDocument());
-    await waitFor(() => expect(screen.getByText(/峰值/)).toBeInTheDocument());
+    // 峰值标注节点以 "峰值 周" 开头，区别于面板副标题中的 "相对峰值着色"
+    await waitFor(() =>
+      expect(screen.getByText((c) => c.startsWith('峰值 周'))).toBeInTheDocument(),
+    );
   });
 
   it('renders word frequency rows', async () => {
     primeMocks();
     await renderPage();
-    await waitFor(() => expect(screen.getByText('词频 Top')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('高频词')).toBeInTheDocument());
     await waitFor(() => expect(screen.getByText('tenacious')).toBeInTheDocument());
     expect(screen.getByText('acquiesce')).toBeInTheDocument();
+  });
+
+  it('renders wordbook rank rows', async () => {
+    primeMocks();
+    await renderPage();
+    await waitFor(() => expect(screen.getByText('词库排行')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('雅思核心词')).toBeInTheDocument());
+    expect(screen.getByText('考研真题词')).toBeInTheDocument();
   });
 
   it('renders insights list', async () => {
@@ -201,13 +221,13 @@ describe('AnalyticsPage', () => {
   it('switches word sort to accuracy and refetches', async () => {
     primeMocks();
     await renderPage();
-    await waitFor(() => expect(screen.getByText('词频 Top')).toBeInTheDocument());
-    const errBtn = screen.getAllByRole('button').find((b) => b.textContent === '错误率');
-    expect(errBtn).toBeDefined();
-    fireEvent.click(errBtn!);
+    await waitFor(() => expect(screen.getByText('高频词')).toBeInTheDocument());
+    const select = screen.getByRole('combobox') as HTMLSelectElement;
+    expect(select).toBeDefined();
+    fireEvent.change(select, { target: { value: 'accuracy' } });
     await waitFor(() =>
       expect(mockAdminApi.analyticsWordFrequency).toHaveBeenCalledWith(
-        expect.objectContaining({ sort: 'accuracy', limit: 10 }),
+        expect.objectContaining({ sort: 'accuracy', limit: 12 }),
       ),
     );
   });

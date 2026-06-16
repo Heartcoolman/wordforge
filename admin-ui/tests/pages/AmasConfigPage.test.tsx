@@ -1,26 +1,34 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { screen, waitFor, fireEvent } from '@solidjs/testing-library';
+import userEvent from '@testing-library/user-event';
 import { renderWithProviders } from '../helpers/render';
 
+// 重构后的 AmasConfigPage 在 onMount 直接调 amasApi.getConfig()，
+// 版本历史 / 灰度走 adminApi.amasListVersions() / amasGetCanary()（createResource）。
 vi.mock('@/api/amas', () => ({
   amasApi: {
     getConfig: vi.fn(),
-    updateConfig: vi.fn(),
-    getMetrics: vi.fn(),
   },
 }));
 
 vi.mock('@/api/admin', () => ({
   adminApi: {
-    reloadAmas: vi.fn(),
-    // m022:CanaryCard 用的端点(无 active canary + 空版本列表)
-    amasGetCanary: vi.fn().mockResolvedValue({ canary: null }),
+    // createResource 在模块初始化即触发，必须给安全默认值
     amasListVersions: vi.fn().mockResolvedValue([]),
-    amasSetCanary: vi.fn(),
-    amasDisableCanary: vi.fn(),
-    // m022:JsonAdvancedPanel TOML 模式
+    amasGetCanary: vi.fn().mockResolvedValue({ canary: null }),
+    // header / 各交互按需调用
+    reloadAmas: vi.fn(),
+    amasUpdateConfigWithNote: vi.fn(),
+    amasRestoreVersion: vi.fn(),
+    amasGetVersion: vi.fn().mockResolvedValue({ snapshotJson: {} }),
+    amasExplainParam: vi.fn(),
+    amasConfigDiffImpact: vi.fn(),
+    // TomlEditor.onMount → amasSerializeToml；解析回写 → amasParseToml
+    amasSerializeToml: vi.fn().mockResolvedValue({ toml: '' }),
     amasParseToml: vi.fn(),
-    amasSerializeToml: vi.fn(),
+    // 灰度面板
+    amasSetCanaryExt: vi.fn(),
+    amasDisableCanary: vi.fn(),
   },
 }));
 
@@ -28,33 +36,64 @@ vi.mock('@/stores/ui', () => ({
   uiStore: { toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() } },
 }));
 
-// m027: JSON pane 改 CodeMirror 后 happy-dom 渲染不稳,mock 掉
-vi.mock('@/components/amas/TomlEditor', () => ({
-  default: () => null,
-}));
-
 import { amasApi } from '@/api/amas';
+import { adminApi } from '@/api/admin';
 
 const mockAmasApi = amasApi as unknown as Record<string, ReturnType<typeof vi.fn>>;
+const mockAdminApi = adminApi as unknown as Record<string, ReturnType<typeof vi.fn>>;
 
-// 仿真后端返回的 AMASConfig：仅含 Tier-A 用到的字段，其余字段省略（schema.validateConfig 对缺失字段静默放行）
+// 仿真后端 AMASConfig：字段名对齐重构页读取的 section.key（src/amas/config.rs）。
 const mockConfig = {
-  featureFlags: { ensembleEnabled: true, heuristicEnabled: true, igeEnabled: true, swdEnabled: true, mdmEnabled: true, iadEnabled: false, mtpEnabled: false, sspEnabled: false },
-  memoryModel: {
-    w: [0.4072, 1.1829, 3.1262, 15.4722, 7.1949, 0.5345, 1.4604, 0.0046, 1.54575, 0.1192, 1.01925, 1.9395, 0.11, 0.29605, 2.2698, 0.2315, 2.9898, 0.51655, 0.6621],
-    baseDesiredRetention: 0.92,
-    maxIntervalDays: 90,
+  featureFlags: {
+    ensembleEnabled: true,
+    heuristicEnabled: true,
+    igeEnabled: true,
+    swdEnabled: true,
+    mdmEnabled: true,
+    iadEnabled: false,
+    mtpEnabled: false,
+    sspEnabled: false,
   },
-  ensemble: { baseWeightHeuristic: 0.4, baseWeightIge: 0.3, baseWeightSwd: 0.3, warmupSamples: 20, blendScale: 100, blendMax: 0.5, minWeight: 0.15, warmupHeuristicBoost: 0.2 },
-  objectiveWeights: { retention: 0.35, accuracy: 0.25, speed: 0.15, fatigue: 0.15, frustration: 0.1 },
-};
-const mockMetrics = {
-  Heuristic: { callCount: 100, totalLatencyUs: 200000, errorCount: 0 },
+  coldStart: {
+    classifyToExploreEvents: 5,
+    exploreToExploitEvents: 20,
+    classifyToExploreConfidence: 0.6,
+  },
+  classifier: { fastLearnerThreshold: 0.8, stableLearnerThreshold: 0.45 },
+  constraints: {
+    highFatigueThreshold: 0.6,
+    maxBatchSizeWhenFatigued: 10,
+    maxDifficultyWhenFatigued: 5,
+    maxNewRatioWhenFatigued: 0.3,
+  },
+  intervention: {
+    fatigueAlertThreshold: 0.7,
+    attentionAlertThreshold: 0.3,
+    motivationAlertThreshold: -0.3,
+  },
+  elo: {
+    defaultElo: 1200,
+    kFactor: 24,
+    noviceKMultiplier: 2,
+    zpdOptimalOffset: 0,
+    zpdGaussianSigma: 200,
+  },
+  ensemble: {
+    baseWeightHeuristic: 0.4,
+    baseWeightIge: 0.3,
+    baseWeightSwd: 0.3,
+    minWeight: 0.15,
+    warmupSamples: 20,
+  },
 };
 
 describe('AmasConfigPage', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // clearAllMocks 会清掉 createResource 用的默认值，重新打底
+    mockAdminApi.amasListVersions.mockResolvedValue([]);
+    mockAdminApi.amasGetCanary.mockResolvedValue({ canary: null });
+    mockAdminApi.amasSerializeToml.mockResolvedValue({ toml: '' });
   });
 
   async function renderPage() {
@@ -64,7 +103,6 @@ describe('AmasConfigPage', () => {
 
   it('renders page title after loading', async () => {
     mockAmasApi.getConfig.mockResolvedValue(mockConfig);
-    mockAmasApi.getMetrics.mockResolvedValue(mockMetrics);
     await renderPage();
     await waitFor(() => {
       expect(screen.getByText('AMAS 调参')).toBeInTheDocument();
@@ -72,72 +110,108 @@ describe('AmasConfigPage', () => {
   });
 
   it('shows loading spinner initially', async () => {
+    // getConfig 永不 resolve → 停在 <Loading/>（wf Spinner: <div class="spinner">）
     mockAmasApi.getConfig.mockReturnValue(new Promise(() => {}));
-    mockAmasApi.getMetrics.mockReturnValue(new Promise(() => {}));
-    await renderPage();
-    expect(screen.getByRole('status')).toBeInTheDocument();
+    const { container } = await renderPage();
+    expect(container.querySelector('.spinner')).toBeInTheDocument();
   });
 
-  it('shows three tabs after loading', async () => {
+  it('shows four tabs after loading', async () => {
     mockAmasApi.getConfig.mockResolvedValue(mockConfig);
-    mockAmasApi.getMetrics.mockResolvedValue(mockMetrics);
+    const { container } = await renderPage();
+    await waitFor(() => {
+      expect(container.querySelector('.tabs')).toBeInTheDocument();
+    });
+    // 重构后 tab 集合：可视化配置 / 高级 (TOML) / 版本历史 / 灰度发布。
+    // 「版本历史」header 与 tab 同名，故按 .tabs 容器内文本断言以消歧。
+    const tabBar = container.querySelector('.tabs') as HTMLElement;
+    const tabLabels = Array.from(tabBar.querySelectorAll('.tab')).map((b) => b.textContent ?? '');
+    expect(tabLabels.some((t) => t.includes('可视化配置'))).toBe(true);
+    expect(tabLabels.some((t) => t.includes('高级 (TOML)'))).toBe(true);
+    expect(tabLabels.some((t) => t.includes('版本历史'))).toBe(true);
+    expect(tabLabels.some((t) => t.includes('灰度发布'))).toBe(true);
+  });
+
+  it('shows 保存为新版本 button after loading', async () => {
+    mockAmasApi.getConfig.mockResolvedValue(mockConfig);
     await renderPage();
     await waitFor(() => {
-      expect(screen.getByRole('tab', { name: /重点参数/ })).toBeInTheDocument();
-      expect(screen.getByRole('tab', { name: /分节配置/ })).toBeInTheDocument();
-      expect(screen.getByRole('tab', { name: /JSON 高级/ })).toBeInTheDocument();
+      // header 重构后主操作：保存为新版本（dirty 时才可用，存在性始终满足）
+      expect(screen.getByRole('button', { name: '保存为新版本' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: '热重载' })).toBeInTheDocument();
     });
   });
 
-  it('shows save button after loading', async () => {
+  it('renders config group sections on visual tab', async () => {
     mockAmasApi.getConfig.mockResolvedValue(mockConfig);
-    mockAmasApi.getMetrics.mockResolvedValue(mockMetrics);
     await renderPage();
     await waitFor(() => {
-      // page-header 重构后:"保存配置" → "验证并应用"
-      expect(screen.getByRole('button', { name: '验证并应用' })).toBeInTheDocument();
+      // 可视化配置默认 tab：分组卡片标题
+      expect(screen.getByText('一键预设')).toBeInTheDocument();
+      expect(screen.getByText('新手探索')).toBeInTheDocument();
+      expect(screen.getByText('算法配比')).toBeInTheDocument();
+      expect(screen.getByText('功能开关')).toBeInTheDocument();
     });
   });
 
-  it('shows 算法指标 section after loading', async () => {
+  it('renders tunable param labels on visual tab', async () => {
     mockAmasApi.getConfig.mockResolvedValue(mockConfig);
-    mockAmasApi.getMetrics.mockResolvedValue(mockMetrics);
     await renderPage();
     await waitFor(() => {
-      expect(screen.getByText('算法指标')).toBeInTheDocument();
+      // 具体可调参数 label（新手探索 / 水平评分 ELO 分组下）
+      expect(screen.getByText('画像所需事件数')).toBeInTheDocument();
+      expect(screen.getByText('稳定所需事件数')).toBeInTheDocument();
+      expect(screen.getByText('评分灵敏度 K')).toBeInTheDocument();
     });
   });
 
-  it('renders Tier-A params on first tab', async () => {
+  it('applying a preset marks config dirty (改动预览 populated)', async () => {
     mockAmasApi.getConfig.mockResolvedValue(mockConfig);
-    mockAmasApi.getMetrics.mockResolvedValue(mockMetrics);
+    const user = userEvent.setup();
     await renderPage();
     await waitFor(() => {
-      // 三层运维视角重构后,Tier-A 字段同时出现在 quick knobs + Tier-A 11 维 grid
-      // → 全用 getAllByText
-      expect(screen.getAllByText('目标长期留存率').length).toBeGreaterThan(0);
-      expect(screen.getAllByText('最大调度间隔（天）').length).toBeGreaterThan(0);
+      expect(screen.getByText('激进')).toBeInTheDocument();
+    });
+    // 「激进」预设的 patch 会改动 exploreToExploitEvents/kFactor/highFatigueThreshold
+    await user.click(screen.getByText('激进'));
+    await waitFor(() => {
+      // dirty 后 header 出现「有未保存修改」徽标，且改动预览不再是空态
+      expect(screen.getAllByText('有未保存修改').length).toBeGreaterThan(0);
+      expect(screen.getByText('稳定所需事件数')).toBeInTheDocument();
     });
   });
 
-  it('switching to JSON 高级 tab reveals 三栏布局 with 配置树', async () => {
+  it('clicking 评估 calls amasConfigDiffImpact', async () => {
     mockAmasApi.getConfig.mockResolvedValue(mockConfig);
-    mockAmasApi.getMetrics.mockResolvedValue(mockMetrics);
-    // m027: JsonAdvancedPanel.onMount 调 amasSerializeToml
-    const { adminApi } = await import('@/api/admin');
-    (adminApi.amasSerializeToml as ReturnType<typeof vi.fn>).mockResolvedValue({
+    mockAdminApi.amasConfigDiffImpact.mockResolvedValue({
+      telemetrySampleSize: 1200,
+      confidence: 'medium',
+      fields: [],
+    });
+    await renderPage();
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '评估' })).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole('button', { name: '评估' }));
+    await waitFor(() => {
+      expect(mockAdminApi.amasConfigDiffImpact).toHaveBeenCalled();
+    });
+  });
+
+  it('switching to 高级 (TOML) tab serializes config via amasSerializeToml', async () => {
+    mockAmasApi.getConfig.mockResolvedValue(mockConfig);
+    mockAdminApi.amasSerializeToml.mockResolvedValue({
       toml: '[memoryModel]\nbaseDesiredRetention = 0.92\n',
     });
     await renderPage();
     await waitFor(() => {
-      expect(screen.getByRole('tab', { name: /JSON 高级/ })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /高级 \(TOML\)/ })).toBeInTheDocument();
     });
-    fireEvent.click(screen.getByRole('tab', { name: /JSON 高级/ }));
+    fireEvent.click(screen.getByRole('button', { name: /高级 \(TOML\)/ }));
     await waitFor(() => {
-      // JSON pane 重构为三栏 IDE,验证左栏 ConfigTree
-      expect(screen.getByText('配置树')).toBeInTheDocument();
-      // 工具栏 + 配置树 path 都含 amas_config.toml,getAllByText 兼容
-      expect(screen.getAllByText(/amas_config\.toml/).length).toBeGreaterThan(0);
+      // TOML 视图卡片标题 + onMount 触发的序列化调用
+      expect(screen.getByText('配置源 (TOML)')).toBeInTheDocument();
+      expect(mockAdminApi.amasSerializeToml).toHaveBeenCalled();
     });
   });
 });

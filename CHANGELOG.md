@@ -6,6 +6,22 @@
 
 ---
 
+## [v1.2.0-beta.2] — 2026-06-16 · Beta · 管理后台蓝玻璃重设计 + 自动刷新滚动修复
+
+后端内嵌管理 GUI（admin-ui，SolidJS）整体重做为蓝玻璃（glassmorphism）设计：全部 16 个路由页 + 外壳重新换肤与排版，沿用既有真实 `adminApi`。本次为**纯前端（运维面板）发布**，服务端核心无逻辑变更，仅版本号 bump（core 1.2.0-beta.1 → 1.2.0-beta.2），无破坏性变更。
+
+### 管理后台重设计
+- 全新设计系统 `admin-ui/src/styles/wf-admin.css`，**作用域限定 `.wf-admin` 根**——保留的登录/初始化页维持原 OKLCH/Tailwind 外观；暗色模式复用既有 `.dark` 类（非原型的 `[data-theme]`）。
+- 新增组件层 `admin-ui/src/components/wf/`：`Icon` / `primitives`（Btn/Card/Badge/Modal/Drawer/StatCard/Panel/Tabs…）/ `charts`（手写 SVG Sparkline/LineChart/BarChart/Donut/Heatmap/Scatter）/ `format` / `sx()`（React 驼峰内联样式 → Solid kebab CSS 转换）。
+- `AdminLayout` 重写为 7 组信息架构 + 玻璃侧栏/顶栏 + 动态 mesh 背景，复用既有 CommandPalette / NotificationBell / OnboardingTour / 主题与 token 逻辑；导航项与既有 `/admin/*` 路由 1:1 对应。
+- 16 个页面改为自包含；图表移除 echarts、AMAS 配置编辑器移除 CodeMirror（改 textarea）→ 两个大 vendor chunk 从 admin 包移除，构建体积下降。
+
+### 修复
+- **自动刷新页滚动归顶**：5s 轮询页（仪表盘 / 设备 / 探针指标 / 版本更新）每次刷新滚动跳回顶部。根因为每个 admin 页包在页级 `<Suspense fallback={<PageSpinner/>}>` 下，`createResource` 的 `refetch()` 被追踪读取时会重新触发 fallback → 整页重挂载 → 滚动归零。修复：轮询/手动 refetch 包入 `startTransition`（transition 分支不递增 suspense 计数、保留旧内容直至新数据就绪），并将约 45 处 `<Show when={!res.loading}>` 局部加载门控改为 `res.state !== 'pending'`（refetch 期间状态为 `refreshing`、保留旧值，面板不再拆除重建）。
+
+### 测试
+- admin-ui：`tsc --noEmit` 0 错误、`vitest` 149 文件 / 1435 通过 / 9 跳过、`build` 绿。29 个受影响测试文件随新 UI 重写，删除死代码 `pages/amas-advisor/HistoryTable.tsx` 及其测试。
+
 ## [v1.2.0-beta.1] — 2026-06-15 · Beta · 三仓联调 + 版本统一
 
 服务端 × iOS × Android 三仓联调收口：以服务端契约为准补齐客户端缺失功能与遥测，三端 marketing 版本统一为 **1.2.0**（服务端 core 1.2.0，保留 `-beta.1` 发布通道标记）。本条目记录客户端侧补齐，服务端仅版本号变更（核心 1.1.5-beta.1 → 1.2.0-beta.1），无破坏性变更。

@@ -1,0 +1,323 @@
+/* ============================================================
+   WordForge Admin — Design System (handoff redesign)
+   Glassmorphism · dual theme · blue accent
+   Scoped to `.wf-admin` so the kept login/setup pages are untouched.
+   Dark mode keyed to the existing `.dark` class (stores/theme.ts).
+   ============================================================ */
+
+.wf-admin {
+  /* ---- brand accent (blue) ---- */
+  --brand-violet: #2f6bff;
+  --brand-blue:   #2563eb;
+  --accent:        #2f6bff;
+  --accent-strong: #1d4ed8;
+  --accent-soft:   rgba(47, 107, 255, 0.10);
+  --accent-mid:    rgba(47, 107, 255, 0.20);
+  --grad-brand: linear-gradient(135deg, #4f8dff 0%, #2563eb 100%);
+  --grad-brand-soft: linear-gradient(135deg, rgba(79,141,255,0.14), rgba(37,99,235,0.08));
+
+  /* ---- status ---- */
+  --wf-success: #18a558; --wf-success-soft: rgba(24,165,88,0.13);
+  --wf-warning: #d99411; --wf-warning-soft: rgba(217,148,17,0.14);
+  --wf-error:   #e5484d; --wf-error-soft:   rgba(229,72,77,0.13);
+  --wf-info:    #2f6bff; --wf-info-soft:    rgba(47,107,255,0.13);
+  /* short aliases used throughout ported markup */
+  --success: var(--wf-success); --success-soft: var(--wf-success-soft);
+  --warning: var(--wf-warning); --warning-soft: var(--wf-warning-soft);
+  --error:   var(--wf-error);   --error-soft:   var(--wf-error-soft);
+  --info:    var(--wf-info);    --info-soft:    var(--wf-info-soft);
+
+  /* ---- light theme surfaces (blue / white) ---- */
+  --bg:            #f4f7fc;
+  --bg-mesh-1:     rgba(47,107,255,0.10);
+  --bg-mesh-2:     rgba(120,170,255,0.10);
+  --surface:        rgba(255,255,255,0.72);
+  --surface-solid:  #ffffff;
+  --surface-2:      rgba(255,255,255,0.55);
+  --surface-sunken: rgba(15,23,42,0.04);
+  --surface-hover:  rgba(15,23,42,0.05);
+  --glass-blur: 20px;
+
+  --border:        rgba(15,23,42,0.10);
+  --border-strong: rgba(15,23,42,0.16);
+  --hairline:      rgba(15,23,42,0.07);
+
+  --text:        #131722;
+  --text-2:      #4a5365;
+  --text-3:      #8b93a4;
+  --text-on-accent: #ffffff;
+
+  --shadow-1: 0 1px 2px rgba(15,23,42,0.06), 0 1px 3px rgba(15,23,42,0.05);
+  --shadow-2: 0 4px 14px rgba(15,23,42,0.08), 0 2px 5px rgba(15,23,42,0.05);
+  --shadow-3: 0 18px 50px -12px rgba(20,20,60,0.28), 0 8px 18px rgba(15,23,42,0.10);
+  --shadow-glow: 0 0 0 1px rgba(47,107,255,0.22), 0 10px 32px -8px rgba(47,107,255,0.35);
+
+  --r-sm: 8px; --r-md: 12px; --r-lg: 16px; --r-xl: 22px; --r-pill: 999px;
+  --sidebar-w: 256px;
+  --topbar-h: 60px;
+  --wf-content-max: 1480px;
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --font: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  font-family: var(--font);
+  color: var(--text);
+}
+
+.dark .wf-admin {
+  --bg:            #0a0e1a;
+  --bg-mesh-1:     rgba(47,107,255,0.18);
+  --bg-mesh-2:     rgba(90,150,255,0.13);
+  --surface:        rgba(20,28,46,0.66);
+  --surface-solid:  #141b2c;
+  --surface-2:      rgba(28,38,60,0.55);
+  --surface-sunken: rgba(255,255,255,0.035);
+  --surface-hover:  rgba(255,255,255,0.06);
+  --glass-blur: 22px;
+
+  --border:        rgba(255,255,255,0.10);
+  --border-strong: rgba(255,255,255,0.18);
+  --hairline:      rgba(255,255,255,0.07);
+
+  --text:        #eef1f8;
+  --text-2:      #a4adc2;
+  --text-3:      #717a90;
+
+  --accent:        #5b9bff;
+  --accent-strong: #2f6bff;
+  --accent-soft:   rgba(91,155,255,0.15);
+  --accent-mid:    rgba(91,155,255,0.26);
+
+  --wf-success-soft: rgba(24,165,88,0.18);
+  --wf-warning-soft: rgba(217,148,17,0.18);
+  --wf-error-soft:   rgba(229,72,77,0.18);
+  --wf-info-soft:    rgba(91,155,255,0.18);
+
+  --shadow-1: 0 1px 2px rgba(0,0,0,0.4);
+  --shadow-2: 0 6px 20px rgba(0,0,0,0.45);
+  --shadow-3: 0 24px 60px -12px rgba(0,0,0,0.7), 0 8px 20px rgba(0,0,0,0.5);
+  --shadow-glow: 0 0 0 1px rgba(139,124,255,0.3), 0 12px 36px -8px rgba(124,92,255,0.45);
+}
+
+/* root shell occupies the viewport; main scrolls (matches prototype) */
+.wf-admin {
+  height: 100vh;
+  background: var(--bg);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+.wf-admin *, .wf-admin *::before, .wf-admin *::after { box-sizing: border-box; }
+.wf-admin ::selection { background: var(--accent-mid); }
+
+/* animated mesh background */
+.wf-admin .app-bg {
+  position: fixed; inset: 0; z-index: 0; pointer-events: none; overflow: hidden;
+}
+.wf-admin .app-bg::before, .wf-admin .app-bg::after {
+  content: ""; position: absolute; border-radius: 50%;
+  filter: blur(80px); opacity: 0.9;
+}
+.wf-admin .app-bg::before {
+  width: 50vw; height: 50vw; top: -12vw; left: -8vw;
+  background: radial-gradient(circle, var(--bg-mesh-1), transparent 70%);
+  animation: wf-drift1 28s var(--ease) infinite alternate;
+}
+.wf-admin .app-bg::after {
+  width: 46vw; height: 46vw; bottom: -14vw; right: -6vw;
+  background: radial-gradient(circle, var(--bg-mesh-2), transparent 70%);
+  animation: wf-drift2 32s var(--ease) infinite alternate;
+}
+@keyframes wf-drift1 { to { transform: translate(8vw, 6vh) scale(1.15); } }
+@keyframes wf-drift2 { to { transform: translate(-7vw, -5vh) scale(1.1); } }
+@media (prefers-reduced-motion: reduce) {
+  .wf-admin .app-bg::before, .wf-admin .app-bg::after { animation: none; }
+}
+
+/* ---------- glass primitives ---------- */
+.wf-admin .glass {
+  background: var(--surface);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(160%);
+  backdrop-filter: blur(var(--glass-blur)) saturate(160%);
+  border: 1px solid var(--border);
+}
+.wf-admin .card {
+  background: var(--surface);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(160%);
+  backdrop-filter: blur(var(--glass-blur)) saturate(160%);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-1);
+  position: relative;
+}
+.wf-admin .card-pad { padding: 20px; }
+.wf-admin .card-hover { transition: transform .25s var(--ease), box-shadow .25s var(--ease), border-color .25s var(--ease); }
+.wf-admin .card-hover:hover { transform: translateY(-2px); box-shadow: var(--shadow-2); border-color: var(--border-strong); }
+
+.wf-admin .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.wf-admin .tnum { font-variant-numeric: tabular-nums; }
+
+/* ---------- buttons ---------- */
+.wf-admin .btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+  font-family: var(--font); font-weight: 600; font-size: 13px;
+  padding: 8px 14px; border-radius: var(--r-md); border: 1px solid transparent;
+  cursor: pointer; white-space: nowrap; transition: all .18s var(--ease);
+  user-select: none; line-height: 1; color: var(--text);
+}
+.wf-admin .btn:active { transform: translateY(1px) scale(0.99); }
+.wf-admin .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.wf-admin .btn svg { width: 15px; height: 15px; }
+.wf-admin .btn-primary { background: var(--grad-brand); color: #fff; box-shadow: 0 4px 14px -3px rgba(47,107,255,0.5); }
+.wf-admin .btn-primary:hover:not(:disabled) { box-shadow: var(--shadow-glow); filter: brightness(1.05); }
+.wf-admin .btn-secondary { background: var(--surface-2); color: var(--text); border-color: var(--border); }
+.wf-admin .btn-secondary:hover:not(:disabled) { background: var(--surface-hover); border-color: var(--border-strong); }
+.wf-admin .btn-ghost { background: transparent; color: var(--text-2); }
+.wf-admin .btn-ghost:hover:not(:disabled) { background: var(--surface-hover); color: var(--text); }
+.wf-admin .btn-danger { background: var(--error); color: #fff; }
+.wf-admin .btn-danger:hover:not(:disabled) { filter: brightness(1.07); box-shadow: 0 4px 14px -3px rgba(229,72,77,0.5); }
+.wf-admin .btn-success { background: var(--success); color: #fff; }
+.wf-admin .btn-warning { background: var(--warning); color: #fff; }
+.wf-admin .btn-outline { background: transparent; color: var(--text); border-color: var(--border-strong); }
+.wf-admin .btn-outline:hover:not(:disabled) { background: var(--surface-hover); }
+.wf-admin .btn-xs { padding: 4px 9px; font-size: 11.5px; border-radius: 7px; gap: 4px; }
+.wf-admin .btn-xs svg { width: 12px; height: 12px; }
+.wf-admin .btn-sm { padding: 6px 11px; font-size: 12.5px; }
+.wf-admin .btn-lg { padding: 11px 20px; font-size: 14px; }
+.wf-admin .btn-icon { padding: 8px; width: 34px; height: 34px; }
+.wf-admin .btn-icon svg { width: 17px; height: 17px; }
+
+/* ---------- badges / chips ---------- */
+.wf-admin .badge {
+  display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 600;
+  padding: 2px 9px; border-radius: var(--r-pill); line-height: 1.5;
+  border: 1px solid transparent; white-space: nowrap;
+}
+.wf-admin .badge .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.wf-admin .badge-default { background: var(--surface-sunken); color: var(--text-2); border-color: var(--hairline); }
+.wf-admin .badge-accent  { background: var(--accent-soft); color: var(--accent); }
+.wf-admin .badge-success { background: var(--success-soft); color: var(--success); }
+.wf-admin .badge-warning { background: var(--warning-soft); color: var(--warning); }
+.wf-admin .badge-error   { background: var(--error-soft); color: var(--error); }
+.wf-admin .badge-info    { background: var(--info-soft); color: var(--info); }
+
+/* ---------- inputs ---------- */
+.wf-admin .input, .wf-admin .select, .wf-admin .textarea {
+  width: 100%; font-family: var(--font); font-size: 13px; color: var(--text);
+  background: var(--surface-solid); border: 1px solid var(--border); border-radius: var(--r-md);
+  padding: 9px 12px; transition: border-color .15s, box-shadow .15s; outline: none;
+}
+.dark .wf-admin .input, .dark .wf-admin .select, .dark .wf-admin .textarea {
+  background: rgba(255,255,255,0.04);
+}
+.wf-admin .input:focus, .wf-admin .select:focus, .wf-admin .textarea:focus {
+  border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.wf-admin .input::placeholder, .wf-admin .textarea::placeholder { color: var(--text-3); }
+.wf-admin .textarea { resize: vertical; min-height: 80px; line-height: 1.55; }
+.wf-admin .field-label { display: block; font-size: 12px; font-weight: 600; color: var(--text-2); margin-bottom: 6px; }
+.wf-admin .field-hint { font-size: 11.5px; color: var(--text-3); margin-top: 5px; }
+
+/* toggle switch */
+.wf-admin .switch { position: relative; width: 38px; height: 22px; flex: none; cursor: pointer; display: inline-block; }
+.wf-admin .switch input { opacity: 0; width: 0; height: 0; }
+.wf-admin .switch .track {
+  position: absolute; inset: 0; border-radius: 99px; background: var(--border-strong);
+  transition: background .2s var(--ease);
+}
+.wf-admin .switch .thumb {
+  position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%;
+  background: #fff; box-shadow: var(--shadow-1); transition: transform .2s var(--ease);
+}
+.wf-admin .switch input:checked + .track { background: var(--accent); }
+.wf-admin .switch input:checked + .track + .thumb,
+.wf-admin .switch input:checked ~ .thumb { transform: translateX(16px); }
+
+/* ---------- tables ---------- */
+.wf-admin .tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
+.wf-admin .tbl thead th {
+  text-align: left; font-size: 11px; font-weight: 600; letter-spacing: 0.04em;
+  text-transform: uppercase; color: var(--text-3); padding: 9px 14px;
+  border-bottom: 1px solid var(--border); position: sticky; top: 0;
+  background: var(--surface); backdrop-filter: blur(8px); z-index: 1;
+}
+.wf-admin .tbl tbody td { padding: 11px 14px; border-bottom: 1px solid var(--hairline); color: var(--text); vertical-align: middle; }
+.wf-admin .tbl tbody tr { transition: background .12s; }
+.wf-admin .tbl tbody tr:hover { background: var(--surface-hover); }
+.wf-admin .tbl tbody tr:last-child td { border-bottom: none; }
+
+/* ---------- misc layout ---------- */
+.wf-admin .section-title { font-size: 15px; font-weight: 700; letter-spacing: -0.01em; color: var(--text); }
+.wf-admin .eyebrow { font-size: 11px; font-weight: 700; letter-spacing: 0.09em; text-transform: uppercase; color: var(--text-3); }
+.wf-admin .page-title { font-size: clamp(24px, 3vw, 30px); font-weight: 800; letter-spacing: -0.025em; margin: 0; }
+.wf-admin .muted { color: var(--text-2); }
+.wf-admin .muted-3 { color: var(--text-3); }
+.wf-admin .hr { height: 1px; background: var(--border); border: none; margin: 0; }
+
+.wf-admin .kbd {
+  font-family: var(--mono); font-size: 10.5px; font-weight: 600; padding: 2px 6px;
+  border-radius: 6px; background: var(--surface-sunken); border: 1px solid var(--border);
+  color: var(--text-2); line-height: 1.3;
+}
+
+/* tabs */
+.wf-admin .tabs { display: inline-flex; gap: 3px; padding: 3px; background: var(--surface-sunken); border-radius: var(--r-md); border: 1px solid var(--hairline); }
+.wf-admin .tab {
+  padding: 6px 14px; border-radius: 9px; font-size: 12.5px; font-weight: 600; cursor: pointer;
+  color: var(--text-2); border: none; background: transparent; transition: all .18s var(--ease); white-space: nowrap;
+}
+.wf-admin .tab:hover { color: var(--text); }
+.wf-admin .tab.active { background: var(--surface-solid); color: var(--accent); box-shadow: var(--shadow-1); }
+.dark .wf-admin .tab.active { background: rgba(255,255,255,0.08); }
+
+/* progress bar */
+.wf-admin .bar { height: 7px; border-radius: 99px; background: var(--surface-sunken); overflow: hidden; }
+.wf-admin .bar > i { display: block; height: 100%; border-radius: 99px; background: var(--grad-brand); transition: width .6s var(--ease); }
+
+/* animations */
+@keyframes wf-fadeUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+@keyframes wf-fadeIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes wf-scaleIn { from { opacity: 0; transform: scale(0.96); } to { opacity: 1; transform: scale(1); } }
+@keyframes wf-ringPulse { 0% { box-shadow: 0 0 0 0 var(--accent-mid); } 70% { box-shadow: 0 0 0 6px transparent; } 100% { box-shadow: 0 0 0 0 transparent; } }
+@keyframes wf-spin { to { transform: rotate(360deg); } }
+@keyframes wf-slideL { from { transform: translateX(40px); opacity: 0; } to { transform: none; opacity: 1; } }
+.wf-admin .fade-up { animation: wf-fadeUp .5s var(--ease) backwards; }
+.wf-admin .fade-in { animation: wf-fadeIn .4s var(--ease) backwards; }
+.wf-admin .scale-in { animation: wf-scaleIn .22s var(--ease) backwards; }
+.wf-admin .pulse-dot { animation: wf-ringPulse 2s infinite; }
+.wf-admin .spin { animation: wf-spin .8s linear infinite; }
+@media (prefers-reduced-motion: reduce) {
+  .wf-admin .fade-up, .wf-admin .fade-in, .wf-admin .scale-in { animation: none; }
+}
+
+.wf-admin .live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--success); box-shadow: 0 0 0 0 var(--success-soft); animation: wf-ringPulse 2s infinite; }
+
+/* skeleton */
+.wf-admin .skel { background: linear-gradient(90deg, var(--surface-sunken) 25%, var(--surface-hover) 37%, var(--surface-sunken) 63%); background-size: 400% 100%; animation: wf-shimmer 1.4s infinite; border-radius: var(--r-sm); }
+@keyframes wf-shimmer { 0% { background-position: 100% 0; } 100% { background-position: -100% 0; } }
+
+.wf-admin .spinner { width: 22px; height: 22px; border: 2.5px solid var(--accent-soft); border-top-color: var(--accent); border-radius: 50%; animation: wf-spin .7s linear infinite; }
+
+/* focus ring */
+.wf-admin :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.wf-admin button, .wf-admin a { -webkit-tap-highlight-color: transparent; }
+.wf-admin a { color: inherit; text-decoration: none; }
+
+/* responsive helpers (mirror prototype inline <style>) */
+@media (max-width: 1080px) { .wf-admin .grid-collapse { grid-template-columns: 1fr !important; } }
+@media (max-width: 720px) { .wf-admin main { padding: 16px 12px 48px !important; } }
+
+/* shell visibility helpers */
+.wf-admin .wf-mobile-only { display: none; }
+.wf-admin .wf-desktop-only { display: inline-flex; }
+@media (max-width: 860px) {
+  .wf-admin .wf-mobile-only { display: inline-flex; }
+  .wf-admin .wf-desktop-only { display: none; }
+  /* sidebar becomes an off-canvas overlay */
+  .wf-admin .wf-sidebar {
+    position: fixed; left: 0; top: 0; height: 100vh;
+    transform: translateX(-100%); box-shadow: var(--shadow-3);
+  }
+  .wf-admin .wf-sidebar.wf-open { transform: translateX(0); }
+}

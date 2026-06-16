@@ -24,7 +24,6 @@ vi.mock('@/api/amas', () => ({
     getMonitoring: vi.fn(() => Promise.resolve([])),
   },
 }));
-vi.mock('@/components/ui/EChart', () => ({ EChart: () => <div data-testid="chart" /> }));
 vi.mock('@/stores/ui', () => ({
   uiStore: { toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() } },
 }));
@@ -59,7 +58,7 @@ describe('DashboardPage — status & update banner', () => {
     primeBase();
     mockApi.getHealth.mockResolvedValue(mockHealth('degraded'));
     await renderPage();
-    // PR redesign: 同时出现在 HeroCard eyebrow + 系统状态卡
+    // redesign: 系统状态卡的 "状态" KV 显示 "性能降级"
     await waitFor(() => expect(screen.getAllByText('性能降级').length).toBeGreaterThan(0));
   });
 
@@ -74,16 +73,16 @@ describe('DashboardPage — status & update banner', () => {
     primeBase();
     mockApi.checkUpdate.mockResolvedValue({ currentVersion: '1.0.0', latestVersion: '1.1.0', hasUpdate: true, releaseUrl: 'https://x.com' });
     await renderPage();
-    // m023:redesign 后"新版本 X.Y.Z"出现在 SystemHealth chip + 待办事项两处,用 getAllByText
-    await waitFor(() => expect(screen.getAllByText(/新版本 1.1.0/).length).toBeGreaterThan(0));
+    // redesign 后 "新版本 1.1.0 可用" 出现在顶部横幅 + 待办事项 TodoRow 两处,用 getAllByText
+    await waitFor(() => expect(screen.getAllByText(/新版本 1\.1\.0/).length).toBeGreaterThan(0));
   });
 
   it('changes days window via picker', async () => {
     primeBase();
     await renderPage();
     await waitFor(() => expect(screen.getByText('全局概览')).toBeInTheDocument());
-    // WindowPicker 升级为 radiogroup；按 14天 radio 触发切换
-    const btn14 = screen.getAllByRole('radio').find((b) => b.textContent === '14天');
+    // redesign 后窗口选择器为 Seg（.tab 按钮），标签为 "7 天" / "14 天" / "30 天"
+    const btn14 = screen.getAllByRole('button').find((b) => b.textContent === '14 天');
     expect(btn14).toBeDefined();
     fireEvent.click(btn14!);
     await waitFor(() => expect(mockApi.getStudyOverview).toHaveBeenCalledWith(14));
