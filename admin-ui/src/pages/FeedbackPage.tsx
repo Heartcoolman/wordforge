@@ -519,7 +519,6 @@ function FeedbackDetailPanel(props: {
   // composer 状态
   const [reply, setReply] = createSignal('');
   const [pushInapp, setPushInapp] = createSignal(true);
-  const [ccEmail, setCcEmail] = createSignal(false);
   const [busy, setBusy] = createSignal<'' | 'reply' | 'draft' | 'assign' | 'resolve' | 'gh'>('');
   const [mergeOpen, setMergeOpen] = createSignal(false);
   const [mergeTarget, setMergeTarget] = createSignal('');
@@ -537,7 +536,6 @@ function FeedbackDetailPanel(props: {
     batch(() => {
       setReply('');
       setPushInapp(true);
-      setCcEmail(false);
     });
     adminApi
       .getFeedbackDraft(id)
@@ -546,7 +544,6 @@ function FeedbackDetailPanel(props: {
         batch(() => {
           setReply(r.draft!.body);
           setPushInapp(r.draft!.pushInapp);
-          setCcEmail(r.draft!.ccEmail);
         });
       })
       .catch(() => {
@@ -564,7 +561,7 @@ function FeedbackDetailPanel(props: {
     const id = props.id;
     draftTimer = setTimeout(() => {
       adminApi
-        .saveFeedbackDraft(id, { body: reply(), pushInapp: pushInapp(), ccEmail: ccEmail() })
+        .saveFeedbackDraft(id, { body: reply(), pushInapp: pushInapp() })
         .catch(() => {
           /* 自动保存失败不打扰 */
         });
@@ -584,7 +581,6 @@ function FeedbackDetailPanel(props: {
       await adminApi.createFeedbackReply(props.id, {
         body,
         pushInapp: pushInapp(),
-        ccEmail: ccEmail(),
       });
       toast.success('已回复');
       setReply('');
@@ -603,7 +599,6 @@ function FeedbackDetailPanel(props: {
       await adminApi.saveFeedbackDraft(props.id, {
         body: reply(),
         pushInapp: pushInapp(),
-        ccEmail: ccEmail(),
       });
       toast.success('已存为草稿', '下次打开此工单将自动恢复');
     } catch (e) {
@@ -965,10 +960,6 @@ function FeedbackDetailPanel(props: {
                   <label style={sx({ display: 'flex', gap: 7, alignItems: 'center', fontSize: 12.5 })}>
                     <Switch checked={pushInapp()} onChange={setPushInapp} />
                     应用内推送
-                  </label>
-                  <label style={sx({ display: 'flex', gap: 7, alignItems: 'center', fontSize: 12.5 })}>
-                    <Switch checked={ccEmail()} onChange={setCcEmail} />
-                    抄送邮箱
                   </label>
                   <div style={sx({ display: 'flex', gap: 8, marginLeft: 'auto' })}>
                     <Btn

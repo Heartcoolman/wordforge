@@ -84,7 +84,6 @@ const detail = {
       authorId: 'lu',
       body: '已认领',
       pushInapp: true,
-      ccEmail: false,
       createdAt: item.createdAt,
     },
   ],
@@ -128,7 +127,7 @@ describe('FeedbackPage', () => {
     mockApi.getFeedbackDetail.mockResolvedValue(detail);
     mockApi.markAllFeedbackRead.mockResolvedValue({ updated: 12 });
     mockApi.getFeedbackDraft.mockResolvedValue({ draft: null });
-    mockApi.saveFeedbackDraft.mockResolvedValue({ id: 'd1', feedbackId: 'fb-12345678', body: '', pushInapp: true, ccEmail: false });
+    mockApi.saveFeedbackDraft.mockResolvedValue({ id: 'd1', feedbackId: 'fb-12345678', body: '', pushInapp: true });
     mockApi.feedbackAnnouncements.mockResolvedValue({ data: [] });
     mockApi.createFeedbackReply.mockResolvedValue({ id: 'r2' });
     mockApi.resolveFeedback.mockResolvedValue(item);

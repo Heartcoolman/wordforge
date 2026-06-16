@@ -230,15 +230,12 @@ export function AdminLayout(props: ParentProps) {
               >
                 <Icon name={themeStore.effective() === 'dark' ? 'sun' : 'moon'} size={17} />
               </button>
-              <button class="btn btn-ghost" title="账户" style={sx({ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 9px 4px 5px', borderRadius: 10, marginLeft: 2, height: 'auto' })}>
+              <div title="账户" style={sx({ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 9px 4px 5px', borderRadius: 10, marginLeft: 2 })}>
                 <span style={sx({ width: 28, height: 28, borderRadius: 8, background: 'var(--accent)', color: '#fff', display: 'grid', placeItems: 'center', fontSize: 12, fontWeight: 600, flex: 'none' })}>
                   {(adminEmail() || 'A').slice(0, 1).toUpperCase()}
                 </span>
-                <span class="wf-desktop-only" style={sx({ display: 'flex', flexDirection: 'column', lineHeight: 1.25, textAlign: 'left' })}>
-                  <span style={sx({ fontSize: 12.5, fontWeight: 600, color: 'var(--text)', maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' })}>{adminEmail() || '管理员'}</span>
-                  <span class="muted-3" style={sx({ fontSize: 10 })}>超级管理员</span>
-                </span>
-              </button>
+                <span class="wf-desktop-only" style={sx({ fontSize: 12.5, fontWeight: 600, color: 'var(--text)', maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' })}>{adminEmail() || '管理员'}</span>
+              </div>
               <button class="btn btn-ghost btn-icon" title="退出登录" aria-label="退出登录" onClick={doLogout}>
                 <Icon name="logout" size={17} />
               </button>

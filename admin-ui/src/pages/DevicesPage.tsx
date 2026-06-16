@@ -161,19 +161,6 @@ function PolicyEditor(props: {
         </Field>
       </div>
 
-      <div style={sx({ display: 'flex', alignItems: 'center', gap: 14, marginTop: 11 })}>
-        <div style={sx({ flex: 1 })}>
-          <div class="field-label">灰度比例 {draft().grayscalePct}%</div>
-          <input type="range" min="0" max="100" value={draft().grayscalePct}
-            onInput={(e) => setDraft({ ...draft(), grayscalePct: +e.currentTarget.value })}
-            style={sx({ width: '100%', accentColor: 'var(--accent)' })} />
-        </div>
-        <label style={sx({ display: 'flex', gap: 7, alignItems: 'center', fontSize: 12.5 })}>
-          <Switch checked={draft().pwaSilentUpdate} onChange={(v) => setDraft({ ...draft(), pwaSilentUpdate: v })} />
-          PWA 静默
-        </label>
-      </div>
-
       <div style={sx({ display: 'flex', gap: 8, marginTop: 12, justifyContent: 'flex-end' })}>
         <Show when={props.policy.minVersion}>
           <Btn size="sm" variant="warning" icon="zap"

@@ -596,7 +596,7 @@ export default function AmasConfigPage() {
 
                   <Panel
                     title="影响评估"
-                    sub="基于遥测回归估计"
+                    sub="参数变化启发式估计（非在线回归）"
                     right={<Btn size="sm" variant="secondary" onClick={checkImpact} disabled={diffLoading()}>{diffLoading() ? '评估中…' : '评估'}</Btn>}
                   >
                     <Show
@@ -949,7 +949,6 @@ function CanaryPanel(props: {
   const [minAccountAgeDays, setMinAccountAgeDays] = createSignal(0);
   const [preferActive, setPreferActive] = createSignal(false);
   const [webOnly, setWebOnly] = createSignal(false);
-  const [autoScale24h, setAutoScale24h] = createSignal(false);
   const [audience, setAudience] = createSignal<CanaryAudience | null>(null);
   const [busy, setBusy] = createSignal(false);
 
@@ -976,7 +975,6 @@ function CanaryPanel(props: {
         minAccountAgeDays: minAccountAgeDays(),
         preferActive: preferActive(),
         webOnly: webOnly(),
-        autoScale24h: autoScale24h(),
       };
       const r = await adminApi.amasSetCanaryExt(req);
       setAudience(r.audience);
@@ -1030,7 +1028,6 @@ function CanaryPanel(props: {
             </Field>
             <label style={sx({ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 13 })}>优先活跃用户<Switch checked={preferActive()} onChange={setPreferActive} /></label>
             <label style={sx({ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 13 })}>仅 Web 端<Switch checked={webOnly()} onChange={setWebOnly} /></label>
-            <label style={sx({ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 13 })}>24h 自动扩量<Switch checked={autoScale24h()} onChange={setAutoScale24h} /></label>
           </div>
           <div style={sx({ display: 'flex', gap: 8 })}>
             <Btn variant="primary" onClick={apply} disabled={busy()}>{busy() ? '应用中…' : '应用灰度'}</Btn>

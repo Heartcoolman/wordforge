@@ -438,7 +438,7 @@ describe('adminApi monitoring / settings / feedback / updates / broadcast 覆盖
     expect(await adminApi.getFeedbackDetail('fb-1')).toMatchObject({ id: 'fb-1' });
   });
 
-  it('createFeedbackReply 发送 body/pushInapp/ccEmail', async () => {
+  it('createFeedbackReply 发送 body/pushInapp', async () => {
     let body: Record<string, unknown> = {};
     server.use(
       http.post(`${BASE}/api/admin/feedback/fb-2/replies`, async ({ request }) => {
@@ -446,9 +446,9 @@ describe('adminApi monitoring / settings / feedback / updates / broadcast 覆盖
         return ok({ id: 'rp-1', body: '收到' });
       }),
     );
-    const r = await adminApi.createFeedbackReply('fb-2', { body: '收到', pushInapp: true, ccEmail: false });
+    const r = await adminApi.createFeedbackReply('fb-2', { body: '收到', pushInapp: true });
     expect(r).toMatchObject({ id: 'rp-1' });
-    expect(body).toEqual({ body: '收到', pushInapp: true, ccEmail: false });
+    expect(body).toEqual({ body: '收到', pushInapp: true });
   });
 
   it('assignFeedback 分派与取消分派(null)', async () => {
@@ -546,9 +546,9 @@ describe('adminApi monitoring / settings / feedback / updates / broadcast 覆盖
       }),
     );
     expect(await adminApi.getFeedbackDraft('fb-7')).toEqual({ draft: null });
-    const r = await adminApi.saveFeedbackDraft('fb-7', { body: '草稿正文', pushInapp: false, ccEmail: true });
+    const r = await adminApi.saveFeedbackDraft('fb-7', { body: '草稿正文', pushInapp: false });
     expect(r).toMatchObject({ feedbackId: 'fb-7' });
-    expect(body).toEqual({ body: '草稿正文', pushInapp: false, ccEmail: true });
+    expect(body).toEqual({ body: '草稿正文', pushInapp: false });
   });
 
   // ─── 走原始 fetch 的下载/导出端点(覆盖 token 注入 + Blob 路径) ───

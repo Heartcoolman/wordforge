@@ -87,18 +87,19 @@ describe('SettingsPage — 新设计结构', () => {
     expect(document.querySelectorAll('.spinner').length).toBeGreaterThanOrEqual(1);
   });
 
-  it('加载后展示站点/认证板块标题', async () => {
+  it('加载后展示认证/备份板块标题（仅存配置的 site/smtp/audit 已隐藏）', async () => {
     await renderPage();
-    // 「站点与外观」在左侧 rail 与 SectionEditor 卡片各出现一次 → getAllByText
-    await waitFor(() => expect(screen.getAllByText('站点与外观').length).toBeGreaterThanOrEqual(1));
-    expect(screen.getAllByText('认证与登录').length).toBeGreaterThanOrEqual(1);
+    // 「认证与登录」在左侧 rail 与 SectionEditor 卡片各出现一次 → getAllByText
+    await waitFor(() => expect(screen.getAllByText('认证与登录').length).toBeGreaterThanOrEqual(1));
+    expect(screen.getAllByText('备份策略').length).toBeGreaterThanOrEqual(1);
+    // 仅存配置、不生效的 section 已从配置页隐藏
+    expect(screen.queryByText('站点与外观')).toBeNull();
   });
 
   it('切到「维护 · 备份」tab 可切换维护模式并调用 setMaintenance', async () => {
     const user = userEvent.setup();
     await renderPage();
-    await waitFor(() => expect(screen.getAllByText('站点与外观').length).toBeGreaterThanOrEqual(1));
-
+    await waitFor(() => expect(screen.getAllByText('认证与登录').length).toBeGreaterThanOrEqual(1));
     await user.click(screen.getByRole('button', { name: '维护 · 备份' }));
     // 维护模式面板渲染
     await waitFor(() => expect(screen.getAllByText('维护模式').length).toBeGreaterThanOrEqual(1));

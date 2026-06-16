@@ -91,73 +91,72 @@ describe('SettingsPage — 板块编辑器渲染', () => {
     expect(screen.getByRole('button', { name: '维护 · 备份' })).toBeInTheDocument();
   });
 
-  it('config 默认高亮首个 section(站点),编辑器显示「站点与外观 配置」', async () => {
+  it('config 默认高亮首个可见 section(认证),编辑器显示「认证与登录 配置」', async () => {
     await renderPage();
-    await waitFor(() => expect(screen.getByText('站点与外观 配置')).toBeInTheDocument());
-    // 左侧分组导航出现各分组标签 + section 标签
-    expect(screen.getByText('站点')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText('认证与登录 配置')).toBeInTheDocument());
+    // 仅保留生效 section 后的分组标签
     expect(screen.getByText('认证 · 安全')).toBeInTheDocument();
     expect(screen.getByText('审计 · 备份')).toBeInTheDocument();
     // section 元信息回显
-    expect(screen.getByText(/section: site/)).toBeInTheDocument();
-  });
-
-  it('site 板块的 theme 字段以枚举下拉渲染(light/dark/system)', async () => {
-    await renderPage();
-    await waitFor(() => expect(screen.getByText('站点与外观 配置')).toBeInTheDocument());
-    // theme 字段在 FIELD_ENUMS → 渲染为 select,当前值 system
-    const selects = Array.from(document.querySelectorAll('select.select')) as HTMLSelectElement[];
-    const themeSel = selects.find((s) => s.value === 'system');
-    expect(themeSel).toBeTruthy();
-    const optVals = Array.from(themeSel!.options).map((o) => o.value);
-    expect(optVals).toEqual(['light', 'dark', 'system']);
-    // brand 字段以文本输入渲染
-    expect(screen.getByText('brand')).toBeInTheDocument();
-  });
-
-  it('切换到 auth 板块,编辑器显示「认证与登录 配置」与 oauth 字段', async () => {
-    await renderPage();
-    await waitFor(() => expect(screen.getByText('站点与外观 配置')).toBeInTheDocument());
-    // 左侧 auth section 导航按钮(认证与登录)
-    fireEvent.click(screen.getByRole('button', { name: '认证与登录' }));
-    await waitFor(() => expect(screen.getByText('认证与登录 配置')).toBeInTheDocument());
     expect(screen.getByText(/section: auth/)).toBeInTheDocument();
-    // auth.json 顶层键(对象值)以字段标签渲染
+    // 仅存配置、不生效的 site / audit-config 已从配置页隐藏
+    expect(screen.queryByText('站点与外观')).toBeNull();
+  });
+
+  it('认证板块顶层键(jwt/oauth/registration)以字段渲染', async () => {
+    await renderPage();
+    await waitFor(() => expect(screen.getByText('认证与登录 配置')).toBeInTheDocument());
     expect(screen.getByText('jwt')).toBeInTheDocument();
     expect(screen.getByText('oauth')).toBeInTheDocument();
     expect(screen.getByText('registration')).toBeInTheDocument();
+  });
+
+  it('切换到备份策略,字段按类型渲染(string→输入框、boolean→开关)', async () => {
+    await renderPage();
+    await waitFor(() => expect(screen.getByText('认证与登录 配置')).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: '备份策略' }));
+    await waitFor(() => expect(screen.getByText('备份策略 配置')).toBeInTheDocument());
+    expect(screen.getByText(/section: backup-policy/)).toBeInTheDocument();
+    // fullCron(string) 文本输入回显当前值;walArchive(boolean) 字段标签出现
+    expect(screen.getByText('walArchive')).toBeInTheDocument();
+    const inputs = Array.from(document.querySelectorAll('input.input')) as HTMLInputElement[];
+    expect(inputs.some((i) => i.value === '0 3 * * 0')).toBe(true);
   });
 });
 
 describe('SettingsPage — 交互与保存', () => {
   beforeEach(() => { vi.clearAllMocks(); defaults(); });
 
-  it('未改动时保存按钮禁用,改 theme 后启用并调用 putSettingsSection(site)', async () => {
+  it('未改动时保存按钮禁用,改字段后启用并调用 putSettingsSection(backup-policy)', async () => {
     mockApi.putSettingsSection.mockImplementation((section: string, json: Record<string, unknown>) =>
       Promise.resolve({ section, json, updatedAt: '2026-05-30T11:00:00Z' }));
     await renderPage();
-    await waitFor(() => expect(screen.getByText('站点与外观 配置')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('认证与登录 配置')).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: '备份策略' }));
+    await waitFor(() => expect(screen.getByText('备份策略 配置')).toBeInTheDocument());
     const saveBtn = screen.getByRole('button', { name: '保存配置' }) as HTMLButtonElement;
     expect(saveBtn).toBeDisabled();
-    // 改 theme select system → dark
-    const selects = Array.from(document.querySelectorAll('select.select')) as HTMLSelectElement[];
-    const themeSel = selects.find((s) => s.value === 'system')!;
-    fireEvent.change(themeSel, { target: { value: 'dark' } });
+    // 改 fullCron 文本字段
+    const inputs = Array.from(document.querySelectorAll('input.input')) as HTMLInputElement[];
+    const cronInput = inputs.find((i) => i.value === '0 3 * * 0')!;
+    fireEvent.input(cronInput, { target: { value: '0 4 * * 0' } });
     // 出现未保存徽标 + 保存按钮启用
     await waitFor(() => expect(screen.getByText('未保存')).toBeInTheDocument());
     await waitFor(() => expect(screen.getByRole('button', { name: '保存配置' })).not.toBeDisabled());
     fireEvent.click(screen.getByRole('button', { name: '保存配置' }));
-    await waitFor(() => expect(mockApi.putSettingsSection).toHaveBeenCalledWith('site', expect.objectContaining({ theme: 'dark', brand: 'WordForge' })));
+    await waitFor(() => expect(mockApi.putSettingsSection).toHaveBeenCalledWith('backup-policy', expect.objectContaining({ fullCron: '0 4 * * 0' })));
     expect(mockToast.success).toHaveBeenCalled();
   });
 
   it('保存失败时弹错误 toast', async () => {
     mockApi.putSettingsSection.mockRejectedValue(new Error('save fail'));
     await renderPage();
-    await waitFor(() => expect(screen.getByText('站点与外观 配置')).toBeInTheDocument());
-    const selects = Array.from(document.querySelectorAll('select.select')) as HTMLSelectElement[];
-    const themeSel = selects.find((s) => s.value === 'system')!;
-    fireEvent.change(themeSel, { target: { value: 'dark' } });
+    await waitFor(() => expect(screen.getByText('认证与登录 配置')).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: '备份策略' }));
+    await waitFor(() => expect(screen.getByText('备份策略 配置')).toBeInTheDocument());
+    const inputs = Array.from(document.querySelectorAll('input.input')) as HTMLInputElement[];
+    const cronInput = inputs.find((i) => i.value === '0 3 * * 0')!;
+    fireEvent.input(cronInput, { target: { value: '0 4 * * 0' } });
     await waitFor(() => expect(screen.getByRole('button', { name: '保存配置' })).not.toBeDisabled());
     fireEvent.click(screen.getByRole('button', { name: '保存配置' }));
     await waitFor(() => expect(mockToast.error).toHaveBeenCalled());

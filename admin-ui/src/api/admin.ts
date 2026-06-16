@@ -457,10 +457,10 @@ export const adminApi = {
   /** GET /api/admin/feedback/:id — 工单详情(条目+回复+时间线+附件) */
   getFeedbackDetail: (id: string) =>
     api.get<FeedbackDetail>(`/api/admin/feedback/${id}`, undefined, { useAdminToken: true }),
-  /** POST /api/admin/feedback/:id/replies — 回复用户;pushInapp 发应用内通知,ccEmail 抄送邮箱 */
+  /** POST /api/admin/feedback/:id/replies — 回复用户;pushInapp 发应用内通知 */
   createFeedbackReply: (
     id: string,
-    payload: { body: string; pushInapp?: boolean; ccEmail?: boolean },
+    payload: { body: string; pushInapp?: boolean },
   ) => api.post<FeedbackReply>(`/api/admin/feedback/${id}/replies`, payload, { useAdminToken: true }),
   /** POST /api/admin/feedback/:id/assign — 分派给指定 admin,传 null 取消分派 */
   assignFeedback: (id: string, assigneeAdminId: string | null) =>
@@ -827,7 +827,7 @@ export const adminApi = {
   // ═══════════ be:feedback-announce:工单回复草稿(每工单一份 upsert) ═══════════
   getFeedbackDraft: (feedbackId: string) =>
     api.get<{ draft: FeedbackReplyDraft | null }>(`/api/admin/feedback/${feedbackId}/draft`, undefined, { useAdminToken: true }),
-  saveFeedbackDraft: (feedbackId: string, payload: { body: string; pushInapp?: boolean; ccEmail?: boolean }) =>
+  saveFeedbackDraft: (feedbackId: string, payload: { body: string; pushInapp?: boolean }) =>
     api.post<FeedbackReplyDraft>(`/api/admin/feedback/${feedbackId}/draft`, payload, { useAdminToken: true }),
 };
 
@@ -1557,7 +1557,6 @@ export interface FeedbackReplyDraft {
   feedbackId: string;
   body: string;
   pushInapp: boolean;
-  ccEmail: boolean;
   authorId: string | null;
   updatedAt: string;
 }

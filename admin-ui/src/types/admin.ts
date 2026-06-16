@@ -710,8 +710,6 @@ export interface FeedbackReply {
   body: string;
   /** 是否推送应用内通知给用户 */
   pushInapp: boolean;
-  /** 是否抄送邮箱 */
-  ccEmail: boolean;
   createdAt: string;
 }
 

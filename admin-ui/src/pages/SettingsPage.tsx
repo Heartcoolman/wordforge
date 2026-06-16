@@ -46,6 +46,14 @@ const GROUP_OF: Record<string, string> = {
 const GROUP_ORDER = ['站点', '认证 · 安全', '审计 · 备份', '配额', '其他'];
 const groupOf = (sec: string) => GROUP_OF[sec] ?? '其他';
 
+// 仅存配置、无运行期消费者的 section（后端 settings_sections.rs 自述 store-only，
+// 保存后当前不生效）——从配置页隐藏，只保留真正生效的（auth 含 registration、
+// backup-policy 含 targets）。维护模式 / 版本门控 / RBAC / API 密钥 / 配置快照为独立页签，不受影响。
+const HIDDEN_SECTIONS = new Set([
+  'site', 'ratelimit', 'roles', 'audit', 'audit-config', 'limits', 'keys',
+  'email', 'smtp', 'sms', 'sms_push', 'storage', 'db', 'cache',
+]);
+
 // 枚举字段 → 可选项（与后端 serde 枚举对齐），让非技术用户下拉选择而非手敲
 const FIELD_ENUMS: Record<string, string[]> = {
   theme: ['light', 'dark', 'system'],
@@ -73,7 +81,8 @@ export default function SettingsPage() {
 
   const [activeSection, setActiveSection] = createSignal<string>('');
 
-  const sections = (): SettingsSection[] => config()?.sections ?? [];
+  const sections = (): SettingsSection[] =>
+    (config()?.sections ?? []).filter((s) => !HIDDEN_SECTIONS.has(s.section));
   // 首个 section 兜底高亮
   createEffect(() => {
     const list = sections();

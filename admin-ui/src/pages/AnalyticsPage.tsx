@@ -36,23 +36,6 @@ const WEEKDAY_CN = ['日', '一', '二', '三', '四', '五', '六'];
 const DOW_ORDER = [1, 2, 3, 4, 5, 6, 0];
 const HOUR_LABELS = Array.from({ length: 24 }, (_, h) => String(h).padStart(2, '0'));
 
-/** 漏斗原始 SQL（运维参考；与后端 /analytics/funnel 同口径） */
-const FUNNEL_SQL = `-- 注册到长期留存漏斗（窗口内注册队列）
-WITH cohort AS (
-  SELECT id AS user_id
-  FROM users
-  WHERE created_at >= :range_start AND created_at < :range_end
-)
-SELECT 'register' AS stage, COUNT(*) AS users FROM cohort
-UNION ALL SELECT 'pick_wordbook', COUNT(DISTINCT c.user_id)
-  FROM cohort c JOIN user_wordbooks uw ON uw.user_id = c.user_id
-UNION ALL SELECT 'first_answer', COUNT(DISTINCT c.user_id)
-  FROM cohort c JOIN learning_records r ON r.user_id = c.user_id
-UNION ALL SELECT 'd1_return', COUNT(DISTINCT c.user_id)
-  FROM cohort c JOIN learning_records r ON r.user_id = c.user_id
-  AND r.created_at >= datetime(:reg_at, '+1 day')
-ORDER BY stage;`;
-
 /* ── 辅助 ───────────────────────────────────────────────────────────── */
 
 /** KPI 百分比 delta → StatCard 期望的 *100 数值（null 时不显示徽标） */
@@ -112,7 +95,6 @@ export default function AnalyticsPage() {
   const setDays = (v: string) => setSearchParams({ days: v });
 
   const [wordSort, setWordSort] = createSignal<WordSort>('count');
-  const [sqlOpen, setSqlOpen] = createSignal(false);
 
   // 各聚合端点独立兜底：单接口 5xx/超时不外抛，下游各自兜空态，避免整页白屏。
   const [kpi] = createResource<AnalyticsKpiSummary | null, { days: number }>(
@@ -251,7 +233,6 @@ export default function AnalyticsPage() {
         <Panel
           title="增长漏斗"
           sub={funnel() ? `最大流失 ${funnel()!.biggestDropFrom} → ${funnel()!.biggestDropTo} (-${(funnel()!.biggestDropPt * 100).toFixed(1)}pt)` : ''}
-          right={<Btn variant="ghost" size="sm" icon="db" onClick={() => setSqlOpen(true)}>SQL</Btn>}
         >
           <Show when={funnel()} fallback={<Loading />}>
             {(f) => (
@@ -272,11 +253,12 @@ export default function AnalyticsPage() {
                             </span>
                             <span class="mono" style={sx({ fontSize: 12.5 })}>
                               {fmtNum(s.count)} · {(s.pct * 100).toFixed(0)}%
-                              <Show when={s.deltaPt != null}>
-                                <span style={sx({ color: s.deltaPt! >= 0 ? 'var(--success)' : 'var(--error)', marginLeft: 6 })}>
+                              {/* delta 固定宽度列：空值也占位，保证 count·pct 在各行对齐 */}
+                              <span style={sx({ display: 'inline-block', minWidth: 68, textAlign: 'left', marginLeft: 6, color: s.deltaPt == null ? 'transparent' : s.deltaPt >= 0 ? 'var(--success)' : 'var(--error)' })}>
+                                <Show when={s.deltaPt != null}>
                                   {s.deltaPt! >= 0 ? '▲' : '▼'}{Math.abs(s.deltaPt! * 100).toFixed(1)}pt
-                                </span>
-                              </Show>
+                                </Show>
+                              </span>
                             </span>
                           </div>
                           <div style={sx({ height: 26, borderRadius: 8, background: 'var(--surface-sunken)', overflow: 'hidden' })}>
@@ -526,16 +508,6 @@ export default function AnalyticsPage() {
         </Show>
       </Panel>
 
-      {/* ── 漏斗原始 SQL 浮层 ────────────────────────────────────── */}
-      <Modal open={sqlOpen()} onClose={() => setSqlOpen(false)} title="增长漏斗原始 SQL" size="lg">
-        <p class="muted-3" style={sx({ fontSize: 12, margin: '0 0 12px' })}>
-          与 <code>/api/admin/analytics/funnel</code> 同口径，参数 <code>:range_start</code> / <code>:range_end</code> 取当前窗口。
-        </p>
-        <pre
-          class="mono"
-          style={sx({ background: 'var(--surface-sunken)', border: '1px solid var(--hairline)', borderRadius: 10, padding: 16, fontSize: 12, lineHeight: 1.6, overflowX: 'auto', margin: 0 }) as JSX.CSSProperties}
-        >{FUNNEL_SQL}</pre>
-      </Modal>
     </div>
   );
 }
