@@ -1658,14 +1658,40 @@ fn run_watcher(args: &WatcherArgs) {
     );
 }
 
-/// 用 curl 探 /health：避免 fork 后 tokio runtime 状态损坏的 reqwest 风险，也避免
-/// 新增 ureq 依赖。Linux 标准发行版均有 curl。
+/// 用 curl 探 /health（取状态码 + body），交 `classify_watcher_health` 判定。
+/// 用 curl 而非 reqwest：避免 fork 后 tokio runtime 状态损坏；Linux 标准发行版均有 curl。
+/// 注意：不加 `-f`——/health 在「子服务不健康」时仍返 200（健康度在 body.status），
+/// 也要在维护 503 时拿到 body 才能区分「维护中(放行)」与「真不健康(回滚)」。
 fn watcher_probe_health(url: &str) -> bool {
-    std::process::Command::new("curl")
-        .args(["-fsS", "--max-time", "3", "-o", "/dev/null", url])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    let output = std::process::Command::new("curl")
+        .args(["-sS", "--max-time", "3", "-w", "\n%{http_code}", url])
+        .output();
+    let Ok(output) = output else {
+        return false; // curl 不可用
+    };
+    if !output.status.success() {
+        return false; // 连接拒绝 / 超时 → 进程没起来 → 不健康
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let (body, code) = match stdout.rsplit_once('\n') {
+        Some((b, c)) => (b, c.trim()),
+        None => ("", stdout.trim()),
+    };
+    classify_watcher_health(code, body)
+}
+
+/// v1.2.0-beta.10：watcher 健康判定——把「升级是否成功」与「维护态/瞬时降级」正确区分。
+/// - 200 且 body 非 `status:"down"` → 健康（`ok`/`degraded` 都放行；degraded 多为 amas/sse/
+///   wbc/clock 等瞬时或外部因素，非升级之过）。
+/// - 200 且 `status:"down"` → store(DB) 不可用 = 坏升级（如旧二进制撞新 schema）→ 不健康，回滚。
+/// - 503 且 body 标维护中 → 进程已起来，维护与升级成功正交 → 放行（探测循环里后续也会转 200）。
+/// - 其余（无响应 / 非维护 503 / 其他码）→ 不健康，回滚。
+fn classify_watcher_health(http_code: &str, body: &str) -> bool {
+    match http_code {
+        "200" => !body.contains("\"status\":\"down\""),
+        "503" => body.contains("\"maintenance\":true") || body.contains("\"maintenance\": true"),
+        _ => false,
+    }
 }
 
 /// 回滚 binary + static + 清 maintenance flag + kill 当前 wordforge 主进程
@@ -1869,6 +1895,31 @@ fn watcher_update_audit_outcome(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// watcher 健康判定:store=down 才判坏升级;degraded/ok 放行;维护 503 放行;无响应/其他不健康。
+    #[test]
+    fn classify_watcher_health_distinguishes_down_maintenance_degraded() {
+        // 200 + ok / degraded → 健康
+        assert!(classify_watcher_health("200", r#"{"status":"ok","services":{}}"#));
+        assert!(classify_watcher_health(
+            "200",
+            r#"{"status":"degraded","services":{"sse":{"healthy":false}}}"#
+        ));
+        // 200 + store down → 坏升级 → 不健康(回滚)
+        assert!(!classify_watcher_health(
+            "200",
+            r#"{"status":"down","services":{"store":{"healthy":false}}}"#
+        ));
+        // 503 + 维护 → 已起来,放行
+        assert!(classify_watcher_health(
+            "503",
+            r#"{"maintenance":true,"message":"服务器升级中"}"#
+        ));
+        // 503 非维护 / 空 code(无响应) / 其他码 → 不健康
+        assert!(!classify_watcher_health("503", r#"{"error":"x"}"#));
+        assert!(!classify_watcher_health("", ""));
+        assert!(!classify_watcher_health("502", ""));
+    }
 
     /// 最强回滚 staging:把目标备份暂存为 <db>.rollback-pending,不动现役库,保留源备份,
     /// 不残留中转 .tmp。真正落地由新进程在 open 前执行。
