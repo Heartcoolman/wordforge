@@ -123,6 +123,7 @@ fn noop_ctx(channel: Channel, tag: &str) -> ApplyContext {
         on_rollback: Box::new(|_| {}),
         on_maintenance: Box::new(|_| {}),
         task_id: "test-task-id".to_string(),
+        audit_db_path: std::path::PathBuf::from(":memory:"),
         allow_downgrade: false,
     }
 }

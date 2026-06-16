@@ -228,6 +228,10 @@ pub struct ApplyContext {
     pub on_rollback: Box<dyn Fn(String) + Send + 'static>,
     pub on_maintenance: Box<dyn Fn(bool) + Send + 'static>,
     pub task_id: String,
+    /// 真实审计 DB 路径（= 运行时 `config.database_url`）。watcher 子进程据此 finalize
+    /// audit outcome（success / rolled_back）。**必须**用运行时实际 DB 路径，不能由
+    /// install_dir 推断——否则 watcher 把终态写进错误/空库，升级记录永远停在 in_progress。
+    pub audit_db_path: PathBuf,
     /// m022:rollback 专用旁路。设 true 时绕过 `is_strictly_newer` 校验,
     /// 允许把当前版本 swap 成更低的 target_tag。默认 false 即沿用 Updater struct
     /// 的 `allow_downgrade` 全局开关(env 配置)。
@@ -542,6 +546,7 @@ impl Updater {
             on_rollback,
             on_maintenance,
             task_id,
+            audit_db_path,
             allow_downgrade: ctx_allow_downgrade,
         } = ctx;
         let latest = {
@@ -611,6 +616,7 @@ impl Updater {
                 on_rollback,
                 on_maintenance,
                 &task_id,
+                &audit_db_path,
             )
             .await;
         // 失败时锁随 file drop 自动释放；成功时进程 exit 也会自动释放
@@ -630,6 +636,7 @@ impl Updater {
         _on_rollback: impl Fn(String) + Send + 'static,
         on_maintenance: impl Fn(bool) + Send + 'static,
         task_id: &str,
+        audit_db_path: &Path,
     ) -> Result<(), UpdaterError>
     where
         F: FnOnce(&Path) -> Result<(), UpdaterError> + Send,
@@ -836,7 +843,7 @@ impl Updater {
             static_backup,
             flag_path,
             health_url: health_url.to_string(),
-            audit_db_path: self.install_dir.join("data").join("learning.db"),
+            audit_db_path: audit_db_path.to_path_buf(),
             #[cfg(unix)]
             parent_pid: unsafe { libc::getpid() },
             #[cfg(not(unix))]
@@ -1891,6 +1898,33 @@ mod tests {
     fn parse_release_list_handles_empty_array() {
         let parsed = parse_release_list_payload(&serde_json::Value::Array(vec![]));
         assert!(parsed.stable.is_none() && parsed.beta.is_none());
+    }
+
+    #[test]
+    fn watcher_update_audit_outcome_writes_to_given_db() {
+        // 回归：watcher 必须写入「传入的」db_path（= 运行时 database_url），而非由 install_dir 推断；
+        // 否则升级终态写进错误/空库，真实记录永远停在 in_progress（升级历史全显示「进行中」）。
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("audit.db");
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE update_audit_log (id TEXT PRIMARY KEY, outcome TEXT, error TEXT, completed_at TEXT);\
+                 INSERT INTO update_audit_log (id, outcome) VALUES ('t-1', 'in_progress');",
+            )
+            .unwrap();
+        }
+        watcher_update_audit_outcome(&db, "t-1", "success", None, true);
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        let (outcome, has_completed): (String, bool) = conn
+            .query_row(
+                "SELECT outcome, completed_at IS NOT NULL FROM update_audit_log WHERE id='t-1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(outcome, "success");
+        assert!(has_completed);
     }
 
     #[test]

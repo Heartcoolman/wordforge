@@ -192,6 +192,11 @@ async fn apply(
     let channel = req.channel;
     // M0-R3：构造子进程健康自检 URL
     let health_url = format!("http://127.0.0.1:{}/health", state.config().port);
+    // watcher 子进程 finalize audit 用的真实 DB 路径（= 运行时 database_url，绝对化以防 watcher CWD 不同）。
+    let bg_audit_db_path = {
+        let p = state.config().database_url.clone();
+        std::fs::canonicalize(&p).unwrap_or_else(|_| std::path::PathBuf::from(p))
+    };
     tokio::spawn(async move {
         let progress_state = bg_state.clone();
         let sink: crate::services::updater::ProgressSink = Arc::new(move |phase| {
@@ -234,6 +239,7 @@ async fn apply(
             on_rollback: Box::new(on_rollback),
             on_maintenance: Box::new(on_maintenance),
             task_id: task_id.clone(),
+            audit_db_path: bg_audit_db_path,
             allow_downgrade: false,
         };
         match bg_updater.apply(ctx, backup_cb, sink).await {
@@ -427,6 +433,10 @@ async fn rollback(
     let target = req.target_version.clone();
     let channel = req.channel;
     let health_url = format!("http://127.0.0.1:{}/health", state.config().port);
+    let bg_audit_db_path = {
+        let p = state.config().database_url.clone();
+        std::fs::canonicalize(&p).unwrap_or_else(|_| std::path::PathBuf::from(p))
+    };
     tokio::spawn(async move {
         let progress_state = bg_state.clone();
         let sink: crate::services::updater::ProgressSink = Arc::new(move |phase| {
@@ -466,6 +476,7 @@ async fn rollback(
             on_rollback: Box::new(on_rollback),
             on_maintenance: Box::new(on_maintenance),
             task_id: task_id.clone(),
+            audit_db_path: bg_audit_db_path,
             allow_downgrade: true,
         };
         match bg_updater.apply(ctx, backup_cb, sink).await {
