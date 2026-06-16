@@ -1,6 +1,6 @@
 import { createResource, createSignal, createEffect, For, Show, type JSX } from 'solid-js';
 import {
-  PageHead, Seg, Panel, StatCard, Badge, Icon, Field, Loading, Skel,
+  PageHead, Seg, Panel, StatCard, Badge, Icon, Field, Loading, Skel, Empty,
   Donut, LineChart, BarChart, Scatter, Heatmap,
   fmtNum, fmtAgo, sx,
 } from '@/components/wf';
@@ -120,20 +120,22 @@ export default function AmasMetricsPage() {
         class="grid-collapse"
         style={sx({ display: 'grid', gridTemplateColumns: 'minmax(0,1fr) minmax(0,1.4fr)', gap: 16, marginBottom: 16 })}
       >
-        <Panel title="算法决策分布" sub="各算法占比">
+        <Panel title="算法决策分布" sub={`${algo()?.length ?? 0} 种算法占比`}>
           <Show when={algo()} fallback={<Loading />}>
             {(a) => (
-              <Donut
-                size={160}
-                thickness={24}
-                centerValue={a().length}
-                centerLabel="算法"
-                data={a().map((row: AmasAlgorithmShare, i) => ({
-                  label: row.algorithm,
-                  value: row.count,
-                  color: ALGO_COLORS[i % ALGO_COLORS.length],
-                }))}
-              />
+              <Show when={a().length > 0} fallback={<Empty title="暂无数据" desc="决策事件未上报" icon="chart" />}>
+                <Donut
+                  size={160}
+                  thickness={24}
+                  centerValue={a().length}
+                  centerLabel="算法"
+                  data={a().map((row: AmasAlgorithmShare, i) => ({
+                    label: row.algorithm,
+                    value: row.count,
+                    color: ALGO_COLORS[i % ALGO_COLORS.length],
+                  }))}
+                />
+              </Show>
             )}
           </Show>
         </Panel>

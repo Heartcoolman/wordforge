@@ -174,6 +174,10 @@ impl Store {
     }
 
     /// 返回最近 N 条升级记录（按 started_at 倒序）。
+    /// 列出「版本历史」：仅自更新 / 回滚（action IN self_update/rollback）。
+    /// 通用 admin 审计行（资源包热更 / 封禁 / 改密等，from/to 版本为空）不在此返回——
+    /// 它们经 `insert_admin_audit` 写入同表，但应走 `list_admin_audit_for_target` 按目标查看，
+    /// 不混入升级历史（否则前端版本列会渲染成空白「→」）。
     pub fn list_update_audit(&self, limit: usize) -> Result<Vec<UpdateAuditEntry>, StoreError> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
@@ -181,6 +185,7 @@ impl Store {
                     started_at, completed_at, outcome, error,
                     action, target_type, target_id, metadata_json
              FROM update_audit_log
+             WHERE action IN ('self_update', 'rollback')
              ORDER BY started_at DESC
              LIMIT ?1",
         )?;
@@ -279,7 +284,10 @@ mod tests {
             Some(&meta),
         )
         .unwrap();
-        let list = s.list_update_audit(10).unwrap();
+        // admin 审计行不进升级历史，按目标读回校验列
+        let list = s
+            .list_admin_audit_for_target("resource_pack", "wordbook-core", 10)
+            .unwrap();
         assert_eq!(list.len(), 1);
         let row = &list[0];
         assert_eq!(row.admin_id, "admin-7");
@@ -302,8 +310,30 @@ mod tests {
         let s = store();
         s.insert_admin_audit("admin-8", "user.unban", Some("user"), Some("uid-1"), None)
             .unwrap();
-        let list = s.list_update_audit(10).unwrap();
+        let list = s
+            .list_admin_audit_for_target("user", "uid-1", 10)
+            .unwrap();
         assert!(list[0].metadata_json.is_none());
         assert_eq!(list[0].action, "user.unban");
+    }
+
+    /// 回归：通用 admin 审计行（无版本）不应混入升级历史 `list_update_audit`，
+    /// 否则前端「版本历史」会出现空白「→」行。
+    #[test]
+    fn list_update_audit_excludes_admin_audit() {
+        let s = store();
+        s.insert_update_audit("up-1", "admin-1", "v1.0.0", "v1.1.0", "stable")
+            .unwrap();
+        s.insert_admin_audit(
+            "admin-9",
+            "resource_pack.upload",
+            Some("resource_pack"),
+            Some("pk"),
+            None,
+        )
+        .unwrap();
+        let list = s.list_update_audit(10).unwrap();
+        assert_eq!(list.len(), 1, "admin 审计不应出现在升级历史");
+        assert_eq!(list[0].action, "self_update");
     }
 }

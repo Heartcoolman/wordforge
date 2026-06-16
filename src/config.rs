@@ -47,7 +47,8 @@ pub struct Config {
     pub records_outbox_async: bool,
 }
 
-/// 远程探针配置：默认 enabled=false，避免未明确开启时被误用。
+/// 远程探针配置：生产（from_env）默认 enabled=true（默认启用，可设 PROBE_ENABLED=false 关闭）；
+/// ProbeConfig::default()（测试 / 裸构造）保守为 false。
 #[derive(Debug, Clone)]
 pub struct ProbeConfig {
     pub enabled: bool,
@@ -432,7 +433,7 @@ impl Config {
             },
             records_outbox_async: env_or_bool("RECORDS_OUTBOX_ASYNC", false),
             probe: ProbeConfig {
-                enabled: env_or_bool("PROBE_ENABLED", false),
+                enabled: env_or_bool("PROBE_ENABLED", true),
                 rate_limit_per_min: env_or_parse("PROBE_RATE_LIMIT_PER_MIN", 10_u32),
                 max_timeout_ms: env_or_parse("PROBE_MAX_TIMEOUT_MS", 10_000_u32),
                 default_timeout_ms: env_or_parse("PROBE_DEFAULT_TIMEOUT_MS", 3_000_u32),

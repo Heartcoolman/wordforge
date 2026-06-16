@@ -59,4 +59,59 @@ export const PROBE_TEMPLATES: ProbeTemplate[] = [
   recentNet: ctx.net.recent(10),
 };`,
   },
+  {
+    name: '健康总览',
+    description: '路由 / 版本 / 在线 / 内存 / 错误数 一屏体检',
+    body: `return {
+  route: ctx.app.route,
+  version: ctx.app.version,
+  online: ctx.nav.online,
+  memoryMB: ctx.perf.memoryMB(),
+  errorCount: ctx.errors.recent(50).length,
+  recentErrors: ctx.errors.recent(3),
+};`,
+  },
+  {
+    name: '控制台日志 Tail',
+    description: '最近 30 条 console（ring buffer）',
+    body: `return {
+  logs: ctx.logs.tail(30),
+};`,
+  },
+  {
+    name: '页面加载时序',
+    description: 'navigation + paint 性能条目',
+    body: `return {
+  navigation: ctx.perf.entries({ type: 'navigation' }),
+  paint: ctx.perf.entries({ type: 'paint' }),
+};`,
+  },
+  {
+    name: '网络质量',
+    description: '在线状态 + 链路类型 / 带宽 / RTT + 最近请求',
+    body: `return {
+  online: ctx.nav.online,
+  connection: ctx.nav.connection,
+  recentNet: ctx.net.recent(8),
+};`,
+  },
+  {
+    name: '时钟 / 时区',
+    description: '客户端时间 / 时区 / 高精度计时（可比对时钟漂移）',
+    body: `return {
+  now: ctx.time.now,
+  tz: ctx.time.tz,
+  performanceNow: ctx.time.performanceNow,
+};`,
+  },
+  {
+    name: '应用状态快照',
+    description: '路由 / 版本 / 构建 hash + 白名单 store 快照',
+    body: `return {
+  route: ctx.app.route,
+  version: ctx.app.version,
+  buildHash: ctx.app.buildHash,
+  store: ctx.app.storeSnapshot(),
+};`,
+  },
 ];

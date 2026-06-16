@@ -1007,7 +1007,8 @@ async fn it_admin_stats_and_users_endpoints() {
 
 /// v1.1-P2.10：ban / unban / reset-password / set-password 四类 admin 敏感操作
 /// 都应在 update_audit_log 留下 admin audit 记录（action 显式区分）。
-/// 通过 GET /api/admin/updates/history 反查（无需启用 updater）。
+/// 通过 GET /api/admin/users/:id/audit-log 按目标反查
+/// （升级历史 /updates/history 已按 action 过滤，不含通用 admin 审计）。
 #[tokio::test]
 async fn it_admin_sensitive_actions_write_audit_log() {
     let app = spawn_test_server().await;
@@ -1060,11 +1061,12 @@ async fn it_admin_sensitive_actions_write_audit_log() {
         assert_eq!(resp.status(), StatusCode::OK, "{path} 应 200");
     }
 
-    // 查 history（updater 未启用也可访问，handler 直接读 store）
+    // 反查该用户的 admin 操作审计（/users/:id/audit-log 按目标读回；
+    // 升级历史 /updates/history 已按 action 过滤，不返回通用 admin 审计）
     let resp = request(
         &app.app,
         Method::GET,
-        "/api/admin/updates/history",
+        &format!("/api/admin/users/{target_user_id}/audit-log"),
         None,
         &[("authorization", auth_header(&admin_token))],
     )

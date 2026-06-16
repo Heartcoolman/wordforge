@@ -458,6 +458,8 @@ export interface UpdateAuditEntry {
   completedAt?: string;
   outcome: 'success' | 'failed' | 'in_progress' | 'rolled_back';
   error?: string;
+  /** 审计动作；升级历史仅 self_update / rollback */
+  action?: string;
 }
 
 /// `POST /api/admin/updates/apply` 立即返回（202 Accepted）的载荷

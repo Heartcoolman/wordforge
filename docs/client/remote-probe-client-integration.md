@@ -48,7 +48,7 @@ admin REPL ──POST /api/admin/probe──► 后端
 | **沙箱能力** | 可以 eval 任意字符串 JS 且**默认无 DOM / fetch / cookie / IndexedDB**。Web 端使用 Dedicated `Worker({ type: 'module' })`；其他端使用各自的隔离机制（QuickJS、JSC、V8 isolate 等） |
 | **HTTPS** | 生产环境必须 HTTPS；script 是基础 64 编码而非加密，传输层泄露等同代码泄露 |
 
-> ⚠️ 远程探针默认 `PROBE_ENABLED=false`。客户端**不需要**前置判断是否启用 —— 关闭时后端不会推 `probe_request`，连不上业务通路是预期行为。
+> ⚠️ 远程探针默认 `PROBE_ENABLED=true`（默认启用）。客户端**不需要**前置判断是否启用 —— 若管理员设 `PROBE_ENABLED=false` 关闭，后端不会推 `probe_request`，连不上业务通路是预期行为。
 
 ---
 

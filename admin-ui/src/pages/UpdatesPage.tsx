@@ -31,6 +31,47 @@ const CHANGELOG_META: Array<{ key: string; label: string; color: string }> = [
   { key: 'perf', label: '性能', color: 'var(--accent)' },
 ];
 
+// release notes(GitHub Release body / CHANGELOG.md 段落）markdown → 结构化分节。
+// 后端无 GitHub compare 解析的 commits（changelogGroups 为空）时，把 releaseNotes 的
+// markdown 解析成「分节标题 + 列表」对齐设计稿，避免把 markdown 源码原样 dump。
+interface ReleaseNoteSection { label: string; color: string; items: string[]; }
+function stripInlineMd(s: string): string {
+  return s
+    .replace(/\*\*(.+?)\*\*/g, '$1')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/\[(.+?)\]\([^)]*\)/g, '$1')
+    .trim();
+}
+function releaseNoteColor(label: string): string {
+  if (/新功能|新增|feat|feature/i.test(label)) return 'var(--success)';
+  if (/修复|fix|bug/i.test(label)) return 'var(--info)';
+  if (/性能|优化|perf/i.test(label)) return 'var(--accent)';
+  return 'var(--text-2)';
+}
+function parseReleaseNotes(md: string): { intro: string; sections: ReleaseNoteSection[] } {
+  const sections: ReleaseNoteSection[] = [];
+  let intro = '';
+  let cur: ReleaseNoteSection | null = null;
+  for (const raw of md.split('\n')) {
+    const line = raw.trim();
+    if (!line) continue;
+    if (line === '---' || /^\*\*Full Changelog\*\*/i.test(line)) break; // 跳过页脚（分隔线 / compare 链接）
+    const h = /^#{1,6}\s+(.*)$/.exec(line);
+    if (h) {
+      cur = { label: stripInlineMd(h[1]), color: releaseNoteColor(h[1]), items: [] };
+      sections.push(cur);
+      continue;
+    }
+    const b = /^[-*]\s+(.*)$/.exec(line);
+    if (b) {
+      if (cur) cur.items.push(stripInlineMd(b[1]));
+      continue;
+    }
+    if (!cur) intro = intro ? `${intro} ${stripInlineMd(line)}` : stripInlineMd(line); // 首个标题前的段落作引言
+  }
+  return { intro, sections: sections.filter((s) => s.items.length > 0) };
+}
+
 // 备份种类 → 中文短标
 const BACKUP_KIND_LABEL: Record<string, string> = {
   upgrade: '升级',
@@ -115,6 +156,12 @@ export default function UpdatesPage() {
       ...m,
       items: cl.commits!.filter((c) => c.category === m.key),
     })).filter((g) => g.items.length > 0);
+  });
+
+  // releaseNotes（GitHub Release body）markdown → 结构化分节，供 changelogGroups 为空时渲染
+  const releaseNotesSections = createMemo(() => {
+    const notes = chStatus()?.releaseNotes;
+    return notes ? parseReleaseNotes(notes) : { intro: '', sections: [] as ReleaseNoteSection[] };
   });
 
   // 升级进行中时启动 2s 轮询，终态后停止
@@ -387,9 +434,36 @@ export default function UpdatesPage() {
                   when={chStatus()?.releaseNotes}
                   fallback={<p class="muted" style={sx({ fontSize: 12.5 })}>{changelog()?.reason ?? '暂无可比对的 CHANGELOG。'}</p>}
                 >
-                  <pre class="muted" style={sx({ fontSize: 12, whiteSpace: 'pre-wrap', margin: 0, lineHeight: 1.6 })}>
-                    {chStatus()!.releaseNotes}
-                  </pre>
+                  <Show
+                    when={releaseNotesSections().sections.length > 0}
+                    fallback={
+                      <pre class="muted" style={sx({ fontSize: 12, whiteSpace: 'pre-wrap', margin: 0, lineHeight: 1.6 })}>
+                        {chStatus()!.releaseNotes}
+                      </pre>
+                    }
+                  >
+                    <div style={sx({ display: 'flex', flexDirection: 'column', gap: 14 })}>
+                      <Show when={releaseNotesSections().intro}>
+                        <p class="muted" style={sx({ fontSize: 12, lineHeight: 1.6, margin: 0 })}>
+                          {releaseNotesSections().intro}
+                        </p>
+                      </Show>
+                      <For each={releaseNotesSections().sections}>
+                        {(g) => (
+                          <div>
+                            <div style={sx({ fontSize: 12, fontWeight: 700, color: g.color, marginBottom: 6 })}>{g.label}</div>
+                            <ul style={sx({ margin: 0, paddingLeft: 18 })}>
+                              <For each={g.items}>
+                                {(it) => (
+                                  <li style={sx({ fontSize: 12.5, marginBottom: 4, color: 'var(--text-2)' })}>{it}</li>
+                                )}
+                              </For>
+                            </ul>
+                          </div>
+                        )}
+                      </For>
+                    </div>
+                  </Show>
                 </Show>
               }
             >
@@ -450,7 +524,7 @@ export default function UpdatesPage() {
                   <tbody>
                     <For each={history()!.entries}>
                       {(h) => {
-                        const isRollback = h.outcome === 'rolled_back';
+                        const isRollback = h.action === 'rollback' || h.outcome === 'rolled_back';
                         const dur = auditDurSecs(h);
                         const canRollback = !!h.fromVersion && h.fromVersion !== status()?.currentVersion;
                         return (

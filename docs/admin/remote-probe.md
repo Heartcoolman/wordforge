@@ -6,18 +6,18 @@ admin 在控制台写 JS 表达式 → 通过 SSE 下发到指定 / 一批 / 全
 
 ## 1. 启用
 
-默认 **关闭**。开启方式（任选其一）：
+默认 **启用**。如需关闭：
 
 ```bash
 # 环境变量（重启生效）
-export PROBE_ENABLED=true
+export PROBE_ENABLED=false
 ```
 
 可调参数（环境变量）：
 
 | 变量 | 默认 | 含义 |
 |---|---|---|
-| `PROBE_ENABLED` | `false` | kill switch；false 时所有 admin probe 端点 503 |
+| `PROBE_ENABLED` | `true` | kill switch；设为 false 时所有 admin probe 端点 503 |
 | `PROBE_RATE_LIMIT_PER_MIN` | `10` | per-admin 每分钟最大 dispatch 次数 |
 | `PROBE_MAX_TIMEOUT_MS` | `10000` | timeoutMs 上限 |
 | `PROBE_DEFAULT_TIMEOUT_MS` | `3000` | 未指定 timeoutMs 时的默认值 |
