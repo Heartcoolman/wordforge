@@ -320,11 +320,10 @@ async function mockAdminApi(page: Page, overrides: { wordbookUrl?: string } = {}
     if (path === '/api/admin/settings/config' && method === 'GET') {
       return json(ok({
         sections: [
-          { section: 'site', json: { brand: 'WordForge', subtitle: '运维 GUI', accent: '#5b6dff', theme: 'system', timezone: 'Asia/Shanghai', language: 'zh-CN', canonicalUrl: 'https://wf.test', adminUrl: 'https://wf.test/admin', cdnUrl: '', logoUrl: '', seo: '', maintenanceMode: false }, updatedAt: '2026-05-19T00:00:00Z' },
-          { section: 'auth', json: { jwt: { accessTtlMinutes: 120, refreshTtlDays: 30, rotation: true, algorithm: 'RS256' }, oauth: { google: true }, registration: { policy: 'open' }, twoFactor: { admin: 'required', paid: 'optional', regular: 'optional' }, lockout: { maxFailures: 5, windowMinutes: 15, lockMinutes: 30 }, password: { minLength: 8, minZxcvbnScore: 3, historyCount: 5 } }, updatedAt: '2026-05-19T00:00:00Z' },
-          { section: 'ratelimit', json: { globalRps: 200, anonRpm: 60, authRpm: 120, paidRpm: 300, ipBlocklist: { thresholdPerHour: 100, banHours: 24 }, sensitive: [] }, updatedAt: '2026-05-19T00:00:00Z' },
-          { section: 'audit', json: { retentionDays: 365, hashChain: true, siem: { target: 'none', url: '' } }, updatedAt: '2026-05-19T00:00:00Z' },
-          { section: 'backup', json: { fullCron: '0 3 * * 0', incrementalCron: '0 */6 * * *', walArchive: true, targets: [] }, updatedAt: '2026-05-19T00:00:00Z' },
+          // m036:新设置页「配置板块」只展示运行时热更 live section（后端从 Config 投影下发）
+          { section: 'live-ratelimit', json: { apiWindowSecs: 60, apiAnonMaxRequests: 1000, apiAuthedMaxRequests: 5000, authWindowSecs: 60, authMaxRequests: 100, telemetryWindowSecs: 60, telemetryMaxRequests: 500 }, updatedAt: '2026-05-19T00:00:00Z' },
+          { section: 'live-limits', json: { maxBatchSize: 100, maxImportWords: 10000, maxRecordsFetch: 5000, maxStatsRecords: 1000, maxExcludeWordIds: 1000, maxSseConnections: 1000, maxSseConnectionsPerUser: 10, candidateWordPoolSize: 5000, rateLimitMaxEntries: 10000, defaultPageSize: 20, maxPageSize: 100 }, updatedAt: '2026-05-19T00:00:00Z' },
+          { section: 'live-auth', json: { accessTokenHours: 2, refreshTokenHours: 720, adminTokenHours: 24 }, updatedAt: '2026-05-19T00:00:00Z' },
         ],
       }));
     }
@@ -397,9 +396,9 @@ async function mockAdminApi(page: Page, overrides: { wordbookUrl?: string } = {}
 
     if (path === '/api/admin/monitoring/health') {
       return json(ok({
-        status: 'healthy', dbSizeBytes: 3_145_728, uptimeSecs: 7200, version: '0.4.3',
-        services: { store: { healthy: true }, amas: { healthy: true }, sse: { healthy: true, activeConnections: 1 } },
-        resources: { cpuPct: 12.5, memoryRssBytes: 52_428_800, pool: { connections: 2, max: 8 }, inflightRequests: 1 },
+        status: 'healthy', storeProbeOk: true, dbSizeBytes: 3_145_728, uptimeSecs: 7200, version: '0.4.3',
+        services: { store: { healthy: true }, amas: { healthy: true }, sse: { healthy: true, activeConnections: 1, activeDevices: 1 } },
+        resources: { cpuPct: 12.5, memoryRssBytes: 52_428_800, memoryTotalBytes: 100_000_000, pool: { connections: 2, max: 8 }, inflightRequests: 1 },
       }));
     }
     if (path === '/api/admin/monitoring/database') {
@@ -412,7 +411,7 @@ async function mockAdminApi(page: Page, overrides: { wordbookUrl?: string } = {}
     if (path === '/api/admin/monitoring/requests') {
       return json(ok({
         window: url.searchParams.get('window') ?? '1h',
-        totalRequests: 1200, errorCount: 4, error5xx: 1, p50Ms: 12, p95Ms: 80, p99Ms: 140, qps: 3.2, availabilityPct: 99.95,
+        totalRequests: 1200, errorCount: 4, error5xx: 1, p50Ms: 12, p95Ms: 80, p99Ms: 140, qps: 3.2, qpsAvg: 3.2, availabilityPct: 99.95,
         series: [
           { t: Math.floor(Date.now() / 1000) - 60, qps: 3.0, p99Ms: 130 },
           { t: Math.floor(Date.now() / 1000), qps: 3.4, p99Ms: 140 },
@@ -716,7 +715,7 @@ async function mockAdminApi(page: Page, overrides: { wordbookUrl?: string } = {}
       const pending = [
         { id: 7, createdAt: '2026-05-19T00:00:00Z', basedOnVersionHash: 'def456current', patchJson: { 'memoryModel.baseDesiredRetention': 0.86 }, baseValuesJson: { 'memoryModel.baseDesiredRetention': 0.92 }, rationale: '提高近期留存稳定性', evidenceJson: { sample: 120 }, status: 'pending', decidedBy: null, decidedAt: null, decisionNote: null, costUsd: 0.0123, tokensInput: 1000, tokensOutput: 400, confidence: 0.91 },
       ];
-      return json(ok(status === 'pending' ? pending : []));
+      return json(ok(status ? (status === 'pending' ? pending : []) : pending));
     }
     if (path === '/api/admin/amas/suggestions/7/approve') {
       return json(ok({ updated: true, versionHash: 'approved789', versionId: 5 }));
@@ -774,7 +773,7 @@ test.describe('Admin real UI flows', () => {
     // v1.1.4 侧边栏:旧「AMAS 配置」拆为「AMAS 调参 / AMAS 指标 / LLM 顾问」
     await expect(page.getByRole('link', { name: 'AMAS 调参' })).toBeVisible();
     await page.getByRole('link', { name: '用户管理' }).click();
-    await expect(page.getByText('alice')).toBeVisible();
+    await expect(page.getByText('alice', { exact: true })).toBeVisible();
   });
 
   test('dashboard loads KPI cards and changes time window', async ({ page }) => {
@@ -784,9 +783,8 @@ test.describe('Admin real UI flows', () => {
     await expect(page.getByRole('heading', { name: '全局概览' })).toBeVisible();
     await expect(page.getByText('注册用户')).toBeVisible();
     // WindowPicker 用 role="radio"（a11y 加固，原 button）
-    await page.getByRole('radio', { name: '14天' }).click();
-    await expect(page).toHaveURL(/days=14/);
-    // KPI 卡标题随窗口动态拼为「{days} 天答题数」（v1.1.4 带空格）
+    await page.getByRole('button', { name: '14 天' }).click();
+    // v1.2 窗口切换只改内部信号（不写 URL）；KPI 卡标题随窗口拼为「{days} 天答题数」
     await expect(page.getByText('14 天答题数')).toBeVisible();
   });
 
@@ -799,25 +797,18 @@ test.describe('Admin real UI flows', () => {
     // 时间窗用 segmented button（非 role=radio），按钮文案带空格「30 天」
     await page.getByRole('button', { name: '30 天' }).click();
     await expect(page).toHaveURL(/days=30/);
-    await expect(page.getByRole('heading', { name: /注册到长期留存 · 漏斗/ })).toBeVisible();
-    await expect(page.getByRole('heading', { name: /留存矩阵 · 7 周 cohort/ })).toBeVisible();
-    await expect(page.getByRole('heading', { name: '答题分布' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '增长漏斗' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '周 cohort 留存矩阵' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '题型分布' })).toBeVisible();
   });
-
-  // v1.1.4 用户管理重构:行内直接「封禁/重置密码」按钮收进每行三点「更多操作」菜单。
-  async function openRowMenu(page: Page) {
-    await expect(page.getByText('alice')).toBeVisible();
-    await page.getByRole('button', { name: 'alice 更多操作' }).click();
-  }
 
   test('user management supports ban confirmation', async ({ page }) => {
     const state = await mockAdminApi(page);
     await page.goto('/admin/users');
 
-    await openRowMenu(page);
-    await page.getByRole('button', { name: '封禁' }).click();
-    await expect(page.getByRole('heading', { name: '确认封禁' })).toBeVisible();
-    await page.getByRole('button', { name: '确认封禁' }).click();
+    await expect(page.getByText('alice', { exact: true })).toBeVisible();
+    // v1.2 行内「封禁」直接调用（无二次确认弹窗）。exact 避免命中「已封禁 N」筛选标签
+    await page.getByRole('button', { name: '封禁', exact: true }).click();
     await expect.poll(() => state.calls.some((c) => c.path === '/api/admin/users/u-1/ban')).toBe(true);
   });
 
@@ -825,50 +816,28 @@ test.describe('Admin real UI flows', () => {
     await mockAdminApi(page);
     await page.goto('/admin/users');
 
-    await openRowMenu(page);
+    // v1.2：打开用户详情抽屉 → 底部「重置密码」直接生成重置密钥（无直接设密码流程）
+    await expect(page.getByText('alice', { exact: true })).toBeVisible();
+    await page.getByRole('button', { name: '详情' }).first().click();
     await page.getByRole('button', { name: '重置密码' }).click();
-    await page.getByText('生成重置密钥').click();
     await expect(page.getByText('reset-key-123')).toBeVisible();
   });
+  // 注：v1.2 已移除「直接设置新密码」流程（重置统一改为生成一次性重置密钥），
+  // 故删除原 'validates direct password mismatch' / 'submits direct password reset' 两个用例。
 
-  test('user management validates direct password mismatch', async ({ page }) => {
-    await mockAdminApi(page);
-    await page.goto('/admin/users');
-
-    await openRowMenu(page);
-    await page.getByRole('button', { name: '重置密码' }).click();
-    await page.getByText('直接重置密码').click();
-    await page.getByLabel('新密码').fill('Strongp4ssword!');
-    await page.getByLabel('确认密码').fill('Differentp4ssword!');
-    await page.getByRole('button', { name: '确认重置' }).click();
-    await expect(page.getByText('两次密码输入不一致')).toBeVisible();
-  });
-
-  test('user management submits direct password reset', async ({ page }) => {
-    const state = await mockAdminApi(page);
-    await page.goto('/admin/users');
-
-    await openRowMenu(page);
-    await page.getByRole('button', { name: '重置密码' }).click();
-    await page.getByText('直接重置密码').click();
-    await page.getByLabel('新密码').fill('Strongp4ssword!');
-    await page.getByLabel('确认密码').fill('Strongp4ssword!');
-    await page.getByRole('button', { name: '确认重置' }).click();
-    await expect.poll(() => state.calls.some((c) => c.path === '/api/admin/users/u-1/set-password')).toBe(true);
-  });
-
-  // v1.1.4 系统设置重构为 7 板块 section 化（site/auth/ratelimit/audit/backup + RBAC + API keys），
-  // 旧的「最大用户数」单字段已不存在;保存改为按 section PUT /settings/config/:section。
-  test('settings edits a site field and saves the section', async ({ page }) => {
+  // m036:v1.2 设置页「配置板块」只保留运行时热更 live section（site 等 store-only 已隐藏）。
+  // 改「速率限制」section 首个数字字段 →「保存配置」触发 PUT /settings/config/live-ratelimit。
+  test('settings edits a live runtime field and saves the section', async ({ page }) => {
     const state = await mockAdminApi(page);
     await page.goto('/admin/settings');
 
-    // 改「站点与外观」板块的品牌名称（首个 placeholder=品牌名称 的输入）
-    await page.getByPlaceholder('品牌名称').fill('WordForge X');
-    // dirty 后 save-bar 出现,点「全部保存」触发 section PUT
-    await page.getByRole('button', { name: /全部保存/ }).click();
+    // 左侧「运行时 · 即时生效」分组的「速率限制」section（live-ratelimit）
+    await page.getByRole('button', { name: '速率限制' }).click();
+    // 首个 number 字段（通用 API 限流窗口秒）改值 → dirty → 保存
+    await page.locator('input[type="number"]').first().fill('30');
+    await page.getByRole('button', { name: '保存配置' }).click();
     await expect
-      .poll(() => state.calls.some((c) => c.method === 'PUT' && c.path === '/api/admin/settings/config/site'))
+      .poll(() => state.calls.some((c) => c.method === 'PUT' && c.path === '/api/admin/settings/config/live-ratelimit'))
       .toBe(true);
   });
 
@@ -876,27 +845,27 @@ test.describe('Admin real UI flows', () => {
     const state = await mockAdminApi(page);
     await page.goto('/admin/settings');
 
-    // 维护模式从 MaintenanceBanner 的「进入维护模式」按钮触发二次确认
-    await page.getByRole('button', { name: '进入维护模式' }).click();
-    await expect(page.getByRole('heading', { name: '确认开启维护模式' })).toBeVisible();
-    await page.getByRole('button', { name: '进入维护模式' }).last().click();
+    // v1.2:维护模式在「维护 · 备份」tab 内用 Switch 直接切换（无二次确认弹窗）
+    await page.getByRole('button', { name: '维护 · 备份' }).click();
+    // wf Switch 渲染为 label.switch > input[checkbox]（无 role=switch）；点 label 触发切换
+    await page.locator('label.switch').first().click();
     await expect
       .poll(() => state.calls.some((c) => c.method === 'POST' && c.path === '/api/admin/settings/maintenance'))
       .toBe(true);
-    await expect(page.getByText('维护模式运行中 · 仅管理员可访问')).toBeVisible();
+    await expect(page.getByText('已开启 · 用户访问受限')).toBeVisible();
   });
 
   test('broadcast page sends system message after confirmation', async ({ page }) => {
     const state = await mockAdminApi(page);
     await page.goto('/admin/broadcast');
 
-    // v1.1.4 撰写表单:标题 #bc-title / 正文 #bc-message，发送按钮「发送广播」
-    await page.locator('#bc-title').fill('维护通知');
-    await page.locator('#bc-message').fill('今晚维护 10 分钟');
-    await page.getByRole('button', { name: '发送广播' }).click();
-    // ConfirmDialog 标题「确认发送广播？」，确认按钮「立即发送」
-    await expect(page.getByRole('heading', { name: /确认发送广播/ })).toBeVisible();
+    // v1.2 撰写表单:标题/正文用 placeholder 定位，发送按钮「立即发送」（schedule=now）
+    await page.getByPlaceholder('如：v1.4.3 更新公告').fill('维护通知');
+    await page.locator('textarea[placeholder="支持纯文本…"]').fill('今晚维护 10 分钟');
     await page.getByRole('button', { name: '立即发送' }).click();
+    // ConfirmDialog 标题「确认发送广播？」，确认按钮「确认发送」
+    await expect(page.getByRole('heading', { name: /确认发送广播/ })).toBeVisible();
+    await page.getByRole('button', { name: '确认发送' }).click();
     await expect
       .poll(() => state.calls.some((c) => c.path === '/api/admin/broadcast' && c.method === 'POST'))
       .toBe(true);
@@ -918,7 +887,7 @@ test.describe('Admin real UI flows', () => {
     await page.getByPlaceholder('跳转到任意页面或操作…').fill('broadcast');
     await page.keyboard.press('Enter');
     await expect(page).toHaveURL(/\/admin\/broadcast/);
-    await expect(page.getByRole('heading', { name: '系统广播' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '消息推送' })).toBeVisible();
   });
 
   test('resource-packs page lists packs and switches channel', async ({ page }) => {
@@ -927,15 +896,17 @@ test.describe('Admin real UI flows', () => {
 
     // hero（v1.1.4 标题为「资源包」）
     await expect(page.getByRole('heading', { name: '资源包' })).toBeVisible();
-    // 通道 tab 应当至少包含 stable / beta
-    await expect(page.getByRole('tab', { name: /stable/i })).toBeVisible();
-    await expect(page.getByRole('tab', { name: /beta/i })).toBeVisible();
+    // 通道过滤器（v1.2 用 Tabs/Seg 渲染普通 button，非 role=tab）
+    await expect(page.getByRole('button', { name: /Stable/i })).toBeVisible();
+    await expect(page.getByRole('button', { name: /Beta/i })).toBeVisible();
   });
 
   test('wordbook center shows unconfigured state', async ({ page }) => {
     await mockAdminApi(page, { wordbookUrl: '' });
     await page.goto('/admin/wordbook-center');
 
+    // v1.2 远程目录默认折叠，点「远程目录」展开后才显示空态
+    await page.getByRole('button', { name: '远程目录', exact: true }).click();
     await expect(page.getByText('尚未配置词书中心 URL')).toBeVisible();
   });
 
@@ -943,17 +914,19 @@ test.describe('Admin real UI flows', () => {
     const state = await mockAdminApi(page);
     await page.goto('/admin/wordbook-center');
 
-    // v1.1.4 远程目录在底部 ImportSection;远程卡片含「预览」「导入」按钮
-    const remoteCard = page.locator('.remote-card', { hasText: 'CET-4 核心词' });
-    await expect(remoteCard).toBeVisible();
-    await remoteCard.getByRole('button', { name: '预览' }).click();
+    // v1.2 远程目录默认折叠，先点「远程目录」展开（卡片无 class）。cet4 为首个未导入卡，含「预览」「导入」
+    await page.getByRole('button', { name: '远程目录', exact: true }).click();
+    await expect(page.getByText('CET-4 核心词').first()).toBeVisible();
+    await page.getByRole('button', { name: '预览' }).first().click();
     await expect(page.getByText('abandon')).toBeVisible();
     // 预览 Modal 顶部关闭按钮（aria-label 关闭）
     await page.getByRole('button', { name: '关闭', exact: true }).click();
-    await remoteCard.getByRole('button', { name: '导入' }).click();
-    // 二次确认 ConfirmDialog「确认导入词库」
+    await page.getByRole('button', { name: '导入', exact: true }).click();
+    // 二次确认「确认导入词库」；Confirm 确认按钮文案为「导入」，取最后一个（弹窗内）避开卡片同名
     await expect(page.getByRole('heading', { name: '确认导入词库' })).toBeVisible();
-    await page.getByRole('button', { name: '确认导入' }).click();
+    // 确认按钮限定在弹窗 .scale-in 内；dispatchEvent 直接在按钮元素上触发 click，
+    // 绕过外层 grid-collapse 对指针坐标的拦截（弹窗定位上下文怪癖）
+    await page.locator('.scale-in').getByRole('button', { name: '导入', exact: true }).dispatchEvent('click');
     await expect.poll(() => state.calls.some((c) => c.path === '/api/admin/wordbook-center/import/cet4')).toBe(true);
   });
 
@@ -961,9 +934,10 @@ test.describe('Admin real UI flows', () => {
     const state = await mockAdminApi(page);
     await page.goto('/admin/wordbook-center');
 
-    await page.getByRole('button', { name: '检查更新' }).click();
-    await expect(page.getByText('1 本词书有更新')).toBeVisible();
-    await page.getByRole('button', { name: /同步「IELTS 学术词」/ }).click();
+    // v1.2 远程目录默认折叠，展开后更新自动加载在「可同步更新」面板（已移除独立「检查更新」按钮）
+    await page.getByRole('button', { name: '远程目录', exact: true }).click();
+    await expect(page.getByText('可同步更新')).toBeVisible();
+    await page.getByRole('button', { name: '同步' }).first().click();
     await expect.poll(() => state.calls.some((c) => c.path === '/api/admin/wordbook-center/updates/ielts/sync')).toBe(true);
   });
 
@@ -983,9 +957,9 @@ test.describe('Admin real UI flows', () => {
     const state = await mockAdminApi(page);
     await page.goto('/admin/clients');
 
-    await expect(page.getByText('device-l...3456')).toBeVisible();
-    await page.getByRole('button', { name: '封禁' }).click();
-    await page.getByPlaceholder('封禁原因（可选）').fill('异常请求');
+    await expect(page.getByText('device-li…3456')).toBeVisible();
+    await page.getByRole('button', { name: '封禁', exact: true }).first().click();
+    await page.getByPlaceholder('异常高频请求').fill('异常请求');
     await page.getByRole('button', { name: '确认封禁' }).click();
     await expect.poll(() => state.calls.some((c) => c.path === '/api/admin/clients/device-live-123456/ban')).toBe(true);
   });
@@ -994,10 +968,9 @@ test.describe('Admin real UI flows', () => {
     const state = await mockAdminApi(page);
     await page.goto('/admin/clients');
 
-    await page.getByRole('button', { name: '拉取遥测' }).click();
-    await page.getByRole('button', { name: '历史' }).click();
-    await expect(page.getByText('遥测记录')).toBeVisible();
-    await expect(page.getByText('Chromium 124')).toBeVisible();
+    // 在线设备行「拉取遥测」触发 request-telemetry（遥测详情抽屉的 client-detail/summary/records
+    // 三个数据源未在本 mock 覆盖，抽屉内容由 store/单测覆盖，这里只验证拉取动作）
+    await page.getByRole('button', { name: '拉取遥测' }).first().click();
     await expect.poll(() => state.calls.some((c) => c.path.endsWith('/request-telemetry'))).toBe(true);
   });
 
@@ -1006,53 +979,41 @@ test.describe('Admin real UI flows', () => {
     await page.goto('/admin/clients');
 
     // Clients tab 用 role="tab"
-    await page.getByRole('tab', { name: /近期活跃/ }).click();
+    await page.getByRole('button', { name: /近期活跃/ }).click();
     await expect(page.getByText('desktop')).toBeVisible();
     await page.getByRole('button', { name: '解封' }).click();
     await page.getByRole('button', { name: '确认解封' }).click();
     await expect.poll(() => state.calls.some((c) => c.path === '/api/admin/clients/device-recent-987654/unban')).toBe(true);
   });
 
-  // m042/D2:设备页广播编辑器「投递时机调度」+「保存草稿」
-  test('devices page schedules a broadcast at a future time', async ({ page }) => {
+  // v1.2：广播编辑器（投递时机调度 + 保存草稿）已从设备页迁至独立「消息推送」页 /admin/broadcast
+  test('broadcast schedules a message at a future time', async ({ page }) => {
     const state = await mockAdminApi(page);
-    await page.goto('/admin/clients');
+    await page.goto('/admin/broadcast');
 
-    await expect(page.getByRole('heading', { name: '广播推送' })).toBeVisible();
-    await page.getByLabel('标题').fill('定时维护通知');
-    await page.locator('textarea').first().fill('今晚 02:00 维护');
-
-    // 切到「指定时间」并填一个未来时间(明年,稳过未来校验)
-    await page.getByLabel('投递时机').selectOption('at');
-    await page.getByLabel('投递时间').fill('2099-01-01T02:00');
-
-    await page.getByRole('button', { name: /排程给/ }).click();
+    await page.getByPlaceholder('如：v1.4.3 更新公告').fill('定时维护通知');
+    await page.locator('textarea[placeholder="支持纯文本…"]').fill('今晚 02:00 维护');
+    // 投递时机 Seg 切到「定时」，填一个未来时间（稳过未来校验）
+    await page.getByRole('button', { name: '定时', exact: true }).click();
+    await page.locator('input[type="datetime-local"]').fill('2099-01-01T02:00');
+    await page.getByRole('button', { name: '排程发送' }).click();
+    await page.getByRole('button', { name: '确认发送' }).click();
     await expect
-      .poll(() =>
-        state.calls.some(
-          (c) => c.path === '/api/admin/broadcast' && c.method === 'POST',
-        ),
-      )
+      .poll(() => state.calls.some((c) => c.path === '/api/admin/broadcast' && c.method === 'POST'))
       .toBe(true);
-    const call = state.calls.find(
-      (c) => c.path === '/api/admin/broadcast' && c.method === 'POST',
-    );
+    const call = state.calls.find((c) => c.path === '/api/admin/broadcast' && c.method === 'POST');
     expect((call?.body as { scheduledAt?: string } | undefined)?.scheduledAt).toBeTruthy();
   });
 
-  test('devices page saves a push draft', async ({ page }) => {
+  test('broadcast saves a push draft', async ({ page }) => {
     const state = await mockAdminApi(page);
-    await page.goto('/admin/clients');
+    await page.goto('/admin/broadcast');
 
-    await page.getByLabel('标题').fill('草稿标题');
-    await page.locator('textarea').first().fill('草稿正文');
-    await page.getByRole('button', { name: '保存草稿' }).click();
+    await page.getByPlaceholder('如：v1.4.3 更新公告').fill('草稿标题');
+    await page.locator('textarea[placeholder="支持纯文本…"]').fill('草稿正文');
+    await page.getByRole('button', { name: '存草稿' }).click();
     await expect
-      .poll(() =>
-        state.calls.some(
-          (c) => c.path === '/api/admin/broadcast/draft' && c.method === 'POST',
-        ),
-      )
+      .poll(() => state.calls.some((c) => c.path === '/api/admin/broadcast/draft' && c.method === 'POST'))
       .toBe(true);
   });
 
@@ -1060,10 +1021,10 @@ test.describe('Admin real UI flows', () => {
     const state = await mockAdminApi(page);
     await page.goto('/admin/updates');
 
-    await expect(page.getByText('当前版本')).toBeVisible();
-    await page.getByRole('button', { name: '立即检查' }).click();
-    // v1.1.4 升级主按钮文案为「立即升级到 X」
-    await page.getByRole('button', { name: /立即升级到 0\.4\.4/ }).click();
+    await expect(page.getByText('当前', { exact: true })).toBeVisible();
+    await page.getByRole('button', { name: '检查更新' }).click();
+    // v1.2 升级主按钮文案为「一键升级到 X」
+    await page.getByRole('button', { name: /一键升级到 0\.4\.4/ }).click();
     await expect(page.getByRole('heading', { name: '确认一键更新' })).toBeVisible();
     await expect.poll(() => state.calls.some((c) => c.path === '/api/admin/updates/check')).toBe(true);
   });
@@ -1072,32 +1033,30 @@ test.describe('Admin real UI flows', () => {
     const state = await mockAdminApi(page);
     await page.goto('/admin/amas-config');
 
-    // 标题在侧栏链接 + 页头 h1 各出现一次,断言收敛到 heading
     await expect(page.getByRole('heading', { name: 'AMAS 调参' })).toBeVisible();
-    // 首个 number 输入是「目标长期留存率」(baseDesiredRetention,合法区间 [0.7,0.97],baseline=0.92)。
-    // 填合法值才能避开校验错误（非法值会让「验证并应用」禁用、dirty 角标改显校验错误）。
-    const firstNumber = page.locator('input[type="number"]').first();
-    await firstNumber.fill('0.85');
-    // v1.1.4 dirty 角标文案「未保存 · N 处」，丢弃改用「回滚到 baseline」+ ConfirmDialog，保存按钮「验证并应用」
-    const dirtyBadge = page.getByText(/未保存 · \d+ 处/);
+    // v1.2 参数为滑块；用「一键预设」按钮套用使配置 dirty（真实 onClick，稳定可靠）
+    // dirty 角标在页头与预设卡各出现一次，取 first 收敛
+    const dirtyBadge = page.getByText('有未保存修改').first();
+    await page.getByRole('button', { name: /激进/ }).click();
     await expect(dirtyBadge).toBeVisible();
+    // 「回滚到 baseline」直接重置，无二次确认
     await page.getByRole('button', { name: '回滚到 baseline' }).click();
-    await page.getByRole('button', { name: '确认回滚' }).click();
     await expect(dirtyBadge).toBeHidden();
-    await firstNumber.fill('0.85');
-    await page.getByRole('button', { name: '验证并应用' }).click();
-    // ConfirmDialog："确认保存 AMAS 配置"
-    await page.getByRole('button', { name: '确认保存' }).click();
-    await expect.poll(() => state.calls.some((c) => c.method === 'PUT' && c.path === '/api/admin/amas/config')).toBe(true);
-    // 保存成功后 baseline 同步 → dirty=false。必须等 saveConfig 的 setBaseline 落定
-    // （否则随后再造的脏修改会被 setBaseline(config) 吞掉），以 dirty 角标消失为信号。
-    await expect(dirtyBadge).toBeHidden();
-    // 想触发热重载需再造一次脏修改（仍取合法区间内值）
-    await firstNumber.fill('0.88');
+    await page.getByRole('button', { name: /激进/ }).click();
     await expect(dirtyBadge).toBeVisible();
-    await page.getByRole('button', { name: '热重载' }).click();
-    // 热重载同样走 ConfirmDialog："确认热重载 AMAS 配置"
-    await page.getByRole('button', { name: '确认热重载' }).click();
+    // 保存：触发「保存为新版本」→ Confirm（title 同名）→ 确认按钮「保存」。
+    // dispatchEvent 直接在弹窗内按钮上触发 click，绕过外层 grid 对指针坐标的拦截。
+    await page.getByRole('button', { name: '保存为新版本' }).click();
+    await expect(page.getByRole('heading', { name: '保存为新版本' })).toBeVisible();
+    await page.locator('.scale-in').getByRole('button', { name: '保存', exact: true }).dispatchEvent('click');
+    await expect.poll(() => state.calls.some((c) => c.method === 'PUT' && c.path === '/api/admin/amas/config')).toBe(true);
+    await expect(dirtyBadge).toBeHidden();
+    // 保存后 baseline 已含「激进」补丁；改套「稳妥」预设再次 dirty，触发热重载
+    await page.getByRole('button', { name: /稳妥/ }).click();
+    await expect(dirtyBadge).toBeVisible();
+    await page.getByRole('button', { name: '热重载', exact: true }).first().click();
+    await expect(page.getByRole('heading', { name: '热重载配置' })).toBeVisible();
+    await page.locator('.scale-in').getByRole('button', { name: '热重载', exact: true }).dispatchEvent('click');
     await expect.poll(() => state.calls.some((c) => c.path === '/api/admin/settings/reload-amas')).toBe(true);
   });
 
@@ -1105,28 +1064,26 @@ test.describe('Admin real UI flows', () => {
     const state = await mockAdminApi(page);
     await page.goto('/admin/amas-config');
 
-    await page.getByRole('button', { name: '版本历史' }).click();
+    await page.getByRole('button', { name: '版本历史', exact: true }).click();
     await expect(page.getByText('previous config')).toBeVisible();
-    await page.getByText('abc123olde').click();
-    await page.getByRole('button', { name: '回滚到此版本' }).click();
-    await page.getByRole('button', { name: '确认回滚' }).click();
+    // 抽屉内仅非 live 版本(abc123older)有「回滚到此」→ Confirm「回滚到此版本」→ 确认按钮「回滚」
+    await page.getByRole('button', { name: '回滚到此' }).click();
+    await page.getByRole('button', { name: '回滚', exact: true }).click();
     await expect.poll(() => state.calls.some((c) => c.path === '/api/admin/amas/config/versions/abc123older/restore')).toBe(true);
   });
 
-  test('AMAS metrics switches between all dashboard tabs', async ({ page }) => {
+  test('AMAS metrics renders all dashboard panels', async ({ page }) => {
     await mockAdminApi(page);
     await page.goto('/admin/amas-metrics');
 
-    // 默认 metrics tab 末尾固定双轴时序卡，h3 与 tab 同名
-    await expect(page.getByRole('heading', { name: '算法延迟 / 错误率' })).toBeVisible();
-    await page.getByRole('tab', { name: /异常/ }).click();
-    await expect(page.getByRole('heading', { name: '异常 / 不变量违反' })).toBeVisible();
-    await page.getByRole('tab', { name: /用户状态分布/ }).click();
+    // v1.2 AMAS 指标合并为单页（无 tab）：PageHead + 多个 Panel
+    await expect(page.getByRole('heading', { name: 'AMAS 指标', level: 1 })).toBeVisible();
     await expect(page.getByRole('heading', { name: '每用户决策数分布' })).toBeVisible();
-    await page.getByRole('tab', { name: /版本对比/ }).click();
-    // 版本对比面板 A/B 选择器 + 指标差异行
-    await expect(page.getByText('基线版本 (A)')).toBeVisible();
-    await expect(page.getByText('对比版本 (B)')).toBeVisible();
+    await expect(page.getByRole('heading', { name: '异常检测' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '版本对比' })).toBeVisible();
+    // 版本对比面板 A/B 选择器
+    await expect(page.getByLabel('版本 A')).toBeVisible();
+    await expect(page.getByLabel('版本 B')).toBeVisible();
   });
 
   test('AMAS advisor approves and rejects a pending suggestion', async ({ page }) => {
