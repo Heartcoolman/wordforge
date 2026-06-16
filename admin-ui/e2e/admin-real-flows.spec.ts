@@ -754,8 +754,8 @@ async function loginAsAdmin(page: Page) {
   await page.addInitScript((token) => {
     sessionStorage.setItem('eng_admin_token', token);
     // 预置已看过本波导览，避免首登 overlay 拦截既有 admin e2e
-    // （值须与 useOnboarding.ts 的 waveOf() 对当前大版本的返回一致；当前波 = v1.1.4r2）
-    localStorage.setItem('wf_admin_onboarding_wave', 'v1.1.4r2');
+    // （值须与 useOnboarding.ts 的 waveOf() 对当前大版本的返回一致；当前波 = v1.2-redesign）
+    localStorage.setItem('wf_admin_onboarding_wave', 'v1.2-redesign');
   }, jwt());
 }
 

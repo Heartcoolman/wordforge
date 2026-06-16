@@ -6,7 +6,7 @@ info:
 
     路径基础路径 `/api`（见 servers[0].url）。
     本规格由 `src/openapi.rs` 自动生成，通过 `cargo test --test openapi_export` 导出，CI 以 `git diff --exit-code docs/openapi.yaml` 防止规格漂移（drift）。
-  version: 1.2.0-beta.2
+  version: 1.2.0-beta.3
 servers:
 - url: /api
 paths:
