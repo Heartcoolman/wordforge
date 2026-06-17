@@ -292,18 +292,20 @@ fn phase_label_percent(phase: &UpdatePhase) -> (String, u8) {
     match phase {
         UpdatePhase::Downloading { downloaded, total } => {
             let p = if *total > 0 {
-                ((*downloaded * 70 / *total).min(70)) as u8
+                ((*downloaded * 55 / *total).min(55)) as u8
             } else {
                 0
             };
             ("downloading".into(), p)
         }
-        UpdatePhase::Verifying => ("verifying".into(), 75),
-        UpdatePhase::Extracting => ("extracting".into(), 80),
-        UpdatePhase::BackingUpDb => ("backing_up_db".into(), 85),
-        UpdatePhase::Swapping => ("swapping".into(), 95),
+        UpdatePhase::Verifying => ("verifying".into(), 60),
+        UpdatePhase::VerifyingSignature => ("verifying_signature".into(), 66),
+        UpdatePhase::Extracting => ("extracting".into(), 72),
+        UpdatePhase::SelfChecking => ("self_checking".into(), 80),
+        UpdatePhase::BackingUpDb => ("backing_up_db".into(), 86),
+        UpdatePhase::Swapping => ("swapping".into(), 92),
+        UpdatePhase::Restarting => ("restarting".into(), 95),
         UpdatePhase::HealthChecking => ("health_checking".into(), 97),
-        UpdatePhase::Restarting => ("restarting".into(), 99),
     }
 }
 

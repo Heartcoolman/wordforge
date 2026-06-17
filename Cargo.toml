@@ -1,6 +1,6 @@
 [package]
 name = "learning-backend"
-version = "1.2.0-beta.10"
+version = "1.2.0-beta.11"
 edition = "2021"
 rust-version = "1.77"
 
@@ -28,7 +28,7 @@ unnecessary_get_then_check = "allow"
 
 [dependencies]
 axum = { version = "0.7", features = ["macros"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "net", "fs", "io-util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "net", "fs", "io-util", "process"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace", "fs", "catch-panic", "set-header", "compression-gzip", "compression-br"] }
 hyper = { version = "1", features = ["full"] }

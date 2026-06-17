@@ -11,18 +11,36 @@ import type {
 
 type Channel = 'stable' | 'beta';
 
-// 后端 apply task 的 phase 标识 → 中文短句（升级进度条文案）
+// 后端 apply task 的 phase 标识 → 中文短句（升级进度条文案）。与后端 phase_label_percent 一一对应。
 const PHASE_LABEL: Record<string, string> = {
   pending: '等待启动',
-  downloading: '下载中',
-  verifying: '校验 SHA256',
+  downloading: '下载新版本',
+  verifying: '校验完整性',
+  verifying_signature: '校验签名',
   extracting: '解压产物',
+  self_checking: '新版本自检',
   backing_up_db: '备份数据库',
   swapping: '替换二进制',
   restarting: '重启服务',
+  health_checking: '确认新版本健康',
   completed: '完成',
   failed: '失败',
 };
+
+// 升级自检流水线的真实步骤顺序（key 与后端 UpdatePhase → phase_label_percent 严格对齐）。
+// 动画步进器据当前真实 phase 逐级点亮，非客户端伪造进度。
+const UPGRADE_STEPS: Array<{ key: string; label: string; icon: string }> = [
+  { key: 'downloading', label: '下载新版本', icon: 'download' },
+  { key: 'verifying', label: '校验完整性', icon: 'check' },
+  { key: 'verifying_signature', label: '校验签名', icon: 'shield' },
+  { key: 'extracting', label: '解压产物', icon: 'package' },
+  { key: 'self_checking', label: '新版本自检', icon: 'cpu' },
+  { key: 'backing_up_db', label: '备份数据库', icon: 'db' },
+  { key: 'swapping', label: '替换二进制', icon: 'layers' },
+  { key: 'restarting', label: '重启服务', icon: 'refresh' },
+  { key: 'health_checking', label: '确认新版本健康', icon: 'probe' },
+];
+type StepState = 'done' | 'active' | 'pending' | 'error';
 
 // CHANGELOG 分类展示元数据（标题 + 颜色），与设计稿 feat/fix/perf 对齐
 const CHANGELOG_META: Array<{ key: string; label: string; color: string }> = [
@@ -102,6 +120,15 @@ function applyInFlight(s: AdminUpdateStatus | undefined): boolean {
   return !!t && t.phase !== 'completed' && t.phase !== 'failed' && !t.error;
 }
 
+// ISO 时间戳是否在最近 ms 内（容忍 60s 时钟偏移）。用于「重启后是否仍处于 watcher 确认窗口」判定。
+function recentWithin(iso: string | undefined, ms: number): boolean {
+  if (!iso) return false;
+  const t = new Date(iso).getTime();
+  if (!isFinite(t)) return false;
+  const age = Date.now() - t;
+  return age < ms && age > -60_000;
+}
+
 // SHA-256 截断展示
 function shortSha(sha: string | null | undefined): string {
   if (!sha) return '—';
@@ -136,8 +163,28 @@ export default function UpdatesPage() {
     'apply' | 'preview' | 'rollback' | { kind: 'restore'; backup: BackupEntry } | null
   >(null);
   const [rollbackTarget, setRollbackTarget] = createSignal<string | null>(null);
-  // 升级进度（apply 进行中 / 终态保留）
-  const [progress, setProgress] = createSignal<{ phase: string; percent: number; failed?: boolean } | null>(null);
+  // 升级进度（apply 进行中 / 终态保留）。phaseKey = 后端真实 phase；status 驱动步进器整体态。
+  const [progress, setProgress] = createSignal<
+    { phaseKey: string; percent: number; status: 'running' | 'failed' | 'done' } | null
+  >(null);
+  // 记住最后一个「真实」phase（非 pending/failed/completed），失败时据此定位是哪一步出错。
+  let lastRealPhase = 'downloading';
+
+  // 真实流水线各步状态：done(<当前) / active(=当前) / error(失败那步) / pending(>当前)。
+  const stepStates = createMemo<Array<{ key: string; label: string; icon: string; state: StepState }> | null>(() => {
+    const p = progress();
+    if (!p) return null;
+    const key = p.phaseKey === 'pending' ? 'downloading' : p.phaseKey;
+    const cur = UPGRADE_STEPS.findIndex((s) => s.key === key);
+    const curIdx = cur < 0 ? 0 : cur;
+    return UPGRADE_STEPS.map((s, i) => {
+      let state: StepState;
+      if (p.status === 'done') state = 'done';
+      else if (p.status === 'failed') state = i < curIdx ? 'done' : i === curIdx ? 'error' : 'pending';
+      else state = i < curIdx ? 'done' : i === curIdx ? 'active' : 'pending';
+      return { ...s, state };
+    });
+  });
 
   // 当前所选通道的 ChannelStatus
   const chStatus = createMemo<ChannelStatus | null>(() => {
@@ -180,37 +227,75 @@ export default function UpdatesPage() {
     return notes ? parseReleaseNotes(notes) : { intro: '', sections: [] as ReleaseNoteSection[] };
   });
 
-  // 升级进行中时启动 2s 轮询，终态后停止
+  // 升级进行中时启动 2s 轮询，终态后停止。同时刷 status（重启前的 applyTask）与 history
+  //（重启后进程内 applyTask 消失，靠审计终态驱动「确认新版本健康」步与最终成败）。
   let pollTimer: ReturnType<typeof setInterval> | undefined;
   function stopPoll() {
     if (pollTimer) { clearInterval(pollTimer); pollTimer = undefined; }
   }
   function startPoll() {
     if (pollTimer) return;
-    pollTimer = setInterval(() => void startTransition(() => refetch()), 2000);
+    pollTimer = setInterval(() => void startTransition(() => { refetch(); refetchHistory(); }), 2000);
   }
 
-  // 监听 status 变化驱动 progress 卡 + 轮询生命周期（createEffect eager 执行，副作用必须用它而非 createMemo）
+  // 重启后仍在 watcher 确认窗口：进程内 applyTask 已随重启消失，看最近一条审计是否仍未达终态。
+  function confirmingFromHistory(): boolean {
+    const latest = history()?.entries?.[0];
+    return !!latest
+      && recentWithin(latest.startedAt, 6 * 60_000)
+      && (latest.outcome === 'applied_pending_watcher' || latest.outcome === 'in_progress');
+  }
+
+  // 监听 status / history 变化驱动 progress 步进器 + 轮询生命周期。
+  // 两段真实流程：① 重启前——后端 applyTask.phase 逐级推进（下载→…→重启）；
+  // ② 重启后——applyTask 丢失，改读审计 outcome：applied_pending_watcher=确认中、
+  //    success=全绿、rolled_back/failed=末步失败。全程映射后端真实状态，无伪造。
   createEffect(() => {
     const s = status();
     const t = s?.applyTask;
-    if (!t) return;
-    const failed = t.phase === 'failed' || !!t.error;
-    const done = t.phase === 'completed';
-    setProgress({ phase: PHASE_LABEL[t.phase] ?? t.phase, percent: t.percent, failed });
-    if (failed || done) {
-      stopPoll();
-      if (done) {
-        toast.success('升级成功', '服务重启完成后自动刷新…');
-        reloadWhenBack();
-      } else {
-        toast.error('升级失败', t.error ?? '后端 apply task 报错');
+
+    if (t) {
+      const failed = t.phase === 'failed' || !!t.error;
+      const done = t.phase === 'completed';
+      if (!failed && !done && PHASE_LABEL[t.phase]) lastRealPhase = t.phase;
+      setProgress({
+        phaseKey: failed ? lastRealPhase : done ? 'health_checking' : t.phase,
+        percent: t.percent,
+        status: failed ? 'failed' : done ? 'done' : 'running',
+      });
+      if (failed || done) {
+        stopPoll();
+        if (done) { toast.success('升级成功', '服务重启完成后自动刷新…'); reloadWhenBack(); }
+        else toast.error('升级失败', t.error ?? '后端 apply task 报错');
+      } else if (applyInFlight(s)) {
+        startPoll();
       }
-    } else if (applyInFlight(s)) {
+      return;
+    }
+
+    // 重启后：依据审计终态推进确认步 / 收尾
+    const latest = history()?.entries?.[0];
+    if (confirmingFromHistory()) {
+      setProgress({ phaseKey: 'health_checking', percent: 97, status: 'running' });
       startPoll();
+    } else if (progress()?.status === 'running' && latest && recentWithin(latest.startedAt, 6 * 60_000)) {
+      // 我们正展示一条进行中的流程，且它刚转入终态
+      if (latest.outcome === 'success') {
+        setProgress({ phaseKey: 'health_checking', percent: 100, status: 'done' });
+        stopPoll();
+        toast.success('升级成功', '新版本已通过健康确认，正在刷新…');
+        reloadWhenBack();
+      } else if (latest.outcome === 'rolled_back' || latest.outcome === 'failed') {
+        setProgress({ phaseKey: 'health_checking', percent: 97, status: 'failed' });
+        stopPoll();
+        toast.error(
+          latest.outcome === 'rolled_back' ? '新版本未通过健康检查，已自动回滚' : '升级失败',
+          latest.error || '详见下方升级历史',
+        );
+      }
     }
   });
-  onMount(() => { if (applyInFlight(status())) startPoll(); });
+  onMount(() => { if (applyInFlight(status()) || confirmingFromHistory()) startPoll(); });
   onCleanup(stopPoll);
 
   async function doCheck() {
@@ -235,7 +320,8 @@ export default function UpdatesPage() {
     const target = targetVersion();
     if (!s || !target) return;
     setBusy(true);
-    setProgress({ phase: PHASE_LABEL.pending, percent: 0 });
+    lastRealPhase = 'downloading';
+    setProgress({ phaseKey: 'pending', percent: 0, status: 'running' });
     try {
       await adminApi.updatesApply(channel(), target, s.currentVersion);
       setConfirm(null);
@@ -413,19 +499,65 @@ export default function UpdatesPage() {
                   </Btn>
                 </div>
 
-                {/* 升级进度（apply 进行中或终态保留） */}
+                {/* 升级自检流水线：动画步进器，逐级点亮的是后端真实 phase（非伪造进度） */}
                 <Show when={progress()}>
                   {(p) => (
-                    <div>
-                      <div style={sx({ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 12, marginBottom: 6 })}>
-                        <span style={sx({ color: p().failed ? 'var(--error)' : 'var(--text-2)' })}>
-                          {p().phase}{p().failed ? '（升级未完成）' : ''}
+                    <div style={sx({ display: 'flex', flexDirection: 'column', gap: 10, padding: '12px 14px', borderRadius: 12, background: 'var(--surface-sunken)', border: '1px solid var(--border)' })}>
+                      {/* 头部：整体态 + 当前阶段 + 百分比 */}
+                      <div style={sx({ display: 'flex', justifyContent: 'space-between', alignItems: 'center' })}>
+                        <span style={sx({ fontSize: 12.5, fontWeight: 600,
+                          color: p().status === 'failed' ? 'var(--error)' : p().status === 'done' ? 'var(--success)' : 'var(--text)' })}>
+                          {p().status === 'failed' ? '升级中断 · ' : p().status === 'done' ? '升级完成 · ' : '升级进行中 · '}
+                          {PHASE_LABEL[p().phaseKey] ?? p().phaseKey}
                         </span>
-                        <span class="mono muted">{p().percent}%</span>
+                        <span class="mono" style={sx({ fontSize: 11, color: 'var(--text-3)' })}>{p().percent}%</span>
                       </div>
-                      <div class="bar" style={sx({ height: 7 })}>
-                        <i style={sx({ width: `${p().percent}%`, background: p().failed ? 'var(--error)' : 'var(--grad-brand)' })} />
+                      {/* 总进度条 */}
+                      <div class="bar" style={sx({ height: 6 })}>
+                        <i style={sx({
+                          width: `${p().percent}%`,
+                          background: p().status === 'failed' ? 'var(--error)' : p().status === 'done' ? 'var(--success)' : 'var(--grad-brand)',
+                          transition: 'width 400ms ease',
+                        })} />
                       </div>
+                      {/* 真实步进器：done(<当前) / active(=当前·脉冲) / error(失败那步) / pending(>当前) */}
+                      <Show when={stepStates()}>
+                        {(steps) => (
+                          <div style={sx({ display: 'flex', flexDirection: 'column', gap: 1, marginTop: 2 })}>
+                            <For each={steps()}>
+                              {(st) => (
+                                <div style={sx({ display: 'flex', alignItems: 'center', gap: 10, padding: '4px 0' })}>
+                                  <div style={sx({
+                                    width: 22, height: 22, flex: 'none', borderRadius: '50%',
+                                    display: 'grid', placeItems: 'center',
+                                    background: st.state === 'done' ? 'var(--success)'
+                                      : st.state === 'error' ? 'var(--error)'
+                                      : st.state === 'active' ? 'var(--accent-soft)' : 'transparent',
+                                    color: st.state === 'done' || st.state === 'error' ? 'var(--text-on-accent)'
+                                      : st.state === 'active' ? 'var(--accent)' : 'var(--text-3)',
+                                    border: st.state === 'pending' ? '1.5px solid var(--border)' : 'none',
+                                    animation: st.state === 'active' ? 'ring-pulse 1.5s infinite' : 'none',
+                                  })}>
+                                    <Icon name={st.state === 'done' ? 'check' : st.state === 'error' ? 'x' : st.icon} size={12} />
+                                  </div>
+                                  <span style={sx({ fontSize: 12.5, fontWeight: st.state === 'active' ? 600 : 500,
+                                    color: st.state === 'pending' ? 'var(--text-3)'
+                                      : st.state === 'done' ? 'var(--text-2)'
+                                      : st.state === 'error' ? 'var(--error)' : 'var(--text)' })}>
+                                    {st.label}
+                                  </span>
+                                  <Show when={st.state === 'active'}>
+                                    <span class="mono" style={sx({ marginLeft: 'auto', fontSize: 10.5, color: 'var(--accent)' })}>进行中</span>
+                                  </Show>
+                                  <Show when={st.state === 'error'}>
+                                    <span class="mono" style={sx({ marginLeft: 'auto', fontSize: 10.5, color: 'var(--error)' })}>失败</span>
+                                  </Show>
+                                </div>
+                              )}
+                            </For>
+                          </div>
+                        )}
+                      </Show>
                     </div>
                   )}
                 </Show>
@@ -567,7 +699,7 @@ export default function UpdatesPage() {
                                 variant={h.outcome === 'success' ? 'success' : h.outcome === 'failed' ? 'error' : h.outcome === 'rolled_back' ? 'warning' : 'info'}
                                 dot
                               >
-                                {h.outcome === 'success' ? '成功' : h.outcome === 'failed' ? '失败' : h.outcome === 'rolled_back' ? '已回滚' : '进行中'}
+                                {h.outcome === 'success' ? '成功' : h.outcome === 'failed' ? '失败' : h.outcome === 'rolled_back' ? '已回滚' : h.outcome === 'applied_pending_watcher' ? '确认中' : '进行中'}
                               </Badge>
                             </td>
                             <td class="mono">{dur != null ? `${dur}s` : '—'}</td>

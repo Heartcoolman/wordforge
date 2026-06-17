@@ -89,6 +89,41 @@ fn redirect_self_update_logs_if_applicable() {
     // 非 unix（Windows/其他）平台无 /proc 也无 dup2 语义，跳过。
 }
 
+/// C(v1.2.0-beta.11) 升级冒烟自检：被 `apply` 以 `--selfcheck` 调起。
+///
+/// 设计为「严格但零副作用」：
+/// 1. 能执行到这里即证明二进制在本机 arch/glibc 成功加载运行（捕获 wrong-arch 的
+///    `Exec format error`、缺 glibc 符号、损坏导致的 SIGILL/SIGSEGV——这些在 exec/加载期
+///    就让进程异常退出，永远到不了这里）。
+/// 2. `Config::from_env()` 解析 + 校验 env 配置（坏配置 panic → 进程非 0 退出 → apply 拦截）。
+/// 3. 关键字段健全性校验 + AMAS 配置可构造。
+///
+/// 全程**不开库、不绑端口、不连网、不起 worker**。通过 → 打印 JSON 退 0；否则非 0 退出，
+/// apply 据非 0 退出码判定坏包，在进维护态 / 换文件之前中止本次升级，现役无损。
+fn run_selfcheck() {
+    let version = env!("GIT_VERSION");
+    // Config::from_env 内含 env 解析与校验；坏配置直接 panic → 非 0 退出 → apply 拦截。
+    let config = Config::from_env();
+    let mut problems: Vec<String> = Vec::new();
+    if config.database_url.trim().is_empty() {
+        problems.push("database_url 为空".into());
+    }
+    if config.port == 0 {
+        problems.push("port 非法(0)".into());
+    }
+    if version.trim().is_empty() {
+        problems.push("GIT_VERSION 为空".into());
+    }
+    // AMAS 配置构造（捕获结构性问题；from_env 内部对非法值有兜底，主要验证不 panic）。
+    let _amas = AMASConfig::from_env(&config.amas);
+    if problems.is_empty() {
+        println!("{{\"selfcheck\":\"ok\",\"version\":\"{version}\"}}");
+    } else {
+        eprintln!("selfcheck FAILED: {}", problems.join("; "));
+        std::process::exit(1);
+    }
+}
+
 #[tokio::main]
 async fn main() {
     // v1.1.0-beta.2：先做自更新子进程 stderr 救场（必须在 dotenvy / Config::from_env 之前，
@@ -97,6 +132,14 @@ async fn main() {
     redirect_self_update_logs_if_applicable();
 
     dotenvy::dotenv().ok();
+
+    // C(v1.2.0-beta.11) 升级冒烟自检：apply 在换二进制前以 `--selfcheck` 试跑新二进制。
+    // 仅验证能在本机 arch/glibc 加载运行 + 解析 env 配置，绝不开库 / 绑端口 / 连网，秒退；
+    // 任一步失败非 0 退出，apply 据此在进维护态 / 换文件之前判定坏包并中止。必须在重活之前。
+    if std::env::args().any(|a| a == "--selfcheck") {
+        run_selfcheck();
+        return;
+    }
 
     let config = Config::from_env();
 

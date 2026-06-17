@@ -31,6 +31,14 @@ const ASSET_SUFFIX_SIG: &str = ".tar.gz.minisig";
 /// M0-P5：每个 apply phase 的独立 watchdog 超时（秒）。
 /// 超过此值未推进到下一 phase 则强制 abort + 回滚。
 const PHASE_TIMEOUT_SECS: u64 = 300; // 5 分钟
+/// B(v1.2.0-beta.11)：下载阶段墙钟预算下/上限（秒）与最低假定带宽（B/s）。
+/// 固定 300s 会误杀国内慢链路（实测 22KB/s × 9MB ≈ 7min > 300s）；per-chunk
+/// read_timeout(60s) 才是卡死探测器，外层墙钟只防真正无限挂起，故按 tarball 大小推导。
+const MIN_DOWNLOAD_BUDGET_SECS: u64 = 600;
+const MAX_DOWNLOAD_BUDGET_SECS: u64 = 3600;
+const MIN_ASSUMED_BPS: u64 = 8 * 1024;
+/// C(v1.2.0-beta.11)：新二进制 `--selfcheck` 冒烟超时（秒）。仅加载 + 解析配置，秒级完成；超时即判坏包。
+const SELFCHECK_TIMEOUT_SECS: u64 = 20;
 /// M0-R4：maintenance 模式持久化 flag 文件名（install_dir 下）。
 /// 新进程启动时若发现此文件，说明上次自更新途中崩溃，应立即清理 maintenance。
 pub const MAINTENANCE_FLAG: &str = ".maintenance.flag";
@@ -94,6 +102,10 @@ pub enum UpdaterError {
         phase: &'static str,
         timeout_secs: u64,
     },
+    /// C(v1.2.0-beta.11)：换二进制前 `--selfcheck` 冒烟失败。新二进制虽过 sha256+minisig，
+    /// 但在本机起不来（架构错配 / glibc 不兼容 / 损坏 / 配置无法解析）→ swap 前即中止，现役无损。
+    #[error("self-check failed: {0}")]
+    SelfCheckFailed(String),
 }
 
 /// 更新通道：stable 排除 prerelease，beta 包含所有（含 stable 自身）。
@@ -209,8 +221,13 @@ pub enum UpdatePhase {
         downloaded: u64,
         total: u64,
     },
+    /// sha256 完整性校验
     Verifying,
+    /// minisign 签名校验（v1.2.0-beta.11 显式成相）
+    VerifyingSignature,
     Extracting,
+    /// C(v1.2.0-beta.11)：换二进制前用新二进制 `--selfcheck` 冒烟（能否在本机加载运行 + 解析配置）
+    SelfChecking,
     BackingUpDb,
     Swapping,
     /// M0-R3：子进程健康自检（等待 /health 返回 200）
@@ -677,13 +694,18 @@ impl Updater {
                     timeout_secs: PHASE_TIMEOUT_SECS,
                 })??;
 
-        // 2) 流式下载 + 计算 sha256（M0-P5 watchdog 覆盖整体下载，per-chunk 由 download_client.read_timeout 兜底）
+        // 2) 流式下载 + 计算 sha256。
+        // B(v1.2.0-beta.11)：下载墙钟按 tarball 大小推导（min 10min / max 60min / 假定 ≥8KB/s），
+        // 不再用固定 300s 误杀慢链路；真正卡死由 download_client 的 per-chunk read_timeout(60s) 探测。
+        let download_budget_secs = (latest.tarball_size / MIN_ASSUMED_BPS)
+            .clamp(MIN_DOWNLOAD_BUDGET_SECS, MAX_DOWNLOAD_BUDGET_SECS);
+        let download_timeout = std::time::Duration::from_secs(download_budget_secs);
         progress(UpdatePhase::Downloading {
             downloaded: 0,
             total: latest.tarball_size,
         });
         let actual_sha = tokio::time::timeout(
-            phase_timeout,
+            download_timeout,
             self.stream_download(
                 &latest.tarball_url,
                 &tarball_path,
@@ -694,7 +716,7 @@ impl Updater {
         .await
         .map_err(|_| UpdaterError::PhaseTimeout {
             phase: "downloading",
-            timeout_secs: PHASE_TIMEOUT_SECS,
+            timeout_secs: download_budget_secs,
         })??;
         progress(UpdatePhase::Verifying);
         if !actual_sha.eq_ignore_ascii_case(&sha_expected) {
@@ -709,6 +731,7 @@ impl Updater {
         }
 
         // 2b) minisign 验签（M0-R2）
+        progress(UpdatePhase::VerifyingSignature);
         tokio::time::timeout(
             phase_timeout,
             self.verify_minisign_tarball(&latest.sig_url, &tarball_path),
@@ -728,6 +751,12 @@ impl Updater {
             extract_tar_gz_safe(&tarball_path, &staging_dir)?;
             locate_extracted_root(&staging_dir)
         })?;
+
+        // 3b) C(v1.2.0-beta.11)：换二进制前冒烟自检——用解出的新二进制跑 `--selfcheck`。
+        // 此刻**尚未进维护态、尚未 swap**，失败直接中止 apply，现役 binary/static/DB 全无损，
+        // 不留任何 churn。捕获「sha256+minisig 都过但在本机起不来」的坏包（架构/glibc/损坏/配置）。
+        progress(UpdatePhase::SelfChecking);
+        smoke_test_binary(&extracted.join("wordforge")).await?;
 
         // 4) DB 备份
         progress(UpdatePhase::BackingUpDb);
@@ -876,6 +905,14 @@ impl Updater {
             parent_pid: unsafe { libc::getpid() },
             #[cfg(not(unix))]
             parent_pid: 0,
+            // D：仅「带 DB 回滚」的 rollback 才记 pre-rollback 现役库快照供 watcher 一致回退；
+            // 普通升级不回退 DB（走前向迁移），故 None。
+            db_revert_backup: if rollback_db_backup.is_some() {
+                Some(backup_path.clone())
+            } else {
+                None
+            },
+            live_db_path: audit_db_path.to_path_buf(),
         };
         // 标 audit outcome='applied_pending_watcher' 让 admin UI 在 watcher 接管期间显示中间态。
         // watcher 60s 后会把 outcome update 为 success / rolled_back 终态。
@@ -1512,6 +1549,45 @@ fn locate_extracted_root(dst: &Path) -> Result<PathBuf, UpdaterError> {
     ))
 }
 
+/// C(v1.2.0-beta.11)：换二进制前用新二进制跑 `--selfcheck` 冒烟。
+///
+/// 能成功退 0 即证明：新二进制在本机 arch/glibc 可加载运行（捕获 wrong-arch 的
+/// `Exec format error`、缺 glibc 符号、损坏导致的 SIGILL/SIGSEGV），且能解析当前 env 配置
+/// （捕获坏配置 panic）。`--selfcheck` 路径在 main 里设计为零副作用——不开库、不绑端口、不连网。
+/// 超时 / 非 0 退出 → `SelfCheckFailed`，在 swap 前中止，现役无损。
+async fn smoke_test_binary(bin: &Path) -> Result<(), UpdaterError> {
+    use std::process::Stdio;
+    let fut = tokio::process::Command::new(bin)
+        .arg("--selfcheck")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output();
+    let out = tokio::time::timeout(std::time::Duration::from_secs(SELFCHECK_TIMEOUT_SECS), fut)
+        .await
+        .map_err(|_| {
+            UpdaterError::SelfCheckFailed(format!(
+                "新二进制 --selfcheck 超过 {SELFCHECK_TIMEOUT_SECS}s 无响应（疑似挂起/不兼容）"
+            ))
+        })?
+        .map_err(|e| UpdaterError::SelfCheckFailed(format!("无法启动新二进制自检: {e}")))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let detail = if !stderr.trim().is_empty() {
+        stderr.trim()
+    } else {
+        stdout.trim()
+    };
+    Err(UpdaterError::SelfCheckFailed(format!(
+        "新二进制 --selfcheck 退出码 {:?}: {}",
+        out.status.code(),
+        detail.chars().take(400).collect::<String>()
+    )))
+}
+
 enum UndoStep {
     /// `from → to` 已发生，回滚需要 `to → from`
     Rename(PathBuf, PathBuf),
@@ -1567,6 +1643,13 @@ struct WatcherArgs {
     /// 当前主进程 PID（fork 前捕获）。watcher 回滚时直接 kill 它让 systemd 拉起回滚后的 binary，
     /// 避免按命令行子串 pgrep 与 install_dir 隐式耦合。
     parent_pid: i32,
+    /// D(v1.2.0-beta.11)：本次 apply 若是「带 DB 回滚」的 rollback，这里是 pre-rollback 现役库
+    /// 快照（`learning-<current>.backup.db`）。watcher 因目标二进制起不来而回滚时，把它 stage 为
+    /// 新 pending，使被退回的二进制下次启动落地一致的 DB——根除「binary 退回旧版、DB 仍停在回滚
+    /// 目标快照」的不一致（静默丢数据）。普通升级为 None。
+    db_revert_backup: Option<PathBuf>,
+    /// D：现役库路径（= audit_db_path），DB 一致回退的 stage 目标。
+    live_db_path: PathBuf,
 }
 
 /// fork watcher 子进程后 parent 立即 exit 让 systemd 接管的工具方法。
@@ -1658,26 +1741,86 @@ fn run_watcher(args: &WatcherArgs) {
     );
 }
 
-/// 用 curl 探 /health（取状态码 + body），交 `classify_watcher_health` 判定。
-/// 用 curl 而非 reqwest：避免 fork 后 tokio runtime 状态损坏；Linux 标准发行版均有 curl。
-/// 注意：不加 `-f`——/health 在「子服务不健康」时仍返 200（健康度在 body.status），
-/// 也要在维护 503 时拿到 body 才能区分「维护中(放行)」与「真不健康(回滚)」。
+/// A(v1.2.0-beta.11)：watcher 健康探针——**纯 std::net 原生 HTTP/1.0 GET，不再依赖外部 curl**。
+///
+/// 旧实现用 `curl` 子进程：最小化 / 裁剪系统无 curl 时 `output` 必 Err → 每次升级都被误判
+/// 不健康而回滚（安全网反成升级杀手）。改为在 fork 出的单线程 watcher 子进程内直接发 HTTP
+/// 请求，取状态码 + body 交 `classify_watcher_health` 判定。
+/// 不加任何「失败即非健康」短路——/health 在子服务不健康时仍返 200（健康度在 body.status），
+/// 维护态返 503 也要拿 body 才能区分「维护中(放行)」与「真不健康(回滚)」。
 fn watcher_probe_health(url: &str) -> bool {
-    let output = std::process::Command::new("curl")
-        .args(["-sS", "--max-time", "3", "-w", "\n%{http_code}", url])
-        .output();
-    let Ok(output) = output else {
-        return false; // curl 不可用
-    };
-    if !output.status.success() {
-        return false; // 连接拒绝 / 超时 → 进程没起来 → 不健康
+    match http_probe(url, std::time::Duration::from_secs(3)) {
+        Some((code, body)) => classify_watcher_health(&code.to_string(), &body),
+        None => false, // 连不上 / 无响应 → 进程没起来 → 不健康
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let (body, code) = match stdout.rsplit_once('\n') {
-        Some((b, c)) => (b, c.trim()),
-        None => ("", stdout.trim()),
+}
+
+/// 解析 `http://host:port/path` → `(host, port, path)`。仅支持 http；非法返回 None。
+fn parse_http_url(url: &str) -> Option<(String, u16, String)> {
+    let rest = url.strip_prefix("http://")?;
+    let (hostport, path) = match rest.find('/') {
+        Some(i) => (&rest[..i], rest[i..].to_string()),
+        None => (rest, "/".to_string()),
     };
-    classify_watcher_health(code, body)
+    let (host, port) = match hostport.rsplit_once(':') {
+        Some((h, p)) => (h.to_string(), p.parse::<u16>().ok()?),
+        None => (hostport.to_string(), 80u16),
+    };
+    if host.is_empty() {
+        return None;
+    }
+    Some((host, port, path))
+}
+
+/// 原生 HTTP/1.0 GET：连接 + 读 + 写超时均为 `timeout`；返回 `(status_code, body)`。
+/// HTTP/1.0 + `Connection: close` 让服务端响应后即关流，读到 EOF 自然结束（无需解析
+/// Content-Length / chunked）。body 上限 64KiB 防异常大响应。任何环节失败返回 None（判不健康）。
+fn http_probe(url: &str, timeout: std::time::Duration) -> Option<(u16, String)> {
+    use std::io::{Read, Write};
+    use std::net::ToSocketAddrs;
+    let (host, port, path) = parse_http_url(url)?;
+    // 解析地址（127.0.0.1:port 无 DNS 解析），逐个尝试连接。
+    let addrs: Vec<std::net::SocketAddr> = (host.as_str(), port).to_socket_addrs().ok()?.collect();
+    let mut stream = None;
+    for a in &addrs {
+        if let Ok(s) = std::net::TcpStream::connect_timeout(a, timeout) {
+            stream = Some(s);
+            break;
+        }
+    }
+    let mut stream = stream?;
+    stream.set_read_timeout(Some(timeout)).ok()?;
+    stream.set_write_timeout(Some(timeout)).ok()?;
+    let req = format!(
+        "GET {path} HTTP/1.0\r\nHost: {host}\r\nConnection: close\r\nAccept: application/json\r\nUser-Agent: wordforge-watcher\r\n\r\n"
+    );
+    stream.write_all(req.as_bytes()).ok()?;
+    let mut buf: Vec<u8> = Vec::with_capacity(4096);
+    let mut tmp = [0u8; 4096];
+    loop {
+        match stream.read(&mut tmp) {
+            Ok(0) => break,
+            Ok(n) => {
+                buf.extend_from_slice(&tmp[..n]);
+                if buf.len() > 64 * 1024 {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    let text = String::from_utf8_lossy(&buf);
+    // 状态行：`HTTP/1.x <code> <reason>`
+    let code = text
+        .lines()
+        .next()
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|c| c.parse::<u16>().ok())?;
+    let body = text
+        .split_once("\r\n\r\n")
+        .map(|(_, b)| b.to_string())
+        .unwrap_or_default();
+    Some((code, body))
 }
 
 /// v1.2.0-beta.10：watcher 健康判定——把「升级是否成功」与「维护态/瞬时降级」正确区分。
@@ -1740,6 +1883,30 @@ fn watcher_rollback(args: &WatcherArgs) {
             "watcher 回滚:static_backup {:?} 不存在,保留当前 static 避免 admin UI 缺失(404)",
             args.static_backup
         );
+    }
+
+    // 2b. D(v1.2.0-beta.11)：DB 一致回退。本次若是「带 DB 回滚」的 rollback 且其目标二进制起不来，
+    //     回滚目标的 DB 已被失败的新进程 apply_pending_rollback_db 落地为现役库——此处把 pre-rollback
+    //     现役库快照重新 stage 为 pending，使刚被退回的二进制下次启动落地一致的库，避免「binary=旧版、
+    //     DB=回滚目标快照」的不一致。须在 kill（步骤 4）之前 stage，以便退回的进程启动时能消费。
+    //     失败仅 warn，不阻断回滚主流程。
+    if let Some(ref revert) = args.db_revert_backup {
+        if revert.exists() {
+            match stage_rollback_db(revert, &args.live_db_path) {
+                Ok(()) => tracing::warn!(
+                    "watcher 回滚:已 stage pre-rollback DB 快照,退回的二进制将落地一致的库"
+                ),
+                Err(e) => tracing::error!(
+                    error=%e,
+                    "watcher 回滚:DB 一致回退 stage 失败,binary/DB 可能不一致"
+                ),
+            }
+        } else {
+            tracing::warn!(
+                revert = ?revert,
+                "watcher 回滚:pre-rollback DB 备份缺失,无法保证回退后 DB 一致"
+            );
+        }
     }
 
     // 3. 清 maintenance flag（M0-R4：新进程启动时也会清，双保险）
@@ -1919,6 +2086,37 @@ mod tests {
         assert!(!classify_watcher_health("503", r#"{"error":"x"}"#));
         assert!(!classify_watcher_health("", ""));
         assert!(!classify_watcher_health("502", ""));
+    }
+
+    /// A：health URL 解析——含端口 / 缺端口 / 缺路径 / 非 http 各形态。
+    #[test]
+    fn parse_http_url_variants() {
+        assert_eq!(
+            parse_http_url("http://127.0.0.1:3000/health"),
+            Some(("127.0.0.1".into(), 3000, "/health".into()))
+        );
+        // 缺路径 → "/"
+        assert_eq!(
+            parse_http_url("http://localhost:8080"),
+            Some(("localhost".into(), 8080, "/".into()))
+        );
+        // 缺端口 → 80
+        assert_eq!(
+            parse_http_url("http://example.com/x"),
+            Some(("example.com".into(), 80, "/x".into()))
+        );
+        // 非 http / 空 host → None
+        assert_eq!(parse_http_url("https://127.0.0.1/health"), None);
+        assert_eq!(parse_http_url("ftp://x"), None);
+        assert_eq!(parse_http_url("http://:3000/health"), None);
+    }
+
+    /// C：SelfCheckFailed 错误展示含诊断细节。
+    #[test]
+    fn self_check_failed_error_display() {
+        let e = UpdaterError::SelfCheckFailed("Exec format error".into());
+        assert!(e.to_string().contains("self-check failed"));
+        assert!(e.to_string().contains("Exec format error"));
     }
 
     /// 最强回滚 staging:把目标备份暂存为 <db>.rollback-pending,不动现役库,保留源备份,

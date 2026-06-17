@@ -437,8 +437,10 @@ export interface BackupList {
 }
 
 /// admin 一键升级后台任务状态（v0.5.2+，配合异步 apply）。
-/// `phase` 取值：`pending` | `downloading` | `verifying` | `extracting`
-///                | `backing_up_db` | `swapping` | `restarting` | `completed` | `failed`
+/// `phase` 取值（v1.2.0-beta.11 起含 verifying_signature / self_checking / health_checking）：
+///   `pending` | `downloading` | `verifying` | `verifying_signature` | `extracting`
+///   | `self_checking` | `backing_up_db` | `swapping` | `restarting` | `health_checking`
+///   | `completed` | `failed`
 export interface ApplyTaskStatus {
   taskId: string;
   phase: string;
@@ -449,7 +451,9 @@ export interface ApplyTaskStatus {
   error?: string;
 }
 
-/// S5：升级历史审计记录。outcome: `success` | `failed` | `in_progress` | `rolled_back`
+/// S5：升级历史审计记录。outcome 三态机：
+/// `in_progress`(下载/换二进制中) → `applied_pending_watcher`(换好待 watcher 健康确认)
+/// → 终态 `success` / `rolled_back` / `failed`。
 export interface UpdateAuditEntry {
   id: string;
   adminId: string;
@@ -458,7 +462,7 @@ export interface UpdateAuditEntry {
   channel: string;
   startedAt: string;
   completedAt?: string;
-  outcome: 'success' | 'failed' | 'in_progress' | 'rolled_back';
+  outcome: 'success' | 'failed' | 'in_progress' | 'applied_pending_watcher' | 'rolled_back';
   error?: string;
   /** 审计动作；升级历史仅 self_update / rollback */
   action?: string;
