@@ -119,6 +119,12 @@ jobs:
     needs: build-backend
     runs-on: ubuntu-latest
     steps:
+      # 先 checkout（取 tag 处的 CHANGELOG.md 供注入 Release body）；
+      # 必须在 download-artifact 之前，否则 checkout 的 clean 会清掉 dist/。
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+
       - uses: actions/download-artifact@v4
         with:
           pattern: wordforge-linux-*
@@ -140,8 +146,18 @@ jobs:
           done
           rm -f /tmp/minisign.key
 
+      # 从 CHANGELOG.md 顶部抽取本次版本段（首个 `## ` 到下一个 `## ` 之前），
+      # 作为 Release body。softprops 在 generate_release_notes=true 时会把 body
+      # 前置、自动生成的 compare 链接追加在后，与历史 Release 格式一致。
+      - name: Extract changelog section for this release
+        run: |
+          awk '/^## / {c++} c==1 {print} c==2 {exit}' CHANGELOG.md > release-notes.md
+          echo '---- release body preview ----'
+          cat release-notes.md
+
       - uses: softprops/action-gh-release@v2
         with:
+          body_path: release-notes.md
           files: |
             dist/*.tar.gz
             dist/*.tar.gz.sha256
