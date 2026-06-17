@@ -557,6 +557,13 @@ fn hex_lower(bytes: &[u8]) -> String {
 }
 
 fn static_pack_dir() -> PathBuf {
+    // 运行时优先用 CWD 下的 static（生产 WorkingDirectory 即仓库根，与 `ServeDir::new("static")` 托管路径一致），
+    // 否则回退编译期源码目录（仅便于本地测试）。沿用 user_profile::resolve_avatar_dir 同款范式。
+    // 不可直接用 env!("CARGO_MANIFEST_DIR")：那是编译期路径，部署后落在 ProtectSystem 只读区会 create_dir_all 失败。
+    let cwd_static = PathBuf::from("static");
+    if cwd_static.is_dir() {
+        return cwd_static.join("packs");
+    }
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("static")
         .join("packs")
@@ -600,6 +607,13 @@ mod tests {
         for bad in &["", "../1.0.0", "1.0/0", "..", ".hidden", "1 0 0"] {
             assert!(validate_version(bad).is_err(), "version {:?} 应被拒绝", bad);
         }
+    }
+
+    #[test]
+    fn static_pack_dir_ends_with_static_packs() {
+        // 不论走 CWD 优先分支还是编译期回退分支，落盘根都必须是 .../static/packs，
+        // 与 ServeDir::new("static") 托管的 /packs/* 下载路径对齐。
+        assert!(static_pack_dir().ends_with("static/packs"));
     }
 
     #[test]
