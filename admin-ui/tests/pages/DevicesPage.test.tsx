@@ -10,6 +10,8 @@ vi.mock('@/api/admin', () => ({
     getClients: vi.fn(),
     banClient: vi.fn(),
     unbanClient: vi.fn(),
+    listFlaggedClients: vi.fn(),
+    clearClientFlag: vi.fn(),
     requestTelemetry: vi.fn(),
     getTelemetry: vi.fn(),
     getTelemetrySummary: vi.fn(),
@@ -108,6 +110,8 @@ describe('DevicesPage', () => {
     // clearAllMocks 会清掉 mockResolvedValue 设的实现,逐项还原默认,避免 createResource 解构 undefined。
     mockApi.getClientsDistribution.mockResolvedValue({ platforms: [], versions: [], policies: [] });
     mockApi.getClientsPaginated.mockResolvedValue({ data: [], total: 0, page: 1, perPage: 14, totalPages: 0 });
+    mockApi.listFlaggedClients.mockResolvedValue({ flagged: [] });
+    mockApi.clearClientFlag.mockResolvedValue({ cleared: true, deviceId: 'x' });
     mockApi.getVersionGate.mockResolvedValue(versionGate);
     mockApi.setVersionGate.mockResolvedValue(versionGate);
     mockApi.putUpgradePolicy.mockResolvedValue({ ok: true, platform: 'web' });
@@ -303,5 +307,41 @@ describe('DevicesPage', () => {
     await waitFor(() => expect(mockApi.getClients).toHaveBeenCalledTimes(1));
     fireEvent.click(screen.getByText('刷新'));
     await waitFor(() => expect(mockApi.getClients).toHaveBeenCalledTimes(2));
+  });
+
+  // m054:关联风控复核 tab —— 列出被牵连设备 + 解除标记
+  it('风险标记 tab 展示被标记设备并可解除标记', async () => {
+    mockApi.getClients.mockResolvedValue({ sseLive: [], recentlyActive: [] });
+    mockApi.listFlaggedClients.mockResolvedValue({
+      flagged: [{
+        deviceId: 'dev-flagged-abcdef',
+        platform: 'web',
+        userId: 'usr-flag-1',
+        lastSeenAt: '2026-04-15 10:00:00',
+        isBanned: false,
+        appVersion: '1.2.0',
+        riskReason: '关联自被封设备 dev-bad:共享出口 IP、相同设备指纹(模糊)',
+        riskFlaggedAt: '2026-04-15 10:00:00',
+        riskRelatedDevice: 'dev-bad',
+      }],
+    });
+    await renderPage();
+    await waitFor(() => expect(screen.getByText('风险标记')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('风险标记'));
+    await waitFor(() => expect(screen.getByText(/共享出口 IP/)).toBeInTheDocument());
+    fireEvent.click(screen.getByText('解除标记'));
+    await waitFor(() => expect(mockApi.clearClientFlag).toHaveBeenCalledWith('dev-flagged-abcdef'));
+  });
+
+  // m054:封禁返回 flaggedRelated>0 时 toast 带复核提示
+  it('封禁联动关联标记时 toast 提示复核数量', async () => {
+    mockApi.getClients.mockResolvedValue({ sseLive: [sseEntry], recentlyActive: [] });
+    mockApi.banClient.mockResolvedValue({ banned: true, deviceId: sseEntry.deviceId, flaggedRelated: 3, flaggedDeviceIds: ['a', 'b', 'c'] });
+    await renderPage();
+    await waitFor(() => expect(screen.getByText('封禁')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('封禁'));
+    await waitFor(() => expect(screen.getByText('确认封禁')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('确认封禁'));
+    await waitFor(() => expect(mockToast.success).toHaveBeenCalledWith(expect.stringContaining('已封禁设备'), expect.stringContaining('3 台')));
   });
 });

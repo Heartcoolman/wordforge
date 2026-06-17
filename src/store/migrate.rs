@@ -121,6 +121,15 @@ fn migrations() -> Vec<(&'static str, MigrationFn)> {
             "052_whitelist_add_w20_decay",
             m052_whitelist_add_w20_decay,
         ),
+        (
+            "053_backfill_engine_event_counts",
+            m053_backfill_engine_event_counts,
+        ),
+        ("054_client_devices_risk_flag", m054_client_devices_risk_flag),
+        (
+            "055_client_devices_fingerprint",
+            m055_client_devices_fingerprint,
+        ),
     ]
 }
 
@@ -236,6 +245,18 @@ fn migrations_down() -> Vec<(&'static str, MigrationFn)> {
         (
             "052_whitelist_add_w20_decay",
             m052_whitelist_add_w20_decay_down,
+        ),
+        (
+            "053_backfill_engine_event_counts",
+            m053_backfill_engine_event_counts_down,
+        ),
+        (
+            "054_client_devices_risk_flag",
+            m054_client_devices_risk_flag_down,
+        ),
+        (
+            "055_client_devices_fingerprint",
+            m055_client_devices_fingerprint_down,
         ),
     ]
 }
@@ -2654,6 +2675,35 @@ fn m052_whitelist_add_w20_decay_down(store: &Store) -> Result<(), StoreError> {
     Ok(())
 }
 
+/// m053:回填 engine_user_states 的标量计数列。
+/// 引擎计数真值历来只写进 state_json,标量列 total_event_count/session_event_count 恒为 DEFAULT 0,
+/// 导致设备数据状态面板 AMAS 通道恒判 nil(黄)。写路径已改为同步两列,此处回填存量行,
+/// 使历史设备无需再答一题即立即转 uploaded(绿)。
+fn m053_backfill_engine_event_counts(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute(
+        // 仅当 JSON 值为数值(integer/real)时回填;字段缺失或为非数值文本时回退现列,
+        // 避免 CAST('非数字' AS INTEGER)=0 误覆盖既有真值。
+        "UPDATE engine_user_states
+            SET total_event_count = COALESCE(
+                    CASE WHEN typeof(json_extract(state_json, '$.totalEventCount')) IN ('integer','real')
+                         THEN CAST(json_extract(state_json, '$.totalEventCount') AS INTEGER) END,
+                    total_event_count),
+                session_event_count = COALESCE(
+                    CASE WHEN typeof(json_extract(state_json, '$.sessionEventCount')) IN ('integer','real')
+                         THEN CAST(json_extract(state_json, '$.sessionEventCount') AS INTEGER) END,
+                    session_event_count)
+          WHERE json_valid(state_json);",
+        [],
+    )?;
+    Ok(())
+}
+
+/// m053 down:纯数据修正,无结构变更;把列清回 0 会破坏真值,故为 no-op。
+fn m053_backfill_engine_event_counts_down(_store: &Store) -> Result<(), StoreError> {
+    Ok(())
+}
+
 /// m040:system_settings 加 canary 自动回滚两阈值列(E3,收尾 C6)。
 /// 原 canary_monitor 写死常量 0.05,迁到 system_settings 让 admin 在线调参。幂等加列。
 fn m040_canary_thresholds(store: &Store) -> Result<(), StoreError> {
@@ -2861,6 +2911,113 @@ fn m035_amas_canary_crowd_filters_down(store: &Store) -> Result<(), StoreError> 
             "ALTER TABLE amas_canary_config DROP COLUMN crowd_filters",
             [],
         )?;
+    }
+    Ok(())
+}
+
+/// m054:client_devices 加 4 列关联风控标记(B 层封禁绕过缓解)。
+/// 封禁某设备时,自动给共享出口 IP / 同账号的其它设备置 risk_flag=1 供 admin 复核,
+/// 不硬封(避免 CGNAT/共享网络误伤)。幂等加列 + partial index。
+fn m054_client_devices_risk_flag(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    let cols: Vec<String> = conn
+        .prepare("PRAGMA table_info(client_devices)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .collect();
+    for (col, ddl) in [
+        (
+            "risk_flag",
+            "INTEGER NOT NULL DEFAULT 0 CHECK (risk_flag IN (0, 1))",
+        ),
+        ("risk_reason", "TEXT DEFAULT NULL"),
+        ("risk_flagged_at", "TEXT DEFAULT NULL"),
+        ("risk_related_device", "TEXT DEFAULT NULL"),
+    ] {
+        if !cols.iter().any(|c| c == col) {
+            conn.execute(
+                &format!("ALTER TABLE client_devices ADD COLUMN {col} {ddl}"),
+                [],
+            )?;
+        }
+    }
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_client_devices_risk
+            ON client_devices(risk_flagged_at DESC) WHERE risk_flag = 1",
+        [],
+    )?;
+    Ok(())
+}
+
+fn m054_client_devices_risk_flag_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch("DROP INDEX IF EXISTS idx_client_devices_risk;")?;
+    let cols: Vec<String> = conn
+        .prepare("PRAGMA table_info(client_devices)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .collect();
+    for col in [
+        "risk_related_device",
+        "risk_flagged_at",
+        "risk_reason",
+        "risk_flag",
+    ] {
+        if cols.iter().any(|c| c == col) {
+            conn.execute(
+                &format!("ALTER TABLE client_devices DROP COLUMN {col}"),
+                [],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// m055:client_devices 加 fp_strong / fp_coarse 两列(web 设备封禁=浏览器指纹)。
+/// fp_strong 高熵→精确匹配自动硬封;fp_coarse 硬件低熵→跨浏览器模糊匹配进 risk_flag。
+/// 仅对已封行建 partial index,使请求路径的指纹匹配只扫被封设备。幂等。
+fn m055_client_devices_fingerprint(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    let cols: Vec<String> = conn
+        .prepare("PRAGMA table_info(client_devices)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .collect();
+    for col in ["fp_strong", "fp_coarse"] {
+        if !cols.iter().any(|c| c == col) {
+            conn.execute(
+                &format!("ALTER TABLE client_devices ADD COLUMN {col} TEXT DEFAULT NULL"),
+                [],
+            )?;
+        }
+    }
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_client_devices_fp_strong
+            ON client_devices(fp_strong) WHERE is_banned = 1 AND fp_strong IS NOT NULL;
+         CREATE INDEX IF NOT EXISTS idx_client_devices_fp_coarse
+            ON client_devices(fp_coarse) WHERE is_banned = 1 AND fp_coarse IS NOT NULL;",
+    )?;
+    Ok(())
+}
+
+fn m055_client_devices_fingerprint_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS idx_client_devices_fp_coarse;
+         DROP INDEX IF EXISTS idx_client_devices_fp_strong;",
+    )?;
+    let cols: Vec<String> = conn
+        .prepare("PRAGMA table_info(client_devices)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .collect();
+    for col in ["fp_coarse", "fp_strong"] {
+        if cols.iter().any(|c| c == col) {
+            conn.execute(
+                &format!("ALTER TABLE client_devices DROP COLUMN {col}"),
+                [],
+            )?;
+        }
     }
     Ok(())
 }

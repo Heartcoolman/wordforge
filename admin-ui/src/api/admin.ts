@@ -52,6 +52,24 @@ export interface RecentlyActiveEntry {
   dataChannels: DataChannelStatus;
   /** m022:同上 */
   appVersion?: string | null;
+  /** m054:关联风控标记(共享 IP/账号/指纹被某次封禁牵连),用于列表红点提示 */
+  riskFlag?: boolean;
+  riskRelatedDevice?: string | null;
+}
+
+/** GET /api/admin/clients/flagged 返回的关联风控复核项(脱敏:不含 last_ip) */
+export interface FlaggedClientEntry {
+  deviceId: string;
+  platform: string;
+  userId: string | null;
+  lastSeenAt: string;
+  isBanned: boolean;
+  appVersion: string | null;
+  /** 打标原因(含触发源设备与命中信号) */
+  riskReason: string | null;
+  riskFlaggedAt: string | null;
+  /** 触发本次标记的源被封设备 id */
+  riskRelatedDevice: string | null;
 }
 
 export interface TelemetrySummary {
@@ -138,6 +156,11 @@ export interface ClientDetail {
   isBanned: boolean;
   bannedAt: string | null;
   banReason: string | null;
+  /** m054:关联风控标记(共享 IP/账号/指纹被牵连) */
+  riskFlag: boolean;
+  riskReason: string | null;
+  riskFlaggedAt: string | null;
+  riskRelatedDevice: string | null;
   /** 当前是否有活跃 SSE 连接 */
   online: boolean;
   /** 活跃 SSE 连接数(0 = 离线) */
@@ -329,9 +352,14 @@ export const adminApi = {
   getClients: () =>
     api.get<{ sseLive: SseLiveEntry[]; recentlyActive: RecentlyActiveEntry[] }>('/api/admin/clients', undefined, { useAdminToken: true }),
   banClient: (id: string, reason?: string) =>
-    api.post<{ banned: boolean; deviceId: string }>(`/api/admin/clients/${id}/ban`, reason ? { reason } : undefined, { useAdminToken: true }),
+    api.post<{ banned: boolean; deviceId: string; flaggedRelated: number; flaggedDeviceIds: string[] }>(`/api/admin/clients/${id}/ban`, reason ? { reason } : undefined, { useAdminToken: true }),
   unbanClient: (id: string) =>
-    api.post<{ banned: boolean; deviceId: string }>(`/api/admin/clients/${id}/unban`, undefined, { useAdminToken: true }),
+    api.post<{ banned: boolean; deviceId: string; clearedRelated: number }>(`/api/admin/clients/${id}/unban`, undefined, { useAdminToken: true }),
+  // m054:关联风控复核——列被标记设备 + 清除单设备误报标记
+  listFlaggedClients: () =>
+    api.get<{ flagged: FlaggedClientEntry[] }>('/api/admin/clients/flagged', undefined, { useAdminToken: true }),
+  clearClientFlag: (id: string) =>
+    api.post<{ cleared: boolean; deviceId: string }>(`/api/admin/clients/${id}/clear-flag`, undefined, { useAdminToken: true }),
   requestTelemetry: (id: string) =>
     api.post<{ requestId: string }>(`/api/admin/clients/${id}/request-telemetry`, undefined, { useAdminToken: true }),
   getTelemetry: (deviceId: string, params?: { limit?: number; offset?: number; eventType?: string }) =>

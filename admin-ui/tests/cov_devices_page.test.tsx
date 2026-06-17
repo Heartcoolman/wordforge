@@ -10,6 +10,8 @@ vi.mock('@/api/admin', () => ({
     getClientsPaginated: vi.fn(),
     banClient: vi.fn(),
     unbanClient: vi.fn(),
+    listFlaggedClients: vi.fn(),
+    clearClientFlag: vi.fn(),
     requestTelemetry: vi.fn(),
     getTelemetry: vi.fn(),
     getTelemetrySummary: vi.fn(),
@@ -77,6 +79,8 @@ describe('DevicesPage 覆盖补充', () => {
     mockApi.getVersionGate.mockResolvedValue(defaultGate);
     mockApi.getClientsPaginated.mockResolvedValue({ data: [], total: 0, page: 1, perPage: 14, totalPages: 1 });
     mockApi.getClients.mockResolvedValue({ sseLive: [], recentlyActive: [] });
+    mockApi.listFlaggedClients.mockResolvedValue({ flagged: [] });
+    mockApi.clearClientFlag.mockResolvedValue({ cleared: true, deviceId: 'x' });
   });
 
   async function renderPage() {

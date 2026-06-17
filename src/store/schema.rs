@@ -574,12 +574,26 @@ CREATE TABLE IF NOT EXISTS client_devices (
     last_ip TEXT DEFAULT NULL,
     -- m038:遥测硬识别上报的设备型号(payload.device.model),供 admin 设备列表/详情展示
     model TEXT DEFAULT NULL,
+    -- m054:关联风控标记。封禁某设备时,自动给共享出口 IP / 同账号的其它设备置 risk_flag=1
+    -- (仅标记供 admin 复核,不硬封,避免 CGNAT/共享网络误伤)。risk_related_device 记触发源。
+    risk_flag INTEGER NOT NULL DEFAULT 0 CHECK (risk_flag IN (0, 1)),
+    risk_reason TEXT DEFAULT NULL,
+    risk_flagged_at TEXT DEFAULT NULL,
+    risk_related_device TEXT DEFAULT NULL,
+    -- m055:浏览器指纹哈希(web 设备封禁,客户端按头/硬件特征算)。fp_strong=高熵(canvas/
+    -- webgl/UA...)用于精确匹配自动封;fp_coarse=硬件低熵子集用于跨浏览器模糊匹配进 flag。
+    fp_strong TEXT DEFAULT NULL,
+    fp_coarse TEXT DEFAULT NULL,
     PRIMARY KEY (device_id)
 );
 CREATE INDEX IF NOT EXISTS idx_client_devices_user ON client_devices(user_id, last_seen_at DESC);
 CREATE INDEX IF NOT EXISTS idx_client_devices_active ON client_devices(last_seen_at DESC) WHERE is_banned = 0;
 CREATE INDEX IF NOT EXISTS idx_client_devices_app_version ON client_devices(app_version) WHERE app_version IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_client_devices_platform ON client_devices(platform, last_seen_at DESC);
+CREATE INDEX IF NOT EXISTS idx_client_devices_risk ON client_devices(risk_flagged_at DESC) WHERE risk_flag = 1;
+-- m055:仅索引已封设备的指纹,使请求路径的"指纹是否被封"匹配只扫被封行。
+CREATE INDEX IF NOT EXISTS idx_client_devices_fp_strong ON client_devices(fp_strong) WHERE is_banned = 1 AND fp_strong IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_client_devices_fp_coarse ON client_devices(fp_coarse) WHERE is_banned = 1 AND fp_coarse IS NOT NULL;
 
 -- m024:强制升级策略(每平台一行)。min_version 以下启动拦截,suggested_version
 -- 以下顶部黄条提示,grayscale_pct 控制灰度推送百分比,pwa_silent_update 仅 Web 有意义。

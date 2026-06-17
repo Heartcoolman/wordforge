@@ -18,6 +18,8 @@ vi.mock('@/api/admin', () => ({
     getTelemetry: vi.fn(),
     banClient: vi.fn(),
     unbanClient: vi.fn(),
+    listFlaggedClients: vi.fn(),
+    clearClientFlag: vi.fn(),
     requestTelemetry: vi.fn(),
     putUpgradePolicy: vi.fn(),
     setVersionGate: vi.fn(),
@@ -103,6 +105,8 @@ describe('DevicesPage — tabs, ban dialog, telemetry drawer', () => {
     mockApi.getClientDetail.mockResolvedValue(clientDetail());
     mockApi.getTelemetrySummary.mockResolvedValue(emptySummary);
     mockApi.getTelemetry.mockResolvedValue({ records: [], total: 0 });
+    mockApi.listFlaggedClients.mockResolvedValue({ flagged: [] });
+    mockApi.clearClientFlag.mockResolvedValue({ cleared: true, deviceId: 'x' });
   });
 
   it('clicking 实时连接 tab switches back from 近期活跃', async () => {

@@ -4,8 +4,8 @@ use std::collections::HashMap;
 
 use crate::store::{Store, StoreError};
 
-/// 13 列 SELECT 的统一行解析(device_id..app_version, country, last_ip, model)。
-/// SELECT 顺序必须严格对齐:列变化时只改这一处。
+/// 17 列 SELECT 的统一行解析(device_id..model, risk_flag, risk_reason,
+/// risk_flagged_at, risk_related_device)。SELECT 顺序必须严格对齐:列变化时只改这一处。
 fn row_to_client_device(r: &rusqlite::Row<'_>) -> rusqlite::Result<ClientDevice> {
     Ok(ClientDevice {
         device_id: r.get(0)?,
@@ -21,8 +21,18 @@ fn row_to_client_device(r: &rusqlite::Row<'_>) -> rusqlite::Result<ClientDevice>
         country: r.get(10)?,
         last_ip: r.get(11)?,
         model: r.get(12)?,
+        risk_flag: r.get::<_, i64>(13)? != 0,
+        risk_reason: r.get(14)?,
+        risk_flagged_at: r.get(15)?,
+        risk_related_device: r.get(16)?,
     })
 }
+
+/// row_to_client_device 依赖的 17 列 SELECT 列表(顺序与解析严格对齐)。各查询点统一引用,
+/// 避免多处手抄列名漂移。
+const CLIENT_DEVICE_COLS: &str = "device_id, platform, user_id, first_seen_at, last_seen_at,
+        is_banned, banned_at, banned_by, ban_reason, app_version,
+        country, last_ip, model, risk_flag, risk_reason, risk_flagged_at, risk_related_device";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -48,6 +58,18 @@ pub struct ClientDevice {
     /// m038:遥测硬识别上报的设备型号(payload.device.model)。NULL=该设备从未上报过型号。
     #[serde(default)]
     pub model: Option<String>,
+    /// m054:关联风控标记。某设备被封时,共享出口 IP / 同账号的其它设备自动置 true 供 admin 复核。
+    #[serde(default)]
+    pub risk_flag: bool,
+    /// m054:风控标记原因(人类可读,含触发源设备与命中信号)。
+    #[serde(default)]
+    pub risk_reason: Option<String>,
+    /// m054:打标时间(ISO 8601)。
+    #[serde(default)]
+    pub risk_flagged_at: Option<String>,
+    /// m054:触发本次标记的源被封设备 device_id。
+    #[serde(default)]
+    pub risk_related_device: Option<String>,
 }
 
 /// m027:强制升级策略一行(每平台独立)。
@@ -177,14 +199,13 @@ impl Store {
         minutes: i64,
     ) -> Result<Vec<ClientDevice>, StoreError> {
         let conn = self.conn()?;
-        let mut stmt = conn.prepare(
-            "SELECT device_id, platform, user_id, first_seen_at, last_seen_at,
-                    is_banned, banned_at, banned_by, ban_reason, app_version,
-                    country, last_ip, model
+        let sql = format!(
+            "SELECT {CLIENT_DEVICE_COLS}
              FROM client_devices
              WHERE last_seen_at >= datetime('now', ?1) OR is_banned = 1
-             ORDER BY is_banned DESC, last_seen_at DESC",
-        )?;
+             ORDER BY is_banned DESC, last_seen_at DESC"
+        );
+        let mut stmt = conn.prepare(&sql)?;
         let offset = format!("-{} minutes", minutes);
         let rows = stmt.query_map(params![offset], row_to_client_device)?;
         let mut result = Vec::new();
@@ -200,16 +221,10 @@ impl Store {
         device_id: &str,
     ) -> Result<Option<ClientDevice>, StoreError> {
         let conn = self.conn()?;
+        let sql =
+            format!("SELECT {CLIENT_DEVICE_COLS} FROM client_devices WHERE device_id = ?1");
         let row = conn
-            .query_row(
-                "SELECT device_id, platform, user_id, first_seen_at, last_seen_at,
-                        is_banned, banned_at, banned_by, ban_reason, app_version,
-                        country, last_ip, model
-                 FROM client_devices
-                 WHERE device_id = ?1",
-                params![device_id],
-                row_to_client_device,
-            )
+            .query_row(&sql, params![device_id], row_to_client_device)
             .optional()?;
         Ok(row)
     }
@@ -276,6 +291,220 @@ impl Store {
         Ok(affected > 0)
     }
 
+    /// m054(B 层封禁绕过缓解):某设备被封后,自动给"共享出口 IP / 同账号"的其它设备
+    /// 打关联风控标记(risk_flag=1)供 admin 复核。**仅标记不硬封**,避免 CGNAT / 共享
+    /// 网络 / 公司出口等场景误伤无辜设备。
+    ///
+    /// 命中信号(任一即标记):last_ip 与被封设备相同(非空)、或 user_id 相同(非空)。
+    /// 排除被封设备自身与已封设备;已标记设备刷新原因/时间/触发源。返回被标记的 device_id
+    /// 列表。被封设备 IP 与账号都为空时直接返回空(无可关联信号)。
+    pub fn flag_related_devices(
+        &self,
+        banned_device_id: &str,
+    ) -> Result<Vec<String>, StoreError> {
+        let conn = self.conn()?;
+        let signals: Option<(Option<String>, Option<String>, Option<String>)> = conn
+            .query_row(
+                "SELECT last_ip, user_id, fp_coarse FROM client_devices WHERE device_id = ?1",
+                params![banned_device_id],
+                |r| {
+                    Ok((
+                        r.get::<_, Option<String>>(0)?,
+                        r.get::<_, Option<String>>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let (ip, uid, coarse) = match signals {
+            Some(v) => v,
+            None => return Ok(Vec::new()),
+        };
+        // 空串等同无信号:防御匿名/历史脏数据把所有 "" 设备误聚成一簇。
+        let ip = ip.filter(|s| !s.is_empty());
+        let uid = uid.filter(|s| !s.is_empty());
+        let coarse = coarse.filter(|s| !s.is_empty());
+        if ip.is_none() && uid.is_none() && coarse.is_none() {
+            return Ok(Vec::new());
+        }
+
+        // NULL 绑定时 `= ?` 求值为 NULL(false),空信号维度自然跳过。
+        let mut stmt = conn.prepare(
+            "SELECT device_id,
+                    (last_ip IS NOT NULL AND last_ip = ?2) AS ip_match,
+                    (user_id IS NOT NULL AND user_id = ?3) AS user_match,
+                    (fp_coarse IS NOT NULL AND fp_coarse = ?4) AS fp_match
+             FROM client_devices
+             WHERE device_id != ?1
+               AND is_banned = 0
+               AND ((last_ip IS NOT NULL AND last_ip = ?2)
+                 OR (user_id IS NOT NULL AND user_id = ?3)
+                 OR (fp_coarse IS NOT NULL AND fp_coarse = ?4))",
+        )?;
+        let candidates: Vec<(String, bool, bool, bool)> = stmt
+            .query_map(params![banned_device_id, ip, uid, coarse], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)? != 0,
+                    r.get::<_, i64>(2)? != 0,
+                    r.get::<_, i64>(3)? != 0,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(stmt);
+
+        let mut flagged = Vec::with_capacity(candidates.len());
+        for (device_id, ip_match, user_match, fp_match) in candidates {
+            let mut parts: Vec<&str> = Vec::new();
+            if ip_match {
+                parts.push("共享出口 IP");
+            }
+            if user_match {
+                parts.push("同一账号");
+            }
+            if fp_match {
+                parts.push("相同设备指纹(模糊)");
+            }
+            if parts.is_empty() {
+                continue; // WHERE 已过滤,理论不可达
+            }
+            let reason = format!("关联自被封设备 {banned_device_id}:{}", parts.join("、"));
+            conn.execute(
+                "UPDATE client_devices
+                    SET risk_flag = 1, risk_reason = ?2,
+                        risk_flagged_at = datetime('now'), risk_related_device = ?3
+                  WHERE device_id = ?1",
+                params![device_id, reason, banned_device_id],
+            )?;
+            flagged.push(device_id);
+        }
+        Ok(flagged)
+    }
+
+    /// m054:清除单设备的关联风控标记(admin 复核判定误报)。
+    pub fn clear_device_risk_flag(&self, device_id: &str) -> Result<bool, StoreError> {
+        let conn = self.conn()?;
+        let affected = conn.execute(
+            "UPDATE client_devices
+                SET risk_flag = 0, risk_reason = NULL,
+                    risk_flagged_at = NULL, risk_related_device = NULL
+              WHERE device_id = ?1 AND risk_flag = 1",
+            params![device_id],
+        )?;
+        Ok(affected > 0)
+    }
+
+    /// m054:解封某设备时顺带清除由它触发的全部关联标记,避免误封纠正后留悬挂标记。
+    /// 返回被清除的设备数。
+    pub fn clear_risk_flags_related_to(
+        &self,
+        source_device_id: &str,
+    ) -> Result<usize, StoreError> {
+        let conn = self.conn()?;
+        let affected = conn.execute(
+            "UPDATE client_devices
+                SET risk_flag = 0, risk_reason = NULL,
+                    risk_flagged_at = NULL, risk_related_device = NULL
+              WHERE risk_related_device = ?1 AND risk_flag = 1",
+            params![source_device_id],
+        )?;
+        Ok(affected)
+    }
+
+    /// m054:列当前被标记关联风险的设备(按打标时间倒序),供 admin 复核面板。
+    pub fn list_flagged_devices(&self, limit: i64) -> Result<Vec<ClientDevice>, StoreError> {
+        let conn = self.conn()?;
+        let sql = format!(
+            "SELECT {CLIENT_DEVICE_COLS}
+             FROM client_devices
+             WHERE risk_flag = 1
+             ORDER BY risk_flagged_at DESC
+             LIMIT ?1"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![limit], row_to_client_device)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// m055:落库设备浏览器指纹(随请求头来,与 last_ip 同性质)。COALESCE 保留已有值,
+    /// 漏带头不清空。设备行须已存在(中间件先 upsert),不存在则 0 行无副作用。
+    pub fn update_device_fingerprint(
+        &self,
+        device_id: &str,
+        fp_strong: Option<&str>,
+        fp_coarse: Option<&str>,
+    ) -> Result<(), StoreError> {
+        if fp_strong.is_none() && fp_coarse.is_none() {
+            return Ok(());
+        }
+        let conn = self.conn()?;
+        conn.execute(
+            "UPDATE client_devices
+                SET fp_strong = COALESCE(?2, fp_strong),
+                    fp_coarse = COALESCE(?3, fp_coarse)
+              WHERE device_id = ?1",
+            params![device_id, fp_strong, fp_coarse],
+        )?;
+        Ok(())
+    }
+
+    /// m055:请求路径"是否被封"判定——设备 id 被封 **或** 强指纹命中任一被封设备。
+    /// 后者使清缓存/隐私模式/换标签得到的新 device_id 仍被同一台机器的封禁覆盖。
+    /// fp_strong 为 None 时退化为纯 device_id 判定。
+    pub fn is_client_banned(
+        &self,
+        device_id: &str,
+        fp_strong: Option<&str>,
+    ) -> Result<bool, StoreError> {
+        let conn = self.conn()?;
+        let banned: bool = conn.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM client_devices
+                WHERE is_banned = 1
+                  AND (device_id = ?1
+                    OR (?2 IS NOT NULL AND fp_strong IS NOT NULL AND fp_strong = ?2))
+            )",
+            params![device_id, fp_strong],
+            |r| r.get(0),
+        )?;
+        Ok(banned)
+    }
+
+    /// m055:若本设备的模糊指纹命中某被封设备(同硬件、换浏览器/会话),给本设备打 risk_flag
+    /// 供 admin 复核(不硬封,coarse 低熵会撞机型)。返回命中的被封设备 id(无命中=None)。
+    /// 本设备已封或已标记则跳过。
+    pub fn flag_device_if_coarse_banned(
+        &self,
+        device_id: &str,
+        fp_coarse: &str,
+    ) -> Result<Option<String>, StoreError> {
+        if fp_coarse.is_empty() {
+            return Ok(None);
+        }
+        let conn = self.conn()?;
+        let related: Option<String> = conn
+            .query_row(
+                "SELECT device_id FROM client_devices
+                  WHERE is_banned = 1 AND fp_coarse = ?1 AND device_id != ?2
+                  LIMIT 1",
+                params![fp_coarse, device_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(related_id) = related else {
+            return Ok(None);
+        };
+        let reason = format!("关联自被封设备 {related_id}:相同设备指纹(模糊)");
+        conn.execute(
+            "UPDATE client_devices
+                SET risk_flag = 1, risk_reason = ?2,
+                    risk_flagged_at = datetime('now'), risk_related_device = ?3
+              WHERE device_id = ?1 AND is_banned = 0 AND risk_flag = 0",
+            params![device_id, reason, related_id],
+        )?;
+        Ok(Some(related_id))
+    }
+
     /// m024:列某 user 关联的 client_devices(按 last_seen_at 倒序)。
     /// 供 admin Drawer "设备/会话" 区块。
     pub fn list_client_devices_for_user(
@@ -284,15 +513,14 @@ impl Store {
         limit: usize,
     ) -> Result<Vec<ClientDevice>, StoreError> {
         let conn = self.conn()?;
-        let mut stmt = conn.prepare(
-            "SELECT device_id, platform, user_id, first_seen_at, last_seen_at,
-                    is_banned, banned_at, banned_by, ban_reason, app_version,
-                    country, last_ip, model
+        let sql = format!(
+            "SELECT {CLIENT_DEVICE_COLS}
              FROM client_devices
              WHERE user_id = ?1
              ORDER BY last_seen_at DESC
-             LIMIT ?2",
-        )?;
+             LIMIT ?2"
+        );
+        let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(params![user_id, limit as i64], |r| row_to_client_device(r))?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
@@ -365,9 +593,7 @@ impl Store {
         let limit_idx = next_idx;
         let offset_idx = next_idx + 1;
         let select_sql = format!(
-            "SELECT device_id, platform, user_id, first_seen_at, last_seen_at,
-                    is_banned, banned_at, banned_by, ban_reason, app_version,
-                    country, last_ip, model
+            "SELECT {CLIENT_DEVICE_COLS}
              FROM client_devices
              {where_clause}
              ORDER BY is_banned DESC, last_seen_at DESC
@@ -909,6 +1135,25 @@ mod tests {
     }
 
     #[test]
+    fn data_upload_status_reflects_persisted_engine_state() {
+        // 回归:引擎写路径须把 state_json 里的 totalEventCount 投影到标量列。
+        // 经正常写路径落库(不手动塞列),数据状态面板 AMAS 通道应判 uploaded;
+        // 修复前写路径只写 state_json、列恒为 0,此处会退回 nil。
+        let store = test_store();
+        let user_id = "u-3".to_string();
+        store
+            .set_engine_user_state(
+                &user_id,
+                &serde_json::json!({ "totalEventCount": 5, "sessionEventCount": 2 }),
+            )
+            .unwrap();
+        let s = store
+            .get_data_upload_status(std::slice::from_ref(&user_id), &[])
+            .unwrap();
+        assert_eq!(s.amas_by_user.get(&user_id).copied(), Some("uploaded"));
+    }
+
+    #[test]
     fn data_channel_status_default_is_none_strings() {
         let s = DataChannelStatus::default();
         assert_eq!(s.amas, "none");
@@ -924,5 +1169,192 @@ mod tests {
         let s = DataUploadSummary::default();
         let json = serde_json::to_string(&s).unwrap();
         assert!(json.contains("amasByUser"));
+    }
+
+    #[test]
+    fn flag_related_devices_marks_shared_ip_and_user() {
+        let store = test_store();
+        // 被封设备:IP=1.2.3.4, user=u-1
+        store
+            .upsert_client_device_with_extras(
+                "dev-bad", "web", "u-1", None, None, Some("1.2.3.4"), None,
+            )
+            .unwrap();
+        // 共享 IP(不同账号)
+        store
+            .upsert_client_device_with_extras(
+                "dev-ip", "web", "u-2", None, None, Some("1.2.3.4"), None,
+            )
+            .unwrap();
+        // 同账号(不同 IP)
+        store
+            .upsert_client_device_with_extras(
+                "dev-user", "web", "u-1", None, None, Some("9.9.9.9"), None,
+            )
+            .unwrap();
+        // 无关设备
+        store
+            .upsert_client_device_with_extras(
+                "dev-clean", "web", "u-3", None, None, Some("5.5.5.5"), None,
+            )
+            .unwrap();
+
+        store
+            .ban_client_device("dev-bad", "admin", Some("spam"))
+            .unwrap();
+        let mut flagged = store.flag_related_devices("dev-bad").unwrap();
+        flagged.sort();
+        assert_eq!(flagged, vec!["dev-ip".to_string(), "dev-user".to_string()]);
+
+        let listed = store.list_flagged_devices(10).unwrap();
+        assert_eq!(listed.len(), 2);
+        assert!(listed.iter().all(|d| d.risk_flag));
+        assert!(listed
+            .iter()
+            .all(|d| d.risk_related_device.as_deref() == Some("dev-bad")));
+
+        let clean = store.get_client_device("dev-clean").unwrap().unwrap();
+        assert!(!clean.risk_flag);
+
+        // 解封触发源 → 关联标记清除
+        store.unban_client_device("dev-bad").unwrap();
+        let cleared = store.clear_risk_flags_related_to("dev-bad").unwrap();
+        assert_eq!(cleared, 2);
+        assert!(store.list_flagged_devices(10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn flag_related_skips_already_banned_and_self() {
+        let store = test_store();
+        store
+            .upsert_client_device_with_extras(
+                "dev-a", "web", "u-1", None, None, Some("1.1.1.1"), None,
+            )
+            .unwrap();
+        store
+            .upsert_client_device_with_extras(
+                "dev-b", "web", "u-1", None, None, Some("1.1.1.1"), None,
+            )
+            .unwrap();
+        store.ban_client_device("dev-b", "admin", None).unwrap(); // 已封,应被排除
+        store.ban_client_device("dev-a", "admin", None).unwrap();
+        // dev-b 已封被排除;dev-a 自身被排除 → 空
+        assert!(store.flag_related_devices("dev-a").unwrap().is_empty());
+    }
+
+    #[test]
+    fn flag_related_noop_when_no_signals() {
+        let store = test_store();
+        // last_ip 与 user_id 都为空 → 无可关联信号
+        store
+            .upsert_client_device_with_extras("dev-x", "web", "", None, None, None, None)
+            .unwrap();
+        store
+            .upsert_client_device_with_extras("dev-y", "web", "", None, None, None, None)
+            .unwrap();
+        store.ban_client_device("dev-x", "admin", None).unwrap();
+        assert!(store.flag_related_devices("dev-x").unwrap().is_empty());
+
+        // 误报清除
+        store
+            .upsert_client_device_with_extras(
+                "dev-z", "web", "u-9", None, None, Some("2.2.2.2"), None,
+            )
+            .unwrap();
+        store
+            .upsert_client_device_with_extras(
+                "dev-z2", "web", "u-9", None, None, Some("2.2.2.2"), None,
+            )
+            .unwrap();
+        store.ban_client_device("dev-z", "admin", None).unwrap();
+        assert_eq!(store.flag_related_devices("dev-z").unwrap().len(), 1);
+        assert!(store.clear_device_risk_flag("dev-z2").unwrap());
+        assert!(store.list_flagged_devices(10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn fingerprint_strong_ban_matches_new_device_id() {
+        let store = test_store();
+        // 老设备:强指纹 FP_A,被封
+        store
+            .upsert_client_device_with_extras("dev-old", "web", "u-1", None, None, None, None)
+            .unwrap();
+        store
+            .update_device_fingerprint("dev-old", Some("FP_A"), Some("CO_A"))
+            .unwrap();
+        store
+            .ban_client_device("dev-old", "admin", Some("spam"))
+            .unwrap();
+
+        // 新 device_id(清缓存/隐私模式),但强指纹相同 → 视为被封
+        assert!(store.is_client_banned("dev-new", Some("FP_A")).unwrap());
+        // 强指纹不同 → 未封
+        assert!(!store.is_client_banned("dev-new", Some("FP_B")).unwrap());
+        // 不带指纹 → 退化为纯 device_id 判定(新 id 未封)
+        assert!(!store.is_client_banned("dev-new", None).unwrap());
+        // device_id 自身被封仍命中
+        assert!(store.is_client_banned("dev-old", None).unwrap());
+    }
+
+    #[test]
+    fn coarse_fingerprint_flags_not_bans() {
+        let store = test_store();
+        store
+            .upsert_client_device_with_extras("dev-old", "web", "u-1", None, None, None, None)
+            .unwrap();
+        store
+            .update_device_fingerprint("dev-old", Some("FP_A"), Some("CO_A"))
+            .unwrap();
+        store.ban_client_device("dev-old", "admin", None).unwrap();
+
+        // 新设备:换浏览器→强指纹不同(FP_B),但同硬件→模糊指纹相同(CO_A)
+        store
+            .upsert_client_device_with_extras("dev-new", "web", "u-2", None, None, None, None)
+            .unwrap();
+        store
+            .update_device_fingerprint("dev-new", Some("FP_B"), Some("CO_A"))
+            .unwrap();
+
+        // 强指纹不同 → 不硬封
+        assert!(!store.is_client_banned("dev-new", Some("FP_B")).unwrap());
+        // 模糊指纹命中 → 打标(不硬封)
+        let related = store.flag_device_if_coarse_banned("dev-new", "CO_A").unwrap();
+        assert_eq!(related.as_deref(), Some("dev-old"));
+        let flagged = store.list_flagged_devices(10).unwrap();
+        assert_eq!(flagged.len(), 1);
+        assert_eq!(flagged[0].device_id, "dev-new");
+        assert_eq!(flagged[0].risk_related_device.as_deref(), Some("dev-old"));
+        // 不匹配的 coarse → 无操作
+        assert!(store
+            .flag_device_if_coarse_banned("dev-new", "CO_OTHER")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn flag_related_devices_includes_coarse_fingerprint() {
+        let store = test_store();
+        store
+            .upsert_client_device_with_extras(
+                "dev-bad", "web", "u-1", None, None, Some("1.2.3.4"), None,
+            )
+            .unwrap();
+        store
+            .update_device_fingerprint("dev-bad", Some("S1"), Some("COARSE"))
+            .unwrap();
+        // 不同 IP、不同账号,但同硬件模糊指纹
+        store
+            .upsert_client_device_with_extras(
+                "dev-fp", "web", "u-9", None, None, Some("8.8.8.8"), None,
+            )
+            .unwrap();
+        store
+            .update_device_fingerprint("dev-fp", Some("S2"), Some("COARSE"))
+            .unwrap();
+        store.ban_client_device("dev-bad", "admin", None).unwrap();
+        let flagged = store.flag_related_devices("dev-bad").unwrap();
+        assert_eq!(flagged, vec!["dev-fp".to_string()]);
+        let d = store.get_client_device("dev-fp").unwrap().unwrap();
+        assert!(d.risk_reason.unwrap().contains("指纹"));
     }
 }

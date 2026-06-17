@@ -342,6 +342,17 @@ async fn submit_telemetry(
         }
     }
 
+    // 心跳与设备活跃度同口径:任何 owner 核验通过的合法上报即视为设备存活(不按 eventType 区分),
+    // 在采样门(下方 sampled_out)之前刷新 last_heartbeat。存活判定不应受 telemetry_sample_rate 影响——
+    // 否则 sample_rate<1.0 时被采样丢弃的周期心跳不刷心跳,会让 watchdog 误报 data_corrupted。
+    // 注:心跳=设备存活,非"数据已落库";落库失败(下方 ??)不回滚此刷新,这超出 watchdog 职责范围。
+    state
+        .last_heartbeat()
+        .insert(device_id.to_string(), std::time::Instant::now());
+    state
+        .heartbeat_miss_count()
+        .insert(device_id.to_string(), 0);
+
     let id = uuid::Uuid::new_v4().to_string();
     let payload_json = serde_json::to_string(&body.payload)
         .map_err(|e| AppError::internal(&format!("payload serialization: {e}")))?;
@@ -398,13 +409,6 @@ async fn submit_telemetry(
             )
         })
         .await??;
-
-    state
-        .last_heartbeat()
-        .insert(device_id.to_string(), std::time::Instant::now());
-    state
-        .heartbeat_miss_count()
-        .insert(device_id.to_string(), 0);
 
     Ok(ok(serde_json::json!({ "id": id })))
 }

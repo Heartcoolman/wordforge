@@ -91,4 +91,11 @@ admin后端/
 # 本地开发空库 / workflow 临时脚本(不入仓)
 wordforge.db
 .claude/wf/
+.claude/workflows/
 .ace-tool/
+
+# 本地产物 / 调研缓存(不入仓)
+__pycache__/
+docs/algo-bench-*/
+docs/amas-evolution-research-*/
+docs/reviews/

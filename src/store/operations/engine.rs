@@ -23,6 +23,22 @@ impl Store {
         }
     }
 
+    /// 把 UserState JSON(camelCase)里的累计计数投影到 engine_user_states 标量列。
+    /// state_json 是引擎真值,但 get_data_upload_status / amas_dashboard 等按标量列查询;
+    /// 每次落库须把列与 JSON 同步,否则列恒为 schema DEFAULT 0 → 设备数据状态 AMAS 通道恒判 nil。
+    fn projected_counts(state: &serde_json::Value) -> (i64, i64) {
+        // 计数为非负整数;兼容 JSON 整数与浮点表示(如 5.0),并 clamp 到 [0, i64::MAX],
+        // 避免 as_i64() 对浮点/超界值返回 None 而静默退化为 0、覆盖标量列误判 nil。
+        let extract = |key: &str| -> i64 {
+            state
+                .get(key)
+                .and_then(|v| v.as_i64().or_else(|| v.as_f64().map(|f| f as i64)))
+                .unwrap_or(0)
+                .max(0)
+        };
+        (extract("totalEventCount"), extract("sessionEventCount"))
+    }
+
     pub fn set_engine_user_state(
         &self,
         user_id: &str,
@@ -31,12 +47,13 @@ impl Store {
         keys::validate_id(user_id)?;
         let conn = self.conn()?;
         let json = Self::serialize_json(state)?;
+        let (total_ev, session_ev) = Self::projected_counts(state);
         let created_at = chrono::Utc::now().to_rfc3339();
         conn.execute(
-            "INSERT INTO engine_user_states (user_id, state_json, created_at)
-             VALUES (?1, ?2, ?3)
-             ON CONFLICT(user_id) DO UPDATE SET state_json=?2",
-            params![user_id, json, created_at],
+            "INSERT INTO engine_user_states (user_id, state_json, total_event_count, session_event_count, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(user_id) DO UPDATE SET state_json=?2, total_event_count=?3, session_event_count=?4",
+            params![user_id, json, total_ev, session_ev, created_at],
         )?;
         Ok(())
     }
@@ -177,6 +194,13 @@ impl Store {
             .and_then(|v| v.as_bool())
             .unwrap_or(false) as i64;
         let json = Self::serialize_json(event)?;
+        // strategy_json 存整坨 event blob 供 get_recent_monitoring_events 向后兼容回读;
+        // reward_json 独立存 event.reward 子对象(此前误与 strategy_json 共用 ?15 占位符,
+        // 导致 reward_json 列恒被写成整坨 event 而非奖励信号)。
+        let reward_json = event
+            .get("reward")
+            .map(|v| serde_json::to_string(v).unwrap_or_else(|_| "{}".to_string()))
+            .unwrap_or_else(|| "{}".to_string());
 
         let conn = self.conn()?;
         conn.execute(
@@ -188,8 +212,8 @@ impl Store {
                 selection_constraints_met, reward_value, config_version,
                 routing_algo, routing_weights_json, is_correct
              ) VALUES (
-                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15, ?16,
-                ?17, ?18, ?19, ?20, ?21, ?22
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
+                ?18, ?19, ?20, ?21, ?22, ?23
              )",
             params![
                 id,
@@ -207,6 +231,7 @@ impl Store {
                 session_event_count,
                 total_event_count,
                 json,
+                reward_json,
                 cold_start_phase,
                 selection_constraints_met,
                 reward_value,
@@ -322,12 +347,13 @@ impl Store {
         // IMMEDIATE：ELO RMW 在 BEGIN 即取写锁，杜绝读后写升级丢更新/死锁。
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let user_json = Self::serialize_json(user_state)?;
+        let (total_ev, session_ev) = Self::projected_counts(user_state);
         let created_at = chrono::Utc::now().to_rfc3339();
         tx.execute(
-            "INSERT INTO engine_user_states (user_id, state_json, created_at)
-             VALUES (?1, ?2, ?3)
-             ON CONFLICT(user_id) DO UPDATE SET state_json=?2",
-            params![user_id, user_json, created_at],
+            "INSERT INTO engine_user_states (user_id, state_json, total_event_count, session_event_count, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(user_id) DO UPDATE SET state_json=?2, total_event_count=?3, session_event_count=?4",
+            params![user_id, user_json, total_ev, session_ev, created_at],
         )?;
         for (algo_id, value) in algo_states {
             let json = Self::serialize_json(value)?;
@@ -377,12 +403,13 @@ impl Store {
         let mut conn = self.conn()?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let json = Self::serialize_json(default_user_state)?;
+        let (total_ev, session_ev) = Self::projected_counts(default_user_state);
         let created_at = chrono::Utc::now().to_rfc3339();
         tx.execute(
-            "INSERT INTO engine_user_states (user_id, state_json, created_at)
-             VALUES (?1, ?2, ?3)
-             ON CONFLICT(user_id) DO UPDATE SET state_json=?2",
-            params![user_id, json, created_at],
+            "INSERT INTO engine_user_states (user_id, state_json, total_event_count, session_event_count, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(user_id) DO UPDATE SET state_json=?2, total_event_count=?3, session_event_count=?4",
+            params![user_id, json, total_ev, session_ev, created_at],
         )?;
         // 删除该用户**所有** algo 状态：mastery:*/evm:*/iad/mtp/ige/swd/trust 一网打尽，
         // 否则旧词记忆/IAD/MTP 残留会与 total_event_count=0 的冷启动态自相矛盾（#24）。
@@ -501,12 +528,13 @@ impl Store {
             match state_opt {
                 Some(v) => {
                     let json = Self::serialize_json(v)?;
+                    let (total_ev, session_ev) = Self::projected_counts(v);
                     let created_at = chrono::Utc::now().to_rfc3339();
                     tx.execute(
-                        "INSERT INTO engine_user_states (user_id, state_json, created_at)
-                         VALUES (?1, ?2, ?3)
-                         ON CONFLICT(user_id) DO UPDATE SET state_json=?2",
-                        params![r.user_id, json, created_at],
+                        "INSERT INTO engine_user_states (user_id, state_json, total_event_count, session_event_count, created_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5)
+                         ON CONFLICT(user_id) DO UPDATE SET state_json=?2, total_event_count=?3, session_event_count=?4",
+                        params![r.user_id, json, total_ev, session_ev, created_at],
                     )?;
                 }
                 None => {

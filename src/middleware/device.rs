@@ -104,14 +104,33 @@ pub async fn device_middleware(
         .filter(|s| is_valid_device_id(s))
         .map(String::from);
 
+    // m055:web 设备封禁=浏览器指纹。fp_strong 高熵→精确匹配自动封(关掉清缓存/隐私模式/
+    // 换标签绕过);fp_coarse 硬件低熵→跨浏览器模糊匹配进 risk_flag 复核。原生端不带头=None,
+    // 逻辑自动退化为纯 device_id 判定。长度上限防滥用头打爆。
+    let fp_strong = req
+        .headers()
+        .get("x-device-fingerprint")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty() && s.len() <= 128)
+        .map(String::from);
+    let fp_coarse = req
+        .headers()
+        .get("x-device-fingerprint-coarse")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty() && s.len() <= 128)
+        .map(String::from);
+
     let mut upgrade_hint: Option<&'static str> = None;
 
     if let Some(ref did) = device_id {
         let banned_check = {
             let did = did.clone();
+            let fp = fp_strong.clone();
             state
-                .run_store_task("middleware.device.is_device_banned", move |store| {
-                    store.is_device_banned(&did)
+                .run_store_task("middleware.device.is_client_banned", move |store| {
+                    store.is_client_banned(&did, fp.as_deref())
                 })
                 .await
         };
@@ -203,18 +222,33 @@ pub async fn device_middleware(
                 let app_version = app_version.clone();
                 let country = country.clone();
                 let client_ip = client_ip.clone();
+                let fp_strong = fp_strong.clone();
+                let fp_coarse = fp_coarse.clone();
                 state
-                    .run_store_task("middleware.device.upsert_client_device", move |store| {
-                        store.upsert_client_device_with_extras(
-                            &did,
-                            &platform,
-                            &uid,
-                            app_version.as_deref(),
-                            country.as_deref(),
-                            client_ip.as_deref(),
-                            None, // model:中间件无 payload,型号由 telemetry handler 落库
-                        )
-                    })
+                    .run_store_task(
+                        "middleware.device.upsert_client_device",
+                        move |store| -> Result<(), crate::store::StoreError> {
+                            store.upsert_client_device_with_extras(
+                                &did,
+                                &platform,
+                                &uid,
+                                app_version.as_deref(),
+                                country.as_deref(),
+                                client_ip.as_deref(),
+                                None, // model:中间件无 payload,型号由 telemetry handler 落库
+                            )?;
+                            // m055:落库指纹供后续封禁/关联;模糊指纹命中被封设备 → 打标复核。
+                            store.update_device_fingerprint(
+                                &did,
+                                fp_strong.as_deref(),
+                                fp_coarse.as_deref(),
+                            )?;
+                            if let Some(ref coarse) = fp_coarse {
+                                store.flag_device_if_coarse_banned(&did, coarse)?;
+                            }
+                            Ok(())
+                        },
+                    )
                     .await
             };
 
@@ -362,6 +396,70 @@ mod tests {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["code"], "CLIENT_BANNED");
+    }
+
+    /// m055:被封设备的强指纹换一个全新 device_id(清缓存/隐私模式)仍被拦截。
+    #[tokio::test]
+    async fn banned_fingerprint_blocks_fresh_device_id() {
+        let (state, _tmp) = build_state().await;
+        state
+            .store()
+            .upsert_client_device("dev-old", "web", "user-1")
+            .unwrap();
+        state
+            .store()
+            .update_device_fingerprint("dev-old", Some("STRONGHASH"), Some("COARSEHASH"))
+            .unwrap();
+        state
+            .store()
+            .ban_client_device("dev-old", "admin", Some("test"))
+            .unwrap();
+
+        let app = build_router(state);
+        // 全新 device_id + 相同强指纹 → 403
+        let req = Request::builder()
+            .uri("/api/ping")
+            .header("x-device-id", "brand-new-id")
+            .header("x-device-fingerprint", "STRONGHASH")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["code"], "CLIENT_BANNED");
+    }
+
+    /// m055:仅模糊指纹相同(换浏览器)不硬封——放行,留 risk_flag 给 admin 复核。
+    #[tokio::test]
+    async fn coarse_fingerprint_only_does_not_block() {
+        let (state, _tmp) = build_state().await;
+        state
+            .store()
+            .upsert_client_device("dev-old", "web", "user-1")
+            .unwrap();
+        state
+            .store()
+            .update_device_fingerprint("dev-old", Some("STRONG_A"), Some("COARSEHASH"))
+            .unwrap();
+        state
+            .store()
+            .ban_client_device("dev-old", "admin", Some("test"))
+            .unwrap();
+
+        let app = build_router(state);
+        // 全新 device_id,强指纹不同(换浏览器),仅 coarse 相同 → 不拦截
+        let req = Request::builder()
+            .uri("/api/ping")
+            .header("x-device-id", "another-id")
+            .header("x-device-fingerprint", "STRONG_B")
+            .header("x-device-fingerprint-coarse", "COARSEHASH")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]

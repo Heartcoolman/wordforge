@@ -7,7 +7,7 @@ import {
 import {
   adminApi,
   type SseLiveEntry, type RecentlyActiveEntry, type DataChannelStatus, type DataChannelValue,
-  type TelemetrySummary,
+  type TelemetrySummary, type FlaggedClientEntry,
 } from '@/api/admin';
 import type {
   ClientPlatformAgg, ClientVersionAgg, ClientUpgradePolicy, ListedDevice, VersionGate,
@@ -295,6 +295,7 @@ function DeviceDrawer(props: {
   deviceId: string | null;
   onClose: () => void;
   onBan: (id: string, action: 'ban' | 'unban') => void;
+  onClearFlag: (id: string) => void;
 }) {
   const [filter, setFilter] = createSignal('');
   const [expanded, setExpanded] = createSignal<string | null>(null);
@@ -339,6 +340,17 @@ function DeviceDrawer(props: {
             <Show when={dt().isBanned}>
               <div style={sx({ padding: '9px 12px', borderRadius: 10, background: 'var(--error-soft)', color: 'var(--error)', fontSize: 12.5, marginBottom: 14 })}>
                 已封禁 · {dt().banReason ?? '无原因'} · {fmtAgo(dt().bannedAt)}
+              </div>
+            </Show>
+
+            {/* m054:关联风控标记(共享 IP/账号/指纹被牵连),供复核 + 一键解除 */}
+            <Show when={dt().riskFlag}>
+              <div style={sx({ display: 'flex', alignItems: 'center', gap: 8, padding: '9px 12px', borderRadius: 10, background: 'var(--warning-soft)', color: 'var(--warning)', fontSize: 12.5, marginBottom: 14 })}>
+                <Icon name="zap" size={14} />
+                <div style={sx({ flex: 1 })}>
+                  关联风险标记 · {dt().riskReason ?? '无原因'} · {fmtAgo(dt().riskFlaggedAt)}
+                </div>
+                <Btn size="xs" variant="outline" onClick={() => { props.onClearFlag(props.deviceId!); props.onClose(); }}>解除</Btn>
               </div>
             </Show>
 
@@ -429,11 +441,12 @@ type DeviceRow = {
   deviceId: string; platform: string; appVersion?: string | null; userId: string | null;
   isBanned: boolean; dataChannels?: DataChannelStatus;
   connectedSecs?: number; connectionCount?: number; lastSeenAt?: string; country?: string | null;
+  riskFlag?: boolean; riskRelatedDevice?: string | null;
 };
 
 export default function DevicesPage() {
   const navigate = useNavigate();
-  const [tab, setTab] = createSignal<'sse' | 'recent' | 'all'>('sse');
+  const [tab, setTab] = createSignal<'sse' | 'recent' | 'all' | 'flagged'>('sse');
   const [detail, setDetail] = createSignal<string | null>(null);
   const [banTarget, setBanTarget] = createSignal<{ id: string; action: 'ban' | 'unban' } | null>(null);
   const [banReason, setBanReason] = createSignal('');
@@ -448,6 +461,8 @@ export default function DevicesPage() {
   const [clients, { refetch: refetchClients }] = createResource(() => adminApi.getClients());
   const [dist, { refetch: refetchDist }] = createResource(() => adminApi.getClientsDistribution());
   const [gate, { refetch: refetchGate }] = createResource(() => adminApi.getVersionGate());
+  // m054:关联风控复核列表(封禁时被牵连的设备)
+  const [flagged, { refetch: refetchFlagged }] = createResource(() => adminApi.listFlaggedClients());
 
   // 全部设备分页查询(仅在 all tab 时拉)
   const [allDev] = createResource(
@@ -467,14 +482,20 @@ export default function DevicesPage() {
 
   const liveRows = createMemo<SseLiveEntry[]>(() => clients()?.sseLive ?? []);
   const recentRows = createMemo<RecentlyActiveEntry[]>(() => clients()?.recentlyActive ?? []);
+  const flaggedRows = createMemo<FlaggedClientEntry[]>(() => flagged()?.flagged ?? []);
 
   const doBan = async () => {
     const t = banTarget();
     if (!t) return;
     try {
       if (t.action === 'ban') {
-        await adminApi.banClient(t.id, banReason() || undefined);
-        toast.success('已封禁设备 ' + shortId(t.id));
+        const r = await adminApi.banClient(t.id, banReason() || undefined);
+        // m054:封禁联动关联标记——提示有多少台共享 IP/账号/指纹的设备进了复核队列
+        if (r.flaggedRelated > 0) {
+          toast.success('已封禁设备 ' + shortId(t.id), `关联标记 ${r.flaggedRelated} 台待复核`);
+        } else {
+          toast.success('已封禁设备 ' + shortId(t.id));
+        }
       } else {
         await adminApi.unbanClient(t.id);
         toast.success('已解封 ' + shortId(t.id));
@@ -482,8 +503,21 @@ export default function DevicesPage() {
       setBanTarget(null);
       setBanReason('');
       void refetchClients();
+      void refetchFlagged();
     } catch (e: any) {
       toast.error(`${t.action === 'ban' ? '封禁' : '解封'}失败`, e?.message);
+    }
+  };
+
+  // m054:复核判定误报,解除单设备关联标记
+  const clearFlag = async (id: string) => {
+    try {
+      await adminApi.clearClientFlag(id);
+      toast.success('已解除关联标记 ' + shortId(id));
+      void refetchFlagged();
+      void refetchClients();
+    } catch (e: any) {
+      toast.error('解除标记失败', e?.message);
     }
   };
 
@@ -574,11 +608,12 @@ export default function DevicesPage() {
       <Card pad={false} style={sx({ overflow: 'hidden', marginBottom: 16 })}>
         <div style={sx({ padding: 14, display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', borderBottom: '1px solid var(--hairline)' })}>
           <Tabs
-            value={tab()} onChange={(v) => setTab(v as 'sse' | 'recent' | 'all')}
+            value={tab()} onChange={(v) => setTab(v as 'sse' | 'recent' | 'all' | 'flagged')}
             tabs={[
               { value: 'sse', label: '实时连接', count: liveRows().length },
               { value: 'recent', label: '近期活跃', count: recentRows().length },
               { value: 'all', label: '全部设备', count: totalDev() || (allDev()?.total ?? 0) },
+              { value: 'flagged', label: '风险标记', count: flaggedRows().length },
             ]}
           />
           <Show when={tab() === 'all'}>
@@ -605,6 +640,59 @@ export default function DevicesPage() {
           </Show>
         </div>
 
+        {/* m054:风险标记复核表(封禁牵连的关联设备) */}
+        <Show when={tab() === 'flagged'}>
+          <div style={sx({ overflowX: 'auto' })}>
+            <table class="tbl">
+              <thead>
+                <tr>
+                  <th>设备 ID</th>
+                  <th>平台</th>
+                  <th>用户</th>
+                  <th>标记原因</th>
+                  <th>触发源</th>
+                  <th>标记时间</th>
+                  <th style={sx({ textAlign: 'right' })}>操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                <Show
+                  when={!flagged.loading}
+                  fallback={<For each={Array.from({ length: 6 })}>{() => <tr><td colSpan={7}><Skel h={22} /></td></tr>}</For>}
+                >
+                  <Show
+                    when={flaggedRows().length}
+                    fallback={<tr><td colSpan={7}><Empty title="暂无风险标记" desc="封禁设备时,共享 IP / 账号 / 设备指纹的关联设备会出现在此待复核" icon="devices" /></td></tr>}
+                  >
+                    <For each={flaggedRows()}>
+                      {(r) => (
+                        <tr>
+                          <td class="mono" style={sx({ fontSize: 11.5 })} title={r.deviceId}>{shortId(r.deviceId)}</td>
+                          <td><Badge variant="default">{r.platform}</Badge></td>
+                          <td class="mono" style={sx({ fontSize: 11.5 })}>{shortId(r.userId)}</td>
+                          <td class="muted" style={sx({ fontSize: 12, maxWidth: 260, whiteSpace: 'normal' })}>{r.riskReason ?? '—'}</td>
+                          <td class="mono" style={sx({ fontSize: 11.5 })} title={r.riskRelatedDevice ?? ''}>{shortId(r.riskRelatedDevice)}</td>
+                          <td class="muted" style={sx({ fontSize: 12 })}>{r.riskFlaggedAt ? fmtAgo(r.riskFlaggedAt) : '—'}</td>
+                          <td>
+                            <div style={sx({ display: 'flex', gap: 5, justifyContent: 'flex-end', flexWrap: 'wrap' })}>
+                              <Show when={!r.isBanned} fallback={<Badge variant="error">已封禁</Badge>}>
+                                <Btn size="xs" variant="danger" onClick={() => setBanTarget({ id: r.deviceId, action: 'ban' })}>封禁</Btn>
+                              </Show>
+                              <Btn size="xs" variant="outline" onClick={() => clearFlag(r.deviceId)}>解除标记</Btn>
+                              <Btn size="xs" variant="ghost" onClick={() => setDetail(r.deviceId)}>遥测详情</Btn>
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                    </For>
+                  </Show>
+                </Show>
+              </tbody>
+            </table>
+          </div>
+        </Show>
+
+        <Show when={tab() !== 'flagged'}>
         <div style={sx({ overflowX: 'auto' })}>
           <table class="tbl">
             <thead>
@@ -638,7 +726,16 @@ export default function DevicesPage() {
                   <For each={currentRows()}>
                     {(r) => (
                       <tr>
-                        <td class="mono" style={sx({ fontSize: 11.5 })} title={r.deviceId}>{shortId(r.deviceId)}</td>
+                        <td class="mono" style={sx({ fontSize: 11.5 })} title={r.deviceId}>
+                          <span style={sx({ display: 'inline-flex', alignItems: 'center', gap: 6 })}>
+                            {shortId(r.deviceId)}
+                            <Show when={r.riskFlag}>
+                              <span title={r.riskRelatedDevice ? `关联自 ${r.riskRelatedDevice}` : '关联风险标记'}>
+                                <Badge variant="warning">风险</Badge>
+                              </span>
+                            </Show>
+                          </span>
+                        </td>
                         <td><Badge variant="default">{r.platform}</Badge></td>
                         <td class="mono muted" style={sx({ fontSize: 11.5 })}>{r.appVersion ?? '—'}</td>
                         <td class="mono" style={sx({ fontSize: 11.5 })}>{shortId(r.userId)}</td>
@@ -681,6 +778,7 @@ export default function DevicesPage() {
             <Pagination page={allPage()} totalPages={allDev()?.totalPages ?? 1} onPage={setAllPage} />
           </div>
         </Show>
+        </Show>
       </Card>
 
       {/* 版本分布 + 升级策略 + 版本门控 */}
@@ -716,6 +814,7 @@ export default function DevicesPage() {
         deviceId={detail()}
         onClose={() => setDetail(null)}
         onBan={(id, action) => setBanTarget({ id, action })}
+        onClearFlag={clearFlag}
       />
 
       {/* 封禁 / 解封确认 */}

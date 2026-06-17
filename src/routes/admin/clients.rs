@@ -17,6 +17,8 @@ pub fn router() -> Router<AppState> {
         // m027:设备表后端分页 + 平台聚合 + 升级策略 CRUD + 强制升级广播
         .route("/paginated", get(list_clients_paginated))
         .route("/distribution", get(get_distribution))
+        // m054:关联风控标记复核(B 层封禁绕过缓解)。静态路由须在 `/:id` 前注册。
+        .route("/flagged", get(list_flagged_clients))
         .route("/upgrade-policy", get(list_upgrade_policy_handler))
         .route("/upgrade-policy/:platform", put(put_upgrade_policy_handler))
         .route(
@@ -26,6 +28,7 @@ pub fn router() -> Router<AppState> {
         .route("/:id", get(get_client_detail))
         .route("/:id/ban", post(ban_client))
         .route("/:id/unban", post(unban_client))
+        .route("/:id/clear-flag", post(clear_client_flag))
         .route("/:id/request-telemetry", post(request_telemetry))
 }
 
@@ -60,6 +63,9 @@ struct RecentlyActiveEntry {
     data_channels: DataChannelStatus,
     /// m022:同上,直接来自 ClientDevice.app_version 字段。
     app_version: Option<String>,
+    /// m054:关联风控标记(共享 IP/账号被牵连),供设备列表内联红点提示。
+    risk_flag: bool,
+    risk_related_device: Option<String>,
 }
 
 async fn list_clients(
@@ -148,6 +154,8 @@ async fn list_clients(
             is_banned: d.is_banned,
             data_channels: DataChannelStatus::default(),
             app_version: d.app_version.clone(),
+            risk_flag: d.risk_flag,
+            risk_related_device: d.risk_related_device.clone(),
         })
         .collect();
 
@@ -238,14 +246,18 @@ async fn ban_client(
     let device_id_for_store = id.clone();
     let admin_id = admin.admin_id.clone();
 
-    state
-        .run_store_task("admin.clients.ban", move |store| -> Result<_, AppError> {
-            if !store.client_device_exists(&device_id_for_store)? {
-                return Err(AppError::not_found("设备不存在"));
-            }
-            store.ban_client_device(&device_id_for_store, &admin_id, reason.as_deref())?;
-            Ok(())
-        })
+    let flagged = state
+        .run_store_task(
+            "admin.clients.ban",
+            move |store| -> Result<Vec<String>, AppError> {
+                if !store.client_device_exists(&device_id_for_store)? {
+                    return Err(AppError::not_found("设备不存在"));
+                }
+                store.ban_client_device(&device_id_for_store, &admin_id, reason.as_deref())?;
+                // m054(B 层):封禁后给共享出口 IP / 同账号的关联设备打风控标记,仅标记不硬封。
+                Ok(store.flag_related_devices(&device_id_for_store)?)
+            },
+        )
         .await??;
 
     // Notify via SSE but keep connection alive for instant unban
@@ -255,8 +267,13 @@ async fn ban_client(
         }
     }
 
-    tracing::info!(admin_id = %admin.admin_id, device_id = %id, "管理员封禁设备");
-    Ok(ok(serde_json::json!({ "banned": true, "deviceId": id })))
+    tracing::info!(admin_id = %admin.admin_id, device_id = %id, flagged_related = flagged.len(), "管理员封禁设备");
+    Ok(ok(serde_json::json!({
+        "banned": true,
+        "deviceId": id,
+        "flaggedRelated": flagged.len(),
+        "flaggedDeviceIds": flagged,
+    })))
 }
 
 async fn unban_client(
@@ -265,14 +282,18 @@ async fn unban_client(
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     let device_id_for_store = id.clone();
-    state
-        .run_store_task("admin.clients.unban", move |store| -> Result<_, AppError> {
-            if !store.client_device_exists(&device_id_for_store)? {
-                return Err(AppError::not_found("设备不存在"));
-            }
-            store.unban_client_device(&device_id_for_store)?;
-            Ok(())
-        })
+    let cleared = state
+        .run_store_task(
+            "admin.clients.unban",
+            move |store| -> Result<usize, AppError> {
+                if !store.client_device_exists(&device_id_for_store)? {
+                    return Err(AppError::not_found("设备不存在"));
+                }
+                store.unban_client_device(&device_id_for_store)?;
+                // m054:误封纠正后清除由该设备触发的全部关联标记,不留悬挂标记。
+                Ok(store.clear_risk_flags_related_to(&device_id_for_store)?)
+            },
+        )
         .await??;
 
     // Notify via existing SSE connection for instant unban
@@ -282,8 +303,74 @@ async fn unban_client(
         }
     }
 
-    tracing::info!(admin_id = %admin.admin_id, device_id = %id, "管理员解封设备");
-    Ok(ok(serde_json::json!({ "banned": false, "deviceId": id })))
+    tracing::info!(admin_id = %admin.admin_id, device_id = %id, cleared_related = cleared, "管理员解封设备");
+    Ok(ok(serde_json::json!({ "banned": false, "deviceId": id, "clearedRelated": cleared })))
+}
+
+/// m054:关联风控复核列表项。脱敏:不暴露 last_ip / banned_by(与设备详情口径一致)。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FlaggedClientEntry {
+    device_id: String,
+    platform: String,
+    user_id: Option<String>,
+    last_seen_at: String,
+    is_banned: bool,
+    app_version: Option<String>,
+    risk_reason: Option<String>,
+    risk_flagged_at: Option<String>,
+    risk_related_device: Option<String>,
+}
+
+impl From<&ClientDevice> for FlaggedClientEntry {
+    fn from(d: &ClientDevice) -> Self {
+        Self {
+            device_id: d.device_id.clone(),
+            platform: d.platform.clone(),
+            user_id: d.user_id.clone(),
+            last_seen_at: d.last_seen_at.clone(),
+            is_banned: d.is_banned,
+            app_version: d.app_version.clone(),
+            risk_reason: d.risk_reason.clone(),
+            risk_flagged_at: d.risk_flagged_at.clone(),
+            risk_related_device: d.risk_related_device.clone(),
+        }
+    }
+}
+
+/// m054:GET /api/admin/clients/flagged —— 列当前被关联风控标记的设备(按打标时间倒序),
+/// 供 admin 复核;每条注明触发源设备与命中信号。
+async fn list_flagged_clients(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let devices = state
+        .run_store_task(
+            "admin.clients.flagged",
+            move |store| -> Result<_, AppError> { Ok(store.list_flagged_devices(200)?) },
+        )
+        .await??;
+    let items: Vec<FlaggedClientEntry> = devices.iter().map(FlaggedClientEntry::from).collect();
+    Ok(ok(serde_json::json!({ "flagged": items })))
+}
+
+/// m054:POST /api/admin/clients/:id/clear-flag —— 复核判定误报,清除单设备的关联标记。
+async fn clear_client_flag(
+    admin: AdminAuthUser,
+    Path(id): Path<String>,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let device_id = id.clone();
+    let cleared = state
+        .run_store_task(
+            "admin.clients.clear_flag",
+            move |store| -> Result<bool, AppError> {
+                Ok(store.clear_device_risk_flag(&device_id)?)
+            },
+        )
+        .await??;
+    tracing::info!(admin_id = %admin.admin_id, device_id = %id, "管理员清除设备关联风控标记");
+    Ok(ok(serde_json::json!({ "cleared": cleared, "deviceId": id })))
 }
 
 async fn request_telemetry(
@@ -751,6 +838,11 @@ struct ClientDetail {
     is_banned: bool,
     banned_at: Option<String>,
     ban_reason: Option<String>,
+    /// m054:关联风控标记(是否因共享 IP/账号被某次封禁牵连)。
+    risk_flag: bool,
+    risk_reason: Option<String>,
+    risk_flagged_at: Option<String>,
+    risk_related_device: Option<String>,
     /// 当前是否有活跃 SSE 连接(在线)。
     online: bool,
     /// 活跃 SSE 连接数(0 = 离线)。
@@ -807,6 +899,10 @@ async fn get_client_detail(
         is_banned: device.is_banned,
         banned_at: device.banned_at,
         ban_reason: device.ban_reason,
+        risk_flag: device.risk_flag,
+        risk_reason: device.risk_reason,
+        risk_flagged_at: device.risk_flagged_at,
+        risk_related_device: device.risk_related_device,
         online: connection_count > 0,
         connection_count,
         telemetry: TelemetrySummaryView {
@@ -837,6 +933,10 @@ mod tests {
             country: None,
             last_ip: None,
             model: None,
+            risk_flag: false,
+            risk_reason: None,
+            risk_flagged_at: None,
+            risk_related_device: None,
         }
     }
 

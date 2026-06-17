@@ -1417,9 +1417,9 @@ async fn admin_user_device_ban(
     let admin_id_for_audit = admin.admin_id.clone();
     let device_id_for_task = device_id.clone();
     let user_id_for_task = user_id.clone();
-    let banned = blocking::run_blocking(
+    let (banned, flagged) = blocking::run_blocking(
         "admin.user_device_ban",
-        move || -> Result<bool, AppError> {
+        move || -> Result<(bool, Vec<String>), AppError> {
             // 验设备存在且归属该 user(防止跨 user 误操作)
             let conn = store.conn()?;
             let owner: Option<Option<String>> = conn
@@ -1446,7 +1446,13 @@ async fn admin_user_device_ban(
             )?;
             // 兜底:撤销该 user 所有 session(不区分 device,目前 sessions 表无 device 列)
             store.delete_user_sessions(&user_id_for_task).ok();
-            Ok(ok)
+            // m054(B 层):封禁后给共享出口 IP / 同账号的关联设备打风控标记(仅标记不硬封)。
+            let flagged = if ok {
+                store.flag_related_devices(&device_id_for_task)?
+            } else {
+                Vec::new()
+            };
+            Ok((ok, flagged))
         },
     )
     .await??;
@@ -1455,11 +1461,14 @@ async fn admin_user_device_ban(
         &admin.admin_id,
         "user.device_ban",
         &user_id,
-        serde_json::json!({ "deviceId": &device_id, "applied": banned }),
+        serde_json::json!({ "deviceId": &device_id, "applied": banned, "flaggedRelated": flagged.len() }),
     );
-    Ok(ok(
-        serde_json::json!({ "banned": banned, "deviceId": device_id }),
-    ))
+    Ok(ok(serde_json::json!({
+        "banned": banned,
+        "deviceId": device_id,
+        "flaggedRelated": flagged.len(),
+        "flaggedDeviceIds": flagged,
+    })))
 }
 
 async fn admin_do_set_user_password(

@@ -111,9 +111,7 @@ fn run_selfcheck() {
     if config.port == 0 {
         problems.push("port 非法(0)".into());
     }
-    if version.trim().is_empty() {
-        problems.push("GIT_VERSION 为空".into());
-    }
+    // GIT_VERSION 由 env! 编译期注入(build.rs 三级兜底保证非空),无运行期空值场景,故不校验。
     // AMAS 配置构造（捕获结构性问题；from_env 内部对非法值有兜底，主要验证不 panic）。
     let _amas = AMASConfig::from_env(&config.amas);
     if problems.is_empty() {
