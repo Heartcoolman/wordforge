@@ -1,4 +1,5 @@
 pub mod admin_analytics;
+pub mod admin_export;
 pub mod admin_rbac;
 pub mod admin_wordbooks;
 pub mod admins;

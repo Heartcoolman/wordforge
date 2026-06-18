@@ -13,6 +13,7 @@ pub mod resource_packs;
 pub mod runtime_settings;
 pub mod settings;
 pub mod settings_sections;
+pub mod system_export;
 pub mod updates;
 pub mod wordbooks;
 
@@ -92,6 +93,7 @@ pub fn router() -> Router<AppState> {
         .nest("/probe", probe::router())
         .nest("/probe-telemetry", probe_telemetry::router())
         .nest("/resource-packs", resource_packs::router())
+        .nest("/system", system_export::router())
         .nest("/telemetry", clients::telemetry_router())
         .route("/users", get(list_users).post(admin_create_user))
         // 用户管理页顶部筛选 chip 计数(全部/活跃/7天未登录/禁用/管理员)
