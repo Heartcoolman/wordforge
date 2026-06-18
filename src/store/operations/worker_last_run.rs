@@ -11,6 +11,8 @@ pub struct WorkerLastRun {
     pub last_duration_ms: i64,
     pub last_error: Option<String>,
     pub last_outcome: String,
+    /// 该 worker 单次任务执行中触发并被 catch_unwind 捕获的累计 panic 次数（m059）。
+    pub panic_count: i64,
 }
 
 impl Store {
@@ -42,7 +44,7 @@ impl Store {
     pub fn list_worker_last_run(&self) -> Result<Vec<WorkerLastRun>, StoreError> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT worker_name, last_run_at, last_duration_ms, last_error, last_outcome
+            "SELECT worker_name, last_run_at, last_duration_ms, last_error, last_outcome, panic_count
              FROM worker_last_run
              ORDER BY worker_name ASC",
         )?;
@@ -54,6 +56,7 @@ impl Store {
                     last_duration_ms: row.get(2)?,
                     last_error: row.get(3)?,
                     last_outcome: row.get(4)?,
+                    panic_count: row.get(5)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -68,7 +71,7 @@ impl Store {
         let conn = self.conn()?;
         let row = conn
             .query_row(
-                "SELECT worker_name, last_run_at, last_duration_ms, last_error, last_outcome
+                "SELECT worker_name, last_run_at, last_duration_ms, last_error, last_outcome, panic_count
                  FROM worker_last_run
                  WHERE worker_name = ?1",
                 params![worker_name],
@@ -79,11 +82,32 @@ impl Store {
                         last_duration_ms: row.get(2)?,
                         last_error: row.get(3)?,
                         last_outcome: row.get(4)?,
+                        panic_count: row.get(5)?,
                     })
                 },
             )
             .optional()?;
         Ok(row)
+    }
+
+    /// 自增某 worker 的累计 panic 次数（m059）。
+    ///
+    /// 与 [`upsert_worker_last_run`] 解耦：panic 发生时该 worker 可能尚无任何
+    /// last_run 记录，故走 UPSERT；冲突时仅累加 panic_count，不触碰执行时间/结果列。
+    /// 首次插入用占位时间戳（last_run_at=0、last_outcome='panic'），后续正常执行会
+    /// 被 [`upsert_worker_last_run`] 覆盖回真实结果，而 panic_count 因不在该 upsert
+    /// 的更新列内得以保留。
+    pub fn increment_worker_panic(&self, worker_name: &str) -> Result<(), StoreError> {
+        let conn = self.conn()?;
+        conn.execute(
+            "INSERT INTO worker_last_run
+                 (worker_name, last_run_at, last_duration_ms, last_outcome, last_error, panic_count)
+             VALUES (?1, 0, 0, 'panic', NULL, 1)
+             ON CONFLICT(worker_name) DO UPDATE SET
+                 panic_count = worker_last_run.panic_count + 1",
+            params![worker_name],
+        )?;
+        Ok(())
     }
 }
 

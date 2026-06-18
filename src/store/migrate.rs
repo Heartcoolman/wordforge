@@ -133,6 +133,7 @@ fn migrations() -> Vec<(&'static str, MigrationFn)> {
         ("056_amas_experiment_ab", m056_amas_experiment_ab),
         ("057_elo_dynamic_k_trend", m057_elo_dynamic_k_trend),
         ("058_word_elo_select_chain", m058_word_elo_select_chain),
+        ("059_worker_panic_count", m059_worker_panic_count),
     ]
 }
 
@@ -264,6 +265,7 @@ fn migrations_down() -> Vec<(&'static str, MigrationFn)> {
         ("056_amas_experiment_ab", m056_amas_experiment_ab_down),
         ("057_elo_dynamic_k_trend", m057_elo_dynamic_k_trend_down),
         ("058_word_elo_select_chain", m058_word_elo_select_chain_down),
+        ("059_worker_panic_count", m059_worker_panic_count_down),
     ]
 }
 
@@ -3200,6 +3202,38 @@ fn m058_word_elo_select_chain_down(store: &Store) -> Result<(), StoreError> {
         .any(|c| c == "rating_select");
     if has {
         conn.execute("ALTER TABLE word_elo DROP COLUMN rating_select", [])?;
+    }
+    Ok(())
+}
+
+/// m059:worker_last_run 加 panic_count 列——记录某 worker 单次任务执行中
+/// 触发 panic（被 catch_unwind 捕获）的累计次数。幂等加列。
+fn m059_worker_panic_count(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    let has: bool = conn
+        .prepare("PRAGMA table_info(worker_last_run)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .any(|c| c == "panic_count");
+    if !has {
+        conn.execute(
+            "ALTER TABLE worker_last_run ADD COLUMN panic_count INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+/// m059 down:DROP panic_count 列。仅 dev/test。
+fn m059_worker_panic_count_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    let has: bool = conn
+        .prepare("PRAGMA table_info(worker_last_run)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .any(|c| c == "panic_count");
+    if has {
+        conn.execute("ALTER TABLE worker_last_run DROP COLUMN panic_count", [])?;
     }
     Ok(())
 }

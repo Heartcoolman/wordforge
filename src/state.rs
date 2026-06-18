@@ -197,6 +197,8 @@ pub struct AppState {
     /// 查库会饱和 BLOCKING_SEMAPHORE；命中未过期缓存即跳过查库。TTL ≈ 一个轮询周期。
     /// 降级语义保留：缓存过期或缺失时回落查库并回填。完整事件驱动推送为后续项。
     sse_user_state_cache: Arc<DashMap<String, (Instant, crate::amas::types::UserState)>>,
+    /// 监控大屏聚合接口的进程级短 TTL 缓存,键 = "<endpoint>:<days>"。
+    dashboard_cache: Arc<DashMap<String, (Instant, serde_json::Value)>>,
     updater: Arc<RwLock<Option<Arc<crate::services::updater::Updater>>>>,
     /// v0.5.2 apply 后台 task 状态；sink 同步写、HTTP 同步读，故用 std::sync::Mutex
     apply_task: Arc<std::sync::Mutex<Option<ApplyTaskStatus>>>,
@@ -295,6 +297,7 @@ impl AppState {
             heartbeat_miss_count: Arc::new(DashMap::new()),
             sse_per_user: Arc::new(DashMap::new()),
             sse_user_state_cache: Arc::new(DashMap::new()),
+            dashboard_cache: Arc::new(DashMap::new()),
             updater: Arc::new(RwLock::new(None)),
             apply_task: Arc::new(std::sync::Mutex::new(None)),
             probe_service: Arc::new(crate::services::probe::ProbeService::new()),
@@ -582,6 +585,10 @@ impl AppState {
 
     pub fn update_cache(&self) -> &RwLock<Option<(Instant, serde_json::Value)>> {
         &self.update_cache
+    }
+
+    pub fn dashboard_cache(&self) -> &DashMap<String, (Instant, serde_json::Value)> {
+        &self.dashboard_cache
     }
 
     pub fn is_maintenance(&self) -> bool {

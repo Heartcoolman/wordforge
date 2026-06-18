@@ -518,6 +518,148 @@ impl Store {
     }
 }
 
+// ─────────── PR-2: A/B 实验臂对比 ───────────
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArmComparison {
+    pub experiment_id: String,
+    pub arm: String,
+    pub event_count: u64,
+    /// 命中率（is_correct=1 占比）
+    pub hit_rate: f64,
+    /// 平均 reward_value
+    pub mean_reward: f64,
+    /// 准确率 = hit_count / event_count（与 hit_rate 同源，保留供前端语义区分）
+    pub accuracy: f64,
+    /// 异常率（is_anomaly=1 占比）
+    pub anomaly_rate: f64,
+}
+
+impl Store {
+    /// A/B 实验臂对比：按 (experiment_id, experiment_arm) 分组聚合 N 天事件。
+    /// 仅含 experiment_id 非空的实验事件（NULL=非实验事件，排除）。
+    /// 每臂：event_count / hit_rate / mean_reward / accuracy / anomaly_rate。
+    pub fn amas_experiment_arm_comparison(
+        &self,
+        days: u32,
+    ) -> Result<Vec<ArmComparison>, StoreError> {
+        let cutoff = (Utc::now() - Duration::days(days as i64)).to_rfc3339();
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT experiment_id, experiment_arm,
+                    COUNT(*),
+                    COALESCE(SUM(is_correct), 0),
+                    COALESCE(AVG(reward_value), 0.0),
+                    COALESCE(SUM(is_anomaly), 0)
+             FROM engine_monitoring_events
+             WHERE datetime(timestamp) >= datetime(?1)
+               AND experiment_id IS NOT NULL AND experiment_id != ''
+             GROUP BY experiment_id, experiment_arm
+             ORDER BY experiment_id ASC, experiment_arm ASC",
+        )?;
+        let rows = stmt
+            .query_map([&cutoff], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, i64>(2)? as u64,
+                    row.get::<_, i64>(3)? as u64,
+                    row.get::<_, f64>(4)?,
+                    row.get::<_, i64>(5)? as u64,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(rows
+            .into_iter()
+            .map(|(exp, arm, n, hits, mean_reward, anom)| {
+                let rate = |x: u64| if n > 0 { x as f64 / n as f64 } else { 0.0 };
+                ArmComparison {
+                    experiment_id: exp,
+                    arm: arm.unwrap_or_default(),
+                    event_count: n,
+                    hit_rate: rate(hits),
+                    mean_reward,
+                    accuracy: rate(hits),
+                    anomaly_rate: rate(anom),
+                }
+            })
+            .collect())
+    }
+}
+
+// ─────────── PR-2: 冷启动质量（explore/exploit × 正确率） ───────────
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ColdStartPhaseStat {
+    /// 冷启动阶段标签（explore / exploit / other）
+    pub phase: String,
+    pub event_count: u64,
+    pub correct_count: u64,
+    pub accuracy: f64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ColdStartQuality {
+    pub explore: ColdStartPhaseStat,
+    pub exploit: ColdStartPhaseStat,
+    /// 既非 explore 也非 exploit 的事件（含 cold_start_phase=NULL）
+    pub other: ColdStartPhaseStat,
+}
+
+impl Store {
+    /// 冷启动质量：按 cold_start_phase 交叉 is_correct 聚合 N 天事件。
+    /// explore / exploit 各自统计事件数、正确数、正确率；其余归 other。
+    pub fn amas_cold_start_quality(&self, days: u32) -> Result<ColdStartQuality, StoreError> {
+        let cutoff = (Utc::now() - Duration::days(days as i64)).to_rfc3339();
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT cold_start_phase,
+                    COUNT(*),
+                    COALESCE(SUM(is_correct), 0)
+             FROM engine_monitoring_events
+             WHERE datetime(timestamp) >= datetime(?1)
+             GROUP BY cold_start_phase",
+        )?;
+        let rows = stmt
+            .query_map([&cutoff], |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, i64>(1)? as u64,
+                    row.get::<_, i64>(2)? as u64,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut explore = (0u64, 0u64);
+        let mut exploit = (0u64, 0u64);
+        let mut other = (0u64, 0u64);
+        for (phase, n, correct) in rows {
+            let bucket = match phase.as_deref() {
+                Some(p) if p.eq_ignore_ascii_case("explore") => &mut explore,
+                Some(p) if p.eq_ignore_ascii_case("exploit") => &mut exploit,
+                _ => &mut other,
+            };
+            bucket.0 += n;
+            bucket.1 += correct;
+        }
+        let mk = |label: &str, (n, c): (u64, u64)| ColdStartPhaseStat {
+            phase: label.to_string(),
+            event_count: n,
+            correct_count: c,
+            accuracy: if n > 0 { c as f64 / n as f64 } else { 0.0 },
+        };
+        Ok(ColdStartQuality {
+            explore: mk("explore", explore),
+            exploit: mk("exploit", exploit),
+            other: mk("other", other),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

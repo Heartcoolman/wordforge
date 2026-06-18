@@ -717,14 +717,27 @@ async fn add_job<Fut, F>(
 
         let fut = run();
         Box::pin(async move {
+            use futures::FutureExt;
             let start = std::time::Instant::now();
             let now_ts = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs() as i64;
 
-            let (outcome, error_msg) = match tokio::time::timeout(WORKER_TIMEOUT, fut).await {
-                Ok(()) => ("success", None),
+            // catch_unwind 跨 await 捕获 worker 内部 panic(release 为 unwind),
+            // 命中时累计 panic_count 埋点并记为失败;否则按 timeout/success 处理。
+            let caught = tokio::time::timeout(
+                WORKER_TIMEOUT,
+                std::panic::AssertUnwindSafe(fut).catch_unwind(),
+            )
+            .await;
+            let (outcome, error_msg) = match caught {
+                Ok(Ok(())) => ("success", None),
+                Ok(Err(_panic)) => {
+                    tracing::error!(worker = name, "Worker panicked");
+                    let _ = store.increment_worker_panic(name);
+                    ("failure", Some("panic"))
+                }
                 Err(_) => {
                     tracing::error!(
                         worker = name,

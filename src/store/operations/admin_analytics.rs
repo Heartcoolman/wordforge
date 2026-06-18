@@ -184,6 +184,146 @@ fn parse_dt(raw: &str) -> Option<DateTime<Utc>> {
         })
 }
 
+// ────────────────── 监控大屏:学习类聚合返回类型 ──────────────────
+
+/// 答题响应时延分箱 + P50/P95(分箱近似)。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminResponseTimeDistribution {
+    /// 各分箱计数:0-500 / 500-1000 / 1000-2000 / >2000 ms。
+    pub bin_0_500: i64,
+    pub bin_500_1000: i64,
+    pub bin_1000_2000: i64,
+    pub bin_2000_plus: i64,
+    pub total: i64,
+    /// 中位数/95 分位(ms),无数据为 None。
+    pub p50_ms: Option<i64>,
+    pub p95_ms: Option<i64>,
+}
+
+/// 按题型分组的首答正确率行。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminFirstAttemptByModeRow {
+    pub question_mode: String,
+    pub first_attempts: i64,
+    pub correct: i64,
+    pub accuracy: Option<f64>,
+}
+
+/// 首答正确率整体 + 按题型分组。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminFirstAttemptAccuracy {
+    pub total_first_attempts: i64,
+    pub total_correct: i64,
+    pub overall_accuracy: Option<f64>,
+    pub by_mode: Vec<AdminFirstAttemptByModeRow>,
+}
+
+/// 会话状态分布行(active/completed/abandoned)。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminSessionStatusRow {
+    pub status: String,
+    pub session_count: i64,
+    /// 占全体会话比例。
+    pub share: f64,
+    /// 该状态平均时长(秒),NULL 计 0。
+    pub avg_duration_secs: Option<f64>,
+}
+
+/// 会话状态汇总:各状态明细 + 完成率/放弃率。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminSessionStatusStats {
+    pub total_sessions: i64,
+    pub completion_rate: Option<f64>,
+    pub abandon_rate: Option<f64>,
+    pub by_status: Vec<AdminSessionStatusRow>,
+}
+
+/// 自评(self_rating 0-3)× 是否答对 的分布行。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminSelfRatingRow {
+    pub self_rating: i64,
+    pub count: i64,
+    pub correct: i64,
+    pub accuracy: Option<f64>,
+    /// 占有 self_rating 记录总数比例。
+    pub share: f64,
+}
+
+/// per-word 正确率二次分箱行(<50 / 50-70 / 70-90 / >90%)。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminWordAccuracyBinRow {
+    pub bin: String,
+    pub word_count: i64,
+    pub avg_elo: Option<f64>,
+    pub user_count: i64,
+}
+
+/// 题型 × ELO 难度分箱 二维矩阵格。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminQuestionDifficultyCell {
+    pub question_mode: String,
+    /// ELO 分箱标签(如 "<1000")。
+    pub elo_bin: String,
+    pub count: i64,
+    pub accuracy: Option<f64>,
+}
+
+/// 词库学习统计行(含正确率/掌握度/学习人数/新词占比)。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminWordbookLearningRow {
+    pub wordbook_id: String,
+    pub name: String,
+    pub word_count: i64,
+    /// 该词库下有学习状态的词条聚合人次。
+    pub user_count: i64,
+    pub accuracy: Option<f64>,
+    pub mastery_avg: Option<f64>,
+    /// NEW 状态占比。
+    pub new_words_pct: Option<f64>,
+}
+
+/// 掌握度分布行:state × mastery_level 分箱。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminMasteryDistributionRow {
+    pub state: String,
+    /// mastery 分箱标签(0-25 / 25-50 / 50-75 / 75-100)。
+    pub mastery_bin: String,
+    pub count: i64,
+}
+
+/// 连续学习天数分布桶。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminConsecutiveStudyDays {
+    /// 桶:1-7 / 8-14 / 15-30 / >30。
+    pub bucket_1_7: i64,
+    pub bucket_8_14: i64,
+    pub bucket_15_30: i64,
+    pub bucket_30_plus: i64,
+    pub user_count: i64,
+    pub max_streak: i64,
+}
+
+/// 高峰时段热力图格:(hour, 10 分钟桶) 计数。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminPeakTimeCell {
+    pub hour: i64,
+    /// 10 分钟桶索引 0..=5(对应 0-9/10-19/.../50-59 分钟)。
+    pub minute_bucket: i64,
+    pub count: i64,
+}
+
 impl Store {
     pub fn admin_study_overview_summary(
         &self,
@@ -1187,6 +1327,532 @@ impl Store {
         })?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(StoreError::from)
+    }
+
+    // ────────────────── 监控大屏:学习类聚合查询 ──────────────────
+
+    /// 答题响应时延分箱(0-500/500-1000/1000-2000/>2000 ms)+ P50/P95。
+    /// P50/P95 用 SQL 百分位:按 response_time_ms 排序后取偏移行。
+    pub fn admin_response_time_distribution(
+        &self,
+        days: u32,
+    ) -> Result<AdminResponseTimeDistribution, StoreError> {
+        let conn = self.conn()?;
+        let since = window_since_date(days);
+        let mut stmt = conn.prepare(
+            "SELECT
+                SUM(CASE WHEN response_time_ms < 500 THEN 1 ELSE 0 END) AS b0,
+                SUM(CASE WHEN response_time_ms >= 500 AND response_time_ms < 1000 THEN 1 ELSE 0 END) AS b1,
+                SUM(CASE WHEN response_time_ms >= 1000 AND response_time_ms < 2000 THEN 1 ELSE 0 END) AS b2,
+                SUM(CASE WHEN response_time_ms >= 2000 THEN 1 ELSE 0 END) AS b3,
+                COUNT(*) AS total
+             FROM learning_records
+             WHERE created_at >= ?1",
+        )?;
+        let (b0, b1, b2, b3, total) = stmt.query_row(params![&since], |r| {
+            Ok((
+                r.get::<_, Option<i64>>(0)?.unwrap_or(0),
+                r.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                r.get::<_, Option<i64>>(2)?.unwrap_or(0),
+                r.get::<_, Option<i64>>(3)?.unwrap_or(0),
+                r.get::<_, i64>(4)?,
+            ))
+        })?;
+
+        // P50/P95:OFFSET = floor(p * (total-1)),按时延升序取该行。
+        let percentile = |conn: &rusqlite::Connection, p: f64| -> Result<Option<i64>, StoreError> {
+            if total == 0 {
+                return Ok(None);
+            }
+            let offset = ((p * (total - 1) as f64).floor()) as i64;
+            let v: i64 = conn.query_row(
+                "SELECT response_time_ms FROM learning_records
+                 WHERE created_at >= ?1
+                 ORDER BY response_time_ms ASC
+                 LIMIT 1 OFFSET ?2",
+                params![&since, offset],
+                |r| r.get(0),
+            )?;
+            Ok(Some(v))
+        };
+        let p50_ms = percentile(&conn, 0.50)?;
+        let p95_ms = percentile(&conn, 0.95)?;
+
+        Ok(AdminResponseTimeDistribution {
+            bin_0_500: b0,
+            bin_500_1000: b1,
+            bin_1000_2000: b2,
+            bin_2000_plus: b3,
+            total,
+            p50_ms,
+            p95_ms,
+        })
+    }
+
+    /// 首答正确率:CTE 取每 (user_id, word_id) 最早 created_at 的首答记录,
+    /// 算总体首答正确率 + 按 question_mode 分组正确率(NULL 题型归 'unknown')。
+    pub fn admin_first_attempt_accuracy(
+        &self,
+        days: u32,
+    ) -> Result<AdminFirstAttemptAccuracy, StoreError> {
+        let conn = self.conn()?;
+        let since = window_since_date(days);
+        // first_attempts:每 (user_id, word_id) 取窗口内最早一条(created_at,id 决胜)。
+        let cte = "WITH ranked AS (
+                SELECT user_id, word_id, is_correct, question_mode,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY user_id, word_id
+                        ORDER BY created_at ASC, id ASC
+                    ) AS rn
+                FROM learning_records
+                WHERE created_at >= ?1
+            ),
+            first_attempts AS (SELECT * FROM ranked WHERE rn = 1)";
+
+        let overall_sql = format!(
+            "{cte}
+             SELECT COUNT(*), SUM(CASE WHEN is_correct = 1 THEN 1 ELSE 0 END)
+             FROM first_attempts"
+        );
+        let (total_first_attempts, total_correct) =
+            conn.query_row(&overall_sql, params![&since], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                ))
+            })?;
+
+        let by_mode_sql = format!(
+            "{cte}
+             SELECT COALESCE(question_mode, 'unknown') AS qm,
+                    COUNT(*) AS cnt,
+                    SUM(CASE WHEN is_correct = 1 THEN 1 ELSE 0 END) AS correct
+             FROM first_attempts
+             GROUP BY qm
+             ORDER BY cnt DESC"
+        );
+        let mut stmt = conn.prepare(&by_mode_sql)?;
+        let by_mode = stmt
+            .query_map(params![&since], |r| {
+                let cnt: i64 = r.get(1)?;
+                let correct: i64 = r.get::<_, Option<i64>>(2)?.unwrap_or(0);
+                Ok(AdminFirstAttemptByModeRow {
+                    question_mode: r.get(0)?,
+                    first_attempts: cnt,
+                    correct,
+                    accuracy: if cnt > 0 {
+                        Some(correct as f64 / cnt as f64)
+                    } else {
+                        None
+                    },
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(AdminFirstAttemptAccuracy {
+            total_first_attempts,
+            total_correct,
+            overall_accuracy: if total_first_attempts > 0 {
+                Some(total_correct as f64 / total_first_attempts as f64)
+            } else {
+                None
+            },
+            by_mode,
+        })
+    }
+
+    /// 会话状态统计:GROUP BY learning_sessions.status,算各状态计数、
+    /// 平均时长(summary_duration_secs,NULL 计 0)+ 完成率/放弃率。
+    pub fn admin_session_status_stats(
+        &self,
+        days: u32,
+    ) -> Result<AdminSessionStatusStats, StoreError> {
+        let conn = self.conn()?;
+        let since = window_since_date(days);
+        let mut stmt = conn.prepare(
+            "SELECT
+                status,
+                COUNT(*) AS cnt,
+                AVG(COALESCE(summary_duration_secs, 0)) AS avg_dur
+             FROM learning_sessions
+             WHERE created_at >= ?1
+             GROUP BY status",
+        )?;
+        let raw = stmt
+            .query_map(params![&since], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, Option<f64>>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let total_sessions: i64 = raw.iter().map(|(_, c, _)| *c).sum();
+        let completed: i64 = raw
+            .iter()
+            .filter(|(s, _, _)| s == "completed")
+            .map(|(_, c, _)| *c)
+            .sum();
+        let abandoned: i64 = raw
+            .iter()
+            .filter(|(s, _, _)| s == "abandoned")
+            .map(|(_, c, _)| *c)
+            .sum();
+
+        let by_status = raw
+            .into_iter()
+            .map(|(status, cnt, avg_dur)| AdminSessionStatusRow {
+                status,
+                session_count: cnt,
+                share: if total_sessions > 0 {
+                    cnt as f64 / total_sessions as f64
+                } else {
+                    0.0
+                },
+                avg_duration_secs: avg_dur,
+            })
+            .collect();
+
+        Ok(AdminSessionStatusStats {
+            total_sessions,
+            completion_rate: if total_sessions > 0 {
+                Some(completed as f64 / total_sessions as f64)
+            } else {
+                None
+            },
+            abandon_rate: if total_sessions > 0 {
+                Some(abandoned as f64 / total_sessions as f64)
+            } else {
+                None
+            },
+            by_status,
+        })
+    }
+
+    /// 自评分布:GROUP BY self_rating(忽略 NULL),交叉 is_correct,
+    /// 每档 count/correct/accuracy/share。
+    pub fn admin_self_rating_distribution(
+        &self,
+        days: u32,
+    ) -> Result<Vec<AdminSelfRatingRow>, StoreError> {
+        let conn = self.conn()?;
+        let since = window_since_date(days);
+        let mut stmt = conn.prepare(
+            "SELECT
+                self_rating,
+                COUNT(*) AS cnt,
+                SUM(CASE WHEN is_correct = 1 THEN 1 ELSE 0 END) AS correct
+             FROM learning_records
+             WHERE created_at >= ?1 AND self_rating IS NOT NULL
+             GROUP BY self_rating
+             ORDER BY self_rating ASC",
+        )?;
+        let raw = stmt
+            .query_map(params![&since], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, Option<i64>>(2)?.unwrap_or(0),
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let total: i64 = raw.iter().map(|(_, c, _)| *c).sum();
+        Ok(raw
+            .into_iter()
+            .map(|(self_rating, count, correct)| AdminSelfRatingRow {
+                self_rating,
+                count,
+                correct,
+                accuracy: if count > 0 {
+                    Some(correct as f64 / count as f64)
+                } else {
+                    None
+                },
+                share: if total > 0 {
+                    count as f64 / total as f64
+                } else {
+                    0.0
+                },
+            })
+            .collect())
+    }
+
+    /// per-word 正确率二次分箱(<50/50-70/70-90/>90%):内层算每词正确率/人数/
+    /// elo(word_elo.rating),外层按正确率分箱统计 wordCount/avgElo/userCount。
+    pub fn admin_word_accuracy_bins(&self) -> Result<Vec<AdminWordAccuracyBinRow>, StoreError> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "WITH per_word AS (
+                SELECT
+                    lr.word_id,
+                    AVG(lr.is_correct) AS acc,
+                    COUNT(DISTINCT lr.user_id) AS users,
+                    we.rating AS elo
+                FROM learning_records lr
+                LEFT JOIN word_elo we ON we.word_id = lr.word_id
+                GROUP BY lr.word_id, we.rating
+            ),
+            binned AS (
+                SELECT
+                    CASE
+                        WHEN acc < 0.5 THEN '<50%'
+                        WHEN acc < 0.7 THEN '50-70%'
+                        WHEN acc < 0.9 THEN '70-90%'
+                        ELSE '>90%'
+                    END AS bin,
+                    elo,
+                    users
+                FROM per_word
+            )
+            SELECT bin,
+                   COUNT(*) AS word_count,
+                   AVG(elo) AS avg_elo,
+                   SUM(users) AS user_count
+            FROM binned
+            GROUP BY bin",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(AdminWordAccuracyBinRow {
+                    bin: r.get(0)?,
+                    word_count: r.get(1)?,
+                    avg_elo: r.get(2)?,
+                    user_count: r.get::<_, Option<i64>>(3)?.unwrap_or(0),
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // 固定桶序输出(缺桶补 0)。
+        let order = ["<50%", "50-70%", "70-90%", ">90%"];
+        let mut out: Vec<AdminWordAccuracyBinRow> = Vec::with_capacity(4);
+        for label in order {
+            match rows.iter().find(|r| r.bin == label) {
+                Some(found) => out.push(AdminWordAccuracyBinRow {
+                    bin: found.bin.clone(),
+                    word_count: found.word_count,
+                    avg_elo: found.avg_elo,
+                    user_count: found.user_count,
+                }),
+                None => out.push(AdminWordAccuracyBinRow {
+                    bin: label.to_string(),
+                    word_count: 0,
+                    avg_elo: None,
+                    user_count: 0,
+                }),
+            }
+        }
+        Ok(out)
+    }
+
+    /// 题型 × ELO 难度分箱 二维矩阵:question_mode(NULL→'unknown')× word_elo.rating
+    /// 分箱(<1000/1000-1200/1200-1400/>1400),每格 count/accuracy。
+    pub fn admin_question_difficulty_matrix(
+        &self,
+        days: u32,
+    ) -> Result<Vec<AdminQuestionDifficultyCell>, StoreError> {
+        let conn = self.conn()?;
+        let since = window_since_date(days);
+        let mut stmt = conn.prepare(
+            "SELECT
+                COALESCE(lr.question_mode, 'unknown') AS qm,
+                CASE
+                    WHEN we.rating IS NULL THEN 'unknown'
+                    WHEN we.rating < 1000 THEN '<1000'
+                    WHEN we.rating < 1200 THEN '1000-1200'
+                    WHEN we.rating < 1400 THEN '1200-1400'
+                    ELSE '>1400'
+                END AS elo_bin,
+                COUNT(*) AS cnt,
+                AVG(lr.is_correct) AS accuracy
+             FROM learning_records lr
+             LEFT JOIN word_elo we ON we.word_id = lr.word_id
+             WHERE lr.created_at >= ?1
+             GROUP BY qm, elo_bin
+             ORDER BY qm, elo_bin",
+        )?;
+        let rows = stmt
+            .query_map(params![&since], |r| {
+                Ok(AdminQuestionDifficultyCell {
+                    question_mode: r.get(0)?,
+                    elo_bin: r.get(1)?,
+                    count: r.get(2)?,
+                    accuracy: r.get(3)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// 词库学习统计:JOIN wordbook_words → word_learning_states,
+    /// 每词库算 accuracy(learning_records)/mastery_avg/user_count/new_words_pct。
+    pub fn admin_wordbook_learning_stats(
+        &self,
+    ) -> Result<Vec<AdminWordbookLearningRow>, StoreError> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT
+                wb.id,
+                wb.name,
+                COUNT(DISTINCT ww.word_id) AS word_count,
+                COUNT(DISTINCT wls.user_id) AS user_count,
+                AVG(wls.mastery_level) AS mastery_avg,
+                AVG(CASE WHEN wls.state = 'NEW' THEN 1.0 ELSE 0.0 END) AS new_pct,
+                (SELECT AVG(lr.is_correct)
+                   FROM learning_records lr
+                   JOIN wordbook_words ww2 ON ww2.word_id = lr.word_id
+                   WHERE ww2.wordbook_id = wb.id) AS accuracy
+             FROM wordbooks wb
+             JOIN wordbook_words ww ON ww.wordbook_id = wb.id
+             LEFT JOIN word_learning_states wls ON wls.word_id = ww.word_id
+             GROUP BY wb.id, wb.name
+             ORDER BY word_count DESC",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(AdminWordbookLearningRow {
+                    wordbook_id: r.get(0)?,
+                    name: r.get(1)?,
+                    word_count: r.get(2)?,
+                    user_count: r.get(3)?,
+                    mastery_avg: r.get(4)?,
+                    new_words_pct: r.get(5)?,
+                    accuracy: r.get(6)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// 掌握度分布:GROUP BY word_learning_states.state × mastery_level 分箱
+    /// (0-25/25-50/50-75/75-100,mastery_level 范围 0..1 故 ×100)。
+    pub fn admin_mastery_distribution(
+        &self,
+    ) -> Result<Vec<AdminMasteryDistributionRow>, StoreError> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT
+                state,
+                CASE
+                    WHEN mastery_level * 100 < 25 THEN '0-25'
+                    WHEN mastery_level * 100 < 50 THEN '25-50'
+                    WHEN mastery_level * 100 < 75 THEN '50-75'
+                    ELSE '75-100'
+                END AS mastery_bin,
+                COUNT(*) AS cnt
+             FROM word_learning_states
+             GROUP BY state, mastery_bin
+             ORDER BY state, mastery_bin",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(AdminMasteryDistributionRow {
+                    state: r.get(0)?,
+                    mastery_bin: r.get(1)?,
+                    count: r.get(2)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// 连续学习天数:每 user 计当前连续学习天数(以最近活跃日为锚,
+    /// 向前逐日回溯无间断的活跃日数),分布桶 1-7/8-14/15-30/>30。
+    /// 活跃日 = learning_records 去重 date(created_at)。
+    pub fn admin_consecutive_study_days(&self) -> Result<AdminConsecutiveStudyDays, StoreError> {
+        let conn = self.conn()?;
+        // 取每 user 的去重活跃日(升序),内存按用户分组算最大尾部连续段。
+        let mut stmt = conn.prepare(
+            "SELECT user_id, date(created_at) AS d
+             FROM learning_records
+             GROUP BY user_id, d
+             ORDER BY user_id, d ASC",
+        )?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        use std::collections::HashMap;
+        // user_id -> 升序活跃日列表。
+        let mut by_user: HashMap<String, Vec<chrono::NaiveDate>> = HashMap::new();
+        for (uid, d) in rows {
+            if let Ok(nd) = chrono::NaiveDate::parse_from_str(&d, "%Y-%m-%d") {
+                by_user.entry(uid).or_default().push(nd);
+            }
+        }
+
+        let mut b1 = 0i64;
+        let mut b2 = 0i64;
+        let mut b3 = 0i64;
+        let mut b4 = 0i64;
+        let mut user_count = 0i64;
+        let mut max_streak = 0i64;
+        for (_, days_vec) in by_user {
+            if days_vec.is_empty() {
+                continue;
+            }
+            user_count += 1;
+            // 最近活跃日往前数无间断段长度。
+            let mut streak = 1i64;
+            for i in (1..days_vec.len()).rev() {
+                let prev = days_vec[i - 1];
+                let cur = days_vec[i];
+                if (cur - prev).num_days() == 1 {
+                    streak += 1;
+                } else {
+                    break;
+                }
+            }
+            if streak > max_streak {
+                max_streak = streak;
+            }
+            match streak {
+                1..=7 => b1 += 1,
+                8..=14 => b2 += 1,
+                15..=30 => b3 += 1,
+                _ => b4 += 1,
+            }
+        }
+
+        Ok(AdminConsecutiveStudyDays {
+            bucket_1_7: b1,
+            bucket_8_14: b2,
+            bucket_15_30: b3,
+            bucket_30_plus: b4,
+            user_count,
+            max_streak,
+        })
+    }
+
+    /// 高峰时段热力图:窗口内按 (hour, 10 分钟桶) 聚合 created_at 计数。
+    /// strftime('%H') 取小时,strftime('%M') 取分钟,整除 10 得 0..=5 桶。
+    pub fn admin_peak_time_minute_heatmap(
+        &self,
+        days: u32,
+    ) -> Result<Vec<AdminPeakTimeCell>, StoreError> {
+        let conn = self.conn()?;
+        let since = window_since_date(days);
+        let mut stmt = conn.prepare(
+            "SELECT
+                CAST(strftime('%H', created_at) AS INTEGER) AS hour,
+                CAST(strftime('%M', created_at) AS INTEGER) / 10 AS minute_bucket,
+                COUNT(*) AS cnt
+             FROM learning_records
+             WHERE created_at >= ?1
+             GROUP BY hour, minute_bucket
+             ORDER BY hour, minute_bucket",
+        )?;
+        let rows = stmt
+            .query_map(params![&since], |r| {
+                Ok(AdminPeakTimeCell {
+                    hour: r.get(0)?,
+                    minute_bucket: r.get(1)?,
+                    count: r.get(2)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 }
 

@@ -60,3 +60,47 @@ pub fn snapshot() -> (u64, u64) {
         HTTP_5XX_TOTAL.load(Ordering::Relaxed),
     )
 }
+
+/// 限流命中（返回 429）累计计数，按命中类型拆分（单调递增，永不归零）。
+/// 由 rate_limit_middleware / auth_rate_limit_middleware 在各拒绝路径递增，
+/// 供 /metrics 或运维面观察各类限流压力来源。不落库。
+pub static RATE_LIMIT_HIT_USER: AtomicU64 = AtomicU64::new(0);
+pub static RATE_LIMIT_HIT_ANON: AtomicU64 = AtomicU64::new(0);
+pub static RATE_LIMIT_HIT_ADMIN: AtomicU64 = AtomicU64::new(0);
+pub static RATE_LIMIT_HIT_AUTH_BRUTEFORCE: AtomicU64 = AtomicU64::new(0);
+
+/// 限流命中类型。各拒绝路径据此选择对应计数器。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RateLimitKind {
+    /// 已登录用户配额拒绝
+    User,
+    /// 匿名（按 IP）配额拒绝
+    Anon,
+    /// admin 贵操作端点配额拒绝
+    Admin,
+    /// 认证端点（登录/注册）暴破限流拒绝
+    AuthBruteforce,
+}
+
+/// 记录一次限流命中（在各 429 拒绝路径调用）
+#[inline]
+pub fn incr_rate_limit_hit(kind: RateLimitKind) {
+    let counter = match kind {
+        RateLimitKind::User => &RATE_LIMIT_HIT_USER,
+        RateLimitKind::Anon => &RATE_LIMIT_HIT_ANON,
+        RateLimitKind::Admin => &RATE_LIMIT_HIT_ADMIN,
+        RateLimitKind::AuthBruteforce => &RATE_LIMIT_HIT_AUTH_BRUTEFORCE,
+    };
+    counter.fetch_add(1, Ordering::Relaxed);
+}
+
+/// 读取限流命中快照：(user, anon, admin, auth_bruteforce)
+#[inline]
+pub fn rate_limit_hit_snapshot() -> (u64, u64, u64, u64) {
+    (
+        RATE_LIMIT_HIT_USER.load(Ordering::Relaxed),
+        RATE_LIMIT_HIT_ANON.load(Ordering::Relaxed),
+        RATE_LIMIT_HIT_ADMIN.load(Ordering::Relaxed),
+        RATE_LIMIT_HIT_AUTH_BRUTEFORCE.load(Ordering::Relaxed),
+    )
+}

@@ -264,6 +264,9 @@ pub async fn rate_limit_middleware(
             .await;
 
         if !result.allowed {
+            crate::metrics_counters::incr_rate_limit_hit(
+                crate::metrics_counters::RateLimitKind::Admin,
+            );
             let mut response = (
                 axum::http::StatusCode::TOO_MANY_REQUESTS,
                 Json(ErrorBody {
@@ -297,13 +300,15 @@ pub async fn rate_limit_middleware(
     // v1.1-P2.3：双轨限流——根据 Authorization 是否解析出有效用户 JWT
     // 选择"已登录 user_id 限流"或"匿名 IP 限流"；JWT 验签失败 / 缺失皆按匿名处理。
     let cfg = state.config();
-    let (key, max_requests) = match resolve_user_from_request(req.headers(), &cfg.jwt_secret) {
-        Some(user_id) => (
-            user_key(&user_id),
-            cfg.rate_limit.authenticated_max_requests(),
-        ),
-        None => (ip_key(ip), cfg.rate_limit.anonymous_max_requests()),
-    };
+    let (key, max_requests, is_authenticated) =
+        match resolve_user_from_request(req.headers(), &cfg.jwt_secret) {
+            Some(user_id) => (
+                user_key(&user_id),
+                cfg.rate_limit.authenticated_max_requests(),
+                true,
+            ),
+            None => (ip_key(ip), cfg.rate_limit.anonymous_max_requests(), false),
+        };
 
     let result = state
         .rate_limit()
@@ -312,6 +317,11 @@ pub async fn rate_limit_middleware(
         .await;
 
     if !result.allowed {
+        crate::metrics_counters::incr_rate_limit_hit(if is_authenticated {
+            crate::metrics_counters::RateLimitKind::User
+        } else {
+            crate::metrics_counters::RateLimitKind::Anon
+        });
         let mut response = (
             axum::http::StatusCode::TOO_MANY_REQUESTS,
             Json(ErrorBody {
@@ -499,6 +509,9 @@ pub async fn auth_rate_limit_middleware(
         .await;
 
     if !result.allowed {
+        crate::metrics_counters::incr_rate_limit_hit(
+            crate::metrics_counters::RateLimitKind::AuthBruteforce,
+        );
         let mut response = (
             axum::http::StatusCode::TOO_MANY_REQUESTS,
             Json(ErrorBody {

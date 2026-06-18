@@ -1222,6 +1222,141 @@ impl Store {
     }
 }
 
+// ─────────────────────────── 10. ELO 趋势（词 top/bottom + 用户分位） ───────────────────────────
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WordEloTrend {
+    pub word_id: String,
+    pub word_text: String,
+    pub rating: f64,
+    /// 当前周环比方向信号：word_elo.trend（带符号 EWMA 残差趋势）。
+    /// 正=上升、负=下降。注：无 word_elo_history 历史快照表，无法计算真实周环比 Δ，
+    /// 用 trend 列作方向/幅度近似。
+    pub trend: f64,
+    pub games: u64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserEloPercentiles {
+    pub sample_size: u64,
+    pub p10: f64,
+    pub p25: f64,
+    pub p50: f64,
+    pub p75: f64,
+    pub p90: f64,
+    /// user_elo_history 中最近一次快照日（无快照为空串）
+    pub latest_snapshot_date: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EloTrends {
+    /// 升幅 top 词（按 trend 降序）
+    pub top_rising: Vec<WordEloTrend>,
+    /// 降幅 top 词（按 trend 升序）
+    pub top_falling: Vec<WordEloTrend>,
+    /// 用户 ELO 分位（取 user_elo_history 最近快照日的全量 rating）
+    pub user_percentiles: UserEloPercentiles,
+}
+
+impl Store {
+    /// ELO 趋势看板：
+    ///   - 词维度：word_elo × words.text，按 trend 取升/降幅 top N（trend = 带符号 EWMA 残差，
+    ///     仅含 games>0 的词）。**word_elo_history 表不存在**，无法算真实周环比，用 trend 列近似方向与幅度。
+    ///   - 用户维度：user_elo_history 最近一次快照日的全量 rating 分位（p10/25/50/75/90）。
+    ///     若无历史快照，回退到 user_elo 当前 rating（games>0）。
+    pub fn amas_elo_trends(&self) -> Result<EloTrends, StoreError> {
+        const TOP_N: i64 = 20;
+        let conn = self.conn()?;
+
+        // 升幅 top：trend 降序
+        let mut rising_stmt = conn.prepare(
+            "SELECT we.word_id, COALESCE(w.text, ''), we.rating, we.trend, we.games
+             FROM word_elo we
+             LEFT JOIN words w ON w.id = we.word_id
+             WHERE we.games > 0
+             ORDER BY we.trend DESC
+             LIMIT ?1",
+        )?;
+        let top_rising = rising_stmt
+            .query_map([TOP_N], map_word_trend)?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // 降幅 top：trend 升序
+        let mut falling_stmt = conn.prepare(
+            "SELECT we.word_id, COALESCE(w.text, ''), we.rating, we.trend, we.games
+             FROM word_elo we
+             LEFT JOIN words w ON w.id = we.word_id
+             WHERE we.games > 0
+             ORDER BY we.trend ASC
+             LIMIT ?1",
+        )?;
+        let top_falling = falling_stmt
+            .query_map([TOP_N], map_word_trend)?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // 用户分位：先取 user_elo_history 最近快照日
+        let latest_date: Option<String> = conn
+            .query_row(
+                "SELECT MAX(snapshot_date) FROM user_elo_history",
+                [],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .unwrap_or(None);
+
+        let (ratings, latest_snapshot_date): (Vec<f64>, String) = match latest_date {
+            Some(date) => {
+                let mut stmt = conn.prepare(
+                    "SELECT rating FROM user_elo_history WHERE snapshot_date = ?1",
+                )?;
+                let v = stmt
+                    .query_map([&date], |row| row.get::<_, f64>(0))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                (v, date)
+            }
+            None => {
+                // 无历史快照，回退到 user_elo 当前 rating
+                let mut stmt =
+                    conn.prepare("SELECT rating FROM user_elo WHERE games > 0")?;
+                let v = stmt
+                    .query_map([], |row| row.get::<_, f64>(0))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                (v, String::new())
+            }
+        };
+
+        let mut sorted = ratings;
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let user_percentiles = UserEloPercentiles {
+            sample_size: sorted.len() as u64,
+            p10: percentile_f64(&sorted, 0.10),
+            p25: percentile_f64(&sorted, 0.25),
+            p50: percentile_f64(&sorted, 0.50),
+            p75: percentile_f64(&sorted, 0.75),
+            p90: percentile_f64(&sorted, 0.90),
+            latest_snapshot_date,
+        };
+
+        Ok(EloTrends {
+            top_rising,
+            top_falling,
+            user_percentiles,
+        })
+    }
+}
+
+fn map_word_trend(row: &rusqlite::Row) -> rusqlite::Result<WordEloTrend> {
+    Ok(WordEloTrend {
+        word_id: row.get::<_, String>(0)?,
+        word_text: row.get::<_, String>(1)?,
+        rating: row.get::<_, f64>(2)?,
+        trend: row.get::<_, f64>(3)?,
+        games: row.get::<_, i64>(4)? as u64,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
