@@ -36,6 +36,39 @@ fn default_difficulty() -> f64 {
     5.0
 }
 
+/// 冷启动先验（Phase 1a）：仅在首评（review_count==0）调整 S₀/D₀，第一次复习后即交还 FSRS。
+/// 全部特征/系数缺省时 deltas=(0,0) → 逐位 legacy（bit-exact no-op）。详见
+/// `plans/synchronous-cooking-beaver.md`。特征值由引擎侧（engine.rs）从 word.text/word_morphemes/
+/// word.difficulty 预计算，benchmark_adapter 由 item 字段注入；两侧消费口径完全一致。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ColdStartPriors {
+    /// 词长 z 值（引擎侧已 clamp 到 [-1,1]）。难度随之 ↑、稳定性随之 ↓。
+    pub len_z: f64,
+    /// 词素透明度 ∈ [0,1]（已知词根/词缀占比×可分解度）；None=无词素信号，该项 no-op。透明度 ↑→更易。
+    pub morph_transparency: Option<f64>,
+    /// 外部每词内在难度 ∈ [1,10]（word.difficulty>0 时映射 1+9·d；0/缺值→None）。
+    pub ext_difficulty: Option<f64>,
+}
+
+impl ColdStartPriors {
+    /// 返回 (δ_S_log, δ_D)：δ_S 在对数域（S₀ ×= exp(δ_S)），δ_D 在 D 加性域。
+    /// 运算结合序必须与 dhp_reference.py `WordforgeMirrorState._cold_start_deltas` 逐位一致。
+    fn deltas(&self, c: &MemoryModelConfig) -> (f64, f64) {
+        let mut delta_d = c.cold_start_d_len_weight * self.len_z;
+        let mut delta_s = -c.cold_start_s_len_weight * self.len_z;
+        if let Some(t) = self.morph_transparency {
+            delta_d -= c.cold_start_d_morph_weight * t;
+            delta_s += c.cold_start_s_morph_weight * t;
+        }
+        if let Some(ed) = self.ext_difficulty {
+            let z = (ed - c.cold_start_extd_ref) / 9.0;
+            delta_d += c.cold_start_d_extd_weight * z;
+            delta_s -= c.cold_start_s_extd_weight * z;
+        }
+        (delta_s, delta_d)
+    }
+}
+
 impl Default for MdmState {
     fn default() -> Self {
         Self {
@@ -98,6 +131,9 @@ pub fn update_strength(
 /// 双腿信任调度证据（advance-before-update，由 mastery 层先记账再传入）：
 /// - `correct_streak`：本次复习记账后的连击数（成功腿 τ_s 挂靠；失败清零→阻尼重启）
 /// - `lapse_count`：含本次失败的累计 lapse 数（失败腿 τ_f 挂靠；首错 f=1 即 no-op）
+///
+/// 兼容入口（无冷启动先验）：保持既有 7 参签名，所有现存调用方/测试不变。
+/// 需要冷启动先验的生产/benchmark 路径走 [`update_strength_with_evidence_cs`]。
 #[allow(clippy::too_many_arguments)]
 pub fn update_strength_with_evidence(
     state: &mut MdmState,
@@ -107,6 +143,25 @@ pub fn update_strength_with_evidence(
     lapse_count: u32,
     now_ms: i64,
     config: &MemoryModelConfig,
+) {
+    update_strength_with_evidence_cs(
+        state, quality, alpha, correct_streak, lapse_count, now_ms, config, None,
+    );
+}
+
+/// 带冷启动先验的 DSR 更新主函数（Phase 1a）。除 `cold_start` 外语义与
+/// [`update_strength_with_evidence`] 完全一致；`cold_start` 仅在首评（review_count==0）
+/// 分支消费，None 或系数缺省 → 与 legacy 逐位一致。
+#[allow(clippy::too_many_arguments)]
+pub fn update_strength_with_evidence_cs(
+    state: &mut MdmState,
+    quality: f64,
+    alpha: f64,
+    correct_streak: u32,
+    lapse_count: u32,
+    now_ms: i64,
+    config: &MemoryModelConfig,
+    cold_start: Option<&ColdStartPriors>,
 ) {
     let quality = quality.clamp(0.0, 1.0);
     let alpha = alpha.clamp(0.0, 1.0);
@@ -132,10 +187,19 @@ pub fn update_strength_with_evidence(
     if state.review_count == 0 {
         // First review: initial stability from w0-w3
         let g = (grade as usize).clamp(1, 4) - 1;
-        state.stability = config.w[g];
+        let s0_base = config.w[g];
         // Initial difficulty: D0(G) = w4 - e^{w5*(G-1)} + 1
-        state.difficulty =
-            (config.w[4] - (config.w[5] * (grade as f64 - 1.0)).exp() + 1.0).clamp(1.0, 10.0);
+        let d0_base = config.w[4] - (config.w[5] * (grade as f64 - 1.0)).exp() + 1.0;
+        // 冷启动先验（默认 no-op）：deltas 全 0 时走逐位 legacy 路径（S₀ 无 clamp、D₀ 仅夹 [1,10]）。
+        let (delta_s, delta_d) = cold_start.map(|cs| cs.deltas(config)).unwrap_or((0.0, 0.0));
+        if delta_s == 0.0 && delta_d == 0.0 {
+            state.stability = s0_base;
+            state.difficulty = d0_base.clamp(1.0, 10.0);
+        } else {
+            // S₀ 乘性（对数域，保正性）；D₀ 加性。夹至 FSRS-6 合法域。
+            state.stability = (s0_base * delta_s.exp()).clamp(0.01, 36_500.0);
+            state.difficulty = (d0_base + delta_d).clamp(1.0, 10.0);
+        }
     } else if fsrs6_faithful {
         // —— FSRS-6 faithful 状态路径（gsp_success_grade==4，契约 GSP_SPEC §3.5）——
         // 逐位等价 Python FSRS6MirrorState / WordforgeMirrorState 的 success_grade==4 分支：
@@ -512,6 +576,67 @@ mod tests {
         assert!((0.0..=1.0).contains(&p1));
         assert!((0.0..=1.0).contains(&p2));
         assert!(p2 <= p1);
+    }
+
+    #[test]
+    fn cold_start_prior_default_is_bit_exact_noop() {
+        // 默认配置所有 cold_start 权重=0 → 即便传入 priors，首评 S₀/D₀ 必须与 None 逐位一致。
+        let config = MemoryModelConfig::default();
+        let now = chrono::Utc::now().timestamp_millis();
+        let priors = ColdStartPriors {
+            len_z: 1.0,
+            morph_transparency: Some(0.8),
+            ext_difficulty: Some(9.0),
+        };
+        for &q in &[0.0_f64, 0.4, 0.7, 0.95] {
+            let mut legacy = MdmState::default();
+            let mut with_cs = MdmState::default();
+            update_strength_with_evidence_cs(&mut legacy, q, 0.3, 1, 0, now, &config, None);
+            update_strength_with_evidence_cs(&mut with_cs, q, 0.3, 1, 0, now, &config, Some(&priors));
+            assert_eq!(legacy.stability, with_cs.stability, "S₀ noop q={q}");
+            assert_eq!(legacy.difficulty, with_cs.difficulty, "D₀ noop q={q}");
+        }
+    }
+
+    #[test]
+    fn cold_start_prior_shifts_first_review_d_and_s() {
+        let mut config = MemoryModelConfig::default();
+        config.cold_start_d_len_weight = 1.0; // 难词 D 升
+        config.cold_start_s_len_weight = 0.3; // 难词 S 降
+        let now = chrono::Utc::now().timestamp_millis();
+        let hard = ColdStartPriors { len_z: 1.0, morph_transparency: None, ext_difficulty: None };
+        let easy = ColdStartPriors { len_z: -1.0, morph_transparency: None, ext_difficulty: None };
+        let (mut base, mut h, mut e) =
+            (MdmState::default(), MdmState::default(), MdmState::default());
+        update_strength_with_evidence_cs(&mut base, 0.7, 0.3, 1, 0, now, &config, None);
+        update_strength_with_evidence_cs(&mut h, 0.7, 0.3, 1, 0, now, &config, Some(&hard));
+        update_strength_with_evidence_cs(&mut e, 0.7, 0.3, 1, 0, now, &config, Some(&easy));
+        assert!(h.difficulty > base.difficulty && e.difficulty < base.difficulty, "D 方向");
+        assert!(h.stability < base.stability && e.stability > base.stability, "S 方向");
+    }
+
+    #[test]
+    fn cold_start_prior_only_affects_first_review() {
+        // review_count>0 时传 priors 必须 no-op（先验只作用首评，之后交还 FSRS）。
+        let mut config = MemoryModelConfig::default();
+        config.cold_start_d_len_weight = 1.0;
+        config.cold_start_s_len_weight = 0.3;
+        let now = chrono::Utc::now().timestamp_millis();
+        let priors = ColdStartPriors {
+            len_z: 1.0,
+            morph_transparency: Some(0.5),
+            ext_difficulty: Some(8.0),
+        };
+        let (mut a, mut b) = (MdmState::default(), MdmState::default());
+        // 首评（均不带先验）→ review_count=1
+        update_strength_with_evidence_cs(&mut a, 0.7, 0.3, 1, 0, now, &config, None);
+        update_strength_with_evidence_cs(&mut b, 0.7, 0.3, 1, 0, now, &config, None);
+        // 第二次复习：b 带先验也必须与 a 逐位一致
+        let later = now + 86_400_000;
+        update_strength_with_evidence_cs(&mut a, 0.7, 0.3, 2, 0, later, &config, None);
+        update_strength_with_evidence_cs(&mut b, 0.7, 0.3, 2, 0, later, &config, Some(&priors));
+        assert_eq!(a.stability, b.stability);
+        assert_eq!(a.difficulty, b.difficulty);
     }
 
     #[test]

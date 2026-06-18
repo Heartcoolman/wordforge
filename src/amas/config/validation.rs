@@ -297,6 +297,31 @@ impl AMASConfig {
         if !(0.0..1.0).contains(&self.memory_model.gsp_interval_fuzz) {
             return Err("memory_model.gsp_interval_fuzz must be in [0,1)".to_string());
         }
+        // 冷启动难度先验（Phase 1a；权重默认 0=关闭）。len_scale 作除数须 >0；ref 落特征定义域；
+        // 6 个权重须有限且非负有上界（防极端值把首评 S₀/D₀ 推到夹边）。
+        if !self.memory_model.cold_start_len_scale.is_finite()
+            || self.memory_model.cold_start_len_scale <= 0.0
+        {
+            return Err("memory_model.cold_start_len_scale must be finite and > 0".to_string());
+        }
+        if !(1.0..=30.0).contains(&self.memory_model.cold_start_len_ref) {
+            return Err("memory_model.cold_start_len_ref must be in [1,30]".to_string());
+        }
+        if !(1.0..=10.0).contains(&self.memory_model.cold_start_extd_ref) {
+            return Err("memory_model.cold_start_extd_ref must be in [1,10]".to_string());
+        }
+        for (val, name, max) in [
+            (self.memory_model.cold_start_d_len_weight, "cold_start_d_len_weight", 3.0),
+            (self.memory_model.cold_start_d_morph_weight, "cold_start_d_morph_weight", 3.0),
+            (self.memory_model.cold_start_d_extd_weight, "cold_start_d_extd_weight", 5.0),
+            (self.memory_model.cold_start_s_len_weight, "cold_start_s_len_weight", 1.0),
+            (self.memory_model.cold_start_s_morph_weight, "cold_start_s_morph_weight", 1.0),
+            (self.memory_model.cold_start_s_extd_weight, "cold_start_s_extd_weight", 1.0),
+        ] {
+            if !val.is_finite() || !(0.0..=max).contains(&val) {
+                return Err(format!("memory_model.{name} must be finite and in [0,{max}]"));
+            }
+        }
         if !(0.0..=1.0).contains(&self.memory_model.retention_min)
             || !(0.0..=1.0).contains(&self.memory_model.retention_max)
         {
@@ -441,6 +466,15 @@ impl AMASConfig {
         }
         if !(0.0..=1.0).contains(&self.word_selector.recall_mastered_threshold) {
             return Err("word_selector.recall_mastered_threshold must be in [0,1]".to_string());
+        }
+        // ② 混淆隔离（Phase 1b）：dampen∈[0,1]（1=no-op，>1 会反向加分无意义）；min_score∈[0,1]。
+        if !self.word_selector.confusion_isolation_dampen.is_finite()
+            || !(0.0..=1.0).contains(&self.word_selector.confusion_isolation_dampen)
+        {
+            return Err("word_selector.confusion_isolation_dampen must be in [0,1]".to_string());
+        }
+        if !(0.0..=1.0).contains(&self.word_selector.confusion_min_score) {
+            return Err("word_selector.confusion_min_score must be in [0,1]".to_string());
         }
 
         // InterventionConfig

@@ -113,8 +113,10 @@ struct EngineStateSnapshot {
     ige: Option<serde_json::Value>,
     swd: Option<serde_json::Value>,
     trust: Option<serde_json::Value>,
-    mastery: Option<serde_json::Value>,
-    mastery_key: String,
+    /// ③ 多痕迹（Phase 2）：快照 mastery 键的 (key, 前态) 列表。单痕迹时仅 `mastery:{word}`；
+    /// question_mode 已知时额外含 `mastery:{word}:{mode}`，覆盖引擎按 arm flag 可能写入的两种键，
+    /// 保证回滚必命中（route 取快照早于 process_event 内部 per-user config 路由，不预知 arm）。
+    mastery_states: Vec<(String, Option<serde_json::Value>)>,
     user_elo: crate::amas::elo::EloRating,
     word_elo: crate::amas::elo::EloRating,
     /// #14：抗投毒账本（user,word）净位移快照，与 word_elo 同步捕获/回滚。
@@ -147,16 +149,29 @@ fn capture_engine_state_snapshot(
     store: &crate::store::Store,
     user_id: &str,
     word_id: &str,
+    question_mode: Option<&str>,
 ) -> Result<EngineStateSnapshot, AppError> {
-    let mastery_key = format!("mastery:{word_id}");
+    // legacy 键恒快照；question_mode 已知则额外快照 per-mode 键（用 multi_trace=true 派生 suffix）。
+    // 不预知本用户落 canary(flag on) 还是 baseline，两键全捕获 → 引擎无论写哪个，回滚都命中。
+    let legacy_key = format!("mastery:{word_id}");
+    let mut mastery_states = vec![(
+        legacy_key.clone(),
+        store.get_engine_algo_state(user_id, &legacy_key)?,
+    )];
+    if let Some(m) = question_mode {
+        let mode_key = crate::amas::memory::mastery::mastery_state_key(word_id, Some(m), true);
+        if mode_key != legacy_key {
+            let prev = store.get_engine_algo_state(user_id, &mode_key)?;
+            mastery_states.push((mode_key, prev));
+        }
+    }
 
     Ok(EngineStateSnapshot {
         user_state: store.get_engine_user_state(user_id)?,
         ige: store.get_engine_algo_state(user_id, "ige")?,
         swd: store.get_engine_algo_state(user_id, "swd")?,
         trust: store.get_engine_algo_state(user_id, "trust")?,
-        mastery: store.get_engine_algo_state(user_id, &mastery_key)?,
-        mastery_key,
+        mastery_states,
         user_elo: store.get_user_elo(user_id)?,
         word_elo: store.get_word_elo(word_id)?,
         word_elo_contrib: store.get_word_elo_user_contrib(user_id, word_id)?,
@@ -174,15 +189,19 @@ fn restore_engine_state_snapshot(
     snapshot: &EngineStateSnapshot,
     clear_marker: Option<&str>,
 ) {
+    // ③ 多痕迹：固定算法态 + 1~2 个 mastery 键（legacy + 可选 per-mode）一并原子还原。
+    let mut algo_states: Vec<(&str, &Option<serde_json::Value>)> = vec![
+        ("ige", &snapshot.ige),
+        ("swd", &snapshot.swd),
+        ("trust", &snapshot.trust),
+    ];
+    for (key, prev) in &snapshot.mastery_states {
+        algo_states.push((key.as_str(), prev));
+    }
     let restore = crate::store::operations::engine::EngineStateRestore {
         user_id,
         user_state: Some(&snapshot.user_state),
-        algo_states: &[
-            ("ige", &snapshot.ige),
-            ("swd", &snapshot.swd),
-            ("trust", &snapshot.trust),
-            (snapshot.mastery_key.as_str(), &snapshot.mastery),
-        ],
+        algo_states: &algo_states,
         user_elo: Some(&snapshot.user_elo),
         word_elo: Some((word_id, &snapshot.word_elo)),
         word_elo_contrib: Some((word_id, snapshot.word_elo_contrib)),
@@ -326,7 +345,10 @@ pub(crate) async fn process_single_record(
         .run_store_task("records.single.snapshot", {
             let user_id = user_id_owned.clone();
             let word_id = word_id.clone();
-            move |store| capture_engine_state_snapshot(&store, &user_id, &word_id)
+            let question_mode = req.question_mode.clone();
+            move |store| {
+                capture_engine_state_snapshot(&store, &user_id, &word_id, question_mode.as_deref())
+            }
         })
         .await??;
 
@@ -349,6 +371,7 @@ pub(crate) async fn process_single_record(
                 paused_time_ms: req.paused_time_ms,
                 hint_used: req.hint_used.unwrap_or(false),
                 confused_with: req.confused_with.clone(),
+                question_mode: req.question_mode.clone(),
             },
             &record.id,
         )

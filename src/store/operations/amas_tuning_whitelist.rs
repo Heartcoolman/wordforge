@@ -111,13 +111,13 @@ mod tests {
     }
 
     #[test]
-    fn empty_then_seed_loads_twelve() {
+    fn empty_then_seed_loads_fifteen() {
         let s = store();
         assert!(s.list_tuning_whitelist().unwrap().is_empty());
         let n = s.seed_tuning_whitelist_if_empty().unwrap();
-        assert_eq!(n, 12);
+        assert_eq!(n, 15);
         let rows = s.list_tuning_whitelist().unwrap();
-        assert_eq!(rows.len(), 12);
+        assert_eq!(rows.len(), 15);
         // seed 内容对齐 const(任取一条核对)
         let ret = rows
             .iter()
@@ -130,10 +130,10 @@ mod tests {
     #[test]
     fn seed_is_idempotent() {
         let s = store();
-        assert_eq!(s.seed_tuning_whitelist_if_empty().unwrap(), 12);
+        assert_eq!(s.seed_tuning_whitelist_if_empty().unwrap(), 15);
         // 二次 seed 不重复插入
         assert_eq!(s.seed_tuning_whitelist_if_empty().unwrap(), 0);
-        assert_eq!(s.list_tuning_whitelist().unwrap().len(), 12);
+        assert_eq!(s.list_tuning_whitelist().unwrap().len(), 15);
     }
 
     #[test]

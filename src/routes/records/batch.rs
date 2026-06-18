@@ -188,16 +188,28 @@ pub(crate) async fn process_batch_record(
         });
     }
 
-    // S6: 只捕获 word 级状态
-    let mastery_key = format!("mastery:{word_id}");
-    let (prev_mastery, prev_word_elo, prev_user_elo, prev_word_contrib) = state
+    // S6: 只捕获 word 级状态。③ 多痕迹：快照 legacy 键 + 本次 mode 键（不预知 arm flag，两键全捕获）。
+    let (prev_mastery_states, prev_word_elo, prev_user_elo, prev_word_contrib) = state
         .run_store_task("records.batch.snapshot", {
             let user_id = user_id_owned.clone();
             let word_id = word_id.clone();
-            let mastery_key = mastery_key.clone();
+            let question_mode = req.question_mode.clone();
             move |store| {
+                let legacy_key = format!("mastery:{word_id}");
+                let mut mastery_states: Vec<(String, Option<serde_json::Value>)> = vec![(
+                    legacy_key.clone(),
+                    store.get_engine_algo_state(&user_id, &legacy_key)?,
+                )];
+                if let Some(m) = question_mode.as_deref() {
+                    let mode_key =
+                        crate::amas::memory::mastery::mastery_state_key(&word_id, Some(m), true);
+                    if mode_key != legacy_key {
+                        let prev = store.get_engine_algo_state(&user_id, &mode_key)?;
+                        mastery_states.push((mode_key, prev));
+                    }
+                }
                 Ok::<_, crate::store::StoreError>((
-                    store.get_engine_algo_state(&user_id, &mastery_key)?,
+                    mastery_states,
                     store.get_word_elo(&word_id)?,
                     store.get_user_elo(&user_id)?,
                     store.get_word_elo_user_contrib(&user_id, &word_id)?,
@@ -225,6 +237,7 @@ pub(crate) async fn process_batch_record(
                 paused_time_ms: req.paused_time_ms,
                 hint_used: req.hint_used.unwrap_or(false),
                 confused_with: req.confused_with.clone(),
+                question_mode: req.question_mode.clone(),
             },
             &record.id,
         )
@@ -327,10 +340,15 @@ pub(crate) async fn process_batch_record(
                         // W1-1：原子回滚 word 级状态（mastery + ELO）+ 清幂等标记（同一 tx）。
                         // 守「标记存在 ⟺ AMAS 已应用」不变式，消除原多步非原子写之间的崩溃窗口
                         // （重试丢 AMAS）。batch 不碰 user_state（user 级快照在批级单独处理）。
+                        let mut algo_states: Vec<(&str, &Option<serde_json::Value>)> =
+                            Vec::with_capacity(prev_mastery_states.len());
+                        for (k, prev) in &prev_mastery_states {
+                            algo_states.push((k.as_str(), prev));
+                        }
                         let restore = crate::store::operations::engine::EngineStateRestore {
                             user_id: &user_id_owned,
                             user_state: None,
-                            algo_states: &[(mastery_key.as_str(), &prev_mastery)],
+                            algo_states: &algo_states,
                             user_elo: Some(&prev_user_elo),
                             word_elo: Some((&word_id, &prev_word_elo)),
                             word_elo_contrib: Some((&word_id, prev_word_contrib)),

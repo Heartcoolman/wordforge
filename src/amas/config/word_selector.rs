@@ -18,6 +18,13 @@ pub struct WordSelectorConfig {
     pub optimal_recall_center: f64,
     #[serde(default = "default_optimal_recall_sigma")]
     pub optimal_recall_sigma: f64,
+    /// ② 混淆隔离（Phase 1b）：命中 SessionSelectionContext.confusion_exclude_word_ids 的词
+    /// 评分乘此系数。1.0=no-op（默认，bit-exact legacy）；<1 降优先级、>=1 无意义（validate 限 [0,1]）。
+    #[serde(default = "default_confusion_isolation_dampen")]
+    pub confusion_isolation_dampen: f64,
+    /// ② 混淆隔离：调用方筛选已出现词的混淆对端时的最小 score 阈值（仅调用侧用，select_words 不读）。
+    #[serde(default = "default_confusion_min_score")]
+    pub confusion_min_score: f64,
 }
 
 pub(crate) fn default_sigmoid_steepness() -> f64 {
@@ -31,6 +38,13 @@ pub(crate) fn default_optimal_recall_center() -> f64 {
 }
 pub(crate) fn default_optimal_recall_sigma() -> f64 {
     0.30
+}
+pub(crate) fn default_confusion_isolation_dampen() -> f64 {
+    // 1.0=no-op（默认关闭，bit-exact legacy）
+    1.0
+}
+pub(crate) fn default_confusion_min_score() -> f64 {
+    0.5
 }
 
 impl Default for WordSelectorConfig {
@@ -46,6 +60,8 @@ impl Default for WordSelectorConfig {
             spacing_cooldown_secs: 300.0,
             optimal_recall_center: 0.50,
             optimal_recall_sigma: 0.30,
+            confusion_isolation_dampen: 1.0,
+            confusion_min_score: 0.5,
         }
     }
 }

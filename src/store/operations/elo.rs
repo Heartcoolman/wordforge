@@ -260,6 +260,65 @@ impl Store {
         }
         Ok(results)
     }
+
+    /// ③ 多痕迹（Phase 2）：批量取候选词的**全部** mastery 痕迹（legacy `mastery:{w}` +
+    /// 各 per-mode `mastery:{w}:{mode}`）。返回 word_id → 已存在痕迹的 MdmState 列表（无痕迹的词
+    /// 不在 map 中）。选词层据此按 min-recall 聚合。per-mode 键含 `:` 无法靠 strip_prefix 还原 word，
+    /// 故用显式 key→word 反查表。
+    pub fn batch_get_engine_mastery_mdm_traces(
+        &self,
+        user_id: &str,
+        word_ids: &[String],
+    ) -> Result<HashMap<String, Vec<MdmState>>, StoreError> {
+        keys::validate_id(user_id)?;
+        let mut result: HashMap<String, Vec<MdmState>> = HashMap::new();
+        if word_ids.is_empty() {
+            return Ok(result);
+        }
+        // 生成所有候选键 + 键→word 反查表（legacy + 每个已知 mode）。
+        let mut key_to_word: HashMap<String, String> = HashMap::new();
+        for w in word_ids {
+            key_to_word
+                .entry(format!("mastery:{w}"))
+                .or_insert_with(|| w.clone());
+            for m in crate::amas::memory::mastery::KNOWN_QUESTION_MODES {
+                key_to_word
+                    .entry(format!("mastery:{w}:{m}"))
+                    .or_insert_with(|| w.clone());
+            }
+        }
+        let conn = self.conn()?;
+        let all_keys: Vec<&String> = key_to_word.keys().collect();
+        for chunk in all_keys.chunks(900) {
+            let placeholders: String = (0..chunk.len())
+                .map(|i| format!("?{}", i + 2))
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "SELECT algo_id, state_json FROM engine_algo_states
+                 WHERE user_id=?1 AND algo_id IN ({placeholders})"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(chunk.len() + 1);
+            params.push(&user_id);
+            for k in chunk {
+                params.push(*k);
+            }
+            let rows = stmt.query_map(params.as_slice(), |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?;
+            for row in rows {
+                let (algo_id, json) = row?;
+                if let Some(word) = key_to_word.get(&algo_id) {
+                    let value: serde_json::Value = Self::deserialize_json(&json)?;
+                    if let Some(mdm) = Self::decode_mastery_mdm_state(value) {
+                        result.entry(word.clone()).or_default().push(mdm);
+                    }
+                }
+            }
+        }
+        Ok(result)
+    }
 }
 
 #[cfg(test)]
@@ -271,6 +330,34 @@ mod tests {
     use crate::amas::memory::mastery::{update_mastery_at, WordMasteryState};
     use crate::amas::memory::mdm::MdmState;
     use crate::store::Store;
+
+    #[test]
+    fn batch_get_engine_mastery_mdm_traces_groups_legacy_and_per_mode() {
+        let store = Store::open(":memory:", 5000, 1).unwrap();
+        store.run_migrations().unwrap();
+        let mk = |s: f64| {
+            let mut st = MdmState::default();
+            st.stability = s;
+            st.review_count = 1;
+            serde_json::to_value(&st).unwrap()
+        };
+        // legacy + 两个 per-mode 痕迹
+        store.set_engine_algo_state("u1", "mastery:w1", &mk(10.0)).unwrap();
+        store
+            .set_engine_algo_state("u1", "mastery:w1:word-to-meaning", &mk(20.0))
+            .unwrap();
+        store
+            .set_engine_algo_state("u1", "mastery:w1:meaning-to-word", &mk(5.0))
+            .unwrap();
+
+        let traces = store
+            .batch_get_engine_mastery_mdm_traces("u1", &["w1".to_string(), "w2".to_string()])
+            .unwrap();
+        let v = traces.get("w1").expect("w1 应有痕迹");
+        assert_eq!(v.len(), 3, "legacy + 2 per-mode");
+        // 无任何痕迹的词不在 map 中
+        assert!(traces.get("w2").is_none());
+    }
 
     #[test]
     fn elo_default_when_missing() {
@@ -329,7 +416,7 @@ mod tests {
         let mut mastery = WordMasteryState::new("w1");
         let config = MemoryModelConfig::default();
         let now_ms = chrono::Utc::now().timestamp_millis();
-        let _ = update_mastery_at(&mut mastery, true, 0.9, 1.0, 0.9, now_ms, &config, None);
+        let _ = update_mastery_at(&mut mastery, true, 0.9, 1.0, 0.9, now_ms, &config, None, None);
 
         store
             .set_engine_algo_state("u1", "mastery:w1", &serde_json::to_value(&mastery).unwrap())

@@ -1380,7 +1380,13 @@ impl AMASEngine {
             return Ok(None);
         }
 
-        let key = format!("mastery:{}", raw_event.word_id);
+        // ③ 多痕迹（Phase 2）：按 question_mode 派生键（flag 关/未知 mode → 单痕迹 legacy）。
+        // 与 records 路由快照/回滚路径共用 mastery_state_key，保证键一致。
+        let key = mastery::mastery_state_key(
+            &raw_event.word_id,
+            raw_event.question_mode.as_deref(),
+            config.feature_flags.multi_trace_enabled,
+        );
         let mut state = match self
             .store
             .get_engine_algo_state(user_id, &key)
@@ -1432,6 +1438,14 @@ impl AMASEngine {
         );
         let now_ms = chrono::Utc::now().timestamp_millis();
 
+        // 冷启动难度先验（Phase 1a）：仅首评（review_count==0）构建并消费，避免每次复习多查 DB。
+        // 默认权重全 0 → ColdStartPriors::deltas=(0,0) → bit-exact legacy。
+        let cold_start = if state.mdm.review_count == 0 {
+            self.build_cold_start_priors(&raw_event.word_id, &config.memory_model)
+        } else {
+            None
+        };
+
         // T1.3:记录更新前的 mastery 态，update 后判定是否发生进入 MASTERED / FORGOTTEN 的边沿。
         let prev_level = state.mastery_level.clone();
         let decision = mastery::update_mastery_at(
@@ -1443,6 +1457,7 @@ impl AMASEngine {
             now_ms,
             &config.memory_model,
             ssp_policy,
+            cold_start.as_ref(),
         );
         let mastery_transition = match decision.mastery_level {
             MasteryLevel::Mastered if prev_level != MasteryLevel::Mastered => Some("mastered"),
@@ -1465,6 +1480,55 @@ impl AMASEngine {
             desired_retention,
             mastery_transition,
         }))
+    }
+
+    /// 冷启动难度先验（Phase 1a）：从 word.text/word.difficulty/word_morphemes 预计算特征。
+    /// word 不存在 → None（更新回落 bit-exact legacy）。权重全 0 时即便返回 Some 也 no-op。
+    fn build_cold_start_priors(
+        &self,
+        word_id: &str,
+        mm: &crate::amas::config::MemoryModelConfig,
+    ) -> Option<mdm::ColdStartPriors> {
+        let word = self.store.get_word(word_id).ok().flatten()?;
+        let len = word.text.chars().count() as f64;
+        let len_z =
+            ((len - mm.cold_start_len_ref) / mm.cold_start_len_scale.max(1e-9)).clamp(-1.0, 1.0);
+        // word.difficulty ∈ (0,1] → [1,10]；0/缺值 → None（与 word_selector::word_difficulty_logit_scale 同义）。
+        let ext_difficulty = if word.difficulty > 0.0 {
+            Some((1.0 + 9.0 * word.difficulty).clamp(1.0, 10.0))
+        } else {
+            None
+        };
+        Some(mdm::ColdStartPriors {
+            len_z,
+            morph_transparency: self.morph_transparency(word_id),
+            ext_difficulty,
+        })
+    }
+
+    /// 词素透明度 ∈ [0,1] = 已知词根/词缀（type∈{prefix,root,suffix} 且 meaning 非空）占比。
+    /// 无词素 / 不可分解（<2 个词素）→ None（无信号，该项 no-op）。
+    fn morph_transparency(&self, word_id: &str) -> Option<f64> {
+        let arr = self
+            .store
+            .get_word_morphemes(word_id)
+            .ok()
+            .flatten()?
+            .as_array()?
+            .clone();
+        if arr.len() < 2 {
+            return None;
+        }
+        let total = arr.len() as f64;
+        let known = arr
+            .iter()
+            .filter(|m| {
+                let ty = m.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                let meaning = m.get("meaning").and_then(|v| v.as_str()).unwrap_or("");
+                matches!(ty, "prefix" | "root" | "suffix") && !meaning.is_empty()
+            })
+            .count() as f64;
+        Some((known / total).clamp(0.0, 1.0))
     }
 
     fn apply_constraints(

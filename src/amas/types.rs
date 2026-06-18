@@ -26,6 +26,10 @@ pub struct RawEvent {
     pub hint_used: bool,
     #[serde(default)]
     pub confused_with: Option<String>,
+    /// ③ 跨题型多痕迹（Phase 2）：本次作答的出题模式（见 KNOWN_QUESTION_MODES）。
+    /// multi_trace 开启时驱动 per-mode mastery 痕迹；None/未知/flag 关 → 单痕迹 legacy。
+    #[serde(default)]
+    pub question_mode: Option<String>,
 }
 
 impl Default for RawEvent {
@@ -45,6 +49,7 @@ impl Default for RawEvent {
             paused_time_ms: None,
             hint_used: false,
             confused_with: None,
+            question_mode: None,
         }
     }
 }

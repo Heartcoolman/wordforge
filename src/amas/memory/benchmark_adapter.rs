@@ -4,7 +4,8 @@ use crate::amas::config::{MemoryModelConfig, SspConfig};
 
 use super::mdm::{
     compute_interval, compute_interval_base_days, gsp_banded_retention, gsp_schedule_active,
-    gsp_schedule_days, recall_probability, update_strength_with_evidence, MdmState,
+    gsp_schedule_days, recall_probability, update_strength_with_evidence_cs, ColdStartPriors,
+    MdmState,
 };
 use super::ssp;
 
@@ -33,6 +34,14 @@ pub struct BenchmarkHistoryItem {
     pub target_retentions: Vec<f64>,
     #[serde(default = "default_interval_scale")]
     pub interval_scale: f64,
+    /// 冷启动先验特征（Phase 1a；仅首评消费）。缺省全 None → 无先验（bit-exact legacy）。
+    /// 与引擎侧 engine.rs::build_cold_start_priors 产出的 ColdStartPriors 字段一一对应。
+    #[serde(default)]
+    pub cs_len_z: Option<f64>,
+    #[serde(default)]
+    pub cs_morph_transparency: Option<f64>,
+    #[serde(default)]
+    pub cs_ext_difficulty: Option<f64>,
 }
 
 impl BenchmarkHistoryItem {
@@ -231,6 +240,19 @@ pub fn replay_history_with_streak(
     // 耦合会破坏 Rust↔Python 对拍可测性，作为已接受的残余保真缺口记录。
     let mut streak: u32 = 0;
     let mut lapses: u32 = 0;
+    // 冷启动先验（仅首评消费；后续迭代 review_count>0 自然 no-op）。
+    let cold_start = if item.cs_len_z.is_some()
+        || item.cs_morph_transparency.is_some()
+        || item.cs_ext_difficulty.is_some()
+    {
+        Some(ColdStartPriors {
+            len_z: item.cs_len_z.unwrap_or(0.0),
+            morph_transparency: item.cs_morph_transparency,
+            ext_difficulty: item.cs_ext_difficulty,
+        })
+    } else {
+        None
+    };
 
     for (&delta_t, &result) in t_history.iter().zip(r_history.iter()) {
         if delta_t < 0 {
@@ -255,7 +277,16 @@ pub fn replay_history_with_streak(
         let base_alpha = (1.0 * config.alpha_scale).clamp(config.alpha_min, config.alpha_max);
         let streak_bonus = 1.0 + (streak.min(5) as f64) * 0.1;
         let alpha = (base_alpha * streak_bonus).clamp(config.alpha_min, config.alpha_max);
-        update_strength_with_evidence(&mut state, quality, alpha, streak, lapses, now_ms, config);
+        update_strength_with_evidence_cs(
+            &mut state,
+            quality,
+            alpha,
+            streak,
+            lapses,
+            now_ms,
+            config,
+            cold_start.as_ref(),
+        );
     }
 
     Ok((state, streak))
@@ -276,6 +307,9 @@ mod tests {
             next_t_days: Some(2.0),
             target_retentions: vec![0.8, 0.85, 0.9],
             interval_scale: 1.0,
+            cs_len_z: None,
+            cs_morph_transparency: None,
+            cs_ext_difficulty: None,
         };
 
         let state = replay_history(&item, &config).expect("state");
@@ -313,6 +347,9 @@ mod tests {
             next_t_days: None,
             target_retentions: vec![],
             interval_scale: 1.0,
+            cs_len_z: None,
+            cs_morph_transparency: None,
+            cs_ext_difficulty: None,
         };
         let err = replay_history(&item, &config).expect_err("should fail");
         assert!(err.contains("history length mismatch"));
@@ -323,7 +360,8 @@ mod tests {
         // T1.4：带 ssp_config 时，scheduled_interval 走 SSP optimal_interval 后端，且 optimal_retention
         // 曲面被暴露（None→Some）。无 ssp_config 时 optimal_retention=None（MDM 路径，bit-exact）。
         let mut config = MemoryModelConfig::default();
-        config.gsp_interval_cap_days = 40.0; // 确保 GSP head 激活 → scheduled_interval_days 为 Some
+        // 确保 GSP head 激活（cap>0 任一旋钮即激活），使 scheduled_interval_days 为 Some。
+        config.gsp_interval_cap_days = 40.0;
         let mk_item = || BenchmarkHistoryItem {
             t_history: vec![0, 3, 7, 15],
             r_history: vec![1, 1, 1, 1],
@@ -332,8 +370,12 @@ mod tests {
             next_t_days: Some(5.0),
             target_retentions: vec![0.85],
             interval_scale: 1.0,
+            cs_len_z: None,
+            cs_morph_transparency: None,
+            cs_ext_difficulty: None,
         };
 
+        // MDM 路径（无 SSP）：optimal_retention=None。
         let mdm = evaluate_batch(BenchmarkAdapterRequest {
             config: config.clone(),
             items: vec![mk_item()],
@@ -343,6 +385,7 @@ mod tests {
         assert!(mdm.items[0].optimal_retention.is_none());
         assert!(mdm.items[0].scheduled_interval_days.is_some());
 
+        // SSP 后端：optimal_retention=Some（DR 曲面暴露），且在 [r_min, r_max] 内。
         let ssp_cfg = SspConfig {
             max_iterations: 50,
             ..Default::default()

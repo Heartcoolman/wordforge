@@ -79,6 +79,23 @@ pub const TIER_A_WHITELIST: &[WhitelistEntry] = &[
         min_safe: 0.1,
         max_safe: 0.8,
     },
+    // 冷启动难度先验·D 偏移权重（Phase 1a；影响有界、仅作用首评，LLM 离线 tune 友好）。
+    // S 偏移权重不进白名单（对 stability 更敏感，留人工 PUT 渠道）。
+    WhitelistEntry {
+        path: "memoryModel.coldStartDLenWeight",
+        min_safe: 0.0,
+        max_safe: 3.0,
+    },
+    WhitelistEntry {
+        path: "memoryModel.coldStartDMorphWeight",
+        min_safe: 0.0,
+        max_safe: 3.0,
+    },
+    WhitelistEntry {
+        path: "memoryModel.coldStartDExtdWeight",
+        min_safe: 0.0,
+        max_safe: 5.0,
+    },
 ];
 
 /// 运行期可解析的白名单条目（owned，来自 store row 或 const）。
@@ -165,8 +182,8 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn whitelist_size_is_12() {
-        assert_eq!(TIER_A_WHITELIST.len(), 12);
+    fn whitelist_size_is_15() {
+        assert_eq!(TIER_A_WHITELIST.len(), 15);
     }
 
     #[test]

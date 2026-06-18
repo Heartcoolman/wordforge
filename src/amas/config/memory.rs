@@ -125,6 +125,37 @@ pub struct MemoryModelConfig {
     pub pred_logit_intercept: f64,
     #[serde(default = "default_pred_logit_review_count_weight")]
     pub pred_logit_review_count_weight: f64,
+    // === 冷启动难度先验（Phase 1a；仅首评 review_count==0 调整 S₀/D₀，之后交还 FSRS）===
+    // 全部权重默认 0.0 → deltas=(0,0) → 与不带该键的旧配置/DB 快照逐位等价（bit-exact legacy）。
+    // 公式见 mdm.rs ColdStartPriors::deltas / dhp_reference.py 镜像。ref/scale 仅用于引擎侧把
+    // word.text 长度、word.difficulty 映射为特征（len_z/ext_difficulty），不参与 deltas 运算。
+    /// 词长参考点（字符数）：len_z = clamp((len − ref)/scale, −1, 1)。
+    #[serde(default = "default_cold_start_len_ref")]
+    pub cold_start_len_ref: f64,
+    /// 词长缩放（>0）：见上。
+    #[serde(default = "default_cold_start_len_scale")]
+    pub cold_start_len_scale: f64,
+    /// 外部难度参考点（[1,10] 标度）：ext_difficulty==ref 时该项位移为 0。
+    #[serde(default = "default_cold_start_extd_ref")]
+    pub cold_start_extd_ref: f64,
+    /// D₀ 偏移·词长权重（难词 D 升）。0.0=关闭。
+    #[serde(default = "default_cold_start_weight_zero")]
+    pub cold_start_d_len_weight: f64,
+    /// D₀ 偏移·词素透明度权重（可分解→D 降，词根促进）。0.0=关闭。
+    #[serde(default = "default_cold_start_weight_zero")]
+    pub cold_start_d_morph_weight: f64,
+    /// D₀ 偏移·外部难度权重。0.0=关闭。
+    #[serde(default = "default_cold_start_weight_zero")]
+    pub cold_start_d_extd_weight: f64,
+    /// S₀ 偏移（对数域，乘性）·词长权重（难词 S 降）。0.0=关闭。
+    #[serde(default = "default_cold_start_weight_zero")]
+    pub cold_start_s_len_weight: f64,
+    /// S₀ 偏移·词素透明度权重（可分解→S 升）。0.0=关闭。
+    #[serde(default = "default_cold_start_weight_zero")]
+    pub cold_start_s_morph_weight: f64,
+    /// S₀ 偏移·外部难度权重。0.0=关闭。
+    #[serde(default = "default_cold_start_weight_zero")]
+    pub cold_start_s_extd_weight: f64,
     // === 原 mdm.rs 模块级常量 ===
     #[serde(default = "default_retention_min")]
     pub retention_min: f64,
@@ -267,6 +298,19 @@ pub(crate) fn default_pred_logit_intercept() -> f64 {
 pub(crate) fn default_pred_logit_review_count_weight() -> f64 {
     0.0
 }
+pub(crate) fn default_cold_start_len_ref() -> f64 {
+    7.0
+}
+pub(crate) fn default_cold_start_len_scale() -> f64 {
+    4.0
+}
+pub(crate) fn default_cold_start_extd_ref() -> f64 {
+    5.0
+}
+pub(crate) fn default_cold_start_weight_zero() -> f64 {
+    // 所有冷启动权重默认 0.0=关闭（bit-exact legacy）
+    0.0
+}
 pub(crate) fn default_retention_min() -> f64 {
     // bench tuned v3：抬高下限防过度拉长间隔
     0.75
@@ -394,6 +438,16 @@ impl Default for MemoryModelConfig {
             pred_logit_base_scale: 1.0,
             pred_logit_intercept: 0.0,
             pred_logit_review_count_weight: 0.0,
+            // 冷启动难度先验：ref/scale 中性值，6 个权重默认 0.0=关闭（bit-exact legacy）
+            cold_start_len_ref: 7.0,
+            cold_start_len_scale: 4.0,
+            cold_start_extd_ref: 5.0,
+            cold_start_d_len_weight: 0.0,
+            cold_start_d_morph_weight: 0.0,
+            cold_start_d_extd_weight: 0.0,
+            cold_start_s_len_weight: 0.0,
+            cold_start_s_morph_weight: 0.0,
+            cold_start_s_extd_weight: 0.0,
             retention_min: 0.75,
             retention_max: 0.95,
             max_interval_days: 90.0,

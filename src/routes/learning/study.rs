@@ -79,6 +79,7 @@ pub(super) async fn get_study_words(
                         word_selector: &amas_config.word_selector,
                         elo: &amas_config.elo,
                         memory_model: &amas_config.memory_model,
+                        multi_trace_enabled: amas_config.feature_flags.multi_trace_enabled,
                     },
                 )?;
 
@@ -220,6 +221,8 @@ pub(super) async fn next_words(
         Some(SessionSelectionContext {
             error_prone_word_ids: perf.error_prone_word_ids.clone(),
             recently_mastered_word_ids: req.mastered_word_ids.clone().unwrap_or_default(),
+            // ② 混淆隔离对端在下方 store task 内按已出现词查 confusion_pairs 填充（需 DB 访问）。
+            confusion_exclude_word_ids: Vec::new(),
             temporal_boost,
         })
     } else {
@@ -249,8 +252,10 @@ pub(super) async fn next_words(
                 candidate_word_ids.dedup();
 
                 let mut exclude_set: HashSet<String> = exclude_word_ids.into_iter().collect();
+                let mut shown_ids: Vec<String> = Vec::new();
                 if let Some(ref sid) = session_id_for_select {
                     for wid in store.get_session_shown_word_ids(sid)? {
+                        shown_ids.push(wid.clone());
                         exclude_set.insert(wid);
                     }
                 }
@@ -258,6 +263,24 @@ pub(super) async fn next_words(
                     .into_iter()
                     .filter(|wid| !exclude_set.contains(wid))
                     .collect();
+
+                // ② 混淆隔离（Phase 1b）：flag 开启时，把本 session 已出现词的高分混淆对端注入
+                // context（候选池里命中者评分被 dampen）。flag 关 → 不查、不填充 → 选词 bit-exact legacy。
+                let mut session_context = session_context;
+                if amas_config.feature_flags.confusion_isolation_enabled {
+                    if let Some(ctx) = session_context.as_mut() {
+                        let min_score = amas_config.word_selector.confusion_min_score;
+                        let mut conf: HashSet<String> = HashSet::new();
+                        for wid in &shown_ids {
+                            for (other, score) in store.get_confusion_pairs_for_word(wid, 20)? {
+                                if score >= min_score {
+                                    conf.insert(other);
+                                }
+                            }
+                        }
+                        ctx.confusion_exclude_word_ids = conf.into_iter().collect();
+                    }
+                }
 
                 let scored = word_selector::select_words(
                     &store,
@@ -270,6 +293,7 @@ pub(super) async fn next_words(
                         word_selector: &amas_config.word_selector,
                         elo: &amas_config.elo,
                         memory_model: &amas_config.memory_model,
+                        multi_trace_enabled: amas_config.feature_flags.multi_trace_enabled,
                     },
                 )?;
                 let scored_word_ids: Vec<String> =

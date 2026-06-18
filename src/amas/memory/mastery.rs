@@ -6,6 +6,28 @@ use crate::amas::types::*;
 use super::mdm::MdmState;
 use super::ssp::SspPolicy;
 
+/// ③ 跨题型多痕迹（Phase 2）：已知出题模式集合。仅这些 mode 在 multi_trace 开启时分痕迹；
+/// NULL / 未知 mode / flag 关 → 回落单一 `mastery:{word}` 键（bit-exact legacy）。
+pub const KNOWN_QUESTION_MODES: &[&str] = &[
+    "word-to-meaning",
+    "meaning-to-word",
+    "audio-to-meaning",
+    "meaning-to-spelling",
+];
+
+/// 派生 mastery 状态键。`multi_trace` 开启且 `question_mode ∈ KNOWN_QUESTION_MODES` 时返回
+/// `mastery:{word}:{mode}`；否则 `mastery:{word}`（legacy，bit-exact）。
+/// **写路径（engine::update_memory）与快照/回滚路径（records 路由）必须共用本函数**，
+/// 避免键分叉导致回滚错位/状态泄漏。
+pub fn mastery_state_key(word_id: &str, question_mode: Option<&str>, multi_trace: bool) -> String {
+    match question_mode {
+        Some(m) if multi_trace && KNOWN_QUESTION_MODES.contains(&m) => {
+            format!("mastery:{word_id}:{m}")
+        }
+        _ => format!("mastery:{word_id}"),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WordMasteryState {
     pub word_id: String,
@@ -50,6 +72,7 @@ pub fn update_mastery(
         chrono::Utc::now().timestamp_millis(),
         config,
         ssp_policy,
+        None,
     )
 }
 
@@ -63,6 +86,7 @@ pub fn update_mastery_at(
     now: i64,
     config: &MemoryModelConfig,
     ssp_policy: Option<&SspPolicy>,
+    cold_start: Option<&super::mdm::ColdStartPriors>,
 ) -> WordMasteryDecision {
     let prev_last_review = state.mdm.last_review_at;
 
@@ -87,7 +111,7 @@ pub fn update_mastery_at(
     // 双腿信任调度证据（advance-before-update）：streak=本次记账后的 correct_streak；
     // lapses=total_attempts-total_correct（total_attempts 已自增，失败时含本次）
     let lapse_count = state.total_attempts - state.total_correct;
-    super::mdm::update_strength_with_evidence(
+    super::mdm::update_strength_with_evidence_cs(
         &mut state.mdm,
         quality,
         alpha,
@@ -95,6 +119,7 @@ pub fn update_mastery_at(
         lapse_count,
         now,
         config,
+        cold_start,
     );
 
     state.recent_results.push(is_correct);
@@ -192,6 +217,24 @@ mod tests {
         let _ = update_mastery(&mut state, true, 0.95, 1.0, 0.9, config, None);
         rewind_last_review(&mut state, 3_600_000);
         state
+    }
+
+    #[test]
+    fn mastery_state_key_derivation() {
+        // flag 关 → legacy（无论 mode）
+        assert_eq!(
+            super::mastery_state_key("w1", Some("word-to-meaning"), false),
+            "mastery:w1"
+        );
+        // flag 开 + 已知 mode → 带 suffix
+        assert_eq!(
+            super::mastery_state_key("w1", Some("word-to-meaning"), true),
+            "mastery:w1:word-to-meaning"
+        );
+        // flag 开 + 未知 mode → legacy
+        assert_eq!(super::mastery_state_key("w1", Some("bogus"), true), "mastery:w1");
+        // None → legacy
+        assert_eq!(super::mastery_state_key("w1", None, true), "mastery:w1");
     }
 
     #[test]

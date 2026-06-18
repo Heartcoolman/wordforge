@@ -149,6 +149,9 @@ pub struct ScoredWord {
 pub struct SessionSelectionContext {
     pub error_prone_word_ids: Vec<String>,
     pub recently_mastered_word_ids: Vec<String>,
+    /// ② 混淆隔离（Phase 1b）：本 session 已出现/已选词的高分混淆对端。命中者评分被
+    /// `confusion_isolation_dampen` 惩罚（非硬排除，防候选稀少掏空批次）。空 → no-op。
+    pub confusion_exclude_word_ids: Vec<String>,
     pub temporal_boost: f64,
 }
 
@@ -156,6 +159,8 @@ pub struct SelectionConfigs<'a> {
     pub word_selector: &'a WordSelectorConfig,
     pub elo: &'a EloConfig,
     pub memory_model: &'a MemoryModelConfig,
+    /// ③ 多痕迹（Phase 2）：开启时按 min-recall 跨 per-mode 痕迹聚合出代表态；默认 false → 单痕迹 legacy。
+    pub multi_trace_enabled: bool,
 }
 
 /// 从候选词中选出最优学习批次
@@ -190,9 +195,30 @@ pub fn select_words(
     } else {
         None
     };
-    let mastery_state_by_id: HashMap<String, MdmState> = store
-        .batch_get_engine_mastery_mdm_states(user_id, candidate_word_ids)
-        .map_err(|e| AppError::internal(&e.to_string()))?;
+    // ③ 多痕迹（Phase 2）：开启时取每词全部痕迹、按 min-recall（最弱题型）选代表态注入下游打分；
+    // 关闭时走单一 `mastery:{word}`（bit-exact legacy）。下游评分路径不变。
+    let mastery_state_by_id: HashMap<String, MdmState> = if configs.multi_trace_enabled {
+        let traces = store
+            .batch_get_engine_mastery_mdm_traces(user_id, candidate_word_ids)
+            .map_err(|e| AppError::internal(&e.to_string()))?;
+        traces
+            .into_iter()
+            .filter_map(|(word_id, states)| {
+                states
+                    .into_iter()
+                    .min_by(|a, b| {
+                        let ra = crate::amas::memory::mdm::recall_probability(a, now_ms, mm);
+                        let rb = crate::amas::memory::mdm::recall_probability(b, now_ms, mm);
+                        ra.partial_cmp(&rb).unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .map(|state| (word_id, state))
+            })
+            .collect()
+    } else {
+        store
+            .batch_get_engine_mastery_mdm_states(user_id, candidate_word_ids)
+            .map_err(|e| AppError::internal(&e.to_string()))?
+    };
 
     let review_population = mastery_state_by_id
         .values()
@@ -220,6 +246,17 @@ pub fn select_words(
                 .collect()
         })
         .unwrap_or_default();
+    // ② 混淆隔离（Phase 1b）：命中集合的词评分乘 dampen（默认 1.0=no-op），降低与已出现易混词
+    // 共排概率。空集合 / dampen=1.0 双保险 → bit-exact 不变。
+    let confusion_exclude_set: std::collections::HashSet<&str> = context
+        .map(|c| {
+            c.confusion_exclude_word_ids
+                .iter()
+                .map(|s| s.as_str())
+                .collect()
+        })
+        .unwrap_or_default();
+    let confusion_dampen = ws.confusion_isolation_dampen;
 
     for word_id in candidate_word_ids {
         let mdm_state = mastery_state_by_id.get(word_id);
@@ -236,14 +273,18 @@ pub fn select_words(
                     .unwrap_or_default(),
             };
 
-            let score = score_new_word_prefetched(
+            let mut score = score_new_word_prefetched(
                 word,
                 word_elo_rating,
                 user_elo.rating,
                 strategy,
                 ws,
                 elo_config,
-            ) + rng.gen_range(0.0..SCORE_TIEBREAK_JITTER);
+            );
+            if confusion_exclude_set.contains(word_id.as_str()) {
+                score *= confusion_dampen;
+            }
+            score += rng.gen_range(0.0..SCORE_TIEBREAK_JITTER);
             new_words.push(ScoredWord {
                 word_id: word_id.clone(),
                 score,
@@ -274,6 +315,10 @@ pub fn select_words(
                 {
                     score += ws.recently_mastered_bonus;
                 }
+            }
+            // ② 混淆隔离惩罚（默认 dampen=1.0 → no-op）。对 suppress_extras 的已掌握词同样适用。
+            if confusion_exclude_set.contains(word_id.as_str()) {
+                score *= confusion_dampen;
             }
             score += rng.gen_range(0.0..SCORE_TIEBREAK_JITTER);
 
@@ -429,6 +474,7 @@ mod tests {
             word_selector: ws,
             elo,
             memory_model: mm,
+            multi_trace_enabled: false,
         }
     }
 
@@ -735,6 +781,7 @@ mod tests {
         let context = SessionSelectionContext {
             error_prone_word_ids: vec![high_word.to_string()],
             recently_mastered_word_ids: vec![high_word.to_string()],
+            confusion_exclude_word_ids: Vec::new(),
             temporal_boost: 1.0,
         };
         let selected = select_words(
@@ -749,5 +796,114 @@ mod tests {
         .unwrap();
 
         assert_eq!(selected[0].word_id, low_word);
+    }
+
+    #[test]
+    fn confusion_isolation_dampens_excluded_word_rank() {
+        let store = test_store();
+        let user_id = "u1";
+        let mm = MemoryModelConfig::default();
+        let mut ws = WordSelectorConfig::default();
+        ws.confusion_isolation_dampen = 0.1; // <1 启用惩罚
+        let elo = EloConfig::default();
+        let configs = default_selection_configs(&mm, &ws, &elo);
+        let strategy = StrategyParams {
+            difficulty: 0.5,
+            batch_size: 2,
+            new_ratio: 0.0,
+            interval_scale: 1.0,
+            review_mode: true,
+        };
+        let now_ms = Utc::now().timestamp_millis();
+
+        let a = "review-a";
+        let b = "review-b";
+        store.upsert_word(&sample_word(a, 0.6)).unwrap();
+        store.upsert_word(&sample_word(b, 0.6)).unwrap();
+        // 同等 recall → 同等 base score；仅靠混淆隔离区分
+        persist_review_state(&store, user_id, a, review_state_for_recall(0.45, now_ms, &mm));
+        persist_review_state(&store, user_id, b, review_state_for_recall(0.45, now_ms, &mm));
+
+        let context = SessionSelectionContext {
+            error_prone_word_ids: Vec::new(),
+            recently_mastered_word_ids: Vec::new(),
+            confusion_exclude_word_ids: vec![a.to_string()],
+            temporal_boost: 1.0,
+        };
+        let selected = select_words(
+            &store,
+            user_id,
+            &[a.to_string(), b.to_string()],
+            &strategy,
+            2,
+            Some(&context),
+            &configs,
+        )
+        .unwrap();
+
+        assert_eq!(selected.len(), 2);
+        assert_eq!(selected[0].word_id, b, "未隔离的 b 应排第一");
+        assert_eq!(selected[1].word_id, a, "被隔离的 a 应被压到末位");
+        let sa = selected.iter().find(|w| w.word_id == a).unwrap().score;
+        let sb = selected.iter().find(|w| w.word_id == b).unwrap().score;
+        assert!(sa < sb, "dampen 后 a({sa}) 应 < b({sb})");
+    }
+
+    #[test]
+    fn multi_trace_min_recall_aggregation_uses_weakest_mode() {
+        let store = test_store();
+        let user_id = "u1";
+        let mm = MemoryModelConfig::default();
+        let ws = WordSelectorConfig::default();
+        let elo = EloConfig::default();
+        let mut configs = default_selection_configs(&mm, &ws, &elo);
+        configs.multi_trace_enabled = true; // ③ 开启
+        let strategy = StrategyParams {
+            difficulty: 0.5,
+            batch_size: 1,
+            new_ratio: 0.0,
+            interval_scale: 1.0,
+            review_mode: true,
+        };
+        let now_ms = Utc::now().timestamp_millis();
+
+        let word = "w-multi";
+        store.upsert_word(&sample_word(word, 0.6)).unwrap();
+        // 强痕迹（recall 0.95，已掌握会被 suppress 成 0.001）+ 弱痕迹（recall 0.40，高 urgency）。
+        // min-recall 聚合必须取弱者 → 最终 score 远大于 0.001。
+        let strong = review_state_for_recall(0.95, now_ms, &mm);
+        let weak = review_state_for_recall(0.40, now_ms, &mm);
+        store
+            .set_engine_algo_state(
+                user_id,
+                "mastery:w-multi:word-to-meaning",
+                &serde_json::to_value(&strong).unwrap(),
+            )
+            .unwrap();
+        store
+            .set_engine_algo_state(
+                user_id,
+                "mastery:w-multi:meaning-to-word",
+                &serde_json::to_value(&weak).unwrap(),
+            )
+            .unwrap();
+
+        let selected = select_words(
+            &store,
+            user_id,
+            &[word.to_string()],
+            &strategy,
+            1,
+            None,
+            &configs,
+        )
+        .unwrap();
+        assert_eq!(selected.len(), 1);
+        assert!(!selected[0].is_new, "有痕迹 → 复习词");
+        assert!(
+            selected[0].score > 0.01,
+            "应按最弱题型(recall 0.40)打 urgency，而非被强题型已掌握抑制；实际 score={}",
+            selected[0].score
+        );
     }
 }
