@@ -186,6 +186,19 @@ class WordforgeMirrorState:
     # 仅作为「外部每词难度」的载体由 warm_start 写入；预测期在 AMASScheduler._recall 以
     # logit 加性项消费（见该处）。不参与 S/D 更新（保持 FSRS 动力学纯净）。
     external_difficulty: float = 5.0
+    # 冷启动难度先验（Phase 1a；仅首评 review_count==0 消费，逐位镜像 mdm.rs ColdStartPriors）。
+    # cs_* 为每词特征（warm_start/测试注入；与 benchmark_adapter item 的 csLenZ 等一一对应）；
+    # cold_start_* 系数来自 config（_mirror_from_config 透传）。全缺省 → deltas=(0,0) → bit-exact legacy。
+    cs_len_z: float | None = None
+    cs_morph_transparency: float | None = None
+    cs_ext_difficulty: float | None = None
+    cold_start_d_len_weight: float = 0.0
+    cold_start_d_morph_weight: float = 0.0
+    cold_start_d_extd_weight: float = 0.0
+    cold_start_s_len_weight: float = 0.0
+    cold_start_s_morph_weight: float = 0.0
+    cold_start_s_extd_weight: float = 0.0
+    cold_start_extd_ref: float = 5.0
 
     def recall(self, elapsed_days: float) -> float:
         power = math.pow(
@@ -196,6 +209,30 @@ class WordforgeMirrorState:
             0.0,
             min(1.0, self.forgetting_curve_floor + (1.0 - self.forgetting_curve_floor) * power),
         )
+
+    def _cold_start_deltas(self) -> tuple[float, float]:
+        """返回 (δ_S_log, δ_D)：逐位镜像 mdm.rs::ColdStartPriors::deltas（运算结合序一致）。
+        cold_start 视为"激活"当且仅当任一 cs_* 特征非 None（与 Rust Option<ColdStartPriors> 同义）；
+        未激活 → (0,0)。len_z 缺失按 0.0 处理（对齐 Rust item.cs_len_z.unwrap_or(0.0)）。"""
+        active = (
+            self.cs_len_z is not None
+            or self.cs_morph_transparency is not None
+            or self.cs_ext_difficulty is not None
+        )
+        if not active:
+            return (0.0, 0.0)
+        len_z = self.cs_len_z if self.cs_len_z is not None else 0.0
+        delta_d = self.cold_start_d_len_weight * len_z
+        delta_s = -self.cold_start_s_len_weight * len_z
+        if self.cs_morph_transparency is not None:
+            t = self.cs_morph_transparency
+            delta_d -= self.cold_start_d_morph_weight * t
+            delta_s += self.cold_start_s_morph_weight * t
+        if self.cs_ext_difficulty is not None:
+            z = (self.cs_ext_difficulty - self.cold_start_extd_ref) / 9.0
+            delta_d += self.cold_start_d_extd_weight * z
+            delta_s -= self.cold_start_s_extd_weight * z
+        return (delta_s, delta_d)
 
     def update(self, recalled: int, elapsed_days: float) -> None:
         """逐句镜像 mdm.rs::update_strength（quality 0.7/0.0 + 连击动态 alpha 的 adapter 重放形态）。
@@ -222,12 +259,19 @@ class WordforgeMirrorState:
         # 但 bench adapter 不调 validate()，alphaMax > 1 时缺此夹会与 Rust 发散
         alpha = max(0.0, min(1.0, alpha))
         if self.review_count == 0:
-            # 首评（mdm.rs review_count==0 分支）：S/D 直接赋值，无 alpha 平滑、无 S 上限
-            self.stability = w[grade - 1]
-            self.difficulty = max(
-                1.0,
-                min(10.0, w[4] - math.exp(w[5] * (grade - 1.0)) + 1.0),
-            )
+            # 首评（mdm.rs review_count==0 分支）：S/D 直接赋值，无 alpha 平滑。
+            s0_base = w[grade - 1]
+            d0_base = w[4] - math.exp(w[5] * (grade - 1.0)) + 1.0
+            # 冷启动先验（Phase 1a；逐位镜像 mdm.rs）：deltas 全 0 → 走 legacy 路径（S₀ 无 clamp）。
+            delta_s, delta_d = self._cold_start_deltas()
+            if delta_s == 0.0 and delta_d == 0.0:
+                self.stability = s0_base
+                self.difficulty = max(1.0, min(10.0, d0_base))
+            else:
+                self.stability = max(
+                    0.01, min(STABILITY_CAP_DAYS, s0_base * math.exp(delta_s))
+                )
+                self.difficulty = max(1.0, min(10.0, d0_base + delta_d))
         elif self.success_grade == 4:
             # —— FSRS-6 faithful 模式（success_grade==4）——
             # v5 架构：未平滑 FSRS-6 核心，逐位等价 FSRS6MirrorState（amas6 公版参考）。
@@ -430,6 +474,21 @@ def _gsp_band_kwargs_from_config(memory_config: Dict[str, object]) -> Dict[str, 
     }
 
 
+def _cold_start_kwargs_from_config(memory_config: Dict[str, object]) -> Dict[str, float]:
+    """冷启动先验系数（Phase 1a；逐位镜像 Rust MemoryModelConfig 同名字段）。
+    缺省全 0 / extd_ref=5.0（bit-exact legacy）。cs_* 每词特征不在此处（由 warm_start/测试按词
+    注入 mirror 实例，与 benchmark_adapter item 的 csLenZ 等对应）。"""
+    return {
+        "cold_start_d_len_weight": float(memory_config.get("coldStartDLenWeight", 0.0)),
+        "cold_start_d_morph_weight": float(memory_config.get("coldStartDMorphWeight", 0.0)),
+        "cold_start_d_extd_weight": float(memory_config.get("coldStartDExtdWeight", 0.0)),
+        "cold_start_s_len_weight": float(memory_config.get("coldStartSLenWeight", 0.0)),
+        "cold_start_s_morph_weight": float(memory_config.get("coldStartSMorphWeight", 0.0)),
+        "cold_start_s_extd_weight": float(memory_config.get("coldStartSExtdWeight", 0.0)),
+        "cold_start_extd_ref": float(memory_config.get("coldStartExtdRef", 5.0)),
+    }
+
+
 def _mirror_from_config(memory_config: Dict[str, object]) -> WordforgeMirrorState:
     weights = list(memory_config["w"])
     # 顶侧间隔夹紧与 Rust default_max_interval_days() 同默认（90 天）
@@ -438,6 +497,7 @@ def _mirror_from_config(memory_config: Dict[str, object]) -> WordforgeMirrorStat
     # success_grade（成功成绩带，缺省 3=bit-exact legacy）随 GSP band 入口 helper 夹紧后透传，
     # 保证 _mirror_from_config 路径与 AMASScheduler._fresh_state 路径口径一致。
     grade_kwargs = {"success_grade": _gsp_band_kwargs_from_config(memory_config)["success_grade"]}
+    cold_start_kwargs = _cold_start_kwargs_from_config(memory_config)
     if len(weights) >= 21:
         # FSRS-6：曲线参数由 w[20] 派生（与 Rust MemoryModelConfig::curve_* 一致）
         decay = max(0.05, min(2.0, float(weights[20])))
@@ -452,6 +512,7 @@ def _mirror_from_config(memory_config: Dict[str, object]) -> WordforgeMirrorStat
             max_interval_days=max_interval_days,
             **alpha_kwargs,
             **grade_kwargs,
+            **cold_start_kwargs,
         )
     return WordforgeMirrorState(
         weights=weights,
@@ -468,6 +529,7 @@ def _mirror_from_config(memory_config: Dict[str, object]) -> WordforgeMirrorStat
         max_interval_days=max_interval_days,
         **alpha_kwargs,
         **grade_kwargs,
+        **cold_start_kwargs,
     )
 
 

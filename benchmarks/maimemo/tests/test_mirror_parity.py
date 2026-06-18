@@ -353,6 +353,115 @@ def test_mirror_matches_rust_adapter():
     )
 
 
+# ===========================================================================
+# 冷启动难度先验（Phase 1a）parity：Rust benchmark_adapter（csLenZ 等 item 字段 + coldStart*
+# config 系数）↔ WordforgeMirrorState（cs_* 实例特征 + 同系数）。先验仅作用首评 review_count==0。
+# ===========================================================================
+
+# 非零权重（D 三项 + S 三项），用于实化先验偏移。extd_ref 取默认 5.0。
+_COLD_START_WEIGHTS = {
+    "coldStartDLenWeight": 0.8,
+    "coldStartDMorphWeight": 1.2,
+    "coldStartDExtdWeight": 0.5,
+    "coldStartSLenWeight": 0.3,
+    "coldStartSMorphWeight": 0.4,
+    "coldStartSExtdWeight": 0.2,
+    "coldStartExtdRef": 5.0,
+}
+
+# (cs_len_z, cs_morph_transparency, cs_ext_difficulty)；None 表示该特征缺失。
+# 首条全 None → cold_start 未激活（必须逐位 legacy）。其余覆盖各特征单独/组合激活。
+_COLD_START_FEATURES = [
+    (None, None, None),
+    (1.0, None, None),
+    (-1.0, 0.0, None),
+    (0.5, 1.0, 8.0),
+    (None, 0.5, 3.0),
+    (0.0, None, 10.0),
+    (-0.7, 0.25, None),
+    (1.0, 1.0, 1.0),
+]
+
+
+def _cold_start_cases(seed: int = 4242) -> list[dict]:
+    rng = random.Random(seed)
+    cases = []
+    for lz, mt, ed in _COLD_START_FEATURES:
+        length = rng.randint(1, 6)
+        cases.append(
+            {
+                "t": [rng.randint(0, 10) for _ in range(length)],
+                "r": [rng.randint(0, 1) for _ in range(length)],
+                "cs_len_z": lz,
+                "cs_morph_transparency": mt,
+                "cs_ext_difficulty": ed,
+            }
+        )
+    return cases
+
+
+def _assert_cold_start_parity(server: AdapterServer, config: dict, case: dict, label: str):
+    mirror = _mirror_from_config(config)
+    mirror.cs_len_z = case["cs_len_z"]
+    mirror.cs_morph_transparency = case["cs_morph_transparency"]
+    mirror.cs_ext_difficulty = case["cs_ext_difficulty"]
+    for recalled, delta in zip(case["r"], case["t"]):
+        mirror.update(recalled, float(delta))
+
+    item = {
+        "tHistory": case["t"],
+        "rHistory": case["r"],
+        "targetRetentions": list(INTERVAL_RETENTIONS),
+        "intervalScale": 1.0,
+    }
+    # 仅在特征非 None 时带字段（与 Rust cold_start=Some(..) 当且仅当任一 cs 字段存在一致）。
+    if case["cs_len_z"] is not None:
+        item["csLenZ"] = case["cs_len_z"]
+    if case["cs_morph_transparency"] is not None:
+        item["csMorphTransparency"] = case["cs_morph_transparency"]
+    if case["cs_ext_difficulty"] is not None:
+        item["csExtDifficulty"] = case["cs_ext_difficulty"]
+    [scored] = server.score_batch(config, [item])
+
+    assert mirror.review_count == scored["reviewCount"], label
+    assert abs(mirror.stability - scored["stability"]) <= STATE_TOL + STATE_TOL * abs(
+        scored["stability"]
+    ), f"{label}: stability {mirror.stability!r} vs {scored['stability']!r}"
+    assert abs(mirror.difficulty - scored["difficulty"]) <= STATE_TOL + STATE_TOL * abs(
+        scored["difficulty"]
+    ), f"{label}: difficulty {mirror.difficulty!r} vs {scored['difficulty']!r}"
+
+
+def test_mirror_cold_start_prior_parity():
+    """非零冷启动权重下 Rust↔Python 首评 S₀/D₀ 偏移逐位一致。"""
+    config = {**json.loads(json.dumps(DEFAULT_MEMORY_MODEL_CONFIG)), **_COLD_START_WEIGHTS}
+    with AdapterServer() as server:
+        for index, case in enumerate(_cold_start_cases()):
+            _assert_cold_start_parity(server, config, case, f"cold-start case {index}")
+
+
+def test_mirror_cold_start_default_weights_noop():
+    """默认配置（冷启动权重全 0）下，即便注入 cs 特征也必须与 legacy 逐位一致（Rust↔Python 双向）。"""
+    config = json.loads(json.dumps(DEFAULT_MEMORY_MODEL_CONFIG))
+    assert config.get("coldStartDLenWeight", 0.0) == 0.0  # 守卫：DEFAULT 不含非零冷启动权重
+    with AdapterServer() as server:
+        for index, case in enumerate(_cold_start_cases()):
+            _assert_cold_start_parity(server, config, case, f"cold-start noop case {index}")
+            # 额外断言 no-op：带特征 vs 不带特征，首评 S/D 必须 bit-exact 相同
+            no_feat = {**case, "cs_len_z": None, "cs_morph_transparency": None, "cs_ext_difficulty": None}
+            m_feat = _mirror_from_config(config)
+            m_feat.cs_len_z = case["cs_len_z"]
+            m_feat.cs_morph_transparency = case["cs_morph_transparency"]
+            m_feat.cs_ext_difficulty = case["cs_ext_difficulty"]
+            m_base = _mirror_from_config(config)
+            for recalled, delta in zip(case["r"], case["t"]):
+                m_feat.update(recalled, float(delta))
+                m_base.update(recalled, float(delta))
+            assert m_feat.stability == m_base.stability, f"noop S case {index}"
+            assert m_feat.difficulty == m_base.difficulty, f"noop D case {index}"
+            _ = no_feat
+
+
 def test_dynamic_alpha_streak_semantics():
     """纯 Python 侧连击语义自检：首评恒过、同日不加不清、失败清零。"""
     mirror = _mirror_from_config(DEFAULT_MEMORY_MODEL_CONFIG)

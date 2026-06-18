@@ -143,6 +143,18 @@ DEFAULT_MEMORY_MODEL_CONFIG: Dict[str, Any] = {
     # 竞品（fsrs/fsrs6/amas6）忽略此键 → 天然 de-tie。详见 pred_diagnose/pred_search/pred_test_eval。
     "difficultyLogitWeight": 0.1,
     "difficultyLogitRef": 5.0,
+    # === 冷启动难度先验（Phase 1a；仅首评 review_count==0 调整 S₀/D₀）===
+    # 6 个权重默认 0.0 = 关闭（与 Rust MemoryModelConfig 同名字段 / dhp_reference 镜像逐位一致）。
+    # 调高任一权重即可在 benchmark 评测冷启动先验；启用前须 prod_replay + 真实 A/B。
+    "coldStartLenRef": 7.0,
+    "coldStartLenScale": 4.0,
+    "coldStartExtdRef": 5.0,
+    "coldStartDLenWeight": 0.0,
+    "coldStartDMorphWeight": 0.0,
+    "coldStartDExtdWeight": 0.0,
+    "coldStartSLenWeight": 0.0,
+    "coldStartSMorphWeight": 0.0,
+    "coldStartSExtdWeight": 0.0,
 }
 
 # fsrs 基线条目专用：保持 FSRS-5 语义（19 维官方 w + 固定曲线），不随 AMAS 升级漂移
