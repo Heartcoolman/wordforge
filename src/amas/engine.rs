@@ -7,6 +7,7 @@ use parking_lot::{Mutex, RwLock};
 use crate::amas::config::AMASConfig;
 use crate::amas::constants::{SIGNAL_THRESHOLD, TREND_BASELINE, USER_LOCK_CLEANUP_THRESHOLD};
 use crate::amas::decision::{ensemble, heuristic, ige, swd};
+use crate::amas::experiment::ActiveExperiment;
 use crate::amas::memory::{evm, mastery, mdm, ssp};
 use crate::amas::metrics;
 use crate::amas::monitoring;
@@ -40,6 +41,32 @@ pub struct AMASEngine {
     /// 后置标志"的时序下,若清理事件读表恰在激活提交之前发生,激活会顺带 bump 代际,使这次基于旧
     /// 视图的自清因代际不符而放弃——封死"误清刚激活 canary"的丢更新竞态。
     canary_generation: Arc<AtomicU64>,
+    /// T1.3 A/B：运行中实验的精简快照（供热路径按桶定 arm）。None=无 running 实验。
+    /// 与 canary 路由解耦：A/A（同配置两桶）即便不改路由配置，也需按桶分 arm 入组。
+    active_experiment: Arc<RwLock<Option<ActiveExperiment>>>,
+    /// 快路门：无 running 实验时跳过实验入组。register/conclude 后经 reload_active_experiment 维护。
+    experiment_active: Arc<AtomicBool>,
+}
+
+/// 路由结果：本次请求生效配置 + 用户桶号 + 命中的 canary version_hash（None=stable）。
+pub struct RouteResult {
+    pub config: Arc<AMASConfig>,
+    pub bucket: u32,
+    pub hit_version_hash: Option<String>,
+}
+
+/// ExperimentRow → 引擎侧 ActiveExperiment 快照（含 A/A 判定：canary 与 baseline 同配置版本）。
+fn active_exp_snapshot(
+    e: crate::store::operations::amas_experiment::ExperimentRow,
+) -> ActiveExperiment {
+    let aa = e.canary_version_hash == e.baseline_version_hash;
+    ActiveExperiment {
+        experiment_id: e.experiment_id,
+        canary_cohort_lo: e.canary_cohort_lo,
+        canary_cohort_hi: e.canary_cohort_hi,
+        canary_version_hash: e.canary_version_hash,
+        aa,
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -55,6 +82,9 @@ struct MemoryFeedback {
     scheduled_recall: f64,
     #[allow(dead_code)]
     desired_retention: f64,
+    /// T1.3:本次答题导致的 mastery 态转移("mastered"/"forgotten"/None)，用于落 word_mastery_events
+    /// 支撑"长期 masteredCount"。仅记进入 MASTERED / 进入 FORGOTTEN 的边沿。
+    mastery_transition: Option<&'static str>,
 }
 
 struct ProcessingContext {
@@ -86,14 +116,21 @@ impl AMASEngine {
         let hash = monitoring::compute_config_hash(&config);
         let ssp_policy = if config.feature_flags.ssp_enabled {
             let result = ssp::precompute(&config.ssp, &config.memory_model);
-            Some(Arc::new(if result.dual_grid {
-                ssp::SspPolicy::from_tables_with_bins(result.tables, result.stability_list)
-            } else {
-                ssp::SspPolicy::from_tables(result.tables, &config.ssp)
-            }))
+            // T1.4：保留 DP 的 (S,D)→最优 R 曲面（Cost-ADR 状态相关 DR），供查询/对拍。
+            Some(Arc::new(
+                if result.dual_grid {
+                    ssp::SspPolicy::from_tables_with_bins(result.tables, result.stability_list)
+                } else {
+                    ssp::SspPolicy::from_tables(result.tables, &config.ssp)
+                }
+                .with_retention_tables(result.optimal_r),
+            ))
         } else {
             None
         };
+        // T1.3：构造时载入 running 实验快照（重启后恢复实验入组，无需等首个 register）。
+        let active_exp = store.get_running_experiment().ok().flatten().map(active_exp_snapshot);
+        let exp_active = active_exp.is_some();
         Self {
             config: Arc::new(RwLock::new(Arc::new(config))),
             config_hash: Arc::new(RwLock::new(hash)),
@@ -104,7 +141,23 @@ impl AMASEngine {
             // 初值 true:首个事件会真查一次并自校正为 false(若无 canary),不漏判。
             canary_active: Arc::new(AtomicBool::new(true)),
             canary_generation: Arc::new(AtomicU64::new(0)),
+            active_experiment: Arc::new(RwLock::new(active_exp)),
+            experiment_active: Arc::new(AtomicBool::new(exp_active)),
         }
+    }
+
+    /// T1.3：重载运行中实验快照。register_experiment / conclude_experiment 之后调用，
+    /// 使热路径的实验入组门即时生效。
+    pub fn reload_active_experiment(&self) {
+        let active = self
+            .store
+            .get_running_experiment()
+            .ok()
+            .flatten()
+            .map(active_exp_snapshot);
+        self.experiment_active
+            .store(active.is_some(), Ordering::Release);
+        *self.active_experiment.write() = active;
     }
 
     /// 标记"可能存在 active canary",激活 canary 的写路径调用后保证热路径不再跳过查询。
@@ -119,11 +172,15 @@ impl AMASEngine {
         let hash = monitoring::compute_config_hash(&new_config);
         let new_ssp = if new_config.feature_flags.ssp_enabled {
             let result = ssp::precompute(&new_config.ssp, &new_config.memory_model);
-            Some(Arc::new(if result.dual_grid {
-                ssp::SspPolicy::from_tables_with_bins(result.tables, result.stability_list)
-            } else {
-                ssp::SspPolicy::from_tables(result.tables, &new_config.ssp)
-            }))
+            // T1.4：保留 DP 的 (S,D)→最优 R 曲面（Cost-ADR 状态相关 DR），供查询/对拍。
+            Some(Arc::new(
+                if result.dual_grid {
+                    ssp::SspPolicy::from_tables_with_bins(result.tables, result.stability_list)
+                } else {
+                    ssp::SspPolicy::from_tables(result.tables, &new_config.ssp)
+                }
+                .with_retention_tables(result.optimal_r),
+            ))
         } else {
             None
         };
@@ -152,23 +209,33 @@ impl AMASEngine {
     /// process_event_blocking 在入口调一次此方法,后续整个 request 内的 ProcessingContext.config
     /// 都用同一份 Arc,保证一次请求内 config 一致。
     pub fn effective_config_for_user(&self, user_id: &str) -> Arc<AMASConfig> {
+        self.route_for_user(user_id).config
+    }
+
+    /// hash(user_id) % 100 桶号；patch canary / m022 单 active / 实验 arm 共用同一散列。
+    fn bucket_for(user_id: &str) -> u32 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        user_id.hash(&mut h);
+        (h.finish() % 100) as u32
+    }
+
+    /// C6 路由 + 桶身份。返回本次请求生效配置、用户桶号、命中的 canary version_hash。
+    /// `effective_config_for_user` 是其薄封装。canary 快路 / 代际自清不变式原样保留（仅返回类型
+    /// 从 Arc<AMASConfig> 扩为携带 bucket+hit）。
+    pub fn route_for_user(&self, user_id: &str) -> RouteResult {
         let stable: Arc<AMASConfig> = Arc::clone(&self.config.read());
+        let bucket = Self::bucket_for(user_id);
         // 快路:确认无 active canary 时跳过下面 1-2 次 SQLite 查询(常态)。
-        // #22:在两次 DB 读之前抓快照 true,用作后面 compare_exchange 的 expected——若期间有
-        // mark_canary_active() 把标志重置为 true(或它本就保持 true),自清才允许;否则放弃自清,
-        // 杜绝"读到旧空表→刚激活的 canary 被 store(false) 误清→静默漏路由"的丢更新竞态。
         if !self.canary_active.load(Ordering::Acquire) {
-            return stable;
+            return RouteResult {
+                config: stable,
+                bucket,
+                hit_version_hash: None,
+            };
         }
         // #22:抓代际快照(必须在两次 DB 读之前)。自清仅在代际未被 mark_canary_active bump 时才允许。
         let gen_snapshot = self.canary_generation.load(Ordering::Acquire);
-        // hash(user_id) % 100 桶号,patch canary 与 m022 单 active 共用同一散列算法
-        let bucket = {
-            use std::hash::{Hash, Hasher};
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            user_id.hash(&mut h);
-            (h.finish() % 100) as u32
-        };
 
         // any_active:本轮是否观测到任一 active canary。仅当确认零 active 时才把快路标志置 false。
         // 查询出错时保守视为 true(不清标志),避免错误跳过。
@@ -182,12 +249,17 @@ impl AMASEngine {
                     .iter()
                     .find(|c| bucket >= c.cohort_lo && bucket < c.cohort_hi)
                 {
-                    return self.load_canary_snapshot(&hit.version_hash, &stable);
+                    let config = self.load_canary_snapshot(&hit.version_hash, &stable);
+                    return RouteResult {
+                        config,
+                        bucket,
+                        hit_version_hash: Some(hit.version_hash.clone()),
+                    };
                 }
             }
             Err(e) => {
                 any_active = true;
-                tracing::warn!(error=%e, "effective_config_for_user: 查 patch canary 失败,回退既有路由");
+                tracing::warn!(error=%e, "route_for_user: 查 patch canary 失败,回退既有路由");
             }
         }
 
@@ -209,17 +281,29 @@ impl AMASEngine {
                         Ordering::Acquire,
                     );
                 }
-                return stable;
+                return RouteResult {
+                    config: stable,
+                    bucket,
+                    hit_version_hash: None,
+                };
             }
             Err(e) => {
-                tracing::warn!(error=%e, "effective_config_for_user: 查 canary 失败,回退 stable");
-                return stable;
+                tracing::warn!(error=%e, "route_for_user: 查 canary 失败,回退 stable");
+                return RouteResult {
+                    config: stable,
+                    bucket,
+                    hit_version_hash: None,
+                };
             }
         };
         let is_forced = canary.force_user_ids.iter().any(|id| id == user_id);
         let in_bucket = (bucket as u64) < canary.percent as u64;
         if !is_forced && !in_bucket {
-            return stable;
+            return RouteResult {
+                config: stable,
+                bucket,
+                hit_version_hash: None,
+            };
         }
         // m035 crowd_filters 接线:非强制命中的用户,还须落入人群过滤(平台/账龄/活跃)。
         // force_user_ids 优先,无条件命中。查询出错保守回退 stable(不误推 canary)。
@@ -227,15 +311,57 @@ impl AMASEngine {
             if let Some(filters) = &canary.crowd_filters {
                 match self.store.user_matches_crowd_filters(user_id, filters) {
                     Ok(true) => {}
-                    Ok(false) => return stable,
+                    Ok(false) => {
+                        return RouteResult {
+                            config: stable,
+                            bucket,
+                            hit_version_hash: None,
+                        }
+                    }
                     Err(e) => {
-                        tracing::warn!(error=%e, "effective_config_for_user: 查 crowd_filters 失败,回退 stable");
-                        return stable;
+                        tracing::warn!(error=%e, "route_for_user: 查 crowd_filters 失败,回退 stable");
+                        return RouteResult {
+                            config: stable,
+                            bucket,
+                            hit_version_hash: None,
+                        };
                     }
                 }
             }
         }
-        self.load_canary_snapshot(&canary.version_hash, &stable)
+        let config = self.load_canary_snapshot(&canary.version_hash, &stable);
+        RouteResult {
+            config,
+            bucket,
+            hit_version_hash: Some(canary.version_hash.clone()),
+        }
+    }
+
+    /// T1.3：有 running 实验时按桶定 arm 并冻结入组（INSERT OR IGNORE），返回 (experiment_id, arm)。
+    /// 无 running 实验返回 None。须在用户锁内调用并把结果传给 emit，避免 drop 锁后读到变更后的实验状态。
+    fn assign_experiment_arm(
+        &self,
+        user_id: &str,
+        bucket: u32,
+        hit_version_hash: Option<&str>,
+        now: &chrono::DateTime<chrono::Utc>,
+    ) -> Option<(String, &'static str)> {
+        if !self.experiment_active.load(Ordering::Acquire) {
+            return None;
+        }
+        let exp = self.active_experiment.read().clone()?;
+        // 按本次实际服务的配置定 arm（A/B 防 cohort/percent 错配静默误归因；A/A 按 cohort 切）。
+        let arm = exp.arm_for(bucket, hit_version_hash);
+        if let Err(e) = self.store.enroll_user_bucket(
+            user_id,
+            &exp.experiment_id,
+            arm.as_str(),
+            bucket,
+            &now.to_rfc3339(),
+        ) {
+            tracing::warn!(error=%e, "assign_experiment_arm: enroll_user_bucket 失败");
+        }
+        Some((exp.experiment_id, arm.as_str()))
     }
 
     /// 从 amas_config_versions 拉 version snapshot,失败/缺失回退 stable + warn。
@@ -360,13 +486,21 @@ impl AMASEngine {
         let _guard = user_lock.lock();
 
         // m022:按 user_id 做 canary 抽样,可能返回 canary version 而非全局 stable。
-        let config = self.effective_config_for_user(user_id);
+        let route = self.route_for_user(user_id);
+        let config = Arc::clone(&route.config);
         let now = chrono::Utc::now();
+        // T1.3:有 running 实验时按桶冻结 arm 入组,捕获 (experiment_id, arm) 供 emit 透传。
+        // 在用户锁内捕获,避免 drop(_guard) 后读到变更后的实验/canary 状态。arm 按本次实际命中的
+        // 配置(route.hit_version_hash)判定,杜绝 cohort/percent 错配把 stable 结果误归 canary 臂。
+        let experiment =
+            self.assign_experiment_arm(user_id, route.bucket, route.hit_version_hash.as_deref(), &now);
         let mut context = self.prepare_processing_context(user_id, &raw_event, config, now)?;
         let strategy = self.select_strategy(&mut context);
         let mut scoring = self.apply_memory_and_score(user_id, &raw_event, &context, &strategy)?;
         // W1-1：取出 per-word 待写状态，交由 persist_state 与幂等标记同 tx 原子提交。
         let pending_algo = std::mem::take(&mut scoring.pending_algo);
+        // T1.3:本次 mastery 态边沿(在 scoring 被后续消费前捕获)。
+        let mastery_transition = scoring.word_mastery.as_ref().and_then(|f| f.mastery_transition);
 
         self.update_trust_scores(
             &mut context.algo_states,
@@ -417,6 +551,24 @@ impl AMASEngine {
             return Ok(None);
         }
 
+        // T1.3:落 mastery 态边沿事件(支撑"长期 masteredCount")。仅幂等学习路径(与 ELO 同口径),
+        // 避免诊断端点重试双计;持久化成功后 best-effort 落库,失败仅 warn 不影响主流程。
+        // 已知 caveat(low):此写与 persist_state 非同一 tx——commit 后、本 INSERT 前崩溃会永久丢该事件
+        // (幂等键已写,重试被拦无法补)。masteredCount 因此在崩溃下略偏低,但丢失对 canary/baseline
+        // 两臂对称(同代码路径),不扭曲 A/B 相对比较,仅绝对值低估;作为纯分析指标可接受。
+        if let Some(event) = mastery_transition {
+            if idempotency_key.is_some() && !raw_event.word_id.is_empty() {
+                if let Err(e) = self.store.insert_word_mastery_event(
+                    user_id,
+                    &raw_event.word_id,
+                    event,
+                    &now.to_rfc3339(),
+                ) {
+                    tracing::warn!(error=%e, "insert_word_mastery_event 失败");
+                }
+            }
+        }
+
         let explanation = self.build_explanation(
             &strategy.constrained_strategy,
             &context.user_state,
@@ -448,6 +600,7 @@ impl AMASEngine {
             &config_version,
             &strategy.weights,
             raw_event.is_correct,
+            experiment.as_ref().map(|(id, arm)| (id.as_str(), *arm)),
         );
 
         Ok(Some(result))
@@ -1279,6 +1432,8 @@ impl AMASEngine {
         );
         let now_ms = chrono::Utc::now().timestamp_millis();
 
+        // T1.3:记录更新前的 mastery 态，update 后判定是否发生进入 MASTERED / FORGOTTEN 的边沿。
+        let prev_level = state.mastery_level.clone();
         let decision = mastery::update_mastery_at(
             &mut state,
             raw_event.is_correct,
@@ -1289,6 +1444,11 @@ impl AMASEngine {
             &config.memory_model,
             ssp_policy,
         );
+        let mastery_transition = match decision.mastery_level {
+            MasteryLevel::Mastered if prev_level != MasteryLevel::Mastered => Some("mastered"),
+            MasteryLevel::Forgotten if prev_level != MasteryLevel::Forgotten => Some("forgotten"),
+            _ => None,
+        };
         let scheduled_at =
             now_ms.saturating_add(decision.next_review_interval_secs.saturating_mul(1000));
         let scheduled_recall =
@@ -1303,6 +1463,7 @@ impl AMASEngine {
             decision,
             scheduled_recall,
             desired_retention,
+            mastery_transition,
         }))
     }
 
@@ -1538,6 +1699,7 @@ impl AMASEngine {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn emit_monitoring(
         &self,
         user_id: &str,
@@ -1548,6 +1710,7 @@ impl AMASEngine {
         config_version: &str,
         routing_weights: &HashMap<AlgorithmId, f64>,
         is_correct: bool,
+        experiment: Option<(&str, &str)>,
     ) {
         monitoring::record_event(
             &self.store,
@@ -1560,6 +1723,7 @@ impl AMASEngine {
             config_version,
             routing_weights,
             is_correct,
+            experiment,
         );
     }
 }
@@ -1907,6 +2071,63 @@ mod tests {
             .expect("process_event");
         assert_eq!(result.session_id, "session-A");
         assert!(result.state.total_event_count >= 1);
+    }
+
+    #[tokio::test]
+    async fn experiment_running_enrolls_and_tags_monitoring() {
+        // T1.3 A/A 基础设施自检：running 实验下，process_event 按桶冻结入组，且监控事件强制全采
+        // 并带 experimentArm（即便配置采样率默认 5%）。
+        let engine = test_engine(AMASConfig::default());
+        let exp = crate::store::operations::amas_experiment::NewExperiment {
+            experiment_id: "aa".into(),
+            suggestion_id: None,
+            canary_version_hash: "v".into(),
+            baseline_version_hash: "v".into(), // A/A：两臂同配置
+            canary_cohort_lo: 0,
+            canary_cohort_hi: 50,
+            primary_metric: "day7_retention".into(),
+            min_sample: 10,
+            alpha: 0.05,
+            power: 0.8,
+            mde: 0.05,
+            offline_delta: None,
+            notes: None,
+        };
+        engine
+            .store
+            .register_experiment(&exp, "2026-05-01T00:00:00+00:00")
+            .unwrap();
+        engine.reload_active_experiment();
+
+        for i in 0..30 {
+            let uid = format!("u{i}");
+            engine
+                .process_event(
+                    &uid,
+                    RawEvent {
+                        word_id: "w".to_string(),
+                        is_correct: true,
+                        response_time_ms: 500,
+                        session_id: Some("s".to_string()),
+                        ..RawEvent::default()
+                    },
+                )
+                .await
+                .expect("process_event");
+        }
+
+        // 入组：每个 distinct 用户冻结一条，两臂合计=30；按 cohort [0,50) 两臂均应有人。
+        let m = engine.store.experiment_raw_metrics("aa").unwrap();
+        assert_eq!(m.canary.enrolled + m.baseline.enrolled, 30);
+        assert!(m.canary.enrolled > 0 && m.baseline.enrolled > 0, "两臂都应有用户");
+
+        // 强制全采：监控事件应带 experimentArm（默认 5% 采样会丢绝大多数，全采则全部落）。
+        let evts = engine.store.get_recent_monitoring_events(100).unwrap();
+        let tagged = evts
+            .iter()
+            .filter(|e| e.get("experimentArm").and_then(|v| v.as_str()).is_some())
+            .count();
+        assert!(tagged >= 25, "实验桶事件应强制全采并带 arm，实际 tagged={tagged}");
     }
 
     #[tokio::test]

@@ -193,6 +193,17 @@ impl Store {
             .get("isCorrect")
             .and_then(|v| v.as_bool())
             .unwrap_or(false) as i64;
+        // T1.3 A/B：实验切分维度（NULL=非实验事件）。
+        let experiment_id: Option<String> = event
+            .get("experimentId")
+            .or_else(|| event.get("experiment_id"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let experiment_arm: Option<String> = event
+            .get("experimentArm")
+            .or_else(|| event.get("experiment_arm"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
         let json = Self::serialize_json(event)?;
         // strategy_json 存整坨 event blob 供 get_recent_monitoring_events 向后兼容回读;
         // reward_json 独立存 event.reward 子对象(此前误与 strategy_json 共用 ?15 占位符,
@@ -210,10 +221,11 @@ impl Store {
                 user_state_motivation, user_state_confidence, user_state_session_event_count,
                 user_state_total_event_count, strategy_json, reward_json, cold_start_phase,
                 selection_constraints_met, reward_value, config_version,
-                routing_algo, routing_weights_json, is_correct
+                routing_algo, routing_weights_json, is_correct,
+                experiment_id, experiment_arm
              ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-                ?18, ?19, ?20, ?21, ?22, ?23
+                ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25
              )",
             params![
                 id,
@@ -238,7 +250,9 @@ impl Store {
                 config_version,
                 routing_algo,
                 routing_weights_json,
-                is_correct
+                is_correct,
+                experiment_id,
+                experiment_arm
             ],
         )?;
         Ok(())
@@ -449,29 +463,50 @@ impl Store {
         user_id: &str,
         spec: &EloUpdateSpec,
     ) -> Result<(), StoreError> {
-        use crate::amas::elo::{update_elo, EloRating};
+        use crate::amas::elo::{update_elo_with_trend, EloRating};
 
-        let read_elo = |table: &str, key_col: &str, key: &str| -> Result<EloRating, StoreError> {
-            let r = tx
-                .query_row(
-                    &format!("SELECT rating, games FROM {table} WHERE {key_col}=?1"),
-                    params![key],
-                    |r| {
-                        Ok(EloRating {
-                            rating: r.get(0)?,
-                            games: r.get(1)?,
-                        })
-                    },
-                )
-                .optional()?;
-            Ok(r.unwrap_or_default())
-        };
+        // T1.2:连同 trend（带符号残差 EWMA）一并读出；动态 K 关闭时 trend 恒 0、不参与。
+        let read_elo =
+            |table: &str, key_col: &str, key: &str| -> Result<(EloRating, f64), StoreError> {
+                let r = tx
+                    .query_row(
+                        &format!("SELECT rating, games, trend FROM {table} WHERE {key_col}=?1"),
+                        params![key],
+                        |r| {
+                            Ok((
+                                EloRating {
+                                    rating: r.get(0)?,
+                                    games: r.get(1)?,
+                                },
+                                r.get::<_, f64>(2)?,
+                            ))
+                        },
+                    )
+                    .optional()?;
+                Ok(r.unwrap_or((EloRating::default(), 0.0)))
+            };
 
-        let mut user_elo = read_elo("user_elo", "user_id", user_id)?;
-        let mut word_elo = read_elo("word_elo", "word_id", &spec.word_id)?;
+        let (mut user_elo, mut user_trend) = read_elo("user_elo", "user_id", user_id)?;
+        let (mut word_elo, mut word_trend) = read_elo("word_elo", "word_id", &spec.word_id)?;
+        // T1.1 选词链：word_elo 独有列（user_elo 无）。缺行回退默认 ELO，与 read_elo 同语义。
+        let mut word_select: f64 = tx
+            .query_row(
+                "SELECT rating_select FROM word_elo WHERE word_id=?1",
+                params![&spec.word_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or_else(|| EloRating::default().rating);
         let word_rating_before = word_elo.rating;
 
-        update_elo(&mut user_elo, &mut word_elo, spec.is_correct, &spec.config);
+        update_elo_with_trend(
+            &mut user_elo,
+            &mut word_elo,
+            &mut user_trend,
+            &mut word_trend,
+            spec.is_correct,
+            &spec.config,
+        );
 
         // #14 抗投毒：限制单用户对该词全局评分的累计净位移。
         let cap = spec.max_user_word_displacement;
@@ -499,15 +534,33 @@ impl Store {
             )?;
         }
 
+        // T1.1 选词链维护（在抗投毒钳制后、用最终 word_elo.rating）：开启时每 refresh_games 局
+        // 把选词链快照到估计链当前值（延迟解耦）；关闭时保持同步（无行为影响，便于将来开启）。
+        if spec.config.parallel_elo_enabled {
+            let interval = spec.config.parallel_elo_refresh_games.max(1);
+            if word_elo.games % interval == 0 {
+                word_select = word_elo.rating;
+            }
+        } else {
+            word_select = word_elo.rating;
+        }
+
         tx.execute(
-            "INSERT INTO user_elo (user_id, rating, games) VALUES (?1, ?2, ?3)
-             ON CONFLICT(user_id) DO UPDATE SET rating=?2, games=?3",
-            params![user_id, user_elo.rating, user_elo.games],
+            "INSERT INTO user_elo (user_id, rating, games, trend) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(user_id) DO UPDATE SET rating=?2, games=?3, trend=?4",
+            params![user_id, user_elo.rating, user_elo.games, user_trend],
         )?;
         tx.execute(
-            "INSERT INTO word_elo (word_id, rating, games) VALUES (?1, ?2, ?3)
-             ON CONFLICT(word_id) DO UPDATE SET rating=?2, games=?3",
-            params![&spec.word_id, word_elo.rating, word_elo.games],
+            "INSERT INTO word_elo (word_id, rating, games, trend, rating_select)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(word_id) DO UPDATE SET rating=?2, games=?3, trend=?4, rating_select=?5",
+            params![
+                &spec.word_id,
+                word_elo.rating,
+                word_elo.games,
+                word_trend,
+                word_select
+            ],
         )?;
         Ok(())
     }
@@ -994,6 +1047,86 @@ mod tests {
         assert_eq!(word_elo.games, 1);
         assert!(user_elo.rating > 1200.0, "答对后用户 ELO 应上升");
         assert!(store.is_event_processed("u1", "rec-1").unwrap());
+    }
+
+    /// T1.2：k_dynamic_enabled 时 trend（残差 EWMA）跨 apply_elo_in_tx 调用持久化累积。
+    #[test]
+    fn dynamic_k_trend_persists_across_events() {
+        let _t = tempfile::tempdir().unwrap();
+        let store = Store::open(_t.path().join("t.db").to_str().unwrap(), 5000, 2).unwrap();
+        store.run_migrations().unwrap();
+
+        let mut cfg = crate::amas::config::EloConfig::default();
+        cfg.k_dynamic_enabled = true;
+        // 同一用户对同一词连续全对：user 残差恒正、word 残差恒负 → trend 应同向累积。
+        for i in 0..6 {
+            let spec = super::EloUpdateSpec {
+                word_id: "wt".to_string(),
+                is_correct: true,
+                config: cfg.clone(),
+                max_user_word_displacement: 0.0,
+            };
+            store
+                .persist_engine_state_atomic(
+                    "ut",
+                    &serde_json::json!({ "attention": 0.5 }),
+                    &[],
+                    Some(&spec),
+                    Some(&format!("rec-{i}")),
+                )
+                .unwrap();
+        }
+        let conn = store.conn().unwrap();
+        let user_trend: f64 = conn
+            .query_row("SELECT trend FROM user_elo WHERE user_id='ut'", [], |r| r.get(0))
+            .unwrap();
+        let word_trend: f64 = conn
+            .query_row("SELECT trend FROM word_elo WHERE word_id='wt'", [], |r| r.get(0))
+            .unwrap();
+        assert!(user_trend > 0.1, "连续全对 user_trend 应正且累积，实际 {user_trend}");
+        assert!(word_trend < -0.1, "连续全对 word_trend 应负且累积，实际 {word_trend}");
+    }
+
+    /// T1.1：parallel_elo_enabled 时选词链(rating_select)滞后估计链(rating)——刷新前保持快照，
+    /// 与估计链解耦。
+    #[test]
+    fn parallel_elo_select_chain_lags_estimate() {
+        let _t = tempfile::tempdir().unwrap();
+        let store = Store::open(_t.path().join("t.db").to_str().unwrap(), 5000, 2).unwrap();
+        store.run_migrations().unwrap();
+
+        let mut cfg = crate::amas::config::EloConfig::default();
+        cfg.parallel_elo_enabled = true;
+        cfg.parallel_elo_refresh_games = 8; // 刷新间隔 8 局
+                                            // 跑 5 局全对（< 8，尚未触发刷新）：估计链下行，选词链应仍为初始默认 1200。
+        for i in 0..5 {
+            let spec = super::EloUpdateSpec {
+                word_id: "wp".to_string(),
+                is_correct: true,
+                config: cfg.clone(),
+                max_user_word_displacement: 0.0,
+            };
+            store
+                .persist_engine_state_atomic(
+                    "up",
+                    &serde_json::json!({ "attention": 0.5 }),
+                    &[],
+                    Some(&spec),
+                    Some(&format!("rec-{i}")),
+                )
+                .unwrap();
+        }
+        let word_elo = store.get_word_elo("wp").unwrap();
+        let select = store
+            .get_word_select_ratings_by_ids(&["wp".to_string()])
+            .unwrap();
+        let select_rating = *select.get("wp").unwrap();
+        assert!(word_elo.rating < 1200.0, "答对后估计链应下行，实际 {}", word_elo.rating);
+        assert!(
+            (select_rating - 1200.0).abs() < 1e-9,
+            "刷新(8局)前选词链应保持初始 1200，实际 {select_rating}"
+        );
+        assert!(select_rating > word_elo.rating, "选词链应滞后于已下行的估计链");
     }
 
     /// #14：单用户对某词全局评分的累计净位移被钳在硬上限内——反复全错不能把该词推到 clamp 边界。

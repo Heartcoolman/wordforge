@@ -16,10 +16,56 @@ pub struct EloConfig {
     pub max_elo: f64,
     #[serde(default = "default_word_k_factor_ratio")]
     pub word_k_factor_ratio: f64,
+    // ── T1.2 动态 K（趋势自适应）。默认 off → bit-exact 退回固定 K。 ──
+    /// 开关：true 时按近期残差趋势动态调 K。
+    #[serde(default)]
+    pub k_dynamic_enabled: bool,
+    /// 残差趋势 EWMA 权重 ∈ (0,1]：越大越看重最近一次残差。
+    #[serde(default = "default_k_trend_weight")]
+    pub k_trend_weight: f64,
+    /// 趋势增益：|趋势| 每单位放大 K 的系数（连续同向误差 → 增 K 追漂移）。
+    #[serde(default = "default_k_trend_gain")]
+    pub k_trend_gain: f64,
+    /// 稳态阻尼：残差震荡(|趋势|→0)时把 K 乘子下压的量（降噪）。
+    #[serde(default = "default_k_trend_damp")]
+    pub k_trend_damp: f64,
+    /// K 乘子下界（防过度降 K 致停滞）。
+    #[serde(default = "default_k_min_factor")]
+    pub k_min_factor: f64,
+    /// K 乘子上界（防放大噪声）。
+    #[serde(default = "default_k_max_factor")]
+    pub k_max_factor: f64,
+    // ── T1.1 Parallel Elo（双链解耦）。默认 off → 选词读估计链(rating)，bit-exact 退回单链。 ──
+    /// 开关：true 时 ZPD 选词读「选词链」(rating_select，延迟快照)，更新写「估计链」(rating)，
+    /// 消除「选择依赖被估计量」的耦合偏差。难度消费者(difflogit/analytics)恒读估计链。
+    #[serde(default)]
+    pub parallel_elo_enabled: bool,
+    /// 选词链延迟刷新间隔（按该词全局对局数）：每 N 局把选词链快照到估计链当前值。
+    #[serde(default = "default_parallel_elo_refresh_games")]
+    pub parallel_elo_refresh_games: u32,
+}
+
+pub(crate) fn default_parallel_elo_refresh_games() -> u32 {
+    8
 }
 
 pub(crate) fn default_word_k_factor_ratio() -> f64 {
     0.5
+}
+pub(crate) fn default_k_trend_weight() -> f64 {
+    0.3
+}
+pub(crate) fn default_k_trend_gain() -> f64 {
+    1.0
+}
+pub(crate) fn default_k_trend_damp() -> f64 {
+    0.2
+}
+pub(crate) fn default_k_min_factor() -> f64 {
+    0.5
+}
+pub(crate) fn default_k_max_factor() -> f64 {
+    2.0
 }
 
 pub(crate) fn default_min_elo() -> f64 {
@@ -41,6 +87,14 @@ impl Default for EloConfig {
             min_elo: 400.0,
             max_elo: 2400.0,
             word_k_factor_ratio: 0.5,
+            k_dynamic_enabled: false,
+            k_trend_weight: 0.3,
+            k_trend_gain: 1.0,
+            k_trend_damp: 0.2,
+            k_min_factor: 0.5,
+            k_max_factor: 2.0,
+            parallel_elo_enabled: false,
+            parallel_elo_refresh_games: 8,
         }
     }
 }

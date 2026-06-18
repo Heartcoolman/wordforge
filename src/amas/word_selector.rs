@@ -179,6 +179,17 @@ pub fn select_words(
     let word_elo_by_id = store
         .get_word_elos_by_ids(candidate_word_ids)
         .map_err(|e| AppError::internal(&e.to_string()))?;
+    // T1.1 Parallel Elo：开启时 ZPD 选词读「选词链」(rating_select 延迟快照)，与估计链(rating)解耦，
+    // 消除「选择依赖被估计量」的方差膨胀/偏差。默认 off → 走估计链，bit-exact 不变。
+    let select_rating_by_id = if elo_config.parallel_elo_enabled {
+        Some(
+            store
+                .get_word_select_ratings_by_ids(candidate_word_ids)
+                .map_err(|e| AppError::internal(&e.to_string()))?,
+        )
+    } else {
+        None
+    };
     let mastery_state_by_id: HashMap<String, MdmState> = store
         .batch_get_engine_mastery_mdm_states(user_id, candidate_word_ids)
         .map_err(|e| AppError::internal(&e.to_string()))?;
@@ -217,10 +228,13 @@ pub fn select_words(
             let Some(word) = words_by_id.get(word_id) else {
                 continue;
             };
-            let word_elo_rating = word_elo_by_id
-                .get(word_id)
-                .map(|elo| elo.rating)
-                .unwrap_or_default();
+            let word_elo_rating = match &select_rating_by_id {
+                Some(sel) => sel.get(word_id).copied().unwrap_or_default(),
+                None => word_elo_by_id
+                    .get(word_id)
+                    .map(|elo| elo.rating)
+                    .unwrap_or_default(),
+            };
 
             let score = score_new_word_prefetched(
                 word,

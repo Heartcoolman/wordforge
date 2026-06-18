@@ -416,6 +416,8 @@ CREATE TABLE IF NOT EXISTS user_elo (
     rating REAL NOT NULL DEFAULT 1200.0,
     games INTEGER NOT NULL DEFAULT 0,
     sigma REAL NOT NULL DEFAULT 86.0,
+    -- T1.2 动态 K：带符号残差 EWMA 趋势（k_dynamic_enabled=false 时恒 0、不参与计算）。
+    trend REAL NOT NULL DEFAULT 0.0,
     PRIMARY KEY (user_id)
 );
 
@@ -423,6 +425,10 @@ CREATE TABLE IF NOT EXISTS word_elo (
     word_id TEXT NOT NULL,
     rating REAL NOT NULL DEFAULT 1200.0,
     games INTEGER NOT NULL DEFAULT 0,
+    -- T1.2 动态 K：带符号残差 EWMA 趋势。
+    trend REAL NOT NULL DEFAULT 0.0,
+    -- T1.1 Parallel Elo：选词链（估计链 rating 的延迟快照），供 ZPD 选词读，解耦选择与估计。
+    rating_select REAL NOT NULL DEFAULT 1200.0,
     PRIMARY KEY (word_id)
 );
 
@@ -488,12 +494,19 @@ CREATE TABLE IF NOT EXISTS engine_monitoring_events (
     routing_algo TEXT NOT NULL DEFAULT '',
     routing_weights_json TEXT NOT NULL DEFAULT '{}',
     is_correct INTEGER NOT NULL DEFAULT 0 CHECK (is_correct IN (0, 1)),
+    -- T1.3 A/B：实验切分维度。config_version 在 no-op A/A 下两桶塌成一片不可分,
+    -- 故独立落 experiment_id + arm('canary'|'baseline'),供按桶聚合与 A/A 自检。NULL=非实验事件。
+    experiment_id TEXT DEFAULT NULL,
+    experiment_arm TEXT DEFAULT NULL,
     PRIMARY KEY (id)
 );
 CREATE INDEX IF NOT EXISTS idx_monitoring_events_timestamp
     ON engine_monitoring_events(timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_monitoring_events_user
     ON engine_monitoring_events(user_id, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_monitoring_events_experiment
+    ON engine_monitoring_events(experiment_id, experiment_arm, timestamp DESC)
+    WHERE experiment_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS algorithm_metrics_daily (
     metric_date TEXT NOT NULL,
@@ -825,6 +838,64 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_amas_canary_active ON amas_canary_config(ac
 CREATE INDEX IF NOT EXISTS idx_amas_canary_created ON amas_canary_config(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_amas_suggestions_status_time
     ON amas_tuning_suggestions(status, created_at DESC);
+
+-- T1.3 A/B：真实留存实验注册表。预注册主指标/最小样本量/显著性/MDE 锁定,承载
+-- "离线赢但真实未赢→不采纳"采纳门。experiment_id 用独立 id(非 config_version),规避
+-- DefaultHasher 跨版本漂移。canary_cohort_[lo,hi) 在注册时固定,不随 scale 漂移,保证
+-- 用户 config↔arm 永久一致(决策3:cohort 锚=首次进桶日)。
+CREATE TABLE IF NOT EXISTS amas_experiments (
+    experiment_id        TEXT NOT NULL PRIMARY KEY,
+    suggestion_id        INTEGER DEFAULT NULL,
+    canary_version_hash  TEXT NOT NULL,
+    baseline_version_hash TEXT NOT NULL,
+    canary_cohort_lo     INTEGER NOT NULL CHECK (canary_cohort_lo BETWEEN 0 AND 100),
+    canary_cohort_hi     INTEGER NOT NULL CHECK (canary_cohort_hi BETWEEN 0 AND 100),
+    primary_metric       TEXT NOT NULL DEFAULT 'day7_retention',
+    min_sample           INTEGER NOT NULL DEFAULT 0,
+    alpha                REAL NOT NULL DEFAULT 0.05,
+    power                REAL NOT NULL DEFAULT 0.8,
+    mde                  REAL NOT NULL DEFAULT 0.0,
+    offline_delta        REAL DEFAULT NULL,
+    status               TEXT NOT NULL DEFAULT 'running'
+                         CHECK (status IN ('running','concluded_adopt','concluded_reject')),
+    registered_at        TEXT NOT NULL,
+    concluded_at         TEXT DEFAULT NULL,
+    notes                TEXT DEFAULT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_amas_experiments_running
+    ON amas_experiments(registered_at DESC) WHERE status = 'running';
+-- 单 active 实验不变式下沉为 DB 约束：至多一行 status='running'，兜底跨连接 TOCTOU 并发注册。
+CREATE UNIQUE INDEX IF NOT EXISTS uniq_amas_experiments_one_running
+    ON amas_experiments(status) WHERE status = 'running';
+
+-- T1.3 A/B：用户→桶归属(全量,非采样)。留存类指标走全量 learning_records,该表是唯一
+-- 持久化的 user→arm 映射。INSERT OR IGNORE 冻结首次归属(first_assigned_at=Day-0 锚点 +
+-- 进桶时 arm),scale/rollback 后跨桶漂移不改写已有行,enrollment 时点归因不串桶。
+CREATE TABLE IF NOT EXISTS user_bucket_assignment (
+    user_id           TEXT NOT NULL,
+    experiment_id     TEXT NOT NULL,
+    arm               TEXT NOT NULL CHECK (arm IN ('canary','baseline')),
+    bucket            INTEGER NOT NULL,
+    first_assigned_at TEXT NOT NULL,
+    PRIMARY KEY (user_id, experiment_id)
+);
+CREATE INDEX IF NOT EXISTS idx_user_bucket_assignment_exp_arm
+    ON user_bucket_assignment(experiment_id, arm, first_assigned_at);
+
+-- T1.3 A/B：词汇 mastered/forgotten 转移事件日志(append-only)。word_learning_states 只存
+-- 当前态、无轨迹,无法回溯"曾 mastered 且保持 N 天"。本表记每次进入 MASTERED / 离开到
+-- FORGOTTEN 的时点,用于"长期 masteredCount"=mastered 后 Day-30 仍未 Forgotten(决策2)。
+CREATE TABLE IF NOT EXISTS word_mastery_events (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    TEXT NOT NULL,
+    word_id    TEXT NOT NULL,
+    event      TEXT NOT NULL CHECK (event IN ('mastered','forgotten')),
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_word_mastery_events_user_word_time
+    ON word_mastery_events(user_id, word_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_word_mastery_events_time
+    ON word_mastery_events(created_at);
 
 -- 远程探针执行审计表（admin REPL 下发 → 客户端 Worker 沙箱执行 → 回传结果）。
 -- 全量留痕，公共 API 无 DELETE 入口；过期记录由 probe_cleanup cron 软删（≥retention_days）。

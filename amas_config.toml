@@ -98,6 +98,14 @@ zpdGaussianSigma = 150.0
 minElo = 400.0
 maxElo = 2400.0
 wordKFactorRatio = 0.5
+# T1.2 动态 K（趋势自适应）。kDynamicEnabled=false 时 bit-exact 退回固定 K。
+# 连续同向残差 → 增 K 追漂移；震荡 → 乘子降到 1-kTrendDamp 降噪；novice 期乘子下界钳 1.0。
+kDynamicEnabled = false
+kTrendWeight = 0.3
+kTrendGain = 1.0
+kTrendDamp = 0.2
+kMinFactor = 0.5
+kMaxFactor = 2.0
 
 [fatigueDecay]
 fullResetThresholdSecs = 1800.0

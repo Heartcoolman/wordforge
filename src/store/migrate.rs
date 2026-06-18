@@ -130,6 +130,9 @@ fn migrations() -> Vec<(&'static str, MigrationFn)> {
             "055_client_devices_fingerprint",
             m055_client_devices_fingerprint,
         ),
+        ("056_amas_experiment_ab", m056_amas_experiment_ab),
+        ("057_elo_dynamic_k_trend", m057_elo_dynamic_k_trend),
+        ("058_word_elo_select_chain", m058_word_elo_select_chain),
     ]
 }
 
@@ -258,6 +261,9 @@ fn migrations_down() -> Vec<(&'static str, MigrationFn)> {
             "055_client_devices_fingerprint",
             m055_client_devices_fingerprint_down,
         ),
+        ("056_amas_experiment_ab", m056_amas_experiment_ab_down),
+        ("057_elo_dynamic_k_trend", m057_elo_dynamic_k_trend_down),
+        ("058_word_elo_select_chain", m058_word_elo_select_chain_down),
     ]
 }
 
@@ -3018,6 +3024,182 @@ fn m055_client_devices_fingerprint_down(store: &Store) -> Result<(), StoreError>
                 [],
             )?;
         }
+    }
+    Ok(())
+}
+
+/// m056:T1.3 真实留存 A/B 验证闭环地基。
+///   - engine_monitoring_events 加 experiment_id / experiment_arm 两列(A/A 硬前置:
+///     config_version 在 no-op 同配置下两桶塌成一片不可分,须独立 arm 维度)。
+///   - 新建 amas_experiments(预注册实验:主指标/最小样本/alpha/MDE,采纳门锚)。
+///   - 新建 user_bucket_assignment(全量 user→arm 映射,冻结首次进桶 = Day-0 锚点+arm)。
+///   - 新建 word_mastery_events(mastered/forgotten 转移日志,长期 masteredCount 口径)。
+/// 幂等:列用 PRAGMA 探测,表用 IF NOT EXISTS。
+fn m056_amas_experiment_ab(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    let cols: Vec<String> = conn
+        .prepare("PRAGMA table_info(engine_monitoring_events)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .collect();
+    for col in ["experiment_id", "experiment_arm"] {
+        if !cols.iter().any(|c| c == col) {
+            conn.execute(
+                &format!("ALTER TABLE engine_monitoring_events ADD COLUMN {col} TEXT DEFAULT NULL"),
+                [],
+            )?;
+        }
+    }
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_monitoring_events_experiment
+            ON engine_monitoring_events(experiment_id, experiment_arm, timestamp DESC)
+            WHERE experiment_id IS NOT NULL;
+
+         CREATE TABLE IF NOT EXISTS amas_experiments (
+            experiment_id        TEXT NOT NULL PRIMARY KEY,
+            suggestion_id        INTEGER DEFAULT NULL,
+            canary_version_hash  TEXT NOT NULL,
+            baseline_version_hash TEXT NOT NULL,
+            canary_cohort_lo     INTEGER NOT NULL CHECK (canary_cohort_lo BETWEEN 0 AND 100),
+            canary_cohort_hi     INTEGER NOT NULL CHECK (canary_cohort_hi BETWEEN 0 AND 100),
+            primary_metric       TEXT NOT NULL DEFAULT 'day7_retention',
+            min_sample           INTEGER NOT NULL DEFAULT 0,
+            alpha                REAL NOT NULL DEFAULT 0.05,
+            power                REAL NOT NULL DEFAULT 0.8,
+            mde                  REAL NOT NULL DEFAULT 0.0,
+            offline_delta        REAL DEFAULT NULL,
+            status               TEXT NOT NULL DEFAULT 'running'
+                                 CHECK (status IN ('running','concluded_adopt','concluded_reject')),
+            registered_at        TEXT NOT NULL,
+            concluded_at         TEXT DEFAULT NULL,
+            notes                TEXT DEFAULT NULL
+         );
+         CREATE INDEX IF NOT EXISTS idx_amas_experiments_running
+            ON amas_experiments(registered_at DESC) WHERE status = 'running';
+         CREATE UNIQUE INDEX IF NOT EXISTS uniq_amas_experiments_one_running
+            ON amas_experiments(status) WHERE status = 'running';
+
+         CREATE TABLE IF NOT EXISTS user_bucket_assignment (
+            user_id           TEXT NOT NULL,
+            experiment_id     TEXT NOT NULL,
+            arm               TEXT NOT NULL CHECK (arm IN ('canary','baseline')),
+            bucket            INTEGER NOT NULL,
+            first_assigned_at TEXT NOT NULL,
+            PRIMARY KEY (user_id, experiment_id)
+         );
+         CREATE INDEX IF NOT EXISTS idx_user_bucket_assignment_exp_arm
+            ON user_bucket_assignment(experiment_id, arm, first_assigned_at);
+
+         CREATE TABLE IF NOT EXISTS word_mastery_events (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id    TEXT NOT NULL,
+            word_id    TEXT NOT NULL,
+            event      TEXT NOT NULL CHECK (event IN ('mastered','forgotten')),
+            created_at TEXT NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS idx_word_mastery_events_user_word_time
+            ON word_mastery_events(user_id, word_id, created_at);
+         CREATE INDEX IF NOT EXISTS idx_word_mastery_events_time
+            ON word_mastery_events(created_at);",
+    )?;
+    Ok(())
+}
+
+/// m056 down:DROP 三表 + 索引 + 两列。仅 dev/test。
+fn m056_amas_experiment_ab_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS idx_word_mastery_events_time;
+         DROP INDEX IF EXISTS idx_word_mastery_events_user_word_time;
+         DROP TABLE IF EXISTS word_mastery_events;
+         DROP INDEX IF EXISTS idx_user_bucket_assignment_exp_arm;
+         DROP TABLE IF EXISTS user_bucket_assignment;
+         DROP INDEX IF EXISTS uniq_amas_experiments_one_running;
+         DROP INDEX IF EXISTS idx_amas_experiments_running;
+         DROP TABLE IF EXISTS amas_experiments;
+         DROP INDEX IF EXISTS idx_monitoring_events_experiment;",
+    )?;
+    let cols: Vec<String> = conn
+        .prepare("PRAGMA table_info(engine_monitoring_events)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .collect();
+    for col in ["experiment_arm", "experiment_id"] {
+        if cols.iter().any(|c| c == col) {
+            conn.execute(
+                &format!("ALTER TABLE engine_monitoring_events DROP COLUMN {col}"),
+                [],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// m057:T1.2 动态 K——user_elo / word_elo 加 trend 列（带符号残差 EWMA）。幂等加列。
+fn m057_elo_dynamic_k_trend(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    for table in ["user_elo", "word_elo"] {
+        let has: bool = conn
+            .prepare(&format!("PRAGMA table_info({table})"))?
+            .query_map([], |r| r.get::<_, String>(1))?
+            .filter_map(Result::ok)
+            .any(|c| c == "trend");
+        if !has {
+            conn.execute(
+                &format!("ALTER TABLE {table} ADD COLUMN trend REAL NOT NULL DEFAULT 0.0"),
+                [],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// m057 down:DROP 两列。仅 dev/test。
+fn m057_elo_dynamic_k_trend_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    for table in ["user_elo", "word_elo"] {
+        let has: bool = conn
+            .prepare(&format!("PRAGMA table_info({table})"))?
+            .query_map([], |r| r.get::<_, String>(1))?
+            .filter_map(Result::ok)
+            .any(|c| c == "trend");
+        if has {
+            conn.execute(&format!("ALTER TABLE {table} DROP COLUMN trend"), [])?;
+        }
+    }
+    Ok(())
+}
+
+/// m058:T1.1 Parallel Elo——word_elo 加 rating_select 列（选词链）。幂等加列 + 回填为当前 rating
+/// （避免存量词选词链突变为默认 1200）。
+fn m058_word_elo_select_chain(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    let has: bool = conn
+        .prepare("PRAGMA table_info(word_elo)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .any(|c| c == "rating_select");
+    if !has {
+        conn.execute(
+            "ALTER TABLE word_elo ADD COLUMN rating_select REAL NOT NULL DEFAULT 1200.0",
+            [],
+        )?;
+        // 回填：存量行选词链 = 当前估计链，避免开启 parallel 时选词突变。
+        conn.execute("UPDATE word_elo SET rating_select = rating", [])?;
+    }
+    Ok(())
+}
+
+/// m058 down:DROP rating_select 列。仅 dev/test。
+fn m058_word_elo_select_chain_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    let has: bool = conn
+        .prepare("PRAGMA table_info(word_elo)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .any(|c| c == "rating_select");
+    if has {
+        conn.execute("ALTER TABLE word_elo DROP COLUMN rating_select", [])?;
     }
     Ok(())
 }

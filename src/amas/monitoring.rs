@@ -88,6 +88,11 @@ pub struct MonitoringEvent {
     /// 本次答题事件是否正确（来自 RawEvent.is_correct），用于按版本聚合命中率
     #[serde(default)]
     pub is_correct: bool,
+    /// T1.3 A/B：实验切分维度（None=非实验事件）。independent of config_version，使 A/A 可分。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub experiment_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub experiment_arm: Option<String>,
 }
 
 pub fn check_invariants(result: &ProcessResult) -> Vec<InvariantViolation> {
@@ -201,15 +206,20 @@ pub fn record_event(
     config_version: &str,
     routing_weights: &HashMap<AlgorithmId, f64>,
     is_correct: bool,
+    experiment: Option<(&str, &str)>,
 ) {
     let violations = check_invariants(result);
     let is_anomaly = !violations.is_empty();
 
-    if !should_sample(
-        is_anomaly,
-        &result.cold_start_phase,
-        config.monitoring.sample_rate,
-    ) {
+    // T1.3:实验桶（experiment.is_some()）强制全采——canary percent 本就小，再叠 5% 采样会令
+    // 引擎代理量率值方差极大、CI 过宽、should_rollback 易误判。非实验事件维持配置采样率。
+    if experiment.is_none()
+        && !should_sample(
+            is_anomaly,
+            &result.cold_start_phase,
+            config.monitoring.sample_rate,
+        )
+    {
         return;
     }
 
@@ -247,6 +257,8 @@ pub fn record_event(
         routing_algo,
         routing_weights: routing_weights_value,
         is_correct,
+        experiment_id: experiment.map(|(id, _)| id.to_string()),
+        experiment_arm: experiment.map(|(_, arm)| arm.to_string()),
     };
 
     if is_anomaly {
@@ -386,6 +398,7 @@ mod tests {
             "v1",
             &HashMap::new(),
             false,
+            None,
         );
         // 落库
         let evts = store.get_recent_monitoring_events(10).unwrap();
@@ -410,6 +423,7 @@ mod tests {
             "v1",
             &HashMap::new(),
             false,
+            None,
         );
         assert!(store.get_recent_monitoring_events(10).unwrap().is_empty());
     }
@@ -476,6 +490,7 @@ mod tests {
             "v1",
             &HashMap::new(),
             false,
+            None,
         );
         assert!(!store.get_recent_monitoring_events(10).unwrap().is_empty());
     }

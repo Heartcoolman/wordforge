@@ -639,6 +639,18 @@ export const adminApi = {
   amasPromoteCanary: (id: number) =>
     api.post<{ promoted: boolean; versionHash: string }>(`/api/admin/amas/advisor/canary/${id}/promote`, undefined, { useAdminToken: true }),
 
+  // ─────────── T1.3：真实留存 A/B 实验 ───────────
+  amasListExperiments: (status?: ExperimentStatus) =>
+    api.get<AmasExperiment[]>('/api/admin/amas/experiments', status ? { status } : undefined, { useAdminToken: true }),
+  amasRegisterExperiment: (payload: RegisterExperimentPayload) =>
+    api.post<AmasExperiment>('/api/admin/amas/experiments', payload, { useAdminToken: true }),
+  amasExperimentMetrics: (id: string) =>
+    api.get<AmasExperimentMetricsResponse>(`/api/admin/amas/experiments/${encodeURIComponent(id)}/metrics`, undefined, { useAdminToken: true }),
+  amasConcludeExperiment: (id: string, adopt: boolean) =>
+    api.post<{ experimentId: string; status: string }>(`/api/admin/amas/experiments/${encodeURIComponent(id)}/conclude`, { adopt }, { useAdminToken: true }),
+  amasPlanExperiment: (payload: PlanExperimentPayload) =>
+    api.post<AmasExperimentPlan>('/api/admin/amas/experiments/plan', payload, { useAdminToken: true }),
+
   // ─────────── m022:新增端点全集 ───────────
   // AMAS TOML 互转
   amasParseToml: (toml: string) =>
@@ -1242,6 +1254,110 @@ export interface PatchCanaryWithMetrics extends PatchCanary {
   liveReward: number;
   liveAnomalyRate: number;
   baselineReward: number;
+}
+
+// ─────────── T1.3：真实留存 A/B 实验（camelCase 镜像后端序列化） ───────────
+export type ExperimentStatus = 'running' | 'concluded_adopt' | 'concluded_reject';
+
+export interface AmasExperiment {
+  experimentId: string;
+  suggestionId: number | null;
+  canaryVersionHash: string;
+  baselineVersionHash: string;
+  canaryCohortLo: number;
+  canaryCohortHi: number;
+  primaryMetric: string;
+  minSample: number;
+  alpha: number;
+  power: number;
+  mde: number;
+  offlineDelta: number | null;
+  status: ExperimentStatus;
+  registeredAt: string;
+  concludedAt: string | null;
+  notes: string | null;
+}
+
+export interface RegisterExperimentPayload {
+  experimentId?: string;
+  suggestionId?: number | null;
+  canaryVersionHash: string;
+  baselineVersionHash: string;
+  canaryCohortLo: number;
+  canaryCohortHi: number;
+  primaryMetric?: string;
+  minSample: number;
+  alpha?: number;
+  power?: number;
+  mde: number;
+  offlineDelta?: number | null;
+  notes?: string | null;
+}
+
+export interface PlanExperimentPayload {
+  kind?: 'proportion' | 'mean';
+  alpha?: number;
+  power?: number;
+  dailySignups?: number;
+  p0?: number;
+  mdeRel?: number;
+  sigma?: number;
+  delta?: number;
+}
+
+export interface AmasProportionRaw { successes: number; n: number }
+export interface AmasMeanRaw { mean: number; var: number; n: number }
+export interface AmasArmRaw {
+  arm: string;
+  enrolled: number;
+  day7Retention: AmasProportionRaw;
+  day30Retention: AmasProportionRaw;
+  reviewsPerDay: AmasMeanRaw;
+  sessionCompletion: AmasProportionRaw;
+  masteredHold: AmasProportionRaw;
+}
+export interface AmasExperimentRawMetrics {
+  experimentId: string;
+  canary: AmasArmRaw;
+  baseline: AmasArmRaw;
+}
+export interface AmasMetricPoint { value: number; ciLow: number; ciHigh: number; n: number }
+export interface AmasMetricComparison {
+  metric: string;
+  kind: 'proportion' | 'mean';
+  higherIsBetter: boolean;
+  canary: AmasMetricPoint;
+  baseline: AmasMetricPoint;
+  diff: number;
+  pValue: number | null;
+  significant: boolean;
+  regressed: boolean;
+}
+export interface AmasExperimentVerdict {
+  experimentId: string;
+  primaryMetric: string;
+  alpha: number;
+  mde: number;
+  minSample: number;
+  metrics: AmasMetricComparison[];
+  sampleOk: boolean;
+  primarySignificant: boolean;
+  primaryPositive: boolean;
+  primaryMeetsMde: boolean;
+  guardrailRegressions: string[];
+  adoptRecommended: boolean;
+  reason: string;
+}
+export interface AmasExperimentMetricsResponse {
+  experiment: AmasExperiment;
+  raw: AmasExperimentRawMetrics;
+  verdict: AmasExperimentVerdict;
+}
+export interface AmasExperimentPlan {
+  minSamplePerArm: number;
+  totalRequired: number;
+  estimatedDays: number | null;
+  recommendedPercent: number;
 }
 
 // ─────────── Analytics 看板深化响应类型（camelCase 镜像后端序列化） ───────────

@@ -148,7 +148,14 @@ const FLAG_META = [
   { key: 'mdmEnabled', label: 'MDM 记忆模型', desc: 'FSRS 记忆/遗忘建模' },
   { key: 'iadEnabled', label: 'IAD 干扰衰减', desc: '混淆词对干扰（B38）' },
   { key: 'mtpEnabled', label: 'MTP 词素迁移', desc: '词素迁移预测（B37）' },
-  { key: 'sspEnabled', label: 'SSP-MMC 调度', desc: '最优间隔 DP 调度' },
+  { key: 'sspEnabled', label: 'SSP / Cost-ADR 调度', desc: '成本最小化 DP（状态相关 DR 曲面；T1.4）' },
+] as const;
+
+/* T1.1/T1.2：ELO 调度实验开关（位于 config.elo，非 featureFlags）。默认关，可随时开；
+   开启后须经 A/B 实验验证真实留存为正再固化（离线赢≠真实赢）。 */
+const ELO_EXPERIMENT_TOGGLES = [
+  { key: 'parallelEloEnabled', label: 'Parallel Elo 双链', desc: '选词链/估计链解耦，修自适应选词偏差（T1.1）' },
+  { key: 'kDynamicEnabled', label: 'ELO 动态 K', desc: '残差趋势自适应学习率，漂移更快收敛（T1.2）' },
 ] as const;
 
 /* ---------------------------- 一键预设 ----------------------------
@@ -191,6 +198,14 @@ function readBool(cfg: AmasConfig, key: string): boolean {
   const flags = (cfg as unknown as Record<string, unknown>).featureFlags;
   if (flags && typeof flags === 'object') {
     return Boolean((flags as Record<string, unknown>)[key]);
+  }
+  return false;
+}
+/** 读 cfg[section][key] 为 bool（缺失 false）。用于非 featureFlags 段的开关（如 elo.parallelEloEnabled）。 */
+function readBoolFrom(cfg: AmasConfig, section: string, key: string): boolean {
+  const sec = (cfg as unknown as Record<string, unknown>)[section];
+  if (sec && typeof sec === 'object') {
+    return Boolean((sec as Record<string, unknown>)[key]);
   }
   return false;
 }
@@ -566,6 +581,27 @@ export default function AmasConfigPage() {
                           </label>
                         )}
                       </For>
+                    </div>
+
+                    {/* T1.1/T1.2：ELO 调度实验开关（config.elo 段，默认关、可随时开） */}
+                    <div style={sx({ marginTop: 16, paddingTop: 14, borderTop: '1px solid var(--hairline)' })}>
+                      <div style={sx({ fontSize: 12.5, fontWeight: 600, marginBottom: 4 })}>ELO 调度实验（默认关）</div>
+                      <div class="muted-3" style={sx({ fontSize: 11, marginBottom: 10, lineHeight: 1.5 })}>
+                        默认关；开启可随时生效（关闭时 bit-exact 退回原行为）。开启后须经「A/B 实验」页验证真实留存为正再固化——离线赢 ≠ 真实赢。
+                      </div>
+                      <div style={sx({ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(220px,1fr))', gap: 10 })}>
+                        <For each={ELO_EXPERIMENT_TOGGLES}>
+                          {(f) => (
+                            <label style={sx({ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, padding: '10px 12px', borderRadius: 10, background: 'var(--surface-sunken)' })}>
+                              <span style={sx({ minWidth: 0 })}>
+                                <span style={sx({ display: 'block', fontSize: 13, fontWeight: 600 })}>{f.label}</span>
+                                <span class="muted-3" style={sx({ display: 'block', fontSize: 11 })}>{f.desc}</span>
+                              </span>
+                              <Switch checked={readBoolFrom(config(), 'elo', f.key)} onChange={(v) => setParam('elo', f.key, v)} />
+                            </label>
+                          )}
+                        </For>
+                      </div>
                     </div>
                   </Card>
                 </div>

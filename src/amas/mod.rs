@@ -3,6 +3,7 @@ pub mod constants;
 pub mod decision;
 pub mod elo;
 pub mod engine;
+pub mod experiment;
 pub mod memory;
 pub mod metrics;
 pub mod metrics_persistence;

@@ -142,6 +142,39 @@ impl Store {
         Ok(())
     }
 
+    /// T1.1：批量取候选词「选词链」评分(rating_select)。供 ZPD 选词在 parallel_elo_enabled 时读。
+    /// 与 [`Self::get_word_elos_by_ids`] 同语义：缺失词回退默认 ELO(1200)，避免新词 ZPD 评分被 0.0 污染。
+    pub fn get_word_select_ratings_by_ids(
+        &self,
+        word_ids: &[String],
+    ) -> Result<HashMap<String, f64>, StoreError> {
+        if word_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let conn = self.conn()?;
+        let mut result = HashMap::with_capacity(word_ids.len());
+        for chunk in word_ids.chunks(900) {
+            let placeholders: Vec<&str> = chunk.iter().map(|_| "?").collect();
+            let sql = format!(
+                "SELECT word_id, rating_select FROM word_elo WHERE word_id IN ({})",
+                placeholders.join(",")
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?))
+            })?;
+            for row in rows {
+                let (word_id, rating) = row?;
+                result.entry(word_id).or_insert(rating);
+            }
+        }
+        let default_elo = EloRating::default().rating;
+        for word_id in word_ids {
+            result.entry(word_id.clone()).or_insert(default_elo);
+        }
+        Ok(result)
+    }
+
     /// #3：批量取候选词 mastery 状态。原实现按 word_id 逐个 `get_engine_algo_state`（N 次
     /// pool.get + N 次查询）；改为单条 `WHERE user_id=? AND algo_id IN ('mastery:w1',...)`，分块
     /// ≤900 占位符避开 SQLite 参数上限。返回值 key 为 word_id（去掉 `mastery:` 前缀），缺失项为

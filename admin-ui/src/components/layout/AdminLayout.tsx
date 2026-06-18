@@ -26,6 +26,7 @@ const NAV: { group: string; items: NavItem[] }[] = [
     { id: 'amas-metrics', label: 'AMAS 指标', icon: 'chart', href: '/admin/amas-metrics' },
     { id: 'amas-config', label: 'AMAS 调参', icon: 'sliders', href: '/admin/amas-config' },
     { id: 'amas-advisor', label: 'LLM 顾问', icon: 'bulb', href: '/admin/amas-advisor' },
+    { id: 'amas-experiments', label: 'A/B 实验', icon: 'chart', href: '/admin/amas-experiments' },
   ] },
   { group: '数据 · 内容', items: [
     { id: 'analytics', label: '数据分析', icon: 'analytics', href: '/admin/analytics' },

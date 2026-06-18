@@ -4,6 +4,7 @@ pub mod admin_wordbooks;
 pub mod admins;
 pub mod amas_canary;
 pub mod amas_dashboard;
+pub mod amas_experiment;
 pub mod amas_patch_canary;
 pub mod amas_suggestions;
 pub mod amas_telemetry;

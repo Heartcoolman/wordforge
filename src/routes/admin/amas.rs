@@ -115,6 +115,14 @@ pub fn admin_router() -> Router<AppState> {
         .route("/advisor/canary/:id/scale", post(scale_canary))
         .route("/advisor/canary/:id/rollback", post(rollback_canary))
         .route("/advisor/canary/:id/promote", post(promote_canary))
+        // T1.3: 真实留存 A/B 实验
+        .route(
+            "/experiments",
+            get(list_experiments).post(register_experiment),
+        )
+        .route("/experiments/plan", post(plan_experiment))
+        .route("/experiments/:id/metrics", get(experiment_metrics))
+        .route("/experiments/:id/conclude", post(conclude_experiment))
 }
 
 // ─────────────────── m022:TOML 互转 + canary ───────────────────
@@ -330,6 +338,8 @@ impl From<ProcessEventRequest> for RawEvent {
             paused_time_ms: value.paused_time_ms,
             hint_used: value.hint_used.unwrap_or(false),
             confused_with: value.confused_with,
+            // admin 调试端点不带 question_mode → 单痕迹 legacy
+            question_mode: None,
         }
     }
 }
@@ -2872,4 +2882,226 @@ async fn promote_canary(
     Ok(ok(
         serde_json::json!({ "promoted": true, "versionHash": version_hash }),
     ))
+}
+
+// ─────────────────── T1.3: 真实留存 A/B 实验 ───────────────────
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RegisterExperimentRequest {
+    /// 缺省自动生成 uuid。
+    experiment_id: Option<String>,
+    suggestion_id: Option<i64>,
+    canary_version_hash: String,
+    baseline_version_hash: String,
+    canary_cohort_lo: u32,
+    canary_cohort_hi: u32,
+    /// 缺省 day7_retention。
+    primary_metric: Option<String>,
+    min_sample: u64,
+    /// 缺省 0.05 / 0.8。
+    alpha: Option<f64>,
+    power: Option<f64>,
+    mde: f64,
+    offline_delta: Option<f64>,
+    notes: Option<String>,
+}
+
+/// POST /experiments —— 注册一个真实留存 A/B 实验（预注册 primary/min_sample/alpha/MDE）。
+/// 要求当前无 running 实验（单 active 实验模型）。注册后引擎热路径即开始按桶冻结 arm 入组。
+async fn register_experiment(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    JsonBody(req): JsonBody<RegisterExperimentRequest>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    use crate::store::operations::amas_experiment::NewExperiment;
+    let exp = NewExperiment {
+        experiment_id: req
+            .experiment_id
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+        suggestion_id: req.suggestion_id,
+        canary_version_hash: req.canary_version_hash,
+        baseline_version_hash: req.baseline_version_hash,
+        canary_cohort_lo: req.canary_cohort_lo,
+        canary_cohort_hi: req.canary_cohort_hi,
+        primary_metric: req
+            .primary_metric
+            .unwrap_or_else(|| "day7_retention".to_string()),
+        min_sample: req.min_sample,
+        alpha: req.alpha.unwrap_or(0.05),
+        power: req.power.unwrap_or(0.8),
+        mde: req.mde,
+        offline_delta: req.offline_delta,
+        notes: req.notes,
+    };
+    let now = chrono::Utc::now().to_rfc3339();
+    let row = state
+        .run_store_task("admin.amas.experiment.register", move |store| {
+            store.register_experiment(&exp, &now)
+        })
+        .await?
+        .map_err(|e| match e {
+            crate::store::StoreError::Validation(msg) => {
+                AppError::bad_request("EXPERIMENT_INVALID", &msg)
+            }
+            other => AppError::internal(&other.to_string()),
+        })?;
+    // 引擎热路径即时生效实验入组门。
+    state.amas().reload_active_experiment();
+    Ok(ok(serde_json::to_value(&row).unwrap()))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ListExperimentsQuery {
+    status: Option<String>,
+}
+
+/// GET /experiments —— 列出实验（可按 status 过滤）。
+async fn list_experiments(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Query(q): Query<ListExperimentsQuery>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let rows = state
+        .run_store_task("admin.amas.experiment.list", move |store| {
+            store.list_experiments(q.status.as_deref())
+        })
+        .await??;
+    Ok(ok(serde_json::to_value(&rows).unwrap()))
+}
+
+/// GET /experiments/:id/metrics —— 两臂北极星指标 + CI + 采纳门判定。
+async fn experiment_metrics(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let (exp, raw) = state
+        .run_store_task("admin.amas.experiment.metrics", move |store| {
+            let exp = store.get_experiment(&id)?;
+            match exp {
+                Some(exp) => {
+                    let raw = store.experiment_raw_metrics(&exp.experiment_id)?;
+                    Ok::<_, crate::store::StoreError>(Some((exp, raw)))
+                }
+                None => Ok(None),
+            }
+        })
+        .await??
+        .ok_or_else(|| AppError::not_found("实验不存在"))?;
+    let verdict = crate::amas::experiment::evaluate::evaluate(&exp, &raw);
+    Ok(ok(serde_json::json!({
+        "experiment": exp,
+        "raw": raw,
+        "verdict": verdict,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ConcludeExperimentRequest {
+    /// true=采纳(concluded_adopt)，false=否决(concluded_reject)。
+    adopt: bool,
+}
+
+/// POST /experiments/:id/conclude —— 结束实验并记录采纳/否决。停止入组（reload）。
+/// 注意：采纳仅记录结论，配置全量上线仍走既有 promote_canary 流程。
+async fn conclude_experiment(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    JsonBody(req): JsonBody<ConcludeExperimentRequest>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let status = if req.adopt {
+        "concluded_adopt"
+    } else {
+        "concluded_reject"
+    };
+    let now = chrono::Utc::now().to_rfc3339();
+    let id2 = id.clone();
+    state
+        .run_store_task("admin.amas.experiment.conclude", move |store| {
+            store.conclude_experiment(&id2, status, &now)
+        })
+        .await?
+        .map_err(|e| match e {
+            crate::store::StoreError::NotFound { .. } => {
+                AppError::not_found("running 实验不存在")
+            }
+            crate::store::StoreError::Validation(msg) => {
+                AppError::bad_request("EXPERIMENT_INVALID", &msg)
+            }
+            other => AppError::internal(&other.to_string()),
+        })?;
+    state.amas().reload_active_experiment();
+    Ok(ok(serde_json::json!({ "experimentId": id, "status": status })))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PlanExperimentRequest {
+    /// "proportion"（默认，如 day7_retention）| "mean"（如 reviews_per_day）。
+    kind: Option<String>,
+    alpha: Option<f64>,
+    power: Option<f64>,
+    /// 两臂合计日进桶用户数（反推运行天数）。
+    daily_signups: Option<f64>,
+    // proportion 入参
+    p0: Option<f64>,
+    mde_rel: Option<f64>,
+    // mean 入参
+    sigma: Option<f64>,
+    delta: Option<f64>,
+}
+
+/// POST /experiments/plan —— 按 primary 基线 + MDE/alpha/power 反推每桶最小样本量与推荐 percent。
+/// 决策4：percent 由后端反推（5% 对 Day-30 低频留存大概率不足）。
+async fn plan_experiment(
+    _admin: AdminAuthUser,
+    JsonBody(req): JsonBody<PlanExperimentRequest>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let alpha = req.alpha.unwrap_or(0.05);
+    let power = req.power.unwrap_or(0.8);
+    let daily = req.daily_signups.unwrap_or(0.0);
+    if !(alpha > 0.0 && alpha < 1.0) || !(power > 0.0 && power < 1.0) {
+        return Err(AppError::bad_request(
+            "INVALID_PARAM",
+            "alpha/power 须 ∈ (0,1)",
+        ));
+    }
+    let kind = req.kind.as_deref().unwrap_or("proportion");
+    let plan = match kind {
+        "mean" => {
+            let sigma = req.sigma.ok_or_else(|| {
+                AppError::bad_request("MISSING_PARAM", "mean 规划需 sigma")
+            })?;
+            let delta = req.delta.ok_or_else(|| {
+                AppError::bad_request("MISSING_PARAM", "mean 规划需 delta")
+            })?;
+            if sigma <= 0.0 || delta <= 0.0 {
+                return Err(AppError::bad_request(
+                    "INVALID_PARAM",
+                    "sigma 与 delta 须 > 0",
+                ));
+            }
+            crate::amas::experiment::plan_mean(sigma, delta, alpha, power, daily)
+        }
+        _ => {
+            let p0 = req
+                .p0
+                .ok_or_else(|| AppError::bad_request("MISSING_PARAM", "proportion 规划需 p0"))?;
+            let mde_rel = req.mde_rel.ok_or_else(|| {
+                AppError::bad_request("MISSING_PARAM", "proportion 规划需 mdeRel")
+            })?;
+            if !(p0 > 0.0 && p0 < 1.0) || mde_rel <= 0.0 {
+                return Err(AppError::bad_request(
+                    "INVALID_PARAM",
+                    "p0 须 ∈ (0,1) 且 mdeRel > 0",
+                ));
+            }
+            crate::amas::experiment::plan_proportion(p0, mde_rel, alpha, power, daily)
+        }
+    };
+    Ok(ok(serde_json::to_value(&plan).unwrap()))
 }

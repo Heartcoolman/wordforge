@@ -7,6 +7,9 @@ use crate::amas::config::SspConfig;
 pub struct SspPolicy {
     /// tables[d_index][s_index] = optimal_interval_days
     tables: Vec<Vec<f64>>,
+    /// T1.4 Cost-ADR：retention_tables[d_index][s_index] = 最优目标保持率 R（状态相关 DR）。
+    /// None = 从 CSV 加载（仅含 interval，无 R）；Some = precompute 直建（保留 DP 的 optimal_r）。
+    retention_tables: Option<Vec<Vec<f64>>>,
     base: f64,
     min_index: i32,
     index_len: usize,
@@ -51,6 +54,7 @@ impl SspPolicy {
 
         Ok(Self {
             tables,
+            retention_tables: None,
             base: config.base,
             min_index: config.min_index,
             index_len,
@@ -63,6 +67,7 @@ impl SspPolicy {
         let index_len = clamp_index_len(config);
         Self {
             tables,
+            retention_tables: None,
             base: config.base,
             min_index: config.min_index,
             index_len,
@@ -75,11 +80,27 @@ impl SspPolicy {
         let index_len = bins.len();
         Self {
             tables,
+            retention_tables: None,
             base: 1.05,
             min_index: 0,
             index_len,
             stability_bins: Some(bins),
         }
+    }
+
+    /// T1.4：附带 Cost-ADR 的状态相关 DR 曲面（precompute 的 optimal_r）。链式构建，CSV load 不调用。
+    pub fn with_retention_tables(mut self, retention_tables: Vec<Vec<f64>>) -> Self {
+        self.retention_tables = Some(retention_tables);
+        self
+    }
+
+    /// T1.4 Cost-ADR：查询 (stability, difficulty) 的状态相关最优目标保持率 R。
+    /// 无 retention 曲面（CSV 加载）时返回 None。与 optimal_interval 用同一 (d_index, s_index) 量化。
+    pub fn optimal_retention(&self, stability: f64, difficulty: f64) -> Option<f64> {
+        let rt = self.retention_tables.as_ref()?;
+        let d_index = ((difficulty.round() as i32).clamp(1, 10) - 1) as usize;
+        let s_index = self.stability_to_index(stability);
+        rt.get(d_index).and_then(|t| t.get(s_index)).copied()
     }
 
     /// 查询 SSP 最优间隔（天）
@@ -110,6 +131,9 @@ impl SspPolicy {
 
 pub struct PrecomputeResult {
     pub tables: Vec<Vec<f64>>,
+    /// T1.4 Cost-ADR：DP 求得的 (difficulty, stability)→最优目标保持率 R 曲面（即状态相关 DR）。
+    /// 此前算出后仅用于反演 interval 即丢弃；现保留以暴露为可查询/可对拍的 Cost-ADR DR 曲面。
+    pub optimal_r: Vec<Vec<f64>>,
     pub stability_list: Vec<f64>,
     pub dual_grid: bool,
 }
@@ -347,6 +371,7 @@ pub fn precompute(
 
     PrecomputeResult {
         tables,
+        optimal_r,
         stability_list,
         dual_grid,
     }
@@ -442,6 +467,36 @@ mod tests {
                 eprintln!($($arg)*);
             }
         };
+    }
+
+    #[test]
+    fn optimal_retention_surface_exposed() {
+        // T1.4：precompute 保留 (S,D)→最优 R 曲面，SspPolicy 可查询；CSV load 路径返回 None。
+        let ssp_config = SspConfig {
+            max_iterations: 50,
+            ..Default::default()
+        };
+        let mem_config = MemoryModelConfig::default();
+        let result = precompute(&ssp_config, &mem_config);
+        assert_eq!(result.optimal_r.len(), 10, "optimal_r 应为 10 个难度档");
+        let policy = if result.dual_grid {
+            SspPolicy::from_tables_with_bins(result.tables, result.stability_list)
+        } else {
+            SspPolicy::from_tables(result.tables, &ssp_config)
+        }
+        .with_retention_tables(result.optimal_r);
+        let r = policy
+            .optimal_retention(50.0, 5.0)
+            .expect("retention 曲面应存在");
+        assert!(
+            r >= ssp_config.r_min - 1e-9 && r <= ssp_config.r_max + 1e-9,
+            "状态相关 DR {r} 应 ∈ [{}, {}]",
+            ssp_config.r_min,
+            ssp_config.r_max
+        );
+        // 无 retention 曲面（CSV load 同构）→ None。
+        let bare = SspPolicy::from_tables(vec![vec![1.0; 4]; 10], &ssp_config);
+        assert!(bare.optimal_retention(50.0, 5.0).is_none());
     }
 
     #[test]
