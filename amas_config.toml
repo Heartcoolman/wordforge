@@ -5,6 +5,10 @@ igeEnabled = true
 swdEnabled = true
 mdmEnabled = true
 sspEnabled = false
+# ② 混淆隔离排程（Phase 1b）：开启后选词把已出现词的高分混淆对端注入 context 惩罚共排（不碰记忆动力学）。
+confusionIsolationEnabled = false
+# ③ 跨题型多痕迹（Phase 2）：开启后 mastery 按 question_mode 分痕迹(mastery:{word}:{mode})，选词按 min-recall 聚合。
+multiTraceEnabled = false
 
 [ensemble]
 # bench tuned v3（真实数据 forward simulation 调优值回写）
@@ -248,6 +252,22 @@ predLogitBaseScale = 1.0
 predLogitIntercept = 0.0
 predLogitReviewCountWeight = 0.0
 
+# === 冷启动难度先验（Phase 1a；仅首评 review_count==0 调整 S₀/D₀，之后交还 FSRS）===
+# 6 个权重默认 0.0 = 关闭（bit-exact legacy）。公式见 mdm.rs ColdStartPriors::deltas / dhp_reference.py 镜像：
+#   δ_D = dLen·len_z − dMorph·transparency + dExtd·((ext_d−extdRef)/9)；D₀=(d0_base+δ_D) 夹[1,10]
+#   δ_S = −sLen·len_z + sMorph·transparency − sExtd·((ext_d−extdRef)/9)；S₀=(s0_base·exp(δ_S)) 夹
+# 特征：len_z=clamp((词长−lenRef)/lenScale,−1,1)；transparency=已知词根占比；ext_d=word.difficulty>0?1+9d:无。
+# 启用前须 prod_replay + 真实 A/B（离线≠真实留存）；dLen/dMorph/dExtd 在 LLM 调参白名单内。
+coldStartLenRef = 7.0
+coldStartLenScale = 4.0
+coldStartExtdRef = 5.0
+coldStartDLenWeight = 0.0
+coldStartDMorphWeight = 0.0
+coldStartDExtdWeight = 0.0
+coldStartSLenWeight = 0.0
+coldStartSMorphWeight = 0.0
+coldStartSExtdWeight = 0.0
+
 # [iad] / [mtp] 段已移除（2026-06-13）：IAD 混淆干扰 / MTP 词素迁移算法删除。
 # confused_with API 字段保留为「接受但忽略」；word_morphemes 表 + /api/content/morphemes 端点保留（词根展示）。
 
@@ -262,6 +282,10 @@ sigmoidSteepness = 8.0
 spacingCooldownSecs = 300.0
 optimalRecallCenter = 0.5
 optimalRecallSigma = 0.3
+# ② 混淆隔离（Phase 1b）：命中混淆对端的词评分乘此系数（1.0=no-op；<1 降优先级，需 featureFlags.confusionIsolationEnabled）。
+confusionIsolationDampen = 1.0
+# 调用方筛选已出现词混淆对端的最小 score 阈值。
+confusionMinScore = 0.5
 
 [intervention]
 fatigueAlertThreshold = 0.7

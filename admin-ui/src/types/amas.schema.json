@@ -35,11 +35,19 @@
     "elo": {
       "default": {
         "defaultElo": 1200.0,
+        "kDynamicEnabled": false,
         "kFactor": 32.0,
+        "kMaxFactor": 2.0,
+        "kMinFactor": 0.5,
+        "kTrendDamp": 0.2,
+        "kTrendGain": 1.0,
+        "kTrendWeight": 0.3,
         "maxElo": 2400.0,
         "minElo": 400.0,
         "noviceGameThreshold": 30,
         "noviceKMultiplier": 2.0,
+        "parallelEloEnabled": false,
+        "parallelEloRefreshGames": 8,
         "wordKFactorRatio": 0.5,
         "zpdGaussianSigma": 150.0,
         "zpdOptimalOffset": 100.0
@@ -192,6 +200,15 @@
         "alphaRampTau": 0.0,
         "alphaScale": 0.3,
         "baseDesiredRetention": 0.9,
+        "coldStartDExtdWeight": 0.0,
+        "coldStartDLenWeight": 0.0,
+        "coldStartDMorphWeight": 0.0,
+        "coldStartExtdRef": 5.0,
+        "coldStartLenRef": 7.0,
+        "coldStartLenScale": 4.0,
+        "coldStartSExtdWeight": 0.0,
+        "coldStartSLenWeight": 0.0,
+        "coldStartSMorphWeight": 0.0,
         "compositeWeightLong": 0.5,
         "compositeWeightMedium": 0.3,
         "compositeWeightShort": 0.2,
@@ -346,6 +363,8 @@
     },
     "wordSelector": {
       "default": {
+        "confusionIsolationDampen": 1.0,
+        "confusionMinScore": 0.5,
         "errorProneBonus": 0.3,
         "newWordGaussianSigma": 0.3,
         "optimalRecallCenter": 0.5,
@@ -489,7 +508,42 @@
           "type": "number",
           "format": "double"
         },
+        "kDynamicEnabled": {
+          "description": "开关：true 时按近期残差趋势动态调 K。",
+          "default": false,
+          "type": "boolean"
+        },
         "kFactor": {
+          "type": "number",
+          "format": "double"
+        },
+        "kMaxFactor": {
+          "description": "K 乘子上界（防放大噪声）。",
+          "default": 2.0,
+          "type": "number",
+          "format": "double"
+        },
+        "kMinFactor": {
+          "description": "K 乘子下界（防过度降 K 致停滞）。",
+          "default": 0.5,
+          "type": "number",
+          "format": "double"
+        },
+        "kTrendDamp": {
+          "description": "稳态阻尼：残差震荡(|趋势|→0)时把 K 乘子下压的量（降噪）。",
+          "default": 0.2,
+          "type": "number",
+          "format": "double"
+        },
+        "kTrendGain": {
+          "description": "趋势增益：|趋势| 每单位放大 K 的系数（连续同向误差 → 增 K 追漂移）。",
+          "default": 1.0,
+          "type": "number",
+          "format": "double"
+        },
+        "kTrendWeight": {
+          "description": "残差趋势 EWMA 权重 ∈ (0,1]：越大越看重最近一次残差。",
+          "default": 0.3,
           "type": "number",
           "format": "double"
         },
@@ -511,6 +565,18 @@
         "noviceKMultiplier": {
           "type": "number",
           "format": "double"
+        },
+        "parallelEloEnabled": {
+          "description": "开关：true 时 ZPD 选词读「选词链」(rating_select，延迟快照)，更新写「估计链」(rating)， 消除「选择依赖被估计量」的耦合偏差。难度消费者(difflogit/analytics)恒读估计链。",
+          "default": false,
+          "type": "boolean"
+        },
+        "parallelEloRefreshGames": {
+          "description": "选词链延迟刷新间隔（按该词全局对局数）：每 N 局把选词链快照到估计链当前值。",
+          "default": 8,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
         },
         "wordKFactorRatio": {
           "default": 0.5,
@@ -709,6 +775,11 @@
         "swdEnabled"
       ],
       "properties": {
+        "confusionIsolationEnabled": {
+          "description": "② 混淆隔离排程（Phase 1b）：开启后选词调用方将已出现词的高分混淆对端注入 SessionSelectionContext.confusion_exclude_word_ids（评分乘 confusion_isolation_dampen）。 默认 false → 调用方不填充 → 选词 bit-exact legacy。",
+          "default": false,
+          "type": "boolean"
+        },
         "ensembleEnabled": {
           "type": "boolean"
         },
@@ -719,6 +790,11 @@
           "type": "boolean"
         },
         "mdmEnabled": {
+          "type": "boolean"
+        },
+        "multiTraceEnabled": {
+          "description": "③ 跨题型多痕迹（Phase 2）：开启后 mastery 状态按 question_mode 分痕迹 （`mastery:{word}:{mode}`），选词按 min-recall 跨痕迹聚合。默认 false → 单一 `mastery:{word}` 键、bit-exact legacy。",
+          "default": false,
           "type": "boolean"
         },
         "sspEnabled": {
@@ -1047,6 +1123,60 @@
         },
         "baseDesiredRetention": {
           "default": 0.85,
+          "type": "number",
+          "format": "double"
+        },
+        "coldStartDExtdWeight": {
+          "description": "D₀ 偏移·外部难度权重。0.0=关闭。",
+          "default": 0.0,
+          "type": "number",
+          "format": "double"
+        },
+        "coldStartDLenWeight": {
+          "description": "D₀ 偏移·词长权重（难词 D 升）。0.0=关闭。",
+          "default": 0.0,
+          "type": "number",
+          "format": "double"
+        },
+        "coldStartDMorphWeight": {
+          "description": "D₀ 偏移·词素透明度权重（可分解→D 降，词根促进）。0.0=关闭。",
+          "default": 0.0,
+          "type": "number",
+          "format": "double"
+        },
+        "coldStartExtdRef": {
+          "description": "外部难度参考点（[1,10] 标度）：ext_difficulty==ref 时该项位移为 0。",
+          "default": 5.0,
+          "type": "number",
+          "format": "double"
+        },
+        "coldStartLenRef": {
+          "description": "词长参考点（字符数）：len_z = clamp((len − ref)/scale, −1, 1)。",
+          "default": 7.0,
+          "type": "number",
+          "format": "double"
+        },
+        "coldStartLenScale": {
+          "description": "词长缩放（>0）：见上。",
+          "default": 4.0,
+          "type": "number",
+          "format": "double"
+        },
+        "coldStartSExtdWeight": {
+          "description": "S₀ 偏移·外部难度权重。0.0=关闭。",
+          "default": 0.0,
+          "type": "number",
+          "format": "double"
+        },
+        "coldStartSLenWeight": {
+          "description": "S₀ 偏移（对数域，乘性）·词长权重（难词 S 降）。0.0=关闭。",
+          "default": 0.0,
+          "type": "number",
+          "format": "double"
+        },
+        "coldStartSMorphWeight": {
+          "description": "S₀ 偏移·词素透明度权重（可分解→S 升）。0.0=关闭。",
+          "default": 0.0,
           "type": "number",
           "format": "double"
         },
@@ -1721,6 +1851,18 @@
         "reviewUcbWeight"
       ],
       "properties": {
+        "confusionIsolationDampen": {
+          "description": "② 混淆隔离（Phase 1b）：命中 SessionSelectionContext.confusion_exclude_word_ids 的词 评分乘此系数。1.0=no-op（默认，bit-exact legacy）；<1 降优先级、>=1 无意义（validate 限 [0,1]）。",
+          "default": 1.0,
+          "type": "number",
+          "format": "double"
+        },
+        "confusionMinScore": {
+          "description": "② 混淆隔离：调用方筛选已出现词的混淆对端时的最小 score 阈值（仅调用侧用，select_words 不读）。",
+          "default": 0.5,
+          "type": "number",
+          "format": "double"
+        },
         "errorProneBonus": {
           "type": "number",
           "format": "double"
