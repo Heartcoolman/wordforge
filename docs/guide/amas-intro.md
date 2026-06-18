@@ -33,6 +33,39 @@ AMAS（**A**daptive **M**astery **A**cquisition **S**ystem）是 WordForge 的�
 | `memory_model` | MDM（多模型记忆曲线）参数 |
 | `iad` | 干扰感知衰减（Interference-Aware Decay） |
 
+## v1.2.0-beta.14 新增能力（默认全关，需显式开启）
+
+beta.14 落地了一批 AMAS 自研升级：**FSRS-6 三特征记忆引擎（作为先验后端）** 与 **Tier-1 调度引擎**（Parallel Elo / 动态 K / SSP 状态相关 DR / 留存 A/B 闭环）。
+
+::: warning 默认全部关闭
+本批所有新特性的 feature flag / 调制系数默认值都是 **关闭 / 0.0**，未声明这些键的旧配置与 DB 历史快照反序列化后 **与旧行为逐位等价（bit-exact legacy）**。要启用必须在调参后台显式打开，开启方式见 [调参管理后台手册 §新特性开启](/amas-admin-console#新特性开启-v1-2-0-beta-14)。
+:::
+
+### 记忆引擎三特征（FSRS-6 先验后端）
+
+记忆核已是 **公版 FSRS-6 逐位等价**（`src/amas/memory/mdm.rs`，21 维 `w`，新增 `w[19]` 同日饱和指数、`w[20]` 可训练遗忘曲线 decay）。三特征作为**预测/调度先验**叠加，**不进入内部 S/D 更新**，默认关：
+
+| 特征 | 作用 | 关闭判据（默认值） |
+|---|---|---|
+| 难度 logit 重校准（v6/v7 预测读出层） | 预测 recall 在 logit 域按每词难度 + 复习次数做 Platt/温度重校准，补 FSRS 二元映射下「预测随难度扁平」的残差 | `memoryModel.difficultyLogitWeight=0.0`、`predLogitBaseScale=1.0`、`predLogitIntercept=0.0`、`predLogitReviewCountWeight=0.0` |
+| 冷启动难度先验（Phase 1a） | 仅首评（`review_count==0`）按词长 / 词素透明度 / 外部难度调整 S₀·D₀，之后交还 FSRS | 6 个 `memoryModel.coldStart{D,S}{Len,Morph,Extd}Weight=0.0` |
+| 双腿信任调度（成功腿 / 失败腿） | 成功复习与 lapse 分别按时间常数 τ 调制 mastery 信任更新率 | `memoryModel.alphaRampTau=0.0`、`alphaLapseRampTau=0.0`（0.0=冻结语义） |
+
+> SSP-MMC 最优间隔后端（`featureFlags.sspEnabled`）、GSP 毕业制调度头（`memoryModel.gsp*`）属此前批次能力，仍由独立开关控制。
+
+### Tier-1 调度引擎
+
+| 能力 | 说明 | 开关（默认值） |
+|---|---|---|
+| **Parallel Elo（T1.1，双链解耦）** | 开启后 ZPD 选词读「选词链」`rating_select`（延迟快照），更新写「估计链」`rating`，消除「选择依赖被估计量」的耦合偏差；难度消费者恒读估计链 | `elo.parallelEloEnabled=false`、刷新间隔 `parallelEloRefreshGames=8` |
+| **动态 K（T1.2，趋势自适应）** | 按近期带符号残差的 EWMA 趋势调 K：同向漂移增 K 追、震荡降 K 降噪；novice 期乘子下界钳 1.0 | `elo.kDynamicEnabled=false`（关闭时与固定 K bit-exact） |
+| **SSP 状态相关 DR 曲面（T1.4 Cost-ADR）** | DP 求得的 (difficulty, stability)→最优目标保持率 R 曲面（此前仅用于反演间隔后丢弃，现保留并可查询/对拍）；代价函数可按 S/D 线性调制 | `ssp.costParams.*=0.0`（默认调制因子恒 1.0，bit-exact）；3D 求解 R 网格 `ssp.rMin=0.70`/`rMax=0.99`/`rStep=0.01` |
+| **真实留存 A/B 闭环（T1.3）** | 实验注册 + 桶归属冻结 + 采纳门（样本量达标 + primary 显著且达 MDE + 无 guardrail 恶化，三条全满足才采纳；离线赢 ≠ 真实赢） | 无运行中实验时为 no-op；需管理员注册 canary 实验 |
+
+数据库迁移 **m056–m058**（启动自动应用）：A/B 实验表（`amas_experiments` / `user_bucket_assignment` / `word_mastery_events`，后者支撑长期 masteredCount）、ELO 动态 K 趋势列（`trend`）与选词链列（`rating_select`）。
+
+设计背景与路线图见 [AMAS 进化调研终稿（2026-06-17）](/amas-evolution-research-2026-06-17/00-final-report)。
+
 ## 配置生命周期
 
 ```

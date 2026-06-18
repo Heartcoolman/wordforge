@@ -587,7 +587,7 @@ export default function UpdatesPage() {
         >
           <Show when={changelog.state !== 'pending'} fallback={<Loading />}>
             <Show
-              when={changelogGroups().length > 0}
+              when={releaseNotesSections().sections.length === 0 && changelogGroups().length > 0}
               fallback={
                 <Show
                   when={chStatus()?.releaseNotes}
@@ -621,6 +621,14 @@ export default function UpdatesPage() {
                           </div>
                         )}
                       </For>
+                      <Show when={changelog()?.compareUrl}>
+                        <div class="muted-3 mono" style={sx({ fontSize: 11 })}>
+                          <Show when={changelog()?.totalCommits != null}>
+                            {changelog()!.totalCommits} commits · {changelog()!.contributors ?? 0} contributors ·{' '}
+                          </Show>
+                          <a style={sx({ color: 'var(--accent)' })} href={changelog()!.compareUrl} target="_blank" rel="noopener">GitHub compare →</a>
+                        </div>
+                      </Show>
                     </div>
                   </Show>
                 </Show>

@@ -105,6 +105,15 @@ export default defineConfig({
           items: [
             { text: '调参管理后台', link: '/amas-admin-console' },
             {
+              text: '2026-06-17 进化调研',
+              collapsed: true,
+              items: [
+                { text: '调研终稿', link: '/amas-evolution-research-2026-06-17/00-final-report' },
+                { text: 'Tier 1/2 路线图', link: '/amas-evolution-research-2026-06-17/01-roadmap-tier1-tier2' },
+                { text: '证据与方法论', link: '/amas-evolution-research-2026-06-17/02-evidence-and-sources' },
+              ],
+            },
+            {
               text: '2026-05-15 调参记录',
               collapsed: true,
               items: [
