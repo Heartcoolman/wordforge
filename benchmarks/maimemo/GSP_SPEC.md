@@ -239,3 +239,52 @@ scaled_days = max(lo, min(fuzz_cap, fuzzed))
 **Rust 移植契约**：mdm.rs `compute_interval`（或等价 next-interval 路径）须在 cap 之后、取整之前
 插入 §7.2/§7.3 同序逻辑，`_fuzz_u` 用 f64 同常数同次序，graduated 判定与 floor 复用既有分支。
 G6 镜像 parity（Python↔Rust max err ≤ 1e-9）须覆盖 fuzz on/off 两态。
+
+---
+
+## 8. SSP 后端（Cost-ADR；状态相关 DR）— T1.4
+
+SSP 是 GSP 的**可选 base 求解后端**：以「达目标稳定性的期望总复习代价最小」的 3D Bellman DP
+（`src/amas/memory/ssp.rs::precompute`）替代单一 `baseDesiredRetention` 求 base 区间。DP 在
+(difficulty 1..10) × (stability bins) 上以目标保持率 R 为 action，产出 **(S,D)→最优 R 曲面**
+（`optimal_r`，即状态相关 DR），随 stability×difficulty 连续变。默认 `sspEnabled=false`（休眠，
+走 §3 MDM banded base）。
+
+### 8.1 base 区间运算次序（SSP 后端，与 mastery.rs 同序）
+
+GSP 激活且 SSP 后端时，§3 的「base 求解」被替换为：
+
+```
+base_days_int = max(1, ceil( min( optimal_interval(stability, difficulty), maxIntervalDays ) ))
+```
+
+其中 `optimal_interval(S,D)` = 从 `optimal_r[d_index][s_index]` 反演的最优区间天数
+（`d_index = clamp(round(difficulty),1,10)-1`；`s_index` 经双网格 `partition_point` 或均匀
+`ln(S)/ln(base)-min_index` 量化）。**其后 §3 的 GSP head（interval_scale → 毕业 floor → cap →
+fuzz → 取整）原样施加**，与底层求解器无关（MDM/SSP 两后端统一收口）。banded retention 仅在
+MDM 后端替换目标保持率口径；SSP 后端 base 由 DP 决定、与 banded 无关。
+
+### 8.2 parity 接口
+
+`maimemo_mdm_adapter` 请求/响应（camelCase）新增：
+
+- 请求 `sspConfig`（可选 `SspConfig`）：Some → 预计算 SSP DP 后端（同 engine.rs 构造，dual_grid
+  二选一 + 保留 optimal_r）；None → MDM 路径（bit-exact legacy）。
+- 响应 `optimalRetention`（可选 f64）：该 (stability, difficulty) 的状态相关最优 R（DR 曲面值），
+  仅 SSP 后端为 Some，供 Python↔Rust 对拍 DR 曲面。
+- 响应 `scheduledIntervalDays`：SSP 后端时由 §8.1 base + §3 head 产出。
+
+**Rust↔Python parity 契约**：Python `SSPMMCScheduler` 的 optimal_interval 与本仓 `ssp.rs`
+`SspPolicy::optimal_interval`、optimalRetention 与 `SspPolicy::optimal_retention` 须逐位一致
+（max err ≤ 1e-9），覆盖 dual_grid on/off。该后端此前在对拍中**零覆盖**，复活/灰度前须先建此 parity。
+
+### 8.3 成本曲线与干净指标（`cost_curve.py`）
+
+- `cost_curve.py` 沿 `desiredRetention` 网格各跑一次 forward-sim，产 reviewsPerDay-vs-实测保持率
+  凸曲线，并插值出 **`reviewsPerDayAtMatchedRetention`**（在同一目标保持率下比复习量，floor-无关、
+  可证伪；不外推）——这才是 Cost-ADR「达目标保持率的总复习次数最小」的对照口径。
+- `simulate.py` 的 `mastered_count` 已与 `gspGraduationFloorDays` **解耦**：改用
+  `oracle_halflife >= MASTERED_HALFLIFE_DAYS(180)` 衡量真实长期保持，不再读调度区间
+  （旧 `next_interval>=30` 与默认 floor=30 同阈值，自我实现、不可证伪）。
+- ⚠️ 墨墨「离线≠真实留存」：下调 DR=拿留存换 workload，离线 reviewsPerDay 降不等于线上留存不掉，
+  SSP/Cost-ADR 任何采纳须经 T1.3 真实 A/B 验证。

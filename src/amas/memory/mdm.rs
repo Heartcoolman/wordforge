@@ -478,7 +478,8 @@ pub fn gsp_schedule_days(
         let u = gsp_fuzz_u(state.stability, state.review_count);
         let fuzzed = scaled_days * (1.0 + config.gsp_interval_fuzz * u);
         // 顶侧夹 fuzz_cap = min(90, cap·(1+fuzz))：允许抖动把 cap-pinned 词推到 cap 之上错峰，
-        // 但绝不越 90 天硬帽。底侧夹 lo：毕业词夹 floor（不破 mastered 定义），非毕业词夹 1。
+        // 但绝不越 90 天硬帽。底侧夹 lo：毕业词夹 floor（保住**离线基准** mastered=interval≥30 口径；
+        // 注意生产 mastered 由 determine_level 三阈值判定、不读 floor，floor 只影响调度区间），非毕业词夹 1。
         let fuzz_cap = config
             .max_interval_days
             .min(cap * (1.0 + config.gsp_interval_fuzz));
@@ -1025,7 +1026,7 @@ mod tests {
         }
     }
 
-    /// fuzz 不把已毕业词拉到 floor 之下（mastered 定义不破），不越 90 硬帽。
+    /// fuzz 不把已毕业词拉到 floor 之下（保住离线基准 mastered=interval≥30 口径；生产 mastered 不读 floor），不越 90 硬帽。
     #[test]
     fn gsp_fuzz_preserves_graduated_floor_and_90_cap() {
         let mut config = gsp_config();

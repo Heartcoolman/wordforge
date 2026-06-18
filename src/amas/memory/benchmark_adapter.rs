@@ -1,11 +1,12 @@
 use serde::{Deserialize, Serialize};
 
-use crate::amas::config::MemoryModelConfig;
+use crate::amas::config::{MemoryModelConfig, SspConfig};
 
 use super::mdm::{
     compute_interval, compute_interval_base_days, gsp_banded_retention, gsp_schedule_active,
     gsp_schedule_days, recall_probability, update_strength_with_evidence, MdmState,
 };
+use super::ssp;
 
 const DAY_MS: i64 = 86_400_000;
 /// 二元 recall（1=记住）按 FSRS 二元拟合惯例映射到 Good(3)，而非 Easy(4)。
@@ -73,6 +74,11 @@ fn default_interval_scale() -> f64 {
 pub struct BenchmarkAdapterRequest {
     pub config: MemoryModelConfig,
     pub items: Vec<BenchmarkHistoryItem>,
+    /// T1.4 Cost-ADR：可选 SSP 后端配置。Some → 预计算 SSP DP，scheduled_interval_days 用
+    /// optimal_interval 作 base（复刻 mastery.rs SSP 分支），并暴露 optimal_retention 曲面供
+    /// Python↔Rust parity（此前 SSP 后端在对拍中零覆盖）。None → MDM 路径（bit-exact legacy）。
+    #[serde(default)]
+    pub ssp_config: Option<SspConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -97,6 +103,10 @@ pub struct BenchmarkAdapterResult {
     /// （band>0 时由 banded retention 替换），契约 GSP_SPEC §3 全 op-order。供 Python↔Rust
     /// 区间 parity 对拍（cap/floor/fuzz/banded 同序逐位）。
     pub scheduled_interval_days: Option<i64>,
+    /// T1.4 Cost-ADR：该 (stability, difficulty) 状态的最优目标保持率 R（状态相关 DR 曲面）。
+    /// 仅在请求带 ssp_config 时为 Some，供 Python↔Rust 对拍 DR 曲面。None=无 SSP 后端。
+    #[serde(default)]
+    pub optimal_retention: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -109,6 +119,18 @@ pub fn evaluate_batch(
     request: BenchmarkAdapterRequest,
 ) -> Result<BenchmarkAdapterResponse, String> {
     let mut results = Vec::with_capacity(request.items.len());
+
+    // T1.4：带 ssp_config 时预计算 SSP DP 一次（含 optimal_r 曲面），供下方 SSP 后端 base 区间 +
+    // DR 曲面 parity。与 engine.rs 构造同序（dual_grid 二选一 + 保留 optimal_r）。
+    let ssp_policy = request.ssp_config.as_ref().map(|sc| {
+        let pre = ssp::precompute(sc, &request.config);
+        if pre.dual_grid {
+            ssp::SspPolicy::from_tables_with_bins(pre.tables, pre.stability_list)
+        } else {
+            ssp::SspPolicy::from_tables(pre.tables, sc)
+        }
+        .with_retention_tables(pre.optimal_r)
+    });
 
     for item in request.items {
         let (state, correct_streak) = replay_history_with_streak(&item, &request.config)?;
@@ -138,8 +160,14 @@ pub fn evaluate_batch(
         let scheduled_interval_days = if gsp_schedule_active(&request.config) {
             let target_recall = gsp_banded_retention(&state, &request.config)
                 .unwrap_or(request.config.base_desired_retention);
-            let base_days_int =
-                compute_interval_base_days(&state, target_recall, &request.config);
+            // T1.4：SSP 后端时 base 取 policy 最优天（min cap → ceil → max(1)），与 mastery.rs SSP 分支
+            // 逐位同序；否则走 MDM banded base。GSP head（cap/floor/fuzz）两后端统一收口。
+            let base_days_int = if let Some(policy) = &ssp_policy {
+                let optimal_days = policy.optimal_interval(state.stability, state.difficulty);
+                (optimal_days.min(request.config.max_interval_days).ceil() as i64).max(1)
+            } else {
+                compute_interval_base_days(&state, target_recall, &request.config)
+            };
             Some(gsp_schedule_days(
                 base_days_int,
                 item.interval_scale,
@@ -151,6 +179,11 @@ pub fn evaluate_batch(
             None
         };
 
+        // T1.4：暴露状态相关 DR 曲面值（仅 SSP 后端）供 Python↔Rust 对拍。
+        let optimal_retention = ssp_policy
+            .as_ref()
+            .and_then(|p| p.optimal_retention(state.stability, state.difficulty));
+
         results.push(BenchmarkAdapterResult {
             stability: state.stability,
             difficulty: state.difficulty,
@@ -159,6 +192,7 @@ pub fn evaluate_batch(
             intervals,
             correct_streak,
             scheduled_interval_days,
+            optimal_retention,
         });
     }
 
@@ -252,6 +286,7 @@ mod tests {
         let response = evaluate_batch(BenchmarkAdapterRequest {
             config,
             items: vec![item],
+            ssp_config: None,
         })
         .expect("response");
         let scored = &response.items[0];
@@ -281,5 +316,52 @@ mod tests {
         };
         let err = replay_history(&item, &config).expect_err("should fail");
         assert!(err.contains("history length mismatch"));
+    }
+
+    #[test]
+    fn ssp_backend_exposes_dr_surface_and_drives_interval() {
+        // T1.4：带 ssp_config 时，scheduled_interval 走 SSP optimal_interval 后端，且 optimal_retention
+        // 曲面被暴露（None→Some）。无 ssp_config 时 optimal_retention=None（MDM 路径，bit-exact）。
+        let mut config = MemoryModelConfig::default();
+        config.gsp_interval_cap_days = 40.0; // 确保 GSP head 激活 → scheduled_interval_days 为 Some
+        let mk_item = || BenchmarkHistoryItem {
+            t_history: vec![0, 3, 7, 15],
+            r_history: vec![1, 1, 1, 1],
+            t_history_csv: None,
+            r_history_csv: None,
+            next_t_days: Some(5.0),
+            target_retentions: vec![0.85],
+            interval_scale: 1.0,
+        };
+
+        let mdm = evaluate_batch(BenchmarkAdapterRequest {
+            config: config.clone(),
+            items: vec![mk_item()],
+            ssp_config: None,
+        })
+        .expect("mdm response");
+        assert!(mdm.items[0].optimal_retention.is_none());
+        assert!(mdm.items[0].scheduled_interval_days.is_some());
+
+        let ssp_cfg = SspConfig {
+            max_iterations: 50,
+            ..Default::default()
+        };
+        let ssp = evaluate_batch(BenchmarkAdapterRequest {
+            config,
+            items: vec![mk_item()],
+            ssp_config: Some(ssp_cfg.clone()),
+        })
+        .expect("ssp response");
+        let dr = ssp.items[0]
+            .optimal_retention
+            .expect("SSP 后端应暴露 DR 曲面");
+        assert!(
+            dr >= ssp_cfg.r_min - 1e-9 && dr <= ssp_cfg.r_max + 1e-9,
+            "状态相关 DR {dr} 应 ∈ [{}, {}]",
+            ssp_cfg.r_min,
+            ssp_cfg.r_max
+        );
+        assert!(ssp.items[0].scheduled_interval_days.is_some());
     }
 }

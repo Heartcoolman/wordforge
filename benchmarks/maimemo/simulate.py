@@ -56,6 +56,11 @@ from .schedulers import AVAILABLE_SCHEDULERS, Scheduler, build_scheduler
 # Data structures
 # ---------------------------------------------------------------------------
 
+# T1.4: mastered 判定的半衰期阈值（天），与调度 floor(gspGraduationFloorDays) 解耦。
+# 用 Oracle 估的记忆半衰期衡量真实长期保持，不读调度区间。
+MASTERED_HALFLIFE_DAYS = 180.0
+
+
 @dataclass
 class WordState:
     """Per-(user, word) simulation state."""
@@ -503,13 +508,14 @@ def simulate_strategies(
             result.daily.append(day_metrics)
 
         # Final state metrics
-        # mastered = word was reviewed at least once during the simulation AND
-        # the scheduler's final next-interval is >= 30 days, indicating the
-        # algorithm considers the word stably retained.
+        # T1.4: mastered 口径与 gspGraduationFloorDays 解耦。旧口径 next_interval>=30 与默认
+        # floor=30 同阈值 → 毕业旋钮直接拉高 mastered（自我实现，不可证伪记忆质量）。改用 Oracle 估的
+        # 半衰期 oracle_halflife >= MASTERED_HALFLIFE_DAYS（与 StrategyResult.mastered_count 注释
+        # "halflife >= 180 days" 一致、与调度 floor 无关），衡量真实长期保持而非调度尾部。
         result.expected_memory_final = result.daily[-1].expected_memory if result.daily else 0.0
         result.mastered_count = sum(
             1 for ws in word_states
-            if ws.last_day > 0 and ws.scheduler.next_interval_days() >= 30
+            if ws.last_day > 0 and ws.oracle_halflife >= MASTERED_HALFLIFE_DAYS
         )
         result.finalize()
         results[strategy_name] = result
