@@ -1,5 +1,9 @@
 # Web 客户端安装
 
+> 三端安装：**Web 客户端**（本页） · [iOS 客户端](./installation-ios) · [Android 客户端](./installation-android)
+>
+> 当前版本：**v1.3.1** · 发布日期 2026-06-17
+
 ## 托管版（由管理员部署）
 
 若管理员已部署 [wordforge-web](https://github.com/Heartcoolman/wordforge-web) 用户学习端，直接访问对应 URL 即可，无需安装任何软件。

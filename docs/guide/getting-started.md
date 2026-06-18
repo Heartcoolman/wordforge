@@ -3,7 +3,7 @@
 ## 前置要求
 
 - **Rust** ≥ 1.77（edition 2021）
-- **Node.js** ≥ 18（前端构建 + 文档站）
+- **Node.js** ≥ 22（`admin-ui/package.json` 的 `engines.node` 为 `>=22.0.0`；前端构建 + 文档站）
 - **wasm-pack**（仅在重建 `crates/visual-fatigue-wasm` 时需要）
 
 SQLite 走 `rusqlite` 的 `bundled` feature，**不需要**单独安装 sqlite3。
@@ -37,6 +37,20 @@ cd admin-ui && npx vite --host     # 终端 2：前端 :5173，自动代理 /api
 ```
 
 `admin-ui/vite.config.ts` 已配好 `/api`、`/health` 反代到 `:3000`。
+
+## 四端本地联调
+
+四端各为独立仓库（均在 `~/english` 下），联调时统一指向同一个本地后端 `:3000`：
+
+| 端 | 仓库 | 本地端口 | 启动 / 接入 |
+|---|---|---|---|
+| Server | `wordforge-server` | `:3000` | `cargo run`（`HOST`/`PORT` 可改） |
+| Admin GUI | `wordforge-server/admin-ui` | `:5173` | `npx vite --host`，已反代 `/api`、`/health` → `:3000` |
+| Web | `wordforge-web` | `:5173`（默认，需改） | `npm run dev`，proxy `/api`、`/health` → `:3000`（`apiTarget` 可配） |
+| Android | `wordforge-android` | — | 模拟器走 `http://10.0.2.2:3000` 访问宿主机后端；真机用局域网 IP |
+| iOS | `wordforge-ios` | — | 模拟器走 `http://127.0.0.1:3000`；真机用局域网 IP |
+
+> admin-ui 与 wordforge-web 的 Vite 默认端口同为 `:5173`，**同机同时跑两者须给其一改端口**（如 `npx vite --port 5174`），否则第二个会自动占用下一个空闲端口。后端 `CORS_ORIGIN` 需包含实际使用的前端来源。
 
 ## 关键环境变量
 

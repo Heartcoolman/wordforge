@@ -805,6 +805,33 @@ Content-Length: 102400
 
 > **不要**在恢复后补发崩溃期间未发出的 telemetry：服务端按 `clientTs` 入库，但 `data_corrupted` SSE 已经触发过了，应直接走 `session_start` 重新建立心跳。
 
+### 12.4 资源包安装上报
+
+资源包热更安装 / 校验 / 回滚结束后上报结果，供 admin 统计聚合。与提交遥测同源鉴权（登录态特性）。
+
+**接口：** `POST /api/telemetry/resource-pack-install`
+**认证：** Bearer Token + `x-device-id` 请求头（`x-device-id` 可选；缺失则该条不关联设备）
+**响应 200：** `{ "success": true, "data": { "received": true } }`
+
+| 字段 | 类型 | 必填 | 约束 |
+|---|---|---|---|
+| `packId` | string | ✓ | 资源包业务 ID |
+| `version` | string | ✓ | 本次安装 / 校验 / 回滚涉及的版本 |
+| `outcome` | string | ✓ | `"installed"`（安装成功）/ `"verify_failed"`（签名或哈希校验失败）/ `"rollback"`（回滚到上一版本） |
+| `appVersion` | string | — | 客户端 App 版本，可选 |
+
+**示例：**
+```json
+{
+  "packId": "wordbook-core",
+  "version": "1.2.3",
+  "outcome": "installed",
+  "appVersion": "1.0.0"
+}
+```
+
+> 此上报不参与心跳判断，也不受遥测限流 / 采样影响，是即发即忘的安装结果日志。每个 `(version, outcome)` 由 admin 端 `GET /api/admin/resource-packs/:packId/stats` 聚合计数。
+
 ---
 
 ## 13. 单词管理模块（Admin）

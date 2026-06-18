@@ -22,7 +22,7 @@
 │   │  - config_watcher     │◀────────── notify ──────┘          │
 │   │  - llm_advisor        │                                    │
 │   │  - update_checker     │                                    │
-│   │  - 20 个聚合/清理 job  │                                    │
+│   │  - 其余聚合/清理 job   │                                    │
 │   └───────────────────────┘                                    │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -34,11 +34,11 @@
 | `main.rs` | 启动入口：加载 env / AMASConfig → 建 Store → 建 AMASEngine → AppState → 起 Router + Workers |
 | `config.rs` | 环境变量解析为强类型 `Config`（含 `UpdateCheckConfig`、`LlmConfig`、`AmasConfigOverrides` 等） |
 | `state.rs` | `AppState`：注入所有共享依赖给 handler |
-| `routes/` | HTTP 路由：`auth` / `users` / `words` / `wordbooks` / `learning` / `feedback` / `probe_results` / `telemetry` / `realtime`（SSE） / `admin/*`（含 `probe` / `probe_telemetry` / `feedback` / `monitoring` / `rbac`） |
+| `routes/` | HTTP 路由（按 `mod.rs` 挂载）：核心学习链路 `auth` / `users` / `words` / `word_states` / `wordbooks` / `wordbook_center` / `learning` / `study_config` / `records` / `word_favorites` / `word_notes` / `user_profile`；内容与运营 `content` / `notifications` / `resource_packs`（资源包热更）；可观测 `feedback` / `probe_results` / `telemetry` / `analytics` / `metrics` / `status` / `realtime`（SSE）；`v1`（兼容别名）/ `health`；`admin/*`（含 `probe` / `probe_telemetry` / `feedback` / `monitoring` / `rbac` / 资源包管理 等） |
 | `services/` | 业务编排：`updater`（自更新）、`llm_provider`、`broadcast`、`metrics_reporter` 等 |
 | `store/` | SQLite 持久层：`schema.rs`（DDL）/`migrate.rs`（版本化迁移）/`operations/*`（按表分文件） |
 | `amas/` | AMAS 核心：见下方"AMAS 模块" |
-| `workers/` | 后台任务（共 23 项）：见下方"Workers" |
+| `workers/` | 后台任务（共 27 个 worker）：见下方"Workers" |
 | `blocking.rs` | `run_blocking()`：把 SQLite/算法等阻塞计算丢到 `spawn_blocking` 池 |
 | `response.rs` | 统一 `AppError` + `ok()` JSON 响应包装 |
 
@@ -85,12 +85,12 @@ amas/
 |---|---|
 | 框架 | SolidJS 1.9 |
 | 路由 | `@solidjs/router` |
-| 数据层 | `@tanstack/solid-query` |
+| 数据层 | SolidJS 原生 `createResource`（不再依赖 `@tanstack/solid-query`） |
 | 样式 | Tailwind CSS v4（`@tailwindcss/vite` 插件） |
 | 构建 | Vite 7 |
 | 图表 | ECharts 6 |
 | 疲劳检测 | `@mediapipe/tasks-vision` + 本仓 `crates/visual-fatigue-wasm`（wasm-pack 产物） |
-| 测试 | Vitest（单测）+ Playwright（E2E，71 用例） |
+| 测试 | Vitest（单测）+ Playwright（E2E，覆盖登录 / 学习流 / 词书 / 设备 / 通知 / 资源包等 11 个 spec） |
 
 构建产物落 `static/`，被后端的 `tower-http::fs::ServeDir` fallback 服务出去——生产环境**单二进制即包含完整 admin GUI**。
 
@@ -104,8 +104,9 @@ amas/
 | **聚合统计** | `daily_aggregation`、`weekly_report`、`metrics_flush`、`health_analysis` |
 | **缓存维护** | `cache_cleanup`、`confusion_pair_cache`、`session_cleanup`、`password_reset_cleanup` |
 | **学习数据** | `forgetting_alert`、`delayed_reward` |
-| **探针/监控** | `monitoring_retention`（事件表 retention + 月度 VACUUM）、`error_rate_watchdog`（5xx 滚动告警）、`scheduler_health_watchdog`（worker 漏跑检测）、`probe_cleanup`、`probe_confirm_sweeper` |
-| **运维** | `heartbeat_watchdog`（持久跑，不归 Manager）、`update_checker`（GitHub Releases 轮询 + SSE）、`log_export`、`db_backup`（每日备份独立循环） |
+| **内容/投递** | `scheduled_broadcast`（定时广播）、`outbox_processor`（出站消息可靠投递） |
+| **探针/监控** | `monitoring_retention`（事件表 retention + 月度 VACUUM）、`telemetry_cleanup`（遥测数据清理）、`error_rate_watchdog`（5xx 滚动告警）、`scheduler_health_watchdog`（worker 漏跑检测）、`probe_cleanup`、`probe_confirm_sweeper` |
+| **运维** | `heartbeat_watchdog`（持久跑，不归 Manager）、`update_checker`（GitHub Releases 轮询 + SSE）、`log_export`、`db_backup`（每日备份独立循环）、`backup_offsite`（备份异地上传） |
 
 ## 数据存储
 
@@ -126,7 +127,21 @@ amas/
 3. 触发 `POST /admin/updates/install` → 下载 tarball（≤ 200 MiB）→ 校验 → SQLite 备份 → 原子替换二进制 → exec 重启
 4. 失败兜底：`semver` 比对禁止 downgrade（除非 `UPDATE_ALLOW_DOWNGRADE=true`），`fs2` 文件锁防并发
 
+> 自更新换的是**整个后端二进制**；资源包热更换的是**客户端不发版的内容/配置**，两条链路互不相关，见下。
+
+## 资源包热更链路
+
+面向 Web / iOS / Android 三端的**不发版内容热更**：服务端把签名后的 `payload.json` 托管在 `static/packs/<pack>/<ver>/`，客户端按需拉取、验签、消费。
+
+1. admin 在「资源包」页上传 `payload.json`（≤ 4 MiB 不透明 JSON）→ 服务端算 SHA-256 + Ed25519 签名落盘（`routes/resource_packs.rs`）
+2. admin 切某通道（`stable` / `beta` / `internal`）「激活」→ 服务端广播 SSE `resource_pack_available`（同 pack×通道 5 分钟去重）
+3. 客户端 `GET /api/resource-packs/<packId>/manifest?appVersion=&locale=&channel=` 拿到 `downloadURL` + `sha256` + 签名 → 下载 → SHA-256 校验 + Ed25519 验签（三端**硬编码生产公钥**为信任锚）+ `minAppVersion` 门控
+4. 注册的 consumer 消费 payload → 渲染 → `POST /api/telemetry/resource-pack-install` 回传 `installed / verify_failed / rollback`
+
+投递链路对任意 `packId` 通用，内容/配置类用途收敛到**两个通用容器**：`content-slots`（公告 / 内容卡 / 激励语 / 空状态等结构化内容位）与 `app-config`（kill-switch / 数值配置类远程开关）。这是**数据热更不是界面热更**——只能给客户端预埋了消费代码的位置喂新数据。完整契约、安全约束与三端消费现状见 [资源包热更](/resource-packs)。
+
 ## 下一步
 
 - [AMAS 入门](./amas-intro) — 16 个子配置、调参流程、版本回滚
 - [API 接口对接](/api-endpoints) — REST 接口清单
+- [资源包热更](/resource-packs) — 签名分发、两个通用容器、三端消费

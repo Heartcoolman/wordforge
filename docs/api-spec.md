@@ -322,3 +322,13 @@ accessToken 过期 → POST /api/auth/refresh（携带 refresh_token）
 | 已注册但归属为其他账号 | `403 DEVICE_OWNERSHIP_MISMATCH` |
 | 已注册且归属当前账号 | 放行 |
 | 已注册但未认领（owner 为 NULL） | claim 放行（不误伤老匿名设备） |
+
+### 11.4 心跳与遥测的协议依赖
+
+`POST /api/telemetry` 除写入历史数据外，还充当设备心跳：每条通过归属核验的上报都会刷新该设备的心跳时间戳（不按 `eventType` 区分，且**不受采样 / 限流影响**——被采样丢弃的周期上报仍刷新心跳）。服务端 watchdog 每 5 秒扫描一次，对**有活跃 SSE 连接**的设备做心跳判定：
+
+- 距上次心跳 **> 10 秒**计 1 次 miss；
+- **连续 5 次 miss** 即向该设备推送 SSE `data_corrupted` 事件（客户端应据此走重拉数据流程），随后 miss 计数归零；
+- 无活跃 SSE 连接的纯遥测设备不参与该判定，其心跳记录在 **300 秒**无新上报后被回收。
+
+由此对客户端构成硬性约束：**有活跃 SSE 连接期间，periodic 遥测必须以 ≤ 10 秒周期上报**（建议 5–8 秒留网络抖动余量），否则累计 miss 会触发 `data_corrupted`。完整的心跳节奏、各 `eventType` 触发时机与 `telemetry_request` 即时上报约定见《客户端上传数据格式说明》§12.2。

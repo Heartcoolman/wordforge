@@ -28,6 +28,9 @@
 18. [V1 兼容层 `/api/v1`](#18-v1-兼容层)
 19. [单词收藏 `/api/word-favorites`](#19-单词收藏)
 20. [单词笔记 `/api/word-notes`](#20-单词笔记)
+21. [资源包热更 `/api/resource-packs`](#21-资源包热更-v1-1)
+22. [资源包管理（admin）`/api/admin/resource-packs`](#22-资源包管理-admin-v1-1)
+23. [设备管理（admin）`/api/admin/clients`](#23-设备管理-admin-v1-2)
 
 ---
 
@@ -3170,3 +3173,356 @@ AMAS 算法指标快照（需 Admin Token）。
   }
 }
 ```
+
+---
+
+## 23. 设备管理（admin · v1.2）
+
+**路径前缀：** `/api/admin/clients`
+**认证：** AdminAuthUser（独立 admin JWT；未携带或失效返回 `401 AUTH_UNAUTHORIZED`，令牌类型非 admin 同样 401）
+
+> 此模块管理的是 end-user 设备（`client_devices` 表），与 admin token 持有者无关。响应均为统一 `{ "success": true, "data": ... }` 包装；为简洁起见，下文响应示例只列 `data` 内容。
+> **脱敏约定：** 设备列表 / 风险列表均不返回 `lastIp` / `bannedBy`（审计敏感字段），仅单设备详情额外透出 `bannedAt` / `banReason`。
+
+### GET /api/admin/clients
+
+设备总览：在线（活跃 SSE）设备 + 近 15 分钟活跃设备（已排除在线设备，避免重复），含各自的数据通道状态（AMAS / learning / telemetry）。
+
+**响应 200：**
+```json
+{
+  "sseLive": [
+    {
+      "deviceId": "uuid",
+      "platform": "ios",
+      "userId": "uuid",
+      "connectedSecs": 42,
+      "connectionCount": 1,
+      "isBanned": false,
+      "dataChannels": { "amas": "ok", "learning": "ok", "telemetry": "ok" },
+      "appVersion": "1.2.0"
+    }
+  ],
+  "recentlyActive": [
+    {
+      "deviceId": "uuid",
+      "platform": "web",
+      "userId": "uuid",
+      "lastSeenAt": "2026-06-17 08:30:00",
+      "isBanned": false,
+      "dataChannels": { "amas": "none", "learning": "none", "telemetry": "ok" },
+      "appVersion": "1.1.0",
+      "riskFlag": false,
+      "riskRelatedDevice": null
+    }
+  ]
+}
+```
+
+- `dataChannels` 各字段取值：`"ok"` / `"nil"` / `"none"`（`nil` 表示有 AMAS 状态但无事件）。
+- `riskFlag`：m054 关联风控标记（共享出口 IP / 同账号被某次封禁牵连）；`riskRelatedDevice` 为触发源设备 ID。
+
+---
+
+### GET /api/admin/clients/paginated
+
+设备表后端分页 + 搜索 + 平台过滤。
+
+**Query 参数：**
+
+| 名 | 类型 | 必填 | 默认 | 说明 |
+|---|---|---|---|---|
+| `page` | number | ⬜ | 1 | 页码，最小 1 |
+| `perPage` | number | ⬜ | 20 | 每页条数，clamp 到 [1, 200] |
+| `q` | string | ⬜ | — | 搜索关键字（设备 ID / 用户 / 型号等） |
+| `platform` | string | ⬜ | — | 平台过滤 `web` / `ios` / `android` |
+| `recentMinutes` | number | ⬜ | — | 仅保留 N 分钟内活跃（含 banned）；缺省 = 全表 + 历史 |
+
+**响应 200：** 分页 envelope（同规范 §4.2）。`data[]` 元素：
+```json
+{
+  "deviceId": "uuid",
+  "platform": "ios",
+  "userId": "uuid",
+  "appVersion": "1.2.0",
+  "model": "iPhone15,2",
+  "country": "CN",
+  "firstSeenAt": "2026-06-01 10:00:00",
+  "lastSeenAt": "2026-06-17 08:30:00",
+  "isBanned": false
+}
+```
+顶层附 `total` / `page` / `perPage` / `totalPages`。
+
+---
+
+### GET /api/admin/clients/distribution
+
+平台聚合 + 平台×版本分布 + 升级策略快照（前端一站式渲染）。
+
+**响应 200：**
+```json
+{
+  "platforms": [
+    { "platform": "ios", "total": 1200, "active7d": 340, "monthOverMonthPct": 5.2 }
+  ],
+  "versions": [
+    { "platform": "ios", "version": "1.2.0", "count": 800 }
+  ],
+  "policies": [ /* 同 GET /upgrade-policy 的 policies[] 元素 */ ]
+}
+```
+
+---
+
+### GET /api/admin/clients/flagged
+
+m054：列当前被关联风控标记的设备（按打标时间倒序，上限 200），供 admin 复核。每条注明触发源设备与命中信号。
+
+**响应 200：**
+```json
+{
+  "flagged": [
+    {
+      "deviceId": "uuid",
+      "platform": "web",
+      "userId": "uuid",
+      "lastSeenAt": "2026-06-17 08:30:00",
+      "isBanned": false,
+      "appVersion": "1.1.0",
+      "riskReason": "shared_ip_with_banned",
+      "riskFlaggedAt": "2026-06-17 08:00:00",
+      "riskRelatedDevice": "uuid-of-banned-device"
+    }
+  ]
+}
+```
+
+---
+
+### GET /api/admin/clients/:id
+
+单设备详情（含在线状态 + 近期 telemetry 摘要）。
+
+**响应 200：**
+```json
+{
+  "deviceId": "uuid",
+  "platform": "ios",
+  "userId": "uuid",
+  "appVersion": "1.2.0",
+  "model": "iPhone15,2",
+  "country": "CN",
+  "firstSeenAt": "2026-06-01 10:00:00",
+  "lastSeenAt": "2026-06-17 08:30:00",
+  "isBanned": false,
+  "bannedAt": null,
+  "banReason": null,
+  "riskFlag": false,
+  "riskReason": null,
+  "riskFlaggedAt": null,
+  "riskRelatedDevice": null,
+  "online": true,
+  "connectionCount": 1,
+  "telemetry": { "total": 128, "latest": { /* 最近一条 telemetry 摘要，从未上报为 null */ } }
+}
+```
+
+**错误码：**
+
+| code | HTTP | 触发场景 |
+|---|---|---|
+| `NOT_FOUND` | 404 | 设备不存在 |
+
+---
+
+### POST /api/admin/clients/:id/ban
+
+封禁设备并触发 SSE 通知（连接保持不断，便于即时解封）。封禁后对共享出口 IP / 同账号的关联设备打风控标记（仅标记不硬封，m054 B 层）。
+
+**请求体（可选）：**
+```json
+{ "reason": "abuse" }
+```
+`reason` 可选，最长截断到 500 字符。
+
+**响应 200：**
+```json
+{
+  "banned": true,
+  "deviceId": "uuid",
+  "flaggedRelated": 2,
+  "flaggedDeviceIds": ["uuid-a", "uuid-b"]
+}
+```
+
+**错误码：**
+
+| code | HTTP | 触发场景 |
+|---|---|---|
+| `NOT_FOUND` | 404 | 设备不存在 |
+
+---
+
+### POST /api/admin/clients/:id/unban
+
+解封设备并经现有 SSE 连接即时通知。同时清除由该设备触发的全部关联标记（不留悬挂标记）。
+
+**响应 200：**
+```json
+{ "banned": false, "deviceId": "uuid", "clearedRelated": 2 }
+```
+
+**错误码：**
+
+| code | HTTP | 触发场景 |
+|---|---|---|
+| `NOT_FOUND` | 404 | 设备不存在 |
+
+---
+
+### POST /api/admin/clients/:id/clear-flag
+
+m054：复核判定误报，清除单设备的关联风控标记（不影响封禁状态）。
+
+**响应 200：**
+```json
+{ "cleared": true, "deviceId": "uuid" }
+```
+`cleared` 为 `false` 表示该设备本无标记。
+
+---
+
+### POST /api/admin/clients/:id/request-telemetry
+
+向设备下发定向遥测请求（SSE `telemetry_request` 事件），仅投递给与设备当前 owner 一致的连接。客户端收到后应立即上报 `eventType: "on_demand"`（详见《客户端上传数据格式说明》§12.2）。
+
+**响应 200：**
+```json
+{ "requestId": "uuid" }
+```
+
+**错误码：**
+
+| code | HTTP | 触发场景 |
+|---|---|---|
+| `DEVICE_OFFLINE` | 422 | 设备当前无活跃 SSE 连接 |
+| `DEVICE_OWNER_UNKNOWN` | 422 | 设备无确定归属（未注册 / 未认领），不向陈旧连接下发 |
+
+---
+
+### GET /api/admin/clients/upgrade-policy
+
+返回各平台的强制升级策略（每平台独立一行）。
+
+**响应 200：**
+```json
+{
+  "policies": [
+    {
+      "platform": "web",
+      "minVersion": "1.0.0",
+      "suggestedVersion": "1.2.0",
+      "grayscalePct": 100,
+      "pwaSilentUpdate": true,
+      "updatedAt": "2026-06-17 08:00:00",
+      "updatedBy": "admin-uuid"
+    }
+  ]
+}
+```
+
+---
+
+### PUT /api/admin/clients/upgrade-policy/:platform
+
+更新某平台升级策略（upsert）。写后失效升级策略缓存并记 admin 审计。
+
+**路径参数：** `platform` 必须是 `web` / `ios` / `android` 之一。
+
+**请求体：**
+```json
+{
+  "minVersion": "1.0.0",
+  "suggestedVersion": "1.2.0",
+  "grayscalePct": 100,
+  "pwaSilentUpdate": true
+}
+```
+
+| 字段 | 类型 | 必填 | 默认 | 说明 |
+|---|---|---|---|---|
+| `minVersion` | string | ⬜ | — | 版本下限 |
+| `suggestedVersion` | string | ⬜ | — | 推荐版本 |
+| `grayscalePct` | number | ⬜ | 0 | 灰度百分比，整数，须在 [0, 100] |
+| `pwaSilentUpdate` | boolean | ⬜ | true | PWA 静默更新开关 |
+
+**响应 200：**
+```json
+{ "ok": true, "platform": "web" }
+```
+
+**错误码：**
+
+| code | HTTP | 触发场景 |
+|---|---|---|
+| `INVALID_PLATFORM` | 400 | platform 不是 web / ios / android |
+| `INVALID_GRAYSCALE` | 400 | grayscalePct 不在 0–100 之间 |
+
+---
+
+### POST /api/admin/clients/broadcast-upgrade/:platform
+
+向该平台下「版本低于 `belowVersion`」的在线设备推送 SSE 强制升级事件（`upgrade_required`）。低频 admin 操作，全平台分页全量扫描后逐连接推送，并记 admin 审计。
+
+**路径参数：** `platform` 必须是 `web` / `ios` / `android` 之一。
+
+**请求体：**
+```json
+{
+  "belowVersion": "1.1.0",
+  "latestVersion": "1.2.0",
+  "message": "请升级到最新版本"
+}
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `belowVersion` | string | ✅ | 目标"低于该版本"的设备会被推送（按 semver 比较，自动剥离前导 `v`） |
+| `latestVersion` | string | ✅ | 推送给客户端的最新版本号 |
+| `message` | string | ⬜ | 附带提示文案 |
+
+**响应 200：**
+```json
+{ "matched": 120, "pushedConnections": 88 }
+```
+`matched` 为命中目标设备数，`pushedConnections` 为实际成功推送的 SSE 连接数。
+
+**错误码：**
+
+| code | HTTP | 触发场景 |
+|---|---|---|
+| `INVALID_PLATFORM` | 400 | platform 不是 web / ios / android |
+| `INVALID_VERSION` | 400 | belowVersion 或 latestVersion 为空 |
+
+---
+
+### GET /api/admin/telemetry/:deviceId
+
+> 该端点挂载在 `/api/admin/telemetry`（与上述 `/api/admin/clients` 同由 clients 模块提供），列某设备的 telemetry 记录。
+
+**Query 参数：** `limit`（默认 50，上限 200）、`offset`（默认 0）、`eventType`（按事件类型过滤，缺省全部）。
+
+**响应 200：** `{ "records": [...], "total": <number> }`
+
+**错误码：** `NOT_FOUND`（404，设备不存在）。
+
+---
+
+### GET /api/admin/telemetry/:deviceId/summary
+
+某设备 telemetry 分类总览：全量按 `eventType` 分组聚合 + 时间范围 + 设备画像。计数走全量（不受分页影响）。
+
+**响应 200：** 聚合对象（`data` 为后端 `get_telemetry_device_summary` 产物）。
+
+**错误码：** `NOT_FOUND`（404，设备不存在）。

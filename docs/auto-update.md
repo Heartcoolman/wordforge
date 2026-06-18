@@ -114,8 +114,8 @@ Content-Type: application/json
 
 {
   "channel": "stable",           // 或 "beta"
-  "targetVersion": "v0.7.0",
-  "confirmCurrentVersion": "v0.6.0"   // 防误操作二次确认，必须与服务端 current 一致
+  "targetVersion": "v1.2.1",
+  "confirmCurrentVersion": "v1.2.0"   // 防误操作二次确认，必须与服务端 current 一致
 }
 ```
 
@@ -127,7 +127,7 @@ Content-Type: application/json
     "taskId": "uuid-xxxx",
     "phase": "pending",
     "percent": 0,
-    "targetVersion": "v0.7.0",
+    "targetVersion": "v1.2.1",
     "startedAt": "2026-05-21T03:00:00Z"
   }
 }

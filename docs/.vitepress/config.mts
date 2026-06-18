@@ -9,12 +9,13 @@ export default defineConfig({
   cleanUrls: true,
   ignoreDeadLinks: true,
   // 开发内部目录（设计草稿 / 调研报告），含泛型尖括号会导致 markdown-it 报未闭合 HTML 错误
-  srcExclude: ['superpowers/**', 'v1-research/**'],
+  srcExclude: ['superpowers/**', 'v1-research/**', 'reviews/**'],
 
   themeConfig: {
     nav: [
       { text: '指南', link: '/guide/introduction' },
       { text: 'API', link: '/api-endpoints' },
+      { text: '资源包', link: '/resource-packs' },
       { text: 'AMAS', link: '/amas-admin-console' },
       { text: '用户', link: '/user/installation-web' },
       { text: '运维', link: '/auto-update' },
@@ -40,6 +41,7 @@ export default defineConfig({
           items: [
             { text: 'Web 客户端安装', link: '/user/installation-web' },
             { text: 'iOS 客户端安装', link: '/user/installation-ios' },
+            { text: 'Android 客户端安装', link: '/user/installation-android' },
             { text: '常见问题', link: '/user/faq' },
             { text: '隐私与数据', link: '/user/privacy' },
           ],
@@ -57,6 +59,7 @@ export default defineConfig({
             { text: '监控对接', link: '/runbook/monitoring-setup' },
             { text: '维护模式', link: '/runbook/maintenance-mode' },
             { text: 'nginx 与 TLS', link: '/runbook/nginx-tls' },
+            { text: '资源包运维', link: '/runbook/resource-pack-ops' },
           ],
         },
       ],
@@ -80,6 +83,7 @@ export default defineConfig({
           items: [
             { text: 'Web 客户端安装', link: '/user/installation-web' },
             { text: 'iOS 客户端安装', link: '/user/installation-ios' },
+            { text: 'Android 客户端安装', link: '/user/installation-android' },
             { text: '常见问题', link: '/user/faq' },
             { text: '隐私与数据', link: '/user/privacy' },
           ],
@@ -92,6 +96,7 @@ export default defineConfig({
             { text: 'API 接口对接', link: '/api-endpoints' },
             { text: 'API 对接规范', link: '/api-spec' },
             { text: '客户端上传数据规范', link: '/client-upload-data' },
+            { text: '资源包热更', link: '/resource-packs' },
           ],
         },
         {
@@ -122,6 +127,7 @@ export default defineConfig({
             { text: '监控对接', link: '/runbook/monitoring-setup' },
             { text: '维护模式', link: '/runbook/maintenance-mode' },
             { text: 'nginx 与 TLS', link: '/runbook/nginx-tls' },
+            { text: '资源包运维', link: '/runbook/resource-pack-ops' },
           ],
         },
         {

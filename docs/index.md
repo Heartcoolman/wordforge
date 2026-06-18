@@ -33,6 +33,10 @@ features:
     icon: 🔌
     details: REST 接口清单与对接规范
     link: /api-endpoints
+  - title: 资源包热更
+    icon: 📦
+    details: Ed25519 签名分发的不发版内容/配置热更，Web / iOS / Android 三端共用
+    link: /resource-packs
   - title: 调参管理后台
     icon: 🎛️
     details: 结构化编辑 + 可视化 + DeepSeek 助手运营手册

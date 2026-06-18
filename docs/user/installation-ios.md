@@ -1,5 +1,9 @@
 # iOS 客户端安装
 
+> 三端安装：[Web 客户端](./installation-web) · **iOS 客户端**（本页） · [Android 客户端](./installation-android)
+>
+> 当前版本：**v1.2.3** · 发布日期 2026-06-17
+
 WordForge iOS 客户端目前通过 **TestFlight** 分发，尚未上架 App Store。
 
 ## TestFlight 安装（推荐）

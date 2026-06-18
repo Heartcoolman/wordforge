@@ -18,12 +18,26 @@ WordForge 是一个**自适应算法驱动的英语词汇学习平台**，由 Ru
 | **疲劳感知** | MediaPipe + WebAssembly 摄像头检测，疲劳信号注入 AMAS 强度调节 |
 | **LLM 调参顾问** | 每 20 分钟跑一次 DeepSeek，综合近期指标产出 patch 建议，白名单 + 成本上限 + 灰度自动应用 |
 | **配置热加载** | `amas_config.toml` 被 `notify` watcher 盯着，500ms 防抖 + validate → `reload_config()` 原子生效 |
-| **Admin GUI（`admin-ui/`）** | 用户、广播、AMAS 调参、版本对比、监控、自更新；SolidJS + Tailwind v4 + TanStack Query；构建产物内嵌进后端二进制 |
+| **Admin GUI（`admin-ui/`）** | 用户、广播、AMAS 调参、版本对比、监控、自更新、资源包；SolidJS + Tailwind v4（数据层用 SolidJS 原生 `createResource`）；构建产物内嵌进后端二进制 |
+| **资源包热更** | 签名（Ed25519）分发的不发版内容/配置热更，三端（Web / iOS / Android）共用 `content-slots` / `app-config` 两个通用容器，详见 [资源包热更](/resource-packs) |
 | **API 服务** | axum 0.7 统一对外，给管理后台与移动/Web 学习端复用 |
 
 ## 仓库定位
 
 本仓库是**后端 + 内嵌 admin GUI 的 monorepo**（**不是**典型的"前后端分离 monorepo"）。`admin-ui/` 是后端的运维 GUI 源码，构建产物 `static/` 由 `learning-backend` 二进制通过 `tower-http::ServeDir` 内嵌 fallback 服务；它**没有独立部署形态** —— 离开后端二进制就不存在。end-user 学习端 Web 已拆分到独立项目 `wordforge-web`，本仓库只对历史用户路径保留过渡页（`LegacyUserFrontendPage`）。
+
+## 四端构成
+
+WordForge 是「一后端 + 三客户端」的四端体系，**各端均为独立 GitHub 仓库、独立发版**；本后端仓库是对外 API 与算法/契约的**唯一权威**，三客户端通过 `/api/*` 接入：
+
+| 端 | 仓库 | 当前版本 | 说明 |
+|---|---|---|---|
+| Server | `wordforge-server` | v1.2.0-beta.14 | Rust 后端 + 内嵌 admin GUI，本仓库 |
+| Web | `wordforge-web` | v1.3.1 | end-user 学习端 SPA，独立部署 |
+| Android | `wordforge-android` | v1.3.1 | 原生客户端 |
+| iOS | `wordforge-ios` | v1.2.3 | 原生客户端 |
+
+三客户端共享同一套契约（OpenAPI / AMAS 事件流 / 资源包签名分发 / 设备心跳 ≤ 10s 等），客户端版本节奏可各自独立，但必须满足后端契约门控（如资源包 `minAppVersion`）。
 
 ## 下一步
 
