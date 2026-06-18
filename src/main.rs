@@ -139,6 +139,14 @@ async fn main() {
         return;
     }
 
+    // 真·任意版本回滚：目标二进制自报其期望的 schema 版本。回滚流程下载/解出目标版本二进制后
+    // 以 `--print-schema-version` 试跑拿到该数(version→schema 映射的主路径)，据此用 down 链把
+    // 当前库副本降级到该版本。零副作用：不开库 / 不连网 / 不绑端口，仅打印编译期常量后秒退。
+    if std::env::args().any(|a| a == "--print-schema-version") {
+        println!("{}", learning_backend::store::migrate::SCHEMA_VERSION);
+        return;
+    }
+
     let config = Config::from_env();
 
     init_tracing(&LogConfig {

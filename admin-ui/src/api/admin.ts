@@ -8,7 +8,7 @@ import type {
   SystemHealth, DatabaseInfo, SystemSettings, VersionGate, WorkerStatusRow, DeadLetterEntry,
   RequestMetrics, LogLine, AlertEvent,
   UpdateCheck, AdminUpdateStatus, ApplyAccepted, UpdateAuditEntry, DailyActiveUsersEntry, DailyRecordsEntry,
-  ChangelogSummary, BackupList, BackupEntry,
+  ChangelogSummary, BackupList, BackupEntry, RollbackPreflight,
   StudyOverview, RecordTypeBreakdown, WordStateDistribution, RetentionCurve,
   FeedbackItem, FeedbackReply, FeedbackStats, FeedbackDetail,
   // m027:设备页对齐 clients.html 设计新增
@@ -255,11 +255,18 @@ export const adminApi = {
   // S5：升级历史审计列表
   updatesHistory: () =>
     api.get<{ entries: UpdateAuditEntry[] }>('/api/admin/updates/history', undefined, { useAdminToken: true }),
-  // m022:回滚到旧版本(后端跳过 semver 上升校验,从 GitHub 拉 target tag metadata + apply)
+  // 真·任意版本回滚：后端跳过 semver 上升校验，用 down 链把当前库副本降级到目标版本 schema。
   updatesRollback: (channel: 'stable' | 'beta', targetVersion: string, confirmCurrentVersion: string) =>
     api.post<ApplyAccepted>(
       '/api/admin/updates/rollback',
       { channel, targetVersion, confirmCurrentVersion },
+      { useAdminToken: true },
+    ),
+  // 回滚前预检（不下载、不执行）：能否回滚 / 目标-当前 schema / 将丢弃哪些新数据 / 是否需下载确认。
+  updatesRollbackPreflight: (targetVersion: string, confirmCurrentVersion: string) =>
+    api.post<RollbackPreflight>(
+      '/api/admin/updates/rollback/preflight',
+      { targetVersion, confirmCurrentVersion },
       { useAdminToken: true },
     ),
   // CHANGELOG（GitHub compare API 分类）。available=false 时前端回退 releaseNotes。

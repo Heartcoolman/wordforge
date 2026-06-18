@@ -12,6 +12,7 @@
 
 use learning_backend::store::{migrate, Store};
 use rusqlite::Connection;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// 列出表是否存在（master 表 type='table'）。
 fn table_exists(conn: &Connection, name: &str) -> bool {
@@ -54,6 +55,174 @@ fn index_exists(conn: &Connection, name: &str) -> bool {
 fn run_to_head(store: &Store) -> u32 {
     migrate::run(store).expect("up to head");
     migrate::get_current_version(store).expect("read version")
+}
+
+/// 单列签名:(name, type, notnull, dflt_value, pk)。
+type ColSig = (String, String, i64, Option<String>, i64);
+/// 全量 schema 快照:表名→列签名列表 + 索引名集合(排除 schema_version 与 sqlite 内部对象)。
+fn dump_schema(conn: &Connection) -> (BTreeMap<String, Vec<ColSig>>, BTreeSet<String>) {
+    let tables: Vec<String> = conn
+        .prepare(
+            "SELECT name FROM sqlite_master WHERE type='table'
+             AND name NOT LIKE 'sqlite_%' AND name <> 'schema_version' ORDER BY name",
+        )
+        .unwrap()
+        .query_map([], |r| r.get::<_, String>(0))
+        .unwrap()
+        .filter_map(Result::ok)
+        .collect();
+    let mut cols = BTreeMap::new();
+    for t in &tables {
+        let sig: Vec<ColSig> = conn
+            .prepare(&format!("PRAGMA table_info({t})"))
+            .unwrap()
+            .query_map([], |r| {
+                // 规范化默认值：`DEFAULT NULL`(Some("NULL")) 与无默认(None) 在 SQLite 语义等价
+                // （schema.rs DDL 写 DEFAULT NULL、迁移 up 的 ALTER ADD COLUMN 省略，纯表象不一致），
+                // 归一为 None 后只比对真实差异(type/notnull/pk/非空默认)。
+                let dflt: Option<String> = r.get(4)?;
+                let dflt = match dflt.as_deref() {
+                    Some(s) if s.eq_ignore_ascii_case("null") => None,
+                    _ => dflt,
+                };
+                Ok((
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?,
+                    dflt,
+                    r.get::<_, i64>(5)?,
+                ))
+            })
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        cols.insert(t.clone(), sig);
+    }
+    let indexes: BTreeSet<String> = conn
+        .prepare(
+            "SELECT name FROM sqlite_master WHERE type='index'
+             AND name NOT LIKE 'sqlite_%'",
+        )
+        .unwrap()
+        .query_map([], |r| r.get::<_, String>(0))
+        .unwrap()
+        .filter_map(Result::ok)
+        .collect();
+    (cols, indexes)
+}
+
+/// 插一条最小合法 users 行（仅 6 个 NOT NULL 无默认列），其余取默认。
+fn seed_user(conn: &Connection, i: usize) {
+    conn.execute(
+        "INSERT INTO users (id, email, username, password_hash, created_at, updated_at)
+         VALUES (?1, ?2, 'u', 'h', datetime('now'), datetime('now'))",
+        rusqlite::params![format!("u{i}"), format!("u{i}@example.com")],
+    )
+    .unwrap();
+}
+
+fn users_count(store: &Store) -> i64 {
+    store
+        .connection()
+        .unwrap()
+        .query_row("SELECT count(*) FROM users", [], |r| r.get(0))
+        .unwrap()
+}
+
+/// 真·任意版本回滚的承重不变式：对**每个**目标 schema 版本 k，
+/// 「up→head → revert_to(k) → up→head」后的 schema 必须与原始 head 逐表逐列逐索引完全一致。
+/// 这证明每个 down 是其 up 的干净逆——过度删除 / 错误删除 / down 或 up 中途失败都会破坏往返一致，
+/// 从而被此 sweep 捕获。生产回滚正是「完整当前库 → revert_to(k)」这一方向。
+#[test]
+fn down_chain_round_trip_schema_identical_for_all_k() {
+    let store = Store::open(":memory:", 5000, 1).unwrap();
+    let head = run_to_head(&store);
+    let baseline = dump_schema(&store.connection().unwrap());
+    for k in 0..=head {
+        migrate::revert_to(&store, k).unwrap_or_else(|e| panic!("revert_to({k}) 失败: {e}"));
+        assert_eq!(
+            migrate::get_current_version(&store).unwrap(),
+            k,
+            "revert_to({k}) 后版本号不符"
+        );
+        migrate::run(&store).unwrap_or_else(|e| panic!("从 {k} re-up 失败: {e}"));
+        assert_eq!(
+            migrate::get_current_version(&store).unwrap(),
+            head,
+            "从 {k} re-up 后未回到 head"
+        );
+        let after = dump_schema(&store.connection().unwrap());
+        assert_eq!(after.0, baseline.0, "往返(k={k})后表/列结构漂移");
+        assert_eq!(after.1, baseline.1, "往返(k={k})后索引集合漂移");
+    }
+}
+
+/// 核心(基线)表数据无损：down 只删 migration 增量对象，绝不删 schema.rs 拥有的基线表的行
+///（m001_down no-op）。seed users 后回退到若干代表性版本，行数必须不变；re-up 后仍不变。
+#[test]
+fn revert_preserves_baseline_table_rows() {
+    let store = Store::open(":memory:", 5000, 1).unwrap();
+    let head = run_to_head(&store);
+    {
+        let conn = store.connection().unwrap();
+        for i in 0..5 {
+            seed_user(&conn, i);
+        }
+    }
+    assert_eq!(users_count(&store), 5);
+    for k in [head - 1, head / 2, 1, 0] {
+        migrate::revert_to(&store, k).unwrap();
+        assert_eq!(users_count(&store), 5, "revert 到 {k} 后基线表 users 行数变化");
+        migrate::run(&store).unwrap();
+        assert_eq!(users_count(&store), 5, "从 {k} re-up 后 users 行数变化");
+    }
+}
+
+/// `revert_db_copy` 文件级端到端：现役库降级产物达到目标 schema、保留基线表数据、现役库零接触、
+/// 产物 sidecar 已清理。这是生产回滚降级引擎的真实路径。
+#[test]
+fn revert_db_copy_end_to_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let live_path = dir.path().join("learning.db");
+    let live = Store::open(live_path.to_str().unwrap(), 5000, 2).unwrap();
+    let head = run_to_head(&live);
+    {
+        let conn = live.connection().unwrap();
+        seed_user(&conn, 1);
+    }
+    // pre-rollback 安全备份（干净单文件快照）
+    let snapshot = dir.path().join("backup-pre-rollback.db");
+    live.backup_to(&snapshot).unwrap();
+
+    let target = head - 3;
+    let out = dir.path().join("learning.db.rollback-src");
+    migrate::revert_db_copy(&snapshot, &out, target).expect("revert_db_copy");
+
+    // 产物 sidecar 已清理（在重新打开产物之前检查，否则重开会再建 WAL）
+    let wal = std::path::PathBuf::from(format!("{}-wal", out.display()));
+    assert!(!wal.exists(), "out-wal sidecar 应已清理");
+
+    // 降级产物达到目标版本且基线数据保留
+    let reverted = Store::open(out.to_str().unwrap(), 5000, 1).unwrap();
+    assert_eq!(migrate::get_current_version(&reverted).unwrap(), target);
+    assert_eq!(users_count(&reverted), 1, "降级产物应保留基线表数据");
+
+    // 现役库未被触碰
+    assert_eq!(
+        migrate::get_current_version(&live).unwrap(),
+        head,
+        "revert_db_copy 不应改动现役库"
+    );
+    assert_eq!(users_count(&live), 1);
+}
+
+/// SCHEMA_VERSION 常量必须与迁移注册表长度一致（`--print-schema-version` 据此自报，不得漂移）。
+#[test]
+fn schema_version_const_matches_registry() {
+    let store = Store::open(":memory:", 5000, 1).unwrap();
+    let head = run_to_head(&store);
+    assert_eq!(head, migrate::SCHEMA_VERSION, "SCHEMA_VERSION 与迁移注册表漂移");
+    assert_eq!(migrate::SCHEMA_VERSION as usize, migrate::migration_count());
 }
 
 /// `revert_to(0)` 后：

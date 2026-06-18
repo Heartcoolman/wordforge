@@ -391,8 +391,28 @@ export interface AdminUpdateStatus {
   installedAt: string | null;
   /// 进程运行时长（秒）
   uptimeSecs: number;
-  /// v1.2.0-beta.8：有本地 DB 备份、可安全回滚的版本 tag 列表（回滚会恢复其数据快照）。
+  /// 真·任意版本回滚：可作为回滚目标的已知历史版本（严格早于当前、down 链可达）。
+  /// 回滚以 down 链把当前库副本降级到目标 schema，不再依赖预存快照。更新的(beta.18+)目标可经
+  /// "回滚到任意版本"输入 + preflight 自声明解析。
   rollbackTargets?: string[];
+  /// 当前二进制期望的 schema 版本（= 迁移注册表长度）。
+  currentSchema?: number;
+}
+
+/// POST /api/admin/updates/rollback/preflight 响应：回滚前预检（不下载、不执行）。
+export interface RollbackPreflight {
+  canRollback: boolean;
+  targetVersion: string;
+  currentVersion: string;
+  /// 目标版本期望的 schema 版本；null ⇒ 需下载目标二进制自报才能确认。
+  targetSchema: number | null;
+  currentSchema: number;
+  willDropAfterSchema: number | null;
+  /// 回滚后将不在新库中的"新增功能"（目标 schema 之后的迁移名）；其数据已进 pre-rollback 安全备份。
+  droppedVersionsHint: string[];
+  /// true ⇒ 目标不在历史表，需下载其二进制试跑 --print-schema-version 才能最终确认。
+  needsDownloadCheck: boolean;
+  reason: string;
 }
 
 /// CHANGELOG 单条 commit（GitHub compare API 分类后）。
@@ -419,8 +439,8 @@ export interface ChangelogSummary {
   compareUrl?: string;
 }
 
-/// 备份种类：升级前 / 每日定时 / 手动 / 恢复前兜底。
-export type BackupKind = 'upgrade' | 'daily' | 'manual' | 'pre_restore';
+/// 备份种类：升级前 / 每日定时 / 手动 / 恢复前兜底 / 回滚前安全备份（永不裁剪，回滚丢弃的新数据从此处恢复）。
+export type BackupKind = 'upgrade' | 'daily' | 'manual' | 'pre_restore' | 'pre_rollback';
 
 export interface BackupEntry {
   name: string;
@@ -439,8 +459,8 @@ export interface BackupList {
 /// admin 一键升级后台任务状态（v0.5.2+，配合异步 apply）。
 /// `phase` 取值（v1.2.0-beta.11 起含 verifying_signature / self_checking / health_checking）：
 ///   `pending` | `downloading` | `verifying` | `verifying_signature` | `extracting`
-///   | `self_checking` | `backing_up_db` | `swapping` | `restarting` | `health_checking`
-///   | `completed` | `failed`
+///   | `self_checking` | `backing_up_db` | `reverting_db`（回滚降级）| `swapping`
+///   | `restarting` | `health_checking` | `completed` | `failed`
 export interface ApplyTaskStatus {
   taskId: string;
   phase: string;

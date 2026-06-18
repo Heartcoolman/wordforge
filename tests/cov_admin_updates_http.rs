@@ -399,3 +399,111 @@ async fn rejects_non_admin_user_token() {
     let (status, _, body) = response_json(resp).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "body={body}");
 }
+
+// ───────────────────────── 真·任意版本回滚：status / preflight / rollback ─────────────────────────
+
+/// status 的 rollbackTargets 改为来自 version_schema 历史表（严格早于当前的已知版本），
+/// 不再依赖本地预存快照；同时下发 currentSchema。
+#[tokio::test]
+async fn status_lists_known_rollback_targets_and_current_schema() {
+    let app = spawn_test_server().await;
+    let token = setup_admin_and_get_token(&app.app).await;
+    let tmp = tempfile::tempdir().unwrap();
+    attach_updater(&app, "v1.2.0-beta.17", &tmp);
+
+    let resp = request(
+        &app.app,
+        Method::GET,
+        "/api/admin/updates/status",
+        None,
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (status, _, body) = response_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "body={body}");
+    let targets = body["data"]["rollbackTargets"].as_array().unwrap();
+    let tags: Vec<&str> = targets.iter().filter_map(|v| v.as_str()).collect();
+    assert!(tags.contains(&"v1.2.0-beta.16"), "应含更旧的 beta.16: {tags:?}");
+    assert!(tags.contains(&"v1.2.0-beta.8"), "应含 beta.8: {tags:?}");
+    assert!(!tags.contains(&"v1.2.0-beta.17"), "不应含当前版本");
+    assert_eq!(body["data"]["currentSchema"], 59);
+}
+
+/// preflight：历史表内目标无需下载即可解析 schema，给出 droppedVersionsHint。
+#[tokio::test]
+async fn preflight_resolves_known_historical_target() {
+    let app = spawn_test_server().await;
+    let token = setup_admin_and_get_token(&app.app).await;
+    let tmp = tempfile::tempdir().unwrap();
+    attach_updater(&app, "v1.2.0-beta.17", &tmp);
+
+    let resp = request(
+        &app.app,
+        Method::POST,
+        "/api/admin/updates/rollback/preflight",
+        Some(serde_json::json!({
+            "targetVersion": "v1.2.0-beta.12",
+            "confirmCurrentVersion": "v1.2.0-beta.17"
+        })),
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (status, _, body) = response_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "body={body}");
+    assert_eq!(body["data"]["canRollback"], true);
+    assert_eq!(body["data"]["targetSchema"], 55);
+    assert_eq!(body["data"]["currentSchema"], 59);
+    assert_eq!(body["data"]["needsDownloadCheck"], false);
+    let dropped = body["data"]["droppedVersionsHint"].as_array().unwrap();
+    assert!(!dropped.is_empty(), "回滚到 schema 55 应提示 56~59 的新增迁移被丢弃");
+}
+
+/// preflight：目标不在历史表（未知/未来版本）→ needsDownloadCheck=true、targetSchema=null。
+#[tokio::test]
+async fn preflight_flags_needs_download_for_unknown_target() {
+    let app = spawn_test_server().await;
+    let token = setup_admin_and_get_token(&app.app).await;
+    let tmp = tempfile::tempdir().unwrap();
+    attach_updater(&app, "v1.2.0-beta.17", &tmp);
+
+    let resp = request(
+        &app.app,
+        Method::POST,
+        "/api/admin/updates/rollback/preflight",
+        Some(serde_json::json!({
+            "targetVersion": "v9.9.9-beta.1",
+            "confirmCurrentVersion": "v1.2.0-beta.17"
+        })),
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (status, _, body) = response_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "body={body}");
+    assert_eq!(body["data"]["needsDownloadCheck"], true);
+    assert!(body["data"]["targetSchema"].is_null());
+}
+
+/// rollback：confirmCurrentVersion 与后端不符 → 400 CURRENT_VERSION_MISMATCH（早于任何下载/执行）。
+#[tokio::test]
+async fn rollback_rejects_current_version_mismatch() {
+    let app = spawn_test_server().await;
+    let token = setup_admin_and_get_token(&app.app).await;
+    let tmp = tempfile::tempdir().unwrap();
+    attach_updater(&app, "v1.2.0-beta.17", &tmp);
+
+    let resp = request(
+        &app.app,
+        Method::POST,
+        "/api/admin/updates/rollback",
+        Some(serde_json::json!({
+            "channel": "beta",
+            "targetVersion": "v1.2.0-beta.12",
+            "confirmCurrentVersion": "v1.2.0-beta.1"
+        })),
+        &[("authorization", auth_header(&token))],
+    )
+    .await;
+    let (status, _, body) = response_json(resp).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={body}");
+    assert_eq!(body["code"], "CURRENT_VERSION_MISMATCH");
+}

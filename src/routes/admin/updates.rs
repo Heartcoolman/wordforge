@@ -25,9 +25,11 @@ use crate::auth::AdminAuthUser;
 use crate::extractors::JsonBody;
 use crate::response::{ok, AppError};
 use crate::services::updater::{
-    ApplyContext, Channel, ChannelStatus, UpdatePhase, Updater, UpdaterError,
+    ApplyContext, Channel, ChannelStatus, RollbackSpec, UpdatePhase, Updater, UpdaterError,
 };
+use crate::services::version_schema;
 use crate::state::{AppState, ApplyTaskStatus, SseEvent};
+use crate::store::migrate;
 use crate::store::operations::update_audit::UpdateAuditEntry;
 
 /// 备份目录总占用阈值（10 GiB），超过前端做软提示。
@@ -43,6 +45,7 @@ pub fn router() -> Router<AppState> {
         .route("/check", post(force_check))
         .route("/apply", post(apply))
         .route("/rollback", post(rollback))
+        .route("/rollback/preflight", post(rollback_preflight))
         .route("/history", get(get_history))
         .route("/changelog", get(get_changelog))
         .route("/backups", get(list_backups).post(create_backup))
@@ -82,12 +85,14 @@ async fn get_status(
             .and_then(|m| m.modified().ok())
             .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339());
         map.insert("installedAt".into(), json!(installed));
-        // v1.2.0-beta.8：有本地 DB 备份的版本 = 可安全回滚目标（回滚会恢复其数据快照）。
-        // UI 据此限定回滚选项，避免回滚到不兼容旧版本。
-        let rollback_targets = data_dir(&state)
-            .map(|d| available_rollback_targets(&d))
-            .unwrap_or_default();
+        // 真·任意版本回滚：可回滚目标 = 已知历史版本(version_schema 表)中严格早于当前、
+        // schema<=当前的版本。回滚以 down 链把当前库副本降级到目标 schema（不再依赖预存快照），
+        // 故无落盘库(:memory:)也能列出目标；仅在真正执行时 data_dir 为 None 才拒绝。
+        let current_tag = updater.current_tag();
+        let rollback_targets =
+            version_schema::rollback_targets(current_tag, migrate::SCHEMA_VERSION);
         map.insert("rollbackTargets".into(), json!(rollback_targets));
+        map.insert("currentSchema".into(), json!(migrate::SCHEMA_VERSION));
     }
     Ok(ok(payload))
 }
@@ -250,7 +255,7 @@ async fn apply(
             audit_db_path: bg_audit_db_path,
             allow_downgrade: false,
             // 升级走前向迁移,不回退 DB
-            rollback_db_backup: None,
+            rollback: None,
         };
         match bg_updater.apply(ctx, backup_cb, sink).await {
             Ok(()) => {
@@ -303,6 +308,7 @@ fn phase_label_percent(phase: &UpdatePhase) -> (String, u8) {
         UpdatePhase::Extracting => ("extracting".into(), 72),
         UpdatePhase::SelfChecking => ("self_checking".into(), 80),
         UpdatePhase::BackingUpDb => ("backing_up_db".into(), 86),
+        UpdatePhase::RevertingDb => ("reverting_db".into(), 89),
         UpdatePhase::Swapping => ("swapping".into(), 92),
         UpdatePhase::Restarting => ("restarting".into(), 95),
         UpdatePhase::HealthChecking => ("health_checking".into(), 97),
@@ -337,6 +343,13 @@ fn map_err(e: UpdaterError) -> AppError {
         UpdaterError::InvalidTarget(_) => {
             AppError::bad_request("INVALID_TARGET_VERSION", &e.to_string())
         }
+        UpdaterError::RollbackSchemaUnresolvable(_) => AppError::bad_request(
+            "ROLLBACK_SCHEMA_UNRESOLVABLE",
+            &format!(
+                "{}（目标版本过旧或未登记，无法安全降级落地；请改用更近的版本或从备份恢复）",
+                e
+            ),
+        ),
         UpdaterError::Api { status, .. } => AppError {
             status: StatusCode::BAD_GATEWAY,
             code: format!("GITHUB_API_{status}"),
@@ -354,15 +367,85 @@ fn map_err(e: UpdaterError) -> AppError {
     }
 }
 
-/// m022:POST /api/admin/updates/rollback —— 显式回退到某个旧版本。
+/// POST /api/admin/updates/rollback/preflight —— 回滚前预检（不下载、不执行）。
+/// 让前端二次确认弹窗据实展示：能否回滚、目标/当前 schema、将丢弃哪些版本之后的新数据、
+/// 是否需下载目标二进制才能确认 schema（beta.18+ 自声明版本）、以及不可回滚的原因。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PreflightRequest {
+    target_version: String,
+    confirm_current_version: String,
+}
+
+async fn rollback_preflight(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    JsonBody(req): JsonBody<PreflightRequest>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let updater = require_updater(&state).await?;
+    let current_tag = updater.current_tag().to_string();
+    let current_schema = migrate::SCHEMA_VERSION;
+    let mut reasons: Vec<String> = Vec::new();
+    let mut can = true;
+
+    if req.confirm_current_version != current_tag {
+        can = false;
+        reasons.push("前端版本号与后端不一致，请刷新后重试".into());
+    }
+    if req.target_version == current_tag {
+        can = false;
+        reasons.push("目标版本与当前版本相同".into());
+    }
+    if data_dir(&state).is_none() {
+        can = false;
+        reasons.push("内存库 / 无落盘数据目录，不支持回滚".into());
+    }
+
+    // schema 可解析 = 历史表命中（v1.1.0~beta.17，无需下载）；未命中需下载目标二进制自报（beta.18+）。
+    let target_schema = version_schema::schema_from_table(&req.target_version);
+    let needs_download_check = target_schema.is_none();
+    let mut dropped: Vec<&'static str> = Vec::new();
+    if let Some(k) = target_schema {
+        if k > current_schema {
+            can = false;
+            reasons.push(format!(
+                "目标 schema {k} 高于当前 {current_schema}（这是升级而非回滚）"
+            ));
+        }
+        if k < migrate::DOWN_PRODUCTION_READY_FROM {
+            can = false;
+            reasons.push("目标版本过旧，down 链未覆盖到该版本".into());
+        }
+        if k <= current_schema {
+            dropped = migrate::migration_names_after(k);
+        }
+    }
+
+    Ok(ok(json!({
+        "canRollback": can,
+        "targetVersion": req.target_version,
+        "currentVersion": current_tag,
+        "targetSchema": target_schema,
+        "currentSchema": current_schema,
+        // 回滚后将不在新库中的"新增功能"（目标 schema 之后的迁移）；其数据已进 pre-rollback 安全备份。
+        "willDropAfterSchema": target_schema,
+        "droppedVersionsHint": dropped,
+        // true ⇒ 目标不在历史表，需下载其二进制试跑 --print-schema-version 才能最终确认是否可回滚。
+        "needsDownloadCheck": needs_download_check,
+        "reason": reasons.join("；"),
+    })))
+}
+
+/// POST /api/admin/updates/rollback —— 真·任意版本回滚。
 ///
 /// 与 `apply` 的差异:
 ///   1. 接收 `target_version` 不必是 channel 的 latest;backend 先调
-///      `fetch_release_by_tag(channel, target_version)` 把那个 tag 的元数据塞 cache,
-///      再走 apply pipeline。
+///      `fetch_release_by_tag(channel, target_version)` 把那个 tag 的元数据塞 cache,再走 apply pipeline。
 ///   2. `ApplyContext.allow_downgrade = true`,绕过 semver 单调向上校验。
-///   3. 审计日志 `action = "rollback"`(默认 `self_update`),前端可按 action 区分。
-///   4. 仍然走 DB backup → swap → health-check → restart 的完整流程;失败自动回滚。
+///   3. 审计日志 `action = "rollback"`,前端可按 action 区分。
+///   4. `ApplyContext.rollback = Some(..)`：apply 在 swap 前用当前二进制的 down 链把"当前库的
+///      pre-rollback 安全备份副本"降级到目标版本期望的 schema，stage 为 pending、新进程启动落地，
+///      保证回滚后 binary/DB 严格一致；失败自动回滚。不再要求预存 DB 快照——任意（≥beta.8）版本可回退。
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RollbackRequest {
@@ -385,30 +468,18 @@ async fn rollback(
         ));
     }
 
-    // v1.2.0-beta.8 最强回滚守卫:目标版本必须有本地 DB 备份(`learning-<target>.backup.db`)
-    // 才放行——回滚会把它原子换为现役库,保证回滚后 binary/DB 严格一致。无备份则拒绝并列出
-    // 可回滚目标,从源头拦住「回滚到不兼容旧版本→崩溃循环」(本次事故的诱因)。
-    let rollback_db_backup = {
-        let dir = data_dir(&state).ok_or_else(|| {
-            AppError::bad_request(
-                "ROLLBACK_NO_DATADIR",
-                "内存库 / 无落盘数据目录，不支持带 DB 回滚",
-            )
-        })?;
-        let p = dir.join(format!("learning-{}.backup.db", req.target_version));
-        if !p.is_file() {
-            let avail = available_rollback_targets(&dir);
-            return Err(AppError::bad_request(
-                "ROLLBACK_NO_DB_BACKUP",
-                &format!(
-                    "目标版本 {} 无本地 DB 备份，无法安全回滚（回滚需恢复该版本的数据快照以保证一致）。可回滚目标：{}",
-                    req.target_version,
-                    if avail.is_empty() { "无".to_string() } else { avail.join("、") }
-                ),
-            ));
-        }
-        p
-    };
+    // 真·任意版本回滚：不再要求预存 DB 快照（回滚以 down 链把当前库副本降级到目标 schema）。
+    // 仍要求有落盘数据目录——:memory: 库无法落盘安全备份 / 降级副本 / 暂存 pending。
+    if data_dir(&state).is_none() {
+        return Err(AppError::bad_request(
+            "ROLLBACK_NO_DATADIR",
+            "内存库 / 无落盘数据目录，不支持回滚",
+        ));
+    }
+    // 解析目标版本期望的 schema：先查历史表（v1.1.0~beta.17，无需下载）；未命中则置 None，由 apply
+    // 在下载/解出目标二进制后试跑 `--print-schema-version` 自报（beta.18+）。仍不可解析（早于回滚
+    // 下界 v1.1.0、未登记）⇒ apply 在 swap 前中止报 ROLLBACK_SCHEMA_UNRESOLVABLE，现役无损。
+    let target_schema = version_schema::schema_from_table(&req.target_version);
 
     // 关键一步:把 target_version 的 release 元数据从 GitHub 拉到 cache,
     // 否则 apply 会在 "channel latest != target_tag" 校验失败。
@@ -517,8 +588,9 @@ async fn rollback(
             task_id: task_id.clone(),
             audit_db_path: bg_audit_db_path,
             allow_downgrade: true,
-            // 最强回滚:把目标版本 DB 备份原子换为现役库,保证 binary/DB 一致
-            rollback_db_backup: Some(rollback_db_backup),
+            // 真·任意版本回滚:apply 在 swap 前用 down 链把当前库副本降级到 target_schema。
+            // target_schema=None 时 apply 试跑目标二进制 --print-schema-version 自报。
+            rollback: Some(RollbackSpec { target_schema }),
         };
         match bg_updater.apply(ctx, backup_cb, sink).await {
             Ok(()) => {
@@ -551,6 +623,9 @@ async fn rollback(
             "targetVersion": initial.target_version,
             "startedAt": initial.started_at,
             "action": "rollback",
+            // targetSchema=null ⇒ apply 将下载目标二进制后自报解析（beta.18+）。
+            "targetSchema": target_schema,
+            "currentSchema": migrate::SCHEMA_VERSION,
         })),
     ))
 }
@@ -635,20 +710,6 @@ fn upgrade_backup_version(name: &str) -> Option<String> {
         .and_then(|s| s.strip_suffix(".backup.db"))
         .filter(|s| !s.is_empty())
         .map(str::to_owned)
-}
-
-/// v1.2.0-beta.8：扫描 data 目录，列出有 `learning-<tag>.backup.db` 的版本 tag——
-/// 即「可安全回滚目标」（带 DB 快照）。供回滚守卫报错提示 + 状态接口下发给 UI。
-fn available_rollback_targets(data_dir: &std::path::Path) -> Vec<String> {
-    let mut v: Vec<String> = std::fs::read_dir(data_dir)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|e| upgrade_backup_version(&e.file_name().to_string_lossy()))
-        .collect();
-    v.sort();
-    v.dedup();
-    v
 }
 
 fn entry_from_path(
@@ -761,6 +822,10 @@ async fn list_backups(
                     "daily"
                 } else if fname.starts_with("backup-pre-restore-") && fname.ends_with(".db") {
                     "pre_restore"
+                } else if fname.starts_with("backup-pre-rollback-") && fname.ends_with(".db") {
+                    // 回滚前的现役库全量安全备份。永不自动裁剪（prune_backups 只裁 manual/daily），
+                    // 保证回滚丢弃的"升级后新数据"始终可从此处恢复（数据可自由恢复）。
+                    "pre_rollback"
                 } else {
                     continue;
                 };
@@ -992,27 +1057,5 @@ mod tests {
         assert_eq!(upgrade_backup_version("learning-.backup.db"), None);
         assert_eq!(upgrade_backup_version("backup-daily-20260610.db"), None);
         assert_eq!(upgrade_backup_version("learning.db"), None);
-    }
-
-    /// 可回滚目标 = data 目录里有 learning-<tag>.backup.db 的版本，排序去重，
-    /// 忽略 daily/manual 等非升级备份与 live 库本身。
-    #[test]
-    fn available_rollback_targets_lists_backed_up_versions() {
-        let dir = tempfile::tempdir().unwrap();
-        for f in [
-            "learning-v1.2.0-beta.5.backup.db",
-            "learning-v1.2.0-beta.4.backup.db",
-            "learning.db",                    // 现役库，非目标
-            "backups/backup-daily-20260610.db", // daily，非目标（且在子目录）
-            "learning.manual-bak.db",         // 手动备份，非 learning-<tag> 形态
-        ] {
-            let p = dir.path().join(f);
-            if let Some(parent) = p.parent() {
-                std::fs::create_dir_all(parent).unwrap();
-            }
-            std::fs::write(&p, b"x").unwrap();
-        }
-        let got = available_rollback_targets(dir.path());
-        assert_eq!(got, vec!["v1.2.0-beta.4", "v1.2.0-beta.5"]);
     }
 }

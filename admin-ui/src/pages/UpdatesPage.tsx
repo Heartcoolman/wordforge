@@ -7,6 +7,7 @@ import { adminApi } from '@/api/admin';
 import { ApiError } from '@/api/http';
 import type {
   AdminUpdateStatus, ChannelStatus, ChangelogSummary, BackupList, BackupEntry, UpdateAuditEntry,
+  RollbackPreflight,
 } from '@/types/admin';
 
 type Channel = 'stable' | 'beta';
@@ -20,6 +21,7 @@ const PHASE_LABEL: Record<string, string> = {
   extracting: '解压产物',
   self_checking: '新版本自检',
   backing_up_db: '备份数据库',
+  reverting_db: '降级数据库',
   swapping: '替换二进制',
   restarting: '重启服务',
   health_checking: '确认新版本健康',
@@ -163,6 +165,9 @@ export default function UpdatesPage() {
     'apply' | 'preview' | 'rollback' | { kind: 'restore'; backup: BackupEntry } | null
   >(null);
   const [rollbackTarget, setRollbackTarget] = createSignal<string | null>(null);
+  // 真·任意版本回滚：任意版本输入框 + 该目标的 preflight 预检结果（驱动确认弹窗实情展示）。
+  const [rollbackInput, setRollbackInput] = createSignal('');
+  const [preflight, setPreflight] = createSignal<RollbackPreflight | null>(null);
   // 升级进度（apply 进行中 / 终态保留）。phaseKey = 后端真实 phase；status 驱动步进器整体态。
   const [progress, setProgress] = createSignal<
     { phaseKey: string; percent: number; status: 'running' | 'failed' | 'done' } | null
@@ -337,6 +342,22 @@ export default function UpdatesPage() {
     }
   }
 
+  // 打开回滚确认前先跑 preflight：拿到目标/当前 schema、将丢弃哪些新数据、是否需下载确认。
+  // preflight 仅用于"实情展示"，失败不阻断（确认框仍可凭基础信息进行），最终由后端守卫兜底。
+  async function openRollbackConfirm(target: string) {
+    const s = status();
+    if (!s || !target) return;
+    setRollbackTarget(target);
+    setPreflight(null);
+    setConfirm('rollback');
+    try {
+      setPreflight(await adminApi.updatesRollbackPreflight(target, s.currentVersion));
+    } catch (e) {
+      const msg = e instanceof ApiError ? `[${e.code}] ${e.message}` : e instanceof Error ? e.message : '未知错误';
+      toast.error('回滚预检失败', msg);
+    }
+  }
+
   async function doRollback() {
     const s = status();
     const target = rollbackTarget() ?? previousEntry()?.fromVersion ?? null;
@@ -345,11 +366,23 @@ export default function UpdatesPage() {
     try {
       await adminApi.updatesRollback(resolveRollbackChannel(target), target, s.currentVersion);
       setConfirm(null);
+      setRollbackInput('');
       toast.success(`已下发回滚到 ${target}`, '服务重启完成后自动刷新…');
       void refetchHistory();
       reloadWhenBack();
     } catch (e) {
-      toast.error('回滚失败', e instanceof Error ? e.message : '未知错误');
+      // 后端守卫错误码 → 可读提示（任意版本输入可能触发 schema 不可解析 / 过旧）。
+      const code = e instanceof ApiError ? e.code : '';
+      const detail = e instanceof ApiError ? e.message : e instanceof Error ? e.message : '未知错误';
+      const hint =
+        code === 'ROLLBACK_SCHEMA_UNRESOLVABLE'
+          ? '目标版本过旧或未登记，无法安全降级落地；请选更近的版本或改用「备份恢复」。'
+          : code === 'ROLLBACK_NO_DATADIR'
+            ? '当前为内存库 / 无落盘数据目录，不支持回滚。'
+            : code === 'CURRENT_VERSION_MISMATCH'
+              ? '前后端版本号不一致，请刷新页面后重试。'
+              : detail;
+      toast.error('回滚失败', hint);
     } finally {
       setBusy(false);
     }
@@ -498,6 +531,35 @@ export default function UpdatesPage() {
                     {targetVersion() ? `一键升级到 ${targetVersion()}` : '暂无可用版本'}
                   </Btn>
                 </div>
+
+                {/* 真·任意版本回滚：下拉选已知历史版本(rollbackTargets) 或手输任意 release tag →
+                    preflight 预检 → 二次确认。回滚以 down 链把当前库副本降级到目标版本 schema。 */}
+                <Field label="回滚到任意版本">
+                  <div style={sx({ display: 'flex', gap: 8 })}>
+                    <input
+                      class="input mono"
+                      list="rollback-targets"
+                      placeholder="选择或输入版本 tag，如 v1.2.0-beta.12"
+                      value={rollbackInput()}
+                      onInput={(e) => setRollbackInput(e.currentTarget.value)}
+                      style={sx({ flex: 1, fontSize: 12 })}
+                    />
+                    <datalist id="rollback-targets">
+                      <For each={s().rollbackTargets ?? []}>{(t) => <option value={t} />}</For>
+                    </datalist>
+                    <Btn
+                      variant="outline"
+                      icon="rotate"
+                      disabled={!rollbackInput().trim() || busy()}
+                      onClick={() => void openRollbackConfirm(rollbackInput().trim())}
+                    >
+                      回滚
+                    </Btn>
+                  </div>
+                  <p class="muted-3" style={sx({ fontSize: 11, marginTop: 6 })}>
+                    可回滚到任意已知历史版本（≥ v1.1.0）；回滚前自动全量安全备份当前库，丢弃的新数据可从「备份恢复」找回。
+                  </p>
+                </Field>
 
                 {/* 升级自检流水线：动画步进器，逐级点亮的是后端真实 phase（非伪造进度） */}
                 <Show when={progress()}>
@@ -693,8 +755,9 @@ export default function UpdatesPage() {
                       {(h) => {
                         const isRollback = h.action === 'rollback' || h.outcome === 'rolled_back';
                         const dur = auditDurSecs(h);
-                        // v1.2.0-beta.8：仅当目标版本有本地 DB 备份（在 rollbackTargets 中）才允许回滚，
-                        // 从源头拦住回滚到不兼容旧版本导致崩溃循环。
+                        // 真·任意版本回滚：fromVersion 在可回滚目标集（已知历史版本、严格早于当前、
+                        // down 链可达）内即放开。回滚以 down 链把当前库副本降级到该版本 schema，不再
+                        // 依赖预存快照，故远比旧版（仅最近 2 个有快照的版本）放得开。
                         const canRollback = !!h.fromVersion
                           && h.fromVersion !== status()?.currentVersion
                           && (status()?.rollbackTargets ?? []).includes(h.fromVersion);
@@ -719,7 +782,7 @@ export default function UpdatesPage() {
                                   size="xs"
                                   variant="outline"
                                   icon="rotate"
-                                  onClick={() => { setRollbackTarget(h.fromVersion); setConfirm('rollback'); }}
+                                  onClick={() => void openRollbackConfirm(h.fromVersion)}
                                 >
                                   回滚
                                 </Btn>
@@ -823,10 +886,10 @@ export default function UpdatesPage() {
         }
       />
 
-      {/* 回滚二次确认 */}
+      {/* 回滚二次确认（实情由 preflight 驱动） */}
       <Confirm
         open={confirm() === 'rollback'}
-        onClose={() => setConfirm(null)}
+        onClose={() => { setConfirm(null); setPreflight(null); }}
         onConfirm={doRollback}
         loading={busy()}
         danger
@@ -835,11 +898,36 @@ export default function UpdatesPage() {
         body={
           <div>
             <p style={sx({ marginTop: 0 })}>
-              将从 <span class="mono">{status()?.currentVersion ?? '—'}</span> 切换到{' '}
-              <span class="mono">{rollbackTarget() ?? previousEntry()?.fromVersion ?? '—'}</span>。
+              将从 <span class="mono">{status()?.currentVersion ?? '—'}</span> 回滚到{' '}
+              <span class="mono">{rollbackTarget() ?? '—'}</span>
+              <Show when={preflight()?.targetSchema != null}>
+                {' '}（schema <span class="mono">{status()?.currentSchema ?? '—'}</span> →{' '}
+                <span class="mono">{preflight()!.targetSchema}</span>）
+              </Show>
+              。
             </p>
-            <p style={sx({ fontSize: 12, color: 'var(--warning)' })}>
-              ⚠ 回滚会把<b>数据库一并恢复到该版本的快照</b>——升级到当前版本之后写入的数据将丢失（回滚前会先自动备份当前库）。仅可回滚到有本地 DB 备份的近期版本；若新版本启动健康检查不过，会自动回滚回当前版本。
+            <p style={sx({ fontSize: 12, color: 'var(--success)' })}>
+              ✅ 回滚前自动全量备份当前库（backup-pre-rollback-*），任何数据都可从「备份恢复」找回。
+            </p>
+            <Show when={(preflight()?.droppedVersionsHint?.length ?? 0) > 0}>
+              <p style={sx({ fontSize: 12, color: 'var(--warning)' })}>
+                ⚠ 回滚后，目标版本之后新增的功能数据将不在新库中（共 {preflight()!.droppedVersionsHint.length} 项，如{' '}
+                <span class="mono">{preflight()!.droppedVersionsHint.slice(0, 3).join('、')}</span>
+                {preflight()!.droppedVersionsHint.length > 3 ? ' 等' : ''}）。这些数据在目标版本本就不存在，且已进上述安全备份。
+              </p>
+            </Show>
+            <Show when={preflight()?.needsDownloadCheck}>
+              <p style={sx({ fontSize: 12, color: 'var(--info)' })}>
+                ℹ 该版本不在已知历史表，将下载其二进制确认是否支持安全回滚（过旧版本会被拒绝）。
+              </p>
+            </Show>
+            <Show when={preflight() && !preflight()!.canRollback}>
+              <p style={sx({ fontSize: 12, color: 'var(--error)' })}>
+                ✕ 预检判定不可回滚：{preflight()!.reason || '未知原因'}
+              </p>
+            </Show>
+            <p style={sx({ fontSize: 12, color: 'var(--text-3)' })}>
+              若目标版本启动健康检查不过，将自动回滚回当前版本并恢复数据。
             </p>
           </div>
         }

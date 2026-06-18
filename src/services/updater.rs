@@ -106,6 +106,10 @@ pub enum UpdaterError {
     /// 但在本机起不来（架构错配 / glibc 不兼容 / 损坏 / 配置无法解析）→ swap 前即中止，现役无损。
     #[error("self-check failed: {0}")]
     SelfCheckFailed(String),
+    /// 真·任意版本回滚：无法确定目标版本期望的 schema 版本（不在历史表、且目标二进制不支持
+    /// `--print-schema-version`，即早于回滚下界 v1.1.0 的过旧/未登记版本）。swap 前中止，现役无损。
+    #[error("rollback schema unresolvable: {0}")]
+    RollbackSchemaUnresolvable(String),
 }
 
 /// 更新通道：stable 排除 prerelease，beta 包含所有（含 stable 自身）。
@@ -229,6 +233,8 @@ pub enum UpdatePhase {
     /// C(v1.2.0-beta.11)：换二进制前用新二进制 `--selfcheck` 冒烟（能否在本机加载运行 + 解析配置）
     SelfChecking,
     BackingUpDb,
+    /// 真·任意版本回滚：用 down 链把当前库副本降级到目标版本 schema（在 swap 前、维护态前）。
+    RevertingDb,
     Swapping,
     /// M0-R3：子进程健康自检（等待 /health 返回 200）
     HealthChecking,
@@ -256,11 +262,19 @@ pub struct ApplyContext {
     /// 允许把当前版本 swap 成更低的 target_tag。默认 false 即沿用 Updater struct
     /// 的 `allow_downgrade` 全局开关(env 配置)。
     pub allow_downgrade: bool,
-    /// v1.2.0-beta.8 最强回滚:目标版本的 DB 备份路径(`learning-<target>.backup.db`)。
-    /// Some 时 apply 在 swap 阶段（binary/static 之后、作为最后一步）把它原子换为现役库,
-    /// 使回滚后 binary 与 DB 严格一致、避免旧二进制撞上新 schema 崩溃循环。仅 rollback
-    /// handler 在备份存在时设置;升级路径恒 None（升级走前向迁移,不回退 DB）。
-    pub rollback_db_backup: Option<PathBuf>,
+    /// 真·任意版本回滚计划。`Some` ⇒ 本次是回滚（而非升级）：apply 在 swap 前用当前二进制的
+    /// down 链把"当前库的安全备份副本"降级到目标版本 schema，作为回滚源 stage 为 pending，新进程
+    /// 启动时落地，使回滚后 binary 与 DB 严格一致、根除旧二进制撞新 schema 崩溃。升级路径恒 `None`
+    /// （走前向迁移，不回退 DB）。
+    pub rollback: Option<RollbackSpec>,
+}
+
+/// 回滚计划：把当前库降级到目标版本期望的 schema。
+#[derive(Debug, Clone, Copy)]
+pub struct RollbackSpec {
+    /// 目标版本期望的 schema 版本。`Some(k)` 由 handler 经历史表解析；`None` ⇒ apply 在下载/解出
+    /// 目标二进制后试跑 `--print-schema-version` 自报（见 services::version_schema）。
+    pub target_schema: Option<u32>,
 }
 
 #[derive(Default)]
@@ -573,7 +587,7 @@ impl Updater {
             task_id,
             audit_db_path,
             allow_downgrade: ctx_allow_downgrade,
-            rollback_db_backup,
+            rollback,
         } = ctx;
         let latest = {
             let cache = self.cache.read().await;
@@ -643,7 +657,7 @@ impl Updater {
                 on_maintenance,
                 &task_id,
                 &audit_db_path,
-                rollback_db_backup.as_deref(),
+                rollback,
             )
             .await;
         // 失败时锁随 file drop 自动释放；成功时进程 exit 也会自动释放
@@ -664,7 +678,7 @@ impl Updater {
         on_maintenance: impl Fn(bool) + Send + 'static,
         task_id: &str,
         audit_db_path: &Path,
-        rollback_db_backup: Option<&Path>,
+        rollback_spec: Option<RollbackSpec>,
     ) -> Result<(), UpdaterError>
     where
         F: FnOnce(&Path) -> Result<(), UpdaterError> + Send,
@@ -758,18 +772,66 @@ impl Updater {
         progress(UpdatePhase::SelfChecking);
         smoke_test_binary(&extracted.join("wordforge")).await?;
 
+        // 3c) 真·任意版本回滚：解析目标版本期望的 schema 版本。`Some(k)` ⇒ 本次是回滚。
+        // handler 多已经历史表解析（v1.1.0~beta.17）；未解析(None)则试跑目标二进制 `--print-schema-version`
+        // 自报(beta.18+)。两者皆失败 ⇒ 目标早于 beta.8、不支持启动落地回滚库 → swap 前中止，现役无损。
+        let resolved_schema: Option<u32> = match rollback_spec {
+            Some(spec) => Some(match spec.target_schema {
+                Some(k) => k,
+                None => {
+                    crate::services::version_schema::probe_binary_schema(
+                        &extracted.join("wordforge"),
+                    )
+                    .await
+                    .ok_or_else(|| {
+                        UpdaterError::RollbackSchemaUnresolvable(latest.tag.clone())
+                    })?
+                }
+            }),
+            None => None,
+        };
+
         // 4) DB 备份
         progress(UpdatePhase::BackingUpDb);
-        let backup_path = self
-            .install_dir
-            .join("data")
-            .join(format!("learning-{}.backup.db", self.current_tag));
+        let backup_path = if resolved_schema.is_some() {
+            // 回滚：pre-rollback 安全全量备份。一物三用——① down 降级源 ② watcher 健康失败时的一致
+            // 回退源 ③ 可恢复的现役快照。命名 `backup-pre-rollback-*` 不匹配任何 prune 规则，永不裁剪。
+            let data_dir = audit_db_path.parent().unwrap_or_else(|| Path::new("."));
+            data_dir.join("backups").join(format!(
+                "backup-pre-rollback-{}.db",
+                Utc::now().format("%Y%m%d-%H%M%S")
+            ))
+        } else {
+            // 升级：当前版本 DB 备份（沿用旧逻辑，供 watcher 一致回退；升级走前向迁移不回退 DB）。
+            self.install_dir
+                .join("data")
+                .join(format!("learning-{}.backup.db", self.current_tag))
+        };
         blocking_io(|| {
             if let Some(parent) = backup_path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
             backup_callback(&backup_path)
         })?;
+
+        // 4c) 回滚降级引擎：把安全备份副本用当前二进制的 down 链降级到目标版本 schema，产出回滚源。
+        // 全程在进维护态 / 换二进制**之前**，且作用于副本——失败即 return Err，现役 binary/static/DB 全无损。
+        let rollback_src: Option<PathBuf> = if let Some(target_schema) = resolved_schema {
+            progress(UpdatePhase::RevertingDb);
+            let mut out_os = audit_db_path.as_os_str().to_owned();
+            out_os.push(".rollback-src");
+            let out = PathBuf::from(out_os);
+            let src = backup_path.clone();
+            let out_for_closure = out.clone();
+            blocking_io(move || {
+                crate::store::migrate::revert_db_copy(&src, &out_for_closure, target_schema)
+                    .map_err(UpdaterError::Store)
+            })?;
+            Some(out)
+        } else {
+            None
+        };
+        let rollback_src_ref = rollback_src.as_deref();
 
         // 5) 原子替换二进制和 static/
         // M0-R4：进入 Swapping 前开启 maintenance 模式，写 flag 文件（新进程启动时清理）。
@@ -832,10 +894,10 @@ impl Updater {
                 )));
             }
 
-            // v1.2.0-beta.8 最强回滚:作为 swap 最后一步,把目标版本 DB 备份暂存为
-            // <db>.rollback-pending(不在此刻覆盖现役库,避免 WAL 串扰)。新进程启动时落地。
-            // 仅 rollback_db_backup=Some(回滚)时执行;失败则 undo binary/static、现役库无损。
-            if let Some(src) = rollback_db_backup {
+            // 最强回滚:作为 swap 最后一步,把已降级到目标 schema 的回滚源暂存为
+            // <db>.rollback-pending(不在此刻覆盖现役库,避免 WAL 串扰)。新进程启动时 apply_pending_rollback_db
+            // 落地。仅回滚(resolved_schema=Some)时执行;失败则 undo binary/static、现役库无损。
+            if let Some(src) = rollback_src_ref {
                 if let Err(e) = stage_rollback_db(src, audit_db_path) {
                     rollback(steps_done);
                     return Err(UpdaterError::RolledBack(format!(
@@ -853,6 +915,14 @@ impl Updater {
             let _ = std::fs::remove_file(&flag_path);
             on_maintenance(false);
             return Err(e);
+        }
+
+        // 回滚源已 copy 进 <db>.rollback-pending，原始降级产物可清理（pending 才是落地用的）。
+        if let Some(ref src) = rollback_src {
+            let _ = blocking_io(|| {
+                let _ = std::fs::remove_file(src);
+                Ok(())
+            });
         }
 
         // 旧版本保留数控制
@@ -905,9 +975,10 @@ impl Updater {
             parent_pid: unsafe { libc::getpid() },
             #[cfg(not(unix))]
             parent_pid: 0,
-            // D：仅「带 DB 回滚」的 rollback 才记 pre-rollback 现役库快照供 watcher 一致回退；
+            // 仅回滚才记 pre-rollback 现役库快照供 watcher 一致回退（目标二进制健康检查不过时，
+            // 把它 stage 回去 → 退回的当前二进制启动后落地，binary/DB 双双回到回滚前）；
             // 普通升级不回退 DB（走前向迁移），故 None。
-            db_revert_backup: if rollback_db_backup.is_some() {
+            db_revert_backup: if resolved_schema.is_some() {
                 Some(backup_path.clone())
             } else {
                 None
@@ -1708,6 +1779,40 @@ fn spawn_watcher_then_exit_parent(_args: WatcherArgs) -> ! {
     std::process::exit(0);
 }
 
+/// `/proc/<pid>/stat` 第 3 字段是否为僵尸态 'Z'（已 exit、已释放 fd/DB，仅留进程表项未被回收）。
+#[cfg(unix)]
+fn proc_is_zombie(pid: i32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        // stat 格式 `pid (comm) STATE ...`；comm 可能含空格/括号，故按最后一个 ')' 切分再取状态字段。
+        .and_then(|s| {
+            s.rsplit_once(')')
+                .map(|(_, rest)| rest.trim_start().starts_with('Z'))
+        })
+        .unwrap_or(false)
+}
+
+/// 阻塞等待父进程 exit（释放现役库），供 watcher 在落地降级库前调用——父仍持库时落地会 WAL 串扰。
+/// 父 fork 出 watcher 后立即 exit(0)，通常毫秒级；以 ESRCH（已回收）或僵尸态（已 exit）判定退出，
+/// 封顶 `max` 后不再等（最坏也只是落地稍早，但父几乎必已 exit）。`parent_pid<=1` 视为无父，直接返回。
+#[cfg(unix)]
+fn wait_for_parent_exit(parent_pid: i32, max: std::time::Duration) {
+    if parent_pid <= 1 {
+        return;
+    }
+    let deadline = std::time::Instant::now() + max;
+    loop {
+        let alive = unsafe { libc::kill(parent_pid, 0) } == 0;
+        if !alive || proc_is_zombie(parent_pid) {
+            return;
+        }
+        if std::time::Instant::now() >= deadline {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
 /// watcher 子进程主循环：
 /// 1. sleep 10s 给 systemd RestartSec=5 + 新 binary startup（migration/bind）共留 10s
 /// 2. 60s loop 探 /health（每 2s 一次）
@@ -1716,6 +1821,17 @@ fn spawn_watcher_then_exit_parent(_args: WatcherArgs) -> ! {
 ///            + 更新 audit outcome=rolled_back
 #[allow(clippy::doc_overindented_list_items)]
 fn run_watcher(args: &WatcherArgs) {
+    // 真·任意版本回滚:目标二进制可能早于 v1.2.0-beta.8、不会在启动时自己落地降级库
+    // （apply_pending_rollback_db 是 beta.8 才引入的）。watcher 在父进程 exit（现役库已无人持有）后、
+    // systemd 重启目标二进制前的窗口里，主动把 <db>.rollback-pending 落地为现役库——使**任意旧目标**
+    // 启动时直接打开已降级好的现役库，无需其自带落地能力。父仍存活时落地会与其 WAL 串扰，故先等父 exit。
+    // 普通升级无 pending → 落地 no-op；beta.8+ 目标自带落地能力 → 此处先落、其启动时 no-op，冗余兼容。
+    #[cfg(unix)]
+    wait_for_parent_exit(args.parent_pid, std::time::Duration::from_secs(8));
+    if let Some(db) = args.live_db_path.to_str() {
+        let _ = apply_pending_rollback_db(db);
+    }
+
     std::thread::sleep(std::time::Duration::from_secs(10));
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
@@ -2175,6 +2291,24 @@ mod tests {
         assert!(!apply_pending_rollback_db(&live.to_string_lossy()));
         // :memory: 跳过
         assert!(!apply_pending_rollback_db(":memory:"));
+    }
+
+    /// watcher 落地前等父 exit：对无父(pid<=1)与不存在的 pid 须立即返回、绝不挂起，
+    /// 否则会卡死 watcher 的回滚落地与健康监督。
+    #[cfg(unix)]
+    #[test]
+    fn wait_for_parent_exit_returns_promptly_for_dead_or_no_parent() {
+        let start = std::time::Instant::now();
+        wait_for_parent_exit(1, std::time::Duration::from_secs(5)); // pid<=1 视为无父
+        wait_for_parent_exit(0, std::time::Duration::from_secs(5));
+        // 几乎必不存在的 pid → kill ESRCH → 立即返回（不等满 max）
+        wait_for_parent_exit(2_000_000_000, std::time::Duration::from_secs(5));
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(2),
+            "对无父/死 pid 不得阻塞等待"
+        );
+        // 不存在的 pid 不是僵尸
+        assert!(!proc_is_zombie(2_000_000_000));
     }
 
     /// watcher 回滚靠 exe 匹配定位当前主进程：Linux 上须能定位到自身 pid；

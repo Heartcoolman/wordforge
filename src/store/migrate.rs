@@ -5,28 +5,44 @@
 //! 未跑过的迁移。每个 up 必须幂等（脚本使用 `IF NOT EXISTS` / `PRAGMA table_info`
 //! 探测）。
 //!
-//! ## down：仅用于本地 dev 重置与测试
+//! ## down：生产可用——真·任意版本回滚的降级引擎
 //! 每个 up 配套一个对应的 down 函数（注册在 [`migrations_down`]），通过 [`revert_to`]
-//! 可把 schema 从当前版本回退到目标版本。**严禁**在 production 自动调用；仅限：
-//!   - 本地开发时清理脏 schema 以重新跑迁移；
-//!   - 集成测试验证迁移的可逆性（up → down → up 循环）。
+//! 把 schema 从当前版本回退到目标版本。除 dev 重置 / 测试外，**生产回滚亦依赖 down**：
+//! [`revert_db_copy`] 在"当前库的安全备份副本"上跑 down 链降级到目标版本期望的 schema，
+//! 作为回滚源（见 services::updater 的 apply 回滚分支）。**绝不**对现役库直接跑 down——只在副本上。
+//!
+//! down 语义：丢弃的只有"目标版本之后才新增的表 / 列"里的数据——这些数据在目标版本本就不存在，
+//! 且回滚前的 pre-rollback 安全备份已完整保留、可随时恢复。schema.rs 拥有的核心表数据无损。
+//! 全部 down 的可逆性由 `tests/migrate_down.rs` 的"全 k 往返 schema 一致 + 核心数据无损"sweep 验证。
 //!
 //! 设计约束：
 //! - `m001_initial` 的实体 DDL 由 [`crate::store::Store::open`] 中的 `init_schema()`
-//!   在全新 DB 上一次性跑掉，m001 本身仅作 marker；其 down 也必须是 no-op：核心表
-//!   （users / learning_records 等）由 schema.rs 拥有，不在迁移回退范围内。
+//!   在全新 DB 上一次性跑掉，m001 本身仅作 marker；其 down 必须是 no-op：核心表
+//!   （users / learning_records 等）由 schema.rs 拥有，回滚到任意版本都在场。
 //!   `revert_to(0)` 仅把 m002~mXXX 的副作用全部回退，保留 schema.rs 建的基线 schema
 //!   与 `schema_version` 表本身（让下一次 [`run`] 走增量路径而非全量 DDL 路径）。
 //! - SQLite `ALTER TABLE DROP COLUMN` 要求列未被 CHECK 表达式 / partial index /
-//!   generated 列引用；被引用时须先 `DROP INDEX`。下方 m005/m008 的 down 顺序已
-//!   显式处理 `learning_records.record_type` 相关索引；`revert_to` 倒序执行，
-//!   保证依赖列的索引先于列本身被丢弃。
-//! - 若某 up 引入了 `NOT NULL` 列且承载了用户数据，DROP COLUMN 会丢失数据，down 仅
-//!   适合 dev/test。生产不可用 down，因此可接受这种数据损失。
+//!   generated 列引用；被引用时须先 `DROP INDEX`。down 顺序须显式处理相关索引；
+//!   `revert_to` 倒序执行，保证依赖列的索引先于列本身被丢弃。
+//! - 整表重建型 down（CHECK 收窄等，如 m046/m048/m049/m051）须包单事务 + 开头
+//!   `DROP IF EXISTS _old/_new`，保证中途崩溃不留半成品。
 
 use crate::store::{Store, StoreError};
+use std::path::{Path, PathBuf};
 
 type MigrationFn = fn(&Store) -> Result<(), StoreError>;
+
+/// 完全迁移后 `schema_version` 应到达的版本号（= [`migrations`] 条目数）。
+/// 编译期常量，供 `--print-schema-version`（任意版本回滚的"目标二进制自声明 schema 版本"）使用；
+/// [`schema_version_const_matches_registry`] 测试守卫它与运行期 `migrations().len()` 不漂移。
+pub const SCHEMA_VERSION: u32 = 59;
+
+/// 已加固到"生产可用"的 down 迁移覆盖下界：回滚目标的 schema 版本必须 `>=` 此值。
+/// 真·任意版本回滚把 down 链当作"把当前库副本降级到目标版本"的降级引擎；低于此下界的
+/// 远古版本其 down 未经可逆性测试验证，回滚守卫据此拒绝（见 routes/admin/updates.rs）。
+/// 全部 59 个 down 已过 `tests/migrate_down.rs` 的 schema 双向一致 + 核心数据无损验证，
+/// 故下界 = 1（schema=1 即 m001 基线，schema.rs 拥有的核心表始终在场）。
+pub const DOWN_PRODUCTION_READY_FROM: u32 = 1;
 
 fn migrations() -> Vec<(&'static str, MigrationFn)> {
     vec![
@@ -291,6 +307,17 @@ pub fn migration_count() -> usize {
     migrations().len()
 }
 
+/// 列出 schema 版本 `> schema` 的迁移名（即回滚到 `schema` 时会被 down 丢弃的"新增功能"）。
+/// 供回滚预检向 UI 提示"将丢弃哪些版本之后的新数据"（这些数据在目标版本本不存在、且已进安全备份）。
+pub fn migration_names_after(schema: u32) -> Vec<&'static str> {
+    migrations()
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| (*i as u32 + 1) > schema)
+        .map(|(_, (name, _))| name)
+        .collect()
+}
+
 pub fn get_current_version(store: &Store) -> Result<u32, StoreError> {
     let conn = store.conn()?;
     let version: u32 = conn
@@ -351,6 +378,88 @@ pub fn revert_to(store: &Store, target_version: u32) -> Result<(), StoreError> {
         func(store)?;
         write_version(store, version - 1)?;
         tracing::info!(version, name, "Revert complete");
+    }
+    Ok(())
+}
+
+/// 删除一个 SQLite 库文件及其 `-wal`/`-shm` sidecar（忽略不存在）。
+fn cleanup_db_files(path: &Path) {
+    for suffix in ["", "-wal", "-shm"] {
+        let mut p = path.as_os_str().to_owned();
+        p.push(suffix);
+        let _ = std::fs::remove_file(PathBuf::from(p));
+    }
+}
+
+/// 真·任意版本回滚的降级引擎：把"现役库的一份干净快照 `src_snapshot`"在副本上用 down 链
+/// 降级到 `target_schema`，产出可作为回滚源的干净单文件 `out_path`。**现役库全程零接触**。
+///
+/// 语义：down 丢弃的只有"目标版本之后才新增的表/列"里的数据——这些数据在目标版本本就不存在，
+/// 且 `src_snapshot`（pre-rollback 安全备份）已完整保留，可随时恢复。schema.rs 拥有的核心表
+/// （users/learning_records/...）由 `m001_initial_down` no-op 保护，回滚到任意版本都在场。
+///
+/// 流程：拷贝快照→副本 → 以独立连接打开副本跑 [`revert_to`] → 校验版本与完整性 →
+/// checkpoint(TRUNCATE) 落 WAL → 清 sidecar，使 `out_path` 主文件即完整库。
+/// 任一步失败立即清理 `out_path` 并返回 Err（调用方在 swap/维护态之前调用，故现役无损）。
+pub fn revert_db_copy(
+    src_snapshot: &Path,
+    out_path: &Path,
+    target_schema: u32,
+) -> Result<(), StoreError> {
+    if !src_snapshot.is_file() {
+        return Err(StoreError::NotFound {
+            entity: "rollback_snapshot".into(),
+            key: src_snapshot.to_string_lossy().into(),
+        });
+    }
+    // 1) 拷贝干净快照为可变工作副本（快照是 VACUUM INTO 单文件，无 WAL，fs::copy 安全）。
+    cleanup_db_files(out_path);
+    if let Some(parent) = out_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::copy(src_snapshot, out_path)?;
+
+    // 2) 以独立单连接打开副本跑 down 链 + 校验（作用域结束即释放连接，确保文件可被后续清理/搬运）。
+    let result = (|| -> Result<(), StoreError> {
+        let copy = Store::open(
+            out_path
+                .to_str()
+                .ok_or_else(|| StoreError::Validation("out_path 非 UTF-8".into()))?,
+            5000,
+            1,
+        )?;
+        revert_to(&copy, target_schema)?;
+        // 3) 校验：版本号必须精确等于 target_schema，且库完整性 quick_check 通过。
+        let got = get_current_version(&copy)?;
+        if got != target_schema {
+            return Err(StoreError::Migration {
+                version: target_schema,
+                message: format!("revert_db_copy 后版本={got}，期望={target_schema}"),
+            });
+        }
+        let conn = copy.conn()?;
+        let qc: String =
+            conn.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
+        if qc != "ok" {
+            return Err(StoreError::Migration {
+                version: target_schema,
+                message: format!("回滚副本 quick_check 失败：{qc}"),
+            });
+        }
+        // 4) checkpoint(TRUNCATE) 把 WAL 落进主文件，使主文件即完整库。
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        Ok(())
+    })();
+
+    if let Err(e) = result {
+        cleanup_db_files(out_path);
+        return Err(e);
+    }
+    // 5) 连接已随作用域释放；清掉 sidecar，留下干净主文件作为回滚源。
+    for suffix in ["-wal", "-shm"] {
+        let mut p = out_path.as_os_str().to_owned();
+        p.push(suffix);
+        let _ = std::fs::remove_file(PathBuf::from(p));
     }
     Ok(())
 }
@@ -2359,12 +2468,15 @@ fn m047_backup_target_status_down(store: &Store) -> Result<(), StoreError> {
     Ok(())
 }
 
-/// m046 down:重建回不含 'canceled' 的 CHECK。仅 dev/test;已 canceled 的行会被丢弃
-///（否则触发旧 CHECK 违反）。
+/// m046 down:重建回不含 'canceled' 的 CHECK。已 canceled 的行会被丢弃（否则触发旧 CHECK 违反）——
+/// 回滚到该版本前 'canceled' 态本不存在，且数据已在 pre-rollback 安全备份中。
+/// 原子表重建:单事务 + 开头 DROP IF EXISTS _old，理由同 m048 down。
 fn m046_scheduled_broadcasts_canceled_down(store: &Store) -> Result<(), StoreError> {
-    let conn = store.conn()?;
-    conn.execute_batch(
-        "CREATE TABLE scheduled_broadcasts_old (
+    let mut conn = store.conn()?;
+    let tx = conn.transaction()?;
+    tx.execute_batch(
+        "DROP TABLE IF EXISTS scheduled_broadcasts_old;
+        CREATE TABLE scheduled_broadcasts_old (
             id                TEXT NOT NULL PRIMARY KEY,
             title             TEXT NOT NULL,
             message           TEXT NOT NULL,
@@ -2392,6 +2504,7 @@ fn m046_scheduled_broadcasts_canceled_down(store: &Store) -> Result<(), StoreErr
         CREATE INDEX IF NOT EXISTS idx_scheduled_broadcasts_due
             ON scheduled_broadcasts(status, scheduled_at);",
     )?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -2436,11 +2549,15 @@ fn m048_scheduled_broadcasts_sending(store: &Store) -> Result<(), StoreError> {
     Ok(())
 }
 
-/// m048 down:重建回不含 'sending' 的 CHECK;残留 'sending' 行重置为 'pending' 以免丢失。仅 dev/test。
+/// m048 down:重建回不含 'sending' 的 CHECK;残留 'sending' 行重置为 'pending' 以免丢失。
+/// 原子表重建:单事务 + 开头 DROP IF EXISTS _old 闭合"上次中途崩溃残留临时表 → CREATE 失败"窗口
+///（与 m048 up / m049 / m051 的整表重建 down 一致，生产任意版本回滚降级引擎依赖其原子性）。
 fn m048_scheduled_broadcasts_sending_down(store: &Store) -> Result<(), StoreError> {
-    let conn = store.conn()?;
-    conn.execute_batch(
-        "CREATE TABLE scheduled_broadcasts_old (
+    let mut conn = store.conn()?;
+    let tx = conn.transaction()?;
+    tx.execute_batch(
+        "DROP TABLE IF EXISTS scheduled_broadcasts_old;
+        CREATE TABLE scheduled_broadcasts_old (
             id                TEXT NOT NULL PRIMARY KEY,
             title             TEXT NOT NULL,
             message           TEXT NOT NULL,
@@ -2470,6 +2587,7 @@ fn m048_scheduled_broadcasts_sending_down(store: &Store) -> Result<(), StoreErro
         CREATE INDEX IF NOT EXISTS idx_scheduled_broadcasts_due
             ON scheduled_broadcasts(status, scheduled_at);",
     )?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -3241,6 +3359,14 @@ fn m059_worker_panic_count_down(store: &Store) -> Result<(), StoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `SCHEMA_VERSION` 编译期常量必须等于运行期迁移注册表长度，防 `--print-schema-version`
+    /// 自报值漂移（每加一个迁移都要同步 +1）。
+    #[test]
+    fn schema_version_const_matches_registry() {
+        assert_eq!(SCHEMA_VERSION as usize, migrations().len());
+        assert_eq!(SCHEMA_VERSION as usize, migrations_down().len());
+    }
 
     #[test]
     fn m033_creates_settings_config_tables() {
