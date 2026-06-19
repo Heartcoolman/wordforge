@@ -61,7 +61,58 @@ pub(crate) fn sse_probe_ok(state: &AppState) -> bool {
     true
 }
 
+/// 词书中心探针结果缓存 TTL。请求路径命中即返回；超过 TTL 旁路触发一次后台刷新，
+/// 当前请求仍用上次结果，境外 CDN 的网络往返永不阻塞 `/health`。
+const WBC_PROBE_TTL: Duration = Duration::from_secs(30);
+
+/// 词书中心健康探针（**非阻塞**）。返回 `(healthy, probe_skipped)`。
+///
+/// 原实现每次都同步发一次词书中心（境外 CDN）的 HTTPS 请求，大陆机房一次 TCP+TLS
+/// 握手 0.5–2s，独力把 `/health` 与 admin `monitoring/health` 的 P99 顶到 1s+，而其余
+/// 接口仅毫秒级。现改为读后台刷新的缓存：
+/// - 命中未过期缓存 → 立即返回；
+/// - 缓存过期 / 缺失 → 旁路 spawn 一次后台刷新（`wbc_probe_refreshing` 去重），当前请求
+///   用上次结果，网络往返不进请求路径；
+/// - 冷启动尚无任何样本 → 返回 `(true, true)`（乐观放行 + 标记未探测），避免冷启动窗口
+///   误报 degraded；首个后台刷新落地后即转为真实结果。
 pub(crate) async fn wordbook_center_probe(state: &AppState) -> (bool, bool) {
+    let cached = *state.wbc_probe_cache().read().await;
+    let stale = match cached {
+        Some((at, ..)) => at.elapsed() >= WBC_PROBE_TTL,
+        None => true,
+    };
+    if stale {
+        trigger_wbc_probe_refresh(state.clone());
+    }
+    match cached {
+        Some((_, healthy, skipped)) => (healthy, skipped),
+        None => (true, true),
+    }
+}
+
+/// 旁路触发一次词书中心探针刷新。`wbc_probe_refreshing` 保证同一时刻仅一个刷新在途；
+/// 用 Drop guard 复位标志，确保探测即便 panic 也不会把刷新永久卡死。
+fn trigger_wbc_probe_refresh(state: AppState) {
+    if state.wbc_probe_refreshing().swap(true, Ordering::AcqRel) {
+        return; // 已有刷新在途，跳过
+    }
+    tokio::spawn(async move {
+        struct ResetGuard(std::sync::Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for ResetGuard {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::Release);
+            }
+        }
+        let _guard = ResetGuard(state.wbc_probe_refreshing().clone());
+        let (healthy, skipped) = probe_wordbook_center_now(&state).await;
+        *state.wbc_probe_cache().write().await = Some((Instant::now(), healthy, skipped));
+    });
+}
+
+/// 实际执行一次词书中心探活（**含网络往返**），仅由 [`trigger_wbc_probe_refresh`] 的后台
+/// 任务调用，不在请求路径。返回 `(healthy, probe_skipped)`；未配置 URL 时视为跳过探测的
+/// 健康态 `(true, true)`。
+pub(crate) async fn probe_wordbook_center_now(state: &AppState) -> (bool, bool) {
     let settings = state
         .run_store_task("health.wbc_settings", |store| store.get_system_settings())
         .await
@@ -73,9 +124,10 @@ pub(crate) async fn wordbook_center_probe(state: &AppState) -> (bool, bool) {
         return (true, true);
     };
 
-    // connect_timeout 显式钳住"建连"阶段：黑洞地址（如不可达的 wordbook center）下,
-    // 总 timeout 在部分平台不可靠地中断 TCP connect,会拖到 OS 默认连接超时（数秒~分钟）。
-    // 加 3s connect_timeout 让探针确定性快失败,既守 /health 的 SLO,也消除 health_http 时序 flaky。
+    // connect_timeout 显式钳住"建连"阶段：黑洞地址（如不可达的词书中心）下,总 timeout 在
+    // 部分平台不可靠地中断 TCP connect,会拖到 OS 默认连接超时（数秒~分钟）。加 3s
+    // connect_timeout 让探针确定性快失败。注意:本函数运行在后台刷新任务里,即便慢到 5s
+    // 也不进请求路径,不影响 /health 的 SLO。
     let client = match reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(3))
         .timeout(Duration::from_secs(5))

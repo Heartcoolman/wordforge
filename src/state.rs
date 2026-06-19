@@ -238,6 +238,15 @@ pub struct AppState {
     /// 最终一致），写端点调 `refresh_version_gate` 立即刷新。
     /// 元组 = (enabled, min_client_version)。
     version_gate: Arc<std::sync::RwLock<VersionGate>>,
+    /// 词书中心健康探针缓存。`/health` 与 admin `monitoring/health` 每次调用都要探活
+    /// 词书中心（境外 CDN，大陆机房一次 TCP+TLS 握手 ~0.5–2s）。原实现把这次网络往返
+    /// 同步压在请求路径上，独力把这两个端点的 P99 顶到 1s+（其余接口仅毫秒级）。改为
+    /// 后台刷新缓存：请求只读缓存，过期时旁路 spawn 一次刷新（`wbc_probe_refreshing`
+    /// 去重），网络往返永不阻塞请求。元组 = (探测时刻, healthy, probe_skipped)；
+    /// None = 冷启动尚无样本。
+    wbc_probe_cache: Arc<RwLock<Option<(Instant, bool, bool)>>>,
+    /// 词书中心探针后台刷新 in-flight 去重标志，见 [`AppState::wbc_probe_cache`]。
+    wbc_probe_refreshing: Arc<AtomicBool>,
 }
 
 /// D4：版本门控运行时状态。`enabled=true` 时按 `min_client_version` 拒绝旧客户端。
@@ -308,6 +317,8 @@ impl AppState {
             geoip: None,
             upgrade_policy_cache: Arc::new(std::sync::RwLock::new(None)),
             version_gate: Arc::new(std::sync::RwLock::new(VersionGate::default())),
+            wbc_probe_cache: Arc::new(RwLock::new(None)),
+            wbc_probe_refreshing: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -585,6 +596,16 @@ impl AppState {
 
     pub fn update_cache(&self) -> &RwLock<Option<(Instant, serde_json::Value)>> {
         &self.update_cache
+    }
+
+    /// 词书中心探针结果缓存（后台刷新、请求路径只读）。详见字段文档。
+    pub fn wbc_probe_cache(&self) -> &RwLock<Option<(Instant, bool, bool)>> {
+        &self.wbc_probe_cache
+    }
+
+    /// 词书中心探针后台刷新去重标志。
+    pub fn wbc_probe_refreshing(&self) -> &Arc<AtomicBool> {
+        &self.wbc_probe_refreshing
     }
 
     pub fn dashboard_cache(&self) -> &DashMap<String, (Instant, serde_json::Value)> {

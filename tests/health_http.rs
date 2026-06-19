@@ -60,19 +60,33 @@ async fn it_public_health_reports_unreachable_wordbook_center() {
     settings.wordbook_center_url = Some("https://10.255.255.1/unreachable".to_string());
     app.state.store().save_system_settings(&settings).unwrap();
 
-    let started_at = tokio::time::Instant::now();
-    let response = request(&app.app, Method::GET, "/health", None, &[]).await;
-    let elapsed = started_at.elapsed();
-    let (status, _, body) = response_json(response).await;
+    // 探针已改为后台刷新（不阻塞请求）：首个请求触发后台探活，随后轮询直到结果落地。
+    // 每次请求都应秒回（不含网络往返），不可达探活在后台 ≤5s 内失败并写回 (false,false)。
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    loop {
+        let started_at = tokio::time::Instant::now();
+        let response = request(&app.app, Method::GET, "/health", None, &[]).await;
+        let elapsed = started_at.elapsed();
+        let (status, _, body) = response_json(response).await;
 
-    assert_eq!(status, StatusCode::OK);
-    assert!(
-        elapsed < Duration::from_secs(8),
-        "health check should complete within probe timeout, got {:?}",
-        elapsed
-    );
-    assert_eq!(body["services"]["wordbookCenter"]["healthy"], false);
-    assert_eq!(body["services"]["wordbookCenter"]["probeSkipped"], false);
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "health 请求不应阻塞在探针网络往返上，实测 {:?}",
+            elapsed
+        );
+
+        let wbc = &body["services"]["wordbookCenter"];
+        if wbc["healthy"] == false {
+            assert_eq!(wbc["probeSkipped"], false, "探测确实发生过，probeSkipped 应为 false");
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "后台探针未在期限内将不可达词书中心标记为 unhealthy"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
 }
 
 /// M0-R4：maintenance 模式集成测试。
