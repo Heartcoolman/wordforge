@@ -34,8 +34,67 @@ pub fn router() -> Router<AppState> {
 
 pub fn telemetry_router() -> Router<AppState> {
     Router::new()
+        // 静态路由须在 `/:device_id` 之前注册,避免被动态段吞掉。
+        .route("/ownership-states", get(ownership_states))
+        .route("/ingest-rejections", get(ingest_rejections))
         .route("/:device_id", get(get_telemetry))
         .route("/:device_id/summary", get(get_telemetry_summary))
+}
+
+/// GET /api/admin/telemetry/ownership-states —— 设备归属态计数(Telemetry 看板)。
+/// claimed/unclaimed 由 client_devices.user_id 是否为空直接派生；mismatch/notRegistered
+/// 是逐请求摄取结果(异主/无行),不可从表统计 → 恒返回 null。
+async fn ownership_states(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let (claimed, unclaimed) = state
+        .run_store_task(
+            "admin.telemetry.ownership_states",
+            move |store| -> Result<_, AppError> { Ok(store.admin_device_ownership_counts()?) },
+        )
+        .await??;
+    Ok(ok(serde_json::json!({
+        "claimed": claimed,
+        "unclaimed": unclaimed,
+        "mismatch": serde_json::Value::Null,
+        "notRegistered": serde_json::Value::Null,
+    })))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct IngestRejectionsQuery {
+    days: Option<u32>,
+}
+
+/// GET /api/admin/telemetry/ingest-rejections —— 近 N 天摄取拒绝码分布(Telemetry 看板)。
+/// 数据来自 telemetry_ingest_rejections(m061，摄取早返时旁路留痕)；pct 在 Rust 计算。
+async fn ingest_rejections(
+    _admin: AdminAuthUser,
+    Query(q): Query<IngestRejectionsQuery>,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let days = q.days.unwrap_or(7).clamp(1, 90);
+    let rows = state
+        .run_store_task(
+            "admin.telemetry.ingest_rejections",
+            move |store| -> Result<_, AppError> { Ok(store.aggregate_ingest_rejections(days)?) },
+        )
+        .await??;
+    let total: u64 = rows.iter().map(|(_, c)| *c as u64).sum();
+    let items: Vec<serde_json::Value> = rows
+        .into_iter()
+        .map(|(code, count)| {
+            let count = count as u64;
+            serde_json::json!({
+                "code": code,
+                "count": count,
+                "pct": if total > 0 { count as f64 / total as f64 * 100.0 } else { 0.0 },
+            })
+        })
+        .collect();
+    Ok(ok(serde_json::json!({ "total": total, "items": items })))
 }
 
 #[derive(Serialize)]

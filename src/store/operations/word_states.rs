@@ -367,6 +367,159 @@ impl Store {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(states)
     }
+
+    /// admin 用户档案：分页列出某用户的 per-word 学习状态，LEFT JOIN mastery_states
+    /// 带出 MDM 内部量（无 mastery 行时这些字段为 None）；并返回该用户词状态总数。
+    pub fn list_admin_user_word_states(
+        &self,
+        user_id: &str,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<AdminUserWordState>, i64), StoreError> {
+        keys::validate_id(user_id)?;
+        let conn = self.conn()?;
+        let total: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM word_learning_states WHERE user_id=?1",
+            params![user_id],
+            |r| r.get(0),
+        )?;
+        let mut stmt = conn.prepare(
+            "SELECT wls.word_id, wls.state, wls.mastery_level, wls.half_life,
+                    wls.correct_streak, wls.total_attempts, wls.next_review_date, wls.updated_at,
+                    ms.mdm_stability, ms.mdm_difficulty, ms.mdm_memory_strength, ms.mdm_review_count
+             FROM word_learning_states wls
+             LEFT JOIN mastery_states ms
+                 ON ms.user_id = wls.user_id AND ms.word_id = wls.word_id
+             WHERE wls.user_id = ?1
+             ORDER BY wls.updated_at DESC
+             LIMIT ?2 OFFSET ?3",
+        )?;
+        let items = stmt
+            .query_map(params![user_id, limit as i64, offset as i64], |r| {
+                let state_str: String = r.get(1)?;
+                let state = WordState::from_str(&state_str).map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        1,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })?;
+                let next_review: Option<String> = r.get(6)?;
+                Ok(AdminUserWordState {
+                    word_id: r.get(0)?,
+                    state,
+                    mastery_level: r.get(2)?,
+                    half_life: r.get(3)?,
+                    correct_streak: r.get::<_, i64>(4)? as u32,
+                    total_attempts: r.get::<_, i64>(5)? as u32,
+                    next_review_date: next_review.map(parse_dt).transpose()?,
+                    updated_at: parse_dt(r.get(7)?)?,
+                    mdm_stability: r.get(8)?,
+                    mdm_difficulty: r.get(9)?,
+                    mdm_memory_strength: r.get(10)?,
+                    mdm_review_count: r.get::<_, Option<i64>>(11)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((items, total))
+    }
+
+    /// 全局单词记忆强度：跨所有用户按 word_id 聚合（avg 掌握度/半衰、sum 次数、用户数、avg MDM
+    /// 记忆强度、众数状态），JOIN words 取词文本，按 avg 掌握度降序取 top-N。avgRetention 以
+    /// MAX(updated_at) 近似末次复习 + 半衰指数衰减（2^(-Δh/half_life)，与 analytics 同模型）。
+    pub fn aggregate_word_mastery(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<WordMasteryAggregate>, StoreError> {
+        let limit_i = limit.clamp(1, 200) as i64;
+        let now = Utc::now();
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT wls.word_id, w.text,
+                    AVG(wls.mastery_level), AVG(wls.half_life),
+                    SUM(wls.total_attempts), COUNT(*),
+                    AVG(ms.mdm_memory_strength), MAX(wls.updated_at),
+                    (SELECT s2.state FROM word_learning_states s2
+                     WHERE s2.word_id = wls.word_id
+                     GROUP BY s2.state ORDER BY COUNT(*) DESC LIMIT 1)
+             FROM word_learning_states wls
+             JOIN words w ON w.id = wls.word_id
+             LEFT JOIN mastery_states ms
+                 ON ms.user_id = wls.user_id AND ms.word_id = wls.word_id
+             GROUP BY wls.word_id, w.text
+             HAVING SUM(wls.total_attempts) > 0
+             ORDER BY AVG(wls.mastery_level) DESC, SUM(wls.total_attempts) DESC
+             LIMIT ?1",
+        )?;
+        let items = stmt
+            .query_map([limit_i], |r| {
+                let avg_mastery: f64 = r.get(2)?;
+                let avg_half_life: f64 = r.get(3)?;
+                let last_updated: String = r.get(7)?;
+                let state_str: String = r.get(8)?;
+                let dominant_state = WordState::from_str(&state_str).map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        8,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })?;
+                let elapsed_h =
+                    (now - parse_dt(last_updated)?).num_seconds().max(0) as f64 / 3600.0;
+                let hl = avg_half_life.max(0.01);
+                let avg_retention = 2f64.powf(-elapsed_h / hl).clamp(0.0, 1.0);
+                Ok(WordMasteryAggregate {
+                    word_id: r.get(0)?,
+                    word_text: r.get(1)?,
+                    avg_mastery,
+                    avg_half_life,
+                    total_attempts: r.get(4)?,
+                    user_count: r.get(5)?,
+                    avg_memory_strength: r.get::<_, Option<f64>>(6)?,
+                    dominant_state,
+                    avg_retention,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(items)
+    }
+}
+
+/// 全局单词记忆强度聚合行（跨所有用户，看板 Amas WordMastery 表）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WordMasteryAggregate {
+    pub word_id: String,
+    pub word_text: String,
+    pub avg_mastery: f64,
+    pub avg_half_life: f64,
+    pub total_attempts: i64,
+    pub user_count: i64,
+    pub avg_memory_strength: Option<f64>,
+    pub dominant_state: WordState,
+    pub avg_retention: f64,
+}
+
+/// admin 用户档案的 per-word 行：word_learning_states + 可选 MDM 内部量。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminUserWordState {
+    pub word_id: String,
+    pub state: WordState,
+    pub mastery_level: f64,
+    pub half_life: f64,
+    pub correct_streak: u32,
+    pub total_attempts: u32,
+    pub next_review_date: Option<DateTime<Utc>>,
+    pub updated_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mdm_stability: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mdm_difficulty: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mdm_memory_strength: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mdm_review_count: Option<i64>,
 }
 
 #[cfg(test)]

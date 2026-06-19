@@ -34,19 +34,38 @@ use crate::store::operations::resource_packs::{
 };
 use chrono::Datelike;
 
-/// Admin 上传单包硬上限：4 MiB（对接文档 §2.2 建议 ≤ 2 MB，这里留一倍余量）。
+/// Admin 上传单包硬上限：4 MiB（JSON 内容包，对接文档 §2.2 建议 ≤ 2 MB，留一倍余量）。
 const MAX_PACK_UPLOAD_SIZE: usize = 4 * 1024 * 1024;
+/// web-app 二进制工件（tar.gz of dist）上限：128 MiB。admin 鉴权 + 低频串行，可接受内存峰值。
+const MAX_WEBAPP_UPLOAD_SIZE: usize = 128 * 1024 * 1024;
+/// 服务端下发 web 应用的托管根：static/web-app/current 指向当前激活版本目录。
+const WEBAPP_PACK_ID: &str = "web-app";
 
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(list_packs))
         .route("/summary", get(pack_summary))
-        .route("/:pack_id/versions", post(upload_version))
+        // 上传端点单独叠加大 body 上限（覆盖路由组默认），支持 web-app tarball；
+        // 其余路由仍受路由组 4 MiB 约束，不把大 body 面暴露给小端点。
+        .route(
+            "/:pack_id/versions",
+            post(upload_version).layer(DefaultBodyLimit::max(MAX_WEBAPP_UPLOAD_SIZE)),
+        )
         .route("/:pack_id/versions/:version", delete(deactivate_version))
         .route("/:pack_id/channel/:channel/active", put(set_active))
         .route("/:pack_id/stats", get(pack_stats))
-        // 单独覆盖 body 上限（默认 2 MiB；本路由组 4 MiB）
+        // 路由组默认 body 上限（小内容包 4 MiB）
         .layer(DefaultBodyLimit::max(MAX_PACK_UPLOAD_SIZE))
+}
+
+/// 工件类型 → 落盘/下载文件名。上传与（未来 manifest）共用，杜绝文件名漂移。
+/// tarball（web-app 二进制）用 payload.tar.gz；其余 JSON 内容包沿用 payload.json。
+fn payload_filename(artifact_type: &str) -> &'static str {
+    if artifact_type == "tarball" {
+        "payload.tar.gz"
+    } else {
+        "payload.json"
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -58,6 +77,10 @@ struct UploadQuery {
     min_app_version: Option<String>,
     #[serde(default)]
     description: Option<String>,
+    /// 工件类型：json（默认，内容包）| tarball（web-app 二进制，dist 的 tar.gz）。
+    /// 未知 query 参数（如 compression=gzip）由 serde 默认忽略，无需声明。
+    #[serde(default)]
+    artifact_type: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -163,12 +186,25 @@ async fn upload_version(
     validate_version(&q.version)?;
     let channel = parse_channel(&q.channel)?;
 
+    let artifact_type = q.artifact_type.as_deref().unwrap_or("json");
+    if artifact_type != "json" && artifact_type != "tarball" {
+        return Err(AppError::bad_request(
+            "VALIDATION_ERROR",
+            "artifactType 仅支持 json | tarball",
+        ));
+    }
+    let max_size = if artifact_type == "tarball" {
+        MAX_WEBAPP_UPLOAD_SIZE
+    } else {
+        MAX_PACK_UPLOAD_SIZE
+    };
+
     if body.is_empty() {
         return Err(AppError::bad_request("PACK_EMPTY", "payload 不能为空"));
     }
-    if body.len() > MAX_PACK_UPLOAD_SIZE {
+    if body.len() > max_size {
         return Err(AppError::payload_too_large(&format!(
-            "payload 超过 {MAX_PACK_UPLOAD_SIZE} 字节上限"
+            "payload 超过 {max_size} 字节上限"
         )));
     }
 
@@ -213,12 +249,20 @@ async fn upload_version(
     tokio::fs::create_dir_all(&dir)
         .await
         .map_err(|e| AppError::internal(&format!("create_dir_all 失败: {e}")))?;
-    let path = dir.join("payload.json");
-    tokio::fs::write(&path, &body)
+    // 文件名按工件类型派生（tarball→payload.tar.gz），ServeDir 据扩展名给正确 Content-Type；
+    // payload_path 同步，激活/下载据此定位（artifact_type 即由该文件名约定承载，免 DB 迁移）。
+    let filename = payload_filename(artifact_type);
+    // 先写临时文件再 rename，避免半截文件被 ServeDir 托管或被激活解包。
+    let tmp_path = dir.join(format!("{filename}.tmp"));
+    tokio::fs::write(&tmp_path, &body)
         .await
         .map_err(|e| AppError::internal(&format!("写 payload 失败: {e}")))?;
+    let path = dir.join(filename);
+    tokio::fs::rename(&tmp_path, &path)
+        .await
+        .map_err(|e| AppError::internal(&format!("rename payload 失败: {e}")))?;
 
-    let payload_path = format!("static/packs/{}/{}/payload.json", pack_id, q.version);
+    let payload_path = format!("static/packs/{}/{}/{}", pack_id, q.version, filename);
     let size_bytes = body.len() as i64;
     let published_at = chrono::Utc::now().to_rfc3339();
 
@@ -278,6 +322,7 @@ async fn upload_version(
         "signature": signature_b64,
         "sizeBytes": size_bytes,
         "channel": channel.as_str(),
+        "artifactType": artifact_type,
     })))
 }
 
@@ -335,6 +380,37 @@ async fn set_active(
             channel = %channel.as_str(),
             "5 分钟内已广播过，本次激活跳过 SSE"
         );
+    }
+
+    // web-app（服务端下发的 web 二进制）切激活 stable：校验工件 → 解包 → 原子切 current，
+    // 使后端根托管即时反映新版本。仅 stable 通道驱动托管根（beta/internal 不动 current）。
+    if pack_id == WEBAPP_PACK_ID && channel == ResourcePackChannel::Stable {
+        let pid = pack_id.clone();
+        let active = state
+            .run_store_task("admin.resource_packs.get_active_webapp", move |store| {
+                store.get_active_pack_version(&pid, ResourcePackChannel::Stable)
+            })
+            .await??;
+        match active {
+            Some(ver) if ver.payload_path.ends_with(".tar.gz") => {
+                let version = ver.version.clone();
+                let payload_path = ver.payload_path.clone();
+                let sha256 = ver.sha256.clone();
+                tokio::task::spawn_blocking(move || {
+                    activate_web_bundle(&version, &payload_path, &sha256)
+                })
+                .await
+                .map_err(|e| AppError::internal(&format!("web-app 解包任务 join 失败: {e}")))?
+                .map_err(|e| AppError::internal(&format!("web-app 解包/切换失败: {e}")))?;
+                tracing::info!(version = %ver.version, "web-app 已解包并切换 current");
+            }
+            _ => {
+                tracing::warn!(
+                    version = %body.version,
+                    "web-app 激活但未找到 tarball 工件，跳过解包（按内容包处理）"
+                );
+            }
+        }
     }
 
     Ok(ok(serde_json::json!({
@@ -554,6 +630,113 @@ fn hex_lower(bytes: &[u8]) -> String {
         out.push_str(&format!("{:02x}", b));
     }
     out
+}
+
+/// web-app 托管根：static/web-app（current 符号链接指向当前激活版本目录）。沿用 static_pack_dir 同款 CWD 优先范式。
+fn static_web_app_dir() -> PathBuf {
+    if PathBuf::from("static").is_dir() {
+        return PathBuf::from("static").join("web-app");
+    }
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("static")
+        .join("web-app")
+}
+
+/// web-app 切激活的解包+原子切换（blocking）。校验工件 sha256 → 解包到 static/web-app/<version>/
+/// → 原子切 current 符号链接。失败返回错误信息（调用方记日志并 500，active 指针已置，admin 重试幂等）。
+fn activate_web_bundle(version: &str, payload_path: &str, expected_sha256: &str) -> Result<(), String> {
+    // 1. 读工件并校验 sha256（防上传后磁盘篡改；工件上传时已签名，此处只做完整性闸）
+    let bytes = std::fs::read(payload_path).map_err(|e| format!("读工件 {payload_path} 失败: {e}"))?;
+    let actual = {
+        let mut h = Sha256::new();
+        h.update(&bytes);
+        hex_lower(&h.finalize())
+    };
+    if !actual.eq_ignore_ascii_case(expected_sha256) {
+        return Err(format!("sha256 不匹配: 期望 {expected_sha256} 实际 {actual}"));
+    }
+    drop(bytes);
+
+    // 2. 解包到版本目录（幂等：先清空）
+    let webapp_root = static_web_app_dir();
+    let version_dir = webapp_root.join(version);
+    if version_dir.exists() {
+        std::fs::remove_dir_all(&version_dir).map_err(|e| format!("清理旧版本目录失败: {e}"))?;
+    }
+    std::fs::create_dir_all(&version_dir).map_err(|e| format!("创建版本目录失败: {e}"))?;
+    extract_tar_gz_safe(std::path::Path::new(payload_path), &version_dir)?;
+
+    // dist 一般 `tar -C dist .` 打包 → index.html 在版本目录根；容错多套一层目录的情况
+    let serve_dir = if version_dir.join("index.html").is_file() {
+        version_dir.clone()
+    } else {
+        let one = std::fs::read_dir(&version_dir)
+            .map_err(|e| format!("读版本目录失败: {e}"))?
+            .flatten()
+            .map(|e| e.path())
+            .find(|p| p.is_dir() && p.join("index.html").is_file());
+        one.ok_or_else(|| "解包内容缺少 index.html".to_string())?
+    };
+
+    // 3. 原子切 current 符号链接 → serve_dir（相对 webapp_root）
+    swap_current_symlink(&webapp_root, &serve_dir)
+}
+
+/// 原子切换 static/web-app/current 符号链接指向 serve_dir（相对目标，可迁移）。
+fn swap_current_symlink(webapp_root: &std::path::Path, serve_dir: &std::path::Path) -> Result<(), String> {
+    let current = webapp_root.join("current");
+    let tmp = webapp_root.join("current.tmp");
+    let target = serve_dir
+        .strip_prefix(webapp_root)
+        .map_err(|e| format!("serve_dir 不在 webapp_root 下: {e}"))?;
+    let _ = std::fs::remove_file(&tmp);
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, &tmp).map_err(|e| format!("创建符号链接失败: {e}"))?;
+        // rename 覆盖已存在的 current 符号链接，POSIX 原子
+        std::fs::rename(&tmp, &current).map_err(|e| format!("切换 current 失败: {e}"))?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (target, current);
+        Err("当前平台不支持符号链接切换".into())
+    }
+}
+
+/// 安全解 tar.gz（拒绝绝对路径/.. 穿越/link，复用 updater::extract_tar_gz_safe 范式）。
+fn extract_tar_gz_safe(tarball: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
+    let f = std::fs::File::open(tarball).map_err(|e| format!("打开工件失败: {e}"))?;
+    let gz = flate2::read::GzDecoder::new(f);
+    let mut archive = tar::Archive::new(gz);
+    archive.set_overwrite(true);
+    let dst_canon = std::fs::canonicalize(dst).unwrap_or_else(|_| dst.to_path_buf());
+    for entry_res in archive.entries().map_err(|e| format!("读 tar 条目失败: {e}"))? {
+        let mut entry = entry_res.map_err(|e| format!("tar 条目失败: {e}"))?;
+        let rel = entry
+            .path()
+            .map_err(|e| format!("tar 路径失败: {e}"))?
+            .into_owned();
+        if rel.is_absolute()
+            || rel
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err(format!("非法路径(穿越): {}", rel.to_string_lossy()));
+        }
+        if matches!(
+            entry.header().entry_type(),
+            tar::EntryType::Symlink | tar::EntryType::Link
+        ) {
+            return Err(format!("禁止 link 条目: {}", rel.to_string_lossy()));
+        }
+        let out = dst_canon.join(&rel);
+        if let Some(parent) = out.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {e}"))?;
+        }
+        entry.unpack(&out).map_err(|e| format!("写出条目失败: {e}"))?;
+    }
+    Ok(())
 }
 
 fn static_pack_dir() -> PathBuf {

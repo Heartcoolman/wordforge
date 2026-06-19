@@ -105,6 +105,121 @@ pub struct JobSpec {
     pub enabled: bool,
 }
 
+/// 所有 planned job 的 cron 列表（单一事实源），不依赖 WorkerManager 实例，
+/// 供 admin 监控 handler 在无 WorkerManager（仅 AppState/Config 可达）时复用。
+/// 条件 worker 的 enabled 由调用方传入对应开关；非 leader 时返回空。
+pub fn worker_cron_specs(
+    cfg: &WorkerConfig,
+    update_checker_enabled: bool,
+    error_rate_watchdog_enabled: bool,
+    scheduler_health_watchdog_enabled: bool,
+    canary_monitor_enabled: bool,
+) -> Vec<JobSpec> {
+    if !cfg.is_leader {
+        return Vec::new();
+    }
+
+    vec![
+        // 核心 worker —— 始终启用
+        JobSpec {
+            name: WorkerName::SessionCleanup,
+            cron: "0 0 * * * *",
+            enabled: true,
+        },
+        JobSpec {
+            name: WorkerName::PasswordResetCleanup,
+            cron: "0 30 * * * *",
+            enabled: true,
+        },
+        JobSpec {
+            name: WorkerName::DelayedReward,
+            cron: "0 */5 * * * *",
+            enabled: true,
+        },
+        JobSpec {
+            name: WorkerName::ForgettingAlert,
+            cron: "0 30 6 * * *",
+            enabled: true,
+        },
+        JobSpec {
+            name: WorkerName::AlgorithmOptimization,
+            cron: "0 0 0 * * *",
+            enabled: true,
+        },
+        JobSpec {
+            name: WorkerName::CacheCleanup,
+            cron: "0 */10 * * * *",
+            enabled: true,
+        },
+        JobSpec {
+            name: WorkerName::DailyAggregation,
+            cron: "0 0 1 * * *",
+            enabled: true,
+        },
+        JobSpec {
+            name: WorkerName::HealthAnalysis,
+            cron: "0 0 5 * * 1",
+            enabled: true,
+        },
+        JobSpec {
+            name: WorkerName::ConfusionPairCache,
+            // cron crate day-of-week 范围 1-7，用 SUN 字符串明确表示「每周日」
+            cron: "0 0 5 * * SUN",
+            enabled: true,
+        },
+        JobSpec {
+            name: WorkerName::WeeklyReport,
+            cron: "0 30 6 * * 1",
+            enabled: true,
+        },
+        JobSpec {
+            name: WorkerName::LogExport,
+            cron: "0 0 * * * *",
+            enabled: true,
+        },
+        // 条件启用 worker
+        JobSpec {
+            name: WorkerName::MetricsFlush,
+            cron: "0 */5 * * * *",
+            enabled: cfg.enable_monitoring,
+        },
+        JobSpec {
+            name: WorkerName::LlmAdvisor,
+            cron: "0 */20 * * * *",
+            enabled: cfg.enable_llm_advisor,
+        },
+        JobSpec {
+            name: WorkerName::UpdateChecker,
+            cron: "0 0 */1 * * *",
+            enabled: update_checker_enabled,
+        },
+        // M0-P3：monitoring_events 30 天 retention + 月度 VACUUM（每月 1 日 UTC 03:00）
+        JobSpec {
+            name: WorkerName::MonitoringRetention,
+            cron: "0 0 3 1 * *",
+            enabled: true,
+        },
+        // M0-P4：5xx 错误率滚动监控，每分钟采样，超 1% 广播 incident SSE 事件
+        JobSpec {
+            name: WorkerName::ErrorRateWatchdog,
+            cron: "0 * * * * *",
+            enabled: error_rate_watchdog_enabled,
+        },
+        // M1-A5：调度器健康监测，每分钟检测 worker 上报状态（time-based 补充检测）
+        JobSpec {
+            name: WorkerName::SchedulerHealthWatchdog,
+            cron: "0 * * * * *",
+            enabled: scheduler_health_watchdog_enabled,
+        },
+        // C6:per-patch canary 自动回滚监测，每 5 分钟；需 AppState 做 SSE
+        JobSpec {
+            name: WorkerName::CanaryMonitor,
+            cron: "0 */5 * * * *",
+            enabled: canary_monitor_enabled,
+        },
+    ]
+}
+
 pub struct WorkerManager {
     store: Arc<Store>,
     amas_engine: Arc<AMASEngine>,
@@ -184,113 +299,18 @@ impl WorkerManager {
 
     /// Single source of truth for all planned jobs and their cron schedules.
     pub fn planned_jobs(&self) -> Vec<JobSpec> {
-        if !self.config.is_leader {
-            return Vec::new();
-        }
-
-        vec![
-            // 核心 worker —— 始终启用
-            JobSpec {
-                name: WorkerName::SessionCleanup,
-                cron: "0 0 * * * *",
-                enabled: true,
-            },
-            JobSpec {
-                name: WorkerName::PasswordResetCleanup,
-                cron: "0 30 * * * *",
-                enabled: true,
-            },
-            JobSpec {
-                name: WorkerName::DelayedReward,
-                cron: "0 */5 * * * *",
-                enabled: true,
-            },
-            JobSpec {
-                name: WorkerName::ForgettingAlert,
-                cron: "0 30 6 * * *",
-                enabled: true,
-            },
-            JobSpec {
-                name: WorkerName::AlgorithmOptimization,
-                cron: "0 0 0 * * *",
-                enabled: true,
-            },
-            JobSpec {
-                name: WorkerName::CacheCleanup,
-                cron: "0 */10 * * * *",
-                enabled: true,
-            },
-            JobSpec {
-                name: WorkerName::DailyAggregation,
-                cron: "0 0 1 * * *",
-                enabled: true,
-            },
-            JobSpec {
-                name: WorkerName::HealthAnalysis,
-                cron: "0 0 5 * * 1",
-                enabled: true,
-            },
-            JobSpec {
-                name: WorkerName::ConfusionPairCache,
-                // cron crate day-of-week 范围 1-7，用 SUN 字符串明确表示「每周日」
-                cron: "0 0 5 * * SUN",
-                enabled: true,
-            },
-            JobSpec {
-                name: WorkerName::WeeklyReport,
-                cron: "0 30 6 * * 1",
-                enabled: true,
-            },
-            JobSpec {
-                name: WorkerName::LogExport,
-                cron: "0 0 * * * *",
-                enabled: true,
-            },
-            // 条件启用 worker
-            JobSpec {
-                name: WorkerName::MetricsFlush,
-                cron: "0 */5 * * * *",
-                enabled: self.config.enable_monitoring,
-            },
-            JobSpec {
-                name: WorkerName::LlmAdvisor,
-                cron: "0 */20 * * * *",
-                enabled: self.config.enable_llm_advisor,
-            },
-            JobSpec {
-                name: WorkerName::UpdateChecker,
-                cron: "0 0 */1 * * *",
-                enabled: self
-                    .update_checker_ctx
-                    .as_ref()
-                    .map(|c| c.enabled)
-                    .unwrap_or(false),
-            },
-            // M0-P3：monitoring_events 30 天 retention + 月度 VACUUM（每月 1 日 UTC 03:00）
-            JobSpec {
-                name: WorkerName::MonitoringRetention,
-                cron: "0 0 3 1 * *",
-                enabled: true,
-            },
-            // M0-P4：5xx 错误率滚动监控，每分钟采样，超 1% 广播 incident SSE 事件
-            JobSpec {
-                name: WorkerName::ErrorRateWatchdog,
-                cron: "0 * * * * *",
-                enabled: self.watchdog_state.is_some(),
-            },
-            // M1-A5：调度器健康监测，每分钟检测 worker 上报状态（time-based 补充检测）
-            JobSpec {
-                name: WorkerName::SchedulerHealthWatchdog,
-                cron: "0 * * * * *",
-                enabled: self.health_state.is_some(),
-            },
-            // C6:per-patch canary 自动回滚监测，每 5 分钟；需 AppState 做 SSE
-            JobSpec {
-                name: WorkerName::CanaryMonitor,
-                cron: "0 */5 * * * *",
-                enabled: self.llm_advisor_state.is_some(),
-            },
-        ]
+        // 条件 worker 的 enabled 由注入的 runtime state 决定（生产中 leader 启动时恒注入）；
+        // 转交 worker_cron_specs 时用各自的 is_some() 还原同一判定。
+        worker_cron_specs(
+            &self.config,
+            self.update_checker_ctx
+                .as_ref()
+                .map(|c| c.enabled)
+                .unwrap_or(false),
+            self.watchdog_state.is_some(),
+            self.health_state.is_some(),
+            self.llm_advisor_state.is_some(),
+        )
     }
 
     /// Start the worker scheduler. Returns an error if the scheduler cannot be created or started.
@@ -712,6 +732,12 @@ async fn add_job<Fut, F>(
                 .unwrap_or_default()
                 .as_secs() as i64;
             let _ = store.upsert_worker_last_run(name, now, 0, "skipped", None);
+            // BA3a：worker_runs append（best-effort，失败仅记录不影响调度）。
+            if let Err(e) =
+                store.insert_worker_run(name, &chrono::Utc::now().to_rfc3339(), 0, "skipped", None)
+            {
+                tracing::warn!(worker = name, error = %e, "insert_worker_run(skipped) 失败");
+            }
             return Box::pin(async {});
         }
 
@@ -752,6 +778,16 @@ async fn add_job<Fut, F>(
             // 成功或失败都重置 miss 计数
             miss_count.store(0, Ordering::SeqCst);
             let _ = store.upsert_worker_last_run(name, now_ts, duration_ms, outcome, error_msg);
+            // BA3a：worker_runs append（best-effort，失败仅记录不影响调度）。
+            if let Err(e) = store.insert_worker_run(
+                name,
+                &chrono::Utc::now().to_rfc3339(),
+                duration_ms,
+                outcome,
+                error_msg,
+            ) {
+                tracing::warn!(worker = name, error = %e, "insert_worker_run(complete) 失败");
+            }
 
             guard.store(false, Ordering::SeqCst);
         })

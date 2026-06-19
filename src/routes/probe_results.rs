@@ -25,6 +25,21 @@ use rusqlite::OptionalExtension;
 
 const MAX_RESULT_BODY: usize = 320 * 1024;
 
+/// BA3a：探针摄取拒绝码 fire-and-forget 留痕（m061，与 telemetry 同表）。绝不阻塞响应。
+fn record_probe_ingest_rejection(state: &AppState, code: &str, device_id: &str, user_id: &str) {
+    let state = state.clone();
+    let code = code.to_string();
+    let device_id = device_id.to_string();
+    let user_id = user_id.to_string();
+    tokio::spawn(async move {
+        let _ = state
+            .run_store_task("probe.ingest_rejection", move |store| {
+                store.insert_ingest_rejection(&code, Some(&device_id), Some(&user_id))
+            })
+            .await;
+    });
+}
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/results", post(submit_result))
@@ -218,7 +233,19 @@ async fn submit_result(
     .map_err(|e| AppError::internal(&format!("spawn_blocking: {e}")))?
     .map_err(|e| AppError::internal(&format!("update_probe_status: {e}")))?;
 
-    let advanced = tx_result?;
+    // BA3a：设备三态拒绝(摄取早返)码 fire-and-forget 留痕（m061），再向上抛出。
+    let advanced = match tx_result {
+        Ok(a) => a,
+        Err(e) => {
+            if matches!(
+                e.code.as_str(),
+                "DEVICE_NOT_REGISTERED" | "DEVICE_OWNERSHIP_MISMATCH"
+            ) {
+                record_probe_ingest_rejection(&state, &e.code, &device_id, &auth.user_id);
+            }
+            return Err(e);
+        }
+    };
 
     // ── 3. confirm_required 路径：写 ticket ──
     // 不覆盖已存在 ticket（不重置 TTL）的语义由上游的 2c 自环拒绝在同一 IMMEDIATE

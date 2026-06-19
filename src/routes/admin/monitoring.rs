@@ -6,6 +6,7 @@ use axum::extract::{Path, Query, State};
 use axum::routing::{delete, get, post};
 use axum::Router;
 use chrono::{Duration as ChronoDuration, Utc};
+use cron::Schedule;
 use once_cell::sync::Lazy;
 use serde::Deserialize;
 use serde_json::json;
@@ -34,6 +35,17 @@ pub fn router() -> Router<AppState> {
         .route("/check-update", get(check_update))
         // M1-A5：worker 执行状态区
         .route("/workers", get(worker_status))
+        // Flow 端点流量表：按 (method,route) 聚合的累积延迟分位/错误率/rpm
+        .route("/endpoints", get(endpoint_metrics))
+        // Worker cron 卡：cadence + next-run + 健康判定（cron 表达式推算下次执行）
+        .route("/workers/cron", get(worker_cron))
+        // BA3a：worker 运行历史时间线（worker_runs，append-only）
+        .route("/workers/history", get(worker_history))
+        // BA3a：进程内 CPU/内存/load 资源历史（sparkline + 时序）
+        .route("/resource-history", get(resource_history))
+        // BA3b：records 热路径分阶段管线指标 + 最近一条摄取瀑布 trace
+        .route("/pipeline", get(pipeline_metrics))
+        .route("/trace/latest", get(trace_latest))
         // M0-P5：监控页对齐设计图新增——滚动请求指标 / 实时日志 / 派生告警时间线
         .route("/requests", get(request_metrics))
         .route("/logs", get(recent_logs))
@@ -404,12 +416,21 @@ async fn sample_resources(state: &AppState) -> serde_json::Value {
     let inflight = crate::metrics_counters::inflight();
     let nginx_edge = sample_nginx_edge().await;
 
+    // 6) 系统负载均值（1/5/15 分钟）。sysinfo 静态方法，Linux/macOS/FreeBSD 有效；
+    //    Windows 恒返回 0（无 load avg 概念），前端据此判定是否渲染。
+    let load_avg = System::load_average();
+
     serde_json::json!({
         "cpuPct": cpu_pct,
         "memoryRssBytes": rss_bytes,
         "memoryTotalBytes": mem_total,
         "diskTotalBytes": disk_total,
         "diskFreeBytes": disk_free,
+        "loadAvg": {
+            "one": load_avg.one,
+            "five": load_avg.five,
+            "fifteen": load_avg.fifteen,
+        },
         "walSizeBytes": wal_size,
         "pool": pool.map(|p| serde_json::json!({
             "max": p.max,
@@ -533,6 +554,186 @@ async fn worker_status(
     Ok(ok(serde_json::json!({ "workers": workers })))
 }
 
+/// GET /api/admin/monitoring/endpoints —— 端点流量表。
+/// 按 (method, route) 聚合 http_metrics REGISTRY，给出累积（自进程启动以来）的
+/// p50/p95/p99 延迟、5xx 错误率、rpm。累积口径无时间窗口。
+async fn endpoint_metrics(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let uptime = state.uptime_secs();
+    let endpoints = crate::middleware::http_metrics::endpoints_snapshot(uptime).await;
+    Ok(ok(json!({ "endpoints": endpoints })))
+}
+
+/// GET /api/admin/monitoring/workers/cron —— worker cron 卡。
+/// cron 表达式来自 planned_jobs 的单一事实源（worker_cron_specs），next-run 由
+/// cron 表达式推算；last-run 来自 worker_last_run；健康判定复用 watchdog 静默阈值。
+async fn worker_cron(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    use std::str::FromStr;
+
+    let last_runs = state
+        .run_store_task("admin.monitoring.workers_cron", |store| {
+            store.list_worker_last_run()
+        })
+        .await
+        .map_err(|e| AppError::internal(&e.to_string()))?
+        .map_err(AppError::from)?;
+    let last_map: std::collections::HashMap<String, _> = last_runs
+        .into_iter()
+        .map(|r| (r.worker_name.clone(), r))
+        .collect();
+
+    let cfg = state.config();
+    // 条件 worker 的启用判定：生产中 leader 启动时恒注入 watchdog/health/canary state，
+    // 故据 is_leader 还原；update_checker 据其专用配置开关。
+    let leader = cfg.worker.is_leader;
+    let specs = crate::workers::worker_cron_specs(
+        &cfg.worker,
+        cfg.update_check.worker_enabled,
+        leader,
+        leader,
+        leader,
+    );
+    let thresholds = crate::workers::scheduler_health_watchdog::expected_max_silence_secs();
+    let now = Utc::now();
+    let now_unix = now.timestamp();
+
+    let workers: Vec<serde_json::Value> = specs
+        .into_iter()
+        .map(|spec| {
+            let name = spec.name.as_str();
+            let next_run_at = Schedule::from_str(spec.cron)
+                .ok()
+                .and_then(|s| s.after(&now).next())
+                .map(|dt| dt.timestamp());
+            let last = last_map.get(name);
+            let last_run_at = last.map(|r| r.last_run_at);
+            let last_outcome = last.map(|r| r.last_outcome.clone());
+            let last_duration_ms = last.map(|r| r.last_duration_ms);
+            let last_error = last.and_then(|r| r.last_error.clone());
+            let panic_count = last.map(|r| r.panic_count).unwrap_or(0);
+
+            // 健康：最近一次成功 且 静默时长 ≤ watchdog 阈值（cron 间隔 × 3）。
+            // 无 last-run 记录或无阈值映射时按未知处理（healthy=false）。
+            let outcome_ok = last_outcome
+                .as_deref()
+                .map(|o| matches!(o, "success" | "ok" | "completed"))
+                .unwrap_or(false);
+            let within_silence = match (last_run_at, thresholds.get(name)) {
+                (Some(lr), Some(max)) if lr > 0 => {
+                    (now_unix.saturating_sub(lr)) as u64 <= *max
+                }
+                _ => false,
+            };
+            let healthy = spec.enabled && outcome_ok && within_silence;
+
+            serde_json::json!({
+                "workerName": name,
+                "cron": spec.cron,
+                "enabled": spec.enabled,
+                "cadenceHuman": cadence_human(spec.cron),
+                "nextRunAt": next_run_at,
+                "lastRunAt": last_run_at,
+                "lastOutcome": last_outcome,
+                "lastDurationMs": last_duration_ms,
+                "lastError": last_error,
+                "panicCount": panic_count,
+                "healthy": healthy,
+            })
+        })
+        .collect();
+
+    Ok(ok(json!({ "workers": workers })))
+}
+
+/// 已知 cron 表达式 → 人类可读节奏文案（仅覆盖 planned_jobs 实际使用的表达式，纯展示）。
+fn cadence_human(cron: &str) -> &'static str {
+    match cron {
+        "0 0 * * * *" => "每小时",
+        "0 30 * * * *" => "每小时（第 30 分）",
+        "0 */5 * * * *" => "每 5 分钟",
+        "0 */10 * * * *" => "每 10 分钟",
+        "0 */20 * * * *" => "每 20 分钟",
+        "0 * * * * *" => "每分钟",
+        "0 0 */1 * * *" => "每小时",
+        "0 30 6 * * *" => "每日 06:30",
+        "0 0 0 * * *" => "每日 00:00",
+        "0 0 1 * * *" => "每日 01:00",
+        "0 0 5 * * 1" => "每周一 05:00",
+        "0 0 5 * * SUN" => "每周日 05:00",
+        "0 30 6 * * 1" => "每周一 06:30",
+        "0 0 3 1 * *" => "每月 1 日 03:00",
+        _ => "自定义",
+    }
+}
+
+// ─────────────── BA3a：worker 运行历史 + 资源历史 ───────────────
+
+#[derive(Debug, Deserialize)]
+struct WorkerHistoryQuery {
+    worker: Option<String>,
+    limit: Option<u32>,
+}
+
+/// GET /api/admin/monitoring/workers/history —— worker 运行历史时间线（worker_runs DESC）。
+/// `worker` 缺省返回全部 worker；`limit` 默认 100，夹到 1..=1000。
+async fn worker_history(
+    _admin: AdminAuthUser,
+    Query(q): Query<WorkerHistoryQuery>,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let limit = q.limit.unwrap_or(100).clamp(1, 1000);
+    let worker = q.worker.clone();
+    let runs = state
+        .run_store_task("admin.monitoring.workers_history", move |store| {
+            store.list_worker_runs(worker.as_deref(), limit)
+        })
+        .await
+        .map_err(|e| AppError::internal(&e.to_string()))?
+        .map_err(AppError::from)?;
+    let runs_json: Vec<serde_json::Value> = runs
+        .into_iter()
+        .map(|r| {
+            json!({
+                "workerName": r.worker_name,
+                "ranAt": r.ran_at,
+                "durationMs": r.duration_ms,
+                "outcome": r.outcome,
+                "error": r.error,
+            })
+        })
+        .collect();
+    Ok(ok(json!({ "runs": runs_json })))
+}
+
+/// GET /api/admin/monitoring/resource-history —— 进程 CPU/RSS/load 时序（oldest-first）。
+/// mem 以字节返回（与 /health resources.memoryRssBytes 同口径）。
+async fn resource_history(
+    _admin: AdminAuthUser,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let samples = crate::resource_sampler::snapshot();
+    let mut cpu = Vec::with_capacity(samples.len());
+    let mut mem = Vec::with_capacity(samples.len());
+    let mut load_one = Vec::with_capacity(samples.len());
+    let mut ts_ms = Vec::with_capacity(samples.len());
+    for s in samples {
+        cpu.push(s.cpu_pct);
+        mem.push(s.mem_rss_bytes);
+        load_one.push(s.load_one);
+        ts_ms.push(s.ts_ms);
+    }
+    Ok(ok(json!({
+        "cpu": cpu,
+        "mem": mem,
+        "loadOne": load_one,
+        "tsMs": ts_ms,
+    })))
+}
+
 // ─────────────── M0-P5：监控页对齐设计图新增端点 ───────────────
 
 #[derive(Debug, Deserialize)]
@@ -561,6 +762,26 @@ async fn request_metrics(
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     let secs = parse_window_secs(q.window.as_deref());
     Ok(ok(crate::middleware::http_metrics::aggregate(secs)))
+}
+
+/// GET /api/admin/monitoring/pipeline?window=1h —— records 摄取热路径分阶段管线指标。
+/// 数据来自 process_single_record 各阶段（amas/sqlite/sse，async 路径含 outbox）的进程内
+/// 埋点（stage_metrics），按窗口聚合 per-stage {rpm,p50,p95,p99,max,errorRate}。
+/// 重启清零；尚无埋点时 stages 为空数组（前端渲染「暂无已埋点阶段」）。
+async fn pipeline_metrics(
+    _admin: AdminAuthUser,
+    Query(q): Query<WindowQuery>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let secs = parse_window_secs(q.window.as_deref());
+    Ok(ok(json!({ "stages": crate::stage_metrics::aggregate(secs) })))
+}
+
+/// GET /api/admin/monitoring/trace/latest —— 最近一条 records 摄取的分步瀑布 trace。
+/// 无（启动后尚无记录被处理）时返回 data:null（前端渲染「暂无最近记录」，非红错）。
+async fn trace_latest(
+    _admin: AdminAuthUser,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    Ok(ok(crate::stage_metrics::latest_trace()))
 }
 
 #[derive(Debug, Deserialize)]

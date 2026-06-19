@@ -26,6 +26,11 @@ pub async fn run(store: &Store) {
         let deleted = store.cleanup_old_monitoring_events(&cutoff)?;
         tracing::info!(deleted, cutoff = %cutoff, "monitoring_retention: deleted old events");
 
+        // BA3a：同 30d 窗口清理 worker_runs 运行历史（append-only，否则无界增长）。
+        let deleted_runs = store.cleanup_old_worker_runs(&cutoff)?;
+        tracing::info!(deleted_runs, cutoff = %cutoff, "monitoring_retention: deleted old worker_runs");
+        let deleted = deleted + deleted_runs;
+
         // VACUUM 只在有删除时执行（避免空跑耗 IO）
         if deleted > 0 {
             store.vacuum_db()?;

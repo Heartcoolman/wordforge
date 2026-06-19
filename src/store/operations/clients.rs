@@ -972,6 +972,22 @@ impl Store {
 
         Ok(summary)
     }
+
+    /// 设备归属两态计数(Telemetry 看板 ownership)：client_devices 按 user_id 是否为 NULL 分
+    /// claimed/unclaimed。返回 (claimed, unclaimed)。mismatch/not_registered 是逐请求摄取结果
+    /// (异主行相对请求者、或根本无行)，无法从表派生 → handler 置 null。
+    pub fn admin_device_ownership_counts(&self) -> Result<(i64, i64), StoreError> {
+        let conn = self.conn()?;
+        let row = conn.query_row(
+            "SELECT
+                COALESCE(SUM(CASE WHEN user_id IS NOT NULL THEN 1 ELSE 0 END), 0) AS claimed,
+                COALESCE(SUM(CASE WHEN user_id IS NULL THEN 1 ELSE 0 END), 0) AS unclaimed
+             FROM client_devices",
+            [],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+        )?;
+        Ok(row)
+    }
 }
 
 #[cfg(test)]

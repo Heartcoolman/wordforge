@@ -59,6 +59,8 @@ tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 tokio-cron-scheduler = "0.11"
+# admin 监控 worker cron 卡：从 cron 表达式推算 next-run（与 tokio-cron-scheduler 同版本族，已在 Cargo.lock）
+cron = "0.12"
 
 reqwest = { version = "0.12", default-features = false, features = ["json", "cookies", "stream", "rustls-tls"] }
 

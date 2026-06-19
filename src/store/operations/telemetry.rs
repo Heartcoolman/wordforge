@@ -569,6 +569,49 @@ impl Store {
             Ok((events + summaries) as u64)
         })
     }
+
+    /// m061：摄取拒绝留痕（fire-and-forget，由摄取热路径调用）。server_ts 用当前 UTC RFC3339。
+    pub fn insert_ingest_rejection(
+        &self,
+        code: &str,
+        device_id: Option<&str>,
+        user_id: Option<&str>,
+    ) -> Result<(), StoreError> {
+        let conn = self.conn()?;
+        conn.execute(
+            "INSERT INTO telemetry_ingest_rejections (code, device_id, user_id, server_ts)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                code,
+                device_id,
+                user_id,
+                chrono::Utc::now().to_rfc3339()
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// m061：近 N 天按拒绝码聚合计数，降序。handler 计算 pct。
+    pub fn aggregate_ingest_rejections(
+        &self,
+        days: u32,
+    ) -> Result<Vec<(String, i64)>, StoreError> {
+        let cutoff = (chrono::Utc::now() - chrono::Duration::days(days as i64)).to_rfc3339();
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT code, COUNT(*) AS n
+             FROM telemetry_ingest_rejections
+             WHERE server_ts >= ?1
+             GROUP BY code
+             ORDER BY n DESC",
+        )?;
+        let rows = stmt
+            .query_map(params![cutoff], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
 }
 
 #[cfg(test)]

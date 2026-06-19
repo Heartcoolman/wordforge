@@ -117,6 +117,13 @@ pub fn router() -> Router<AppState> {
         // m025:用户档案深化数据源
         .route("/users/:id/extras", get(admin_user_extras))
         .route("/users/:id/activity-log", get(admin_user_activity_log))
+        // AMAS 用户内部态（admin-by-id 变体）：UserState / 当前策略+奖励 / per-word 掌握度
+        .route("/users/:id/amas/state", get(admin_user_amas_state))
+        .route("/users/:id/amas/strategy", get(admin_user_amas_strategy))
+        .route("/users/:id/amas/words", get(admin_user_amas_words))
+        // BA：单用户最近答题逐条明细 + 14d 每日答题量（看板用户详情 records / 活跃日历卡）
+        .route("/users/:id/records", get(admin_user_records))
+        .route("/users/:id/daily-activity", get(admin_user_daily_activity))
         // m026:批量操作 + 设备封禁
         .route(
             "/users/bulk-reset-password",
@@ -637,6 +644,93 @@ async fn admin_create_password_reset(
     })
 }
 
+// ─────────────── AMAS 用户内部态（admin-by-id 变体） ───────────────
+
+/// GET /api/admin/users/:id/amas/state —— 用户完整 UserState（attention/fatigue/
+/// motivation/confidence + cognitiveProfile / trendState / habitProfile）。
+/// 与 user_profile.rs 的 self-only 路由同源，仅把 user_id 换成 Path(:id)。
+async fn admin_user_amas_state(
+    _admin: AdminAuthUser,
+    Path(id): Path<String>,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let user_state = state.amas().get_user_state_async(&id).await?;
+    Ok(ok(user_state))
+}
+
+/// GET /api/admin/users/:id/amas/strategy —— 当前策略（由 UserState 确定性重算，无滞后）
+/// + 最近一次采样落库的 reward（engine_monitoring_events，按 sample_rate 抽样，可能滞后；
+/// 无采样事件时为 null）。
+async fn admin_user_amas_strategy(
+    _admin: AdminAuthUser,
+    Path(id): Path<String>,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let user_state = state.amas().get_user_state_async(&id).await?;
+    let strategy = state.amas().compute_strategy_from_state(&user_state);
+
+    let user_id = id.clone();
+    let reward_row = state
+        .run_store_task("admin.user_amas_strategy.reward", move |store| {
+            store.get_latest_monitoring_reward(&user_id)
+        })
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .flatten();
+
+    // reward_json 是 RewardComponents 子对象坨；原样转 JSON 透传 components，附 value/at。
+    let reward = reward_row.map(|(reward_json, reward_value, at)| {
+        let components = serde_json::from_str::<serde_json::Value>(&reward_json)
+            .unwrap_or(serde_json::Value::Null);
+        serde_json::json!({
+            "value": reward_value,
+            "components": components,
+            "at": at,
+        })
+    });
+
+    Ok(ok(serde_json::json!({
+        "strategy": strategy,
+        "reward": reward,
+    })))
+}
+
+/// GET /api/admin/users/:id/amas/words?limit=50&offset=0 —— per-word 掌握度分页，
+/// LEFT JOIN mastery_states 带出 MDM 内部量；返回 { items, total }。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AmasWordsQuery {
+    #[serde(default = "default_amas_words_limit")]
+    limit: usize,
+    #[serde(default)]
+    offset: usize,
+}
+fn default_amas_words_limit() -> usize {
+    50
+}
+
+async fn admin_user_amas_words(
+    _admin: AdminAuthUser,
+    Path(id): Path<String>,
+    Query(q): Query<AmasWordsQuery>,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let limit = q.limit.clamp(1, 500);
+    let offset = q.offset;
+    let user_id = id;
+    let (items, total) = state
+        .run_store_task("admin.user_amas_words", move |store| {
+            store.list_admin_user_word_states(&user_id, limit, offset)
+        })
+        .await??;
+
+    Ok(ok(serde_json::json!({
+        "items": items,
+        "total": total,
+    })))
+}
+
 // ─────────────── m022:用户档案 / 会话 / 批量 ban ───────────────
 
 /// GET /api/admin/users/:id/profile —— 用户答题聚合(总记录数 / 准确率 /
@@ -771,6 +865,116 @@ async fn admin_user_sessions(
     .await??;
 
     Ok(ok(serde_json::json!({ "sessions": rows })))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UserRecordsQuery {
+    #[serde(default = "default_user_records_limit")]
+    limit: u32,
+}
+fn default_user_records_limit() -> u32 {
+    50
+}
+
+/// GET /api/admin/users/:id/records?limit=50 —— 单用户最近答题逐条明细
+/// (learning_records LEFT JOIN words 取词文本，按时间倒序)。供看板用户详情「最近答题」卡。
+async fn admin_user_records(
+    _admin: AdminAuthUser,
+    Path(id): Path<String>,
+    Query(q): Query<UserRecordsQuery>,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let limit = q.limit.clamp(1, 200);
+    let user_id = id;
+    let (rows, total) = blocking::run_blocking(
+        "admin.user_records",
+        move || -> Result<(Vec<serde_json::Value>, i64), crate::store::StoreError> {
+            let conn = state.store().conn()?;
+            let total: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM learning_records WHERE user_id = ?1",
+                rusqlite::params![user_id],
+                |r| r.get(0),
+            )?;
+            let mut stmt = conn.prepare(
+                "SELECT lr.id, lr.word_id, COALESCE(w.text, lr.word_id) AS word,
+                        lr.is_correct, lr.response_time_ms, lr.created_at, lr.record_type
+                 FROM learning_records lr
+                 LEFT JOIN words w ON w.id = lr.word_id
+                 WHERE lr.user_id = ?1
+                 ORDER BY lr.created_at DESC, lr.id DESC
+                 LIMIT ?2",
+            )?;
+            let rows: Result<Vec<serde_json::Value>, _> = stmt
+                .query_map(rusqlite::params![user_id, limit as i64], |r| {
+                    Ok(serde_json::json!({
+                        "id": r.get::<_, String>(0)?,
+                        "wordId": r.get::<_, String>(1)?,
+                        "word": r.get::<_, String>(2)?,
+                        "isCorrect": r.get::<_, i64>(3)? != 0,
+                        "responseTimeMs": r.get::<_, Option<i64>>(4)?,
+                        "createdAt": r.get::<_, String>(5)?,
+                        "recordType": r.get::<_, Option<String>>(6)?,
+                    }))
+                })?
+                .collect();
+            Ok((rows?, total))
+        },
+    )
+    .await??;
+
+    Ok(ok(serde_json::json!({ "records": rows, "total": total })))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DailyActivityQuery {
+    #[serde(default = "default_daily_activity_days")]
+    days: u32,
+}
+fn default_daily_activity_days() -> u32 {
+    14
+}
+
+/// GET /api/admin/users/:id/daily-activity?days=14 —— 单用户每日答题量序列
+/// (learning_records 按 UTC 日聚合)。仅返回有记录的日期，前端补齐连续窗口。供「活跃日历」卡。
+async fn admin_user_daily_activity(
+    _admin: AdminAuthUser,
+    Path(id): Path<String>,
+    Query(q): Query<DailyActivityQuery>,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let days = q.days.clamp(1, 90);
+    let user_id = id;
+    // since 与 created_at 同用 chrono to_rfc3339()(+00:00)，保证字符串 >= 比较有效。
+    let since = (Utc::now() - Duration::days(days as i64 - 1)).to_rfc3339();
+    let rows = blocking::run_blocking(
+        "admin.user_daily_activity",
+        move || -> Result<Vec<serde_json::Value>, crate::store::StoreError> {
+            let conn = state.store().conn()?;
+            let mut stmt = conn.prepare(
+                "SELECT date(lr.created_at) AS day, COUNT(*) AS total,
+                        COALESCE(SUM(CASE WHEN lr.is_correct = 1 THEN 1 ELSE 0 END), 0) AS correct
+                 FROM learning_records lr
+                 WHERE lr.user_id = ?1 AND lr.created_at >= ?2
+                 GROUP BY day
+                 ORDER BY day ASC",
+            )?;
+            let rows: Result<Vec<serde_json::Value>, _> = stmt
+                .query_map(rusqlite::params![user_id, since], |r| {
+                    Ok(serde_json::json!({
+                        "date": r.get::<_, String>(0)?,
+                        "count": r.get::<_, i64>(1)?,
+                        "correct": r.get::<_, i64>(2)?,
+                    }))
+                })?
+                .collect();
+            Ok(rows?)
+        },
+    )
+    .await??;
+
+    Ok(ok(serde_json::json!({ "days": rows, "windowDays": days })))
 }
 
 #[derive(Debug, Deserialize)]

@@ -352,6 +352,10 @@ pub(crate) async fn process_single_record(
         })
         .await??;
 
+    // BA3b：从 AMAS 阶段起锚定瀑布 trace（record.id 已就绪）。早退的重复/并发坍缩路径
+    // 不调用 finish()，故不入环 —— trace 只记录真正完整处理的事件。
+    let mut trace = crate::stage_metrics::TraceBuilder::start(&record.id);
+    let t_amas = std::time::Instant::now();
     let amas_result = state
         .amas()
         .process_event_idempotent(
@@ -376,6 +380,12 @@ pub(crate) async fn process_single_record(
             &record.id,
         )
         .await?;
+    crate::stage_metrics::stage_observe(
+        crate::stage_metrics::Stage::Amas,
+        t_amas.elapsed().as_secs_f64() * 1000.0,
+        false,
+    );
+    trace.mark("amas");
     // W1-1 并发收口：None 表示并发同 client_record_id 请求抢先写入幂等标记、本次 AMAS 已整笔回滚，
     // 走与 already_processed 一致的裸记录回放（不重复累加 ELO/mastery/trust）。
     let Some(amas_result) = amas_result else {
@@ -395,6 +405,7 @@ pub(crate) async fn process_single_record(
     };
     let amas_result_for_store = amas_result.clone();
 
+    let t_sql = std::time::Instant::now();
     state
         .run_store_task(
             "records.single.persist",
@@ -488,10 +499,17 @@ pub(crate) async fn process_single_record(
             },
         )
         .await??;
+    crate::stage_metrics::stage_observe(
+        crate::stage_metrics::Stage::Sqlite,
+        t_sql.elapsed().as_secs_f64() * 1000.0,
+        false,
+    );
+    trace.mark("sqlite");
 
     // v1.1-P1 S2：写库成功后旁路 emit RecordCreated；
     // AMAS 已在前面同步通路执行过，这里只是事件总线基础设施落地，
     // 为未来 outbox 持久化 + 真异步消费铺路。fire-and-forget 不阻塞 HTTP 响应。
+    let t_sse = std::time::Instant::now();
     state.event_bus().emit(DomainEvent::RecordCreated {
         user_id: record.user_id.clone(),
         word_id: record.word_id.clone(),
@@ -502,6 +520,13 @@ pub(crate) async fn process_single_record(
         record_type: record.record_type,
         created_at: record.created_at,
     });
+    crate::stage_metrics::stage_observe(
+        crate::stage_metrics::Stage::Sse,
+        t_sse.elapsed().as_secs_f64() * 1000.0,
+        false,
+    );
+    trace.mark("sse");
+    trace.finish();
 
     Ok(CreateRecordResponse {
         record,
@@ -540,11 +565,17 @@ async fn create_record(
         };
         let json =
             serde_json::to_string(&payload).map_err(|e| AppError::internal(&e.to_string()))?;
+        let t_outbox = std::time::Instant::now();
         state
             .run_store_task("records.outbox.enqueue", move |store| {
                 store.enqueue_outbox_event("record_created", &json)
             })
             .await??;
+        crate::stage_metrics::stage_observe(
+            crate::stage_metrics::Stage::Outbox,
+            t_outbox.elapsed().as_secs_f64() * 1000.0,
+            false,
+        );
         return Ok((
             axum::http::StatusCode::ACCEPTED,
             axum::Json(serde_json::json!({

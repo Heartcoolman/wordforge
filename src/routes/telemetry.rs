@@ -10,6 +10,26 @@ use crate::response::{ok, AppError};
 use crate::state::AppState;
 use crate::store::operations::telemetry::TelemetrySummaryInput;
 
+/// BA3a：摄取拒绝码 fire-and-forget 留痕（m061）。摄取早返(400/403)在写库前丢弃了
+/// 拒绝码,此处旁路 spawn 一条 telemetry_ingest_rejections，绝不阻塞/失败响应。
+fn record_ingest_rejection(
+    state: &AppState,
+    code: &'static str,
+    device_id: Option<&str>,
+    user_id: Option<&str>,
+) {
+    let state = state.clone();
+    let device_id = device_id.map(str::to_string);
+    let user_id = user_id.map(str::to_string);
+    tokio::spawn(async move {
+        let _ = state
+            .run_store_task("telemetry.ingest_rejection", move |store| {
+                store.insert_ingest_rejection(code, device_id.as_deref(), user_id.as_deref())
+            })
+            .await;
+    });
+}
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", post(submit_telemetry))
@@ -134,22 +154,41 @@ async fn submit_telemetry(
 
     // m038 遥测硬识别:四要素必填(缺任一直接 400 拦截,不受 strict_mode 开关控制)。
     // 平台/版本走 header,时区/型号走 payload.device。
-    let dev_platform = headers
+    let dev_platform = match headers
         .get("x-device-platform")
         .and_then(|v| v.to_str().ok())
         .map(str::trim)
         .filter(|s| !s.is_empty() && *s != "unknown")
-        .ok_or_else(|| {
-            AppError::bad_request("MISSING_OS", "缺少 x-device-platform 头（客户端类型）")
-        })?;
-    let dev_app_version = headers
+    {
+        Some(p) => p,
+        None => {
+            record_ingest_rejection(&state, "MISSING_OS", Some(device_id), Some(&auth.user_id));
+            return Err(AppError::bad_request(
+                "MISSING_OS",
+                "缺少 x-device-platform 头（客户端类型）",
+            ));
+        }
+    };
+    let dev_app_version = match headers
         .get("x-app-version")
         .and_then(|v| v.to_str().ok())
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| {
-            AppError::bad_request("MISSING_APP_VERSION", "缺少 x-app-version 头（版本号）")
-        })?;
+    {
+        Some(v) => v,
+        None => {
+            record_ingest_rejection(
+                &state,
+                "MISSING_APP_VERSION",
+                Some(device_id),
+                Some(&auth.user_id),
+            );
+            return Err(AppError::bad_request(
+                "MISSING_APP_VERSION",
+                "缺少 x-app-version 头（版本号）",
+            ));
+        }
+    };
     let dev_obj = body.payload.get("device").and_then(|v| v.as_object());
     if dev_obj
         .and_then(|d| d.get("timezone"))
@@ -158,23 +197,37 @@ async fn submit_telemetry(
         .filter(|s| !s.is_empty())
         .is_none()
     {
+        record_ingest_rejection(
+            &state,
+            "MISSING_TIMEZONE",
+            Some(device_id),
+            Some(&auth.user_id),
+        );
         return Err(AppError::bad_request(
             "MISSING_TIMEZONE",
             "telemetry payload 缺少 device.timezone（时区）",
         ));
     }
-    let dev_model = dev_obj
+    let dev_model = match dev_obj
         .and_then(|d| d.get("model"))
         .and_then(|v| v.as_str())
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| {
-            AppError::bad_request(
+    {
+        Some(m) => m.to_string(),
+        None => {
+            record_ingest_rejection(
+                &state,
+                "MISSING_DEVICE_MODEL",
+                Some(device_id),
+                Some(&auth.user_id),
+            );
+            return Err(AppError::bad_request(
                 "MISSING_DEVICE_MODEL",
                 "telemetry payload 缺少 device.model（设备型号）",
-            )
-        })?
-        .to_string();
+            ));
+        }
+    };
 
     // §12 strict-mode payload 级软校验：language 必填 + session_start 设备指纹。
     // timezone 已由上方四要素硬校验接管,此处不再重复;language/指纹维持受 hard_block 开关。
@@ -187,11 +240,19 @@ async fn submit_telemetry(
             .is_some_and(|s| !s.is_empty());
 
         if !language_ok {
-            strict_reject_or_warn(
+            if let Err(e) = strict_reject_or_warn(
                 &strict,
                 "MISSING_LANGUAGE",
                 "telemetry payload 缺少 device.language",
-            )?;
+            ) {
+                record_ingest_rejection(
+                    &state,
+                    "MISSING_LANGUAGE",
+                    Some(device_id),
+                    Some(&auth.user_id),
+                );
+                return Err(e);
+            }
         }
 
         if body.event_type == "session_start" {
@@ -201,11 +262,19 @@ async fn submit_telemetry(
                     .all(|k| d.get(*k).and_then(|v| v.as_f64()).is_some_and(|n| n > 0.0))
             });
             if !fp_ok {
-                strict_reject_or_warn(
+                if let Err(e) = strict_reject_or_warn(
                     &strict,
                     "MISSING_DEVICE_FINGERPRINT",
                     "session_start 必须携带完整设备指纹（screenWidth/screenHeight/pixelRatio/cpuCores 均 > 0）",
-                )?;
+                ) {
+                    record_ingest_rejection(
+                        &state,
+                        "MISSING_DEVICE_FINGERPRINT",
+                        Some(device_id),
+                        Some(&auth.user_id),
+                    );
+                    return Err(e);
+                }
             }
         }
     }
@@ -239,6 +308,12 @@ async fn submit_telemetry(
         .await??;
     match owner {
         None => {
+            record_ingest_rejection(
+                &state,
+                "DEVICE_NOT_REGISTERED",
+                Some(device_id),
+                Some(&auth.user_id),
+            );
             return Err(AppError {
                 status: StatusCode::FORBIDDEN,
                 code: "DEVICE_NOT_REGISTERED".into(),
@@ -247,6 +322,12 @@ async fn submit_telemetry(
             });
         }
         Some(Some(existing)) if existing != auth.user_id => {
+            record_ingest_rejection(
+                &state,
+                "DEVICE_OWNERSHIP_MISMATCH",
+                Some(device_id),
+                Some(&auth.user_id),
+            );
             return Err(AppError {
                 status: StatusCode::FORBIDDEN,
                 code: "DEVICE_OWNERSHIP_MISMATCH".into(),

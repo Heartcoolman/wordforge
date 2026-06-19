@@ -74,6 +74,14 @@ pub fn admin_router() -> Router<AppState> {
         .route("/anomalies", get(anomalies_overview))
         .route("/anomalies/feed", get(anomalies_feed))
         .route("/user-state/distribution", get(user_state_distribution))
+        // 看板补充:UserState 标量均值 / 认知三轴分布 / 算法对比(accuracy+p95)
+        .route("/user-state/summary", get(user_state_summary))
+        .route("/cognitive/distribution", get(cognitive_distribution))
+        .route("/algo-compare", get(algo_compare))
+        // BA：全局策略均值 / 奖励均值 / 单词记忆强度（看板 strategy / reward / WordMastery 卡）
+        .route("/strategy/summary", get(strategy_summary))
+        .route("/reward/summary", get(reward_summary))
+        .route("/word-mastery", get(word_mastery))
         .route("/user-state/transitions", get(user_state_transitions))
         .route("/user-state/clusters", get(user_state_clusters))
         .route("/compare", get(compare_versions))
@@ -113,6 +121,8 @@ pub fn admin_router() -> Router<AppState> {
         // C6: per-patch canary 子系统
         .route("/advisor/canary", get(list_canaries).post(create_canary))
         .route("/advisor/canary/:id/scale", post(scale_canary))
+        // BA：灰度 baseline vs canary 指标对比（看板 Canary 卡）
+        .route("/advisor/canary/:id/compare", get(compare_canary_baseline))
         .route("/advisor/canary/:id/rollback", post(rollback_canary))
         .route("/advisor/canary/:id/promote", post(promote_canary))
         // T1.3: 真实留存 A/B 实验
@@ -706,6 +716,56 @@ async fn user_state_distribution(
     Ok(ok(dist))
 }
 
+/// GET /user-state/summary —— UserState 标量均值(engine_user_states 当前队列,未采样)。
+async fn user_state_summary(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let means = state
+        .run_store_task("admin.amas.user_state_summary", move |store| {
+            store.aggregate_amas_user_state_means()
+        })
+        .await??;
+    Ok(ok(means))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BinsQuery {
+    bins: Option<u32>,
+}
+
+/// GET /cognitive/distribution —— 认知三轴(memory/processing/stability)mean+直方图。
+async fn cognitive_distribution(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Query(q): Query<BinsQuery>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let bins = q.bins.unwrap_or(20);
+    let dist = state
+        .run_store_task("admin.amas.cognitive_distribution", move |store| {
+            store.aggregate_amas_cognitive_distribution(bins)
+        })
+        .await??;
+    Ok(ok(dist))
+}
+
+/// GET /algo-compare —— 按 routing_algo 的 count/share/accuracy/p50-p95-mean 延迟。
+/// 注意:基于采样事件、且 accuracy 为「被选中主算法」条件下的命中率,非反事实 A/B。
+async fn algo_compare(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Query(q): Query<DaysQuery>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let days = q.days.unwrap_or(7).clamp(1, 90);
+    let rows = state
+        .run_store_task("admin.amas.algo_compare", move |store| {
+            store.aggregate_amas_algo_compare(days)
+        })
+        .await??;
+    Ok(ok(rows))
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CompareQuery {
@@ -906,6 +966,142 @@ async fn compare_versions_ext(
         )
         .await??;
     Ok(ok(serde_json::json!({"a": a, "b": b})))
+}
+
+// ─────────── BA: 看板 strategy / reward / WordMastery / Canary 聚合 handlers ───────────
+
+/// GET /strategy/summary?days=7 —— Amas 全局策略均值（engine_monitoring_events 采样窗口口径）。
+async fn strategy_summary(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Query(q): Query<DaysQuery>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let days = q.days.unwrap_or(7).clamp(1, 90);
+    let r = state
+        .run_store_task("admin.amas.strategy_summary", move |store| {
+            store.aggregate_amas_strategy_means(days)
+        })
+        .await??;
+    Ok(ok(r))
+}
+
+/// GET /reward/summary?days=7 —— Amas 全局奖励分量均值（采样窗口口径）。
+async fn reward_summary(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Query(q): Query<DaysQuery>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let days = q.days.unwrap_or(7).clamp(1, 90);
+    let r = state
+        .run_store_task("admin.amas.reward_summary", move |store| {
+            store.aggregate_amas_reward_means(days)
+        })
+        .await??;
+    Ok(ok(r))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LimitQuery {
+    limit: Option<u32>,
+}
+
+/// GET /word-mastery?limit=7 —— 全局单词记忆强度 top-N（跨所有用户聚合）。
+async fn word_mastery(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Query(q): Query<LimitQuery>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let limit = q.limit.unwrap_or(7).clamp(1, 200) as usize;
+    let rows = state
+        .run_store_task("admin.amas.word_mastery", move |store| {
+            store.aggregate_word_mastery(limit)
+        })
+        .await??;
+    Ok(ok(rows))
+}
+
+/// GET /advisor/canary/:id/compare —— 灰度 canary vs baseline(parent_version) 指标对比。
+/// 每侧 accuracy(hit_rate) / retention7d / dailyReview(event_count÷活跃天数) / eventCount。
+/// 无 parent_version 或无活跃流量时各字段由前端按 eventCount 渲染 '—'。非随机 A/B，按
+/// config_version 切分，存在混淆，口径为 sampled。
+async fn compare_canary_baseline(
+    _admin: AdminAuthUser,
+    Path(id): Path<i64>,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let fatigue_threshold = state.amas().get_config().constraints.high_fatigue_threshold;
+    let fallback_epsilon = state
+        .amas()
+        .get_config()
+        .memory_model
+        .half_life_base_epsilon;
+
+    let canary = state
+        .run_store_task("admin.amas.canary.compare.get", move |store| {
+            store.get_patch_canary(id)
+        })
+        .await??
+        .ok_or_else(|| AppError::not_found("canary 不存在"))?;
+
+    let cv = canary.version_hash.clone();
+    let (canary_slice, baseline_hash) = state
+        .run_store_task(
+            "admin.amas.canary.compare",
+            move |store| -> Result<_, crate::store::StoreError> {
+                let cs = store.aggregate_amas_version_slice_ext(
+                    &cv,
+                    fatigue_threshold,
+                    fallback_epsilon,
+                )?;
+                let bh = store
+                    .get_amas_config_version(&cv)?
+                    .and_then(|d| d.parent_version_hash);
+                Ok((cs, bh))
+            },
+        )
+        .await??;
+
+    let baseline_slice = match baseline_hash.clone() {
+        Some(h) => Some(
+            state
+                .run_store_task("admin.amas.canary.compare.base", move |store| {
+                    store.aggregate_amas_version_slice_ext(&h, fatigue_threshold, fallback_epsilon)
+                })
+                .await??,
+        ),
+        None => None,
+    };
+
+    // 活跃天数 = (last-first)/86400，≥1；dailyReview = event_count / 活跃天数。
+    let mk = |s: &crate::store::operations::amas_dashboard::VersionSliceExt| {
+        let active_days = match (
+            s.first_event_at
+                .as_deref()
+                .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok()),
+            s.last_event_at
+                .as_deref()
+                .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok()),
+        ) {
+            (Some(f), Some(l)) => ((l - f).num_seconds() as f64 / 86_400.0).max(1.0),
+            _ => 1.0,
+        };
+        serde_json::json!({
+            "accuracy": s.hit_rate,
+            "retention7d": s.retention7d,
+            "dailyReview": s.event_count as f64 / active_days,
+            "eventCount": s.event_count,
+        })
+    };
+
+    Ok(ok(serde_json::json!({
+        "canaryVersion": canary.version_hash,
+        "baselineVersion": baseline_hash,
+        "percent": canary.percent,
+        "status": canary.status,
+        "canary": mk(&canary_slice),
+        "baseline": baseline_slice.as_ref().map(|b| mk(b)),
+    })))
 }
 
 // ─────────── PR-5: Suggestions / Advisor 路由 ───────────

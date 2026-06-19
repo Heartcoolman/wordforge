@@ -135,14 +135,25 @@ pub fn build_router(state: AppState) -> Router {
         .route("/metrics", axum::routing::get(metrics::metrics_handler));
 
     if !state.config().api_only {
-        let static_files = ServeDir::new("static").append_index_html_on_directories(false);
+        // 服务端下发的 web 用户应用：在根托管 static/web-app/current（激活时原子切换的符号链接，
+        // 指向当前激活的 web-app 工件解包目录）。SPA fallback 到其 index.html；current 不存在
+        // （未发布过 web-app）时 404，不影响 /api。
+        let webapp_spa = ServeDir::new("static/web-app/current")
+            .append_index_html_on_directories(false)
+            .fallback(ServeFile::new("static/web-app/current/index.html"));
+        let webapp_index = || get_service(ServeFile::new("static/web-app/current/index.html"));
+        // admin-ui 维持 /admin。注：admin-ui 资产为绝对 /assets，与 web-app 资产共用 /assets 路径，
+        // 彻底隔离需 admin-ui 改 base=/admin/（既有 follow-up）；本次确保 web-app 占根可用。
         let admin_spa = ServeDir::new("static").fallback(ServeFile::new("static/index.html"));
         app = LEGACY_USER_SPA_PATHS.iter().fold(app, |router, path| {
-            router.route_service(path, get_service(ServeFile::new("static/index.html")))
+            router.route_service(path, webapp_index())
         });
         app = app
             .nest_service("/admin", admin_spa)
-            .fallback_service(static_files)
+            // 资源包 payload 下载与用户头像：显式挂载，避免被 web-app 根 fallback 截走
+            .nest_service("/packs", ServeDir::new("static/packs"))
+            .nest_service("/avatars", ServeDir::new("static/avatars"))
+            .fallback_service(webapp_spa)
             .layer(axum::middleware::from_fn(static_cache_headers));
     }
 

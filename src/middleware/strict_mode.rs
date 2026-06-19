@@ -60,7 +60,13 @@ pub async fn strict_mode_middleware(
             .get("x-device-platform")
             .and_then(|v| v.to_str().ok());
 
-        if ua_parsed.is_none() {
+        // web 端豁免 UA 契约：浏览器禁止 fetch 设置 User-Agent（forbidden header），无法满足
+        // WordForge-Web/<ver>。后端同源托管 web 应用后没有 dev 代理注入 UA，故以
+        // x-device-platform=web 作为平台标识豁免 UA 校验；平台头本身仍必须存在（见下 platform_ok）。
+        // 注：web 的版本门控由 /api/status.webTargetVersion + X-Upgrade-Hint（软更新）承担，
+        // 不依赖此处基于 UA semver 的硬切流（native 仍走 UA）。
+        let is_web = platform == Some("web");
+        if !is_web && ua_parsed.is_none() {
             if let Some(resp) = enforce(&cfg, path, "MISSING_USER_AGENT", "缺少或非法的 User-Agent")
             {
                 return resp;
