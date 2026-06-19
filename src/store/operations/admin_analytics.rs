@@ -1856,6 +1856,114 @@ impl Store {
     }
 }
 
+// ===========================================================================
+// Reward-type distribution / chronotype segments (Users 看板 mock 替换)
+// ===========================================================================
+
+/// chronotype-segments 每段聚合的中间累计行（store 层 derive 后返回，handler 算均值/占比）。
+#[derive(Debug, Clone, Default)]
+pub struct AdminChronotypeSegmentRow {
+    /// "morning" | "evening" | "neutral"
+    pub seg: String,
+    pub users: i64,
+    /// SUM(user_stats.correct_records) / SUM(user_stats.total_records);分母 0 → None。
+    pub correct_sum: i64,
+    pub total_sum: i64,
+    /// SUM(habit_profiles.sessions_per_day) —— handler 除以 users 得均值。
+    pub sessions_per_day_sum: f64,
+    /// SUM(median_session_length_mins * 60) —— handler 除以 users 得 durationSecsAvg。
+    pub duration_secs_sum: f64,
+}
+
+impl Store {
+    /// reward-distribution：按 reward_type 分布(LEFT JOIN users，无偏好行的活跃用户隐式计 'standard')。
+    /// reward_type 为自由 TEXT 列(无 CHECK)，返回真实存在的取值；handler 计算 pct。
+    /// 镜像 `admin_question_distribution` 的简单 GROUP BY + Rust pct 模式。
+    pub fn admin_reward_distribution(&self) -> Result<Vec<(String, i64)>, StoreError> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT COALESCE(rp.reward_type, 'standard') AS t, COUNT(*) AS n
+             FROM users u
+             LEFT JOIN reward_preferences rp ON rp.user_id = u.id
+             WHERE u.is_banned = 0
+             GROUP BY t
+             ORDER BY n DESC",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// chronotype-segments：habit_profiles LEFT JOIN user_stats，按 preferred_hours_json 的
+    /// 均值 derive 三段(mean<11→morning，mean>=18→evening，else neutral)，每段累计计数/正确数/
+    /// 总答题数/sessions_per_day/时长。chronotype 非存储列，全部在 Rust 端从 JSON 派生。
+    /// habit_profiles 为空时返回三段全零行。
+    pub fn admin_chronotype_segments(&self) -> Result<Vec<AdminChronotypeSegmentRow>, StoreError> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT hp.preferred_hours_json, hp.sessions_per_day, hp.median_session_length_mins,
+                    COALESCE(us.correct_records, 0), COALESCE(us.total_records, 0)
+             FROM habit_profiles hp
+             LEFT JOIN user_stats us ON us.user_id = hp.user_id",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, f64>(1)?,
+                    r.get::<_, f64>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, i64>(4)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // 固定三段顺序，缺数据段保留零行。
+        let mut segs: [AdminChronotypeSegmentRow; 3] = [
+            AdminChronotypeSegmentRow {
+                seg: "morning".to_string(),
+                ..Default::default()
+            },
+            AdminChronotypeSegmentRow {
+                seg: "evening".to_string(),
+                ..Default::default()
+            },
+            AdminChronotypeSegmentRow {
+                seg: "neutral".to_string(),
+                ..Default::default()
+            },
+        ];
+
+        for (hours_json, spd, median_mins, correct, total) in rows {
+            let hours: Vec<f64> = serde_json::from_str(&hours_json).unwrap_or_default();
+            // 空数组无法判型 → 归 neutral(索引 2)。
+            let idx = if hours.is_empty() {
+                2
+            } else {
+                let mean = hours.iter().sum::<f64>() / hours.len() as f64;
+                if mean < 11.0 {
+                    0
+                } else if mean >= 18.0 {
+                    1
+                } else {
+                    2
+                }
+            };
+            let s = &mut segs[idx];
+            s.users += 1;
+            s.correct_sum += correct;
+            s.total_sum += total;
+            s.sessions_per_day_sum += spd;
+            s.duration_secs_sum += median_mins * 60.0;
+        }
+
+        Ok(segs.into_iter().collect())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

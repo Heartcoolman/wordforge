@@ -520,7 +520,17 @@ impl AppState {
         T: Send + 'static,
     {
         let store = self.store().clone();
-        crate::blocking::run_blocking(task_name, move || f(store)).await
+        // BA3b：Sqlite 阶段 = 所有 store task 的阻塞执行时长（run_store_task 是 DB 访问的
+        // 唯一中心入口）。is_error 仅反映 blocking 调度失败；T 为业务 Result 时其内部 Err
+        // 不在此区分（管线视图只看 DB 时延）。
+        let start = std::time::Instant::now();
+        let out = crate::blocking::run_blocking(task_name, move || f(store)).await;
+        crate::stage_metrics::stage_observe(
+            crate::stage_metrics::Stage::Sqlite,
+            start.elapsed().as_secs_f64() * 1000.0,
+            out.is_err(),
+        );
+        out
     }
 
     pub fn amas(&self) -> &AMASEngine {
@@ -628,11 +638,18 @@ impl AppState {
     /// 用于 admin 级别的全局通知（update_available / update_progress 等）。
     /// 非 admin 前端没有对应 handler，收到只会忽略。
     pub fn broadcast_to_all_sse(&self, event: SseEvent) {
+        // BA3b：Sse 阶段 = 一次全局广播 fan-out 耗时（遍历所有连接 send）。
+        let start = std::time::Instant::now();
         for entry in self.active_sse.iter() {
             for conn in entry.value() {
                 let _ = conn.tx.send(event.clone());
             }
         }
+        crate::stage_metrics::stage_observe(
+            crate::stage_metrics::Stage::Sse,
+            start.elapsed().as_secs_f64() * 1000.0,
+            false,
+        );
     }
 
     pub fn last_heartbeat(&self) -> &DashMap<String, Instant> {

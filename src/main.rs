@@ -382,6 +382,27 @@ async fn main() {
         });
     }
 
+    // BA3a：资源历史采样器（CPU / RSS / load avg）每 60s 一点入进程内环形缓冲，
+    // 供监控页资源时序/sparkline。纯内存、无 DB，所有实例各采各的（非 leader 门控）。
+    {
+        let mut shutdown_rx = shutdown_tx.subscribe();
+        tokio::spawn(async move {
+            let mut sampler = learning_backend::resource_sampler::Sampler::new();
+            let mut tick = tokio::time::interval(Duration::from_secs(
+                learning_backend::resource_sampler::SAMPLE_INTERVAL_SECS,
+            ));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    _ = shutdown_rx.recv() => break,
+                    _ = tick.tick() => {
+                        sampler.tick();
+                    }
+                }
+            }
+        });
+    }
+
     tokio::spawn(learning_backend::workers::probe_confirm_sweeper::run(
         state.clone(),
         shutdown_tx.subscribe(),

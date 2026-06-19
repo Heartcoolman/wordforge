@@ -51,7 +51,16 @@ pub async fn run(state: &AppState) {
     tracing::debug!(count = due.len(), "outbox_processor 处理一批事件");
 
     for ev in due {
-        match process_one(&ev, state).await {
+        // BA3b：Outbox 阶段 = 单条 outbox 事件处理耗时（含其内部 process_single_record 的
+        // AMAS/Sqlite 子调用，故与那两阶段时长重叠，属预期）。
+        let outbox_start = std::time::Instant::now();
+        let processed = process_one(&ev, state).await;
+        crate::stage_metrics::stage_observe(
+            crate::stage_metrics::Stage::Outbox,
+            outbox_start.elapsed().as_secs_f64() * 1000.0,
+            processed.is_err(),
+        );
+        match processed {
             Ok(()) => {
                 let id = ev.id;
                 if let Err(e) = state

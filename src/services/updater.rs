@@ -744,11 +744,17 @@ impl Updater {
             });
         }
 
-        // 2b) minisign 验签（M0-R2）
+        // 2b) minisign 验签（M0-R2）。allow_unsigned=回滚：minisign 签名是 v1.2.0-beta.11 才引入的，
+        // 回滚到更老的目标其 release 本就无 .minisig，此时跳过验签（sha256 已校验完整性）而非按
+        // 降级攻击阻断；升级路径仍严格要求签名（缺失即疑似攻击）。
         progress(UpdatePhase::VerifyingSignature);
         tokio::time::timeout(
             phase_timeout,
-            self.verify_minisign_tarball(&latest.sig_url, &tarball_path),
+            self.verify_minisign_tarball(
+                &latest.sig_url,
+                &tarball_path,
+                /* allow_unsigned = */ rollback_spec.is_some(),
+            ),
         )
         .await
         .map_err(|_| UpdaterError::PhaseTimeout {
@@ -769,8 +775,15 @@ impl Updater {
         // 3b) C(v1.2.0-beta.11)：换二进制前冒烟自检——用解出的新二进制跑 `--selfcheck`。
         // 此刻**尚未进维护态、尚未 swap**，失败直接中止 apply，现役 binary/static/DB 全无损，
         // 不留任何 churn。捕获「sha256+minisig 都过但在本机起不来」的坏包（架构/glibc/损坏/配置）。
-        progress(UpdatePhase::SelfChecking);
-        smoke_test_binary(&extracted.join("wordforge")).await?;
+        //
+        // 真·任意版本回滚例外：`--selfcheck` 是 v1.2.0-beta.11 才引入的；回滚目标可能更老，老二进制
+        // 不认该参数 → 当成正常启动跑到 bind 端口（被现役进程占用）→ panic exit 101 → 误判坏包。
+        // 故回滚一律跳过 selfcheck：目标是此前已发布、在本机跑过的版本，arch/glibc 与现役一致；
+        // 完整性由 sha256 保证，可运行性由换二进制后的 /health 探测 + watcher 自动回退兜底。
+        if rollback_spec.is_none() {
+            progress(UpdatePhase::SelfChecking);
+            smoke_test_binary(&extracted.join("wordforge")).await?;
+        }
 
         // 3c) 真·任意版本回滚：解析目标版本期望的 schema 版本。`Some(k)` ⇒ 本次是回滚。
         // handler 多已经历史表解析（v1.1.0~beta.17）；未解析(None)则试跑目标二进制 `--print-schema-version`
@@ -1193,6 +1206,7 @@ impl Updater {
         &self,
         sig_url: &str,
         tarball_path: &Path,
+        allow_unsigned: bool,
     ) -> Result<(), UpdaterError> {
         const PUBKEY_STR: &str = env!("MINISIGN_PUBKEY");
         if PUBKEY_STR.is_empty() {
@@ -1200,9 +1214,15 @@ impl Updater {
             return Ok(());
         }
         // 公钥非空 = 生产构建，必须验签。
-        // sig_url 空意味着 release assets 列表里没有 .minisig 文件——
-        // 可能是攻击者控制 API 响应去掉了该字段，按降级攻击处理，直接阻断。
+        // sig_url 空意味着 release assets 列表里没有 .minisig 文件。
+        // 升级路径（allow_unsigned=false）：按降级攻击处理，直接阻断。
+        // 回滚路径（allow_unsigned=true）：目标可能早于 minisign 引入(beta.11)、本就无签名，
+        // 跳过验签（sha256 已校验完整性，且回滚目标由 admin 显式选定）。
         if sig_url.is_empty() {
+            if allow_unsigned {
+                tracing::warn!("回滚目标 release 无 .minisig（早于签名引入版本），跳过验签，依赖 sha256");
+                return Ok(());
+            }
             return Err(UpdaterError::SignatureInvalid(
                 "release 无 .minisig asset，疑似降级攻击".into(),
             ));
@@ -2629,16 +2649,28 @@ mod tests {
         let dummy_path = std::env::temp_dir().join("dummy_tarball_nonexistent.tar.gz");
 
         const PUBKEY_STR: &str = env!("MINISIGN_PUBKEY");
-        let result = updater.verify_minisign_tarball("", &dummy_path).await;
+        // 升级路径（allow_unsigned=false）
+        let upgrade = updater
+            .verify_minisign_tarball("", &dummy_path, false)
+            .await;
+        // 回滚路径（allow_unsigned=true）：无签名老 release 应放行
+        let rollback = updater
+            .verify_minisign_tarball("", &dummy_path, true)
+            .await;
 
         if PUBKEY_STR.is_empty() {
-            // 本地开发：公钥为空，跳过验签，返回 Ok
-            assert!(result.is_ok(), "本地开发构建应跳过验签");
+            // 本地开发：公钥为空，两条路径都跳过验签，返回 Ok
+            assert!(upgrade.is_ok(), "本地开发构建应跳过验签");
+            assert!(rollback.is_ok(), "本地开发构建应跳过验签");
         } else {
-            // 生产构建：公钥非空 + sig_url 空 → 必须阻断
+            // 生产构建：公钥非空 + sig_url 空 → 升级阻断、回滚放行
             assert!(
-                matches!(result, Err(UpdaterError::SignatureInvalid(_))),
-                "生产构建应拒绝无签名 release，实际结果：{result:?}"
+                matches!(upgrade, Err(UpdaterError::SignatureInvalid(_))),
+                "升级路径应拒绝无签名 release，实际结果：{upgrade:?}"
+            );
+            assert!(
+                rollback.is_ok(),
+                "回滚路径应放行无签名老 release（依赖 sha256），实际结果：{rollback:?}"
             );
         }
     }

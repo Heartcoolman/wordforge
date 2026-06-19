@@ -279,6 +279,10 @@ pub(crate) async fn process_single_record(
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
+    // BA3b：单记录瀑布 trace。仅完整 happy-path（落库成功）会 finish() 写入环形缓冲；
+    // 重复/并发早返不产出 trace（瀑布卡只关心一条完整处理链）。
+    let mut trace = crate::stage_metrics::TraceBuilder::start(&record_id);
+
     if let Some(existing) = state
         .run_store_task("records.single.check_duplicate", {
             let user_id = user_id_owned.clone();
@@ -293,6 +297,7 @@ pub(crate) async fn process_single_record(
             duplicate: true,
         });
     }
+    trace.mark("checkDuplicate");
 
     let record = LearningRecord {
         id: record_id,
@@ -340,6 +345,7 @@ pub(crate) async fn process_single_record(
             duplicate: true,
         });
     }
+    trace.mark("checkProcessed");
 
     let engine_snapshot = state
         .run_store_task("records.single.snapshot", {
@@ -351,6 +357,7 @@ pub(crate) async fn process_single_record(
             }
         })
         .await??;
+    trace.mark("snapshot");
 
     let amas_result = state
         .amas()
@@ -376,6 +383,7 @@ pub(crate) async fn process_single_record(
             &record.id,
         )
         .await?;
+    trace.mark("amasProcess");
     // W1-1 并发收口：None 表示并发同 client_record_id 请求抢先写入幂等标记、本次 AMAS 已整笔回滚，
     // 走与 already_processed 一致的裸记录回放（不重复累加 ELO/mastery/trust）。
     let Some(amas_result) = amas_result else {
@@ -488,6 +496,7 @@ pub(crate) async fn process_single_record(
             },
         )
         .await??;
+    trace.mark("persistRecord");
 
     // v1.1-P1 S2：写库成功后旁路 emit RecordCreated；
     // AMAS 已在前面同步通路执行过，这里只是事件总线基础设施落地，
@@ -502,6 +511,9 @@ pub(crate) async fn process_single_record(
         record_type: record.record_type,
         created_at: record.created_at,
     });
+    trace.mark("emitEvent");
+    // BA3b：完整 happy-path 完成，写入瀑布环形缓冲。
+    trace.finish();
 
     Ok(CreateRecordResponse {
         record,

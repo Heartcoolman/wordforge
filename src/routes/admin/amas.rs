@@ -74,6 +74,10 @@ pub fn admin_router() -> Router<AppState> {
         .route("/anomalies", get(anomalies_overview))
         .route("/anomalies/feed", get(anomalies_feed))
         .route("/user-state/distribution", get(user_state_distribution))
+        // 看板补充:UserState 标量均值 / 认知三轴分布 / 算法对比(accuracy+p95)
+        .route("/user-state/summary", get(user_state_summary))
+        .route("/cognitive/distribution", get(cognitive_distribution))
+        .route("/algo-compare", get(algo_compare))
         .route("/user-state/transitions", get(user_state_transitions))
         .route("/user-state/clusters", get(user_state_clusters))
         .route("/compare", get(compare_versions))
@@ -704,6 +708,56 @@ async fn user_state_distribution(
         })
         .await??;
     Ok(ok(dist))
+}
+
+/// GET /user-state/summary —— UserState 标量均值(engine_user_states 当前队列,未采样)。
+async fn user_state_summary(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let means = state
+        .run_store_task("admin.amas.user_state_summary", move |store| {
+            store.aggregate_amas_user_state_means()
+        })
+        .await??;
+    Ok(ok(means))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BinsQuery {
+    bins: Option<u32>,
+}
+
+/// GET /cognitive/distribution —— 认知三轴(memory/processing/stability)mean+直方图。
+async fn cognitive_distribution(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Query(q): Query<BinsQuery>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let bins = q.bins.unwrap_or(20);
+    let dist = state
+        .run_store_task("admin.amas.cognitive_distribution", move |store| {
+            store.aggregate_amas_cognitive_distribution(bins)
+        })
+        .await??;
+    Ok(ok(dist))
+}
+
+/// GET /algo-compare —— 按 routing_algo 的 count/share/accuracy/p50-p95-mean 延迟。
+/// 注意:基于采样事件、且 accuracy 为「被选中主算法」条件下的命中率,非反事实 A/B。
+async fn algo_compare(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Query(q): Query<DaysQuery>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let days = q.days.unwrap_or(7).clamp(1, 90);
+    let rows = state
+        .run_store_task("admin.amas.algo_compare", move |store| {
+            store.aggregate_amas_algo_compare(days)
+        })
+        .await??;
+    Ok(ok(rows))
 }
 
 #[derive(Debug, Deserialize)]

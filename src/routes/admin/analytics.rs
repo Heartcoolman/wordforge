@@ -8,10 +8,10 @@ use crate::auth::AdminAuthUser;
 use crate::response::{ok, AppError};
 use crate::state::AppState;
 use crate::store::operations::admin_analytics::{
-    AdminDailyRecordTypeRow, AdminDailyRegisteredUsersRow, AdminFunnelRow, AdminHourlyBucketRow,
-    AdminKpiWindowRow, AdminQuestionDistRow, AdminRetentionCohortRow, AdminRetentionMatrixRow,
-    AdminRetentionSampleRow, AdminStudyDailyRow, AdminStudySummaryRow, AdminWordFreqRow,
-    AdminWordbookRankRow,
+    AdminChronotypeSegmentRow, AdminDailyRecordTypeRow, AdminDailyRegisteredUsersRow,
+    AdminFunnelRow, AdminHourlyBucketRow, AdminKpiWindowRow, AdminQuestionDistRow,
+    AdminRetentionCohortRow, AdminRetentionMatrixRow, AdminRetentionSampleRow, AdminStudyDailyRow,
+    AdminStudySummaryRow, AdminWordFreqRow, AdminWordbookRankRow,
 };
 use crate::store::operations::records::RecordType;
 
@@ -36,6 +36,9 @@ pub fn router() -> Router<AppState> {
         .route("/question-distribution", get(question_distribution))
         .route("/word-frequency", get(word_frequency))
         .route("/insights", get(insights))
+        // Users 看板:奖励类型分布 / 作息分段(替换 mock)
+        .route("/reward-distribution", get(reward_distribution))
+        .route("/chronotype-segments", get(chronotype_segments))
 }
 
 // ---------------------------------------------------------------------------
@@ -1644,4 +1647,109 @@ async fn insights(
         days: w.days,
         items,
     }))
+}
+
+// ---------------------------------------------------------------------------
+// reward-distribution（Users 看板奖励类型分布）
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RewardDistItem {
+    label: String,
+    count: u64,
+    pct: f64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RewardDistResponse {
+    total: u64,
+    items: Vec<RewardDistItem>,
+}
+
+async fn reward_distribution(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let rows = state
+        .run_store_task("admin.analytics.reward_distribution", move |store| {
+            store.admin_reward_distribution()
+        })
+        .await??;
+    let total: u64 = rows.iter().map(|(_, c)| *c as u64).sum();
+    let items = rows
+        .into_iter()
+        .map(|(label, count)| {
+            let count = count as u64;
+            RewardDistItem {
+                label,
+                count,
+                pct: if total > 0 {
+                    count as f64 / total as f64 * 100.0
+                } else {
+                    0.0
+                },
+            }
+        })
+        .collect();
+    Ok(ok(RewardDistResponse { total, items }))
+}
+
+// ---------------------------------------------------------------------------
+// chronotype-segments（Users 看板作息分段：morning/evening/neutral）
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChronotypeSegment {
+    seg: String,
+    users: u64,
+    /// SUM(correct)/SUM(total)；分母 0 → null。
+    accuracy: Option<f64>,
+    sessions_per_day: f64,
+    duration_secs_avg: f64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChronotypeSegmentsResponse {
+    segments: Vec<ChronotypeSegment>,
+}
+
+fn to_chronotype_segment(r: AdminChronotypeSegmentRow) -> ChronotypeSegment {
+    let users = r.users.max(0) as u64;
+    let div = if r.users > 0 { r.users as f64 } else { 1.0 };
+    ChronotypeSegment {
+        seg: r.seg,
+        users,
+        accuracy: if r.total_sum > 0 {
+            Some(r.correct_sum as f64 / r.total_sum as f64)
+        } else {
+            None
+        },
+        sessions_per_day: if r.users > 0 {
+            r.sessions_per_day_sum / div
+        } else {
+            0.0
+        },
+        duration_secs_avg: if r.users > 0 {
+            r.duration_secs_sum / div
+        } else {
+            0.0
+        },
+    }
+}
+
+async fn chronotype_segments(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let rows = state
+        .run_store_task("admin.analytics.chronotype_segments", move |store| {
+            store.admin_chronotype_segments()
+        })
+        .await??;
+    let segments = rows.into_iter().map(to_chronotype_segment).collect();
+    Ok(ok(ChronotypeSegmentsResponse { segments }))
 }

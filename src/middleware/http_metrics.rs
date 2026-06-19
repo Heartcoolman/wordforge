@@ -142,6 +142,13 @@ pub async fn record_http_metrics(req: Request, next: Next) -> Response {
 
         // M0-P5：滚动窗口聚合（SLO 卡 / 请求延迟图 / axum 服务行 rps 的数据源）
         record_rolling(elapsed, (500..=599).contains(&status_code), bytes_in);
+
+        // BA3b：Gateway 阶段 = 整请求端到端耗时（管线总览的入口阶段）。
+        crate::stage_metrics::stage_observe(
+            crate::stage_metrics::Stage::Gateway,
+            elapsed * 1000.0,
+            (500..=599).contains(&status_code),
+        );
     }
 
     response
@@ -392,12 +399,14 @@ fn percentile_ms(buckets: &[u64], count: u64, p: f64) -> f64 {
     BUCKET_BOUNDS[BUCKET_BOUNDS.len() - 1] * 1000.0
 }
 
-/// 时序图单点：unix 秒 + QPS + P99(ms)。前端负责格式化 HH:MM 标签。
+/// 时序图单点：unix 秒 + QPS + P50/P95/P99(ms)。前端负责格式化 HH:MM 标签。
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RequestMetricsPoint {
     pub t: i64,
     pub qps: f64,
+    pub p50_ms: f64,
+    pub p95_ms: f64,
     pub p99_ms: f64,
 }
 
@@ -413,6 +422,7 @@ pub struct RequestMetricsAggregate {
     pub total_5xx: u64,
     pub qps_avg: f64,
     pub p50_ms: f64,
+    pub p95_ms: f64,
     pub p99_ms: f64,
     /// 窗口错误率 0.0–1.0
     pub error_rate: f64,
@@ -477,12 +487,74 @@ pub fn aggregate(window_secs: u64) -> RequestMetricsAggregate {
         total_5xx: err,
         qps_avg: total as f64 / effective_secs as f64,
         p50_ms: percentile_ms(&agg_buckets, total, 0.50),
+        p95_ms: percentile_ms(&agg_buckets, total, 0.95),
         p99_ms: percentile_ms(&agg_buckets, total, 0.99),
         error_rate,
         availability_pct: (1.0 - error_rate) * 100.0,
         bandwidth_in_bps: bytes as f64 / effective_secs as f64,
         series,
     }
+}
+
+/// 单个端点（method+route）的累积指标行。延迟分位/错误率/计数均为「自进程启动以来」
+/// 的累积值（REGISTRY 是 lifetime histogram，无时间窗口），rpm 据 uptime 折算。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EndpointMetricsRow {
+    pub method: String,
+    pub route: String,
+    pub count: u64,
+    /// 每分钟请求数 = count / uptime_secs × 60（累积均值，非瞬时）
+    pub rpm: f64,
+    pub p50_ms: f64,
+    pub p95_ms: f64,
+    pub p99_ms: f64,
+    /// 5xx 占比 0.0–1.0
+    pub error_rate: f64,
+}
+
+/// 端点流量表数据源：把 REGISTRY 的 (method, route, status_class) 直方图按
+/// (method, route) 合并 status 类，算 p50/p95/p99 + 5xx 错误率 + rpm。
+/// 累积自进程启动（lifetime histogram，无窗口语义），按 count 降序。
+pub async fn endpoints_snapshot(uptime_secs: u64) -> Vec<EndpointMetricsRow> {
+    use std::collections::HashMap;
+
+    let data = snapshot().await;
+    // (method, route) -> (聚合桶, count, err5xx)
+    let mut grouped: HashMap<(String, String), (Vec<u64>, u64, u64)> = HashMap::new();
+    for ((method, route, status), hist) in &data {
+        let entry = grouped
+            .entry((method.clone(), route.clone()))
+            .or_insert_with(|| (vec![0u64; BUCKET_BOUNDS.len() + 1], 0, 0));
+        for (i, b) in hist.buckets.iter().enumerate() {
+            entry.0[i] += b;
+        }
+        entry.1 += hist.count;
+        if status == "5xx" {
+            entry.2 += hist.count;
+        }
+    }
+
+    let secs = uptime_secs.max(1) as f64;
+    let mut rows: Vec<EndpointMetricsRow> = grouped
+        .into_iter()
+        .map(|((method, route), (buckets, count, err5xx))| EndpointMetricsRow {
+            method,
+            route,
+            count,
+            rpm: count as f64 / secs * 60.0,
+            p50_ms: percentile_ms(&buckets, count, 0.50),
+            p95_ms: percentile_ms(&buckets, count, 0.95),
+            p99_ms: percentile_ms(&buckets, count, 0.99),
+            error_rate: if count > 0 {
+                err5xx as f64 / count as f64
+            } else {
+                0.0
+            },
+        })
+        .collect();
+    rows.sort_by(|a, b| b.count.cmp(&a.count));
+    rows
 }
 
 /// 将窗口内的槽分组下采样为 ≤target 个时序点。
@@ -508,6 +580,8 @@ fn downsample(slots: &[&Slot], gran: i64, target: usize) -> Vec<RequestMetricsPo
         out.push(RequestMetricsPoint {
             t: last_key * gran,
             qps: count as f64 / span_secs,
+            p50_ms: percentile_ms(&buckets, count, 0.50),
+            p95_ms: percentile_ms(&buckets, count, 0.95),
             p99_ms: percentile_ms(&buckets, count, 0.99),
         });
         i += group;

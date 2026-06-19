@@ -35,12 +35,12 @@ type MigrationFn = fn(&Store) -> Result<(), StoreError>;
 /// 完全迁移后 `schema_version` 应到达的版本号（= [`migrations`] 条目数）。
 /// 编译期常量，供 `--print-schema-version`（任意版本回滚的"目标二进制自声明 schema 版本"）使用；
 /// [`schema_version_const_matches_registry`] 测试守卫它与运行期 `migrations().len()` 不漂移。
-pub const SCHEMA_VERSION: u32 = 59;
+pub const SCHEMA_VERSION: u32 = 61;
 
 /// 已加固到"生产可用"的 down 迁移覆盖下界：回滚目标的 schema 版本必须 `>=` 此值。
 /// 真·任意版本回滚把 down 链当作"把当前库副本降级到目标版本"的降级引擎；低于此下界的
 /// 远古版本其 down 未经可逆性测试验证，回滚守卫据此拒绝（见 routes/admin/updates.rs）。
-/// 全部 59 个 down 已过 `tests/migrate_down.rs` 的 schema 双向一致 + 核心数据无损验证，
+/// 全部 down 已过 `tests/migrate_down.rs` 的 schema 双向一致 + 核心数据无损验证，
 /// 故下界 = 1（schema=1 即 m001 基线，schema.rs 拥有的核心表始终在场）。
 pub const DOWN_PRODUCTION_READY_FROM: u32 = 1;
 
@@ -150,6 +150,11 @@ fn migrations() -> Vec<(&'static str, MigrationFn)> {
         ("057_elo_dynamic_k_trend", m057_elo_dynamic_k_trend),
         ("058_word_elo_select_chain", m058_word_elo_select_chain),
         ("059_worker_panic_count", m059_worker_panic_count),
+        ("060_worker_runs", m060_worker_runs),
+        (
+            "061_telemetry_ingest_rejections",
+            m061_telemetry_ingest_rejections,
+        ),
     ]
 }
 
@@ -282,6 +287,11 @@ fn migrations_down() -> Vec<(&'static str, MigrationFn)> {
         ("057_elo_dynamic_k_trend", m057_elo_dynamic_k_trend_down),
         ("058_word_elo_select_chain", m058_word_elo_select_chain_down),
         ("059_worker_panic_count", m059_worker_panic_count_down),
+        ("060_worker_runs", m060_worker_runs_down),
+        (
+            "061_telemetry_ingest_rejections",
+            m061_telemetry_ingest_rejections_down,
+        ),
     ]
 }
 
@@ -3353,6 +3363,68 @@ fn m059_worker_panic_count_down(store: &Store) -> Result<(), StoreError> {
     if has {
         conn.execute("ALTER TABLE worker_last_run DROP COLUMN panic_count", [])?;
     }
+    Ok(())
+}
+
+/// m060:worker_runs 追加式运行历史表——worker_last_run 只存最后一次(PK 覆盖),
+/// 此表逐次 append 每个 worker 的运行结果(成功/失败/跳过 + 耗时 + 错误),
+/// 供监控页 run-history 时间线。monitoring_retention worker 按 30d 清理。幂等建表。
+fn m060_worker_runs(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS worker_runs (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            worker_name TEXT NOT NULL,
+            ran_at      TEXT NOT NULL,
+            duration_ms INTEGER,
+            outcome     TEXT NOT NULL CHECK (outcome IN ('success','failure','skipped')),
+            error       TEXT
+         );
+         CREATE INDEX IF NOT EXISTS idx_worker_runs_name_ran
+            ON worker_runs(worker_name, ran_at DESC);
+         CREATE INDEX IF NOT EXISTS idx_worker_runs_ran
+            ON worker_runs(ran_at DESC);",
+    )?;
+    Ok(())
+}
+
+/// m060 down:DROP worker_runs + 索引。仅 dev/test。
+fn m060_worker_runs_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS idx_worker_runs_ran;
+         DROP INDEX IF EXISTS idx_worker_runs_name_ran;
+         DROP TABLE IF EXISTS worker_runs;",
+    )?;
+    Ok(())
+}
+
+/// m061:telemetry_ingest_rejections 摄取拒绝记录表——telemetry/probe 摄取早返(400/403)
+/// 在写库前丢弃了拒绝码,此表逐条留痕(code + 设备/用户上下文 + 时间)供 Telemetry 看板
+/// 拒绝码分布。摄取热路径上 fire-and-forget 写入。幂等建表。
+fn m061_telemetry_ingest_rejections(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS telemetry_ingest_rejections (
+            id        INTEGER PRIMARY KEY AUTOINCREMENT,
+            code      TEXT NOT NULL,
+            device_id TEXT,
+            user_id   TEXT,
+            server_ts TEXT NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS idx_telemetry_ingest_rejections_ts
+            ON telemetry_ingest_rejections(server_ts DESC);",
+    )?;
+    Ok(())
+}
+
+/// m061 down:DROP telemetry_ingest_rejections + 索引。仅 dev/test。
+fn m061_telemetry_ingest_rejections_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS idx_telemetry_ingest_rejections_ts;
+         DROP TABLE IF EXISTS telemetry_ingest_rejections;",
+    )?;
     Ok(())
 }
 

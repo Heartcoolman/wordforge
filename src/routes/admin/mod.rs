@@ -117,6 +117,10 @@ pub fn router() -> Router<AppState> {
         // m025:用户档案深化数据源
         .route("/users/:id/extras", get(admin_user_extras))
         .route("/users/:id/activity-log", get(admin_user_activity_log))
+        // AMAS 用户内部态（admin-by-id 变体）：UserState / 当前策略+奖励 / per-word 掌握度
+        .route("/users/:id/amas/state", get(admin_user_amas_state))
+        .route("/users/:id/amas/strategy", get(admin_user_amas_strategy))
+        .route("/users/:id/amas/words", get(admin_user_amas_words))
         // m026:批量操作 + 设备封禁
         .route(
             "/users/bulk-reset-password",
@@ -635,6 +639,93 @@ async fn admin_create_password_reset(
         reset_key: raw_token,
         expires_in_hours,
     })
+}
+
+// ─────────────── AMAS 用户内部态（admin-by-id 变体） ───────────────
+
+/// GET /api/admin/users/:id/amas/state —— 用户完整 UserState（attention/fatigue/
+/// motivation/confidence + cognitiveProfile / trendState / habitProfile）。
+/// 与 user_profile.rs 的 self-only 路由同源，仅把 user_id 换成 Path(:id)。
+async fn admin_user_amas_state(
+    _admin: AdminAuthUser,
+    Path(id): Path<String>,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let user_state = state.amas().get_user_state_async(&id).await?;
+    Ok(ok(user_state))
+}
+
+/// GET /api/admin/users/:id/amas/strategy —— 当前策略（由 UserState 确定性重算，无滞后）
+/// + 最近一次采样落库的 reward（engine_monitoring_events，按 sample_rate 抽样，可能滞后；
+/// 无采样事件时为 null）。
+async fn admin_user_amas_strategy(
+    _admin: AdminAuthUser,
+    Path(id): Path<String>,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let user_state = state.amas().get_user_state_async(&id).await?;
+    let strategy = state.amas().compute_strategy_from_state(&user_state);
+
+    let user_id = id.clone();
+    let reward_row = state
+        .run_store_task("admin.user_amas_strategy.reward", move |store| {
+            store.get_latest_monitoring_reward(&user_id)
+        })
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .flatten();
+
+    // reward_json 是 RewardComponents 子对象坨；原样转 JSON 透传 components，附 value/at。
+    let reward = reward_row.map(|(reward_json, reward_value, at)| {
+        let components = serde_json::from_str::<serde_json::Value>(&reward_json)
+            .unwrap_or(serde_json::Value::Null);
+        serde_json::json!({
+            "value": reward_value,
+            "components": components,
+            "at": at,
+        })
+    });
+
+    Ok(ok(serde_json::json!({
+        "strategy": strategy,
+        "reward": reward,
+    })))
+}
+
+/// GET /api/admin/users/:id/amas/words?limit=50&offset=0 —— per-word 掌握度分页，
+/// LEFT JOIN mastery_states 带出 MDM 内部量；返回 { items, total }。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AmasWordsQuery {
+    #[serde(default = "default_amas_words_limit")]
+    limit: usize,
+    #[serde(default)]
+    offset: usize,
+}
+fn default_amas_words_limit() -> usize {
+    50
+}
+
+async fn admin_user_amas_words(
+    _admin: AdminAuthUser,
+    Path(id): Path<String>,
+    Query(q): Query<AmasWordsQuery>,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let limit = q.limit.clamp(1, 500);
+    let offset = q.offset;
+    let user_id = id;
+    let (items, total) = state
+        .run_store_task("admin.user_amas_words", move |store| {
+            store.list_admin_user_word_states(&user_id, limit, offset)
+        })
+        .await??;
+
+    Ok(ok(serde_json::json!({
+        "items": items,
+        "total": total,
+    })))
 }
 
 // ─────────────── m022:用户档案 / 会话 / 批量 ban ───────────────

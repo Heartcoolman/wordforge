@@ -585,7 +585,15 @@ impl AMASEngine {
             context.cold_start_phase,
         );
 
-        let latency_ms = start.elapsed().as_millis() as i64;
+        let elapsed = start.elapsed();
+        let latency_ms = elapsed.as_millis() as i64;
+        // BA3b：Amas 阶段 = 单次 AMAS 决策（process_event_blocking）端到端耗时（含锁内
+        // 原子持久化），sub-ms 精度。is_error=false：到此点决策已成功产出。
+        crate::stage_metrics::stage_observe(
+            crate::stage_metrics::Stage::Amas,
+            elapsed.as_secs_f64() * 1000.0,
+            false,
+        );
         // 用本次请求实际生效的配置算 hash（命中 canary 时即 canary 配置），与 create_canary
         // 落库的 version_hash 同源，保证 canary 切片可被 aggregate_amas_version_slice 聚合、
         // 自动回滚/实测指标管线生效；否则恒打 stable hash 会让 canary 切片永远为空。

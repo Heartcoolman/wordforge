@@ -187,40 +187,52 @@ where
     type Rejection = AppError;
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
-        let app_state = AppState::from_ref(state);
-        let token = extract_token_from_headers(&parts.headers)?;
-        let claims = verify_jwt(&token, &app_state.config().jwt_secret)?;
+        // BA3b：Auth 阶段 = 整个提取器耗时（含其内部 auth.load_user store task；故 Auth 与
+        // Sqlite 在该子调用上有时长重叠，属预期）。inner 异步块收口多处 ? 早返，再统一观测。
+        let start = std::time::Instant::now();
+        let result = async {
+            let app_state = AppState::from_ref(state);
+            let token = extract_token_from_headers(&parts.headers)?;
+            let claims = verify_jwt(&token, &app_state.config().jwt_secret)?;
 
-        if claims.token_type != "user" {
-            return Err(AppError::unauthorized("令牌类型无效"));
-        }
+            if claims.token_type != "user" {
+                return Err(AppError::unauthorized("令牌类型无效"));
+            }
 
-        let token_hash = hash_token(&token);
-        let sub = claims.sub.clone();
-        app_state
-            .run_store_task("auth.load_user", move |store| -> Result<(), AppError> {
-                let session = store
-                    .get_session(&token_hash)?
-                    .ok_or_else(|| AppError::unauthorized("会话不存在或已过期"))?;
+            let token_hash = hash_token(&token);
+            let sub = claims.sub.clone();
+            app_state
+                .run_store_task("auth.load_user", move |store| -> Result<(), AppError> {
+                    let session = store
+                        .get_session(&token_hash)?
+                        .ok_or_else(|| AppError::unauthorized("会话不存在或已过期"))?;
 
-                if session.user_id != sub {
-                    return Err(AppError::unauthorized("会话不匹配"));
-                }
+                    if session.user_id != sub {
+                        return Err(AppError::unauthorized("会话不匹配"));
+                    }
 
-                let user = store
-                    .get_user_by_id(&sub)?
-                    .ok_or_else(|| AppError::unauthorized("用户不存在"))?;
+                    let user = store
+                        .get_user_by_id(&sub)?
+                        .ok_or_else(|| AppError::unauthorized("用户不存在"))?;
 
-                if user.is_banned {
-                    return Err(AppError::forbidden("用户已被封禁"));
-                }
-                Ok(())
+                    if user.is_banned {
+                        return Err(AppError::forbidden("用户已被封禁"));
+                    }
+                    Ok(())
+                })
+                .await??;
+
+            Ok(AuthUser {
+                user_id: claims.sub,
             })
-            .await??;
-
-        Ok(AuthUser {
-            user_id: claims.sub,
-        })
+        }
+        .await;
+        crate::stage_metrics::stage_observe(
+            crate::stage_metrics::Stage::Auth,
+            start.elapsed().as_secs_f64() * 1000.0,
+            result.is_err(),
+        );
+        result
     }
 }
 
@@ -233,6 +245,9 @@ where
     type Rejection = AppError;
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        // BA3b：Auth 阶段 = 整个 admin 提取器耗时（含内部 auth.load_admin store task）。
+        let start = std::time::Instant::now();
+        let result = async {
         let app_state = AppState::from_ref(state);
         let token = extract_token_from_headers(&parts.headers)?;
         let claims = verify_jwt(&token, &app_state.config().admin_jwt_secret)?;
@@ -268,6 +283,14 @@ where
         Ok(AdminAuthUser {
             admin_id: claims.sub,
         })
+        }
+        .await;
+        crate::stage_metrics::stage_observe(
+            crate::stage_metrics::Stage::Auth,
+            start.elapsed().as_secs_f64() * 1000.0,
+            result.is_err(),
+        );
+        result
     }
 }
 

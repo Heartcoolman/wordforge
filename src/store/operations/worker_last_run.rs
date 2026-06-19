@@ -109,6 +109,92 @@ impl Store {
         )?;
         Ok(())
     }
+
+    /// m060：追加一条 worker 运行历史记录（worker_runs，append-only）。
+    /// `ran_at` 为 RFC3339 字符串；`outcome` ∈ success|failure|skipped。
+    pub fn insert_worker_run(
+        &self,
+        worker_name: &str,
+        ran_at: &str,
+        duration_ms: i64,
+        outcome: &str,
+        error: Option<&str>,
+    ) -> Result<(), StoreError> {
+        let conn = self.conn()?;
+        conn.execute(
+            "INSERT INTO worker_runs (worker_name, ran_at, duration_ms, outcome, error)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![worker_name, ran_at, duration_ms, outcome, error],
+        )?;
+        Ok(())
+    }
+
+    /// m060：按 ran_at 倒序读 worker 运行历史；`worker` 为 None 时返回全部 worker。
+    pub fn list_worker_runs(
+        &self,
+        worker: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<WorkerRun>, StoreError> {
+        let limit = limit.clamp(1, 1000) as i64;
+        let conn = self.conn()?;
+        let map_row = |row: &rusqlite::Row<'_>| {
+            Ok(WorkerRun {
+                worker_name: row.get(0)?,
+                ran_at: row.get(1)?,
+                duration_ms: row.get(2)?,
+                outcome: row.get(3)?,
+                error: row.get(4)?,
+            })
+        };
+        let rows = match worker {
+            Some(name) => {
+                let mut stmt = conn.prepare(
+                    "SELECT worker_name, ran_at, duration_ms, outcome, error
+                     FROM worker_runs
+                     WHERE worker_name = ?1
+                     ORDER BY ran_at DESC
+                     LIMIT ?2",
+                )?;
+                let out = stmt
+                    .query_map(params![name, limit], map_row)?
+                    .collect::<Result<Vec<_>, _>>()?;
+                out
+            }
+            None => {
+                let mut stmt = conn.prepare(
+                    "SELECT worker_name, ran_at, duration_ms, outcome, error
+                     FROM worker_runs
+                     ORDER BY ran_at DESC
+                     LIMIT ?1",
+                )?;
+                let out = stmt
+                    .query_map(params![limit], map_row)?
+                    .collect::<Result<Vec<_>, _>>()?;
+                out
+            }
+        };
+        Ok(rows)
+    }
+}
+
+impl Store {
+    /// m060：删除 ran_at < cutoff 的 worker_runs 行（保留窗清理，由 monitoring_retention 调用）。
+    pub fn cleanup_old_worker_runs(&self, cutoff: &str) -> Result<usize, StoreError> {
+        let conn = self.conn()?;
+        let n = conn.execute("DELETE FROM worker_runs WHERE ran_at < ?1", params![cutoff])?;
+        Ok(n)
+    }
+}
+
+/// m060：worker_runs 行（append-only 运行历史）。
+#[derive(Debug, Clone)]
+pub struct WorkerRun {
+    pub worker_name: String,
+    pub ran_at: String,
+    /// NULL 时为 None（skipped 分支可能无耗时）。
+    pub duration_ms: Option<i64>,
+    pub outcome: String,
+    pub error: Option<String>,
 }
 
 #[cfg(test)]

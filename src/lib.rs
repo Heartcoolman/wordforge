@@ -11,9 +11,11 @@ pub mod metrics_counters;
 pub mod middleware;
 // M0-C2：25 个 v1-stable 端点的 OpenAPI 3.1 集中声明
 pub mod openapi;
+pub mod resource_sampler;
 pub mod response;
 pub mod routes;
 pub mod services;
+pub mod stage_metrics;
 pub mod state;
 pub mod store;
 pub mod validation;

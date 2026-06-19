@@ -225,6 +225,18 @@ pub async fn rate_limit_middleware(
     req: Request,
     next: Next,
 ) -> Result<Response, AppError> {
+    // BA3b：RateLimit 阶段 = 限流中间件自身开销（路径判定 + 限流器 check），不含下游
+    // next.run。在调用 next.run / 返回 429 之前观测 elapsed。早 bypass 分支（非 /api、
+    // admin 廉价端点）不做限流工作，不计入该阶段。
+    let rl_start = std::time::Instant::now();
+    let observe_rl = |is_error: bool| {
+        crate::stage_metrics::stage_observe(
+            crate::stage_metrics::Stage::RateLimit,
+            rl_start.elapsed().as_secs_f64() * 1000.0,
+            is_error,
+        );
+    };
+
     let raw_path = req.uri().path().to_string();
     let path = normalize_api_path(&raw_path);
 
@@ -282,9 +294,11 @@ pub async fn rate_limit_middleware(
             if let Ok(v) = state.rate_limit().limiter.window_secs().to_string().parse() {
                 response.headers_mut().insert("retry-after", v);
             }
+            observe_rl(true);
             return Ok(response);
         }
 
+        observe_rl(false);
         let mut response = next.run(req).await;
         apply_rate_limit_headers(&mut response, &result);
         return Ok(response);
@@ -338,9 +352,11 @@ pub async fn rate_limit_middleware(
         if let Ok(v) = state.rate_limit().limiter.window_secs().to_string().parse() {
             response.headers_mut().insert("retry-after", v);
         }
+        observe_rl(true);
         return Ok(response);
     }
 
+    observe_rl(false);
     let mut response = next.run(req).await;
     apply_rate_limit_headers(&mut response, &result);
     Ok(response)

@@ -30,7 +30,7 @@ fn now_secs() -> u64 {
 
 /// 每个调度 worker 的预期最大静默秒数（即 cron 间隔 × MISS_THRESHOLD）。
 /// 键为 worker_name（与 WorkerName::as_str() 对应），值为阈值秒数。
-fn expected_max_silence_secs() -> HashMap<&'static str, u64> {
+pub fn expected_max_silence_secs() -> HashMap<&'static str, u64> {
     [
         // 间隔 1 小时的 worker：3 × 3600 = 10800 秒
         ("session_cleanup", 3 * 3600),

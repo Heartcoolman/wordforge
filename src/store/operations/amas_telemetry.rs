@@ -1,4 +1,5 @@
 use chrono::{DateTime, Duration, Utc};
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 
 use crate::store::{Store, StoreError};
@@ -657,6 +658,234 @@ impl Store {
             exploit: mk("exploit", exploit),
             other: mk("other", other),
         })
+    }
+}
+
+// ─────────── Amas 看板：UserState 均值 / 认知分布 / 算法对比 ───────────
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AmasUserStateMeans {
+    pub mean_attention: f64,
+    pub mean_fatigue: f64,
+    pub mean_motivation: f64,
+    pub mean_confidence: f64,
+    pub n: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CognitiveAxis {
+    pub mean: f64,
+    pub histogram: Vec<u64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AmasCognitiveDistribution {
+    pub memory_capacity: CognitiveAxis,
+    pub processing_speed: CognitiveAxis,
+    pub stability: CognitiveAxis,
+    pub n: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AmasAlgoCompareRow {
+    pub algorithm: String,
+    pub count: u64,
+    pub share: f64,
+    /// SUM(is_correct)/COUNT(*)；无样本 → None。
+    pub accuracy: Option<f64>,
+    pub p50_latency_ms: f64,
+    pub p95_latency_ms: f64,
+    pub mean_latency_ms: f64,
+}
+
+/// 升序排序后取分位（与 amas_dashboard::percentile_f64 同实现，本模块私有副本）。
+fn pct_f64(sorted: &[f64], q: f64) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let idx = ((sorted.len() as f64 - 1.0) * q).round() as usize;
+    sorted[idx.min(sorted.len() - 1)]
+}
+
+impl Store {
+    /// Amas UserState 卡片标量均值：engine_user_states 当前队列(未采样)的
+    /// AVG(attention/fatigue/motivation/confidence) + COUNT。空表 → 全零、n=0。
+    pub fn aggregate_amas_user_state_means(&self) -> Result<AmasUserStateMeans, StoreError> {
+        let conn = self.conn()?;
+        let row = conn.query_row(
+            "SELECT
+                COALESCE(AVG(attention), 0.0),
+                COALESCE(AVG(fatigue), 0.0),
+                COALESCE(AVG(motivation), 0.0),
+                COALESCE(AVG(confidence), 0.0),
+                COUNT(*)
+             FROM engine_user_states",
+            [],
+            |r| {
+                Ok(AmasUserStateMeans {
+                    mean_attention: r.get(0)?,
+                    mean_fatigue: r.get(1)?,
+                    mean_motivation: r.get(2)?,
+                    mean_confidence: r.get(3)?,
+                    n: r.get::<_, i64>(4)? as u64,
+                })
+            },
+        )?;
+        Ok(row)
+    }
+
+    /// Amas 认知分布：engine_user_states 三个去归一化标量列
+    /// (cognitive_memory_capacity / cognitive_processing_speed / cognitive_stability)
+    /// 各自算 mean + [0,1] 等宽分箱直方图。空表 → mean 0、空直方图(全零)、n=0。
+    pub fn aggregate_amas_cognitive_distribution(
+        &self,
+        bins: u32,
+    ) -> Result<AmasCognitiveDistribution, StoreError> {
+        let bins = bins.clamp(4, 100) as usize;
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT cognitive_memory_capacity, cognitive_processing_speed, cognitive_stability
+             FROM engine_user_states",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, f64>(0)?,
+                    r.get::<_, f64>(1)?,
+                    r.get::<_, f64>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let (mut mem, mut spd, mut sta) = (
+            Vec::with_capacity(rows.len()),
+            Vec::with_capacity(rows.len()),
+            Vec::with_capacity(rows.len()),
+        );
+        for (m, p, s) in &rows {
+            mem.push(*m);
+            spd.push(*p);
+            sta.push(*s);
+        }
+        let axis = |vals: &[f64]| -> CognitiveAxis {
+            let mut hist = vec![0u64; bins];
+            if vals.is_empty() {
+                return CognitiveAxis {
+                    mean: 0.0,
+                    histogram: hist,
+                };
+            }
+            let mean = vals.iter().sum::<f64>() / vals.len() as f64;
+            for &v in vals {
+                let clamped = v.clamp(0.0, 1.0);
+                let idx = ((clamped * bins as f64).floor() as usize).min(bins - 1);
+                hist[idx] += 1;
+            }
+            CognitiveAxis {
+                mean,
+                histogram: hist,
+            }
+        };
+
+        Ok(AmasCognitiveDistribution {
+            memory_capacity: axis(&mem),
+            processing_speed: axis(&spd),
+            stability: axis(&sta),
+            n: rows.len() as u64,
+        })
+    }
+
+    /// Amas 算法对比：engine_monitoring_events 按 routing_algo 分组(排除空)，N 天窗口内
+    /// count / share / accuracy(SUM(is_correct)/COUNT) / p50/p95/mean latency_ms。
+    /// 注意：这是 routing_algo = 被选中主算法的「条件准确率」、且事件经采样，非反事实 A/B。
+    pub fn aggregate_amas_algo_compare(
+        &self,
+        days: u32,
+    ) -> Result<Vec<AmasAlgoCompareRow>, StoreError> {
+        let cutoff = (Utc::now() - Duration::days(days as i64)).to_rfc3339();
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT routing_algo, latency_ms, is_correct
+             FROM engine_monitoring_events
+             WHERE datetime(timestamp) >= datetime(?1) AND routing_algo != ''",
+        )?;
+        let rows = stmt
+            .query_map([&cutoff], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)? as f64,
+                    r.get::<_, i64>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let total = rows.len() as u64;
+        // 按算法聚合：保留每算法 latency 列以算分位。
+        let mut by_algo: std::collections::HashMap<String, (Vec<f64>, i64)> =
+            std::collections::HashMap::new();
+        for (algo, lat, correct) in rows {
+            let e = by_algo.entry(algo).or_insert_with(|| (Vec::new(), 0));
+            e.0.push(lat);
+            e.1 += correct;
+        }
+
+        let mut out: Vec<AmasAlgoCompareRow> = by_algo
+            .into_iter()
+            .map(|(algorithm, (mut lats, correct))| {
+                let count = lats.len() as u64;
+                lats.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                let mean = if lats.is_empty() {
+                    0.0
+                } else {
+                    lats.iter().sum::<f64>() / lats.len() as f64
+                };
+                AmasAlgoCompareRow {
+                    algorithm,
+                    count,
+                    share: if total > 0 {
+                        count as f64 / total as f64
+                    } else {
+                        0.0
+                    },
+                    accuracy: if count > 0 {
+                        Some(correct as f64 / count as f64)
+                    } else {
+                        None
+                    },
+                    p50_latency_ms: pct_f64(&lats, 0.50),
+                    p95_latency_ms: pct_f64(&lats, 0.95),
+                    mean_latency_ms: mean,
+                }
+            })
+            .collect();
+        out.sort_by(|a, b| b.count.cmp(&a.count));
+        Ok(out)
+    }
+
+    /// admin 用户档案：取某用户最近一次采样落库的 reward（engine_monitoring_events）。
+    /// reward 为按 monitoring.sample_rate 抽样的 per-event 信号，可能滞后真实最新事件；
+    /// 无任何采样事件时返回 None。返回 (reward_json, reward_value, timestamp)。
+    pub fn get_latest_monitoring_reward(
+        &self,
+        user_id: &str,
+    ) -> Result<Option<(String, f64, String)>, StoreError> {
+        let conn = self.conn()?;
+        let row = conn
+            .query_row(
+                "SELECT reward_json, reward_value, timestamp
+                 FROM engine_monitoring_events
+                 WHERE user_id = ?1
+                 ORDER BY timestamp DESC
+                 LIMIT 1",
+                rusqlite::params![user_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        Ok(row)
     }
 }
 
