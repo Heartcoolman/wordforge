@@ -6,6 +6,9 @@ import topLevelAwait from 'vite-plugin-top-level-await';
 import { fileURLToPath, URL } from 'node:url';
 
 export default defineConfig({
+  // admin-ui 在后端 /admin 子路径托管：资源走 /admin/assets，与根托管的 web-app 资源(/assets)隔离，
+  // 避免管理面绝对 /assets 被 web-app fallback 截走导致白屏。SPA 路由本就用 /admin/* 绝对路径，无需改 Router。
+  base: '/admin/',
   plugins: [solid(), tailwindcss(), wasm(), topLevelAwait()],
   resolve: {
     alias: {
