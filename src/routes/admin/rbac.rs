@@ -72,17 +72,23 @@ fn normalize_admin_role(raw: Option<&str>) -> Result<String, AppError> {
     }
 }
 
-/// 特权守卫:仅 super_admin 可调用。校验调用方(而非目标)角色,非 super_admin 返回 403。
-pub(crate) async fn require_super_admin(state: &AppState, caller_admin_id: &str) -> Result<(), AppError> {
+/// 判定调用方是否 super_admin。读路径归属隔离用：非 super_admin 仅可见自己下发的资源。
+pub(crate) async fn is_super_admin(state: &AppState, caller_admin_id: &str) -> Result<bool, AppError> {
     let caller_id = caller_admin_id.to_string();
     let role = state
-        .run_store_task("admin.rbac.require_super_admin", move |store| {
+        .run_store_task("admin.rbac.is_super_admin", move |store| {
             store.get_admin_role(&caller_id)
         })
         .await??;
-    match role.as_deref() {
-        Some("super_admin") => Ok(()),
-        _ => Err(AppError::forbidden("仅超级管理员可执行此操作")),
+    Ok(role.as_deref() == Some("super_admin"))
+}
+
+/// 特权守卫:仅 super_admin 可调用。校验调用方(而非目标)角色,非 super_admin 返回 403。
+pub(crate) async fn require_super_admin(state: &AppState, caller_admin_id: &str) -> Result<(), AppError> {
+    if is_super_admin(state, caller_admin_id).await? {
+        Ok(())
+    } else {
+        Err(AppError::forbidden("仅超级管理员可执行此操作"))
     }
 }
 

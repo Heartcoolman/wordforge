@@ -459,7 +459,7 @@ struct ListQuery {
 }
 
 async fn list_probe(
-    _admin: AdminAuthUser,
+    admin: AdminAuthUser,
     Query(q): Query<ListQuery>,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
@@ -471,10 +471,18 @@ async fn list_probe(
     }
     let limit = q.limit.unwrap_or(50).min(200);
     let offset = q.offset.unwrap_or(0);
+    // P2-19:非 super_admin 仅可见自己下发的探针，强制 admin_id == caller，
+    // 忽略客户端透传的 q.admin_id，阻断 `?adminId=<他人>` 跨 admin 越权读脚本/结果。
+    let is_super = crate::routes::admin::rbac::is_super_admin(&state, &admin.admin_id).await?;
+    let admin_id_filter = if is_super {
+        q.admin_id
+    } else {
+        Some(admin.admin_id.clone())
+    };
     let filter = ProbeListFilter {
         batch_id: q.batch_id,
         device_id: q.device_id,
-        admin_id: q.admin_id,
+        admin_id: admin_id_filter,
         status: q.status,
     };
     let store = state.store().clone();
@@ -487,7 +495,7 @@ async fn list_probe(
 }
 
 async fn get_probe(
-    _admin: AdminAuthUser,
+    admin: AdminAuthUser,
     Path(request_id): Path<String>,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
@@ -503,11 +511,16 @@ async fn get_probe(
         .map_err(|e| AppError::internal(&format!("spawn_blocking: {e}")))?
         .map_err(|e| AppError::internal(&format!("get_probe_execution: {e}")))?
         .ok_or_else(|| AppError::not_found("probe execution 不存在"))?;
+    // P2-19:非 super_admin 不得查看他人探针；归属不符按"不存在"处理，不泄露存在性。
+    let is_super = crate::routes::admin::rbac::is_super_admin(&state, &admin.admin_id).await?;
+    if !is_super && row.admin_id != admin.admin_id {
+        return Err(AppError::not_found("probe execution 不存在"));
+    }
     Ok(ok(serde_json::json!(row)))
 }
 
 async fn batch_stream(
-    _admin: AdminAuthUser,
+    admin: AdminAuthUser,
     Path(batch_id): Path<String>,
     State(state): State<AppState>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, AppError> {
@@ -523,7 +536,7 @@ async fn batch_stream(
     // expected = 总行数 - 离线行数。
     let batch_id_for_total = batch_id.clone();
     let store = state.store().clone();
-    let expected = tokio::task::spawn_blocking(move || {
+    let (expected, batch_admin) = tokio::task::spawn_blocking(move || {
         let total = store.count_probe_in_batch(&batch_id_for_total)?;
         let (_, offline) = store.list_probe_executions(
             &ProbeListFilter {
@@ -535,12 +548,29 @@ async fn batch_stream(
             0,
             0,
         )?;
-        Ok::<_, crate::store::StoreError>(total.saturating_sub(offline))
+        // P2-19:取该 batch 任意一行的 admin_id（同 batch 同一下发者）用于读路径归属核验。
+        let (one, _) = store.list_probe_executions(
+            &ProbeListFilter {
+                batch_id: Some(batch_id_for_total.clone()),
+                device_id: None,
+                admin_id: None,
+                status: None,
+            },
+            1,
+            0,
+        )?;
+        let batch_admin = one.first().map(|r| r.admin_id.clone());
+        Ok::<_, crate::store::StoreError>((total.saturating_sub(offline), batch_admin))
     })
     .await
     .map_err(|e| AppError::internal(&format!("spawn_blocking: {e}")))?
     .map_err(|e| AppError::internal(&format!("count_probe_in_batch: {e}")))?;
     if expected == 0 {
+        return Err(AppError::not_found("batch 不存在、已过期或目标全部离线"));
+    }
+    // P2-19:非 super_admin 不得订阅他人 batch 的结果流；归属不符按"不存在"处理，不泄露存在性。
+    let is_super = crate::routes::admin::rbac::is_super_admin(&state, &admin.admin_id).await?;
+    if !is_super && batch_admin.as_deref() != Some(admin.admin_id.as_str()) {
         return Err(AppError::not_found("batch 不存在、已过期或目标全部离线"));
     }
 

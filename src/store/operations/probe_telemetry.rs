@@ -165,10 +165,11 @@ impl Store {
 
     /// error_js 探针:SUM(error_count) FROM telemetry_summaries,窗口 window_days 天。
     /// count24h = 错误总数(SUM);lastTs = 有错误的最近一行 server_ts。
+    /// 每行 error_count 先 clamp 到 [0, 1e6] 再求和：防探针上报负值/超大值污染统计或撑爆 i64。
     pub fn probe_stat_error_js(&self, window_days: i64) -> Result<ProbeStat, StoreError> {
         let conn = self.conn()?;
         let row = conn.query_row(
-            "SELECT COALESCE(SUM(error_count), 0),
+            "SELECT COALESCE(SUM(MIN(MAX(error_count, 0), 1000000)), 0),
                     MAX(CASE WHEN error_count > 0 THEN server_ts END)
              FROM telemetry_summaries
              WHERE datetime(server_ts) > datetime('now', ?1)",
