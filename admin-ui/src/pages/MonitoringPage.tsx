@@ -171,6 +171,13 @@ export default function MonitoringPage() {
 
   // ── 派生 ──
   const res = () => health()?.resources ?? null;
+  // 过载/饱和度（后端 health.saturation）——让可用性卡/服务状态反映过载，不被 5xx 口径的可用性掩盖。
+  const sat = () => (health() as any)?.saturation as { degraded?: boolean; reasons?: string[]; p99Ms?: number } | undefined;
+  const overloaded = () => !!sat()?.degraded;
+  const overloadReasons = () => {
+    const map: Record<string, string> = { latency_p99: 'P99延迟', inflight_backlog: '请求堆积', db_pool_exhausted: '写池耗尽', sse_near_cap: 'SSE近上限' };
+    return (sat()?.reasons ?? []).map((x) => map[x] ?? x).join('·');
+  };
   const workerStats = createMemo(() => {
     const ws = workers();
     return {
@@ -226,10 +233,10 @@ export default function MonitoringPage() {
             {(rq) => (
               <>
                 <StatCard
-                  tone={rq().availabilityPct >= 99.9 ? 'success' : rq().availabilityPct >= 99 ? 'warning' : 'error'}
+                  tone={health()?.status === 'down' ? 'error' : overloaded() ? 'warning' : rq().availabilityPct >= 99.9 ? 'success' : rq().availabilityPct >= 99 ? 'warning' : 'error'}
                   label="后端可用性" icon="shield"
                   value={rq().availabilityPct.toFixed(2)} unit="%"
-                  deltaLabel={`目标 ≥ 99.9% · 窗口 ${fmtDur(rq().effectiveSecs)}`}
+                  deltaLabel={overloaded() ? `⚠ 过载降级 · ${overloadReasons()}` : `目标 ≥ 99.9% · 窗口 ${fmtDur(rq().effectiveSecs)}`}
                 />
                 <StatCard
                   tone="accent" label="平均 RPS" icon="zap"
@@ -281,7 +288,7 @@ export default function MonitoringPage() {
             <Show when={health()} fallback={<Loading />}>
               {(h) => (
                 <div style={sx({ display: 'flex', flexDirection: 'column', gap: 11 })}>
-                  <StatusRow label="HTTP 服务" ok={h().status !== 'down'} value={h().status === 'down' ? '不可用' : '运行正常'} />
+                  <StatusRow label="HTTP 服务" ok={h().status === 'healthy'} value={h().status === 'down' ? '不可用' : h().status === 'degraded' ? (overloaded() ? '降级 · 过载' : '降级') : '运行正常'} />
                   <StatusRow label="数据库" ok={h().storeProbeOk !== false} value={`${fmtBytes(h().dbSizeBytes)} · WAL`} />
                   <StatusRow label="运行时间" ok value={fmtDur(h().uptimeSecs)} />
                   <StatusRow label="AMAS 引擎" ok={h().services?.amas.healthy !== false}

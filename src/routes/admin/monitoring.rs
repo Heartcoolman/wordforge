@@ -66,9 +66,14 @@ async fn system_health(
     let sse_healthy = sse_probe_ok(&state);
     let (wbc_healthy, wbc_probe_skipped) = wordbook_center_probe(&state).await;
 
+    // 饱和度/延迟 SLO 纳入健康判定:过载(P99 暴涨/在途堆积/写池耗尽/SSE 近上限)即便无 5xx
+    // 也应降级,避免「可用性 100% 掩盖过载」。资源采样上移以参与判定。
+    let resources = sample_resources(&state).await;
+    let overload = detect_overload(&state, &resources);
+
     let status = if !store_probe_ok {
         "down"
-    } else if !amas_healthy || !sse_healthy || !wbc_healthy {
+    } else if !amas_healthy || !sse_healthy || !wbc_healthy || overload.degraded {
         "degraded"
     } else {
         "healthy"
@@ -82,9 +87,7 @@ async fn system_health(
         0.0
     };
 
-    // m023:进程级 CPU/RSS + DB 池 + 工作目录磁盘。采样 ~negligible(~1ms),
-    // 失败时字段返回 null,前端不渲染进度条 ——不让监控干扰本体。
-    let resources = sample_resources(&state).await;
+    // m023:资源采样已上移至 status 判定前（参与过载/饱和度判定）。
 
     // S2-1：outbox 异步消费健康（待处理数 / lag 秒 / 死信累计）。读失败降级为默认零值。
     let outbox = state
@@ -104,6 +107,7 @@ async fn system_health(
         "version": env!("GIT_VERSION"),
         "errorRate": error_rate,
         "resources": resources,
+        "saturation": overload.to_json(),
         "outbox": outbox,
         "services": {
             "amas": { "healthy": amas_healthy },
@@ -119,6 +123,88 @@ async fn system_health(
             },
         },
     })))
+}
+
+/// 过载/饱和度判定:延迟 SLO 违约 + 在途堆积 + 写池耗尽 + SSE 近上限。
+/// 把「慢/满但不报 5xx」的过载纳入 health.status=degraded（不再被 5xx 口径的可用性掩盖）。
+struct Overload {
+    degraded: bool,
+    p99_ms: f64,
+    latency_breach: bool,
+    inflight: u64,
+    inflight_high: bool,
+    pool_exhausted: bool,
+    sse_near_cap: bool,
+}
+
+impl Overload {
+    fn to_json(&self) -> serde_json::Value {
+        let mut reasons: Vec<&str> = Vec::new();
+        if self.latency_breach {
+            reasons.push("latency_p99");
+        }
+        if self.inflight_high {
+            reasons.push("inflight_backlog");
+        }
+        if self.pool_exhausted {
+            reasons.push("db_pool_exhausted");
+        }
+        if self.sse_near_cap {
+            reasons.push("sse_near_cap");
+        }
+        serde_json::json!({
+            "degraded": self.degraded,
+            "p99Ms": self.p99_ms,
+            "inflightRequests": self.inflight,
+            "reasons": reasons,
+        })
+    }
+}
+
+/// 1h 窗口 P99 超此阈值（且样本足够）视为延迟 SLO 违约。与前端 P99 卡红线一致。
+const OVERLOAD_P99_MS: f64 = 800.0;
+const OVERLOAD_MIN_SAMPLES: u64 = 50;
+/// 在途请求堆积阈值（正常远低于此；堆积=请求排在 SQLite/信号量后面）。
+const OVERLOAD_INFLIGHT: u64 = 64;
+
+fn detect_overload(state: &AppState, resources: &serde_json::Value) -> Overload {
+    // 延迟 SLO（1h 滚动窗口 P99）。样本不足时不判违约,避免冷启动误报。
+    let agg = crate::middleware::http_metrics::aggregate(3600);
+    let latency_breach =
+        agg.total_requests >= OVERLOAD_MIN_SAMPLES && agg.p99_ms > OVERLOAD_P99_MS;
+
+    let inflight = resources
+        .get("inflightRequests")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let inflight_high = inflight >= OVERLOAD_INFLIGHT;
+
+    // r2d2 写池耗尽:连接占满且无空闲。
+    let pool_exhausted = resources
+        .get("pool")
+        .and_then(|p| {
+            let conns = p.get("connections")?.as_u64()?;
+            let max = p.get("max")?.as_u64()?;
+            let idle = p.get("idle")?.as_u64()?;
+            Some(max > 0 && conns >= max && idle == 0)
+        })
+        .unwrap_or(false);
+
+    // SSE 长连接逼近配置上限。
+    let active_sse = SSE_CONNECTION_COUNT.load(Ordering::Relaxed);
+    let max_sse = state.config().limits.max_sse_connections;
+    let sse_near_cap = max_sse > 0 && active_sse as f64 >= max_sse as f64 * 0.9;
+
+    let degraded = latency_breach || inflight_high || pool_exhausted || sse_near_cap;
+    Overload {
+        degraded,
+        p99_ms: agg.p99_ms,
+        latency_breach,
+        inflight,
+        inflight_high,
+        pool_exhausted,
+        sse_near_cap,
+    }
 }
 
 async fn database_stats(
