@@ -447,8 +447,11 @@ impl AMASEngine {
             engine.process_event_blocking(&user_id, raw_event, None)
         })
         .await??;
-        // 非幂等路径不传幂等键，persist_state 恒返回 true（无标记可竞争），故必为 Some。
-        result.ok_or_else(|| AppError::internal("process_event returned None without idempotency key"))
+        // 非幂等路径不传幂等键，persist_state 恒 committed=true（无标记可竞争），故必为 Some。
+        // 诊断端点不做 tx2 / 回滚，丢弃 swd_appended_seq。
+        result
+            .map(|(r, _)| r)
+            .ok_or_else(|| AppError::internal("process_event returned None without idempotency key"))
     }
 
     /// W1-1：幂等版 process_event。把 `client_record_id` 作为幂等键，在 AMAS 状态落库的
@@ -462,7 +465,7 @@ impl AMASEngine {
         user_id: &str,
         raw_event: RawEvent,
         client_record_id: &str,
-    ) -> Result<Option<ProcessResult>, AppError> {
+    ) -> Result<Option<(ProcessResult, Option<i64>)>, AppError> {
         let engine = self.clone();
         let user_id = user_id.to_string();
         let key = client_record_id.to_string();
@@ -479,7 +482,7 @@ impl AMASEngine {
         user_id: &str,
         raw_event: RawEvent,
         idempotency_key: Option<&str>,
-    ) -> Result<Option<ProcessResult>, AppError> {
+    ) -> Result<Option<(ProcessResult, Option<i64>)>, AppError> {
         let start = std::time::Instant::now();
 
         let user_lock = self.acquire_user_lock_blocking(user_id);
@@ -502,7 +505,7 @@ impl AMASEngine {
         // T1.3:本次 mastery 态边沿(在 scoring 被后续消费前捕获)。
         let mastery_transition = scoring.word_mastery.as_ref().and_then(|f| f.mastery_transition);
 
-        self.update_trust_scores(
+        let swd_append = self.update_trust_scores(
             &mut context.algo_states,
             &strategy.candidates,
             scoring.reward.value,
@@ -540,14 +543,16 @@ impl AMASEngine {
             }
         });
         // W1-1 并发收口：标记已被并发请求抢先写入则整笔回滚，返回 None 让调用方走裸记录回放。
-        if !self.persist_state(
+        let outcome = self.persist_state(
             user_id,
             &mut context.user_state,
             &context.algo_states,
             pending_algo,
+            swd_append.as_ref(),
             elo_spec.as_ref(),
             idempotency_key,
-        )? {
+        )?;
+        if !outcome.committed {
             return Ok(None);
         }
 
@@ -603,7 +608,7 @@ impl AMASEngine {
             experiment.as_ref().map(|(id, arm)| (id.as_str(), *arm)),
         );
 
-        Ok(Some(result))
+        Ok(Some((result, outcome.swd_appended_seq)))
     }
 
     fn prepare_processing_context(
@@ -1017,18 +1022,21 @@ impl AMASEngine {
             states.ige = ige::IgeState::new(&config.ige);
         }
 
-        if let Some(v) = self
-            .store
-            .get_engine_algo_state(user_id, "swd")
-            .map_err(|e| AppError::internal(&e.to_string()))?
-        {
-            states.swd = match serde_json::from_value(v) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::warn!(user_id, algo = "swd", error = %e, "Algo state deserialization failed, using default");
-                    swd::SwdState::default()
-                }
-            };
+        // 写放大重构：swd 历史从追加式行表 engine_swd_history 重建（取最近 max 条、seq ASC 保插入序
+        // → swd::generate 浮点加权求和 bit-exact）。max_history_size 是死字段（generate 不读、update
+        // 用 config.swd.max_history_size 裁剪），填运行期 config 值。缺行/读失败回退空历史（= default）。
+        let swd_max = config.swd.max_history_size;
+        match self.store.load_swd_history(user_id, swd_max) {
+            Ok(history) => {
+                states.swd = swd::SwdState {
+                    strategy_history: history,
+                    max_history_size: swd_max,
+                };
+            }
+            Err(e) => {
+                tracing::warn!(user_id, algo = "swd", error = %e, "swd history load failed, using default");
+                states.swd = swd::SwdState::default();
+            }
         }
 
         if let Some(v) = self
@@ -1564,6 +1572,7 @@ impl AMASEngine {
         strategy
     }
 
+    /// 返回本事件新增的 swd 历史 entry（无 Swd 候选则 None），交由 persist_state 追加到行表。
     #[allow(clippy::too_many_arguments)]
     fn update_trust_scores(
         &self,
@@ -1574,10 +1583,11 @@ impl AMASEngine {
         user_state: &UserState,
         weights: &HashMap<AlgorithmId, f64>,
         config: &AMASConfig,
-    ) {
+    ) -> Option<swd::StrategyRewardEntry> {
         let blended = reward * 0.5 + objective_score * 0.5;
         let max_weight = weights.values().copied().fold(0.0_f64, f64::max).max(1e-9);
 
+        let mut swd_entry = None;
         for candidate in candidates {
             let weight = weights.get(&candidate.algorithm_id).copied().unwrap_or(0.0);
             if weight <= 0.0 {
@@ -1597,19 +1607,21 @@ impl AMASEngine {
             }
 
             if candidate.algorithm_id == AlgorithmId::Swd {
-                swd::update(
+                swd_entry = Some(swd::update_returning(
                     &mut algo_states.swd,
                     user_state,
                     &candidate.strategy,
                     blended,
                     config,
-                );
+                ));
             }
         }
+        swd_entry
     }
 
-    /// 返回 `true`=本次状态已提交；`false`=幂等标记已被并发请求抢先写入、整笔回滚（详见
-    /// [`Store::persist_engine_state_atomic`]）。`idempotency_key` 为 `None` 时恒 `true`。
+    /// 返回 [`PersistOutcome`]：`committed=true`=本次状态已提交；`false`=幂等标记已被并发请求抢先
+    /// 写入、整笔回滚（详见 [`Store::persist_engine_state_atomic`]）。`idempotency_key` 为 `None` 时
+    /// 恒 `committed=true`。`swd_appended_seq` 供 tx2 失败回滚删除该条 swd 历史行。
     #[allow(clippy::too_many_arguments)]
     fn persist_state(
         &self,
@@ -1617,9 +1629,10 @@ impl AMASEngine {
         user_state: &mut UserState,
         algo_states: &AlgoStates,
         pending_algo: Vec<(String, serde_json::Value)>,
+        swd_append: Option<&swd::StrategyRewardEntry>,
         elo: Option<&crate::store::operations::engine::EloUpdateSpec>,
         idempotency_key: Option<&str>,
-    ) -> Result<bool, AppError> {
+    ) -> Result<crate::store::operations::engine::PersistOutcome, AppError> {
         // 在保存前清理浮点字段，防止 NaN 传播
         user_state.attention = sanitize_float(user_state.attention, 0.5).clamp(0.0, 1.0);
         user_state.fatigue = sanitize_float(user_state.fatigue, 0.0).clamp(0.0, 1.0);
@@ -1635,18 +1648,14 @@ impl AMASEngine {
         let user_state_json =
             serde_json::to_value(&*user_state).map_err(|e| AppError::internal(&e.to_string()))?;
 
-        // W1-1：ige/swd/trust 与 update_memory 累积的 per-word 状态（mastery/IAD/MTP/EVM）合并，
-        // 连同幂等标记由 persist_engine_state_atomic 同一 tx 原子提交——保证"标记存在 ⟺ 全部 AMAS
-        // 状态已应用"，崩溃重试不会对记忆模型二次累加。
+        // W1-1：ige/trust 与 update_memory 累积的 per-word 状态（mastery/IAD/MTP/EVM）合并，连同
+        // swd 历史追加行 + 幂等标记由 persist_engine_state_atomic 同一 tx 原子提交——保证"标记存在
+        // ⟺ 全部 AMAS 状态已应用"，崩溃重试不会对记忆模型二次累加。
+        // swd 不再在此全量序列化（写放大根因）；改由 swd_append 在 tx 内追加一行 engine_swd_history。
         let mut algo_entries: Vec<(String, serde_json::Value)> = vec![
             (
                 "ige".to_string(),
                 serde_json::to_value(&algo_states.ige)
-                    .map_err(|e| AppError::internal(&e.to_string()))?,
-            ),
-            (
-                "swd".to_string(),
-                serde_json::to_value(&algo_states.swd)
                     .map_err(|e| AppError::internal(&e.to_string()))?,
             ),
             (
@@ -1662,6 +1671,7 @@ impl AMASEngine {
                 user_id,
                 &user_state_json,
                 &algo_entries,
+                swd_append,
                 elo,
                 idempotency_key,
             )

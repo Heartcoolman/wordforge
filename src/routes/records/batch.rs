@@ -244,7 +244,8 @@ pub(crate) async fn process_batch_record(
         .await?;
     // W1-1 并发收口：None 表示并发同 client_record_id 请求抢先写入幂等标记、本次 AMAS 已整笔回滚，
     // 走与 already_processed 一致的裸记录回放（不重复累加 ELO/mastery/trust）。
-    let Some(amas_result) = amas_result else {
+    // batch per-record 不回滚 swd（与旧实现一致：swd 由批级快照统一回滚），丢弃 appended_seq。
+    let Some((amas_result, _swd_appended_seq)) = amas_result else {
         let record_for_replay = record.clone();
         state
             .run_store_task("records.batch.persist_replayed", move |store| {
@@ -352,6 +353,8 @@ pub(crate) async fn process_batch_record(
                             user_elo: Some(&prev_user_elo),
                             word_elo: Some((&word_id, &prev_word_elo)),
                             word_elo_contrib: Some((&word_id, prev_word_contrib)),
+                            // batch per-record 不回滚 swd（批级统一处理）。
+                            swd_delete_seq: None,
                             clear_marker_record_id: Some(&record_for_store.id),
                         };
                         if let Err(e) = store.restore_engine_state_atomic(&restore) {

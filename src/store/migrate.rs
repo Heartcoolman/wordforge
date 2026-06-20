@@ -35,7 +35,7 @@ type MigrationFn = fn(&Store) -> Result<(), StoreError>;
 /// 完全迁移后 `schema_version` 应到达的版本号（= [`migrations`] 条目数）。
 /// 编译期常量，供 `--print-schema-version`（任意版本回滚的"目标二进制自声明 schema 版本"）使用；
 /// [`schema_version_const_matches_registry`] 测试守卫它与运行期 `migrations().len()` 不漂移。
-pub const SCHEMA_VERSION: u32 = 61;
+pub const SCHEMA_VERSION: u32 = 62;
 
 /// 已加固到"生产可用"的 down 迁移覆盖下界：回滚目标的 schema 版本必须 `>=` 此值。
 /// 真·任意版本回滚把 down 链当作"把当前库副本降级到目标版本"的降级引擎；低于此下界的
@@ -155,6 +155,7 @@ fn migrations() -> Vec<(&'static str, MigrationFn)> {
             "061_telemetry_ingest_rejections",
             m061_telemetry_ingest_rejections,
         ),
+        ("062_engine_swd_history", m062_engine_swd_history),
     ]
 }
 
@@ -292,6 +293,7 @@ fn migrations_down() -> Vec<(&'static str, MigrationFn)> {
             "061_telemetry_ingest_rejections",
             m061_telemetry_ingest_rejections_down,
         ),
+        ("062_engine_swd_history", m062_engine_swd_history_down),
     ]
 }
 
@@ -3428,6 +3430,92 @@ fn m061_telemetry_ingest_rejections_down(store: &Store) -> Result<(), StoreError
     Ok(())
 }
 
+/// m062:写放大重构——swd 滚动历史从 engine_algo_states 单块 blob（每事件全量重写，写放大根因）
+/// 迁出为追加式行表 engine_swd_history。建表 + 把存量 swd blob **按 Vec 顺序逐条 INSERT**（行 seq 序 =
+/// 原 Vec 序 = bit-exact）+ 删旧 blob 源（避免双源，此后 load 只读行表）。整体单 tx 原子；DDL 与
+/// schema.rs 同源。损坏 blob 跳过（= 空历史 = SwdState::default）。
+fn m062_engine_swd_history(store: &Store) -> Result<(), StoreError> {
+    let mut conn = store.conn()?;
+    let tx = conn.transaction()?;
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS engine_swd_history (
+            seq INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            snap_attention REAL NOT NULL,
+            snap_fatigue REAL NOT NULL,
+            snap_motivation REAL NOT NULL,
+            snap_total_events INTEGER NOT NULL,
+            strat_difficulty REAL NOT NULL,
+            strat_batch_size INTEGER NOT NULL,
+            strat_new_ratio REAL NOT NULL,
+            strat_interval_scale REAL NOT NULL,
+            strat_review_mode INTEGER NOT NULL CHECK (strat_review_mode IN (0,1)),
+            reward REAL NOT NULL,
+            ts_ms INTEGER NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS idx_engine_swd_history_user_seq ON engine_swd_history(user_id, seq);",
+    )?;
+
+    // 存量 swd blob → 行表（保插入序）。
+    let blobs: Vec<(String, String)> = {
+        let mut stmt =
+            tx.prepare("SELECT user_id, state_json FROM engine_algo_states WHERE algo_id='swd'")?;
+        let mapped = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        let mut out = Vec::new();
+        for row in mapped {
+            out.push(row?);
+        }
+        out
+    };
+    for (user_id, state_json) in blobs {
+        let state: crate::amas::decision::swd::SwdState =
+            match serde_json::from_str(&state_json) {
+                Ok(s) => s,
+                Err(_) => continue, // 损坏 → 跳过，起步空历史
+            };
+        for e in &state.strategy_history {
+            tx.execute(
+                "INSERT INTO engine_swd_history
+                 (user_id, snap_attention, snap_fatigue, snap_motivation, snap_total_events,
+                  strat_difficulty, strat_batch_size, strat_new_ratio, strat_interval_scale,
+                  strat_review_mode, reward, ts_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                rusqlite::params![
+                    user_id,
+                    e.user_state_snapshot.attention,
+                    e.user_state_snapshot.fatigue,
+                    e.user_state_snapshot.motivation,
+                    e.user_state_snapshot.total_event_count as i64,
+                    e.strategy.difficulty,
+                    e.strategy.batch_size as i64,
+                    e.strategy.new_ratio,
+                    e.strategy.interval_scale,
+                    e.strategy.review_mode as i64,
+                    e.reward,
+                    e.timestamp,
+                ],
+            )?;
+        }
+    }
+    // 删旧源：避免双源，load_algo_states 此后只读行表。
+    tx.execute("DELETE FROM engine_algo_states WHERE algo_id='swd'", [])?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// m062 down:DROP engine_swd_history + 索引。不回灌 blob（任意版本回滚走 DB 副本 + pre-rollback
+/// 备份恢复数据，down 仅做 schema 降级）。仅 dev/test。
+fn m062_engine_swd_history_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS idx_engine_swd_history_user_seq;
+         DROP TABLE IF EXISTS engine_swd_history;",
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3697,5 +3785,66 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 3, "fresh DB 上 init_schema 应建立全量目标 schema");
+    }
+
+    /// m062：把存量 swd blob 按 Vec 顺序逐条迁入 engine_swd_history（行序=Vec 序，字段精确往返），
+    /// 并删除旧 blob 源（避免双源）。
+    #[test]
+    fn m062_migrates_swd_blob_to_rows_and_deletes_source() {
+        use crate::amas::decision::swd::{StrategyRewardEntry, SwdState, UserStateSnapshot};
+        use crate::amas::types::StrategyParams;
+        let _t = tempfile::tempdir().unwrap();
+        let store = Store::open(_t.path().join("t.db").to_str().unwrap(), 5000, 2).unwrap();
+        store.run_migrations().unwrap();
+
+        let mk = |reward: f64, ec: u64| StrategyRewardEntry {
+            user_state_snapshot: UserStateSnapshot {
+                attention: 0.6,
+                fatigue: 0.1,
+                motivation: -0.2,
+                total_event_count: ec,
+            },
+            strategy: StrategyParams {
+                difficulty: 0.3 + reward,
+                batch_size: 12,
+                new_ratio: 0.25,
+                interval_scale: 0.9,
+                review_mode: ec % 2 == 1,
+            },
+            reward,
+            timestamp: 5000 + ec as i64,
+        };
+        let history = vec![mk(0.11, 0), mk(0.22, 1), mk(0.33, 2)];
+        let blob = SwdState {
+            strategy_history: history.clone(),
+            max_history_size: 100,
+        };
+        // 模拟旧库：把 swd 整块 blob 塞进 engine_algo_states。
+        store
+            .set_engine_algo_state("ulegacy", "swd", &serde_json::to_value(&blob).unwrap())
+            .unwrap();
+
+        // 直接调 m062（同模块可见）：建表(已存在则 no-op) + 迁移 + 删旧源。
+        super::m062_engine_swd_history(&store).unwrap();
+
+        // 行表按 Vec 顺序重建，逐字段精确相等。
+        let rows = store.load_swd_history("ulegacy", 100).unwrap();
+        assert_eq!(rows.len(), 3);
+        for (got, want) in rows.iter().zip(history.iter()) {
+            assert_eq!(got.reward, want.reward);
+            assert_eq!(got.timestamp, want.timestamp);
+            assert_eq!(got.strategy.difficulty, want.strategy.difficulty);
+            assert_eq!(got.strategy.review_mode, want.strategy.review_mode);
+            assert_eq!(
+                got.user_state_snapshot.total_event_count,
+                want.user_state_snapshot.total_event_count
+            );
+            assert_eq!(got.user_state_snapshot.motivation, want.user_state_snapshot.motivation);
+        }
+        // 旧 blob 源已删（避免双源）。
+        assert!(store
+            .get_engine_algo_state("ulegacy", "swd")
+            .unwrap()
+            .is_none());
     }
 }

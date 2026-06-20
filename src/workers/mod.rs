@@ -24,6 +24,7 @@ pub mod scheduler_health_watchdog;
 pub mod session_cleanup;
 pub mod telemetry_cleanup;
 pub mod update_checker;
+pub mod wal_checkpoint;
 pub mod weekly_report;
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -71,6 +72,8 @@ pub enum WorkerName {
     SchedulerHealthWatchdog,
     /// C6:per-patch canary 自动回滚监测（每 5 分钟）
     CanaryMonitor,
+    /// perf:周期 wal_checkpoint(TRUNCATE) 回收 WAL，避免臃肿 WAL 放大每次 commit 成本（每 10 分钟）
+    WalCheckpoint,
 }
 
 impl WorkerName {
@@ -94,6 +97,7 @@ impl WorkerName {
             Self::ErrorRateWatchdog => "error_rate_watchdog",
             Self::SchedulerHealthWatchdog => "scheduler_health_watchdog",
             Self::CanaryMonitor => "canary_monitor",
+            Self::WalCheckpoint => "wal_checkpoint",
         }
     }
 }
@@ -197,6 +201,12 @@ pub fn worker_cron_specs(
         JobSpec {
             name: WorkerName::MonitoringRetention,
             cron: "0 0 3 1 * *",
+            enabled: true,
+        },
+        // perf：周期 wal_checkpoint(TRUNCATE) 回收 WAL（每 10 分钟）
+        JobSpec {
+            name: WorkerName::WalCheckpoint,
+            cron: "0 */10 * * * *",
             enabled: true,
         },
         // M0-P4：5xx 错误率滚动监控，每分钟采样，超 1% 广播 incident SSE 事件
@@ -609,6 +619,23 @@ impl WorkerManager {
                     )
                     .await;
                 }
+                // perf：周期 WAL checkpoint(TRUNCATE) 回收 WAL
+                WorkerName::WalCheckpoint => {
+                    add_job(
+                        scheduler,
+                        spec.cron,
+                        name_str,
+                        job_store,
+                        health_state,
+                        move || {
+                            let store = store.clone();
+                            async move {
+                                wal_checkpoint::run(&store).await;
+                            }
+                        },
+                    )
+                    .await;
+                }
                 // M0-P4：5xx 错误率 watchdog
                 WorkerName::ErrorRateWatchdog => {
                     let watchdog_state = match self.watchdog_state.clone() {
@@ -933,6 +960,7 @@ mod tests {
             WorkerName::ConfusionPairCache,
             WorkerName::WeeklyReport,
             WorkerName::LogExport,
+            WorkerName::WalCheckpoint,
         ];
 
         for name in &names {

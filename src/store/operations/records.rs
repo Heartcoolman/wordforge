@@ -61,8 +61,6 @@ pub struct LearningRecord {
 pub struct UserStatsAgg {
     pub total_records: u64,
     pub correct_records: u64,
-    pub word_ids: HashSet<String>,
-    pub session_ids: HashSet<String>,
 }
 
 const RECORD_COLS: &str =
@@ -98,22 +96,46 @@ fn record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LearningRecord> 
 impl Store {
     pub fn get_user_stats_agg(&self, user_id: &str) -> Result<UserStatsAgg, StoreError> {
         let conn = self.conn()?;
-        let result: Option<(i64, i64, String, String)> = conn
+        let result: Option<(i64, i64)> = conn
             .query_row(
-                "SELECT total_records, correct_records, word_ids_json, session_ids_json FROM user_stats WHERE user_id=?1",
+                "SELECT total_records, correct_records FROM user_stats WHERE user_id=?1",
                 params![user_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
         match result {
-            Some((total, correct, words_json, sessions_json)) => Ok(UserStatsAgg {
+            Some((total, correct)) => Ok(UserStatsAgg {
                 total_records: total as u64,
                 correct_records: correct as u64,
-                word_ids: Self::deserialize_json(&words_json)?,
-                session_ids: Self::deserialize_json(&sessions_json)?,
             }),
             None => Ok(UserStatsAgg::default()),
         }
+    }
+
+    /// 该用户答题过的去重词数（去掉 user_stats 增长型 word_ids_json blob 后的读时替代）。
+    /// 取 **records 维度** `COUNT(DISTINCT word_id)`（与旧 word_ids 集合语义 bit 等价；不可用
+    /// word_learning_states 行数——裸回放只写 records、reset 删 word_state 留 records，两者会偏）。
+    /// 走 `(user_id, word_id)` 覆盖前缀索引，非热路径。
+    pub fn count_distinct_words(&self, user_id: &str) -> Result<u64, StoreError> {
+        let conn = self.conn()?;
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(DISTINCT word_id) FROM learning_records WHERE user_id=?1",
+            params![user_id],
+            |r| r.get(0),
+        )?;
+        Ok(n as u64)
+    }
+
+    /// 该用户的去重会话数（替代 session_ids_json blob）。旧逻辑仅 session_id=Some 时计入，
+    /// COUNT(DISTINCT) 本就跳 NULL，显式 `IS NOT NULL` 加防御。走 `(user_id, session_id)` 索引。
+    pub fn count_distinct_sessions(&self, user_id: &str) -> Result<u64, StoreError> {
+        let conn = self.conn()?;
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(DISTINCT session_id) FROM learning_records WHERE user_id=?1 AND session_id IS NOT NULL",
+            params![user_id],
+            |r| r.get(0),
+        )?;
+        Ok(n as u64)
     }
 
     pub fn count_active_users_since(&self, since: DateTime<Utc>) -> Result<usize, StoreError> {
@@ -236,43 +258,17 @@ impl Store {
         }
 
         // Update user_stats —— 仅在记录行确实新插入时累加,避免并发裸回放与全量持久化对同一事件双计。
+        // 纯 SQL 自增（不再读改写、不再维护 word_ids_json/session_ids_json 增长型集合——那两列只为
+        // 读基数而存，已改由 count_distinct_words/sessions 读时 COUNT(DISTINCT) 求得）。
+        // word_ids_json/session_ids_json 列保留 DEFAULT '[]' 仅停写（零迁移、可回滚）。
         if inserted > 0 {
-            let mut stats = {
-                let result: Option<(i64, i64, String, String)> = tx
-                    .query_row(
-                        "SELECT total_records, correct_records, word_ids_json, session_ids_json FROM user_stats WHERE user_id=?1",
-                        params![&record.user_id],
-                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-                    )
-                    .optional()?;
-                match result {
-                    Some((total, correct, words_json, sessions_json)) => UserStatsAgg {
-                        total_records: total as u64,
-                        correct_records: correct as u64,
-                        word_ids: serde_json::from_str(&words_json).unwrap_or_default(),
-                        session_ids: serde_json::from_str(&sessions_json).unwrap_or_default(),
-                    },
-                    None => UserStatsAgg::default(),
-                }
-            };
-            stats.total_records += 1;
-            if record.is_correct {
-                stats.correct_records += 1;
-            }
-            stats.word_ids.insert(record.word_id.clone());
-            if let Some(ref sid) = record.session_id {
-                stats.session_ids.insert(sid.clone());
-            }
             tx.execute(
-                "INSERT INTO user_stats (user_id, total_records, correct_records, word_ids_json, session_ids_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5)
+                "INSERT INTO user_stats (user_id, total_records, correct_records)
+                 VALUES (?1, 1, ?2)
                  ON CONFLICT(user_id) DO UPDATE SET
-                    total_records=?2, correct_records=?3, word_ids_json=?4, session_ids_json=?5",
-                params![
-                    &record.user_id, stats.total_records as i64, stats.correct_records as i64,
-                    serde_json::to_string(&stats.word_ids).unwrap_or_default(),
-                    serde_json::to_string(&stats.session_ids).unwrap_or_default(),
-                ],
+                    total_records = total_records + 1,
+                    correct_records = correct_records + ?2",
+                params![&record.user_id, record.is_correct as i64],
             )?;
         }
 
@@ -688,8 +684,8 @@ mod tests {
         let s = store.get_user_stats_agg("nobody").unwrap();
         assert_eq!(s.total_records, 0);
         assert_eq!(s.correct_records, 0);
-        assert!(s.word_ids.is_empty());
-        assert!(s.session_ids.is_empty());
+        assert_eq!(store.count_distinct_words("nobody").unwrap(), 0);
+        assert_eq!(store.count_distinct_sessions("nobody").unwrap(), 0);
     }
 
     #[test]
@@ -779,8 +775,8 @@ mod tests {
         let stats = store.get_user_stats_agg("u1").unwrap();
         assert_eq!(stats.total_records, 1);
         assert_eq!(stats.correct_records, 1);
-        assert!(stats.word_ids.contains("w1"));
-        assert!(stats.session_ids.contains("s1"));
+        assert_eq!(store.count_distinct_words("u1").unwrap(), 1);
+        assert_eq!(store.count_distinct_sessions("u1").unwrap(), 1);
 
         // 第二条记录复用同一个 user，累加 stats
         let r2 = LearningRecord {
@@ -791,7 +787,7 @@ mod tests {
         let stats2 = store.get_user_stats_agg("u1").unwrap();
         assert_eq!(stats2.total_records, 2);
         assert_eq!(stats2.correct_records, 1);
-        assert!(stats2.word_ids.contains("w2"));
+        assert_eq!(store.count_distinct_words("u1").unwrap(), 2);
     }
 
     /// PR #61 审查 P1 回归:并发同 client_record_id 下,"裸记录回放"先落库后,在途"全量持久化"

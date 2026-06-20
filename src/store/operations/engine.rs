@@ -353,9 +353,10 @@ impl Store {
         user_id: &str,
         user_state: &serde_json::Value,
         algo_states: &[(String, serde_json::Value)],
+        swd_append: Option<&crate::amas::decision::swd::StrategyRewardEntry>,
         elo: Option<&EloUpdateSpec>,
         idempotency: Option<&str>,
-    ) -> Result<bool, StoreError> {
+    ) -> Result<PersistOutcome, StoreError> {
         keys::validate_id(user_id)?;
         let mut conn = self.conn()?;
         // IMMEDIATE：ELO RMW 在 BEGIN 即取写锁，杜绝读后写升级丢更新/死锁。
@@ -378,12 +379,40 @@ impl Store {
                 params![user_id, algo_id, json],
             )?;
         }
+        // 写放大重构：swd 滚动历史从"每事件全量重写整块 Vec blob"改为**追加一行**到 engine_swd_history
+        // （热路径仅 1 INSERT、无 prune；无界增长由维护 worker 兜底）。与 user_state/algo/ELO/幂等标记
+        // 同一原子 tx 提交，守 W1-1。返回 seq 供 tx2 失败时按行回滚。
+        let mut swd_appended_seq = None;
+        if let Some(entry) = swd_append {
+            tx.execute(
+                "INSERT INTO engine_swd_history
+                 (user_id, snap_attention, snap_fatigue, snap_motivation, snap_total_events,
+                  strat_difficulty, strat_batch_size, strat_new_ratio, strat_interval_scale,
+                  strat_review_mode, reward, ts_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                params![
+                    user_id,
+                    entry.user_state_snapshot.attention,
+                    entry.user_state_snapshot.fatigue,
+                    entry.user_state_snapshot.motivation,
+                    entry.user_state_snapshot.total_event_count as i64,
+                    entry.strategy.difficulty,
+                    entry.strategy.batch_size as i64,
+                    entry.strategy.new_ratio,
+                    entry.strategy.interval_scale,
+                    entry.strategy.review_mode as i64,
+                    entry.reward,
+                    entry.timestamp,
+                ],
+            )?;
+            swd_appended_seq = Some(tx.last_insert_rowid());
+        }
         // #11/#14/#39：ELO 同 tx 原子 RMW。
         if let Some(spec) = elo {
             Self::apply_elo_in_tx(&tx, user_id, spec)?;
         }
         // W1-1：幂等标记与 AMAS 状态同 tx 原子提交,保证"标记存在 ⟺ AMAS 已应用"。
-        // affected rows==0 即标记已被并发请求抢先写入 → 回滚本次重复增量。
+        // affected rows==0 即标记已被并发请求抢先写入 → 回滚本次重复增量（含上面 append 的 swd 行）。
         if let Some(client_record_id) = idempotency {
             let inserted = tx.execute(
                 "INSERT OR IGNORE INTO processed_events (user_id, client_record_id, processed_at)
@@ -392,11 +421,86 @@ impl Store {
             )?;
             if inserted == 0 {
                 tx.rollback()?;
-                return Ok(false);
+                return Ok(PersistOutcome {
+                    committed: false,
+                    swd_appended_seq: None,
+                });
             }
         }
         tx.commit()?;
-        Ok(true)
+        Ok(PersistOutcome {
+            committed: true,
+            swd_appended_seq,
+        })
+    }
+
+    /// 读取某用户最近 ≤`max` 条 swd 策略历史，重建 `Vec<StrategyRewardEntry>`。
+    /// 取 `seq DESC LIMIT max` 再翻回 **`seq ASC`** —— 保持与旧内存 Vec 相同的插入顺序，使
+    /// `swd::generate` 的浮点加权求和逐位相同（bit-exact）。缺行返回空 Vec（= `SwdState::default`）。
+    pub fn load_swd_history(
+        &self,
+        user_id: &str,
+        max: usize,
+    ) -> Result<Vec<crate::amas::decision::swd::StrategyRewardEntry>, StoreError> {
+        use crate::amas::decision::swd::{StrategyRewardEntry, UserStateSnapshot};
+        use crate::amas::types::StrategyParams;
+        keys::validate_id(user_id)?;
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT snap_attention, snap_fatigue, snap_motivation, snap_total_events,
+                    strat_difficulty, strat_batch_size, strat_new_ratio, strat_interval_scale,
+                    strat_review_mode, reward, ts_ms
+             FROM (SELECT * FROM engine_swd_history WHERE user_id=?1 ORDER BY seq DESC LIMIT ?2)
+             ORDER BY seq ASC",
+        )?;
+        let rows = stmt.query_map(params![user_id, max as i64], |r| {
+            Ok(StrategyRewardEntry {
+                user_state_snapshot: UserStateSnapshot {
+                    attention: r.get(0)?,
+                    fatigue: r.get(1)?,
+                    motivation: r.get(2)?,
+                    total_event_count: r.get::<_, i64>(3)? as u64,
+                },
+                strategy: StrategyParams {
+                    difficulty: r.get(4)?,
+                    batch_size: r.get::<_, i64>(5)? as u32,
+                    new_ratio: r.get(6)?,
+                    interval_scale: r.get(7)?,
+                    review_mode: r.get::<_, i64>(8)? != 0,
+                },
+                reward: r.get(9)?,
+                timestamp: r.get(10)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// 某用户 swd 历史的当前最大 seq（无行返回 0）。batch 路径在批量首条前捕获，供"全批失败"
+    /// 时 [`Self::delete_swd_history_after`] 把批内 append 的所有 swd 行删回。
+    pub fn swd_max_seq(&self, user_id: &str) -> Result<i64, StoreError> {
+        keys::validate_id(user_id)?;
+        let conn = self.conn()?;
+        let seq: i64 = conn.query_row(
+            "SELECT COALESCE(MAX(seq), 0) FROM engine_swd_history WHERE user_id=?1",
+            params![user_id],
+            |r| r.get(0),
+        )?;
+        Ok(seq)
+    }
+
+    /// 删除某用户 `seq > after_seq` 的 swd 历史行（batch 全批回滚到批前快照）。
+    pub fn delete_swd_history_after(&self, user_id: &str, after_seq: i64) -> Result<(), StoreError> {
+        keys::validate_id(user_id)?;
+        let conn = self.conn()?;
+        conn.execute(
+            "DELETE FROM engine_swd_history WHERE user_id=?1 AND seq>?2",
+            params![user_id, after_seq],
+        )?;
+        Ok(())
     }
 
     /// #23/#24：在**单个 IMMEDIATE tx** 内完整重置某用户的引擎态——把 user_state 写回
@@ -429,6 +533,11 @@ impl Store {
         // 否则旧词记忆/IAD/MTP 残留会与 total_event_count=0 的冷启动态自相矛盾（#24）。
         tx.execute(
             "DELETE FROM engine_algo_states WHERE user_id=?1",
+            params![user_id],
+        )?;
+        // 写放大重构：swd 历史已迁出 engine_algo_states 到独立行表，reset 一并清空。
+        tx.execute(
+            "DELETE FROM engine_swd_history WHERE user_id=?1",
             params![user_id],
         )?;
         tx.execute("DELETE FROM user_elo WHERE user_id=?1", params![user_id])?;
@@ -641,6 +750,14 @@ impl Store {
                 params![r.user_id, word_id, net],
             )?;
         }
+        // 写放大重构：单条路径 tx2 失败回滚时，删除本事件在 tx1 append 的那一行 swd 历史
+        //（与 marker 清除同 tx，守 W1-1）。batch per-record 不回滚 swd（None），批级另行处理。
+        if let Some(seq) = r.swd_delete_seq {
+            tx.execute(
+                "DELETE FROM engine_swd_history WHERE seq=?1",
+                params![seq],
+            )?;
+        }
         if let Some(rec_id) = r.clear_marker_record_id {
             tx.execute(
                 "DELETE FROM processed_events WHERE user_id=?1 AND client_record_id=?2",
@@ -650,6 +767,16 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
+}
+
+/// 写放大重构：[`Store::persist_engine_state_atomic`] 的返回。
+/// `committed=false` 表示幂等标记被并发请求抢先写入、整笔回滚未生效（调用方走裸记录回放）。
+/// `swd_appended_seq` 为本次 append 到 `engine_swd_history` 的行 seq（committed 时 Some），供
+/// tx2 失败时按行回滚删除该条 swd 历史。
+#[derive(Debug, Clone)]
+pub struct PersistOutcome {
+    pub committed: bool,
+    pub swd_appended_seq: Option<i64>,
 }
 
 /// #11/#14/#39：[`Store::persist_engine_state_atomic`] 的 ELO 原子更新入参。
@@ -674,6 +801,9 @@ pub struct EngineStateRestore<'a> {
     pub word_elo: Option<(&'a str, &'a crate::amas::elo::EloRating)>,
     /// #14：Some((word_id, net_displacement))=同 tx 把抗投毒账本复位到捕获时的净位移。
     pub word_elo_contrib: Option<(&'a str, f64)>,
+    /// 写放大重构：Some(seq)=同 tx 删除本事件 append 的那一行 swd 历史（单条路径回滚）；
+    /// None=不动 swd（batch per-record 回滚不碰 swd，由批级 delete_swd_history_after 处理）。
+    pub swd_delete_seq: Option<i64>,
     /// Some(client_record_id)=同 tx 删除 processed_events 标记。
     pub clear_marker_record_id: Option<&'a str>,
 }
@@ -899,7 +1029,7 @@ mod tests {
             ("a2".to_string(), serde_json::json!({"l":2})),
         ];
         store
-            .persist_engine_state_atomic("u1", &user_state, &algo, None, None)
+            .persist_engine_state_atomic("u1", &user_state, &algo, None, None, None)
             .unwrap();
         let us = store.get_engine_user_state("u1").unwrap().unwrap();
         assert_eq!(us["attention"], 0.5);
@@ -911,7 +1041,7 @@ mod tests {
         // 二次 atomic upsert 替换
         let algo2 = vec![("a1".into(), serde_json::json!({"l":99}))];
         store
-            .persist_engine_state_atomic("u1", &serde_json::json!({"attention":0.9}), &algo2, None, None)
+            .persist_engine_state_atomic("u1", &serde_json::json!({"attention":0.9}), &algo2, None, None, None)
             .unwrap();
         assert_eq!(
             store.get_engine_algo_state("u1", "a1").unwrap().unwrap()["l"],
@@ -921,7 +1051,7 @@ mod tests {
         // 错误 ID
         assert!(matches!(
             store
-                .persist_engine_state_atomic("", &user_state, &[], None, None)
+                .persist_engine_state_atomic("", &user_state, &[], None, None, None)
                 .unwrap_err(),
             crate::store::StoreError::Validation(_)
         ));
@@ -945,6 +1075,7 @@ mod tests {
                 &serde_json::json!({"attention": 0.9}),
                 &algo,
                 None,
+                None,
                 Some("rec-1"),
             )
             .unwrap();
@@ -962,6 +1093,7 @@ mod tests {
                 user_elo: Some(&elo),
                 word_elo: Some(("w1", &elo)),
                 word_elo_contrib: None,
+                swd_delete_seq: None,
                 clear_marker_record_id: Some("rec-1"),
             })
             .unwrap();
@@ -1036,6 +1168,7 @@ mod tests {
                 "u1",
                 &serde_json::json!({"attention": 0.5}),
                 &[],
+                None,
                 Some(&spec),
                 Some("rec-1"),
             )
@@ -1071,6 +1204,7 @@ mod tests {
                     "ut",
                     &serde_json::json!({ "attention": 0.5 }),
                     &[],
+                    None,
                     Some(&spec),
                     Some(&format!("rec-{i}")),
                 )
@@ -1111,6 +1245,7 @@ mod tests {
                     "up",
                     &serde_json::json!({ "attention": 0.5 }),
                     &[],
+                    None,
                     Some(&spec),
                     Some(&format!("rec-{i}")),
                 )
@@ -1150,6 +1285,7 @@ mod tests {
                     "attacker",
                     &serde_json::json!({}),
                     &[],
+                    None,
                     Some(&spec),
                     Some(&format!("rec-{i}")),
                 )
@@ -1186,6 +1322,7 @@ mod tests {
                     "attacker",
                     &serde_json::json!({}),
                     &[],
+                    None,
                     Some(&spec),
                     Some(&format!("rec-{i}")),
                 )
@@ -1247,6 +1384,7 @@ mod tests {
                 user_elo: None,
                 word_elo: None,
                 word_elo_contrib: Some(("w1", 5.0)),
+                swd_delete_seq: None,
                 clear_marker_record_id: None,
             })
             .unwrap();
@@ -1256,5 +1394,115 @@ mod tests {
             5.0,
             "回滚应把账本复位到捕获值 5.0"
         );
+    }
+
+    fn swd_entry(reward: f64, ec: u64) -> crate::amas::decision::swd::StrategyRewardEntry {
+        crate::amas::decision::swd::StrategyRewardEntry {
+            user_state_snapshot: crate::amas::decision::swd::UserStateSnapshot {
+                attention: 0.7,
+                fatigue: 0.2,
+                motivation: 0.1,
+                total_event_count: ec,
+            },
+            strategy: crate::amas::types::StrategyParams {
+                difficulty: 0.4 + reward,
+                batch_size: 8,
+                new_ratio: 0.3,
+                interval_scale: 1.2,
+                review_mode: ec % 2 == 0,
+            },
+            reward,
+            timestamp: 1000 + ec as i64,
+        }
+    }
+
+    fn assert_entry_eq(
+        a: &crate::amas::decision::swd::StrategyRewardEntry,
+        b: &crate::amas::decision::swd::StrategyRewardEntry,
+    ) {
+        // 逐字段 == （非 epsilon）：bit-exact 守卫，浮点经 REAL 精确往返。
+        assert_eq!(a.user_state_snapshot.attention, b.user_state_snapshot.attention);
+        assert_eq!(a.user_state_snapshot.fatigue, b.user_state_snapshot.fatigue);
+        assert_eq!(a.user_state_snapshot.motivation, b.user_state_snapshot.motivation);
+        assert_eq!(
+            a.user_state_snapshot.total_event_count,
+            b.user_state_snapshot.total_event_count
+        );
+        assert_eq!(a.strategy.difficulty, b.strategy.difficulty);
+        assert_eq!(a.strategy.batch_size, b.strategy.batch_size);
+        assert_eq!(a.strategy.new_ratio, b.strategy.new_ratio);
+        assert_eq!(a.strategy.interval_scale, b.strategy.interval_scale);
+        assert_eq!(a.strategy.review_mode, b.strategy.review_mode);
+        assert_eq!(a.reward, b.reward);
+        assert_eq!(a.timestamp, b.timestamp);
+    }
+
+    /// 写放大重构：swd 历史行表 append → load 保持插入顺序（bit-exact），load max 截取最近 N 条，
+    /// 单条路径回滚按 appended_seq 删该行。
+    #[test]
+    fn swd_history_append_load_order_max_and_rollback() {
+        use super::EngineStateRestore;
+        let _t = tempfile::tempdir().unwrap();
+        let store = Store::open(_t.path().join("t.db").to_str().unwrap(), 5000, 2).unwrap();
+        store.run_migrations().unwrap();
+
+        let e0 = swd_entry(0.10, 0);
+        let e1 = swd_entry(0.20, 1);
+        let e2 = swd_entry(0.30, 2);
+        let mut seqs = Vec::new();
+        for e in [&e0, &e1, &e2] {
+            let outcome = store
+                .persist_engine_state_atomic("u1", &serde_json::json!({}), &[], Some(e), None, None)
+                .unwrap();
+            assert!(outcome.committed);
+            seqs.push(outcome.swd_appended_seq.expect("append seq"));
+        }
+        // seq 单调递增（FIFO）。
+        assert!(seqs[0] < seqs[1] && seqs[1] < seqs[2]);
+
+        // 全量 load：插入序 e0,e1,e2。
+        let all = store.load_swd_history("u1", 10).unwrap();
+        assert_eq!(all.len(), 3);
+        assert_entry_eq(&all[0], &e0);
+        assert_entry_eq(&all[1], &e1);
+        assert_entry_eq(&all[2], &e2);
+
+        // max=2：取最近 2 条，仍按插入序 e1,e2。
+        let recent = store.load_swd_history("u1", 2).unwrap();
+        assert_eq!(recent.len(), 2);
+        assert_entry_eq(&recent[0], &e1);
+        assert_entry_eq(&recent[1], &e2);
+
+        // 单条路径回滚：删最后 append 的那行（seqs[2]）→ 剩 e0,e1。
+        let none_val: Option<serde_json::Value> = None;
+        store
+            .restore_engine_state_atomic(&EngineStateRestore {
+                user_id: "u1",
+                user_state: None,
+                algo_states: &[],
+                user_elo: None,
+                word_elo: None,
+                word_elo_contrib: None,
+                swd_delete_seq: Some(seqs[2]),
+                clear_marker_record_id: None,
+            })
+            .unwrap();
+        let after = store.load_swd_history("u1", 10).unwrap();
+        assert_eq!(after.len(), 2);
+        assert_entry_eq(&after[1], &e1);
+
+        // batch 级回滚：删 seq > seqs[0] → 仅剩 e0。
+        store.delete_swd_history_after("u1", seqs[0]).unwrap();
+        let batch_after = store.load_swd_history("u1", 10).unwrap();
+        assert_eq!(batch_after.len(), 1);
+        assert_entry_eq(&batch_after[0], &e0);
+        assert_eq!(store.swd_max_seq("u1").unwrap(), seqs[0]);
+
+        // reset 清空 swd 历史。
+        store
+            .reset_engine_state_atomic("u1", &serde_json::json!({}))
+            .unwrap();
+        assert!(store.load_swd_history("u1", 10).unwrap().is_empty());
+        assert_eq!(store.swd_max_seq("u1").unwrap(), 0);
     }
 }

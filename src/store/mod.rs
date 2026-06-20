@@ -77,6 +77,7 @@ impl Store {
                  PRAGMA synchronous = NORMAL;
                  PRAGMA foreign_keys = ON;
                  PRAGMA busy_timeout = {};
+                 PRAGMA wal_autocheckpoint = 2000;
                  PRAGMA cache_size = -16000;
                  PRAGMA mmap_size = 134217728;
                  PRAGMA temp_store = MEMORY;",
@@ -118,6 +119,16 @@ impl Store {
     pub fn flush(&self) -> Result<(), StoreError> {
         let conn = self.conn()?;
         conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE);")?;
+        Ok(())
+    }
+
+    /// 主动把 WAL 帧落回主库并**截断** WAL 文件，回收磁盘并避免臃肿 WAL 放大每次 commit 的
+    /// 页查找成本。由周期 worker（wal_checkpoint，见 workers/mod.rs）在低峰调用——默认
+    /// `wal_autocheckpoint` 的 PASSIVE 内联 checkpoint 不缩文件、且高写时与写锁争用，故另设
+    /// TRUNCATE 周期回收。TRUNCATE 与并发写短暂竞争属预期；busy 时本调用返回错误，调用方仅 warn。
+    pub fn checkpoint_truncate(&self) -> Result<(), StoreError> {
+        let conn = self.conn()?;
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
         Ok(())
     }
 

@@ -111,7 +111,9 @@ pub(crate) struct CreateRecordResponse {
 struct EngineStateSnapshot {
     user_state: Option<serde_json::Value>,
     ige: Option<serde_json::Value>,
-    swd: Option<serde_json::Value>,
+    /// 写放大重构：swd 历史已落追加式行表，回滚不再覆写整块 blob，而是删除本事件 append 的那一行。
+    /// 捕获时未知（None）；process_event 返回后填入 appended_seq；tx2 失败回滚时删该 seq。
+    swd_appended_seq: Option<i64>,
     trust: Option<serde_json::Value>,
     /// ③ 多痕迹（Phase 2）：快照 mastery 键的 (key, 前态) 列表。单痕迹时仅 `mastery:{word}`；
     /// question_mode 已知时额外含 `mastery:{word}:{mode}`，覆盖引擎按 arm flag 可能写入的两种键，
@@ -127,7 +129,9 @@ struct EngineStateSnapshot {
 pub(crate) struct UserStateSnapshot {
     pub(crate) user_state: Option<serde_json::Value>,
     pub(crate) ige: Option<serde_json::Value>,
-    pub(crate) swd: Option<serde_json::Value>,
+    /// 写放大重构：批量首条前的 swd 历史最大 seq。全批失败回滚时删 `seq > swd_max_seq` 的行，
+    /// 等价于把 swd 还原到批前快照（旧实现是覆写整块 swd blob）。
+    pub(crate) swd_max_seq: i64,
     pub(crate) trust: Option<serde_json::Value>,
     pub(crate) user_elo: crate::amas::elo::EloRating,
 }
@@ -139,7 +143,7 @@ pub(crate) fn capture_user_state_snapshot(
     Ok(UserStateSnapshot {
         user_state: store.get_engine_user_state(user_id)?,
         ige: store.get_engine_algo_state(user_id, "ige")?,
-        swd: store.get_engine_algo_state(user_id, "swd")?,
+        swd_max_seq: store.swd_max_seq(user_id)?,
         trust: store.get_engine_algo_state(user_id, "trust")?,
         user_elo: store.get_user_elo(user_id)?,
     })
@@ -169,7 +173,8 @@ fn capture_engine_state_snapshot(
     Ok(EngineStateSnapshot {
         user_state: store.get_engine_user_state(user_id)?,
         ige: store.get_engine_algo_state(user_id, "ige")?,
-        swd: store.get_engine_algo_state(user_id, "swd")?,
+        // swd 不再在此读整块 blob（写放大重构省一次大读）；回滚句柄在 process_event 后填入。
+        swd_appended_seq: None,
         trust: store.get_engine_algo_state(user_id, "trust")?,
         mastery_states,
         user_elo: store.get_user_elo(user_id)?,
@@ -189,10 +194,10 @@ fn restore_engine_state_snapshot(
     snapshot: &EngineStateSnapshot,
     clear_marker: Option<&str>,
 ) {
-    // ③ 多痕迹：固定算法态 + 1~2 个 mastery 键（legacy + 可选 per-mode）一并原子还原。
+    // ③ 多痕迹：固定算法态(ige/trust) + 1~2 个 mastery 键（legacy + 可选 per-mode）一并原子还原。
+    // swd 不再走 algo_states blob，改由 swd_delete_seq 删本事件 append 的那一行（同 tx）。
     let mut algo_states: Vec<(&str, &Option<serde_json::Value>)> = vec![
         ("ige", &snapshot.ige),
-        ("swd", &snapshot.swd),
         ("trust", &snapshot.trust),
     ];
     for (key, prev) in &snapshot.mastery_states {
@@ -205,6 +210,7 @@ fn restore_engine_state_snapshot(
         user_elo: Some(&snapshot.user_elo),
         word_elo: Some((word_id, &snapshot.word_elo)),
         word_elo_contrib: Some((word_id, snapshot.word_elo_contrib)),
+        swd_delete_seq: snapshot.swd_appended_seq,
         clear_marker_record_id: clear_marker,
     };
     if let Err(error) = store.restore_engine_state_atomic(&restore) {
@@ -231,8 +237,11 @@ pub(crate) fn restore_user_state_snapshot(
     }
 
     restore_engine_algo_state(store, user_id, "ige", &snapshot.ige);
-    restore_engine_algo_state(store, user_id, "swd", &snapshot.swd);
     restore_engine_algo_state(store, user_id, "trust", &snapshot.trust);
+    // 写放大重构：删批内 append 的所有 swd 历史行（seq > 批前 max），等价还原 swd 到批前快照。
+    if let Err(error) = store.delete_swd_history_after(user_id, snapshot.swd_max_seq) {
+        tracing::warn!(user_id, error = %error, "Failed to rollback swd history");
+    }
 
     if let Err(error) = store.set_user_elo(user_id, &snapshot.user_elo) {
         tracing::warn!(user_id, error = %error, "Failed to rollback user ELO");
@@ -341,7 +350,7 @@ pub(crate) async fn process_single_record(
         });
     }
 
-    let engine_snapshot = state
+    let mut engine_snapshot = state
         .run_store_task("records.single.snapshot", {
             let user_id = user_id_owned.clone();
             let word_id = word_id.clone();
@@ -388,7 +397,7 @@ pub(crate) async fn process_single_record(
     trace.mark("amas");
     // W1-1 并发收口：None 表示并发同 client_record_id 请求抢先写入幂等标记、本次 AMAS 已整笔回滚，
     // 走与 already_processed 一致的裸记录回放（不重复累加 ELO/mastery/trust）。
-    let Some(amas_result) = amas_result else {
+    let Some((amas_result, swd_appended_seq)) = amas_result else {
         let record_for_replay = record.clone();
         state
             .run_store_task("records.single.persist_replayed", move |store| {
@@ -403,6 +412,8 @@ pub(crate) async fn process_single_record(
             duplicate: true,
         });
     };
+    // 回填 swd 回滚句柄：tx2 失败时按此 seq 删本事件 append 的那一行 swd 历史。
+    engine_snapshot.swd_appended_seq = swd_appended_seq;
     let amas_result_for_store = amas_result.clone();
 
     let t_sql = std::time::Instant::now();

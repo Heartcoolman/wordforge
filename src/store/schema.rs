@@ -470,6 +470,25 @@ CREATE TABLE IF NOT EXISTS engine_algo_states (
     PRIMARY KEY (user_id, algo_id)
 );
 
+-- 写放大重构：swd 滚动策略历史从 engine_algo_states 单块 blob（每事件全量重写）迁出为追加式行表。
+-- 热路径每事件仅 INSERT 一行（无 prune）；读时取最近 max 条（见 load_swd_history）。seq 自增单调=FIFO。
+CREATE TABLE IF NOT EXISTS engine_swd_history (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    snap_attention REAL NOT NULL,
+    snap_fatigue REAL NOT NULL,
+    snap_motivation REAL NOT NULL,
+    snap_total_events INTEGER NOT NULL,
+    strat_difficulty REAL NOT NULL,
+    strat_batch_size INTEGER NOT NULL,
+    strat_new_ratio REAL NOT NULL,
+    strat_interval_scale REAL NOT NULL,
+    strat_review_mode INTEGER NOT NULL CHECK (strat_review_mode IN (0,1)),
+    reward REAL NOT NULL,
+    ts_ms INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_engine_swd_history_user_seq ON engine_swd_history(user_id, seq);
+
 CREATE TABLE IF NOT EXISTS engine_monitoring_events (
     id TEXT NOT NULL,
     user_id TEXT NOT NULL,

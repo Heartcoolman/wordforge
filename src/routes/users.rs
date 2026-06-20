@@ -171,8 +171,8 @@ async fn get_stats(
                 let accuracy_rate = agg.correct_records as f64 / agg.total_records as f64;
                 let records = store.get_user_records(&user_id, max_records_fetch)?;
                 return Ok(UserStats {
-                    total_words_learned: agg.word_ids.len() as u64,
-                    total_sessions: agg.session_ids.len() as u64,
+                    total_words_learned: store.count_distinct_words(&user_id)?,
+                    total_sessions: store.count_distinct_sessions(&user_id)?,
                     total_records: agg.total_records,
                     streak_days: compute_streak_days(&records),
                     accuracy_rate,
