@@ -92,6 +92,16 @@ function parseReleaseNotes(md: string): { intro: string; sections: ReleaseNoteSe
   return { intro, sections: sections.filter((s) => s.items.length > 0) };
 }
 
+// 条目「短标题：详情」结构 → 标题加粗，提升升级页可扫读性（一条一条更分明）。
+// 仅当冒号前为短标题（≤14 字、内部无句中标点）时才拆，避免把正文里的冒号误判为标题分隔。
+function splitItemLead(it: string): { lead: string | null; rest: string } {
+  const idx = it.indexOf('：');
+  if (idx > 0 && idx <= 14 && !/[，。、；,.;]/.test(it.slice(0, idx))) {
+    return { lead: it.slice(0, idx + 1), rest: it.slice(idx + 1).trim() };
+  }
+  return { lead: null, rest: it };
+}
+
 // 升级 / 回滚触发后端 fork-exec 自重启：轮询 /api/status 探活，服务回来再整页重载，
 // 避免在重启窗口内硬重载撞 502（旧裸 setTimeout 重载的问题）。超时兜底仍重载。
 function reloadWhenBack(maxWaitMs = 60_000) {
@@ -672,12 +682,20 @@ export default function UpdatesPage() {
                       <For each={releaseNotesSections().sections}>
                         {(g) => (
                           <div>
-                            <div style={sx({ fontSize: 12, fontWeight: 700, color: g.color, marginBottom: 6 })}>{g.label}</div>
-                            <ul style={sx({ margin: 0, paddingLeft: 18 })}>
+                            <div style={sx({ fontSize: 12, fontWeight: 700, color: g.color, marginBottom: 8 })}>{g.label}</div>
+                            <ul style={sx({ margin: 0, padding: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 7 })}>
                               <For each={g.items}>
-                                {(it) => (
-                                  <li style={sx({ fontSize: 12.5, marginBottom: 4, color: 'var(--text-2)' })}>{it}</li>
-                                )}
+                                {(it) => {
+                                  const { lead, rest } = splitItemLead(it);
+                                  return (
+                                    <li style={sx({ display: 'flex', gap: 8, fontSize: 12.5, lineHeight: 1.6, color: 'var(--text-2)' })}>
+                                      <span style={sx({ flex: 'none', width: 5, height: 5, borderRadius: '50%', marginTop: 7, background: g.color, opacity: 0.75 })} />
+                                      <span style={sx({ flex: 1, minWidth: 0 })}>
+                                        <Show when={lead}><strong style={sx({ color: 'var(--text)', fontWeight: 600 })}>{lead}</strong></Show>{rest}
+                                      </span>
+                                    </li>
+                                  );
+                                }}
                               </For>
                             </ul>
                           </div>
@@ -705,17 +723,20 @@ export default function UpdatesPage() {
                 <For each={changelogGroups()}>
                   {(g) => (
                     <div>
-                      <div style={sx({ fontSize: 12, fontWeight: 700, color: g.color, marginBottom: 6 })}>
+                      <div style={sx({ fontSize: 12, fontWeight: 700, color: g.color, marginBottom: 8 })}>
                         {g.label}（{g.items.length}）
                       </div>
-                      <ul style={sx({ margin: 0, paddingLeft: 18 })}>
+                      <ul style={sx({ margin: 0, padding: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 7 })}>
                         <For each={g.items}>
                           {(c) => (
-                            <li style={sx({ fontSize: 12.5, marginBottom: 4, color: 'var(--text-2)' })}>
-                              <Show when={c.scope}>
-                                <span class="mono" style={sx({ color: 'var(--text-3)', marginRight: 4 })}>{c.scope}:</span>
-                              </Show>
-                              {c.subject} <code class="mono" style={sx({ fontSize: 10.5, color: 'var(--text-3)' })}>{c.sha.slice(0, 7)}</code>
+                            <li style={sx({ display: 'flex', gap: 8, fontSize: 12.5, lineHeight: 1.6, color: 'var(--text-2)' })}>
+                              <span style={sx({ flex: 'none', width: 5, height: 5, borderRadius: '50%', marginTop: 7, background: g.color, opacity: 0.75 })} />
+                              <span style={sx({ flex: 1, minWidth: 0 })}>
+                                <Show when={c.scope}>
+                                  <span class="mono" style={sx({ color: 'var(--text-3)', marginRight: 4 })}>{c.scope}:</span>
+                                </Show>
+                                {c.subject} <code class="mono" style={sx({ fontSize: 10.5, color: 'var(--text-3)' })}>{c.sha.slice(0, 7)}</code>
+                              </span>
                             </li>
                           )}
                         </For>
@@ -871,7 +892,7 @@ export default function UpdatesPage() {
         body={
           <div>
             <p style={sx({ marginTop: 0 })}>目标 {targetVersion() ?? '—'}（{channel()} 通道）将执行：</p>
-            <ul style={sx({ paddingLeft: 18, fontSize: 13, lineHeight: 1.8, margin: 0 })}>
+            <ul style={sx({ paddingLeft: 18, fontSize: 13, lineHeight: 1.8, margin: 0, listStyle: 'disc' })}>
               <li>VACUUM INTO 备份当前 SQLite</li>
               <li>下载 tarball（{chStatus() ? fmtBytes(chStatus()!.tarballSize) : '—'}）并校验 sha256</li>
               <li>原子替换二进制与 static 目录</li>
