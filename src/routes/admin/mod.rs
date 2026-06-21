@@ -1645,19 +1645,14 @@ async fn admin_user_device_ban(
                 }
                 None => return Err(AppError::not_found("设备不存在")),
             }
-            let ok = store.ban_client_device(
+            // 封禁 + m054 关联打标在单事务内原子完成,避免打标失败时封禁已落库却返回 500。
+            let (ok, flagged) = store.ban_device_with_flagging(
                 &device_id_for_task,
                 &admin_id_for_audit,
                 Some("admin user-detail panel"),
             )?;
             // 兜底:撤销该 user 所有 session(不区分 device,目前 sessions 表无 device 列)
             store.delete_user_sessions(&user_id_for_task).ok();
-            // m054(B 层):封禁后给共享出口 IP / 同账号的关联设备打风控标记(仅标记不硬封)。
-            let flagged = if ok {
-                store.flag_related_devices(&device_id_for_task)?
-            } else {
-                Vec::new()
-            };
             Ok((ok, flagged))
         },
     )

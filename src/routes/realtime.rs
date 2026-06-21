@@ -238,9 +238,16 @@ pub async fn sse_handler(
             yield Ok(Event::default().event("maintenance").data(json));
         }
 
+        // 设备在连接存活期间被封时置 true,解封置回 false。封禁期间停发业务状态推送
+        // (amas_state / maintenance / update_available 及定向探针等),仅保留 banned/unbanned,
+        // 避免被封设备(尤其逆向客户端忽略 banned 事件者)继续经此长连接窃取实时状态。
+        // 注:连接建立时已被封的设备会被 device_middleware 403 拦在建连前,故初始恒为 false。
+        let mut banned = false;
+
         loop {
             tokio::select! {
                 _ = interval.tick() => {
+                    if banned { continue; }
                     let polled = match state.get_sse_user_state_cached(&user_id, SSE_STATE_TTL) {
                         Some(s) => Some(s),
                         None => match state.amas().get_user_state_async(&user_id).await {
@@ -270,6 +277,7 @@ pub async fn sse_handler(
                     }
                 }
                 result = maintenance_rx.recv() => {
+                    if banned { continue; }
                     if let Ok(active) = result {
                         let data = serde_json::json!({ "type": "maintenance", "active": active });
                         if let Ok(json) = serde_json::to_string(&data) {
@@ -278,6 +286,7 @@ pub async fn sse_handler(
                     }
                 }
                 result = update_rx.recv() => {
+                    if banned { continue; }
                     if let Ok(payload) = result {
                         if let Ok(json) = serde_json::to_string(&payload) {
                             yield Ok(Event::default().event("update_available").data(json));
@@ -287,25 +296,40 @@ pub async fn sse_handler(
                 msg = per_conn_rx.recv() => {
                     match msg {
                         Some(event) => {
-                            if let Ok(json) = serde_json::to_string(&event) {
-                                let event_name = match &event {
-                                    crate::state::SseEvent::Maintenance { .. } => "maintenance",
-                                    crate::state::SseEvent::TelemetryRequest { .. } => "telemetry_request",
-                                    crate::state::SseEvent::Banned => "banned",
-                                    crate::state::SseEvent::Unbanned => "unbanned",
-                                    crate::state::SseEvent::DataCorrupted => "data_corrupted",
-                                    crate::state::SseEvent::NewLlmSuggestion { .. } => "new_llm_suggestion",
-                                    crate::state::SseEvent::ReleaseAvailable { .. } => "release_available",
-                                    crate::state::SseEvent::UpdateProgress { .. } => "update_progress",
-                                    crate::state::SseEvent::ProbeRequest { .. } => "probe_request",
-                                    crate::state::SseEvent::ProbeConfirm { .. } => "probe_confirm",
-                                    crate::state::SseEvent::Incident { .. } => "incident",
-                                    crate::state::SseEvent::WorkerMissed { .. } => "worker_missed",
-                                    crate::state::SseEvent::LlmBudgetExceeded { .. } => "llm_budget_exceeded",
-                                    crate::state::SseEvent::ResourcePackAvailable { .. } => "resource_pack_available",
-                                    crate::state::SseEvent::UpgradeRequired { .. } => "upgrade_required",
-                                };
-                                yield Ok(Event::default().event(event_name).data(json));
+                            // 封禁状态机:Banned 置位、Unbanned 复位;二者本身恒下发。
+                            match &event {
+                                crate::state::SseEvent::Banned => banned = true,
+                                crate::state::SseEvent::Unbanned => banned = false,
+                                _ => {}
+                            }
+                            // 封禁期间抑制除 banned/unbanned 外的一切定向事件,防状态泄漏。
+                            let suppressed = banned
+                                && !matches!(
+                                    &event,
+                                    crate::state::SseEvent::Banned
+                                        | crate::state::SseEvent::Unbanned
+                                );
+                            if !suppressed {
+                                if let Ok(json) = serde_json::to_string(&event) {
+                                    let event_name = match &event {
+                                        crate::state::SseEvent::Maintenance { .. } => "maintenance",
+                                        crate::state::SseEvent::TelemetryRequest { .. } => "telemetry_request",
+                                        crate::state::SseEvent::Banned => "banned",
+                                        crate::state::SseEvent::Unbanned => "unbanned",
+                                        crate::state::SseEvent::DataCorrupted => "data_corrupted",
+                                        crate::state::SseEvent::NewLlmSuggestion { .. } => "new_llm_suggestion",
+                                        crate::state::SseEvent::ReleaseAvailable { .. } => "release_available",
+                                        crate::state::SseEvent::UpdateProgress { .. } => "update_progress",
+                                        crate::state::SseEvent::ProbeRequest { .. } => "probe_request",
+                                        crate::state::SseEvent::ProbeConfirm { .. } => "probe_confirm",
+                                        crate::state::SseEvent::Incident { .. } => "incident",
+                                        crate::state::SseEvent::WorkerMissed { .. } => "worker_missed",
+                                        crate::state::SseEvent::LlmBudgetExceeded { .. } => "llm_budget_exceeded",
+                                        crate::state::SseEvent::ResourcePackAvailable { .. } => "resource_pack_available",
+                                        crate::state::SseEvent::UpgradeRequired { .. } => "upgrade_required",
+                                    };
+                                    yield Ok(Event::default().event(event_name).data(json));
+                                }
                             }
                         }
                         None => break,

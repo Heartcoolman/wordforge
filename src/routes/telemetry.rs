@@ -410,6 +410,34 @@ async fn submit_telemetry(
         })
         .await??;
 
+    // m055 修复:遥测端点同样落库浏览器指纹(中间件对本端点整体跳过 upsert,含指纹写)。
+    // 否则只走遥测心跳的 web 设备 fp_strong/fp_coarse 恒为 NULL,使"换 device_id 仍被封"的强指纹
+    // 封禁与模糊关联打标对其失效。须在上面 upsert(设备行已存在)之后写。校验口径同 device 中间件。
+    let fp_strong = headers
+        .get("x-device-fingerprint")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty() && s.len() <= 128)
+        .map(String::from);
+    let fp_coarse = headers
+        .get("x-device-fingerprint-coarse")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty() && s.len() <= 128)
+        .map(String::from);
+    if fp_strong.is_some() || fp_coarse.is_some() {
+        let did = device_id.to_string();
+        let _ = state
+            .run_store_task("telemetry.update_fingerprint", move |store| {
+                store.update_device_fingerprint(&did, fp_strong.as_deref(), fp_coarse.as_deref())?;
+                if let Some(ref coarse) = fp_coarse {
+                    store.flag_device_if_coarse_banned(&did, coarse)?;
+                }
+                Ok::<(), crate::store::StoreError>(())
+            })
+            .await;
+    }
+
     // P2 数值校验:对客户端明确拒绝负数(422),覆盖 extract_summary 写库的全部 i64/f64
     // 数值字段(顶层 + device/behavior 子对象)。非对象 payload 在此跳过(无字段可取),
     // 由 extract_summary 内的 clamp 兜底——脏数据(负值/超界)绝不进 summary 表。

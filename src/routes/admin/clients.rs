@@ -305,6 +305,7 @@ async fn ban_client(
     let device_id_for_store = id.clone();
     let admin_id = admin.admin_id.clone();
 
+    let reason_for_audit = reason.clone();
     let flagged = state
         .run_store_task(
             "admin.clients.ban",
@@ -312,9 +313,25 @@ async fn ban_client(
                 if !store.client_device_exists(&device_id_for_store)? {
                     return Err(AppError::not_found("设备不存在"));
                 }
-                store.ban_client_device(&device_id_for_store, &admin_id, reason.as_deref())?;
-                // m054(B 层):封禁后给共享出口 IP / 同账号的关联设备打风控标记,仅标记不硬封。
-                Ok(store.flag_related_devices(&device_id_for_store)?)
+                // 封禁 + m054 关联打标在单事务内原子完成:全成功或全回滚,
+                // 避免关联打标失败时封禁已落库却返回 500 的状态不一致。
+                let (_, flagged) = store.ban_device_with_flagging(
+                    &device_id_for_store,
+                    &admin_id,
+                    reason.as_deref(),
+                )?;
+                // 审计为尽力而为(失败仅告警,不回滚封禁):与用户封禁审计口径一致。
+                let _ = store.insert_admin_audit(
+                    &admin_id,
+                    "client.device.ban",
+                    Some("device"),
+                    Some(&device_id_for_store),
+                    Some(&serde_json::json!({
+                        "reason": reason_for_audit,
+                        "flaggedRelated": flagged.len(),
+                    })),
+                );
+                Ok(flagged)
             },
         )
         .await??;
@@ -341,6 +358,7 @@ async fn unban_client(
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     let device_id_for_store = id.clone();
+    let admin_id = admin.admin_id.clone();
     let cleared = state
         .run_store_task(
             "admin.clients.unban",
@@ -348,9 +366,17 @@ async fn unban_client(
                 if !store.client_device_exists(&device_id_for_store)? {
                     return Err(AppError::not_found("设备不存在"));
                 }
-                store.unban_client_device(&device_id_for_store)?;
-                // m054:误封纠正后清除由该设备触发的全部关联标记,不留悬挂标记。
-                Ok(store.clear_risk_flags_related_to(&device_id_for_store)?)
+                // 解封 + 重算关联标记在单事务内原子完成。重算(而非盲清)避免多源牵连时错清/漏清。
+                let (_, cleared) =
+                    store.unban_device_with_flag_recompute(&device_id_for_store)?;
+                let _ = store.insert_admin_audit(
+                    &admin_id,
+                    "client.device.unban",
+                    Some("device"),
+                    Some(&device_id_for_store),
+                    Some(&serde_json::json!({ "clearedRelated": cleared })),
+                );
+                Ok(cleared)
             },
         )
         .await??;
@@ -420,11 +446,20 @@ async fn clear_client_flag(
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     let device_id = id.clone();
+    let admin_id = admin.admin_id.clone();
     let cleared = state
         .run_store_task(
             "admin.clients.clear_flag",
             move |store| -> Result<bool, AppError> {
-                Ok(store.clear_device_risk_flag(&device_id)?)
+                let cleared = store.clear_device_risk_flag(&device_id)?;
+                let _ = store.insert_admin_audit(
+                    &admin_id,
+                    "client.device.clear_flag",
+                    Some("device"),
+                    Some(&device_id),
+                    Some(&serde_json::json!({ "cleared": cleared })),
+                );
+                Ok(cleared)
             },
         )
         .await??;
@@ -725,49 +760,31 @@ async fn broadcast_upgrade_handler(
         ));
     }
 
-    // 找全平台 + version < below 的设备 id list。分页循环拉全量,避免大舰队
-    // (>单页上限)被静默截断漏推。广播是低频 admin 操作,全量扫描可接受。
+    // 取该平台全部设备的 (device_id, app_version) 一致快照(单次查询),按 version < below
+    // 在 Rust 内过滤。替代此前的 OFFSET 分页循环——后者按易变 last_seen_at 排序,扫描期间
+    // 设备活跃刷新会使 OFFSET 窗口错位导致漏推/重复推。广播是低频 admin 操作,全量可接受。
     let platform_owned = platform.to_string();
     let below_for_db = below.clone();
-    const PAGE: i64 = 5_000;
     let targets: Vec<String> = state
         .run_store_task(
             "admin.clients.broadcast_upgrade.list",
             move |store| -> Result<_, AppError> {
-                let mut out: Vec<String> = Vec::new();
-                let mut offset: i64 = 0;
-                loop {
-                    let (rows, total) = store.list_client_devices_paginated(
-                        None,
-                        Some(&platform_owned),
-                        None,
-                        PAGE,
-                        offset,
-                    )?;
-                    let fetched = rows.len() as i64;
-                    out.extend(
-                        rows.into_iter()
-                            .filter(|d| {
-                                d.app_version
-                                    .as_deref()
-                                    .map(|v| {
-                                        let a = v.trim_start_matches('v');
-                                        let t = below_for_db.trim_start_matches('v');
-                                        match (semver::Version::parse(a), semver::Version::parse(t))
-                                        {
-                                            (Ok(av), Ok(tv)) => av < tv,
-                                            _ => false,
-                                        }
-                                    })
-                                    .unwrap_or(false)
-                            })
-                            .map(|d| d.device_id),
-                    );
-                    offset += fetched;
-                    if fetched == 0 || offset >= total {
-                        break;
-                    }
-                }
+                let rows = store.list_device_versions_for_platform(&platform_owned)?;
+                let t = below_for_db.trim_start_matches('v');
+                let target_ver = semver::Version::parse(t).ok();
+                let out: Vec<String> = rows
+                    .into_iter()
+                    .filter(|(_, app_version)| {
+                        match (app_version.as_deref(), target_ver.as_ref()) {
+                            (Some(v), Some(tv)) => {
+                                let a = v.trim_start_matches('v');
+                                semver::Version::parse(a).map(|av| av < *tv).unwrap_or(false)
+                            }
+                            _ => false,
+                        }
+                    })
+                    .map(|(device_id, _)| device_id)
+                    .collect();
                 Ok(out)
             },
         )

@@ -271,6 +271,16 @@ impl Store {
         reason: Option<&str>,
     ) -> Result<bool, StoreError> {
         let conn = self.conn()?;
+        Self::ban_device_on_conn(&conn, device_id, banned_by, reason)
+    }
+
+    /// 在给定连接(可为事务)上执行封禁 UPDATE。供单连接事务复用,使"封禁 + 关联打标"原子化。
+    fn ban_device_on_conn(
+        conn: &rusqlite::Connection,
+        device_id: &str,
+        banned_by: &str,
+        reason: Option<&str>,
+    ) -> Result<bool, StoreError> {
         let affected = conn.execute(
             "UPDATE client_devices SET is_banned = 1, banned_at = datetime('now'),
                     banned_by = ?2, ban_reason = ?3
@@ -282,6 +292,14 @@ impl Store {
 
     pub fn unban_client_device(&self, device_id: &str) -> Result<bool, StoreError> {
         let conn = self.conn()?;
+        Self::unban_device_on_conn(&conn, device_id)
+    }
+
+    /// 在给定连接(可为事务)上执行解封 UPDATE。供单连接事务复用。
+    fn unban_device_on_conn(
+        conn: &rusqlite::Connection,
+        device_id: &str,
+    ) -> Result<bool, StoreError> {
         let affected = conn.execute(
             "UPDATE client_devices SET is_banned = 0, banned_at = NULL,
                     banned_by = NULL, ban_reason = NULL
@@ -289,6 +307,37 @@ impl Store {
             params![device_id],
         )?;
         Ok(affected > 0)
+    }
+
+    /// 原子封禁:在单个 `BEGIN IMMEDIATE` 事务内执行"封禁 UPDATE + m054 关联打标",
+    /// 二者全成功或全回滚。修复此前两步各取独立连接、autocommit 互不在一事务,导致
+    /// 关联打标失败时封禁已落库却返回 500 的状态不一致。返回 (是否实际封禁, 被关联打标的设备列表)。
+    pub fn ban_device_with_flagging(
+        &self,
+        device_id: &str,
+        banned_by: &str,
+        reason: Option<&str>,
+    ) -> Result<(bool, Vec<String>), StoreError> {
+        self.with_transaction(|conn| {
+            let banned = Self::ban_device_on_conn(conn, device_id, banned_by, reason)?;
+            let flagged = Self::flag_related_on_conn(conn, device_id)?;
+            Ok((banned, flagged))
+        })
+    }
+
+    /// 原子解封:在单个事务内执行"解封 UPDATE + 重算由该设备触发的关联标记"。
+    /// 重算(而非盲清)修复"多个被封设备共同牵连同一设备时,解封其一会错清/漏清"的缺陷:
+    /// 仅当被牵连设备不再与任何**其它仍被封**设备共享信号时才清标,否则改指向仍有效的源。
+    /// 返回 (是否实际解封, 被清除标记的设备数)。
+    pub fn unban_device_with_flag_recompute(
+        &self,
+        device_id: &str,
+    ) -> Result<(bool, usize), StoreError> {
+        self.with_transaction(|conn| {
+            let unbanned = Self::unban_device_on_conn(conn, device_id)?;
+            let cleared = Self::recompute_flags_for_source(conn, device_id)?;
+            Ok((unbanned, cleared))
+        })
     }
 
     /// m054(B 层封禁绕过缓解):某设备被封后,自动给"共享出口 IP / 同账号"的其它设备
@@ -303,6 +352,15 @@ impl Store {
         banned_device_id: &str,
     ) -> Result<Vec<String>, StoreError> {
         let conn = self.conn()?;
+        Self::flag_related_on_conn(&conn, banned_device_id)
+    }
+
+    /// 在给定连接(可为事务)上执行关联打标。供 [`ban_device_with_flagging`] 在单事务内复用,
+    /// 使 SELECT 候选 + 逐条 UPDATE 整批落在一次写锁内(消除部分提交 + 降低 SQLITE_BUSY)。
+    fn flag_related_on_conn(
+        conn: &rusqlite::Connection,
+        banned_device_id: &str,
+    ) -> Result<Vec<String>, StoreError> {
         let signals: Option<(Option<String>, Option<String>, Option<String>)> = conn
             .query_row(
                 "SELECT last_ip, user_id, fp_coarse FROM client_devices WHERE device_id = ?1",
@@ -409,6 +467,115 @@ impl Store {
             params![source_device_id],
         )?;
         Ok(affected)
+    }
+
+    /// m054 修复:解封某源设备后,重算"由它触发的关联标记"应保留还是清除。
+    /// 对每个仍指向该源的被标记设备 X:若 X 仍与**任一其它仍被封**设备共享信号(IP/账号/模糊指纹),
+    /// 则改指向那个仍有效的源(刷新原因/时间),保持标记;否则清除标记。返回被清除的设备数。
+    /// 调用前须已将 source 自身置为 is_banned=0(故下方 `is_banned=1` 过滤天然排除 source)。
+    fn recompute_flags_for_source(
+        conn: &rusqlite::Connection,
+        source_device_id: &str,
+    ) -> Result<usize, StoreError> {
+        let mut stmt = conn.prepare(
+            "SELECT device_id, last_ip, user_id, fp_coarse
+             FROM client_devices
+             WHERE risk_related_device = ?1 AND risk_flag = 1",
+        )?;
+        let affected: Vec<(String, Option<String>, Option<String>, Option<String>)> = stmt
+            .query_map(params![source_device_id], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(stmt);
+
+        let mut cleared = 0usize;
+        for (x_id, ip, uid, coarse) in affected {
+            let ip = ip.filter(|s| !s.is_empty());
+            let uid = uid.filter(|s| !s.is_empty());
+            let coarse = coarse.filter(|s| !s.is_empty());
+            // 找另一台仍被封、且与 X 共享任一信号的设备(排除 X 自身;source 已 is_banned=0 自然排除)。
+            let other: Option<(String, bool, bool, bool)> = conn
+                .query_row(
+                    "SELECT device_id,
+                            (last_ip IS NOT NULL AND last_ip = ?2) AS ip_match,
+                            (user_id IS NOT NULL AND user_id = ?3) AS user_match,
+                            (fp_coarse IS NOT NULL AND fp_coarse = ?4) AS fp_match
+                     FROM client_devices
+                     WHERE is_banned = 1 AND device_id != ?1
+                       AND ((last_ip IS NOT NULL AND last_ip = ?2)
+                         OR (user_id IS NOT NULL AND user_id = ?3)
+                         OR (fp_coarse IS NOT NULL AND fp_coarse = ?4))
+                     LIMIT 1",
+                    params![x_id, ip, uid, coarse],
+                    |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, i64>(1)? != 0,
+                            r.get::<_, i64>(2)? != 0,
+                            r.get::<_, i64>(3)? != 0,
+                        ))
+                    },
+                )
+                .optional()?;
+            match other {
+                Some((new_src, ip_match, user_match, fp_match)) => {
+                    let mut parts: Vec<&str> = Vec::new();
+                    if ip_match {
+                        parts.push("共享出口 IP");
+                    }
+                    if user_match {
+                        parts.push("同一账号");
+                    }
+                    if fp_match {
+                        parts.push("相同设备指纹(模糊)");
+                    }
+                    let reason = format!("关联自被封设备 {new_src}:{}", parts.join("、"));
+                    conn.execute(
+                        "UPDATE client_devices
+                            SET risk_reason = ?2, risk_flagged_at = datetime('now'),
+                                risk_related_device = ?3
+                          WHERE device_id = ?1",
+                        params![x_id, reason, new_src],
+                    )?;
+                }
+                None => {
+                    conn.execute(
+                        "UPDATE client_devices
+                            SET risk_flag = 0, risk_reason = NULL,
+                                risk_flagged_at = NULL, risk_related_device = NULL
+                          WHERE device_id = ?1",
+                        params![x_id],
+                    )?;
+                    cleared += 1;
+                }
+            }
+        }
+        Ok(cleared)
+    }
+
+    /// m027 修复:取某平台全部设备的 (device_id, app_version),单次查询一致快照。
+    /// 替代 broadcast_upgrade 的 OFFSET 分页循环——后者按易变的 last_seen_at 排序,
+    /// 扫描期间设备活跃刷新会使 OFFSET 窗口错位,导致漏推/重复推。低频 admin 操作,全量可接受。
+    pub fn list_device_versions_for_platform(
+        &self,
+        platform: &str,
+    ) -> Result<Vec<(String, Option<String>)>, StoreError> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT device_id, app_version FROM client_devices WHERE platform = ?1",
+        )?;
+        let rows = stmt
+            .query_map(params![platform], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     /// m054:列当前被标记关联风险的设备(按打标时间倒序),供 admin 复核面板。
@@ -1237,6 +1404,68 @@ mod tests {
         let cleared = store.clear_risk_flags_related_to("dev-bad").unwrap();
         assert_eq!(cleared, 2);
         assert!(store.list_flagged_devices(10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn ban_device_with_flagging_is_atomic_and_returns_flagged() {
+        let store = test_store();
+        store
+            .upsert_client_device_with_extras("dev-bad", "web", "u-1", None, None, Some("1.2.3.4"), None)
+            .unwrap();
+        store
+            .upsert_client_device_with_extras("dev-rel", "web", "u-2", None, None, Some("1.2.3.4"), None)
+            .unwrap();
+        let (banned, flagged) = store
+            .ban_device_with_flagging("dev-bad", "admin", Some("spam"))
+            .unwrap();
+        assert!(banned);
+        assert_eq!(flagged, vec!["dev-rel".to_string()]);
+        assert!(store.is_device_banned("dev-bad").unwrap());
+        let rel = store.get_client_device("dev-rel").unwrap().unwrap();
+        assert!(rel.risk_flag);
+        assert_eq!(rel.risk_related_device.as_deref(), Some("dev-bad"));
+    }
+
+    #[test]
+    fn unban_recompute_keeps_flag_when_other_banned_source_remains() {
+        // X 同时被 A、B 牵连,但 A、B 彼此无共享信号(A 与 X 共享 IP;B 与 X 共享账号)。
+        // 封 A→X 标记(源 A);封 B→X 改指向 B。解封 B(recompute)→X 仍保持标记(A 仍被封,
+        // 重指向 A);再解封 A→X 清除。锁定多源牵连下解封不错清/不漏清。
+        let store = test_store();
+        // A: IP=1.1.1.1, user=uA
+        store
+            .upsert_client_device_with_extras("dev-a", "web", "uA", None, None, Some("1.1.1.1"), None)
+            .unwrap();
+        // B: IP=2.2.2.2, user=uB(与 A 既不同 IP 也不同账号)
+        store
+            .upsert_client_device_with_extras("dev-b", "web", "uB", None, None, Some("2.2.2.2"), None)
+            .unwrap();
+        // X: IP=1.1.1.1(同 A), user=uB(同 B)
+        store
+            .upsert_client_device_with_extras("dev-x", "web", "uB", None, None, Some("1.1.1.1"), None)
+            .unwrap();
+        store.ban_device_with_flagging("dev-a", "admin", None).unwrap();
+        assert_eq!(
+            store.get_client_device("dev-x").unwrap().unwrap().risk_related_device.as_deref(),
+            Some("dev-a")
+        );
+        store.ban_device_with_flagging("dev-b", "admin", None).unwrap();
+        assert_eq!(
+            store.get_client_device("dev-x").unwrap().unwrap().risk_related_device.as_deref(),
+            Some("dev-b")
+        );
+
+        // 解封 B:X 不应被清(A 仍被封)→重指向 A,标记保留。
+        let (_, cleared_b) = store.unban_device_with_flag_recompute("dev-b").unwrap();
+        assert_eq!(cleared_b, 0);
+        let x = store.get_client_device("dev-x").unwrap().unwrap();
+        assert!(x.risk_flag);
+        assert_eq!(x.risk_related_device.as_deref(), Some("dev-a"));
+
+        // 解封 A:再无被封关联源 → X 清除。
+        let (_, cleared_a) = store.unban_device_with_flag_recompute("dev-a").unwrap();
+        assert_eq!(cleared_a, 1);
+        assert!(!store.get_client_device("dev-x").unwrap().unwrap().risk_flag);
     }
 
     #[test]
