@@ -13,6 +13,7 @@ vi.mock('@/pages/AmasConfigPage', () => ({ default: () => <div>AmasConfig</div> 
 vi.mock('@/pages/AmasMetricsPage', () => ({ default: () => <div>AmasMetrics</div> }));
 vi.mock('@/pages/AmasAdvisorPage', () => ({ default: () => <div>AmasAdvisor</div> }));
 vi.mock('@/pages/MonitoringPage', () => ({ default: () => <div>Monitoring</div> }));
+vi.mock('@/pages/VitalsPage', () => ({ default: () => <div>Vitals</div> }));
 vi.mock('@/pages/AnalyticsPage', () => ({ default: () => <div>Analytics</div> }));
 vi.mock('@/pages/SettingsPage', () => ({ default: () => <div>Settings</div> }));
 vi.mock('@/pages/UpdatesPage', () => ({ default: () => <div>Updates</div> }));
@@ -90,6 +91,7 @@ const ROUTES: Array<[string, string]> = [
   ['/admin/amas-metrics', 'AmasMetrics'],
   ['/admin/amas-advisor', 'AmasAdvisor'],
   ['/admin/monitoring', 'Monitoring'],
+  ['/admin/vitals', 'Vitals'],
   ['/admin/analytics', 'Analytics'],
   ['/admin/settings', 'Settings'],
   ['/admin/updates', 'Updates'],

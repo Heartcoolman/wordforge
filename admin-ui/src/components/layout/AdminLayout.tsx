@@ -33,6 +33,7 @@ const NAV: { group: string; items: NavItem[] }[] = [
     { id: 'wordbooks', label: '词库中心', icon: 'book', href: '/admin/wordbook-center' },
   ] },
   { group: '运维监控', items: [
+    { id: 'vitals', label: '服务体征', icon: 'pulse', href: '/admin/vitals' },
     { id: 'monitoring', label: '系统监控', icon: 'monitor', href: '/admin/monitoring' },
     { id: 'probe', label: '数据探针', icon: 'probe', href: '/admin/probe' },
     { id: 'remote-probe', label: '远程探针', icon: 'remote', href: '/admin/remote-probe' },

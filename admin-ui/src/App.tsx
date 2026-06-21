@@ -29,6 +29,7 @@ const AmasMetricsPage = lazy(() => import('@/pages/AmasMetricsPage'));
 const AmasAdvisorPage = lazy(() => import('@/pages/AmasAdvisorPage'));
 const AmasExperimentsPage = lazy(() => import('@/pages/AmasExperimentsPage'));
 const MonitoringPage = lazy(() => import('@/pages/MonitoringPage'));
+const VitalsPage = lazy(() => import('@/pages/VitalsPage'));
 const AnalyticsPage = lazy(() => import('@/pages/AnalyticsPage'));
 const SettingsPage = lazy(() => import('@/pages/SettingsPage'));
 const UpdatesPage = lazy(() => import('@/pages/UpdatesPage'));
@@ -198,6 +199,7 @@ export default function App() {
             <Route path="/amas-advisor" component={guarded(AmasAdvisorPage)} />
             <Route path="/amas-experiments" component={guarded(AmasExperimentsPage)} />
             <Route path="/monitoring" component={guarded(MonitoringPage)} />
+            <Route path="/vitals" component={guarded(VitalsPage)} />
             <Route path="/analytics" component={guarded(AnalyticsPage)} />
             <Route path="/settings" component={guarded(SettingsPage)} />
             <Route path="/updates" component={guarded(UpdatesPage)} />

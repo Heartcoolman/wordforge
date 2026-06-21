@@ -47,10 +47,10 @@ describe('AdminLayout extra', () => {
   it('renders the new sidebar nav groups and items', async () => {
     const { AdminLayout } = await import('@/components/layout/AdminLayout');
     renderWithProviders(() => <AdminLayout>Content</AdminLayout>);
-    // 新 IA 的 16 个导航项标签
+    // 新 IA 的 17 个导航项标签
     const labels = [
       '仪表盘', '用户管理', '设备与遥测', 'AMAS 指标', 'AMAS 调参', 'LLM 顾问',
-      '数据分析', '词库中心', '系统监控', '数据探针', '远程探针', '消息推送',
+      '数据分析', '词库中心', '服务体征', '系统监控', '数据探针', '远程探针', '消息推送',
       '用户反馈', '版本更新', '资源包', '系统设置',
     ];
     for (const label of labels) {
