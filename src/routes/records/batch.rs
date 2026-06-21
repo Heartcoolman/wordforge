@@ -189,7 +189,13 @@ pub(crate) async fn process_batch_record(
     }
 
     // S6: 只捕获 word 级状态。③ 多痕迹：快照 legacy 键 + 本次 mode 键（不预知 arm flag，两键全捕获）。
-    let (prev_mastery_states, prev_word_elo, prev_user_elo, prev_word_contrib) = state
+    let (
+        prev_mastery_states,
+        prev_word_elo,
+        prev_word_trend_select,
+        prev_user_elo,
+        prev_word_contrib,
+    ) = state
         .run_store_task("records.batch.snapshot", {
             let user_id = user_id_owned.clone();
             let word_id = word_id.clone();
@@ -211,6 +217,7 @@ pub(crate) async fn process_batch_record(
                 Ok::<_, crate::store::StoreError>((
                     mastery_states,
                     store.get_word_elo(&word_id)?,
+                    store.get_word_elo_trend_select(&word_id)?,
                     store.get_user_elo(&user_id)?,
                     store.get_word_elo_user_contrib(&user_id, &word_id)?,
                 ))
@@ -352,6 +359,11 @@ pub(crate) async fn process_batch_record(
                             algo_states: &algo_states,
                             user_elo: Some(&prev_user_elo),
                             word_elo: Some((&word_id, &prev_word_elo)),
+                            word_elo_trend_select: Some((
+                                &word_id,
+                                prev_word_trend_select.0,
+                                prev_word_trend_select.1,
+                            )),
                             word_elo_contrib: Some((&word_id, prev_word_contrib)),
                             // batch per-record 不回滚 swd（批级统一处理）。
                             swd_delete_seq: None,

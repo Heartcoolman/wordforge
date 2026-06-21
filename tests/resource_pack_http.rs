@@ -338,6 +338,19 @@ async fn telemetry_install_log_aggregates_in_admin_stats() {
     )
     .await;
 
+    // report_resource_pack_install 与 submit_telemetry 同口径做设备归属校验：
+    // 未注册设备会被 403 DEVICE_NOT_REGISTERED 拒绝。此处 seed 一台未认领设备
+    // （user_id NULL），命中归属校验的"未认领→放行"分支，模拟真实客户端登录后设备已登记。
+    {
+        let conn = app.state.store().connection().unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO client_devices (device_id, platform, first_seen_at, last_seen_at)
+             VALUES (?1, 'web', datetime('now'), datetime('now'))",
+            rusqlite::params!["dev-test"],
+        )
+        .unwrap();
+    }
+
     // 客户端上报：2 installed + 1 verify_failed
     for outcome in &["installed", "installed", "verify_failed"] {
         let resp = request(

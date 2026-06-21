@@ -24,23 +24,35 @@ pub(crate) fn is_valid_device_id(id: &str) -> bool {
 
 /// m027:从 headers 提取 client IP。同 routes/auth.rs 实现,本仓库目前仅两处用,
 /// 不抽公共模块避免跨 mod 引用扩散。
-fn extract_client_ip(headers: &axum::http::HeaderMap) -> Option<String> {
-    // 优先取不可伪造的 x-real-ip(nginx $remote_addr);回退 XFF 取最右段(最近可信跳),
-    // 避免客户端注入 XFF 首值伪造审计 IP。与 middleware/rate_limit.rs 限流取值口径一致。
-    if let Some(real) = headers
-        .get("x-real-ip")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-    {
-        return Some(real);
+fn extract_client_ip(
+    headers: &axum::http::HeaderMap,
+    trust_proxy: bool,
+    connect_ip: Option<std::net::IpAddr>,
+) -> Option<String> {
+    // 仅在 trust_proxy 时才信任客户端可伪造的 x-real-ip/XFF 头(与 middleware/rate_limit.rs 取值口径一致),
+    // 否则直接落连接对端 socket IP——直连暴露场景下客户端可任意伪造头,信任会污染设备审计 IP/GeoIP。
+    if trust_proxy {
+        // 优先取不可伪造的 x-real-ip(nginx $remote_addr);回退 XFF 取最右段(最近可信跳),
+        // 避免客户端注入 XFF 首值伪造审计 IP。
+        if let Some(real) = headers
+            .get("x-real-ip")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+        {
+            return Some(real);
+        }
+        if let Some(xff) = headers
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|xff| xff.split(',').next_back())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+        {
+            return Some(xff);
+        }
     }
-    headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|xff| xff.split(',').next_back())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+    connect_ip.map(|ip| ip.to_string())
 }
 
 /// m027:semver "<" 比较;任一边 parse 失败返 false(降级为"无 hint")。
@@ -80,7 +92,8 @@ pub async fn device_middleware(
     req: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
-    if req.uri().path().starts_with("/api/admin/") {
+    // 该中间件 layer 挂在 `/api` nest 之内,axum 已剥掉 `/api` 前缀,故此处看到的是 `/admin/...`。
+    if req.uri().path().starts_with("/admin/") {
         return next.run(req).await;
     }
 
@@ -124,6 +137,61 @@ pub async fn device_middleware(
 
     let mut upgrade_hint: Option<&'static str> = None;
 
+    // m055 硬化:被封 web 用户若丢弃/伪造 x-device-id 但仍带同一 x-device-fingerprint,
+    // 不能让缺失 device-id 头跳过基于强指纹的封禁。无有效 device-id 但有 fp_strong 时,
+    // 用空 device_id(不匹配任何真实设备)+ fp_strong 跑纯指纹封禁检查,沿用同一 ban 语义。
+    if device_id.is_none() {
+        if let Some(ref fp) = fp_strong {
+            let banned_check = {
+                let fp = fp.clone();
+                state
+                    .run_store_task(
+                        "middleware.device.is_client_banned_fp",
+                        move |store| store.is_client_banned("", Some(&fp)),
+                    )
+                    .await
+            };
+            match banned_check {
+                Ok(Ok(true)) => {
+                    return (
+                        StatusCode::FORBIDDEN,
+                        axum::Json(serde_json::json!({
+                            "success": false,
+                            "code": "CLIENT_BANNED",
+                            "message": "设备已被封禁"
+                        })),
+                    )
+                        .into_response();
+                }
+                Ok(Ok(false)) => {}
+                Ok(Err(e)) => {
+                    tracing::error!(error = %e, "Failed to check device ban (fp-only)");
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        axum::Json(serde_json::json!({
+                            "success": false,
+                            "code": "BAN_CHECK_UNAVAILABLE",
+                            "message": "设备状态校验暂不可用，请稍后重试"
+                        })),
+                    )
+                        .into_response();
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "Device ban task failed (fp-only)");
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        axum::Json(serde_json::json!({
+                            "success": false,
+                            "code": "BAN_CHECK_UNAVAILABLE",
+                            "message": "设备状态校验暂不可用，请稍后重试"
+                        })),
+                    )
+                        .into_response();
+                }
+            }
+        }
+    }
+
     if let Some(ref did) = device_id {
         let banned_check = {
             let did = did.clone();
@@ -143,6 +211,7 @@ pub async fn device_middleware(
                 return (
                     StatusCode::FORBIDDEN,
                     axum::Json(serde_json::json!({
+                        "success": false,
                         "code": "CLIENT_BANNED",
                         "message": "设备已被封禁"
                     })),
@@ -157,6 +226,7 @@ pub async fn device_middleware(
                 return (
                     StatusCode::SERVICE_UNAVAILABLE,
                     axum::Json(serde_json::json!({
+                        "success": false,
                         "code": "BAN_CHECK_UNAVAILABLE",
                         "message": "设备状态校验暂不可用，请稍后重试"
                     })),
@@ -168,6 +238,7 @@ pub async fn device_middleware(
                 return (
                     StatusCode::SERVICE_UNAVAILABLE,
                     axum::Json(serde_json::json!({
+                        "success": false,
                         "code": "BAN_CHECK_UNAVAILABLE",
                         "message": "设备状态校验暂不可用，请稍后重试"
                     })),
@@ -198,7 +269,12 @@ pub async fn device_middleware(
         }
 
         // m027:IP → country。GeoIP 缺失或 IP 私网/未知都返 None,country 字段保持 NULL。
-        let client_ip = extract_client_ip(req.headers());
+        let connect_ip = req
+            .extensions()
+            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+            .map(|ci| ci.0.ip());
+        let client_ip =
+            extract_client_ip(req.headers(), state.config().trust_proxy, connect_ip);
         let country = client_ip
             .as_deref()
             .and_then(|s| s.parse::<std::net::IpAddr>().ok())

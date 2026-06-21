@@ -250,8 +250,13 @@ async fn upload_s3(
         .map_err(|e| format!("S3 上传失败: {e}"))?;
 
     // 远端 prune：列前缀对象，删 last_modified 早于 retention 的 backup-daily-*.db。
+    // 严格限定为「直接位于本 target 前缀下」的对象（前缀段 + 恰好一段文件名），
+    // 避免空前缀（bucket 根）target 列举整桶时误删同桶其他前缀下别的 target 的离站备份。
     let cutoff = chrono::Utc::now() - chrono::Duration::days(retention_days as i64);
-    let list_prefix = (!prefix.is_empty()).then(|| object_store::path::Path::from(prefix));
+    let scope = object_store::path::Path::from(prefix);
+    // 本 target 前缀的规范化段序列（空前缀 = bucket 根 = 空段序列）。
+    let scope_parts: Vec<_> = scope.parts().collect();
+    let list_prefix = (!prefix.is_empty()).then(|| scope.clone());
     let mut stream = s3.list(list_prefix.as_ref());
     while let Some(meta) = stream.next().await {
         let meta = match meta {
@@ -261,6 +266,15 @@ async fn upload_s3(
                 break;
             }
         };
+        // 仅删恰好直接位于本前缀下的对象：location 段序列 == 前缀段 + 恰好一段文件名。
+        // 既排除更深层级（子目录），也排除 list 前缀字符串误匹配的兄弟前缀（如 replica vs replica2），
+        // 绝不跨 target 删除。
+        let loc_parts: Vec<_> = meta.location.parts().collect();
+        if loc_parts.len() != scope_parts.len() + 1
+            || loc_parts[..scope_parts.len()] != scope_parts[..]
+        {
+            continue;
+        }
         let name = meta.location.filename().unwrap_or("");
         if name.starts_with("backup-daily-") && name.ends_with(".db") && meta.last_modified < cutoff
         {

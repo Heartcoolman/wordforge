@@ -212,27 +212,30 @@ impl Store {
         Ok((total as u64, correct as u64))
     }
 
-    /// Aggregate daily stats: (total, correct, unique_users, unique_words) for records on or after `since`.
+    /// Aggregate daily stats: (total, correct, unique_users, unique_words) for records in
+    /// the half-open window `[since, until)`.
     pub fn daily_aggregation_stats(
         &self,
         since: chrono::DateTime<chrono::Utc>,
+        until: chrono::DateTime<chrono::Utc>,
     ) -> Result<(u64, u64, u64, u64), StoreError> {
         let conn = self.conn()?;
         let since_str = since.to_rfc3339();
+        let until_str = until.to_rfc3339();
         let (total, correct): (i64, i64) = conn.query_row(
             "SELECT COUNT(*), COALESCE(SUM(CASE WHEN is_correct=1 THEN 1 ELSE 0 END), 0)
-             FROM learning_records WHERE created_at >= ?1",
-            params![&since_str],
+             FROM learning_records WHERE created_at >= ?1 AND created_at < ?2",
+            params![&since_str, &until_str],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
         let unique_users: i64 = conn.query_row(
-            "SELECT COUNT(DISTINCT user_id) FROM learning_records WHERE created_at >= ?1",
-            params![&since_str],
+            "SELECT COUNT(DISTINCT user_id) FROM learning_records WHERE created_at >= ?1 AND created_at < ?2",
+            params![&since_str, &until_str],
             |r| r.get(0),
         )?;
         let unique_words: i64 = conn.query_row(
-            "SELECT COUNT(DISTINCT word_id) FROM learning_records WHERE created_at >= ?1",
-            params![&since_str],
+            "SELECT COUNT(DISTINCT word_id) FROM learning_records WHERE created_at >= ?1 AND created_at < ?2",
+            params![&since_str, &until_str],
             |r| r.get(0),
         )?;
         Ok((
@@ -403,7 +406,7 @@ mod tests {
         assert_eq!((total, correct), (3, 2));
 
         let (t, c, uu, uw) = store
-            .daily_aggregation_stats(now - Duration::seconds(1))
+            .daily_aggregation_stats(now - Duration::seconds(1), now + Duration::seconds(1))
             .unwrap();
         assert_eq!((t, c, uu, uw), (3, 2, 2, 2));
     }

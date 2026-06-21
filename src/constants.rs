@@ -25,6 +25,9 @@ pub const DEFAULT_PAGE_SIZE: u64 = 20;
 /// 列表接口最大分页大小
 pub const MAX_PAGE_SIZE: u64 = 100;
 
+/// 列表接口最大页码：封顶 (page-1)*per_page 防 u64 溢出（release 无 overflow-checks 会回绕成乱序 offset）。
+pub const MAX_PAGE_NUMBER: u64 = 1_000_000;
+
 /// 新单词初始半衰期（小时）
 pub const DEFAULT_HALF_LIFE_HOURS: f64 = 24.0;
 

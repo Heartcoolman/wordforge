@@ -4,9 +4,10 @@ use crate::store::Store;
 pub async fn run(registry: &MetricsRegistry, store: &Store) {
     tracing::debug!("metrics_flush: start");
     let snapshot = registry.snapshot_and_reset();
+    let snapshot_for_flush = snapshot.clone();
     let store_for_flush = store.clone();
     match crate::blocking::run_blocking("worker.metrics_flush", move || {
-        crate::amas::metrics_persistence::flush_metrics_snapshot(snapshot, &store_for_flush)
+        crate::amas::metrics_persistence::flush_metrics_snapshot(snapshot_for_flush, &store_for_flush)
     })
     .await
     {
@@ -14,6 +15,8 @@ pub async fn run(registry: &MetricsRegistry, store: &Store) {
         // m037 软拦截:落库失败若仅 log,run 不抛错→调度框架记 success→admin 监控盲视。
         // 故主动告警 admin(无 user 上下文,只 admin)。
         Ok(Err(e)) => {
+            // 落库失败把取走的计数加回 registry，避免该区间计数随 reset 永久丢失（reset-before-confirm）。
+            registry.merge_snapshot(&snapshot);
             tracing::error!(error=%e, "metrics_flush failed");
             if let Err(ae) = store.record_system_alert(
                 "amas.metrics_flush",
@@ -26,6 +29,8 @@ pub async fn run(registry: &MetricsRegistry, store: &Store) {
             }
         }
         Err(e) => {
+            // 任务失败（snapshot 未必落库）同样加回计数，避免该区间永久丢失。
+            registry.merge_snapshot(&snapshot);
             tracing::error!(error=%e, "metrics_flush task failed");
             if let Err(ae) = store.record_system_alert(
                 "amas.metrics_flush",

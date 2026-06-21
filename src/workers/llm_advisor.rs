@@ -311,7 +311,13 @@ fn should_auto_apply(
     }
     // 当日已自动应用数
     if let Ok(rows) = store.list_amas_suggestions(Some(SuggestionStatus::AutoApplied), 200) {
-        let today = chrono::Utc::now() - chrono::Duration::days(1);
+        // 以 UTC 自然日起点为界，匹配 "今日/max_per_day" 的日历日语义（而非滚动 24h 窗口）。
+        let now = chrono::Utc::now();
+        let today = now
+            .date_naive()
+            .and_hms_opt(0, 0, 0)
+            .map(|naive| naive.and_utc())
+            .unwrap_or(now);
         let today_count = rows.iter().filter(|r| r.created_at >= today).count() as u32;
         if today_count >= settings.amas_auto_apply_max_per_day {
             return AutoDecision::Skip(format!(

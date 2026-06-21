@@ -148,10 +148,9 @@ impl LlmProvider {
 
         // OpenAI 兼容响应：choices[0].message.content + usage
         let parsed: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
-            LlmError::Network(format!(
-                "parse: {e}; body: {}",
-                &text[..text.len().min(200)]
-            ))
+            // 按字符截断,避免 200 字节落在多字节 UTF-8 字符中间 panic（上游可能返中文/emoji 错误体）。
+            let body: String = text.chars().take(200).collect();
+            LlmError::Network(format!("parse: {e}; body: {body}"))
         })?;
         let content = parsed
             .get("choices")

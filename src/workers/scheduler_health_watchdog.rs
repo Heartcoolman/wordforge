@@ -168,7 +168,7 @@ mod tests {
     async fn no_alert_when_no_runs_and_within_window() {
         let (store, _tmp) = make_store();
         let state = make_state(Arc::new(store.clone()));
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(crate::state::SSE_CONN_CHANNEL_CAP);
         state
             .active_sse()
             .entry("d1".into())
@@ -196,7 +196,7 @@ mod tests {
     async fn alert_fires_when_overdue() {
         let (store, _tmp) = make_store();
         let state = make_state(Arc::new(store.clone()));
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::state::SseEvent>();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::state::SseEvent>(crate::state::SSE_CONN_CHANNEL_CAP);
         state
             .active_sse()
             .entry("d2".into())

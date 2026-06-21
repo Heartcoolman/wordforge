@@ -108,8 +108,34 @@ impl Store {
     }
 
     pub fn get_wordbook(&self, wordbook_id: &str) -> Result<Option<Wordbook>, StoreError> {
+        let conn = self.conn()?;
+        Self::get_wordbook_conn(&conn, wordbook_id)
+    }
+
+    /// 仅更新词库的 name / description,绝不触碰 word_count。
+    /// 避免 admin 改名走 get→upsert 的跨连接 read-modify-write 把陈旧 word_count 写回,
+    /// 覆盖并发 add/remove_word_to_wordbook 维护的真实计数(lost update)。
+    pub fn update_wordbook_meta(
+        &self,
+        wordbook_id: &str,
+        name: &str,
+        description: &str,
+    ) -> Result<bool, StoreError> {
         keys::validate_id(wordbook_id)?;
         let conn = self.conn()?;
+        let affected = conn.execute(
+            "UPDATE wordbooks SET name = ?2, description = ?3 WHERE id = ?1",
+            params![wordbook_id, name, description],
+        )?;
+        Ok(affected > 0)
+    }
+
+    /// 同 [`get_wordbook`],但在调用方提供的连接/事务上执行,供 read-modify-write 收进事务。
+    pub fn get_wordbook_conn(
+        conn: &rusqlite::Connection,
+        wordbook_id: &str,
+    ) -> Result<Option<Wordbook>, StoreError> {
+        keys::validate_id(wordbook_id)?;
         Ok(conn
             .query_row(
                 &format!("SELECT {WB_COLS} FROM wordbooks WHERE id = ?1"),
@@ -215,8 +241,19 @@ impl Store {
     ) -> Result<Vec<String>, StoreError> {
         keys::validate_id(wordbook_id)?;
         let conn = self.conn()?;
+        Self::list_wordbook_words_conn(&conn, wordbook_id, limit, offset)
+    }
+
+    /// 在调用方提供的连接/事务上执行词书内词列表查询，供 count+list 同事务一致快照复用。
+    fn list_wordbook_words_conn(
+        conn: &rusqlite::Connection,
+        wordbook_id: &str,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<String>, StoreError> {
         let mut stmt = conn.prepare(
-            "SELECT word_id FROM wordbook_words WHERE wordbook_id = ?1 LIMIT ?2 OFFSET ?3",
+            "SELECT word_id FROM wordbook_words WHERE wordbook_id = ?1 \
+             ORDER BY added_at, word_id LIMIT ?2 OFFSET ?3",
         )?;
         let ids = stmt
             .query_map(params![wordbook_id, limit as i64, offset as i64], |r| {
@@ -224,6 +261,26 @@ impl Store {
             })?
             .collect::<Result<Vec<String>, _>>()?;
         Ok(ids)
+    }
+
+    /// 在单个事务快照内同时取词书词数与当前页 word_id 列表，避免两次独立 SELECT 间
+    /// 被并发增删词打断导致 total 与列表不一致。
+    pub fn count_and_list_wordbook_words(
+        &self,
+        wordbook_id: &str,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(u64, Vec<String>), StoreError> {
+        keys::validate_id(wordbook_id)?;
+        self.with_transaction(|conn| {
+            let total: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM wordbook_words WHERE wordbook_id = ?1",
+                params![wordbook_id],
+                |r| r.get(0),
+            )?;
+            let word_ids = Self::list_wordbook_words_conn(conn, wordbook_id, limit, offset)?;
+            Ok((total as u64, word_ids))
+        })
     }
 
     // ────────────────── m022:wordbook_local_tags ──────────────────

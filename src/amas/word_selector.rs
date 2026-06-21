@@ -69,7 +69,9 @@ fn cooldown_factor(last_review_at: Option<i64>, now_ms: i64, cooldown_secs: f64)
     match last_review_at {
         None => 1.0,
         Some(last) => {
-            let elapsed_secs = (now_ms - last) as f64 / 1000.0;
+            // 钳非负：时钟回拨(NTP step / VM 校时)致 now_ms < last 时，elapsed 为负会让 exp>1、
+            // 冷却因子变负，翻转高优先复习词排序。未来/相等时间戳视作 0 elapsed → 因子 0。
+            let elapsed_secs = (now_ms - last).max(0) as f64 / 1000.0;
             1.0 - (-elapsed_secs / cooldown_secs).exp()
         }
     }

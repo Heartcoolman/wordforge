@@ -207,15 +207,19 @@ impl Store {
     /// Execute a function within a database transaction.
     /// On success, the transaction is committed; on failure, it is rolled back.
     ///
-    /// 用 rusqlite RAII 事务（`unchecked_transaction`）：commit 前任何早退（含 COMMIT
+    /// 用 rusqlite RAII 事务（`BEGIN IMMEDIATE`）：commit 前任何早退（含 COMMIT
     /// 失败、闭包返回 Err、panic）都由 `Transaction` 的 Drop 自动 ROLLBACK，连接归还池前
     /// 不会残留未提交事务，避免污染后续使用者。
+    ///
+    /// 用 `IMMEDIATE` 而非默认 `DEFERRED`：BEGIN 时即取写锁，避免「先 SELECT 拿读锁、再写时升级」
+    /// 的丢更新窗口（DEFERRED 读后写经典坑）。RMW 调用方（words.rs update_word、word_states.rs、
+    /// amas_patch_canary.rs）依赖此处 BEGIN 即持写锁的语义。
     pub fn with_transaction<T>(
         &self,
         f: impl FnOnce(&rusqlite::Connection) -> Result<T, StoreError>,
     ) -> Result<T, StoreError> {
-        let conn = self.conn()?;
-        let tx = conn.unchecked_transaction()?;
+        let mut conn = self.conn()?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let result = f(&tx)?;
         tx.commit()?;
         Ok(result)

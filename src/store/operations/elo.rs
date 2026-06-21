@@ -85,6 +85,22 @@ impl Store {
         Ok(v.unwrap_or(0.0))
     }
 
+    /// W1-1：回滚快照取某词全局 ELO 的派生列（trend / rating_select），与 `word_elo` 一并捕获/恢复。
+    /// `get_word_elo` 只读 rating/games，回滚 UPSERT 不覆盖 trend/rating_select 会让这两列前移后残留，
+    /// 污染全局选词排序（rating_select）与动态 K（trend）。无行回退建表默认 (0.0, 1200.0)。
+    pub fn get_word_elo_trend_select(&self, word_id: &str) -> Result<(f64, f64), StoreError> {
+        keys::validate_id(word_id)?;
+        let conn = self.conn()?;
+        let v: Option<(f64, f64)> = conn
+            .query_row(
+                "SELECT trend, rating_select FROM word_elo WHERE word_id=?1",
+                params![word_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        Ok(v.unwrap_or((0.0, 1200.0)))
+    }
+
     /// #3：批量取候选词 ELO。原实现按 word_id 逐个 `get_word_elo`（N 次 pool.get + N 次查询）；
     /// 改为单条 `WHERE word_id IN (...)`，分块 ≤900 占位符以避开 SQLite 参数上限。**表中缺失的词
     /// （未被任何人作答过的新词，常态）回退 `EloRating::default()`（rating=default_elo 1200）填入**，

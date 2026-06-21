@@ -114,8 +114,11 @@ impl Store {
     pub fn count_word_favorites(&self, user_id: &str) -> Result<u64, StoreError> {
         keys::validate_id(user_id)?;
         let conn = self.conn()?;
+        // 仅统计仍有对应 words 行的收藏，与 list 端 filter_map 丢弃缺词项后的返回集一致，
+        // 避免分页 total 大于实际可返回条数导致客户端翻页漏项。
         let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM word_favorites WHERE user_id=?1",
+            "SELECT COUNT(*) FROM word_favorites f
+             WHERE f.user_id=?1 AND EXISTS (SELECT 1 FROM words w WHERE w.id = f.word_id)",
             params![user_id],
             |r| r.get(0),
         )?;
@@ -287,6 +290,27 @@ mod tests {
         format!("word-{}", uuid::Uuid::new_v4())
     }
 
+    /// 插入一条真实 words 行并返回其 id；count_word_favorites 仅统计有对应词的收藏，
+    /// 故计数相关用例需先建词，而非仅生成 id。
+    fn word_with_row(store: &Store) -> String {
+        let id = word();
+        store
+            .upsert_word(&crate::store::operations::words::Word {
+                id: id.clone(),
+                text: "t".into(),
+                meaning: "m".into(),
+                pronunciation: None,
+                part_of_speech: None,
+                difficulty: 0.0,
+                examples: vec![],
+                tags: vec![],
+                embedding: None,
+                created_at: Utc::now(),
+            })
+            .unwrap();
+        id
+    }
+
     #[test]
     fn favorite_upsert_idempotent_and_returns_current_row() {
         let (_tmp, store) = test_store();
@@ -313,7 +337,8 @@ mod tests {
         let (_tmp, store) = test_store();
         let u = user();
         for _ in 0..3 {
-            store.upsert_word_favorite(&u, &word()).unwrap();
+            let w = word_with_row(&store);
+            store.upsert_word_favorite(&u, &w).unwrap();
         }
         let all = store.list_word_favorites(&u, 10, 0).unwrap();
         assert_eq!(all.len(), 3);

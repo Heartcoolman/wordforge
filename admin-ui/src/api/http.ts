@@ -12,6 +12,9 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 const SSE_INITIAL_RECONNECT_MS = 3_000;
 const SSE_MAX_RECONNECT_MS = 30_000;
 const SSE_READ_TIMEOUT_MS = 60_000;
+// 连接存活超过该时长才视为「健康连接」，重连退避才重置；否则按指数退避，
+// 避免代理 idle-close / 服务端干净结束流时形成零延迟重连风暴。
+const SSE_STABLE_UPTIME_MS = 30_000;
 
 function resolveApiBase(): string {
   if (!API_BASE_URL) return window.location.origin;
@@ -91,7 +94,13 @@ async function unwrap<T>(response: Response, context?: { useAdminToken: boolean 
   if (response.status === 204 || response.headers.get('content-length') === '0') {
     return undefined as unknown as T;
   }
-  const json = await response.json();
+  // 空 body 但无 Content-Length:0(chunked / 代理剥离长度头)时,response.json() 会抛
+  // SyntaxError 逃逸统一错误处理。先读文本判空,空则返回 undefined,非空再解析。
+  const text = await response.text();
+  if (!text) {
+    return undefined as unknown as T;
+  }
+  const json = JSON.parse(text);
   if (json && typeof json === 'object' && 'success' in json) {
     if (json.success) return json.data as T;
     throw new ApiError(response.status, json.code ?? 'API_ERROR', json.message ?? json.error);
@@ -281,7 +290,7 @@ export function connectSseStream(callbacks: SseCallbacks): () => void {
           throw new Error(`SSE 连接失败: ${response.status}`);
         }
 
-        reconnectDelay = SSE_INITIAL_RECONNECT_MS;
+        const connectedAt = Date.now();
 
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
@@ -370,6 +379,15 @@ export function connectSseStream(callbacks: SseCallbacks): () => void {
             }
           }
         }
+
+        // 内层循环正常结束（流被干净关闭 / 读超时 done=true）也要退避，否则会零延迟重连风暴。
+        if (aborted) return;
+        if (Date.now() - connectedAt >= SSE_STABLE_UPTIME_MS) {
+          // 长存活连接：视为健康，重置退避。
+          reconnectDelay = SSE_INITIAL_RECONNECT_MS;
+        }
+        await new Promise(resolve => setTimeout(resolve, reconnectDelay));
+        reconnectDelay = Math.min(reconnectDelay * 2, SSE_MAX_RECONNECT_MS);
       } catch (err) {
         if (aborted) return;
         const delay = !tokenManager.getToken() ? SSE_MAX_RECONNECT_MS : reconnectDelay;

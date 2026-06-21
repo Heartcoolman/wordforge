@@ -59,6 +59,46 @@ async fn sweep_once(state: &AppState) -> Result<(), String> {
             "telemetry_cleanup swept old telemetry rows"
         );
     }
+
+    // m061：摄取拒绝留痕表同 retention 清理。该表 server_ts 为 RFC3339（'T' 分隔 + 时区后缀，
+    // 见 insert_ingest_rejection），与上方空格格式 cutoff 不同，必须用 RFC3339 cutoff 比较。
+    let cutoff_rfc3339 =
+        (chrono::Utc::now() - chrono::Duration::days(retention_days as i64)).to_rfc3339();
+    let store_rej = state.store().clone();
+    let cutoff_rej = cutoff_rfc3339.clone();
+    let deleted_rej = tokio::task::spawn_blocking(move || {
+        store_rej.delete_ingest_rejections_older_than(&cutoff_rej)
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking(ingest_rejections): {e}"))?
+    .map_err(|e| format!("delete_ingest_rejections_older_than: {e}"))?;
+    if deleted_rej > 0 {
+        tracing::info!(
+            deleted = deleted_rej,
+            cutoff = %cutoff_rfc3339,
+            retention_days,
+            "telemetry_cleanup swept old ingest_rejection rows"
+        );
+    }
+
+    // 资源包安装留痕表同 retention 清理。installed_at 为 RFC3339（见 record_pack_install），
+    // 复用上方 RFC3339 cutoff。此前该表无任何 retention，只增不删（单调膨胀）。
+    let store_pack = state.store().clone();
+    let cutoff_pack = cutoff_rfc3339.clone();
+    let deleted_pack = tokio::task::spawn_blocking(move || {
+        store_pack.delete_pack_installs_older_than(&cutoff_pack)
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking(pack_installs): {e}"))?
+    .map_err(|e| format!("delete_pack_installs_older_than: {e}"))?;
+    if deleted_pack > 0 {
+        tracing::info!(
+            deleted = deleted_pack,
+            cutoff = %cutoff_rfc3339,
+            retention_days,
+            "telemetry_cleanup swept old resource_pack_install_log rows"
+        );
+    }
     Ok(())
 }
 

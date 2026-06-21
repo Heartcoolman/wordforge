@@ -42,6 +42,15 @@ const USER_SCOPED_TABLES: &[&str] = &[
     "user_elo_history",
     "engine_monitoring_events",
     "password_reset_tokens",
+    // #14 抗投毒账本(user,word 净位移),注销时一并清理避免孤儿 + 全局污染残留
+    "word_elo_user_contrib",
+    // GDPR Art.17:含 user_id 的剩余 PII 表(swd 历史、分桶、mastery 事件、导出审计),注销时一并清理
+    "engine_swd_history",
+    "user_bucket_assignment",
+    "word_mastery_events",
+    "gdpr_export_log",
+    // 幂等标记(精确一次账本),注销时一并清理避免孤儿无界增长
+    "processed_events",
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -266,6 +275,82 @@ impl Store {
             key: user.id.clone(),
             attempts: MAX_CAS_RETRIES,
         })
+    }
+
+    /// 字段级更新：只写 password_hash + updated_at，绝不触碰 is_banned /
+    /// failed_login_count / locked_until / role / status。
+    /// 避免改密路径用陈旧整行快照覆盖并发写入（如管理员封禁）导致的 lost-update。
+    pub fn update_user_password(
+        &self,
+        user_id: &str,
+        password_hash: &str,
+    ) -> Result<(), StoreError> {
+        keys::validate_id(user_id)?;
+        let conn = self.conn()?;
+        let updated = conn.execute(
+            "UPDATE users SET password_hash=?1, updated_at=?2 WHERE id=?3",
+            params![password_hash, Utc::now().to_rfc3339(), user_id],
+        )?;
+        if updated == 0 {
+            return Err(StoreError::NotFound {
+                entity: "user".into(),
+                key: user_id.into(),
+            });
+        }
+        Ok(())
+    }
+
+    /// 字段级更新：重置密码路径——写 password_hash 并清除锁定状态
+    /// （failed_login_count=0, locked_until=NULL），其余列保持不变。
+    pub fn update_user_password_clear_lockout(
+        &self,
+        user_id: &str,
+        password_hash: &str,
+    ) -> Result<(), StoreError> {
+        keys::validate_id(user_id)?;
+        let conn = self.conn()?;
+        let updated = conn.execute(
+            "UPDATE users SET password_hash=?1, failed_login_count=0, locked_until=NULL,
+             updated_at=?2 WHERE id=?3",
+            params![password_hash, Utc::now().to_rfc3339(), user_id],
+        )?;
+        if updated == 0 {
+            return Err(StoreError::NotFound {
+                entity: "user".into(),
+                key: user_id.into(),
+            });
+        }
+        Ok(())
+    }
+
+    /// 字段级更新：只写 username + updated_at，绝不触碰其他列。
+    pub fn update_user_username(
+        &self,
+        user_id: &str,
+        username: &str,
+    ) -> Result<(), StoreError> {
+        keys::validate_id(user_id)?;
+        let conn = self.conn()?;
+        let updated = match conn.execute(
+            "UPDATE users SET username=?1, updated_at=?2 WHERE id=?3",
+            params![username, Utc::now().to_rfc3339(), user_id],
+        ) {
+            Ok(n) => n,
+            Err(e) if is_unique_violation(&e) => {
+                return Err(StoreError::Conflict {
+                    entity: "user_username".into(),
+                    key: username.into(),
+                });
+            }
+            Err(e) => return Err(e.into()),
+        };
+        if updated == 0 {
+            return Err(StoreError::NotFound {
+                entity: "user".into(),
+                key: user_id.into(),
+            });
+        }
+        Ok(())
     }
 
     fn set_banned(&self, user_id: &str, banned: bool) -> Result<(), StoreError> {
@@ -625,7 +710,12 @@ impl Store {
             })?;
             let new_count = user.failed_login_count + 1;
             let locked = new_count >= MAX_FAILED_LOGIN_ATTEMPTS;
-            let locked_until = if locked {
+            // 已有未到期的锁:不再延展 locked_until,把锁封顶到单个固定窗口,避免攻击者
+            // 持续投错密码把已锁账户的解锁时间无限往后推(账户锁定 DoS)。
+            let already_locked = user
+                .locked_until
+                .is_some_and(|t| t > Utc::now());
+            let locked_until = if locked && !already_locked {
                 Some((Utc::now() + Duration::minutes(LOCKOUT_DURATION_MINUTES)).to_rfc3339())
             } else {
                 user.locked_until.map(|t| t.to_rfc3339())
@@ -744,7 +834,29 @@ impl Store {
             });
         }
         tx.commit()?;
+        // GDPR Art.17：DB 删除提交后 best-effort 清除磁盘上的头像文件，否则
+        // static/avatars/<id>.<ext> 仍被无鉴权 ServeDir 公开服务，构成个人数据残留。
+        // 文件名确定性派生自 user_id（与 upload_avatar 的 safe_id 口径一致）。
+        Self::remove_user_avatar_files(user_id);
         Ok(())
+    }
+
+    /// best-effort 删除某用户磁盘上各格式的头像文件；失败静默（孤儿文件不阻断删号）。
+    fn remove_user_avatar_files(user_id: &str) {
+        let safe_id = user_id.replace(['/', '\\', '.', '\0'], "_");
+        let avatar_dir = {
+            let cwd_static_dir = std::path::PathBuf::from("static");
+            if cwd_static_dir.is_dir() {
+                cwd_static_dir.join("avatars")
+            } else {
+                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("static")
+                    .join("avatars")
+            }
+        };
+        for ext in ["png", "jpg", "gif", "webp"] {
+            let _ = std::fs::remove_file(avatar_dir.join(format!("{safe_id}.{ext}")));
+        }
     }
 
     /// 一次连接内算齐用户管理页 5 个 chip 计数。inactive7d 与 list_users_filtered
@@ -819,6 +931,69 @@ impl Store {
         )?;
         Ok(())
     }
+
+    /// 原子的「检查冷却 + 记录导出」：在单个 `BEGIN IMMEDIATE` 事务内 SELECT 上次导出时间，
+    /// 若仍在冷却窗内返回 `RateLimited(retry_after_secs)` 且不记录；否则 upsert 本次时间并返回
+    /// `Began { exported_at }`（写入的时间戳，供流式失败时精确回滚冷却）。
+    /// 取写锁后再读，杜绝两个并发请求都读到旧时间、都通过冷却门的 TOCTOU 双导出窗口。
+    pub fn try_begin_gdpr_export(
+        &self,
+        user_id: &str,
+        cooldown_secs: i64,
+    ) -> Result<GdprBeginResult, StoreError> {
+        keys::validate_id(user_id)?;
+        self.with_user_tx(|tx| {
+            let row: Option<String> = tx
+                .query_row(
+                    "SELECT exported_at FROM gdpr_export_log WHERE user_id=?1",
+                    params![user_id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if let Some(s) = row {
+                let last_at = s.parse::<DateTime<Utc>>().map_err(|e| {
+                    StoreError::Validation(format!("gdpr_export_log invalid date: {e}"))
+                })?;
+                let elapsed = (Utc::now() - last_at).num_seconds();
+                if elapsed < cooldown_secs {
+                    return Ok(GdprBeginResult::RateLimited(cooldown_secs - elapsed));
+                }
+            }
+            let now = Utc::now().to_rfc3339();
+            tx.execute(
+                "INSERT INTO gdpr_export_log (user_id, exported_at) VALUES (?1, ?2)
+                 ON CONFLICT(user_id) DO UPDATE SET exported_at=?2",
+                params![user_id, &now],
+            )?;
+            Ok(GdprBeginResult::Began { exported_at: now })
+        })
+    }
+
+    /// 流式导出失败时回滚 `try_begin_gdpr_export` 写入的冷却行：仅当当前 `exported_at`
+    /// 仍等于本次写入的时间戳时才删除，避免误删并发重试写入的较新冷却记录。
+    /// 瞬态失败不应消耗用户 24h 配额（GDPR 数据可获取性）。
+    pub fn rollback_gdpr_export_log(
+        &self,
+        user_id: &str,
+        exported_at: &str,
+    ) -> Result<(), StoreError> {
+        keys::validate_id(user_id)?;
+        let conn = self.conn()?;
+        conn.execute(
+            "DELETE FROM gdpr_export_log WHERE user_id=?1 AND exported_at=?2",
+            params![user_id, exported_at],
+        )?;
+        Ok(())
+    }
+}
+
+/// `try_begin_gdpr_export` 的结果：要么命中冷却（返回剩余秒数），要么成功开始并返回写入的时间戳。
+#[derive(Debug, Clone)]
+pub enum GdprBeginResult {
+    /// 仍在冷却窗内，retry_after 秒。
+    RateLimited(i64),
+    /// 已记录本次导出，携带写入的 `exported_at`（供失败回滚）。
+    Began { exported_at: String },
 }
 
 #[cfg(test)]
@@ -826,7 +1001,12 @@ mod tests {
     use super::*;
 
     fn test_store() -> Store {
-        Store::open(":memory:", 5000, 1).unwrap()
+        let store = Store::open(":memory:", 5000, 1).unwrap();
+        // 跑全量迁移,使内存测试库与生产(main.rs 启动即 run_migrations)及其余测试夹具
+        // (word_selector/device/集成 app.rs 等)的 table 集一致,覆盖 gdpr_export_log /
+        // processed_events 等仅由迁移创建、不在 schema.rs 基线快照中的 USER_SCOPED_TABLES 表。
+        store.run_migrations().unwrap();
+        store
     }
 
     fn sample_user(id: &str, email: &str) -> User {
@@ -906,6 +1086,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.db");
         let store = Store::open(path.to_str().unwrap(), 5000, 4).unwrap();
+        // 同 test_store:跑全量迁移使测试库 table 集与生产一致,覆盖仅由迁移创建的
+        // USER_SCOPED_TABLES 表(gdpr_export_log / processed_events 等)。
+        store.run_migrations().unwrap();
         (dir, store)
     }
 

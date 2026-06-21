@@ -69,11 +69,37 @@ pub async fn run(state: &AppState) {
                 if permanent || attempts >= MAX_ATTEMPTS {
                     let ev2 = ev.clone();
                     let err2 = err.clone();
-                    let _ = state
+                    let dl_res = state
                         .run_store_task("outbox.dead_letter", move |store| {
                             store.move_outbox_to_dead_letter(&ev2, attempts, &err2)
                         })
                         .await;
+                    // 死信写失败不能静默吞掉:该行未被删除。若不推进 next_retry_at,下一 tick
+                    // 会立即重新领取并重处理(对永久错误尤甚:无退避的繁忙重处理回路 + 重复告警)。
+                    // 故死信写失败时按退避重排,使该行下次 tick 之前不被重新领取;并仅在死信行
+                    // 确实写入(Ok(Ok))时才告警,避免重复告警刷屏。
+                    let dl_written = matches!(dl_res, Ok(Ok(())));
+                    if !dl_written {
+                        match &dl_res {
+                            Err(e) => tracing::error!(id = ev.id, error = %e, "outbox 死信写入任务失败(行未删除,退避重排后下次 tick 重试)"),
+                            Ok(Err(e)) => tracing::error!(id = ev.id, error = %e, "outbox 死信写入失败(行未删除,退避重排后下次 tick 重试)"),
+                            Ok(Ok(())) => unreachable!(),
+                        }
+                        let next =
+                            (now + chrono::Duration::seconds(backoff_secs(attempts))).to_rfc3339();
+                        let id = ev.id;
+                        let err2 = err.clone();
+                        if let Err(e) = state
+                            .run_store_task("outbox.dead_letter.reschedule", move |store| {
+                                store.reschedule_outbox_event(id, attempts, &next, &err2)
+                            })
+                            .await
+                        {
+                            tracing::error!(id, error = %e, "outbox 死信写失败后退避重排任务失败(未推进 next_retry_at)");
+                        }
+                        // 死信未落盘:不删行、不告警,等待下次 tick 重试。
+                        continue;
+                    }
                     let reason = if permanent {
                         "永久错误,跳过退避"
                     } else {
@@ -101,11 +127,18 @@ pub async fn run(state: &AppState) {
                         (now + chrono::Duration::seconds(backoff_secs(attempts))).to_rfc3339();
                     let id = ev.id;
                     let err2 = err.clone();
-                    let _ = state
+                    let rs_res = state
                         .run_store_task("outbox.retry", move |store| {
                             store.reschedule_outbox_event(id, attempts, &next, &err2)
                         })
                         .await;
+                    // 重排写失败不能静默吞掉:next_retry_at 未被推进,该行下一 tick 仍 <= now 会被
+                    // 立即重新领取且无任何退避→繁忙重处理回路。记 error 留痕(行幂等,不致数据损坏)。
+                    match &rs_res {
+                        Err(e) => tracing::error!(id, error = %e, "outbox 退避重排任务失败(未推进 next_retry_at)"),
+                        Ok(Err(e)) => tracing::error!(id, error = %e, "outbox 退避重排写入失败(未推进 next_retry_at)"),
+                        Ok(Ok(())) => {}
+                    }
                     tracing::warn!(id, attempts, error = %err, "outbox 事件处理失败，已退避重排");
                 }
             }

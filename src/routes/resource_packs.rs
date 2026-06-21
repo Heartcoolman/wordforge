@@ -122,9 +122,15 @@ async fn fetch_manifest(
         }
     }
 
-    let base = resolve_public_base_url(&headers);
+    let base = resolve_public_base_url(&headers, state.config().trust_proxy);
+    // 下发文件名从 active.payload_path 派生(tarball 工件落盘为 payload.tar.gz,JSON 为
+    // payload.json),不能硬编码 payload.json,否则 tarball pack 的 downloadURL 会 404。
+    let fname = std::path::Path::new(&active.payload_path)
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or("payload.json");
     let download_url = format!(
-        "{base}/packs/{pack}/{ver}/payload.json",
+        "{base}/packs/{pack}/{ver}/{fname}",
         pack = pack_id,
         ver = active.version,
     );
@@ -153,19 +159,34 @@ async fn fetch_manifest(
 }
 
 /// 推断 base URL：优先 env RESOURCE_PACK_BASE_URL，否则从请求 Host + 推断 Scheme。
-fn resolve_public_base_url(headers: &HeaderMap) -> String {
+/// 安全：x-forwarded-host / x-forwarded-proto 是客户端可伪造的头,仅在 trust_proxy(前置可信代理)
+/// 时才信任(与 middleware 里的 extract_client_ip 取值口径一致)。本 manifest 端点匿名可达,直连暴露
+/// (trust_proxy=false)时若信任 x-forwarded-host,攻击者即可把下发 downloadURL 指向恶意主机(主机头注入,
+/// 致 DoS / 载荷替换),故此场景只用 Host 头 + 固定 http scheme。生产建议直接设 RESOURCE_PACK_BASE_URL。
+fn resolve_public_base_url(headers: &HeaderMap, trust_proxy: bool) -> String {
     if let Ok(env_url) = std::env::var("RESOURCE_PACK_BASE_URL") {
         return env_url.trim_end_matches('/').to_string();
     }
-    let host = headers
-        .get("x-forwarded-host")
-        .or_else(|| headers.get(header::HOST))
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("localhost");
-    let scheme = headers
-        .get("x-forwarded-proto")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("http");
+    let host = if trust_proxy {
+        headers
+            .get("x-forwarded-host")
+            .or_else(|| headers.get(header::HOST))
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("localhost")
+    } else {
+        headers
+            .get(header::HOST)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("localhost")
+    };
+    let scheme = if trust_proxy {
+        headers
+            .get("x-forwarded-proto")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("http")
+    } else {
+        "http"
+    };
     format!("{scheme}://{host}")
 }
 
@@ -212,17 +233,34 @@ mod tests {
         std::env::remove_var("RESOURCE_PACK_BASE_URL");
         let mut headers = HeaderMap::new();
         headers.insert(header::HOST, "api.example.com".parse().unwrap());
-        assert_eq!(resolve_public_base_url(&headers), "http://api.example.com");
+        // trust_proxy=false：只用 Host + 固定 http
+        assert_eq!(
+            resolve_public_base_url(&headers, false),
+            "http://api.example.com"
+        );
 
-        // x-forwarded-proto / x-forwarded-host 优先级高于 Host
+        // 伪造的 x-forwarded-host/proto 在 trust_proxy=false 时必须被忽略（防主机头注入）
         headers.insert("x-forwarded-proto", "https".parse().unwrap());
-        headers.insert("x-forwarded-host", "cdn.example.com".parse().unwrap());
-        assert_eq!(resolve_public_base_url(&headers), "https://cdn.example.com");
+        headers.insert("x-forwarded-host", "attacker.example".parse().unwrap());
+        assert_eq!(
+            resolve_public_base_url(&headers, false),
+            "http://api.example.com"
+        );
 
-        // env 优先级高于一切，且会 strip 末尾 /
+        // trust_proxy=true：x-forwarded-proto / x-forwarded-host 优先级高于 Host
+        assert_eq!(
+            resolve_public_base_url(&headers, true),
+            "https://attacker.example"
+        );
+
+        // env 优先级高于一切（无论 trust_proxy），且会 strip 末尾 /
         std::env::set_var("RESOURCE_PACK_BASE_URL", "https://override.example.com/");
         assert_eq!(
-            resolve_public_base_url(&headers),
+            resolve_public_base_url(&headers, false),
+            "https://override.example.com"
+        );
+        assert_eq!(
+            resolve_public_base_url(&headers, true),
             "https://override.example.com"
         );
         std::env::remove_var("RESOURCE_PACK_BASE_URL");

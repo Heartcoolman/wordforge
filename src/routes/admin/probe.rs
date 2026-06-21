@@ -258,7 +258,7 @@ async fn dispatch_probe(
                 if conn.user_id != owner {
                     continue;
                 }
-                let _ = conn.tx.send(SseEvent::ProbeRequest {
+                let _ = conn.tx.try_send(SseEvent::ProbeRequest {
                     request_id: p.request_id.clone(),
                     batch_id: batch_id.clone(),
                     script_b64: script_b64.clone(),
@@ -422,7 +422,7 @@ async fn confirm_probe(
                     if conn.user_id != owner_uid {
                         continue;
                     }
-                    let _ = conn.tx.send(SseEvent::ProbeConfirm {
+                    let _ = conn.tx.try_send(SseEvent::ProbeConfirm {
                         request_id: request_id.clone(),
                         confirm_token: ticket.token.clone(),
                     });

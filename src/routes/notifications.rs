@@ -227,9 +227,21 @@ fn compute_streak_days(records: &[crate::store::operations::records::LearningRec
     if records.is_empty() {
         return 0;
     }
-    let today = Utc::now().date_naive();
-    let dates: BTreeSet<chrono::NaiveDate> =
-        records.iter().map(|r| r.created_at.date_naive()).collect();
+    // 用应用默认时区（Asia/Shanghai）做日历日分桶，与 analytics / learning::session 的
+    // tz-aware 路径一致；避免 UTC+8 用户在本地凌晨学习被错算到前一 UTC 日，导致连续天数被低估、
+    // streak_7 徽章延迟解锁。tz 解析失败时降级回 UTC（保持原行为，不影响功能可用性）。
+    let tz: Option<chrono_tz::Tz> = "Asia/Shanghai".parse().ok();
+    let day_of = |dt: &chrono::DateTime<Utc>| -> chrono::NaiveDate {
+        match tz {
+            Some(tz) => dt.with_timezone(&tz).date_naive(),
+            None => dt.date_naive(),
+        }
+    };
+    let today = match tz {
+        Some(tz) => Utc::now().with_timezone(&tz).date_naive(),
+        None => Utc::now().date_naive(),
+    };
+    let dates: BTreeSet<chrono::NaiveDate> = records.iter().map(|r| day_of(&r.created_at)).collect();
     let mut streak = 0u32;
     let mut current = today;
     if !dates.contains(&current) {
@@ -309,27 +321,9 @@ async fn set_preferences(
     State(state): State<AppState>,
     JsonBody(req): JsonBody<UpdateUserPreferences>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let existing = state
-        .store()
-        .get_user_preferences(&auth.user_id)
-        .map_err(|e| AppError::internal(&e.to_string()))?;
-    let existing_wbc_url = existing
-        .as_ref()
-        .and_then(|v| v["wordbook_center_url"].as_str())
-        .map(|s| s.to_string());
-    let mut prefs = match existing {
-        Some(val) => UserPreferences {
-            theme: val["theme"].as_str().unwrap_or(DEFAULT_THEME).to_string(),
-            language: val["language"]
-                .as_str()
-                .unwrap_or(DEFAULT_LANGUAGE)
-                .to_string(),
-            notification_enabled: val["notification_enabled"].as_bool().unwrap_or(true),
-            sound_enabled: val["sound_enabled"].as_bool().unwrap_or(true),
-        },
-        None => UserPreferences::default(),
-    };
-
+    // 先做入参校验（失败需返回 400）。写入交由 store.merge_user_preferences 在单事务内完成：
+    // 只更新本端涉及的列（theme/language/notification/sound），绝不触碰 wordbook_center_url，
+    // 与 set_user_wb_center_url 写者更新互不相交的列，从根本上消除整行 RMW 的丢更新。
     if let Some(ref v) = req.theme {
         const VALID_THEMES: &[&str] = &["light", "dark", "system"];
         if !VALID_THEMES.contains(&v.as_str()) {
@@ -338,7 +332,6 @@ async fn set_preferences(
                 "主题必须是以下之一：light、dark、system",
             ));
         }
-        prefs.theme = v.clone();
     }
     if let Some(ref v) = req.language {
         const VALID_LANGUAGES: &[&str] = &["en", "zh", "ja", "ko", "fr", "de", "es"];
@@ -348,27 +341,41 @@ async fn set_preferences(
                 "语言必须是以下之一：en、zh、ja、ko、fr、de、es",
             ));
         }
-        prefs.language = v.clone();
-    }
-    if let Some(v) = req.notification_enabled {
-        prefs.notification_enabled = v;
-    }
-    if let Some(v) = req.sound_enabled {
-        prefs.sound_enabled = v;
     }
 
-    let prefs_val = serde_json::json!({
-        "theme": prefs.theme,
-        "language": prefs.language,
-        "notification_enabled": prefs.notification_enabled,
-        "sound_enabled": prefs.sound_enabled,
-        "wordbook_center_url": existing_wbc_url,
-    });
-    state
-        .run_store_task("notifications.set_preferences", move |store| {
-            store
-                .set_user_preferences(&auth.user_id, &prefs_val)
-                .map_err(|e| AppError::internal(&e.to_string()))
+    let prefs = state
+        .run_store_task("notifications.set_preferences", {
+            let uid = auth.user_id.clone();
+            move |store| -> Result<UserPreferences, AppError> {
+                // 单事务内仅合并写本端列，不读改写 wordbook_center_url，避免覆盖并发写者已提交的新值。
+                store
+                    .merge_user_preferences(
+                        &uid,
+                        req.theme.as_deref(),
+                        req.language.as_deref(),
+                        req.notification_enabled,
+                        req.sound_enabled,
+                    )
+                    .map_err(|e| AppError::internal(&e.to_string()))?;
+
+                // 回读最终值返回（与并发写者的 wordbook_center_url 一并取到当前快照）。
+                let prefs = match store
+                    .get_user_preferences(&uid)
+                    .map_err(|e| AppError::internal(&e.to_string()))?
+                {
+                    Some(val) => UserPreferences {
+                        theme: val["theme"].as_str().unwrap_or(DEFAULT_THEME).to_string(),
+                        language: val["language"]
+                            .as_str()
+                            .unwrap_or(DEFAULT_LANGUAGE)
+                            .to_string(),
+                        notification_enabled: val["notification_enabled"].as_bool().unwrap_or(true),
+                        sound_enabled: val["sound_enabled"].as_bool().unwrap_or(true),
+                    },
+                    None => UserPreferences::default(),
+                };
+                Ok(prefs)
+            }
         })
         .await??;
     Ok(ok(prefs))

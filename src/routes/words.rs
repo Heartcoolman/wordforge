@@ -3,7 +3,7 @@ use axum::routing::{get, post};
 use axum::Router;
 
 use crate::auth::{AdminAuthUser, AuthUser};
-use crate::constants::{DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE};
+use crate::constants::{DEFAULT_PAGE_SIZE, MAX_PAGE_NUMBER, MAX_PAGE_SIZE};
 use crate::extractors::JsonBody;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -12,6 +12,7 @@ use std::net::{IpAddr, SocketAddr};
 use crate::response::{created, ok, paginated, AppError};
 use crate::state::AppState;
 use crate::store::operations::words::Word;
+use crate::store::Store;
 
 /// 对外 API 使用的 Word 视图，排除 embedding 等内部字段
 #[derive(Debug, Serialize)]
@@ -64,7 +65,8 @@ struct ListWordsQuery {
 
 impl ListWordsQuery {
     fn page(&self) -> u64 {
-        self.page.unwrap_or(1).clamp(1, u64::MAX)
+        // 上界封顶防 (page-1)*per_page 在 release(无 overflow-checks)下溢出回绕成乱序 offset。
+        self.page.unwrap_or(1).clamp(1, MAX_PAGE_NUMBER)
     }
 
     fn per_page(&self) -> u64 {
@@ -100,10 +102,8 @@ async fn list_words(
 
     let (total, items) = state
         .run_store_task("words.list", move |store| {
-            Ok::<_, crate::store::StoreError>((
-                store.count_words()?,
-                store.list_words(limit, offset)?,
-            ))
+            // count + list 收进同一事务快照，避免并发写入导致 total 与 items 不一致。
+            store.count_and_list_words(limit, offset)
         })
         .await??;
     let items: Vec<WordPublic> = items.iter().map(WordPublic::from).collect();
@@ -237,39 +237,46 @@ async fn update_word(
     State(state): State<AppState>,
     JsonBody(req): JsonBody<UpsertWordRequest>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let lookup_id = id.clone();
-    let existing = state
-        .run_store_task("words.update.load", move |store| store.get_word(&lookup_id))
+    // 读改写置于单个 store 任务的 with_transaction(BEGIN IMMEDIATE)内，避免两个独立任务跨连接
+    // 读旧快照后整行覆盖造成并发丢更新（last-writer-wins）。
+    let word = state
+        .run_store_task("words.update", move |store| -> Result<Option<Word>, AppError> {
+            Ok(store.with_transaction(|conn| {
+                let existing = match Store::get_word_conn(conn, &id)? {
+                    Some(w) => w,
+                    None => return Ok(None),
+                };
+
+                let word = Word {
+                    id: existing.id,
+                    text: if req.text.trim().is_empty() {
+                        existing.text
+                    } else {
+                        req.text.trim().to_string()
+                    },
+                    meaning: if req.meaning.trim().is_empty() {
+                        existing.meaning
+                    } else {
+                        req.meaning.trim().to_string()
+                    },
+                    pronunciation: req.pronunciation.or(existing.pronunciation),
+                    part_of_speech: req.part_of_speech.or(existing.part_of_speech),
+                    difficulty: req
+                        .difficulty
+                        .unwrap_or(existing.difficulty)
+                        .clamp(0.0, 1.0),
+                    examples: req.examples.unwrap_or(existing.examples),
+                    tags: req.tags.unwrap_or(existing.tags),
+                    embedding: existing.embedding,
+                    created_at: existing.created_at,
+                };
+                Store::upsert_word_conn(conn, &word)?;
+                Ok(Some(word))
+            })?)
+        })
         .await??
         .ok_or_else(|| AppError::not_found("单词不存在"))?;
-
-    let word = Word {
-        id: existing.id,
-        text: if req.text.trim().is_empty() {
-            existing.text
-        } else {
-            req.text.trim().to_string()
-        },
-        meaning: if req.meaning.trim().is_empty() {
-            existing.meaning
-        } else {
-            req.meaning.trim().to_string()
-        },
-        pronunciation: req.pronunciation.or(existing.pronunciation),
-        part_of_speech: req.part_of_speech.or(existing.part_of_speech),
-        difficulty: req
-            .difficulty
-            .unwrap_or(existing.difficulty)
-            .clamp(0.0, 1.0),
-        examples: req.examples.unwrap_or(existing.examples),
-        tags: req.tags.unwrap_or(existing.tags),
-        embedding: existing.embedding,
-        created_at: existing.created_at,
-    };
     let response = WordPublic::from(&word);
-    state
-        .run_store_task("words.update", move |store| store.upsert_word(&word))
-        .await??;
     Ok(ok(response))
 }
 
@@ -553,6 +560,7 @@ pub(crate) fn is_private_ip(ip: IpAddr) -> bool {
                 || v4.is_link_local()
                 || v4.is_broadcast()
                 || v4.is_unspecified()
+                || v4.octets()[0] == 0  // 0.0.0.0/8（Linux 内核路由到本机，否则可绕过 SSRF 拦截）
                 || v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64  // 100.64.0.0/10 (CGN)
                 || v4.octets()[0] == 169 && v4.octets()[1] == 254  // 169.254.0.0/16
                 || v4.octets()[0] == 192 && v4.octets()[1] == 0 && v4.octets()[2] == 0

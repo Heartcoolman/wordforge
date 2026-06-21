@@ -1,4 +1,4 @@
-import { api } from './http';
+import { api, buildUrl } from './http';
 import { tokenManager } from '@/lib/token';
 
 /** 资源包通道。与后端 ResourcePackChannel 对齐（小写 stable / beta / internal） */
@@ -110,17 +110,19 @@ export const packsApi = {
     body: Blob | ArrayBuffer | string,
     onProgress?: (frac: number) => void,
   ): Promise<{ packId: string; version: string; sha256: string; signature: string; sizeBytes: number; channel: PackChannel }> => {
-    const params = new URLSearchParams({
+    // 经 buildUrl 解析，与其余请求一致遵循 API_BASE（VITE_API_BASE_URL）；
+    // 否则原始相对路径会落到 window.location.origin，跨域配置下打到错误源。
+    const uploadUrl = buildUrl(`/api/admin/resource-packs/${encodeURIComponent(packId)}/versions`, {
       version: query.version,
       channel: query.channel,
+      minAppVersion: query.minAppVersion || undefined,
+      description: query.description || undefined,
     });
-    if (query.minAppVersion) params.set('minAppVersion', query.minAppVersion);
-    if (query.description) params.set('description', query.description);
 
     // 用原生 XHR，axios/fetch 在 Solid 项目暂未引入上传进度封装
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
-      xhr.open('POST', `/api/admin/resource-packs/${encodeURIComponent(packId)}/versions?${params.toString()}`);
+      xhr.open('POST', uploadUrl);
       // token 经 tokenManager 读取（sessionStorage 原始串），不要用 localStorage+JSON.parse（存储格式是裸串，会抛异常导致无鉴权）
       const adminToken = tokenManager.getAdminToken();
       if (adminToken) {
@@ -134,6 +136,12 @@ export const packsApi = {
         if (xhr.status >= 200 && xhr.status < 300) {
           resolve(xhr.response?.data ?? xhr.response);
         } else {
+          // 该 XHR 绕过了 http.ts 的统一管线，需自行处理 admin token 401，
+          // 与 unwrap() 一致：清 admin token 并广播 admin:unauthorized 触发重新登录。
+          if (xhr.status === 401) {
+            tokenManager.clearAdminToken();
+            window.dispatchEvent(new Event('admin:unauthorized'));
+          }
           reject(new Error(xhr.response?.message ?? `HTTP ${xhr.status}`));
         }
       };

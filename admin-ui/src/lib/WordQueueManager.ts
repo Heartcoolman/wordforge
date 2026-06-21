@@ -171,8 +171,10 @@ export function createWordQueueManager(batchSize = 5) {
       const others = shuffle(
         allWords.filter((q) => q.word.id !== targetWord.word.id),
       )
-        .slice(0, 3)
-        .map((q) => (mode === 'word-to-meaning' ? q.word.meaning : q.word.text));
+        .map((q) => (mode === 'word-to-meaning' ? q.word.meaning : q.word.text))
+        // 去重：剔除与正确答案相同的干扰项（同义/重复导入/同形词），避免出现两个看似正确的选项
+        .filter((v) => v !== correctAnswer)
+        .slice(0, 3);
 
       while (others.length < 3) {
         others.push(mode === 'word-to-meaning' ? '(无释义)' : '(未知)');

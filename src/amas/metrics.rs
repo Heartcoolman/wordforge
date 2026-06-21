@@ -123,6 +123,7 @@ impl MetricsRegistry {
                         call_count: metric.call_count.load(Ordering::Relaxed),
                         total_latency_us: metric.total_latency_us.load(Ordering::Relaxed),
                         error_count: metric.error_count.load(Ordering::Relaxed),
+                        latency_buckets: [0; 6],
                     },
                 )
             })
@@ -136,8 +137,10 @@ impl MetricsRegistry {
                 let call_count = metric.call_count.swap(0, Ordering::Relaxed);
                 let total_latency_us = metric.total_latency_us.swap(0, Ordering::Relaxed);
                 let error_count = metric.error_count.swap(0, Ordering::Relaxed);
-                for bucket in &metric.latency_buckets {
-                    bucket.swap(0, Ordering::Relaxed);
+                // 同时取走桶计数，供 flush 失败时 merge_snapshot 原样加回，避免延迟分布丢失。
+                let mut latency_buckets = [0u64; 6];
+                for (i, bucket) in metric.latency_buckets.iter().enumerate() {
+                    latency_buckets[i] = bucket.swap(0, Ordering::Relaxed);
                 }
                 (
                     id.as_str().to_string(),
@@ -145,6 +148,7 @@ impl MetricsRegistry {
                         call_count,
                         total_latency_us,
                         error_count,
+                        latency_buckets,
                     },
                 )
             })
@@ -174,6 +178,37 @@ impl MetricsRegistry {
         }
     }
 
+    /// 持久化失败时把 snapshot_and_reset 取走的计数原子加回，下次 flush 重试，避免该区间计数永久丢失。
+    /// 用 fetch_add（非 store），与失败窗口内新到达的 record_call 增量累加而不互相覆盖。
+    pub fn merge_snapshot(&self, snapshot: &HashMap<String, MetricsSnapshot>) {
+        for (algo_id_str, snap) in snapshot {
+            let algo_id = match algo_id_str.as_str() {
+                "heuristic" => AlgorithmId::Heuristic,
+                "ige" => AlgorithmId::Ige,
+                "swd" => AlgorithmId::Swd,
+                "ensemble" => AlgorithmId::Ensemble,
+                "mdm" => AlgorithmId::Mdm,
+                "mastery" => AlgorithmId::Mastery,
+                _ => continue,
+            };
+            if let Some(metric) = self.metrics.get(&algo_id) {
+                metric
+                    .call_count
+                    .fetch_add(snap.call_count, Ordering::Relaxed);
+                metric
+                    .total_latency_us
+                    .fetch_add(snap.total_latency_us, Ordering::Relaxed);
+                metric
+                    .error_count
+                    .fetch_add(snap.error_count, Ordering::Relaxed);
+                // 把快照取走的桶计数加回，与失败窗口内新到达的增量累加而不互相覆盖。
+                for (i, bucket) in metric.latency_buckets.iter().enumerate() {
+                    bucket.fetch_add(snap.latency_buckets[i], Ordering::Relaxed);
+                }
+            }
+        }
+    }
+
     pub fn reset(&self) {
         for metric in self.metrics.values() {
             metric.call_count.store(0, Ordering::Relaxed);
@@ -198,6 +233,10 @@ pub struct MetricsSnapshot {
     pub call_count: u64,
     pub total_latency_us: u64,
     pub error_count: u64,
+    /// 延迟直方图桶计数。仅用于 flush 失败时 merge_snapshot 把桶原样加回 registry，
+    /// 不持久化（serde skip）：DB 行只存三个标量，故反序列化的 snapshot 此字段为 0。
+    #[serde(skip, default)]
+    pub latency_buckets: [u64; 6],
 }
 
 #[allow(unused_macros)]
@@ -297,6 +336,7 @@ mod tests {
             call_count: 7,
             total_latency_us: 1234,
             error_count: 2,
+            latency_buckets: [0; 6],
         };
         reg.restore("swd", &snap);
         let after = reg.snapshot();
@@ -312,6 +352,7 @@ mod tests {
             call_count: 9,
             total_latency_us: 999,
             error_count: 0,
+            latency_buckets: [0; 6],
         };
         reg.restore("unknown_algo_xyz", &snap);
         // 不影响已知 key
@@ -331,6 +372,7 @@ mod tests {
                     call_count: 1,
                     total_latency_us: 10,
                     error_count: 0,
+                    latency_buckets: [0; 6],
                 },
             );
         }
@@ -380,6 +422,7 @@ mod tests {
             call_count: 10,
             total_latency_us: 12345,
             error_count: 3,
+            latency_buckets: [0; 6],
         };
         let json = serde_json::to_string(&snap).unwrap();
         let back: MetricsSnapshot = serde_json::from_str(&json).unwrap();

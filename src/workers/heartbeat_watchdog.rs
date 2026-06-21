@@ -71,6 +71,9 @@ async fn scan(state: &AppState) {
         };
 
         if is_banned {
+            // 封禁期间跳过 miss-count 逻辑;同时清零 miss_count,避免封禁前累积的旧计数
+            // (如 4)在解封后某次漏心跳即触达阈值,造成"单次漏心跳即误报 DataCorrupted"。
+            state.heartbeat_miss_count().remove(&device_id);
             continue;
         }
 
@@ -104,7 +107,7 @@ async fn scan(state: &AppState) {
 fn send_data_corrupted(state: &AppState, device_id: &str) {
     if let Some(conns) = state.active_sse().get(device_id) {
         for conn in conns.value() {
-            let _ = conn.tx.send(SseEvent::DataCorrupted);
+            let _ = conn.tx.try_send(SseEvent::DataCorrupted);
         }
     }
 }

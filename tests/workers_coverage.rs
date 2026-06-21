@@ -354,7 +354,6 @@ async fn it_runs_worker_tasks_and_persists_side_effects() {
     for metric_name in [
         "heuristic",
         "optimization",
-        "daily_aggregation",
         "health_analysis",
         "weekly_report",
     ] {
@@ -366,6 +365,18 @@ async fn it_runs_worker_tasks_and_persists_side_effects() {
             "missing metrics for {metric_name}"
         );
     }
+    // daily_aggregation 聚合「前一整天」[昨天 00:00, 今天 00:00)，以昨天日期入库
+    // （见 workers/daily_aggregation.rs），故按昨天日期查询。
+    let yesterday = (Utc::now() - chrono::Duration::days(1))
+        .format("%Y-%m-%d")
+        .to_string();
+    assert!(
+        store
+            .get_metrics_daily(&yesterday, "daily_aggregation")
+            .expect("get metrics daily")
+            .is_some(),
+        "missing daily_aggregation metrics for {yesterday}"
+    );
 
     let current_hour = Utc::now().format("%Y-%m-%d-%H").to_string();
     assert!(store

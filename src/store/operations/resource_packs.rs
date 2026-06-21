@@ -548,6 +548,21 @@ impl Store {
         )?;
         Ok(())
     }
+
+    /// 资源包安装留痕表 retention 清理：删除 installed_at < cutoff 的行，返回删除行数。
+    /// **注意**：installed_at 由 `record_pack_install` 写入 `to_rfc3339()`（'T' 分隔 + 时区后缀），
+    /// 故 cutoff 必须同为 RFC3339，不可复用空格格式 cutoff（TEXT 字典序比较会因 'T' vs 空格失配）。
+    pub fn delete_pack_installs_older_than(
+        &self,
+        cutoff_rfc3339: &str,
+    ) -> Result<u64, StoreError> {
+        let conn = self.conn()?;
+        let deleted = conn.execute(
+            "DELETE FROM resource_pack_install_log WHERE installed_at < ?1",
+            params![cutoff_rfc3339],
+        )?;
+        Ok(deleted as u64)
+    }
 }
 
 #[cfg(test)]

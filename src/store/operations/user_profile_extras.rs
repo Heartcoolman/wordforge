@@ -243,15 +243,59 @@ impl Store {
         Ok(())
     }
 
+    /// 原子合并写用户偏好:在**单条连接 + 单个 `BEGIN IMMEDIATE` 事务**内,只更新调用方提供的
+    /// 列(theme/language/notification_enabled/sound_enabled),绝不触碰 `wordbook_center_url`。
+    /// 这样本端写者与 `set_user_wb_center_url` 写者更新互不相交的列,消除整行 RMW 的丢更新窗口。
+    /// 行不存在时插入,缺省列取默认值(wordbook_center_url 留 NULL)。
+    pub fn merge_user_preferences(
+        &self,
+        user_id: &str,
+        theme: Option<&str>,
+        language: Option<&str>,
+        notification_enabled: Option<bool>,
+        sound_enabled: Option<bool>,
+    ) -> Result<(), StoreError> {
+        keys::validate_id(user_id)?;
+        self.with_transaction(|conn| {
+            conn.execute(
+                "INSERT INTO user_preferences
+                    (user_id, theme, language, notification_enabled, sound_enabled, wordbook_center_url)
+                 VALUES (?1, ?2, ?3, ?4, ?5, NULL)
+                 ON CONFLICT(user_id) DO UPDATE SET
+                    theme = COALESCE(?6, theme),
+                    language = COALESCE(?7, language),
+                    notification_enabled = COALESCE(?8, notification_enabled),
+                    sound_enabled = COALESCE(?9, sound_enabled)",
+                params![
+                    user_id,
+                    // INSERT 路径:首次插入时缺省列取与原 set_user_preferences 一致的默认值
+                    theme.unwrap_or("light"),
+                    language.unwrap_or("en"),
+                    notification_enabled.unwrap_or(true) as i64,
+                    sound_enabled.unwrap_or(true) as i64,
+                    // UPDATE 路径:仅提供的列被覆盖,未提供(None→SQL NULL)时 COALESCE 保留原值
+                    theme,
+                    language,
+                    notification_enabled.map(|b| b as i64),
+                    sound_enabled.map(|b| b as i64),
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
     // -- User Avatars --
 
+    /// 写入/更新用户头像元数据，并在**同一事务**内返回被替换掉的旧 filename（若有且与新值不同）。
+    /// 调用方据此只删除「确切的前一份文件」，而非盲删所有其他扩展名——后者在同用户并发换
+    /// 格式上传时会删掉另一请求刚落盘并写入 DB 的文件，导致 DB.avatarUrl 指向 404。
     pub fn set_user_avatar(
         &self,
         user_id: &str,
         avatar: &serde_json::Value,
-    ) -> Result<(), StoreError> {
+    ) -> Result<Option<String>, StoreError> {
         keys::validate_id(user_id)?;
-        let conn = self.conn()?;
+        let mut conn = self.conn()?;
         let url = avatar
             .get("avatarUrl")
             .and_then(|v| v.as_str())
@@ -268,12 +312,24 @@ impl Store {
             .get("sizeBytes")
             .and_then(|v| v.as_i64())
             .unwrap_or(0);
-        conn.execute(
+        // BEGIN IMMEDIATE 串行化同一用户的「读旧 filename → upsert」临界区，
+        // 使并发换格式上传不会交错出「另一请求删掉本请求刚写入的文件」。
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let prev_filename: Option<String> = tx
+            .query_row(
+                "SELECT filename FROM user_avatars WHERE user_id=?1",
+                params![user_id],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?;
+        tx.execute(
             "INSERT INTO user_avatars (user_id, avatar_url, filename, extension, size_bytes) VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(user_id) DO UPDATE SET avatar_url=?2, filename=?3, extension=?4, size_bytes=?5",
             params![user_id, url, filename, ext, size],
         )?;
-        Ok(())
+        tx.commit()?;
+        // 仅当旧文件名存在且与新文件名不同才需清理（同扩展名覆盖写无需删除）。
+        Ok(prev_filename.filter(|f| !f.is_empty() && f != filename))
     }
 }
 
@@ -402,6 +458,24 @@ mod tests {
         assert_eq!(got["theme"], json!("dark"));
         assert_eq!(got["notification_enabled"], json!(false));
         assert_eq!(got["wordbook_center_url"], json!("https://example.com"));
+    }
+
+    #[test]
+    fn merge_user_preferences_preserves_wordbook_center_url() {
+        let (_t, store) = test_store();
+        // 先经 wbc 写者落 wordbook_center_url
+        store
+            .set_user_preferences("u1", &json!({"wordbook_center_url":"https://wbc.example"}))
+            .unwrap();
+        // 本端只改 theme，不应清掉 wordbook_center_url（验证列互不相交）
+        store
+            .merge_user_preferences("u1", Some("dark"), None, None, None)
+            .unwrap();
+        let got = store.get_user_preferences("u1").unwrap().unwrap();
+        assert_eq!(got["theme"], json!("dark"));
+        assert_eq!(got["wordbook_center_url"], json!("https://wbc.example"));
+        // 未提供的列保持原值
+        assert_eq!(got["notification_enabled"], json!(true));
     }
 
     #[test]

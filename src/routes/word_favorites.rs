@@ -4,6 +4,7 @@ use axum::Router;
 use serde::{Deserialize, Serialize};
 
 use crate::auth::AuthUser;
+use crate::constants::MAX_PAGE_NUMBER;
 use crate::response::{ok, paginated, AppError};
 use crate::routes::words::WordPublic;
 use crate::state::AppState;
@@ -59,7 +60,8 @@ async fn list_favorites(
     Query(q): Query<ListFavoritesQuery>,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let page = q.page.unwrap_or(1).max(1);
+    // 上界封顶防 (page-1)*per_page 在 release(无 overflow-checks)下溢出回绕成乱序 offset。
+    let page = q.page.unwrap_or(1).clamp(1, MAX_PAGE_NUMBER);
     let per_page = q
         .per_page
         .unwrap_or(state.config().pagination.default_page_size)

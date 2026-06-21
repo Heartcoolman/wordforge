@@ -357,7 +357,9 @@ async fn upload_avatar(
 
     let extension = match body.get(..4) {
         Some(b"\x89PNG") => "png",
-        Some(b"\xFF\xD8\xFF\xE0") | Some(b"\xFF\xD8\xFF\xE1") | Some(b"\xFF\xD8\xFF\xDB") => "jpg",
+        // 所有 JPEG 均以 SOI(FF D8) + FF + 任意 APPn/标记字节起始；仅校验前三字节
+        // 以接纳 E0/E1/E2(ICC)/EE(Adobe)/DB 等全部合法变体。
+        Some(bytes) if bytes.starts_with(b"\xFF\xD8\xFF") => "jpg",
         Some(bytes) if bytes.starts_with(b"GIF8") => "gif",
         Some(bytes) if bytes.starts_with(b"RIFF") && body.len() > 12 && &body[8..12] == b"WEBP" => {
             "webp"
@@ -378,6 +380,9 @@ async fn upload_avatar(
     let filename = format!("{}.{}", safe_id, extension);
     let path = avatar_dir.join(&filename);
 
+    // 顺序：先写新文件 → 再更新 DB → 最后才 best-effort 清理旧格式文件。
+    // 保证 DB avatarUrl 指向的文件在任意时刻都已落盘存在，避免并发换格式上传时
+    // 「删除步骤先于另一请求的 DB 写入」导致 DB 指向已被删除文件（404）的不一致。
     tokio::fs::write(&path, &body).await.map_err(|e| {
         AppError::internal(&format!("Failed to save avatar to {}: {e}", path.display()))
     })?;
@@ -390,11 +395,21 @@ async fn upload_avatar(
         "sizeBytes": body.len(),
     });
     let avatar_metadata_for_store = avatar_metadata.clone();
-    state
+    // set_user_avatar 在同事务内返回被替换掉的旧 filename（若与新文件名不同）。
+    let prev_filename = state
         .run_store_task("user_profile.upload_avatar", move |store| {
             store.set_user_avatar(&auth.user_id, &avatar_metadata_for_store)
         })
         .await??;
+
+    // 仅删除 DB 中确切记录的前一份文件，而非盲删所有其他扩展名——后者在同用户并发换
+    // 格式上传时会删掉另一请求刚落盘并写入 DB 的文件，导致 DB.avatarUrl 指向 404。
+    if let Some(old) = prev_filename {
+        // 防御性约束：只允许形如 "<safe_id>.<ext>" 的本用户文件名，杜绝路径穿越。
+        if old != filename && !old.contains('/') && !old.contains('\\') && !old.contains("..") {
+            let _ = tokio::fs::remove_file(avatar_dir.join(&old)).await;
+        }
+    }
 
     Ok(ok(serde_json::json!({
         "avatarUrl": avatar_metadata["avatarUrl"],

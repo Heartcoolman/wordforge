@@ -332,14 +332,17 @@ pub fn migration_names_after(schema: u32) -> Vec<&'static str> {
 
 pub fn get_current_version(store: &Store) -> Result<u32, StoreError> {
     let conn = store.conn()?;
-    let version: u32 = conn
-        .query_row(
-            "SELECT version FROM schema_version WHERE singleton_id = 1",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(0);
-    Ok(version)
+    // 仅「无版本行」(QueryReturnedNoRows) 才回落到 0；其余 SQLite 错误（锁/损坏/解码失败）必须
+    // 上抛中止启动，避免把已填充的生产库误判为版本 0 而重跑整条迁移链。
+    match conn.query_row(
+        "SELECT version FROM schema_version WHERE singleton_id = 1",
+        [],
+        |row| row.get::<_, u32>(0),
+    ) {
+        Ok(v) => Ok(v),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(0),
+        Err(e) => Err(e.into()),
+    }
 }
 
 pub fn set_version(store: &Store, version: u32) -> Result<(), StoreError> {
@@ -1260,7 +1263,9 @@ fn m020_resource_packs_down(store: &Store) -> Result<(), StoreError> {
 ///   5. wordbook_local_tags 新表 —— 词书本地标签覆盖层（远端 metadata 不可写）
 ///   6. amas_canary_config 新表 —— AMAS 灰度配置（百分比抽样 + 强制白名单）
 fn m022_admin_ui_completeness(store: &Store) -> Result<(), StoreError> {
-    let conn = store.conn()?;
+    // 用单个可变连接：事务直接借用本连接（conn.transaction()），避免再从连接池取第二个
+    // 连接——测试 store pool_size=1 时第二次取连接会死锁/超时（pool error: timed out）。
+    let mut conn = store.conn()?;
 
     // 1) client_devices.app_version
     let has_app_version: bool = conn
@@ -1269,16 +1274,21 @@ fn m022_admin_ui_completeness(store: &Store) -> Result<(), StoreError> {
         .filter_map(Result::ok)
         .any(|n| n == "app_version");
     if !has_app_version {
-        conn.execute(
+        // 加列 + 建索引包在单事务内原子提交（同 m046/m058）：若崩溃发生在两条语句之间，
+        // set_version 也未执行，重启重跑时列与索引要么同时存在要么同时缺失，
+        // 杜绝「列已加但索引被跳过且永不重建」的部分迁移。
+        let tx = conn.transaction()?;
+        tx.execute(
             "ALTER TABLE client_devices ADD COLUMN app_version TEXT DEFAULT NULL",
             [],
         )?;
-        conn.execute(
+        tx.execute(
             "CREATE INDEX IF NOT EXISTS idx_client_devices_app_version
                  ON client_devices(app_version)
                  WHERE app_version IS NOT NULL",
             [],
         )?;
+        tx.commit()?;
     }
 
     // 2) users.role / status / last_login_at
@@ -3305,19 +3315,23 @@ fn m057_elo_dynamic_k_trend_down(store: &Store) -> Result<(), StoreError> {
 /// m058:T1.1 Parallel Elo——word_elo 加 rating_select 列（选词链）。幂等加列 + 回填为当前 rating
 /// （避免存量词选词链突变为默认 1200）。
 fn m058_word_elo_select_chain(store: &Store) -> Result<(), StoreError> {
-    let conn = store.conn()?;
+    let mut conn = store.conn()?;
     let has: bool = conn
         .prepare("PRAGMA table_info(word_elo)")?
         .query_map([], |r| r.get::<_, String>(1))?
         .filter_map(Result::ok)
         .any(|c| c == "rating_select");
     if !has {
-        conn.execute(
+        // 加列 + 回填包在单事务内原子提交：若中途崩溃，set_version 也未执行，
+        // 重启重跑时列与回填要么同时存在要么同时缺失，杜绝「列已加但回填丢失且迁移被跳过」。
+        let tx = conn.transaction()?;
+        tx.execute(
             "ALTER TABLE word_elo ADD COLUMN rating_select REAL NOT NULL DEFAULT 1200.0",
             [],
         )?;
         // 回填：存量行选词链 = 当前估计链，避免开启 parallel 时选词突变。
-        conn.execute("UPDATE word_elo SET rating_select = rating", [])?;
+        tx.execute("UPDATE word_elo SET rating_select = rating", [])?;
+        tx.commit()?;
     }
     Ok(())
 }

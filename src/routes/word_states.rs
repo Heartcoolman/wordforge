@@ -190,24 +190,29 @@ async fn mark_mastered(
                     return Err(AppError::not_found("单词不存在"));
                 }
 
-                let mut wls = store
-                    .get_word_learning_state(&auth.user_id, &word_id)?
-                    .unwrap_or_else(|| WordLearningState {
-                        user_id: auth.user_id.clone(),
-                        word_id: word_id.clone(),
-                        state: WordState::New,
-                        mastery_level: 0.0,
-                        next_review_date: None,
-                        half_life: DEFAULT_HALF_LIFE_HOURS,
-                        correct_streak: 0,
-                        total_attempts: 0,
-                        updated_at: Utc::now(),
-                    });
+                // read-modify-write 收进 BEGIN IMMEDIATE 事务，避免与并发学习记录写同一行时丢更新。
+                let wls = store.with_user_tx(|conn| {
+                    let mut wls = Store::get_word_learning_state_conn(conn, &auth.user_id, &word_id)?
+                        .unwrap_or_else(|| WordLearningState {
+                            user_id: auth.user_id.clone(),
+                            word_id: word_id.clone(),
+                            state: WordState::New,
+                            mastery_level: 0.0,
+                            next_review_date: None,
+                            half_life: DEFAULT_HALF_LIFE_HOURS,
+                            correct_streak: 0,
+                            total_attempts: 0,
+                            updated_at: Utc::now(),
+                        });
 
-                wls.state = WordState::Mastered;
-                wls.mastery_level = 1.0;
-                wls.updated_at = Utc::now();
-                store.set_word_learning_state(&wls)?;
+                    wls.state = WordState::Mastered;
+                    wls.mastery_level = 1.0;
+                    // 掌握后清除复习排程，与 reset_word 一致，避免已掌握词残留在 due 队列/ETA 统计。
+                    wls.next_review_date = None;
+                    wls.updated_at = Utc::now();
+                    Store::set_word_learning_state_conn(conn, &wls)?;
+                    Ok(wls)
+                })?;
                 Ok(enrich_one(&store, &auth.user_id, wls)?)
             },
         )
@@ -239,7 +244,8 @@ async fn reset_word(
                 updated_at: Utc::now(),
             };
 
-            store.set_word_learning_state(&wls)?;
+            // 全列覆写仍可能与并发写者交错，收进 BEGIN IMMEDIATE 事务串行化。
+            store.with_user_tx(|conn| Store::set_word_learning_state_conn(conn, &wls))?;
             Ok(enrich_one(&store, &auth.user_id, wls)?)
         })
         .await??;
@@ -311,6 +317,29 @@ async fn batch_update(
 
                         if let Some(ref s) = item.state {
                             wls.state = s.clone();
+                            // 状态切到 Mastered/New 时同步清除复习排程，保持 state 与 due 队列一致。
+                            if matches!(s, WordState::Mastered | WordState::New) {
+                                wls.next_review_date = None;
+                            }
+                            // 客户端只传 state 未传 mastery_level 时，强制 mastery_level 与终态对齐
+                            // （Mastered→1.0、New→0.0），与 mark_mastered/reset_word 口径一致，
+                            // 避免持久化出 state=MASTERED 但 mastery_level=0.0 的不一致进度。
+                            if item.mastery_level.is_none() {
+                                match s {
+                                    WordState::Mastered => wls.mastery_level = 1.0,
+                                    WordState::New => wls.mastery_level = 0.0,
+                                    _ => {}
+                                }
+                            }
+                            // 切到 Reviewing/Forgotten/Learning 但无排程日期时，默认立即可复习；否则该词
+                            // 被标为需复习却因 next_review_date IS NULL 永不进入 due 队列而搁浅。
+                            if matches!(
+                                s,
+                                WordState::Reviewing | WordState::Forgotten | WordState::Learning
+                            ) && wls.next_review_date.is_none()
+                            {
+                                wls.next_review_date = Some(Utc::now());
+                            }
                         }
                         if let Some(level) = item.mastery_level {
                             wls.mastery_level = level.clamp(0.0, 1.0);

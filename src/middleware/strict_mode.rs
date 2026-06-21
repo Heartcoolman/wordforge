@@ -83,6 +83,22 @@ pub async fn strict_mode_middleware(
 
     // 3) 最低版本门控（仅当 UA 解析成功且门控启用/配置）。
     //    门控独立于 cfg.hard_block：发布切流场景下「拒绝」必须是硬拒绝（否则切流无效）。
+
+    // D4 切流防绕过：只要版本强制生效（gate.enabled 或 cfg.enabled）且配置了 min_client_version，
+    // native 客户端（非 web）若缺失/非法 UA 就无法解析出 semver，会绕过下方 semver 门控直接放行——
+    // 等于丢/改 UA 即可逃避切流。故反绕过守卫的条件必须与下方 semver 强制条件(gate.enabled || cfg.enabled)
+    // 一致,否则 cfg.enabled=true 而 gate.enabled=false 时,丢 UA 仍可绕过。web 端不走 UA semver 门控，豁免。
+    if (gate.enabled || cfg.enabled) && gate.min_client_version.is_some() && ua_parsed.is_none() {
+        let is_web = req
+            .headers()
+            .get("x-device-platform")
+            .and_then(|v| v.to_str().ok())
+            == Some("web");
+        if !is_web {
+            return client_outdated_response("unknown", gate.min_client_version.as_deref().unwrap_or(""));
+        }
+    }
+
     if let (Some((_plat, client_ver)), Some(min_ver)) =
         (ua_parsed.as_ref(), gate.min_client_version.as_ref())
     {
@@ -163,14 +179,17 @@ pub(crate) fn parse_wordforge_ua(ua: &str) -> Option<(String, String)> {
     if ver.is_empty() {
         return None;
     }
-    // 至少要 `\d+\.\d+\.\d+` 三段
+    // 必须恰好是 `\d+\.\d+\.\d+` 三段:消费三段数字后须无残余段。否则像 "1.2.3.4"
+    // 会被 semver::Version::parse 拒绝(返回 Err),从而绕过版本门(release 切量硬开关)。
     let mut parts = ver.split('.');
+    // 每段必须**非空**且全为数字:空串对 `all(is_ascii_digit)` 是真空真,会让 "1.2."、"1..3"、".."
+    // 误判为合法 UA(返回 Some)却无法通过 semver::parse,导致版本门(release 切量硬开关)静默失效被绕过。
     let valid = (0..3).all(|_| {
         parts
             .next()
-            .is_some_and(|s| s.chars().all(|c| c.is_ascii_digit()))
+            .is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
     });
-    if !valid {
+    if !valid || parts.next().is_some() {
         return None;
     }
     Some((platform.to_string(), ver.to_string()))
@@ -208,5 +227,20 @@ mod tests {
     fn rejects_non_semver() {
         assert_eq!(parse_wordforge_ua("WordForge-iOS/1.0"), None);
         assert_eq!(parse_wordforge_ua("WordForge-iOS/v1.0.0"), None);
+    }
+
+    #[test]
+    fn rejects_empty_version_segment() {
+        // 空版本段必须被拒绝,否则可绕过版本门(参见 parse_wordforge_ua 注释)。
+        assert_eq!(parse_wordforge_ua("WordForge-iOS/1.2."), None);
+        assert_eq!(parse_wordforge_ua("WordForge-iOS/1..3"), None);
+        assert_eq!(parse_wordforge_ua("WordForge-iOS/.."), None);
+    }
+
+    #[test]
+    fn rejects_extra_version_segment() {
+        // 4 段语义版本会被 semver 拒绝,必须在解析阶段就剔除以免绕过版本门。
+        assert_eq!(parse_wordforge_ua("WordForge-iOS/1.2.3.4"), None);
+        assert_eq!(parse_wordforge_ua("WordForge-Android/1.2.3.0"), None);
     }
 }

@@ -191,6 +191,13 @@ fn normalize_ip_for_rate_limit(ip: IpAddr) -> IpAddr {
     match ip {
         IpAddr::V4(_) => ip,
         IpAddr::V6(v6) => {
+            // 双栈监听(HOST=::)时 IPv4 客户端会以 IPv4-mapped IPv6(::ffff:a.b.c.d)到达;
+            // 若直接做 /64 聚合,这类地址前 80 位全 0,会全部坍缩到同一个桶(::),导致所有
+            // IPv4 客户端共享一个限流计数(单点拖垮全局 / 暴力破解防护退化)。故先把 IPv4-mapped
+            // 还原成内嵌的 IPv4,仅对真正的 IPv6 做 /64 聚合。
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return IpAddr::V4(v4);
+            }
             let segments = v6.segments();
             let normalized = std::net::Ipv6Addr::new(
                 segments[0],
@@ -635,6 +642,22 @@ mod tests {
     fn ipv4_not_aggregated() {
         let ip: IpAddr = "10.0.0.1".parse().unwrap();
         assert_eq!(normalize_ip_for_rate_limit(ip), ip);
+    }
+
+    #[test]
+    fn ipv4_mapped_ipv6_canonicalized_not_collapsed() {
+        // IPv4-mapped IPv6 必须还原为内嵌 IPv4,不同客户端落不同桶,不能坍缩到同一个 ::。
+        let a: IpAddr = "::ffff:10.0.0.1".parse().unwrap();
+        let b: IpAddr = "::ffff:10.0.0.2".parse().unwrap();
+        assert_eq!(
+            normalize_ip_for_rate_limit(a),
+            "10.0.0.1".parse::<IpAddr>().unwrap()
+        );
+        assert_eq!(
+            normalize_ip_for_rate_limit(b),
+            "10.0.0.2".parse::<IpAddr>().unwrap()
+        );
+        assert_ne!(normalize_ip_for_rate_limit(a), normalize_ip_for_rate_limit(b));
     }
 
     use crate::amas::config::AMASConfig;

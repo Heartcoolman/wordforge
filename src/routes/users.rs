@@ -16,6 +16,7 @@ use crate::response::{ok, AppError};
 use crate::routes::auth::UserProfile;
 use crate::state::AppState;
 use crate::store::operations::records::LearningRecord;
+use crate::store::operations::users::GdprBeginResult;
 use crate::validation::{validate_password, validate_username};
 
 /// 每用户 GDPR 导出冷却时间（秒）。
@@ -71,13 +72,11 @@ async fn update_profile(
             .run_store_task(
                 "users.update_profile",
                 move |store| -> Result<_, AppError> {
-                    let mut user = store
+                    // 字段级更新：只写 username，避免陈旧整行快照覆盖并发封禁等状态。
+                    store.update_user_username(&user_id, &username)?;
+                    store
                         .get_user_by_id(&user_id)?
-                        .ok_or_else(|| AppError::not_found("用户不存在"))?;
-                    user.username = username;
-                    user.updated_at = Utc::now();
-                    store.update_user(&user)?;
-                    Ok(user)
+                        .ok_or_else(|| AppError::not_found("用户不存在"))
                 },
             )
             .await??;
@@ -129,7 +128,7 @@ async fn change_password(
     let current_password = req.current_password;
     let new_password = req.new_password;
     crate::blocking::run_blocking("users.change_password", move || -> Result<(), AppError> {
-        let mut user = store
+        let user = store
             .get_user_by_id(&user_id)?
             .ok_or_else(|| AppError::not_found("用户不存在"))?;
 
@@ -137,9 +136,9 @@ async fn change_password(
             return Err(AppError::unauthorized("当前密码不正确"));
         }
 
-        user.password_hash = hash_password(&new_password)?;
-        user.updated_at = Utc::now();
-        store.update_user(&user)?;
+        // 字段级更新：只写 password_hash，避免陈旧整行快照覆盖并发封禁等状态。
+        let new_hash = hash_password(&new_password)?;
+        store.update_user_password(&user.id, &new_hash)?;
         let _ = store.delete_user_sessions(&user_id)?;
         Ok(())
     })
@@ -220,47 +219,37 @@ async fn gdpr_export(
 ) -> Result<Response<Body>, AppError> {
     let user_id = auth.user_id.clone();
 
-    // 频率检查（在 blocking 线程做，避免 async 跨越 SQLite 连接）
-    let retry_after = state
-        .run_store_task("users.gdpr_export.check_rate", {
+    // 原子「检查冷却 + 记录导出」（单事务，BEGIN IMMEDIATE）：避免两个并发请求都读到旧时间、
+    // 都通过冷却门导致的 TOCTOU 双导出。通过则当场记录本次导出时间，冷却从此刻开始计算。
+    let begin = state
+        .run_store_task("users.gdpr_export.begin", {
             let user_id = user_id.clone();
-            move |store| -> Result<Option<i64>, AppError> {
-                let last = store.get_gdpr_export_last_at(&user_id)?;
-                if let Some(last_at) = last {
-                    let elapsed = (Utc::now() - last_at).num_seconds();
-                    if elapsed < GDPR_EXPORT_COOLDOWN_SECS {
-                        return Ok(Some(GDPR_EXPORT_COOLDOWN_SECS - elapsed));
-                    }
-                }
-                Ok(None)
+            move |store| -> Result<GdprBeginResult, AppError> {
+                Ok(store.try_begin_gdpr_export(&user_id, GDPR_EXPORT_COOLDOWN_SECS)?)
             }
         })
         .await??;
 
-    if let Some(secs) = retry_after {
-        tracing::warn!(user_id = %user_id, retry_after = secs, "GDPR export rate limited");
-        let body = serde_json::json!({
-            "success": false,
-            "code": "GDPR_EXPORT_RATE_LIMITED",
-            "message": "每 24 小时只能导出一次数据",
-        });
-        return Response::builder()
-            .status(StatusCode::TOO_MANY_REQUESTS)
-            .header(header::CONTENT_TYPE, "application/json")
-            .header("retry-after", secs.to_string())
-            .body(Body::from(body.to_string()))
-            .map_err(|e| AppError::internal(&e.to_string()));
-    }
+    let exported_at = match begin {
+        GdprBeginResult::RateLimited(secs) => {
+            tracing::warn!(user_id = %user_id, retry_after = secs, "GDPR export rate limited");
+            let body = serde_json::json!({
+                "success": false,
+                "code": "GDPR_EXPORT_RATE_LIMITED",
+                "message": "每 24 小时只能导出一次数据",
+            });
+            return Response::builder()
+                .status(StatusCode::TOO_MANY_REQUESTS)
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("retry-after", secs.to_string())
+                .body(Body::from(body.to_string()))
+                .map_err(|e| AppError::internal(&e.to_string()));
+        }
+        GdprBeginResult::Began { exported_at } => exported_at,
+    };
 
-    // 记录本次导出（先记录，再读取；冷却从此刻开始计算）
-    {
-        let uid = user_id.clone();
-        state
-            .run_store_task("users.gdpr_export.log", move |store| {
-                store.upsert_gdpr_export_log(&uid)
-            })
-            .await??;
-    }
+    // 导出时间已在上面的原子 begin 中记录（保留原子 begin 防并发双导出）；但若下方流式生产失败，
+    // 需回滚这条冷却记录，使瞬态失败不消耗用户 24h 配额（GDPR 数据可获取性）。
 
     // v1.1 P0：真流式 NDJSON。逐块读取后立即推入 mpsc channel，axum 用 ReceiverStream 包装为
     // Body，HTTP/1.1 自动 Transfer-Encoding: chunked。修复 C4/B4 报告：原 `Vec.join` 一次性
@@ -273,10 +262,38 @@ async fn gdpr_export(
     let state_for_stream = state.clone();
     let uid_for_stream = user_id.clone();
     tokio::spawn(async move {
-        if let Err(err) = run_export_stream(state_for_stream, uid_for_stream, tx.clone()).await {
-            // AppError 无 Display 实现，用其暴露的 message 字段拼 NDJSON 错误行。
-            let line = serde_json::json!({"table": "_error", "data": err.message}).to_string();
-            let _ = tx.send(Ok(Bytes::from(line + "\n"))).await;
+        match run_export_stream(state_for_stream.clone(), uid_for_stream.clone(), tx.clone()).await
+        {
+            Ok(()) => {}
+            // 客户端断连(mpsc 接收端被 drop):客户端已主动放弃下载,**不**回滚冷却记录,
+            // 否则恶意客户端可反复"开流→读首块后立即断开→回滚配额"绕过 24h 限额,放大 DB/CPU。
+            // 客户端已不在,也无需再发 _error 行。
+            Err(ExportError::ClientDisconnected) => {
+                tracing::debug!(user_id = %uid_for_stream, "GDPR export client disconnected; cooldown kept");
+            }
+            // 仅服务端内部/存储错误才回滚冷却记录,使真正的瞬态失败不消耗用户配额。
+            Err(ExportError::Internal(err)) => {
+                // 瞬态失败回滚冷却记录：仅当 exported_at 仍是本次写入的时间戳才删，避免误删并发重试的较新行。
+                let rollback = state_for_stream
+                    .run_store_task("users.gdpr_export.rollback", {
+                        let uid = uid_for_stream.clone();
+                        let ts = exported_at.clone();
+                        move |store| store.rollback_gdpr_export_log(&uid, &ts)
+                    })
+                    .await;
+                match rollback {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        tracing::warn!(user_id = %uid_for_stream, error = %e, "GDPR export cooldown rollback failed (store)");
+                    }
+                    Err(e) => {
+                        tracing::warn!(user_id = %uid_for_stream, error = ?e, "GDPR export cooldown rollback failed (task)");
+                    }
+                }
+                // AppError 无 Display 实现，用其暴露的 message 字段拼 NDJSON 错误行。
+                let line = serde_json::json!({"table": "_error", "data": err.message}).to_string();
+                let _ = tx.send(Ok(Bytes::from(line + "\n"))).await;
+            }
         }
     });
     let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
@@ -292,16 +309,43 @@ async fn gdpr_export(
         .map_err(|e| AppError::internal(&e.to_string()))
 }
 
+/// GDPR 导出流式生产的失败类别:区分客户端断连与服务端内部错误,
+/// 前者不应回滚冷却配额(防绕过限额),后者才回滚(真正的瞬态失败)。
+enum ExportError {
+    /// 客户端断连(mpsc 接收端被 drop):配额已被合理消耗,不回滚。
+    ClientDisconnected,
+    /// 服务端内部/存储错误:回滚冷却记录,使瞬态失败不消耗配额。
+    Internal(AppError),
+}
+
+impl From<AppError> for ExportError {
+    fn from(e: AppError) -> Self {
+        ExportError::Internal(e)
+    }
+}
+
+impl From<crate::blocking::BlockingTaskError> for ExportError {
+    fn from(e: crate::blocking::BlockingTaskError) -> Self {
+        ExportError::Internal(AppError::from(e))
+    }
+}
+
+impl From<crate::store::StoreError> for ExportError {
+    fn from(e: crate::store::StoreError) -> Self {
+        ExportError::Internal(AppError::from(e))
+    }
+}
+
 /// v1.1 P0：GDPR 导出真流式 body 生产者。
 /// 每块单独在 blocking 线程读完后立即 push 到 channel；channel 容量 8 提供少量背压，
 /// 客户端断连时 tx.send 返回 Err → 后续块直接早退（不再浪费 store 任务）。
 ///
-/// 错误返回给调用方包装为 NDJSON `_error` 行（见 `gdpr_export` 内的 spawn）。
+/// 错误返回给调用方按类别处理（见 `gdpr_export` 内的 spawn）。
 async fn run_export_stream(
     state: AppState,
     user_id: String,
     tx: tokio::sync::mpsc::Sender<Result<Bytes, Infallible>>,
-) -> Result<(), AppError> {
+) -> Result<(), ExportError> {
     // profile
     let profile = state
         .run_store_task("users.gdpr_export.profile", {
@@ -390,17 +434,18 @@ async fn run_export_stream(
     Ok(())
 }
 
-/// 流式 helper：序列化一行并 push 到 channel；客户端断连时返回 Err 让上游早退。
+/// 流式 helper：序列化一行并 push 到 channel；客户端断连时返回 `ClientDisconnected` 让上游早退。
+/// 断连是客户端主动行为,**不**作为可回滚的内部错误处理,以免被用来绕过导出冷却配额。
 async fn send_line<T: Serialize>(
     tx: &tokio::sync::mpsc::Sender<Result<Bytes, Infallible>>,
     table: &str,
     data: &T,
-) -> Result<(), AppError> {
+) -> Result<(), ExportError> {
     let line = json_line(table, data) + "\n";
     let chunk: Result<Bytes, Infallible> = Ok(Bytes::from(line));
     tx.send(chunk)
         .await
-        .map_err(|_| AppError::internal("GDPR 导出客户端已断连"))
+        .map_err(|_| ExportError::ClientDisconnected)
 }
 
 /// 序列化一个数据块为 JSON Lines 行。

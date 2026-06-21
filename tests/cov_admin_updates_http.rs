@@ -426,7 +426,7 @@ async fn status_lists_known_rollback_targets_and_current_schema() {
     assert!(tags.contains(&"v1.2.0-beta.16"), "应含更旧的 beta.16: {tags:?}");
     assert!(tags.contains(&"v1.2.0-beta.8"), "应含 beta.8: {tags:?}");
     assert!(!tags.contains(&"v1.2.0-beta.17"), "不应含当前版本");
-    assert_eq!(body["data"]["currentSchema"], 61);
+    assert_eq!(body["data"]["currentSchema"], 62);
 }
 
 /// preflight：历史表内目标无需下载即可解析 schema，给出 droppedVersionsHint。
@@ -452,10 +452,10 @@ async fn preflight_resolves_known_historical_target() {
     assert_eq!(status, StatusCode::OK, "body={body}");
     assert_eq!(body["data"]["canRollback"], true);
     assert_eq!(body["data"]["targetSchema"], 55);
-    assert_eq!(body["data"]["currentSchema"], 61);
+    assert_eq!(body["data"]["currentSchema"], 62);
     assert_eq!(body["data"]["needsDownloadCheck"], false);
     let dropped = body["data"]["droppedVersionsHint"].as_array().unwrap();
-    assert!(!dropped.is_empty(), "回滚到 schema 55 应提示 56~61 的新增迁移被丢弃");
+    assert!(!dropped.is_empty(), "回滚到 schema 55 应提示 56~62 的新增迁移被丢弃");
 }
 
 /// preflight：目标不在历史表（未知/未来版本）→ needsDownloadCheck=true、targetSchema=null。

@@ -59,11 +59,18 @@ impl Store {
         user_id: &str,
         expires_at: &str,
     ) -> Result<(), StoreError> {
-        let conn = self.conn()?;
-        conn.execute(
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+        // 单活令牌不变式：签发新令牌前作废该用户既有未用令牌，避免多枚同时有效扩大被盗窃面。
+        tx.execute(
+            "DELETE FROM password_reset_tokens WHERE user_id=?1",
+            params![user_id],
+        )?;
+        tx.execute(
             "INSERT INTO password_reset_tokens (token_hash, user_id, expires_at) VALUES (?1, ?2, ?3)",
             params![token_hash, user_id, expires_at],
         )?;
+        tx.commit()?;
         Ok(())
     }
 

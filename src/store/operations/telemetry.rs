@@ -570,6 +570,23 @@ impl Store {
         })
     }
 
+    /// m061：摄取拒绝留痕表 retention 清理,删除 server_ts < cutoff 的行,返回删除行数。
+    /// **注意**:本表 server_ts 由 `insert_ingest_rejection` 写入 `to_rfc3339()`（'T' 分隔 + 时区后缀,
+    /// 与 `aggregate_ingest_rejections` 的 cutoff 口径一致),与 telemetry_events 的 `datetime('now')`
+    /// 空格格式不同。故 cutoff 必须同为 RFC3339,严禁复用 `delete_telemetry_older_than` 的空格 cutoff,
+    /// 否则 TEXT 字典序比较因 'T'(0x54) vs 空格(0x20) 失配。
+    pub fn delete_ingest_rejections_older_than(
+        &self,
+        cutoff_rfc3339: &str,
+    ) -> Result<u64, StoreError> {
+        let conn = self.conn()?;
+        let deleted = conn.execute(
+            "DELETE FROM telemetry_ingest_rejections WHERE server_ts < ?1",
+            params![cutoff_rfc3339],
+        )?;
+        Ok(deleted as u64)
+    }
+
     /// m061：摄取拒绝留痕（fire-and-forget，由摄取热路径调用）。server_ts 用当前 UTC RFC3339。
     pub fn insert_ingest_rejection(
         &self,

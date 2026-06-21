@@ -116,15 +116,27 @@ pub async fn sse_handler(
     }
     guard.user_sse_acquired = true;
 
+    // 与 telemetry / device_middleware 一致校验 x-device-id 格式：格式非法的 id 视为 None，
+    // 不登记进 active_sse / last_heartbeat，避免心跳刷新路径(telemetry 会先 400 拒绝同一 id)
+    // 永远刷不到它而触发卡死的 heartbeat key + 误报 data_corrupted。
     let device_id = headers
         .get("x-device-id")
         .and_then(|v| v.to_str().ok())
+        .filter(|v| crate::middleware::device::is_valid_device_id(v))
         .map(String::from);
     let platform = headers
         .get("x-device-platform")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("unknown")
         .to_string();
+
+    // 在归属核验 await 之前先订阅 maintenance/update 广播：broadcast 只投递 subscribe()
+    // 之后发出的消息，若在下方 owner-check await 期间触发 set_maintenance/broadcast_update，
+    // 晚订阅会漏收该事件，使刚连上的客户端停留在过期维护状态。
+    let mut maintenance_rx = state.maintenance_rx();
+    let mut update_rx = state.update_rx();
+    // 连接时的当前维护状态，作为初始事件下发，避免连上即维护却收不到任何事件的盲区。
+    let initial_maintenance = state.is_maintenance();
 
     // 归属核验:device_id 取自客户端可控 x-device-id 头,登记进 active_sse 后会收到
     // admin 定向事件(探针脚本 / 封禁令牌等)。仅当设备未被他人认领(owner 为 NULL 或
@@ -157,9 +169,15 @@ pub async fn sse_handler(
         None => None,
     };
 
-    let (per_conn_tx, mut per_conn_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (per_conn_tx, mut per_conn_rx) =
+        tokio::sync::mpsc::channel(crate::state::SSE_CONN_CHANNEL_CAP);
 
+    // device_id 为 None（无/非法头、归属他人、核验失败）时不登记 active_sse，但仍须保留
+    // per_conn_tx 存活至流结束，否则唯一 Sender 被 drop → per_conn_rx.recv() 立即返回 None →
+    // 流在首轮 select 即 break 关闭，违反「保留流、通用事件仍下发」契约。
+    let keepalive_tx;
     if let Some(ref did) = device_id {
+        keepalive_tx = None;
         let info = SseClientInfo {
             conn_id: conn_id.clone(),
             user_id: auth.user_id.clone(),
@@ -178,15 +196,17 @@ pub async fn sse_handler(
         // P0：核验通过且登记完成后才把 did 交给 guard，确保此前取消路径不会触及 active_sse。
         // 此处至 stream 起始之间均为同步操作，无 .await，故安全。
         guard.device_id = Some(did.clone());
+    } else {
+        keepalive_tx = Some(per_conn_tx);
     }
 
     let mut shutdown_rx = state.shutdown_rx();
-    let mut maintenance_rx = state.maintenance_rx();
-    let mut update_rx = state.update_rx();
     let user_id = auth.user_id.clone();
 
     let stream = async_stream::stream! {
         let _guard = guard;
+        // 未登记时持有 per_conn_tx 存活，使 per_conn_rx 永不因 Sender 全 drop 而提前关闭流。
+        let _keepalive_tx = keepalive_tx;
 
         let mut interval = tokio::time::interval(Duration::from_secs(5));
         let mut last_event_count: u64 = 0;
@@ -208,6 +228,14 @@ pub async fn sse_handler(
         };
         if let Some(user_state) = initial_state {
             last_event_count = user_state.total_event_count;
+        }
+
+        // 连接即下发当前维护状态，保证新连接客户端不会停留在过期维护状态（即使连接时
+        // 维护已开启且后续无 toggle）。
+        if let Ok(json) =
+            serde_json::to_string(&serde_json::json!({ "type": "maintenance", "active": initial_maintenance }))
+        {
+            yield Ok(Event::default().event("maintenance").data(json));
         }
 
         loop {
@@ -405,7 +433,7 @@ mod tests {
         let state = test_state();
         let device_id = "device-1".to_string();
         let conn_id = "conn-1".to_string();
-        let (tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, _) = tokio::sync::mpsc::channel(crate::state::SSE_CONN_CHANNEL_CAP);
 
         state.active_sse().insert(
             device_id.clone(),
@@ -446,7 +474,7 @@ mod tests {
         let device_id = "device-reconnect".to_string();
         let old_conn = "conn-old".to_string();
         let new_conn = "conn-new".to_string();
-        let (tx_new, _) = tokio::sync::mpsc::unbounded_channel();
+        let (tx_new, _) = tokio::sync::mpsc::channel(crate::state::SSE_CONN_CHANNEL_CAP);
 
         // 模拟：旧连接已从列表移除（列表当前只剩新连接），新连接刚写入心跳基线。
         state.active_sse().insert(

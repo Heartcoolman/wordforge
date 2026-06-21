@@ -733,7 +733,12 @@ fn build_cors_layer(config: &Config) -> CorsLayer {
     let origin_str = config.cors_origin.trim();
     // 跨域时浏览器默认不允许 JS 读非简单响应头，要让前端读到 X-Server-Time 做时钟对齐，
     // 必须显式 expose（见 middleware/server_time.rs）。
-    let expose_headers = [HeaderName::from_static("x-server-time")];
+    // 同理 429 的 Retry-After 不是 CORS 安全列表头，跨域时若不 expose，客户端 headers.get('Retry-After')
+    // 会返回 null，丢失精确重试时机（见 rate_limit.rs / wordforge-web client.ts）。
+    let expose_headers = [
+        HeaderName::from_static("x-server-time"),
+        HeaderName::from_static("retry-after"),
+    ];
 
     if origin_str == "*" {
         return CorsLayer::new()

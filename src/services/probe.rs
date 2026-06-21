@@ -90,10 +90,14 @@ impl ProbeService {
         }
     }
 
-    /// admin SSE 流结束时调用：清理 sender。若仍有其他订阅者会被
-    /// broadcast::Receiver::Closed 唤醒（属预期）。
+    /// admin SSE 流结束时调用：仅当该 batch 已无任何存活订阅者时才移除 sender。
+    /// 同一 batch 可能有多个并发 admin 流共享一个 sender（如 super_admin + owning admin），
+    /// 若在第一个流结束时无条件 remove，会一并销毁 sender、切断其余流的结果投递。
+    /// guard 在 receiver(`rx`) 之后被 drop，故 `receiver_count()` 已反映剩余存活流数：
+    /// 为 0 时才安全移除，避免误删仍被订阅的 sender。
     pub fn drop_batch(&self, batch_id: &str) {
-        self.result_tx.remove(batch_id);
+        self.result_tx
+            .remove_if(batch_id, |_, sender| sender.receiver_count() == 0);
     }
 
     /// 客户端首次回传 `status=confirm_required` 时，admin probe results 路由

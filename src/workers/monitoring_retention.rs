@@ -11,7 +11,8 @@
 use crate::store::Store;
 
 /// 保留最近 N 天的 engine_monitoring_events 数据。
-const RETENTION_DAYS: i64 = 30;
+/// 同时作为 cache_cleanup 清理同一张表的窗口下限，避免双权威用更短窗口提前删空。
+pub(crate) const RETENTION_DAYS: i64 = 30;
 
 pub async fn run(store: &Store) {
     tracing::info!(

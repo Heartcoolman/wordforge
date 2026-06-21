@@ -121,6 +121,9 @@ struct EngineStateSnapshot {
     mastery_states: Vec<(String, Option<serde_json::Value>)>,
     user_elo: crate::amas::elo::EloRating,
     word_elo: crate::amas::elo::EloRating,
+    /// W1-1：word_elo 的派生列（trend, rating_select）快照。EloRating 只含 rating/games，
+    /// 这两列须单独捕获，否则回滚不复位会留下全局污染（动态 K / 选词链）。
+    word_elo_trend_select: (f64, f64),
     /// #14：抗投毒账本（user,word）净位移快照，与 word_elo 同步捕获/回滚。
     word_elo_contrib: f64,
 }
@@ -179,6 +182,7 @@ fn capture_engine_state_snapshot(
         mastery_states,
         user_elo: store.get_user_elo(user_id)?,
         word_elo: store.get_word_elo(word_id)?,
+        word_elo_trend_select: store.get_word_elo_trend_select(word_id)?,
         word_elo_contrib: store.get_word_elo_user_contrib(user_id, word_id)?,
     })
 }
@@ -209,6 +213,11 @@ fn restore_engine_state_snapshot(
         algo_states: &algo_states,
         user_elo: Some(&snapshot.user_elo),
         word_elo: Some((word_id, &snapshot.word_elo)),
+        word_elo_trend_select: Some((
+            word_id,
+            snapshot.word_elo_trend_select.0,
+            snapshot.word_elo_trend_select.1,
+        )),
         word_elo_contrib: Some((word_id, snapshot.word_elo_contrib)),
         swd_delete_seq: snapshot.swd_appended_seq,
         clear_marker_record_id: clear_marker,

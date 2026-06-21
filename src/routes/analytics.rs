@@ -392,20 +392,19 @@ fn compute_dashboard_aggregate(
 
     for session in sessions {
         let date = session.created_at.with_timezone(&tz).date_naive();
+        // 仅当 session 的本地日期落在 [start_date, end_date] 桶内才计入 summary，与 daily 分桶口径
+        // 保持一致（records 已采用同样的 guard）。否则在 DST 零点跳变等边界 case 下，session 会被计入
+        // summary 却无对应 daily 桶，造成 sum(daily) != summary 的内部不一致。
         if let Some(day) = daily.get_mut(&date) {
             day.session_count += 1;
             day.study_duration_secs += session_duration_secs(&session);
+            summary.session_count += 1;
+            summary.study_duration_secs += session_duration_secs(&session);
             if let Some(summary_data) = &session.summary {
                 for word_id in &summary_data.mastered_word_ids {
                     day.mastered_words.insert(word_id.clone());
+                    summary.mastered_words.insert(word_id.clone());
                 }
-            }
-        }
-        summary.session_count += 1;
-        summary.study_duration_secs += session_duration_secs(&session);
-        if let Some(summary_data) = &session.summary {
-            for word_id in &summary_data.mastered_word_ids {
-                summary.mastered_words.insert(word_id.clone());
             }
         }
     }
@@ -684,6 +683,8 @@ async fn forgetting_risk(
                         .unwrap_or(std::cmp::Ordering::Equal)
                         .then_with(|| b.overdue_hours.cmp(&a.overdue_hours))
                 });
+                // 仅返回风险最高的前 N 条，避免重度用户产生数 MB 级超大响应；summary 仍含全量计数。
+                risk_words.truncate(200);
 
                 let retention_curve = ["new", "1d", "3d", "7d", "14d", "30d"]
                     .iter()

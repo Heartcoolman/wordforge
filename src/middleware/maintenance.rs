@@ -16,6 +16,7 @@ pub async fn maintenance_middleware(
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             axum::Json(serde_json::json!({
+                "success": false,
                 "code": "MAINTENANCE",
                 "message": "服务器维护中，请稍后重试"
             })),

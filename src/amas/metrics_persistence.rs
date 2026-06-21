@@ -16,7 +16,12 @@ pub fn flush_metrics(
     store: &Store,
 ) -> Result<(), crate::store::StoreError> {
     let snapshot = registry.snapshot_and_reset();
-    flush_metrics_snapshot(snapshot, store)
+    // 落库失败时把取走的计数加回 registry，避免该区间计数随 reset 永久丢失（reset-before-confirm）。
+    if let Err(e) = flush_metrics_snapshot(snapshot.clone(), store) {
+        registry.merge_snapshot(&snapshot);
+        return Err(e);
+    }
+    Ok(())
 }
 
 pub fn flush_metrics_snapshot(
@@ -35,6 +40,7 @@ pub fn flush_metrics_snapshot(
                         call_count: 0,
                         total_latency_us: 0,
                         error_count: 0,
+                        latency_buckets: [0; 6],
                     });
                 existing.call_count += metrics.call_count;
                 existing.total_latency_us += metrics.total_latency_us;

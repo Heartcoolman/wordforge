@@ -137,8 +137,10 @@ async fn issue_token_pair(user_id: &str, state: &AppState) -> Result<(String, St
         .run_store_task(
             "auth.issue_token_pair",
             move |store| -> Result<(), AppError> {
-                if let Err(e) =
-                    store.cleanup_oldest_user_sessions(&cleanup_user_id, MAX_SESSIONS_PER_USER)
+                // 每次登录/刷新写入 access+refresh 两行，故上限须按「会话对」换算为行数（*2），
+                // 否则 MAX_SESSIONS_PER_USER 行实际只够约一半的并发设备数，并会成对裁掉仍有效的旧设备。
+                if let Err(e) = store
+                    .cleanup_oldest_user_sessions(&cleanup_user_id, MAX_SESSIONS_PER_USER * 2)
                 {
                     tracing::warn!(user_id = %cleanup_user_id, error = %e, "清理多余会话失败");
                 }
@@ -246,29 +248,43 @@ async fn register(
 // m025:从代理 / 直连请求里 best-effort 取 client IP,无则返回 None。
 // 优先不可伪造的 x-real-ip(nginx $remote_addr),次 XFF 最右段(最近可信跳),均无 → None。
 // 取最右段而非首段以防客户端注入 XFF 首值伪造审计 IP,与 rate_limit 限流口径一致。
-fn extract_client_ip(headers: &axum::http::HeaderMap) -> Option<String> {
-    if let Some(real) = headers
-        .get("x-real-ip")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-    {
-        return Some(real);
+fn extract_client_ip(
+    headers: &axum::http::HeaderMap,
+    trust_proxy: bool,
+    connect_ip: Option<std::net::IpAddr>,
+) -> Option<String> {
+    // 仅在 trust_proxy 时信任客户端可伪造的 x-real-ip/XFF 头(与 rate_limit 口径一致),
+    // 否则落连接对端 socket IP——直连暴露下客户端可任意伪造头,信任会污染登录审计 IP。
+    if trust_proxy {
+        if let Some(real) = headers
+            .get("x-real-ip")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+        {
+            return Some(real);
+        }
+        if let Some(xff) = headers
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|xff| xff.split(',').next_back())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+        {
+            return Some(xff);
+        }
     }
-    headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|xff| xff.split(',').next_back())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+    connect_ip.map(|ip| ip.to_string())
 }
 
 async fn login(
     State(state): State<AppState>,
+    connect_info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
     headers: axum::http::HeaderMap,
     JsonBody(req): JsonBody<LoginRequest>,
 ) -> Result<Response, AppError> {
-    let client_ip = extract_client_ip(&headers);
+    let connect_ip = connect_info.map(|ci| ci.0.ip());
+    let client_ip = extract_client_ip(&headers, state.config().trust_proxy, connect_ip);
     let email = req.email.trim().to_lowercase();
     let (user, is_locked) = state
         .run_store_task("auth.login.lookup", move |store| -> Result<_, AppError> {
@@ -277,27 +293,18 @@ async fn login(
             }
 
             let user = store.get_user_by_email(&email)?;
-            let is_locked = if let Some(ref user) = user {
-                store.is_account_locked(&user.id)?
-            } else {
-                false
-            };
+            // 锁定状态直接从已取出的 user 行派生（locked_until > now），不再为「存在账号」
+            // 多跑一条 is_account_locked SELECT——该非对称额外查询会泄露账号存在性的时序 oracle。
+            let is_locked = user
+                .as_ref()
+                .and_then(|u| u.locked_until)
+                .is_some_and(|t| t > Utc::now());
             Ok((user, is_locked))
         })
         .await??;
 
-    // Check ban and lockout status BEFORE password verification to prevent timing attacks
-    if let Some(ref u) = user {
-        if u.is_banned {
-            return Err(AppError::forbidden("用户已被封禁"));
-        }
-    }
-    if is_locked {
-        return Err(AppError::account_locked(
-            "账户因多次登录失败已被临时锁定，请稍后再试",
-        ));
-    }
-
+    // 先做密码校验（始终对真实或 dummy hash 跑，constant-time 防时序），校验失败一律返回通用 401，
+    // 不暴露账号是否存在/封禁/锁定——把封禁与锁定状态的区分推迟到密码校验通过之后，避免枚举 oracle。
     let stored_hash = user
         .as_ref()
         .map(|user| user.password_hash.clone())
@@ -308,25 +315,48 @@ async fn login(
     })
     .await??;
     if !verified || user.is_none() {
+        // 把失败计数写出同步响应路径(detached spawn):无论账号是否存在,响应延迟都只含
+        // argon2 校验,不再因「存在账号多一次 DB 写」而泄露账号存在性(枚举时序 oracle)。
         if let Some(ref u) = user {
             let user_id = u.id.clone();
-            match state
-                .run_store_task("auth.login.record_failed_login", move |store| {
-                    store.record_failed_login(&user_id)
-                })
-                .await
-            {
-                Ok(Ok(_)) => {}
-                Ok(Err(e)) => {
-                    tracing::warn!(user_id = %u.id, error = %e, "Failed to record login failure")
+            let log_id = u.id.clone();
+            let state = state.clone();
+            tokio::spawn(async move {
+                match state
+                    .run_store_task("auth.login.record_failed_login", move |store| {
+                        store.record_failed_login(&user_id)
+                    })
+                    .await
+                {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(e)) => {
+                        tracing::warn!(user_id = %log_id, error = %e, "Failed to record login failure")
+                    }
+                    Err(e) => {
+                        tracing::warn!(user_id = %log_id, error = %e, "Login failure task failed")
+                    }
                 }
-                Err(e) => tracing::warn!(user_id = %u.id, error = %e, "Login failure task failed"),
-            }
+            });
         }
         return Err(AppError::unauthorized("邮箱或密码错误"));
     }
 
     let user = user.unwrap();
+
+    // 密码已验证通过，方可披露封禁/锁定状态（仅对持有正确密码的账号本人，非枚举攻击者）。
+    if user.is_banned {
+        return Err(AppError::forbidden("用户已被封禁"));
+    }
+    // 安全权衡（已知可接受风险）：账户锁定是暴力破解的核心防御,但知道受害者邮箱的攻击者可故意
+    // 提交若干次错误密码把账户打到锁定态,形成定向 DoS。此处不软化锁定语义——放行「锁定期内的正确
+    // 密码」会重新打开锁定窗口内的无限猜测(攻击者借响应区分命中/未命中)。爆炸半径已被 record_failed_login
+    // 的 already_locked 守卫限制为单个不可延长的 15 分钟自动解锁窗口,且 IP 维度另有 auth_rate_limit。
+    // 彻底消除定向 DoS 需 CAPTCHA / 步进验证等额外设施(本构建邮件重置亦关闭),超出本次修复范围。
+    if is_locked {
+        return Err(AppError::account_locked(
+            "账户因多次登录失败已被临时锁定，请稍后再试",
+        ));
+    }
 
     let user_id = user.id.clone();
     match state
@@ -488,32 +518,46 @@ async fn forgot_password(
     JsonBody(req): JsonBody<ForgotPasswordRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     let email = req.email.trim().to_lowercase();
-    if let Some(user) = state
+    let user = state
         .run_store_task("auth.forgot_password.get_user_by_email", move |store| {
             store.get_user_by_email(&email)
         })
-        .await??
-    {
-        let raw_token = uuid::Uuid::new_v4().simple().to_string();
-        let token_hash = hash_token(&raw_token);
-        let expires_at = (Utc::now() + Duration::hours(1)).to_rfc3339();
+        .await??;
 
-        state
-            .run_store_task("auth.forgot_password.create_token", move |store| {
-                store.create_password_reset_token(&token_hash, &user.id, &expires_at)
-            })
-            .await??;
+    // 始终生成并 hash token,使两条分支的 CPU 工作量一致;真正的事务写入移出同步响应路径
+    // (detached spawn),让响应延迟不依赖账号是否存在,关闭枚举时序 oracle。
+    let raw_token = uuid::Uuid::new_v4().simple().to_string();
+    let token_hash = hash_token(&raw_token);
+    if let Some(user) = user {
+        let expires_at = (Utc::now() + Duration::hours(1)).to_rfc3339();
 
         // 仅通过日志输出 token，绝不在响应中返回
         tracing::trace!(
             token_prefix = %&raw_token[..8],
             "Password reset token generated (dev diagnostics only)"
         );
-
         tracing::info!(
             email = %mask_email_for_log(&user.email),
             "Password reset requested; email delivery disabled in trimmed build"
         );
+
+        let state = state.clone();
+        tokio::spawn(async move {
+            match state
+                .run_store_task("auth.forgot_password.create_token", move |store| {
+                    store.create_password_reset_token(&token_hash, &user.id, &expires_at)
+                })
+                .await
+            {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => {
+                    tracing::warn!(error = %e, "Password reset token creation failed")
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Password reset token creation task failed")
+                }
+            }
+        });
     }
 
     Ok(ok(serde_json::json!({
@@ -532,10 +576,12 @@ async fn reset_password(
 
     let token_hash = hash_token(&req.token);
 
-    // 原子删除+返回，确保同一 token 只能使用一次
+    // 先做非破坏性校验（get 而非 delete）：令牌存在且未过期。哈希可能瞬态失败（panic/runtime
+    // shutdown），若此处就消费一次性令牌会白白作废它，逼用户重走 forgot-password。
+    let lookup_hash = token_hash.clone();
     let entry = state
-        .run_store_task("auth.reset_password.take_token", move |store| {
-            store.take_password_reset_token(&token_hash)
+        .run_store_task("auth.reset_password.get_token", move |store| {
+            store.get_password_reset_token(&lookup_hash)
         })
         .await??
         .ok_or_else(|| AppError::bad_request("AUTH_INVALID_RESET_TOKEN", "重置令牌无效"))?;
@@ -555,29 +601,33 @@ async fn reset_password(
         .as_str()
         .ok_or_else(|| AppError::internal("reset token missing user_id"))?;
 
-    let mut user = state
-        .run_store_task("auth.reset_password.get_user", {
-            let user_id = user_id.to_string();
-            move |store| store.get_user_by_id(&user_id)
+    let user_id = user_id.to_string();
+
+    // 哈希在消费令牌之前完成：哈希失败时令牌仍未删除，用户可原样重试。
+    let new_password = req.new_password;
+    let new_hash = crate::blocking::run_blocking("auth.reset_password.hash_password", move || {
+        hash_password(&new_password)
+    })
+    .await??;
+
+    // 哈希成功后再以 DELETE...RETURNING 原子消费令牌，保证一次性；并发已被取走则视为无效。
+    let take_hash = token_hash.clone();
+    state
+        .run_store_task("auth.reset_password.take_token", move |store| {
+            store.take_password_reset_token(&take_hash)
         })
         .await??
         .ok_or_else(|| AppError::bad_request("AUTH_INVALID_RESET_TOKEN", "重置令牌无效"))?;
-
-    let new_password = req.new_password;
-    user.password_hash =
-        crate::blocking::run_blocking("auth.reset_password.hash_password", move || {
-            hash_password(&new_password)
-        })
-        .await??;
-    user.updated_at = Utc::now();
-    let user_for_update = user.clone();
-    let user_id = user.id.clone();
+    // 成功重置密码后清除锁定状态：被 5 次失败登录锁定的用户正是走重置流程恢复账号，
+    // 若不清零会让其凭新密码仍被 ACCOUNT_LOCKED 挡到 15 分钟锁定窗口自然过期。
+    // 字段级更新：只写 password_hash + 清锁定，避免陈旧整行快照覆盖并发封禁等状态。
+    let uid_for_update = user_id.clone();
     match state
         .run_store_task(
             "auth.reset_password.update_user",
             move |store| -> Result<(), AppError> {
-                store.update_user(&user_for_update)?;
-                let _ = store.delete_user_sessions(&user_id);
+                store.update_user_password_clear_lockout(&uid_for_update, &new_hash)?;
+                let _ = store.delete_user_sessions(&uid_for_update);
                 Ok(())
             },
         )

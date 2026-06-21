@@ -157,16 +157,21 @@ export default function MonitoringPage() {
     await Promise.allSettled([fetchSlow(), fetchRequests(), fetchLogs(), fetchEvents()]);
   }
 
+  // 定时器在组件体内同步创建并同步注册 onCleanup：SolidJS 的 onCleanup 只绑定到当前
+  // 同步执行的 reactive Owner，一旦放到 async onMount 的 await 之后，Owner 上下文已失效，
+  // onCleanup 变为无 owner 的空操作，导致离开本页时三个 setInterval 永不清除而泄漏。
+  // 因此与 DevicesPage 一致，把 setInterval + onCleanup 放在同步路径，仅 refreshAll 走异步。
+  const clockTimer = setInterval(() => setClock(new Date().toLocaleTimeString('zh-CN', { hour12: false })), 1000);
+  const fastTimer = setInterval(() => {
+    if (!autoRefresh()) return;
+    void fetchRequests(); void fetchLogs(); void fetchEvents();
+  }, FAST_MS);
+  const slowTimer = setInterval(() => { if (autoRefresh()) void fetchSlow(); }, SLOW_MS);
+  onCleanup(() => { clearInterval(clockTimer); clearInterval(fastTimer); clearInterval(slowTimer); });
+
   onMount(async () => {
     await refreshAll();
     setLoading(false);
-    const clockTimer = setInterval(() => setClock(new Date().toLocaleTimeString('zh-CN', { hour12: false })), 1000);
-    const fastTimer = setInterval(() => {
-      if (!autoRefresh()) return;
-      void fetchRequests(); void fetchLogs(); void fetchEvents();
-    }, FAST_MS);
-    const slowTimer = setInterval(() => { if (autoRefresh()) void fetchSlow(); }, SLOW_MS);
-    onCleanup(() => { clearInterval(clockTimer); clearInterval(fastTimer); clearInterval(slowTimer); });
   });
 
   // ── 派生 ──

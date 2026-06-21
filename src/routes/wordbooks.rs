@@ -7,6 +7,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::auth::AuthUser;
+use crate::constants::MAX_PAGE_NUMBER;
 use crate::response::{created, ok, paginated, AppError};
 use crate::routes::words::WordPublic;
 use crate::state::AppState;
@@ -194,7 +195,8 @@ async fn list_wordbook_words(
     Query(q): Query<ListWordbookWordsQuery>,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let page = q.page.unwrap_or(1).clamp(1, u64::MAX);
+    // 上界封顶防 (page-1)*per_page 在 release(无 overflow-checks)下溢出回绕成乱序 offset。
+    let page = q.page.unwrap_or(1).clamp(1, MAX_PAGE_NUMBER);
     let per_page = q
         .per_page
         .unwrap_or(state.config().pagination.default_page_size)
@@ -214,8 +216,9 @@ async fn list_wordbook_words(
                     return Err(AppError::forbidden("您没有该词书的操作权限"));
                 }
 
-                let total = store.count_wordbook_words(&id_for_lookup)?;
-                let word_ids = store.list_wordbook_words(&id_for_lookup, limit, offset)?;
+                // count + list 收进同一事务快照，避免并发增删词导致 total 与列表不一致。
+                let (total, word_ids) =
+                    store.count_and_list_wordbook_words(&id_for_lookup, limit, offset)?;
                 let words_by_id = store.get_words_by_ids(&word_ids)?;
                 Ok((total, word_ids, words_by_id))
             },
@@ -265,8 +268,14 @@ async fn add_words(
                 return Err(AppError::forbidden("您没有该词书的操作权限"));
             }
 
+            // 校验 word_id 真实存在,避免幻影 id 灌入 wordbook_words 虚增 word_count
+            //（wordbook_words 无指向 words 的外键,DB 不会拒绝不存在的词）。
+            let existing = store.get_words_by_ids(&word_ids)?;
             let mut added = 0usize;
             for word_id in &word_ids {
+                if !existing.contains_key(word_id) {
+                    continue;
+                }
                 if store.add_word_to_wordbook(&id_for_update, word_id)? {
                     added += 1;
                 }

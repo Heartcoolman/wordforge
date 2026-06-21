@@ -322,7 +322,7 @@ async fn ban_client(
     // Notify via SSE but keep connection alive for instant unban
     if let Some(conns) = state.active_sse().get(&id) {
         for conn in conns.value() {
-            let _ = conn.tx.send(SseEvent::Banned);
+            let _ = conn.tx.try_send(SseEvent::Banned);
         }
     }
 
@@ -358,7 +358,7 @@ async fn unban_client(
     // Notify via existing SSE connection for instant unban
     if let Some(conns) = state.active_sse().get(&id) {
         for conn in conns.value() {
-            let _ = conn.tx.send(SseEvent::Unbanned);
+            let _ = conn.tx.try_send(SseEvent::Unbanned);
         }
     }
 
@@ -480,7 +480,7 @@ async fn request_telemetry(
         if conn.user_id != owner {
             continue;
         }
-        let _ = conn.tx.send(event.clone());
+        let _ = conn.tx.try_send(event.clone());
     }
 
     Ok(ok(serde_json::json!({ "requestId": request_id })))
@@ -781,7 +781,7 @@ async fn broadcast_upgrade_handler(
                 message: req.message.clone(),
             };
             for conn in conns.value() {
-                if conn.tx.send(event.clone()).is_ok() {
+                if conn.tx.try_send(event.clone()).is_ok() {
                     hit += 1;
                 }
             }

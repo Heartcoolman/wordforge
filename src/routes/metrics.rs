@@ -33,8 +33,18 @@ fn gauge(out: &mut String, name: &str, help: &str, labels: &str, value: f64) {
 
 /// 追加一条 counter metric（含 HELP + TYPE）
 fn counter(out: &mut String, name: &str, help: &str, labels: &str, value: f64) {
+    counter_header(out, name, help);
+    counter_line(out, name, labels, value);
+}
+
+/// 仅写 counter 的 HELP + TYPE 头（每个 metric family 只能出现一次）
+fn counter_header(out: &mut String, name: &str, help: &str) {
     let _ = writeln!(out, "# HELP {name} {help}");
     let _ = writeln!(out, "# TYPE {name} counter");
+}
+
+/// 仅写 counter 的数据行（不含 HELP/TYPE），用于带 label 的多行族
+fn counter_line(out: &mut String, name: &str, labels: &str, value: f64) {
     if labels.is_empty() {
         let _ = writeln!(out, "{name}_total {value}");
     } else {
@@ -94,30 +104,73 @@ pub async fn metrics_handler(
     // amas_process_event_call_count_total{algorithm}
     // amas_process_event_error_count_total{algorithm}
     // amas_process_event_latency_us_total{algorithm}  — 累计总微秒数（用于计算平均值）
+    //
+    // Prometheus 计数器必须单调累增。registry 每 5 分钟被 metrics_flush reset(swap 0),
+    // 直接读 registry 会让 `_total` 锯齿归零→违反计数器契约且 rate()/increase() 误判 reset。
+    // 故以已落库的全历史累计为基准,叠加当前未 flush 的内存增量,得到单调累计值。
+    //
+    // 读取顺序必须「内存在前、DB 在后」：metrics_flush 是「先 reset 内存、再落库」两阶段。
+    // 若先读 DB(=P) 再读内存,可能恰好落在 flush「内存已归零、DB 尚未写入 P+D」的窗口,读到
+    // P+0=P,而上一次抓取报的是 P+D → `_total` 倒退,Prometheus 误判 counter reset。先读内存、
+    // 再读 DB:并发 flush 只会让同一份 D 既计入内存快照又计入已落库 DB(短暂双计、单调不减),
+    // 永不少计,保证计数器单调。
     let amas_snapshot = state.amas().metrics_registry().snapshot();
+    let persisted_totals = state
+        .run_store_task("metrics.cumulative_amas", |store| {
+            store.cumulative_metrics_totals()
+        })
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or_default();
 
-    for (algo, snap) in &amas_snapshot {
+    // 合并落库累计 + 内存增量(union of algorithm keys)。
+    let mut algos: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    algos.extend(persisted_totals.keys().cloned());
+    algos.extend(amas_snapshot.keys().cloned());
+
+    // HELP/TYPE 每个 metric family 只能出现一次：在 per-algo 循环之前统一写头，
+    // 循环内仅写带 label 的数据行，避免重复 HELP/TYPE 被严格 scraper 拒绝整次抓取。
+    counter_header(
+        &mut out,
+        "amas_process_event_calls",
+        "AMAS 算法处理事件的累计调用次数",
+    );
+    counter_header(
+        &mut out,
+        "amas_process_event_errors",
+        "AMAS 算法处理事件时发生错误的累计次数",
+    );
+    counter_header(
+        &mut out,
+        "amas_process_event_latency_us",
+        "AMAS 算法处理事件的累计延迟（微秒），用于计算平均延迟",
+    );
+    for algo in &algos {
+        let (p_calls, p_errors, p_latency) =
+            persisted_totals.get(algo).copied().unwrap_or((0, 0, 0));
+        let (d_calls, d_errors, d_latency) = amas_snapshot
+            .get(algo)
+            .map(|s| (s.call_count, s.error_count, s.total_latency_us))
+            .unwrap_or((0, 0, 0));
         let label = format!("algorithm=\"{algo}\"");
-        counter(
+        counter_line(
             &mut out,
             "amas_process_event_calls",
-            "AMAS 算法处理事件的累计调用次数",
             &label,
-            snap.call_count as f64,
+            p_calls.saturating_add(d_calls) as f64,
         );
-        counter(
+        counter_line(
             &mut out,
             "amas_process_event_errors",
-            "AMAS 算法处理事件时发生错误的累计次数",
             &label,
-            snap.error_count as f64,
+            p_errors.saturating_add(d_errors) as f64,
         );
-        counter(
+        counter_line(
             &mut out,
             "amas_process_event_latency_us",
-            "AMAS 算法处理事件的累计延迟（微秒），用于计算平均延迟",
             &label,
-            snap.total_latency_us as f64,
+            p_latency.saturating_add(d_latency) as f64,
         );
     }
 

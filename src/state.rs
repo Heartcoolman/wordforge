@@ -17,8 +17,12 @@ pub struct SseClientInfo {
     pub user_id: String,
     pub platform: String,
     pub connected_at: Instant,
-    pub tx: mpsc::UnboundedSender<SseEvent>,
+    /// 有界通道：stalled-but-connected 客户端的回压不会让队列无界膨胀（满则 try_send 丢弃该事件）。
+    pub tx: mpsc::Sender<SseEvent>,
 }
+
+/// 每连接 SSE 事件队列容量。满时新事件被丢弃（try_send），避免慢读端把服务端内存撑爆。
+pub const SSE_CONN_CHANNEL_CAP: usize = 256;
 
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "type")]
@@ -651,7 +655,7 @@ impl AppState {
     pub fn broadcast_to_all_sse(&self, event: SseEvent) {
         for entry in self.active_sse.iter() {
             for conn in entry.value() {
-                let _ = conn.tx.send(event.clone());
+                let _ = conn.tx.try_send(event.clone());
             }
         }
     }

@@ -279,14 +279,46 @@ fn now_unix() -> i64 {
 }
 
 /// 取/建匹配 key 的尾部槽，并保持容量上限。
+/// 时钟回拨(NTP step / VM 挂起恢复)时 key 可能 < 队尾 key；此时不在尾部压入更小 key（会破坏
+/// aggregate/downsample 依赖的升序不变式）：先找已存在的同 key 槽合并，无则按 key 二分插入到
+/// 正确的有序位置（而非误并入尾槽），保持队列升序，并把观测落到真正对应当前时刻的槽。
 fn touch_slot(dq: &mut VecDeque<Slot>, key: i64, cap: usize) -> &mut Slot {
-    if dq.back().map(|s| s.key) != Some(key) {
-        dq.push_back(Slot::new(key));
-        while dq.len() > cap {
-            dq.pop_front();
+    match dq.back().map(|s| s.key) {
+        Some(back_key) if back_key == key => dq.back_mut().unwrap(),
+        Some(back_key) if key < back_key => {
+            // 回拨：找已有同 key 槽合并，避免在尾部压入更小 key 破坏升序。
+            if let Some(idx) = dq.iter().rposition(|s| s.key == key) {
+                dq.get_mut(idx).unwrap()
+            } else {
+                // 无同 key 槽：按 key 二分定位插入点，插入新槽保持升序，
+                // 而非把回拨观测错误地并入最新（尾）槽。
+                let idx = dq.partition_point(|s| s.key < key);
+                if idx == 0 && dq.len() >= cap {
+                    // key 比保留窗口内所有槽都旧，且已满；新建槽会被立刻淘汰，
+                    // 退而合并进当前最旧（front）槽，避免无意义的插入/淘汰。
+                    dq.front_mut().unwrap()
+                } else {
+                    dq.insert(idx, Slot::new(key));
+                    // idx>=1 时 front 不是新槽，pop_front 安全淘汰最旧槽。
+                    while dq.len() > cap {
+                        dq.pop_front();
+                    }
+                    let pos = dq
+                        .iter()
+                        .position(|s| s.key == key)
+                        .expect("inserted slot must exist");
+                    dq.get_mut(pos).unwrap()
+                }
+            }
+        }
+        _ => {
+            dq.push_back(Slot::new(key));
+            while dq.len() > cap {
+                dq.pop_front();
+            }
+            dq.back_mut().unwrap()
         }
     }
-    dq.back_mut().unwrap()
 }
 
 fn record_rolling(latency_secs: f64, is_5xx: bool, bytes_in: u64) {

@@ -155,6 +155,33 @@ impl AMASConfig {
         if !self.elo.word_k_factor_ratio.is_finite() || self.elo.word_k_factor_ratio <= 0.0 {
             return Err("elo.word_k_factor_ratio must be finite and > 0".to_string());
         }
+        // k_min_factor/k_max_factor 作为 dynamic_k_mult 的 f64::clamp 边界，min > max 会 panic 学习热路径。
+        if !self.elo.k_min_factor.is_finite()
+            || !self.elo.k_max_factor.is_finite()
+            || self.elo.k_min_factor <= 0.0
+            || self.elo.k_min_factor > self.elo.k_max_factor
+        {
+            return Err(
+                "elo.k_min_factor must be finite, > 0 and <= k_max_factor".to_string(),
+            );
+        }
+        // EWMA 趋势参数：k_trend_weight 是 update_elo_with_trend 的 EWMA 混合系数 w，
+        // w∉[0,1] 会令 (1-w)^n 发散，把持久化的 trend 推向 ±Inf；故必须夹在 [0,1]。
+        if !self.elo.k_trend_weight.is_finite()
+            || self.elo.k_trend_weight < 0.0
+            || self.elo.k_trend_weight > 1.0
+        {
+            return Err("elo.k_trend_weight must be in [0, 1]".to_string());
+        }
+        if !self.elo.k_trend_gain.is_finite() || self.elo.k_trend_gain < 0.0 {
+            return Err("elo.k_trend_gain must be finite and >= 0".to_string());
+        }
+        if !self.elo.k_trend_damp.is_finite()
+            || self.elo.k_trend_damp < 0.0
+            || self.elo.k_trend_damp > 1.0
+        {
+            return Err("elo.k_trend_damp must be in [0, 1]".to_string());
+        }
 
         // FatigueDecayConfig
         if self.fatigue_decay.full_reset_threshold_secs

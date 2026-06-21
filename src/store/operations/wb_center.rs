@@ -131,6 +131,33 @@ impl Store {
         let mut conn = self.conn()?;
         let tx = conn.transaction()?;
 
+        // 并发去重闸门：先在事务内插入导入记录（ON CONFLICT DO NOTHING）。两个并发的同
+        // (source,remote,user) 导入只会有一个插入成功；插入 0 行者整笔回滚，绝不再建词书，
+        // 杜绝「两笔都建出独立词书、第二笔 DO UPDATE 重指致第一笔词书成孤儿」。
+        let inserted = tx.execute(
+            "INSERT INTO wb_center_imports
+                (source_url_hash_prefix, remote_id, local_wordbook_id, source_url, version, user_id, imported_at, updated_at, word_count)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(source_url_hash_prefix, remote_id, user_id) DO NOTHING",
+            params![
+                &prefix,
+                &import.remote_id,
+                &import.local_wordbook_id,
+                &import.source_url,
+                &import.version,
+                import.user_id.as_deref().unwrap_or(""),
+                import.imported_at.to_rfc3339(),
+                import.updated_at.to_rfc3339(),
+                import.word_count as i64,
+            ],
+        )?;
+        if inserted == 0 {
+            return Err(StoreError::Conflict {
+                entity: "wb_center_import".into(),
+                key: format!("{}:{}", import.remote_id, import.user_id.as_deref().unwrap_or("")),
+            });
+        }
+
         tx.execute(
             "INSERT INTO wordbooks (id, name, description, book_type, user_id, word_count, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
@@ -176,29 +203,6 @@ impl Store {
             )?;
         }
 
-        tx.execute(
-            "INSERT INTO wb_center_imports
-                (source_url_hash_prefix, remote_id, local_wordbook_id, source_url, version, user_id, imported_at, updated_at, word_count)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-             ON CONFLICT(source_url_hash_prefix, remote_id, user_id) DO UPDATE SET
-               local_wordbook_id = excluded.local_wordbook_id,
-               source_url = excluded.source_url,
-               version = excluded.version,
-               updated_at = excluded.updated_at,
-               word_count = excluded.word_count",
-            params![
-                &prefix,
-                &import.remote_id,
-                &import.local_wordbook_id,
-                &import.source_url,
-                &import.version,
-                import.user_id.as_deref().unwrap_or(""),
-                import.imported_at.to_rfc3339(),
-                import.updated_at.to_rfc3339(),
-                import.word_count as i64,
-            ],
-        )?;
-
         tx.commit()?;
         Ok(())
     }
@@ -208,6 +212,23 @@ impl Store {
     /// 多写无事务的孤儿/半量问题)。`remove_word_ids` 须由调用方限定为本远程来源词(按 wb-center +
     /// remote_id tag),不波及用户手动加入的词。返回同步后该词书实际词条数。SQL 与 upsert_word /
     /// add_word_to_wordbook / remove_word_from_wordbook / upsert_wb_center_import 同口径,改其一须同步此处。
+    /// 事务内复核：本词书是否已挂接「拼写为 text（lower+trim 归一）」的词。用于并发 sync 去重，
+    /// 避免两次并发同步各自铸新 uuid 插入同拼写的重复 Word 行。
+    fn wordbook_has_spelling_tx(
+        tx: &rusqlite::Transaction,
+        wb_id: &str,
+        text: &str,
+    ) -> Result<bool, StoreError> {
+        let norm = text.trim().to_lowercase();
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM wordbook_words ww JOIN words w ON w.id = ww.word_id \
+             WHERE ww.wordbook_id = ?1 AND lower(trim(w.text)) = ?2)",
+            params![wb_id, norm],
+            |r| r.get(0),
+        )?;
+        Ok(exists)
+    }
+
     pub fn sync_remote_wordbook_atomic(
         &self,
         wb_id: &str,
@@ -220,10 +241,28 @@ impl Store {
         let prefix = keys::source_url_hash_prefix(&import.source_url);
         let now = Utc::now().to_rfc3339();
         let mut conn = self.conn()?;
-        let tx = conn.transaction()?;
+        // IMMEDIATE：BEGIN 即取写锁，使同一 wordbook 的并发 sync 在事务边界串行化。配合下方
+        // 在事务内按拼写复核「新增词」是否已被并发 sync 抢先挂接，消除两次 sync 各自铸新 uuid
+        // 插入同拼写重复 Word 行（add 链以 word_id 为键，INSERT OR IGNORE 不会去重）的 TOCTOU。
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+
+        // 「新增」词（add_word_ids）的拼写映射：用于在事务内复核已挂接的同拼写词。
+        let add_id_set: std::collections::HashSet<&str> =
+            add_word_ids.iter().map(|s| s.as_str()).collect();
+        let add_text_by_id: std::collections::HashMap<&str, String> = upserts
+            .iter()
+            .filter(|w| add_id_set.contains(w.id.as_str()))
+            .map(|w| (w.id.as_str(), w.text.trim().to_lowercase()))
+            .collect();
 
         for word in upserts {
             keys::validate_id(&word.id)?;
+            // 新增词若其拼写已被并发 sync 抢先挂接到本词书，则跳过插入（避免重复 Word 行）。
+            if add_id_set.contains(word.id.as_str())
+                && Self::wordbook_has_spelling_tx(&tx, wb_id, &word.text)?
+            {
+                continue;
+            }
             tx.execute(
                 "INSERT OR REPLACE INTO words (id, text, meaning, pronunciation, part_of_speech, difficulty, examples_json, tags_json, embedding_json, created_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
@@ -244,6 +283,13 @@ impl Store {
 
         for word_id in add_word_ids {
             keys::validate_id(word_id)?;
+            // 若该新增词因并发抢先已存在同拼写挂接，则跳过链接（与上方插入跳过一致）：
+            // 此时本 word_id 的 Word 行已被跳过插入，wordbook_words 不会留下指向不存在词的孤儿。
+            if let Some(text) = add_text_by_id.get(word_id.as_str()) {
+                if Self::wordbook_has_spelling_tx(&tx, wb_id, text)? {
+                    continue;
+                }
+            }
             tx.execute(
                 "INSERT OR IGNORE INTO wordbook_words (wordbook_id, word_id, added_at)
                  VALUES (?1, ?2, ?3)",
@@ -310,8 +356,8 @@ impl Store {
         let conn = self.conn()?;
         Ok(conn
             .query_row(
-                &format!("SELECT {COLS} FROM wb_center_imports WHERE source_url_hash_prefix = ?1 AND remote_id = ?2 AND user_id = ?3"),
-                params![&prefix, remote_id, user_id.unwrap_or("")],
+                &format!("SELECT {COLS} FROM wb_center_imports WHERE source_url_hash_prefix = ?1 AND remote_id = ?2 AND user_id = ?3 AND source_url = ?4"),
+                params![&prefix, remote_id, user_id.unwrap_or(""), source_url],
                 import_from_row,
             )
             .optional()?)
@@ -354,8 +400,8 @@ impl Store {
         let prefix = keys::source_url_hash_prefix(source_url);
         let conn = self.conn()?;
         let deleted = conn.execute(
-            "DELETE FROM wb_center_imports WHERE source_url_hash_prefix = ?1 AND remote_id = ?2 AND user_id = ?3",
-            params![&prefix, remote_id, user_id.unwrap_or("")],
+            "DELETE FROM wb_center_imports WHERE source_url_hash_prefix = ?1 AND remote_id = ?2 AND user_id = ?3 AND source_url = ?4",
+            params![&prefix, remote_id, user_id.unwrap_or(""), source_url],
         )?;
         Ok(deleted > 0)
     }

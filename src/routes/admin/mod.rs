@@ -1684,13 +1684,15 @@ async fn admin_do_set_user_password(
 ) -> Result<u32, AppError> {
     let store = state.store().clone();
     blocking::run_blocking("admin.set_user_password", move || -> Result<_, AppError> {
-        let mut user = store
-            .get_user_by_id(&user_id)?
-            .ok_or_else(|| AppError::not_found("用户不存在"))?;
-
-        user.password_hash = hash_password(&new_password)?;
-        user.updated_at = Utc::now();
-        store.update_user(&user)?;
+        // 字段级更新：只写 password_hash，避免陈旧整行快照覆盖并发封禁等状态。
+        let new_hash = hash_password(&new_password)?;
+        // 缺失用户须返回 404（StoreError::NotFound 经 From 默认映射为 500，此处显式改 404）。
+        store
+            .update_user_password(&user_id, &new_hash)
+            .map_err(|e| match e {
+                crate::store::StoreError::NotFound { .. } => AppError::not_found("用户不存在"),
+                other => other.into(),
+            })?;
 
         Ok(store.delete_user_sessions(&user_id)?)
     })

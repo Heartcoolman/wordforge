@@ -56,8 +56,17 @@ fn study_mode_from_str(s: &str) -> StudyMode {
 
 impl Store {
     pub fn get_study_config(&self, user_id: &str) -> Result<UserStudyConfig, StoreError> {
-        keys::validate_id(user_id)?;
         let conn = self.conn()?;
+        Self::get_study_config_conn(&conn, user_id)
+    }
+
+    /// 同 [`get_study_config`],但在调用方提供的连接/事务上执行,供 read-modify-write
+    /// 收进单个 `with_user_tx` 事务、规避跨连接读旧快照的并发丢更新。
+    pub fn get_study_config_conn(
+        conn: &rusqlite::Connection,
+        user_id: &str,
+    ) -> Result<UserStudyConfig, StoreError> {
+        keys::validate_id(user_id)?;
         let row = conn.query_row(
             "SELECT selected_wordbook_ids_json, daily_word_count, study_mode, daily_mastery_target
                  FROM study_configs WHERE user_id = ?1",
@@ -88,8 +97,16 @@ impl Store {
     }
 
     pub fn set_study_config(&self, config: &UserStudyConfig) -> Result<(), StoreError> {
-        keys::validate_id(&config.user_id)?;
         let conn = self.conn()?;
+        Self::set_study_config_conn(&conn, config)
+    }
+
+    /// 同 [`set_study_config`],但在调用方提供的连接/事务上执行(见 `get_study_config_conn`)。
+    pub fn set_study_config_conn(
+        conn: &rusqlite::Connection,
+        config: &UserStudyConfig,
+    ) -> Result<(), StoreError> {
+        keys::validate_id(&config.user_id)?;
         let ids_json = Self::serialize_json(&config.selected_wordbook_ids)?;
         conn.execute(
             "INSERT INTO study_configs (user_id, selected_wordbook_ids_json, daily_word_count, study_mode, daily_mastery_target)

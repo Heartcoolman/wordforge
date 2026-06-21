@@ -232,6 +232,23 @@ impl Store {
         Ok(states)
     }
 
+    /// 返回用户「已学过」的全部 word_id（word_learning_states 中 state != 'NEW'）。
+    /// 用于 today-words 跨天去重：曾进入过学习/复习/掌握态的词不再作为今日新词重复下发。
+    pub fn list_learned_word_ids(
+        &self,
+        user_id: &str,
+    ) -> Result<std::collections::HashSet<String>, StoreError> {
+        keys::validate_id(user_id)?;
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT word_id FROM word_learning_states WHERE user_id=?1 AND state != 'NEW'",
+        )?;
+        let ids = stmt
+            .query_map(params![user_id], |r| r.get::<_, String>(0))?
+            .collect::<Result<std::collections::HashSet<String>, _>>()?;
+        Ok(ids)
+    }
+
     pub fn get_word_state_stats(&self, user_id: &str) -> Result<WordStateStats, StoreError> {
         self.get_word_state_stats_filtered(user_id, None)
     }

@@ -315,6 +315,36 @@ impl Store {
         Ok(())
     }
 
+    /// 跨全部历史日期按 algorithm 聚合累计 (call_count, error_count, total_latency_us)。
+    /// 供 Prometheus 计数器暴露:5 分钟 flush 会 reset 内存 registry,直接读 registry 会
+    /// 让 `_total` 计数器每 5 分钟锯齿归零(违反计数器单调性)。以已落库的历史累计为基准,
+    /// 调用方再叠加当前未 flush 的内存增量,即得单调累计值。
+    pub fn cumulative_metrics_totals(
+        &self,
+    ) -> Result<std::collections::HashMap<String, (u64, u64, u64)>, StoreError> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT algorithm_id, metrics_json FROM algorithm_metrics_daily",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        let mut totals: std::collections::HashMap<String, (u64, u64, u64)> =
+            std::collections::HashMap::new();
+        for row in rows {
+            let (algo_id, json) = row?;
+            if let Ok(snap) =
+                serde_json::from_str::<crate::amas::metrics::MetricsSnapshot>(&json)
+            {
+                let e = totals.entry(algo_id).or_insert((0, 0, 0));
+                e.0 = e.0.saturating_add(snap.call_count);
+                e.1 = e.1.saturating_add(snap.error_count);
+                e.2 = e.2.saturating_add(snap.total_latency_us);
+            }
+        }
+        Ok(totals)
+    }
+
     pub fn get_metrics_daily(
         &self,
         date: &str,
@@ -740,6 +770,15 @@ impl Store {
                 params![word_id, elo.rating, elo.games],
             )?;
         }
+        // W1-1：trend / rating_select 随 word_elo 一并回滚（同 tx）。get_word_elo 只读 rating/games，
+        // 上面的 UPSERT 不触碰这两列，apply_elo_in_tx 已把它们前移，不复位会留下全局污染（动态 K / 选词链）。
+        if let Some((word_id, trend, rating_select)) = r.word_elo_trend_select {
+            tx.execute(
+                "INSERT INTO word_elo (word_id, trend, rating_select) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(word_id) DO UPDATE SET trend=?2, rating_select=?3",
+                params![word_id, trend, rating_select],
+            )?;
+        }
         // #14：抗投毒账本随 word_elo 一并回滚（同 tx）。否则 word_elo 复位、账本仍前移，
         // 重放会按虚高的 prior 净位移把合法位移误钳。捕获值为 0.0 即归零（语义等同无行）。
         if let Some((word_id, net)) = r.word_elo_contrib {
@@ -799,6 +838,9 @@ pub struct EngineStateRestore<'a> {
     pub algo_states: &'a [(&'a str, &'a Option<serde_json::Value>)],
     pub user_elo: Option<&'a crate::amas::elo::EloRating>,
     pub word_elo: Option<(&'a str, &'a crate::amas::elo::EloRating)>,
+    /// W1-1：Some((word_id, trend, rating_select))=同 tx 把 word_elo 的派生列复位到捕获值。
+    /// `word_elo` 的 EloRating 仅含 rating/games，trend/rating_select 须单独捕获/恢复，否则前移残留。
+    pub word_elo_trend_select: Option<(&'a str, f64, f64)>,
     /// #14：Some((word_id, net_displacement))=同 tx 把抗投毒账本复位到捕获时的净位移。
     pub word_elo_contrib: Option<(&'a str, f64)>,
     /// 写放大重构：Some(seq)=同 tx 删除本事件 append 的那一行 swd 历史（单条路径回滚）；
@@ -1092,6 +1134,7 @@ mod tests {
                 algo_states: &[("mastery:w1", &none_val)],
                 user_elo: Some(&elo),
                 word_elo: Some(("w1", &elo)),
+                word_elo_trend_select: None,
                 word_elo_contrib: None,
                 swd_delete_seq: None,
                 clear_marker_record_id: Some("rec-1"),
@@ -1383,6 +1426,7 @@ mod tests {
                 algo_states: no_algo,
                 user_elo: None,
                 word_elo: None,
+                word_elo_trend_select: None,
                 word_elo_contrib: Some(("w1", 5.0)),
                 swd_delete_seq: None,
                 clear_marker_record_id: None,
@@ -1482,6 +1526,7 @@ mod tests {
                 algo_states: &[],
                 user_elo: None,
                 word_elo: None,
+                word_elo_trend_select: None,
                 word_elo_contrib: None,
                 swd_delete_seq: Some(seqs[2]),
                 clear_marker_record_id: None,

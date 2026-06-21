@@ -120,7 +120,7 @@ export default function ResourcePacksPage() {
   };
 
   const sortedVersions = (pack: AdminPackEntry) =>
-    [...pack.versions].sort((a, b) => (b.publishedAt > a.publishedAt ? 1 : -1));
+    [...pack.versions].sort((a, b) => b.publishedAt.localeCompare(a.publishedAt));
 
   const isActive = (pack: AdminPackEntry, v: ResourcePackVersion) =>
     pack.active[v.channel] === v.version && !v.deactivatedAt;
@@ -772,7 +772,9 @@ function aggregateStats(rows: PackStatsEntry[]): StatAgg[] {
     else if (r.outcome === 'rollback') a.rollback += r.count;
     byVer.set(r.version, a);
   }
-  return Array.from(byVer.values()).sort((x, y) => (y.version > x.version ? 1 : -1));
+  return Array.from(byVer.values()).sort((x, y) =>
+    y.version.localeCompare(x.version, undefined, { numeric: true })
+  );
 }
 
 function PackCard(props: {
@@ -792,7 +794,7 @@ function PackCard(props: {
   const candidates = (ch: PackChannel) =>
     pack()
       .versions.filter((v) => v.channel === ch && !v.deactivatedAt)
-      .sort((a, b) => (b.publishedAt > a.publishedAt ? 1 : -1));
+      .sort((a, b) => b.publishedAt.localeCompare(a.publishedAt));
 
   // 安装统计柱状图（按版本 totalInstalls 近似：用 outcomes 无法分版本，这里用版本表的近 7 天 installed 不可得，
   // 故用各版本签名状态展示不直观；改用 outcomes7d 三态条形对比，符合真实可得字段）

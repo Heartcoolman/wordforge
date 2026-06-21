@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 
 use crate::auth::{AdminAuthUser, AuthUser};
-use crate::constants::{DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE};
+use crate::constants::{DEFAULT_PAGE_SIZE, MAX_PAGE_NUMBER, MAX_PAGE_SIZE};
 use crate::extractors::JsonBody;
 use crate::response::{created, ok, paginated, AppError};
 use crate::routes::words::{resolve_import_url_addrs, validate_import_url};
@@ -431,6 +431,14 @@ async fn do_import(
 ) -> Result<serde_json::Value, AppError> {
     let remote: RemoteWordbook =
         fetch_remote_json(base_url, &format!("wordbooks/{}.json", remote_id)).await?;
+    // 导入记录按 remote.id 入库,而 sync/更新检测按请求的 path id 查找。若 JSON 内部 id 与 path id
+    // 不一致,导入会成功却永远无法同步("导入记录不存在")。故此处强制一致,不一致即拒绝。
+    if remote.id != remote_id {
+        return Err(AppError::bad_request(
+            "WB_CENTER_ID_MISMATCH",
+            "远程词书内部 id 与请求 id 不一致",
+        ));
+    }
     let downloaded_remote_id = remote.id.clone();
     let source_url = base_url.to_string();
     let store = state.store().clone();
@@ -440,19 +448,33 @@ async fn do_import(
     })
     .await??;
 
-    // Fire-and-forget download counter
+    // Fire-and-forget download counter —— 必须走与主拉取相同的 SSRF 校验 + 地址 pinning +
+    // 禁重定向，否则用户可控的 base_url 可借 DNS rebinding / 3xx 重定向把这条 POST 打向内网。
     let counter_url = format!(
         "{}/wordbooks/{}/download",
         base_url.trim_end_matches('/'),
         downloaded_remote_id
     );
-    tokio::spawn(async move {
-        let _ = reqwest::Client::new()
-            .post(&counter_url)
-            .timeout(std::time::Duration::from_secs(5))
-            .send()
-            .await;
-    });
+    if let Ok(url_parsed) = validate_import_url(&counter_url) {
+        if let Ok((resolved_host, resolved_addrs)) = resolve_import_url_addrs(&url_parsed).await {
+            let mut client_builder = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(5))
+                .redirect(reqwest::redirect::Policy::none());
+            if url_parsed
+                .host_str()
+                .and_then(|host| host.parse::<IpAddr>().ok())
+                .is_none()
+            {
+                client_builder =
+                    client_builder.resolve_to_addrs(&resolved_host, &resolved_addrs);
+            }
+            if let Ok(client) = client_builder.build() {
+                tokio::spawn(async move {
+                    let _ = client.post(url_parsed).send().await;
+                });
+            }
+        }
+    }
 
     Ok(result)
 }
@@ -632,7 +654,13 @@ async fn admin_browse(
         .run_store_task("wordbook_center.admin_browse.imports", {
             let base_url = base_url.clone();
             move |store| {
-                let imports = store.list_wb_center_imports_by_source(&base_url)?;
+                // 过滤到 admin/system 命名空间（user_id=None/空串），与 list_wb_center_imports_by_user(None)
+                // 语义一致，避免 build_browse_items 的 remote_id HashMap key 与普通用户导入冲突而泄露其私有词书。
+                let imports: Vec<_> = store
+                    .list_wb_center_imports_by_source(&base_url)?
+                    .into_iter()
+                    .filter(|i| i.user_id.is_none() || i.user_id.as_deref() == Some(""))
+                    .collect();
                 let tags = local_tags_map(&store, &imports);
                 Ok::<_, crate::store::StoreError>((imports, tags))
             }
@@ -660,7 +688,8 @@ async fn admin_preview(
     let remote: RemoteWordbook =
         fetch_remote_json(&base_url, &format!("wordbooks/{}.json", id)).await?;
 
-    let page = q.page.unwrap_or(1).max(1);
+    // 上界封顶防 (page-1)*per_page 在 release(无 overflow-checks)下溢出回绕成乱序 offset。
+    let page = q.page.unwrap_or(1).clamp(1, MAX_PAGE_NUMBER);
     let per_page = q
         .per_page
         .unwrap_or(DEFAULT_PAGE_SIZE)
@@ -1054,7 +1083,8 @@ async fn user_preview(
     let remote: RemoteWordbook =
         fetch_remote_json(&base_url, &format!("wordbooks/{}.json", id)).await?;
 
-    let page = q.page.unwrap_or(1).max(1);
+    // 上界封顶防 (page-1)*per_page 在 release(无 overflow-checks)下溢出回绕成乱序 offset。
+    let page = q.page.unwrap_or(1).clamp(1, MAX_PAGE_NUMBER);
     let per_page = q
         .per_page
         .unwrap_or(DEFAULT_PAGE_SIZE)
@@ -1087,7 +1117,8 @@ async fn user_import_history(
     Query(q): Query<ImportHistoryQuery>,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let page = q.page.unwrap_or(1).max(1);
+    // 上界封顶防 (page-1)*per_page 在 release(无 overflow-checks)下溢出回绕成乱序 offset。
+    let page = q.page.unwrap_or(1).clamp(1, MAX_PAGE_NUMBER);
     let per_page = q
         .per_page
         .unwrap_or(DEFAULT_PAGE_SIZE)

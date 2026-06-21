@@ -148,7 +148,9 @@ pub async fn scan_once(state: &AppState) {
                 let title = row.title.clone();
                 let code = e.code.clone();
                 let msg = e.message.clone();
-                let _ = tokio::task::spawn_blocking(move || {
+                // 收件箱告警写入失败也要记日志,避免静默丢失(与本文件其它 store 调用一致)。
+                let alert_id = row.id.clone();
+                match tokio::task::spawn_blocking(move || {
                     store.record_system_alert(
                         "scheduled_broadcast",
                         "delivery_failed",
@@ -157,7 +159,16 @@ pub async fn scan_once(state: &AppState) {
                         &format!("{code}: {msg}"),
                     )
                 })
-                .await;
+                .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        tracing::warn!(broadcast_id = %alert_id, error = %e, "scheduled_broadcast: 写入失败告警(收件箱)失败(store)");
+                    }
+                    Err(e) => {
+                        tracing::warn!(broadcast_id = %alert_id, error = %e, "scheduled_broadcast: 写入失败告警(收件箱)任务 panic");
+                    }
+                }
                 tracing::warn!(
                     broadcast_id = %row.id,
                     code = %e.code,

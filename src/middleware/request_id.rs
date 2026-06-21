@@ -43,9 +43,17 @@ pub async fn request_id_middleware(req: Request, next: Next) -> Response {
         response.headers_mut().insert("x-request-id", value);
     }
 
-    // M0-P4：全局 HTTP 请求计数，供 error_rate_watchdog 计算 5xx 错误率
-    let is_5xx = response.status().is_server_error();
-    crate::metrics_counters::record_request(is_5xx);
+    // M0-P4：全局 HTTP 请求计数，供 error_rate_watchdog 计算 5xx 错误率。
+    // 排除基础设施探针 /health 与 /metrics：二者由 LB/编排器/抓取器高频轮询且几乎不会 5xx，
+    // 计入会膨胀分母、稀释 5xx 错误率，使 watchdog 漏报真实 incident；亦兑现计数器文档
+    // 「不含健康检查」的契约。
+    let path = uri.path();
+    let is_infra_path =
+        path == "/health" || path.starts_with("/health/") || path == "/metrics";
+    if !is_infra_path {
+        let is_5xx = response.status().is_server_error();
+        crate::metrics_counters::record_request(is_5xx);
+    }
 
     if !response.status().is_success() {
         if is_json_content_type(&response) {
@@ -76,7 +84,20 @@ async fn inject_trace_id(response: Response, request_id: &str) -> Response {
 
     let bytes = match body.collect().await {
         Ok(collected) => collected.to_bytes(),
-        Err(_) => return Response::from_parts(parts, Body::empty()),
+        // body 流采集失败：合成合法的 ErrorBody JSON（保留原状态码 + INTERNAL_ERROR + traceId），
+        // 而非返回带 application/json 头但空体的响应——后者会让客户端 JSON 解析失败。
+        Err(_) => {
+            return (
+                parts.status,
+                axum::Json(ErrorBody {
+                    success: false,
+                    code: "INTERNAL_ERROR".to_string(),
+                    message: "响应体读取失败".to_string(),
+                    trace_id: Some(request_id.to_string()),
+                }),
+            )
+                .into_response();
+        }
     };
 
     let patched = match serde_json::from_slice::<serde_json::Value>(&bytes) {
@@ -98,8 +119,10 @@ async fn inject_trace_id(response: Response, request_id: &str) -> Response {
 async fn wrap_plain_error_as_json(response: Response, request_id: &str) -> Response {
     let status = response.status();
 
-    // Read the original body to use as the message if present
-    let (_, body) = response.into_parts();
+    // 保留原 parts（含内层 server_time 写入的 X-Server-Time、可能的 Retry-After 等头），
+    // 仅替换 body 为 JSON ErrorBody —— 与 inject_trace_id 复用 parts 的 JSON 错误路径口径一致，
+    // 避免重建响应丢掉时钟同步锚点等内层头。
+    let (mut parts, body) = response.into_parts();
     let original_message = body
         .collect()
         .await
@@ -111,16 +134,31 @@ async fn wrap_plain_error_as_json(response: Response, request_id: &str) -> Respo
     let code = error_code_for_status(status);
     let message = original_message.unwrap_or_else(|| reason.to_string());
 
-    (
-        status,
-        axum::Json(ErrorBody {
-            success: false,
-            code: code.to_string(),
-            message,
-            trace_id: Some(request_id.to_string()),
-        }),
-    )
-        .into_response()
+    // 用 axum::Json 生成 body + 正确的 content-type/content-length，再把这两个头合并进原 parts。
+    let json_response = axum::Json(ErrorBody {
+        success: false,
+        code: code.to_string(),
+        message,
+        trace_id: Some(request_id.to_string()),
+    })
+    .into_response();
+    let (json_parts, json_body) = json_response.into_parts();
+
+    // 覆盖 content-type / content-length 为新 JSON body 的值（原值可能是 text/plain）。
+    for key in [header::CONTENT_TYPE, header::CONTENT_LENGTH] {
+        if let Some(value) = json_parts.headers.get(&key) {
+            parts.headers.insert(key, value.clone());
+        } else {
+            parts.headers.remove(&key);
+        }
+    }
+    // 保持与 JSON 错误路径一致：写回 x-request-id。
+    if let Ok(value) = request_id.parse() {
+        parts.headers.insert("x-request-id", value);
+    }
+    parts.status = status;
+
+    Response::from_parts(parts, json_body)
 }
 
 fn error_code_for_status(status: StatusCode) -> &'static str {

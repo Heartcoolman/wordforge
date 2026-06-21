@@ -1316,7 +1316,13 @@ impl Updater {
             .filter_map(|e| e.ok())
             .filter(|e| e.file_name().to_string_lossy().starts_with(prefix))
             .collect();
-        entries.sort_by_key(|e| e.metadata().and_then(|m| m.modified()).ok());
+        // mtime 不可读的条目排到最后（视为最新），避免 Option::None 排首被当作「最旧」误删最新备份。
+        entries.sort_by_key(|e| {
+            (
+                e.metadata().and_then(|m| m.modified()).is_err(),
+                e.metadata().and_then(|m| m.modified()).ok(),
+            )
+        });
         while entries.len() > KEEP_OLD_VERSIONS {
             let victim = entries.remove(0);
             let p = victim.path();
@@ -1345,7 +1351,13 @@ impl Updater {
                 s.starts_with("learning-") && s.ends_with(".backup.db")
             })
             .collect();
-        entries.sort_by_key(|e| e.metadata().and_then(|m| m.modified()).ok());
+        // mtime 不可读的条目排到最后（视为最新），避免 Option::None 排首被当作「最旧」误删最新备份。
+        entries.sort_by_key(|e| {
+            (
+                e.metadata().and_then(|m| m.modified()).is_err(),
+                e.metadata().and_then(|m| m.modified()).ok(),
+            )
+        });
         while entries.len() > KEEP_OLD_VERSIONS {
             let victim = entries.remove(0);
             if let Err(e) = std::fs::remove_file(victim.path()) {
@@ -2088,13 +2100,25 @@ fn stage_rollback_db(src: &Path, live_db: &Path) -> std::io::Result<()> {
     let tmp = PathBuf::from(tmp_os);
     let _ = std::fs::remove_file(&tmp);
     std::fs::copy(src, &tmp)?;
+    // fsync tmp 文件本体，确保数据落盘；再 fsync 父目录，确保后续 rename 的目录项也可持久，
+    // 避免崩溃后留下半截 / 不可见的 pending 文件被 apply 阶段误用。
+    {
+        let f = std::fs::File::open(&tmp)?;
+        f.sync_all()?;
+    }
     std::fs::rename(&tmp, &pending)?;
+    if let Some(dir) = pending.parent() {
+        if let Ok(d) = std::fs::File::open(dir) {
+            let _ = d.sync_all();
+        }
+    }
     Ok(())
 }
 
 /// v1.2.0-beta.8 最强回滚落地：新进程在 `Store::open` 之前调用。若 `<database_url>.rollback-pending`
-/// （回滚 apply 暂存的目标版本 DB 快照）存在，则在无连接持库的此刻把它落地为现役库——删现役库 +
-/// `-wal`/`-shm` 再 rename pending 就位，彻底规避 stale WAL 串扰。返回是否落地（true=已换库）。
+/// （回滚 apply 暂存的目标版本 DB 快照）存在，则在无连接持库的此刻把它落地为现役库——原子 rename
+/// pending 直接替换现役库主文件，成功后再清理旧 `-wal`/`-shm`，彻底规避 stale WAL 串扰；rename 失败则
+/// 现役库原封不动可恢复，不会留下空库。返回是否落地（true=已换库）。
 /// 仅落盘库适用（`:memory:` / 空跳过）；rename 失败仅 error、沿用现役库，不 panic。
 pub fn apply_pending_rollback_db(database_url: &str) -> bool {
     if database_url == ":memory:" || database_url.is_empty() {
@@ -2107,13 +2131,16 @@ pub fn apply_pending_rollback_db(database_url: &str) -> bool {
     if !pending.is_file() {
         return false;
     }
-    for suffix in ["", "-wal", "-shm"] {
-        let mut p = live.as_os_str().to_owned();
-        p.push(suffix);
-        let _ = std::fs::remove_file(PathBuf::from(p));
-    }
+    // 非破坏性原子替换：先 rename(pending -> live)，POSIX rename 单系统调用原子替换现役库主文件，
+    // 无需也不应先删主文件——若 rename 失败则现役库原封不动，可恢复。仅在主文件替换成功后再清理
+    // 旧 `-wal`/`-shm`（它们属于被替换掉的旧库，残留会与换入库串扰）。
     match std::fs::rename(&pending, live) {
         Ok(()) => {
+            for suffix in ["-wal", "-shm"] {
+                let mut p = live.as_os_str().to_owned();
+                p.push(suffix);
+                let _ = std::fs::remove_file(PathBuf::from(p));
+            }
             tracing::warn!(db = %database_url, "最强回滚：已落地目标版本 DB 快照为现役库");
             true
         }

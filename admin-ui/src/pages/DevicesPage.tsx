@@ -465,7 +465,7 @@ export default function DevicesPage() {
   const [flagged, { refetch: refetchFlagged }] = createResource(() => adminApi.listFlaggedClients());
 
   // 全部设备分页查询(仅在 all tab 时拉)
-  const [allDev] = createResource(
+  const [allDev, { refetch: refetchAllDev }] = createResource(
     () => (tab() === 'all' ? { page: allPage(), q: allQ(), platform: allPlat() } : null),
     (dep) => adminApi.getClientsPaginated({ page: dep.page, perPage: 14, q: dep.q || undefined, platform: dep.platform || undefined }),
   );
@@ -504,6 +504,8 @@ export default function DevicesPage() {
       setBanReason('');
       void refetchClients();
       void refetchFlagged();
+      // 「全部设备」tab 的行(含 isBanned 状态与封禁/解封按钮)源自 allDev,封禁/解封后需同步刷新。
+      void refetchAllDev();
     } catch (e: any) {
       toast.error(`${t.action === 'ban' ? '封禁' : '解封'}失败`, e?.message);
     }
@@ -516,6 +518,7 @@ export default function DevicesPage() {
       toast.success('已解除关联标记 ' + shortId(id));
       void refetchFlagged();
       void refetchClients();
+      void refetchAllDev();
     } catch (e: any) {
       toast.error('解除标记失败', e?.message);
     }
@@ -536,7 +539,10 @@ export default function DevicesPage() {
     if (!rows.length) { toast.info('当前页无数据可导出'); return; }
     const header = ['deviceId', 'platform', 'userId', 'appVersion', 'model', 'country', 'firstSeenAt', 'lastSeenAt', 'isBanned'];
     const esc = (v: unknown) => {
-      const s = v == null ? '' : String(v);
+      let s = v == null ? '' : String(v);
+      // CSV/Excel 公式注入防护:客户端可控字段(如 x-app-version 来源的 appVersion)可能以
+      // = + - @ 或 TAB/CR 开头,被 Excel/WPS 当作公式求值。前缀单引号阻断公式执行。
+      if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
       return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
     };
     const lines = [header.join(','), ...rows.map((r) => header.map((k) => esc((r as unknown as Record<string, unknown>)[k])).join(','))];
@@ -612,7 +618,7 @@ export default function DevicesPage() {
             tabs={[
               { value: 'sse', label: '实时连接', count: liveRows().length },
               { value: 'recent', label: '近期活跃', count: recentRows().length },
-              { value: 'all', label: '全部设备', count: totalDev() || (allDev()?.total ?? 0) },
+              { value: 'all', label: '全部设备', count: (allQ() || allPlat()) ? (allDev()?.total ?? 0) : (totalDev() || (allDev()?.total ?? 0)) },
               { value: 'flagged', label: '风险标记', count: flaggedRows().length },
             ]}
           />

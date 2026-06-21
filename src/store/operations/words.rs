@@ -56,8 +56,13 @@ const WORD_COLS: &str =
 
 impl Store {
     pub fn upsert_word(&self, word: &Word) -> Result<(), StoreError> {
-        keys::validate_id(&word.id)?;
         let conn = self.conn()?;
+        Self::upsert_word_conn(&conn, word)
+    }
+
+    /// 在调用方提供的连接（可处于事务中）上执行 upsert，供 read-modify-write 单事务复用。
+    pub fn upsert_word_conn(conn: &rusqlite::Connection, word: &Word) -> Result<(), StoreError> {
+        keys::validate_id(&word.id)?;
         conn.execute(
             "INSERT OR REPLACE INTO words (id, text, meaning, pronunciation, part_of_speech, difficulty, examples_json, tags_json, embedding_json, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
@@ -79,6 +84,14 @@ impl Store {
 
     pub fn get_word(&self, word_id: &str) -> Result<Option<Word>, StoreError> {
         let conn = self.conn()?;
+        Self::get_word_conn(&conn, word_id)
+    }
+
+    /// 在调用方提供的连接（可处于事务中）上读取，供 read-modify-write 单事务复用。
+    pub fn get_word_conn(
+        conn: &rusqlite::Connection,
+        word_id: &str,
+    ) -> Result<Option<Word>, StoreError> {
         Ok(conn
             .query_row(
                 &format!("SELECT {WORD_COLS} FROM words WHERE id = ?1"),
@@ -113,6 +126,15 @@ impl Store {
 
     pub fn list_words(&self, limit: usize, offset: usize) -> Result<Vec<Word>, StoreError> {
         let conn = self.conn()?;
+        Self::list_words_conn(&conn, limit, offset)
+    }
+
+    /// 在调用方提供的连接/事务上执行列表查询，供 count+list 同事务一致快照复用。
+    pub(crate) fn list_words_conn(
+        conn: &rusqlite::Connection,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<Word>, StoreError> {
         let mut stmt = conn.prepare(&format!(
             "SELECT {WORD_COLS} FROM words ORDER BY created_at DESC LIMIT ?1 OFFSET ?2"
         ))?;
@@ -120,10 +142,31 @@ impl Store {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    /// 在调用方提供的连接/事务上执行总数查询，供 count+list 同事务一致快照复用。
+    pub(crate) fn count_words_conn(conn: &rusqlite::Connection) -> Result<u64, StoreError> {
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM words", [], |r| r.get(0))?;
+        Ok(count as u64)
+    }
+
+    /// 在单个事务快照内同时取总数与当前页，避免两次独立 SELECT 间被并发写入打断
+    /// 导致 total 与 items 不一致（分页末页错算）。
+    pub fn count_and_list_words(
+        &self,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(u64, Vec<Word>), StoreError> {
+        self.with_transaction(|conn| {
+            let total = Self::count_words_conn(conn)?;
+            let items = Self::list_words_conn(conn, limit, offset)?;
+            Ok((total, items))
+        })
+    }
+
     pub fn delete_word(&self, word_id: &str) -> Result<(), StoreError> {
-        let conn = self.conn()?;
-        conn.execute_batch("BEGIN")?;
-        let result = (|| -> Result<(), StoreError> {
+        // 用 with_transaction（RAII Transaction）替代手写 BEGIN/COMMIT/ROLLBACK：
+        // commit 前任何早退（闭包 Err / COMMIT 失败 / panic）都由 Transaction 的 Drop
+        // 自动 ROLLBACK，连接归还池前不会残留未提交事务，避免污染后续使用者。
+        self.with_transaction(|conn| {
             // Decrement word_count before deleting wordbook_words rows
             conn.execute(
                 "UPDATE wordbooks SET word_count = MAX(word_count - 1, 0)
@@ -136,6 +179,12 @@ impl Store {
                 "word_learning_states",
                 "mastery_states",
                 "word_elo",
+                // m050 反投毒账本（per (user,word)）、会话已展示词、掌握度事件三表无 FK CASCADE，
+                // 必须显式按 word_id 清理，否则删词后孤儿行残留：word_elo_user_contrib 会冻结
+                // 同 id 复现后的合法 ELO 更新，另两表污染分析/会话再加入路径。
+                "word_elo_user_contrib",
+                "session_shown_words",
+                "word_mastery_events",
                 "etymologies",
                 "word_morphemes",
                 "alert_dedup",
@@ -153,23 +202,12 @@ impl Store {
             )?;
             conn.execute("DELETE FROM words WHERE id = ?1", params![word_id])?;
             Ok(())
-        })();
-        match result {
-            Ok(()) => {
-                conn.execute_batch("COMMIT")?;
-                Ok(())
-            }
-            Err(e) => {
-                let _ = conn.execute_batch("ROLLBACK");
-                Err(e)
-            }
-        }
+        })
     }
 
     pub fn count_words(&self) -> Result<u64, StoreError> {
         let conn = self.conn()?;
-        let count: i64 = conn.query_row("SELECT COUNT(*) FROM words", [], |r| r.get(0))?;
-        Ok(count as u64)
+        Self::count_words_conn(&conn)
     }
 
     pub fn search_words(
@@ -179,16 +217,23 @@ impl Store {
         offset: usize,
     ) -> Result<(Vec<Word>, u64), StoreError> {
         let conn = self.conn()?;
-        let pattern = format!("%{query}%");
+        // 转义用户输入中的 LIKE 元字符(\ % _)并配合 ESCAPE '\\':否则用户搜索词里的 % / _
+        // 会被当作通配符——搜 "100%" 会匹配所有以 100 开头的词、搜 "_" 会匹配全表,
+        // 导致 COUNT 总数与结果页都错误。参数仍走绑定,不存在 SQL 注入,这里只修正语义。
+        let escaped = query
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let pattern = format!("%{escaped}%");
 
         let total: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM words WHERE text LIKE ?1 OR meaning LIKE ?1",
+            "SELECT COUNT(*) FROM words WHERE text LIKE ?1 ESCAPE '\\' OR meaning LIKE ?1 ESCAPE '\\'",
             params![pattern],
             |r| r.get(0),
         )?;
 
         let mut stmt = conn.prepare(&format!(
-            "SELECT {WORD_COLS} FROM words WHERE text LIKE ?1 OR meaning LIKE ?1 ORDER BY text LIMIT ?2 OFFSET ?3"
+            "SELECT {WORD_COLS} FROM words WHERE text LIKE ?1 ESCAPE '\\' OR meaning LIKE ?1 ESCAPE '\\' ORDER BY text LIMIT ?2 OFFSET ?3"
         ))?;
         let rows = stmt.query_map(params![pattern, limit as i64, offset as i64], word_from_row)?;
         let words: Vec<Word> = rows.collect::<Result<Vec<_>, _>>()?;

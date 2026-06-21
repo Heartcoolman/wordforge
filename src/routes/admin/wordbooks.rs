@@ -412,7 +412,12 @@ async fn patch_wordbook(
                 if let Some(d) = desc {
                     wb.description = d;
                 }
-                store.upsert_wordbook(&wb)?;
+                // 仅字段级更新 name/description,绝不回写 word_count,避免覆盖并发增删词维护的计数。
+                store.update_wordbook_meta(&id_for_task, &wb.name, &wb.description)?;
+                // word_count 可能在读取后被并发增删词修改,返回前重读以反映真实值。
+                let wb = store
+                    .get_wordbook(&id_for_task)?
+                    .ok_or_else(|| AppError::not_found("词库不存在"))?;
                 Ok(wb)
             },
         )
