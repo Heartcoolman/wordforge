@@ -172,7 +172,7 @@ export function Modal(props: {
     <Show when={props.open}>
       <div
         class="fade-in"
-        style={sx({ position: 'fixed', inset: 0, zIndex: 1000, display: 'grid', placeItems: 'center', padding: 20, background: 'rgba(8,10,18,0.5)', backdropFilter: 'blur(4px)' })}
+        style={sx({ position: 'fixed', inset: 0, zIndex: 1000, display: 'grid', placeItems: 'center', padding: 20, background: 'rgba(0,0,0,0.5)' })}
         onMouseDown={(e) => e.target === e.currentTarget && props.onClose()}
       >
         <div
@@ -206,7 +206,7 @@ export function Drawer(props: {
     <Show when={props.open}>
       <div
         class="fade-in"
-        style={sx({ position: 'fixed', inset: 0, zIndex: 1000, background: 'rgba(8,10,18,0.45)', backdropFilter: 'blur(3px)' })}
+        style={sx({ position: 'fixed', inset: 0, zIndex: 1000, background: 'rgba(0,0,0,0.5)' })}
         onMouseDown={(e) => e.target === e.currentTarget && props.onClose()}
       >
         <div
@@ -263,7 +263,7 @@ export function StatCard(props: {
       <div style={sx({ display: 'flex', alignItems: 'center', justifyContent: 'space-between' })}>
         <span style={sx({ display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 12.5, fontWeight: 600, color: 'var(--text-2)' })}>
           <Show when={props.icon}>
-            <span style={sx({ display: 'grid', placeItems: 'center', width: 26, height: 26, borderRadius: 8, background: `color-mix(in oklch, ${toneCol()} 14%, transparent)`, color: toneCol() })}>
+            <span style={sx({ display: 'grid', placeItems: 'center', width: 26, height: 26, borderRadius: 8, background: `color-mix(in srgb, ${toneCol()} 12%, transparent)`, color: toneCol() })}>
               <Icon name={props.icon!} size={15} />
             </span>
           </Show>
@@ -312,7 +312,7 @@ export function Progress(props: {
   value: number; max?: number; tone?: 'accent' | 'success' | 'warning' | 'error' | 'info'; height?: number; showLabel?: boolean;
 }) {
   const pct = () => Math.min(100, (props.value / (props.max ?? 100)) * 100);
-  const col = () => ({ accent: 'var(--grad-brand)', success: 'var(--success)', warning: 'var(--warning)', error: 'var(--error)', info: 'var(--info)' }[props.tone ?? 'accent']);
+  const col = () => ({ accent: 'var(--accent)', success: 'var(--success)', warning: 'var(--warning)', error: 'var(--error)', info: 'var(--info)' }[props.tone ?? 'accent']);
   return (
     <div style={sx({ display: 'flex', alignItems: 'center', gap: 8 })}>
       <div class="bar" style={sx({ height: props.height ?? 7, flex: 1 })}><i style={sx({ width: pct() + '%', background: col() })} /></div>

@@ -1,6 +1,6 @@
 import { themeStore } from '@/stores/theme';
 
-type Tone =
+export type Tone =
   | 'accent'
   | 'success'
   | 'warning'
@@ -10,26 +10,28 @@ type Tone =
   | 'pink'
   | 'violet';
 
+/* mono ink-on-paper：accent=墨、四状态色(q/w/e/r)=唯一彩色、其余收敛为灰。
+   不再有 indigo/pink/violet 彩虹色。 */
 const LIGHT_FALLBACKS: Record<Tone, string> = {
-  accent: '#6366f1',
-  success: '#10b981',
-  warning: '#f59e0b',
-  error: '#ef4444',
-  info: '#3b82f6',
-  muted: '#94a3b8',
-  pink: '#ec4899',
-  violet: '#8b5cf6',
+  accent: '#0a0a0b',
+  success: '#2f8a5b',
+  warning: '#b7791f',
+  error: '#c0392b',
+  info: '#2d6cdf',
+  muted: '#9ca3af',
+  pink: '#6b7280',
+  violet: '#3f4654',
 };
 
 const DARK_FALLBACKS: Record<Tone, string> = {
-  accent: '#818cf8',
-  success: '#34d399',
-  warning: '#fbbf24',
-  error: '#f87171',
-  info: '#60a5fa',
-  muted: '#64748b',
-  pink: '#f472b6',
-  violet: '#a78bfa',
+  accent: '#ffffff',
+  success: '#5fc98e',
+  warning: '#e2b062',
+  error: '#f0938c',
+  info: '#6fa0ee',
+  muted: '#67676e',
+  pink: '#a1a1aa',
+  violet: '#c5cad3',
 };
 
 const CSS_VAR_BY_TONE: Partial<Record<Tone, string>> = {
@@ -54,14 +56,30 @@ export function chartColor(tone: Tone) {
   return variable ? cssVar(variable, fallback) : fallback;
 }
 
+/* mono 多系列分类色序：墨 → 四状态色 → 灰。克制、可辨、不喧宾夺主。 */
 export function chartPalette() {
   return [
-    chartColor('accent'),
-    chartColor('success'),
-    chartColor('warning'),
-    chartColor('pink'),
-    chartColor('info'),
-    chartColor('violet'),
+    chartColor('accent'),  // 墨
+    chartColor('info'),     // r 蓝
+    chartColor('success'),  // e 绿
+    chartColor('warning'),  // w 琥珀
+    chartColor('error'),    // q 红
+    chartColor('muted'),    // 灰
+  ];
+}
+
+/** mono 算法/分类色序（8 档）。经 chartColor 解析为真实色值且随主题翻转，
+ *  可安全用于 SVG presentation 属性（var() 在 SVG 属性里不解析）。 */
+export function algoPalette(): string[] {
+  return [
+    chartColor('accent'),  // 墨
+    chartColor('info'),    // r 蓝
+    chartColor('success'), // e 绿
+    chartColor('warning'), // w 琥珀
+    chartColor('error'),   // q 红
+    chartColor('muted'),   // 灰
+    chartColor('pink'),    // 灰（中）
+    chartColor('violet'),  // 灰（深/浅）
   ];
 }
 

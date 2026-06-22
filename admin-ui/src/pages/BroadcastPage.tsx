@@ -389,7 +389,7 @@ export default function BroadcastPage() {
               <Panel title="预览">
                 <div style={sx({ padding: 14, borderRadius: 12, background: 'var(--surface-sunken)', border: '1px solid var(--hairline)' })}>
                   <div style={sx({ display: 'flex', gap: 9, alignItems: 'center', marginBottom: 8 })}>
-                    <span style={sx({ width: 28, height: 28, borderRadius: 8, background: 'var(--grad-brand)', color: '#fff', display: 'grid', placeItems: 'center', fontWeight: 800, fontSize: 13 })}>W</span>
+                    <span style={sx({ width: 28, height: 28, borderRadius: '50%', background: 'var(--accent)', color: 'var(--solid-ink)', display: 'grid', placeItems: 'center', fontWeight: 700, fontSize: 13 })}>W</span>
                     <b style={sx({ fontSize: 13 })}>WordForge</b>
                   </div>
                   <div style={sx({ fontWeight: 700, fontSize: 14 })}>{title() || '广播标题'}</div>

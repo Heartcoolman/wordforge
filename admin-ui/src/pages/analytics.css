@@ -42,7 +42,7 @@
 .analytics .btn-secondary { background: var(--surface-elevated); color: var(--content); box-shadow: inset 0 0 0 1px var(--border); }
 .analytics .btn-secondary:hover { background: var(--surface-secondary); box-shadow: inset 0 0 0 1px var(--border-hover); }
 .analytics .btn-secondary.is-on { background: var(--accent-light); color: var(--accent); box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--accent) 30%, transparent); }
-.analytics .btn-primary { background: var(--accent); color: #fff; }
+.analytics .btn-primary { background: var(--accent); color: var(--solid-ink); }
 .analytics .btn-primary:hover { background: color-mix(in oklab, var(--accent) 88%, #000); }
 .analytics .btn-ghost { background: transparent; color: var(--content-secondary); }
 .analytics .btn-ghost:hover { background: var(--surface-secondary); color: var(--content); }
@@ -90,16 +90,16 @@
 .analytics .funnel-row .bar-wrap { position: relative; height: 32px; background: var(--surface-secondary); border-radius: var(--radius-md); overflow: hidden; }
 .analytics .funnel-row .bar {
   position: absolute; left: 0; top: 0; bottom: 0;
-  background: linear-gradient(90deg, var(--accent), oklch(58% 0.20 300));
+  background: var(--accent);
   border-radius: var(--radius-md);
   animation: funnel-fill 700ms var(--ease-out-expo) both;
 }
-.analytics .funnel-row .bar.is-good { background: linear-gradient(90deg, var(--success), oklch(56% 0.18 162)); }
-.analytics .funnel-row .bar.is-warn { background: linear-gradient(90deg, var(--warning), oklch(64% 0.18 60)); }
+.analytics .funnel-row .bar.is-good { background: var(--success); }
+.analytics .funnel-row .bar.is-warn { background: var(--warning); }
 .analytics .funnel-row .bar-label {
   position: absolute; right: 12px; top: 50%; transform: translateY(-50%);
   font: 600 12px/1 var(--font-mono);
-  color: #fff;
+  color: var(--solid-ink);
   font-variant-numeric: tabular-nums;
 }
 @keyframes funnel-fill { from { transform: scaleX(0); transform-origin: left; } to { transform: scaleX(1); } }
@@ -130,8 +130,8 @@
   font-weight: 500;
   color: var(--content);
 }
-.analytics .cell-retention.r-100 { background: var(--accent); color: #fff; }
-.analytics .cell-retention.r-70  { background: color-mix(in oklab, var(--accent) 60%, var(--surface-elevated)); color: #fff; }
+.analytics .cell-retention.r-100 { background: var(--accent); color: var(--solid-ink); }
+.analytics .cell-retention.r-70  { background: color-mix(in oklab, var(--accent) 60%, var(--surface-elevated)); color: var(--solid-ink); }
 .analytics .cell-retention.r-50  { background: color-mix(in oklab, var(--accent) 38%, var(--surface-elevated)); color: var(--accent); }
 .analytics .cell-retention.r-30  { background: color-mix(in oklab, var(--accent) 22%, var(--surface-elevated)); color: var(--accent); }
 .analytics .cell-retention.r-15  { background: color-mix(in oklab, var(--accent) 12%, var(--surface-elevated)); color: var(--content-secondary); }
@@ -143,11 +143,11 @@
 .analytics .dist-row { display: grid; grid-template-columns: 90px 1fr 60px; align-items: center; gap: 10px; padding: 5px 0; font-size: 12px; }
 .analytics .dist-row .lbl { color: var(--content-secondary); }
 .analytics .dist-row .track { height: 10px; background: var(--surface-tertiary); border-radius: var(--radius-pill); overflow: hidden; }
-.analytics .dist-row .fill { height: 100%; background: linear-gradient(90deg, var(--accent), oklch(58% 0.20 300)); border-radius: var(--radius-pill); animation: bar-fill 700ms var(--ease-out-expo) both; }
-.analytics .dist-row .fill.is-success { background: linear-gradient(90deg, var(--success), oklch(56% 0.16 162)); }
-.analytics .dist-row .fill.is-info { background: linear-gradient(90deg, var(--info), oklch(56% 0.16 245)); }
-.analytics .dist-row .fill.is-warning { background: linear-gradient(90deg, var(--warning), oklch(62% 0.18 60)); }
-.analytics .dist-row .fill.is-violet { background: linear-gradient(90deg, oklch(58% 0.22 290), oklch(56% 0.22 320)); }
+.analytics .dist-row .fill { height: 100%; background: var(--accent); border-radius: var(--radius-pill); animation: bar-fill 700ms var(--ease-out-expo) both; }
+.analytics .dist-row .fill.is-success { background: var(--success); }
+.analytics .dist-row .fill.is-info { background: var(--info); }
+.analytics .dist-row .fill.is-warning { background: var(--warning); }
+.analytics .dist-row .fill.is-violet { background: var(--accent); }
 .analytics .dist-row .v { text-align: right; font-family: var(--font-mono); font-variant-numeric: tabular-nums; color: var(--content); }
 @keyframes bar-fill { from { width: 0 !important; } }
 

@@ -154,8 +154,8 @@ describe('lib/chartTheme', () => {
   });
 
   it('有 CSS 变量映射的 tone：变量为空时回退到 light fallback', () => {
-    // accent 有 CSS 变量映射，但变量值为空 → fallback
-    expect(chartColor('accent')).toBe('#6366f1');
+    // accent 有 CSS 变量映射，但变量值为空 → fallback（mono：墨）
+    expect(chartColor('accent')).toBe('#0a0a0b');
   });
 
   it('有 CSS 变量映射的 tone：变量有值时优先取变量', () => {
@@ -165,15 +165,15 @@ describe('lib/chartTheme', () => {
 
   it('暗色模式下无 CSS 变量映射的 tone 取 dark fallback', () => {
     themeEffective.mockReturnValue('dark');
-    // pink / violet 没有 CSS 变量映射 → 直接 fallback
-    expect(chartColor('pink')).toBe('#f472b6');
-    expect(chartColor('violet')).toBe('#a78bfa');
+    // pink / violet 没有 CSS 变量映射 → 直接 fallback（mono：灰）
+    expect(chartColor('pink')).toBe('#a1a1aa');
+    expect(chartColor('violet')).toBe('#c5cad3');
   });
 
   it('明色模式下无 CSS 变量映射的 tone 取 light fallback', () => {
     themeEffective.mockReturnValue('light');
-    expect(chartColor('pink')).toBe('#ec4899');
-    expect(chartColor('violet')).toBe('#8b5cf6');
+    expect(chartColor('pink')).toBe('#6b7280');
+    expect(chartColor('violet')).toBe('#3f4654');
   });
 
   it('muted 有 CSS 变量映射（--content-tertiary）', () => {

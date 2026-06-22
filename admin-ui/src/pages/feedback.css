@@ -11,7 +11,7 @@
 }
 @media (max-width: 1100px) { .fb-summary { grid-template-columns: 1fr 1fr; } }
 .fb-inbox-card {
-  background: linear-gradient(135deg, var(--accent-light) 0%, var(--surface-elevated) 55%);
+  background: var(--surface-secondary);
   border-radius: var(--radius-lg);
   padding: 20px;
   box-shadow: var(--elevation-1);
@@ -45,9 +45,9 @@
 .fb-summary .kpi-trend .delta.down { background: var(--error-light);   color: var(--error-strong); }
 .fb-summary .kpi-trend .delta.flat { background: var(--surface-secondary); color: var(--content-tertiary); }
 .fb-summary .kpi-spark { position: absolute; right: 14px; bottom: 14px; width: 80px; height: 28px; opacity: 0.65; pointer-events: none; }
-.fb-summary .kpi.is-accent  { background: linear-gradient(135deg, var(--accent-light) 0%, var(--surface-elevated) 60%); }
-.fb-summary .kpi.is-success { background: linear-gradient(135deg, var(--success-light) 0%, var(--surface-elevated) 60%); }
-.fb-summary .kpi.is-info    { background: linear-gradient(135deg, var(--info-light)    0%, var(--surface-elevated) 60%); }
+.fb-summary .kpi.is-accent  { background: var(--surface-secondary); }
+.fb-summary .kpi.is-success { background: var(--success-light); }
+.fb-summary .kpi.is-info    { background: var(--info-light); }
 
 /* Category tabs */
 .fb-tabs {
@@ -120,7 +120,7 @@
   border-radius: 50%;
   display: grid; place-items: center;
   font: 600 12px/1 var(--font-display);
-  color: #fff;
+  color: var(--solid-ink);
   flex-shrink: 0;
 }
 .fb-row .body { min-width: 0; }
@@ -146,8 +146,8 @@
 .cat-badge.support  { background: var(--surface-tertiary); color: var(--content-secondary); }
 
 .pri-badge { font: 600 10px/1 var(--font-mono); padding: 1px 5px; border-radius: 3px; letter-spacing: 0.05em; }
-.pri-badge.P0 { background: var(--error); color: #fff; }
-.pri-badge.P1 { background: var(--warning); color: #fff; }
+.pri-badge.P0 { background: var(--error); color: var(--solid-ink); }
+.pri-badge.P1 { background: var(--warning); color: var(--solid-ink); }
 .pri-badge.P2 { background: var(--info-light); color: var(--info-strong); }
 .pri-badge.P3 { background: var(--surface-tertiary); color: var(--content-tertiary); }
 
@@ -164,7 +164,7 @@
 .fb-detail-head h2 { font: 600 19px/1.3 var(--font-display); letter-spacing: -0.015em; }
 .fb-detail-head .meta-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-top: 10px; font-size: 12px; color: var(--content-secondary); }
 .fb-detail-head .meta-row .reporter { display: inline-flex; align-items: center; gap: 8px; }
-.fb-detail-head .meta-row .reporter .av { width: 22px; height: 22px; border-radius: 50%; background: linear-gradient(135deg, var(--accent), oklch(54% 0.22 290)); display: grid; place-items: center; font: 600 10px/1 var(--font-display); color: #fff; }
+.fb-detail-head .meta-row .reporter .av { width: 22px; height: 22px; border-radius: 50%; background: var(--accent); display: grid; place-items: center; font: 600 10px/1 var(--font-display); color: var(--solid-ink); }
 
 .fb-detail-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
 
@@ -192,20 +192,20 @@
   color: var(--accent);
 }
 .fb-content pre {
-  background: oklch(15% 0.01 250);
-  color: oklch(94% 0.005 250);
+  background: var(--surface-sunken);
+  color: var(--content);
   padding: 14px 16px;
   border-radius: var(--radius-md);
   font: 500 12px/1.6 var(--font-mono);
   overflow-x: auto;
   margin: 10px 0 14px;
 }
-.fb-content pre .ln { color: oklch(45% 0.01 250); margin-right: 14px; user-select: none; }
+.fb-content pre .ln { color: var(--content-tertiary); margin-right: 14px; user-select: none; }
 .fb-content pre .hl { background: color-mix(in oklab, var(--error) 30%, transparent); display: inline-block; width: calc(100% + 32px); margin: 0 -16px; padding: 0 16px; }
 
 .fb-screenshots { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 12px 0 16px; }
 .fb-screenshots .sc {
-  background: linear-gradient(135deg, var(--surface-secondary), var(--surface-tertiary));
+  background: var(--surface-secondary);
   border-radius: var(--radius-md);
   aspect-ratio: 16/10;
   position: relative;
@@ -224,7 +224,7 @@
   position: absolute; left: 8px; bottom: 6px;
   font-size: 10px;
   background: rgba(0,0,0,0.55);
-  color: #fff;
+  color: var(--solid-ink);
   padding: 1px 6px;
   border-radius: 3px;
   z-index: 2;

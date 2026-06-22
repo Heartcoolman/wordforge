@@ -1,46 +1,31 @@
 @import "tailwindcss";
 
 /* ═══════════════════════════════════════════
-   Local Inter Font (self-hosted)
+   WordMaster Mono — self-hosted webfonts (latin 子集)
+   Sora     — 显示 / 标题 / 数字（紧负字距）
+   IBM Plex Mono — eyebrow / 数据 / 计数（大写宽字距）
+   Inter    — 正文回退（Sora 之后）
+   中文走系统 PingFang SC 回退；离线/内网可用，无 CDN 依赖。
    ═══════════════════════════════════════════ */
 
-@font-face {
-  font-family: "Inter";
-  font-style: normal;
-  font-weight: 400;
-  font-display: swap;
-  src: url("/fonts/inter-400.woff2") format("woff2");
-}
+/* —— Sora（display / numerals） —— */
+@font-face { font-family: "Sora"; font-style: normal; font-weight: 300; font-display: swap; src: url("/fonts/sora-300.woff2") format("woff2"); }
+@font-face { font-family: "Sora"; font-style: normal; font-weight: 400; font-display: swap; src: url("/fonts/sora-400.woff2") format("woff2"); }
+@font-face { font-family: "Sora"; font-style: normal; font-weight: 500; font-display: swap; src: url("/fonts/sora-500.woff2") format("woff2"); }
+@font-face { font-family: "Sora"; font-style: normal; font-weight: 600; font-display: swap; src: url("/fonts/sora-600.woff2") format("woff2"); }
+@font-face { font-family: "Sora"; font-style: normal; font-weight: 700; font-display: swap; src: url("/fonts/sora-700.woff2") format("woff2"); }
+@font-face { font-family: "Sora"; font-style: normal; font-weight: 800; font-display: swap; src: url("/fonts/sora-800.woff2") format("woff2"); }
 
-@font-face {
-  font-family: "Inter";
-  font-style: normal;
-  font-weight: 500;
-  font-display: swap;
-  src: url("/fonts/inter-500.woff2") format("woff2");
-}
+/* —— IBM Plex Mono（eyebrow / data voice） —— */
+@font-face { font-family: "IBM Plex Mono"; font-style: normal; font-weight: 400; font-display: swap; src: url("/fonts/ibm-plex-mono-400.woff2") format("woff2"); }
+@font-face { font-family: "IBM Plex Mono"; font-style: normal; font-weight: 500; font-display: swap; src: url("/fonts/ibm-plex-mono-500.woff2") format("woff2"); }
+@font-face { font-family: "IBM Plex Mono"; font-style: normal; font-weight: 600; font-display: swap; src: url("/fonts/ibm-plex-mono-600.woff2") format("woff2"); }
 
-@font-face {
-  font-family: "Inter";
-  font-style: normal;
-  font-weight: 600;
-  font-display: swap;
-  src: url("/fonts/inter-600.woff2") format("woff2");
-}
-
-@font-face {
-  font-family: "Inter";
-  font-style: normal;
-  font-weight: 700;
-  font-display: swap;
-  src: url("/fonts/inter-700.woff2") format("woff2");
-}
-
-/* JetBrains Mono v2 webfont(OFL,GitHub release),
-   ~92KB/weight × 3 = 282KB 总增量,font-display: swap 不阻塞首屏。 */
-@font-face { font-family: "JetBrains Mono"; font-weight: 400; src: url("/fonts/jetbrains-mono-400.woff2") format("woff2"); font-display: swap; }
-@font-face { font-family: "JetBrains Mono"; font-weight: 500; src: url("/fonts/jetbrains-mono-500.woff2") format("woff2"); font-display: swap; }
-@font-face { font-family: "JetBrains Mono"; font-weight: 600; src: url("/fonts/jetbrains-mono-600.woff2") format("woff2"); font-display: swap; }
+/* —— Inter（body fallback） —— */
+@font-face { font-family: "Inter"; font-style: normal; font-weight: 400; font-display: swap; src: url("/fonts/inter-400.woff2") format("woff2"); }
+@font-face { font-family: "Inter"; font-style: normal; font-weight: 500; font-display: swap; src: url("/fonts/inter-500.woff2") format("woff2"); }
+@font-face { font-family: "Inter"; font-style: normal; font-weight: 600; font-display: swap; src: url("/fonts/inter-600.woff2") format("woff2"); }
+@font-face { font-family: "Inter"; font-style: normal; font-weight: 700; font-display: swap; src: url("/fonts/inter-700.woff2") format("woff2"); }
 
 /* ═══════════════════════════════════════════
    Theme CSS Variables (Light / Dark)
@@ -49,152 +34,135 @@
    ═══════════════════════════════════════════ */
 
 :root {
-  /* Surface — 4 层 + sunken */
-  --surface: oklch(99.4% 0.004 250);
-  --surface-secondary: oklch(97.8% 0.006 250);
-  --surface-tertiary: oklch(95.4% 0.008 250);
-  --surface-elevated: oklch(100% 0 0);
-  --surface-sunken: oklch(96% 0.006 250);
+  /* —— 原始 mono ramp：黑墨白纸，唯一彩色=q/w/e/r 四状态对 —— */
+  --bg: #ffffff;          /* 页面 / 纸 */
+  --ink: #15181e;         /* 主墨（近黑） */
+  --ink-2: #6b7280;       /* 次墨 */
+  --ink-3: #9ca3af;       /* 三级墨 / placeholder */
+  --line: #ececec;        /* 发丝线 */
+  --line-strong: #dcdcdc; /* 加强发丝线 */
+  --solid: #0a0a0b;       /* 实心填充（主按钮 / accent） */
+  --solid-ink: #ffffff;   /* 实心之上的字 */
+  --q-bg: #fce9e9; --q-ink: #c0392b;  /* error / 已遗忘 */
+  --w-bg: #fbf0dc; --w-ink: #b7791f;  /* warning / 学习中 */
+  --e-bg: #e4f4ea; --e-ink: #2f8a5b;  /* success / 已掌握 */
+  --r-bg: #e6effb; --r-ink: #2d6cdf;  /* info / 复习中 */
+  /* 唯一一档阴影：仅给浮层（弹层/抽屉），扁平卡片靠边框 */
+  --shadow: 0 1px 2px rgba(20, 22, 28, 0.04), 0 18px 40px -24px rgba(20, 22, 28, 0.16);
 
-  /* Content — text 4 级 + inverse */
-  --content: oklch(20% 0.024 264);
-  --content-secondary: oklch(44% 0.022 258);
-  --content-tertiary: oklch(62% 0.016 258);
-  --content-quaternary: oklch(78% 0.010 258);
-  --content-inverse: oklch(100% 0 0);
+  /* —— Surface（纸面 4 层 + sunken） —— */
+  --surface: #ffffff;
+  --surface-secondary: #f4f4f5;
+  --surface-tertiary: #f4f4f5;
+  --surface-elevated: #ffffff;
+  --surface-sunken: #f4f4f5;
 
-  /* Accent — primary action（indigo on oklch） */
-  --accent: oklch(58% 0.20 269);
-  --accent-hover: oklch(52% 0.22 269);
-  --accent-active: oklch(46% 0.22 269);
-  --accent-light: oklch(96% 0.04 269);
-  --accent-content: #ffffff;
-  --accent-ring: color-mix(in oklab, oklch(58% 0.20 269) 35%, transparent);
+  /* —— Content（4 级墨 + inverse），全部读 ramp —— */
+  --content: var(--ink);
+  --content-secondary: var(--ink-2);
+  --content-tertiary: var(--ink-3);
+  --content-quaternary: #c5cad3;
+  --content-inverse: var(--solid-ink);
 
-  /* Status — emerald / amber / red / sky；soft + strong 双轨 */
-  --success: oklch(63% 0.16 162);
-  --success-strong: oklch(54% 0.18 162);
-  --success-light: oklch(96% 0.05 162);
-  --warning: oklch(72% 0.16 75);
-  --warning-strong: oklch(60% 0.18 60);
-  --warning-light: oklch(97% 0.05 80);
-  --error: oklch(61% 0.22 27);
-  --error-strong: oklch(54% 0.22 27);
-  --error-light: oklch(97% 0.04 25);
-  --info: oklch(64% 0.16 245);
-  --info-strong: oklch(54% 0.18 245);
-  --info-light: oklch(97% 0.04 240);
+  /* —— Accent = 实心墨（the accent is black，无品牌色相） —— */
+  --accent: var(--solid);
+  --accent-hover: var(--ink);
+  --accent-active: #000000;
+  --accent-light: var(--surface-secondary);
+  --accent-content: var(--solid-ink);
+  --accent-ring: rgba(21, 24, 30, 0.30);
 
-  /* Border — hairline / 标准 / hover / strong */
-  --border: oklch(91% 0.008 250);
-  --border-hover: oklch(84% 0.010 250);
-  --border-strong: oklch(75% 0.012 250);
-  --border-hairline: color-mix(in oklab, oklch(20% 0.024 264) 8%, transparent);
+  /* —— Status = 四状态色（soft + strong 同墨；唯一允许的彩色） —— */
+  --success: var(--e-ink); --success-strong: var(--e-ink); --success-light: var(--e-bg);
+  --warning: var(--w-ink); --warning-strong: var(--w-ink); --warning-light: var(--w-bg);
+  --error: var(--q-ink);   --error-strong: var(--q-ink);   --error-light: var(--q-bg);
+  --info: var(--r-ink);    --info-strong: var(--r-ink);    --info-light: var(--r-bg);
 
-  /* Shadows — legacy 单层（保留兼容） */
-  --shadow-sm: 0 1px 2px 0 rgba(15, 23, 42, 0.04);
-  --shadow-md: 0 4px 6px -1px rgba(15, 23, 42, 0.06), 0 2px 4px -2px rgba(15, 23, 42, 0.04);
-  --shadow-lg: 0 10px 15px -3px rgba(15, 23, 42, 0.08), 0 4px 6px -4px rgba(15, 23, 42, 0.05);
-  --shadow-xl: 0 20px 30px -10px rgba(15, 23, 42, 0.10);
+  /* —— Border = 1px 发丝线 —— */
+  --border: var(--line);
+  --border-hover: var(--line-strong);
+  --border-strong: var(--line-strong);
+  --border-hairline: var(--line);
 
-  /* Elevation — Linear / Vercel 风 1px ring + 多层 drop（新名 --elevation-N） */
-  --elevation-1: 0 0 0 1px rgba(15, 23, 42, 0.04), 0 1px 2px rgba(15, 23, 42, 0.04);
-  --elevation-2: 0 0 0 1px rgba(15, 23, 42, 0.05), 0 2px 4px rgba(15, 23, 42, 0.04), 0 4px 8px rgba(15, 23, 42, 0.04);
-  --elevation-3: 0 0 0 1px rgba(15, 23, 42, 0.06), 0 4px 8px rgba(15, 23, 42, 0.05), 0 12px 20px rgba(15, 23, 42, 0.06);
-  --elevation-4: 0 0 0 1px rgba(15, 23, 42, 0.06), 0 8px 16px rgba(15, 23, 42, 0.06), 0 24px 40px rgba(15, 23, 42, 0.08);
+  /* —— Shadows（mono 只有一档；旧别名全部收敛到 --shadow） —— */
+  --shadow-sm: var(--shadow);
+  --shadow-md: var(--shadow);
+  --shadow-lg: var(--shadow);
+  --shadow-xl: var(--shadow);
+  --elevation-1: var(--shadow);
+  --elevation-2: var(--shadow);
+  --elevation-3: var(--shadow);
+  --elevation-4: var(--shadow);
+  --shadow-elevation-1: var(--shadow);
+  --shadow-elevation-2: var(--shadow);
+  --shadow-elevation-3: var(--shadow);
+  --shadow-elevation-4: var(--shadow);
 
-  /* Legacy alias — 60 天兼容期，旧组件仍可用 --shadow-elevation-N */
-  --shadow-elevation-1: var(--elevation-1);
-  --shadow-elevation-2: var(--elevation-2);
-  --shadow-elevation-3: var(--elevation-3);
-  --shadow-elevation-4: var(--elevation-4);
+  /* —— 无渐变：旧 gradient token 压平为实色，杜绝彩色渐变 —— */
+  --gradient-surface-subtle: var(--surface);
+  --gradient-accent-soft: var(--surface-secondary);
+  --gradient-accent-strong: var(--solid);
+  --gradient-brand-mark: var(--solid);
 
-  /* Subtle gradients */
-  --gradient-surface-subtle: linear-gradient(180deg, var(--surface) 0%, var(--surface-secondary) 100%);
-  --gradient-accent-soft: linear-gradient(135deg, color-mix(in oklab, var(--accent) 10%, transparent) 0%, transparent 100%);
-  --gradient-accent-strong: linear-gradient(180deg, var(--accent) 0%, var(--accent-hover) 100%);
-  --gradient-brand-mark: linear-gradient(140deg, var(--accent) 0%, oklch(46% 0.22 290) 100%);
-
-  /* Radius — px（与 brand-spec 对齐） */
-  --radius-xs: 4px;
-  --radius-sm: 6px;
-  --radius-md: 8px;
-  --radius-lg: 12px;
-  --radius-xl: 16px;
-  --radius-2xl: 20px;
+  /* —— Radius（圆润、药丸倾向） —— */
+  --radius-xs: 6px;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 20px;
+  --radius-2xl: 24px;
   --radius-pill: 9999px;
-  --radius-full: 9999px; /* alias for --radius-pill, 不破坏现有 rounded-full 使用 */
+  --radius-full: 9999px;
 
-  /* Motion — duration */
-  --duration-fast: 140ms;
-  --duration-base: 220ms;
-  --duration-slow: 360ms;
+  /* —— Motion（签名缓动，无回弹） —— */
+  --duration-fast: 150ms;
+  --duration-base: 250ms;
+  --duration-slow: 440ms;
+  --ease-out-expo: cubic-bezier(0.2, 0.7, 0.3, 1);
+  --ease-spring: cubic-bezier(0.2, 0.7, 0.3, 1);
+  --ease-in-out-quart: cubic-bezier(0.4, 0, 0.2, 1);
 
-  /* Motion — easing */
-  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
-  --ease-spring: cubic-bezier(0.5, 1.4, 0.5, 1);
-  --ease-in-out-quart: cubic-bezier(0.76, 0, 0.24, 1);
+  /* —— Typography stacks —— */
+  --font-display: "Sora", "Inter", ui-sans-serif, system-ui, -apple-system, "PingFang SC", sans-serif;
+  --font-body: "Sora", "Inter", ui-sans-serif, system-ui, -apple-system, "PingFang SC", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  --tracking-body: -0.011em;
+  --tracking-eyebrow: 0.18em;
 
-  /* Typography stacks */
-  --font-display: "Inter", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --font-body: "Inter", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --font-mono: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, monospace;
-
-  /* Layout geometry — admin shell 用 */
-  --sidebar-w-open: 240px;
-  --sidebar-w-collapsed: 64px;
+  /* —— Layout geometry — admin shell 用 —— */
+  --sidebar-w-open: 248px;
+  --sidebar-w-collapsed: 68px;
   --topbar-h: 64px;
   --content-max: 1440px;
   --space-pane: 24px;
 }
 
 .dark {
-  --surface: oklch(15% 0.012 258);
-  --surface-secondary: oklch(19% 0.014 258);
-  --surface-tertiary: oklch(24% 0.014 258);
-  --surface-elevated: oklch(21% 0.014 258);
-  --surface-sunken: oklch(13% 0.012 258);
+  /* 反相：纯黑纸 + 白墨。只覆盖原始 ramp 与 surface，
+     其余 content/accent/border/status/shadow/gradient 经语义别名自动跟随。 */
+  --bg: #000000;
+  --ink: #ffffff;
+  --ink-2: #a1a1aa;
+  --ink-3: #67676e;
+  --line: #1e1e22;
+  --line-strong: #2c2c31;
+  --solid: #ffffff;
+  --solid-ink: #0a0a0b;
+  --q-bg: #2a1718; --q-ink: #f0938c;
+  --w-bg: #2a2113; --w-ink: #e2b062;
+  --e-bg: #122620; --e-ink: #5fc98e;
+  --r-bg: #121f33; --r-ink: #6fa0ee;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.5), 0 22px 50px -26px rgba(0, 0, 0, 0.7);
 
-  --content: oklch(96% 0.006 250);
-  --content-secondary: oklch(74% 0.014 250);
-  --content-tertiary: oklch(58% 0.014 250);
-  --content-quaternary: oklch(42% 0.014 250);
-  --content-inverse: oklch(20% 0.024 264);
+  --surface: #0c0c0e;
+  --surface-secondary: #161618;
+  --surface-tertiary: #161618;
+  --surface-elevated: #0c0c0e;
+  --surface-sunken: #0a0a0c;
 
-  --accent: oklch(72% 0.16 269);
-  --accent-hover: oklch(78% 0.13 269);
-  --accent-active: oklch(82% 0.10 269);
-  --accent-light: oklch(28% 0.10 269);
-  --accent-content: #ffffff;
-  --accent-ring: color-mix(in oklab, oklch(72% 0.16 269) 40%, transparent);
-
-  --success-light: oklch(28% 0.08 162);
-  --warning-light: oklch(28% 0.10 75);
-  --error-light: oklch(28% 0.10 27);
-  --info-light: oklch(28% 0.08 245);
-
-  --border: oklch(30% 0.012 258);
-  --border-hover: oklch(38% 0.014 258);
-  --border-strong: oklch(46% 0.014 258);
-  --border-hairline: rgba(255, 255, 255, 0.08);
-
-  --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.3);
-  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.4), 0 2px 4px -2px rgba(0, 0, 0, 0.3);
-  --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.45);
-  --shadow-xl: 0 20px 30px -10px rgba(0, 0, 0, 0.55);
-
-  --elevation-1: 0 0 0 1px rgba(255, 255, 255, 0.06), 0 1px 2px rgba(0, 0, 0, 0.4);
-  --elevation-2: 0 0 0 1px rgba(255, 255, 255, 0.06), 0 2px 4px rgba(0, 0, 0, 0.4), 0 4px 8px rgba(0, 0, 0, 0.4);
-  --elevation-3: 0 0 0 1px rgba(255, 255, 255, 0.07), 0 4px 8px rgba(0, 0, 0, 0.5), 0 12px 20px rgba(0, 0, 0, 0.5);
-  --elevation-4: 0 0 0 1px rgba(255, 255, 255, 0.08), 0 8px 16px rgba(0, 0, 0, 0.5), 0 24px 40px rgba(0, 0, 0, 0.6);
-
-  --shadow-elevation-1: var(--elevation-1);
-  --shadow-elevation-2: var(--elevation-2);
-  --shadow-elevation-3: var(--elevation-3);
-  --shadow-elevation-4: var(--elevation-4);
-
-  --gradient-accent-soft: linear-gradient(135deg, color-mix(in oklab, var(--accent) 20%, transparent) 0%, transparent 100%);
-  --gradient-accent-strong: linear-gradient(180deg, var(--accent) 0%, var(--accent-hover) 100%);
+  --content-quaternary: #4a4a52;
+  --accent-active: #ffffff;
+  --accent-ring: rgba(255, 255, 255, 0.34);
 }
 
 /* data-theme='dark' 作为可选 alias — 与设计交付 admin.js / public/theme-init.js 兼容 */
@@ -207,8 +175,8 @@
    ═══════════════════════════════════════════ */
 
 @theme {
-  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
-  --font-mono: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, monospace;
+  --font-sans: "Sora", "Inter", ui-sans-serif, system-ui, "PingFang SC", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
 
   /* Surface */
   --color-surface: var(--surface);
@@ -290,8 +258,10 @@ html {
 
 body {
   font-family: var(--font-sans);
-  background-color: var(--surface);
+  background-color: var(--bg);
   color: var(--content);
+  /* 签名正文字距（mono：-0.011em） */
+  letter-spacing: var(--tracking-body);
   /* tabular-nums 默认开启 —— 表格数值更新不再左右抖动 */
   font-variant-numeric: tabular-nums;
   transition: background-color 200ms ease, color 200ms ease;

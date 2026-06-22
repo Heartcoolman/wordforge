@@ -3,7 +3,7 @@
 
 .update-hero {
   position: relative;
-  background: linear-gradient(135deg, var(--accent-light) 0%, var(--surface-elevated) 60%);
+  background: var(--surface-secondary);
   border-radius: var(--radius-xl);
   padding: 28px 32px;
   box-shadow: var(--elevation-2);
@@ -12,7 +12,7 @@
 .update-hero::before {
   content: ''; position: absolute; right: -10%; top: -50%;
   width: 50%; height: 200%;
-  background: radial-gradient(closest-side, color-mix(in oklab, var(--accent) 20%, transparent), transparent);
+  background: transparent;
   pointer-events: none;
 }
 .update-hero .hero-grid {
@@ -46,7 +46,7 @@
   width: 22px; height: 22px;
   border-radius: var(--radius-pill);
   background: var(--accent);
-  color: #fff;
+  color: var(--solid-ink);
   display: grid; place-items: center;
   flex-shrink: 0;
   flex: none;
@@ -94,16 +94,16 @@
 .step .duration { font-size: 10.5px; color: var(--content-quaternary); margin-top: 2px; font-family: var(--font-mono); }
 
 .step.is-done { border-color: color-mix(in oklab, var(--success) 30%, transparent); background: var(--success-light); }
-.step.is-done .ic { background: var(--success); color: #fff; }
+.step.is-done .ic { background: var(--success); color: var(--solid-ink); }
 .step.is-done .status { color: var(--success-strong); }
 
 .step.is-running { border-color: color-mix(in oklab, var(--accent) 40%, transparent); background: var(--accent-light); }
-.step.is-running .ic { background: var(--accent); color: #fff; }
+.step.is-running .ic { background: var(--accent); color: var(--solid-ink); }
 .step.is-running .status { color: var(--accent); }
 .step.is-running::before {
   content: ''; position: absolute; inset: -1px;
   border-radius: var(--radius-md);
-  background: linear-gradient(135deg, color-mix(in oklab, var(--accent) 25%, transparent), transparent);
+  background: transparent;
   animation: update-shimmer 1.5s infinite;
   pointer-events: none;
   z-index: -1;
@@ -197,7 +197,7 @@
   width: 36px; height: 36px;
   border-radius: 10px;
   background: var(--warning);
-  color: #fff;
+  color: var(--solid-ink);
   display: grid; place-items: center;
   flex-shrink: 0;
 }

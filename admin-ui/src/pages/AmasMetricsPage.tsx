@@ -5,6 +5,7 @@ import {
   fmtNum, fmtAgo, sx,
 } from '@/components/wf';
 import { adminApi } from '@/api/admin';
+import { algoPalette } from '@/lib/chartTheme';
 import type {
   AmasMetricsKpi, AmasAlgorithmShare, AmasStageDistribution, AmasEloScatter,
   AmasMdmHeatmap, AmasFatigueTimeseries, AmasDecisionHistogram, AmasUserStateDistribution,
@@ -17,8 +18,8 @@ import type {
    决策 / 命中率 / ELO / MDM / 疲劳 / 阶段 / 异常 / 版本对比
    ============================================================ */
 
-const ALGO_COLORS = ['#7c5cff', '#4f7dfb', '#18a558', '#d99411', '#e5484d', '#0ea5b7', '#a855f7', '#64748b'];
-const STAGE_COLOR: Record<string, string> = { cold: '#d99411', transition: '#4f7dfb', stable: '#18a558' };
+// 阶段色：mono 四状态色 mid-tone（两主题皆可见，可用于 SVG 属性）
+const STAGE_COLOR: Record<string, string> = { cold: '#b7791f', transition: '#2d6cdf', stable: '#2f8a5b' };
 const STAGE_LABEL: Record<string, string> = { cold: '冷启动', transition: '过渡', stable: '稳定' };
 
 const DAY_OPTS = [
@@ -132,7 +133,7 @@ export default function AmasMetricsPage() {
                   data={a().map((row: AmasAlgorithmShare, i) => ({
                     label: row.algorithm,
                     value: row.count,
-                    color: ALGO_COLORS[i % ALGO_COLORS.length],
+                    color: algoPalette()[i % 8],
                   }))}
                 />
               </Show>
@@ -300,7 +301,7 @@ export default function AmasMetricsPage() {
                         <div class="muted-3" style={sx({ fontSize: 10.5 })}>{fmtNum(cl.count)} 人</div>
                       </div>
                       <div class="bar" style={sx({ height: 8 })}>
-                        <i style={sx({ width: (cl.pct * 100) + '%', background: ALGO_COLORS[i() % ALGO_COLORS.length] })} />
+                        <i style={sx({ width: (cl.pct * 100) + '%', background: algoPalette()[i() % 8] })} />
                       </div>
                       <div class="muted mono" style={sx({ fontSize: 11, textAlign: 'right' })}>{Math.round(cl.avgResponseMs)}ms · 错误 {(cl.errorRate * 100).toFixed(0)}%</div>
                     </div>

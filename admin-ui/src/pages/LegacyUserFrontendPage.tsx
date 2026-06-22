@@ -20,20 +20,20 @@ export default function LegacyUserFrontendPage() {
   const isHome = createMemo(() => location.pathname === '/');
 
   return (
-    <main class="min-h-screen bg-[radial-gradient(circle_at_top,_rgba(14,165,233,0.18),_transparent_38%),linear-gradient(180deg,_#f7fbff_0%,_#eef6ff_100%)] text-slate-900">
+    <main class="min-h-screen bg-surface-secondary text-content">
       <div class="mx-auto flex min-h-screen max-w-3xl items-center px-6 py-16">
-        <section class="w-full rounded-3xl border border-sky-100 bg-white/90 p-8 shadow-[0_24px_80px_rgba(15,23,42,0.10)] backdrop-blur">
-          <p class="text-sm font-semibold uppercase tracking-[0.28em] text-sky-600">WordForge</p>
-          <h1 class="mt-4 text-3xl font-semibold tracking-tight text-slate-950">
+        <section class="w-full rounded-3xl border border-border bg-surface p-8 shadow-[var(--shadow)]">
+          <p class="font-mono text-[11px] font-medium uppercase tracking-[0.18em] text-content-tertiary">WordForge</p>
+          <h1 class="mt-4 text-3xl font-bold tracking-[-0.03em] text-content">
             用户前端已迁移到独立仓库
           </h1>
-          <p class="mt-4 text-base leading-7 text-slate-600">
+          <p class="mt-4 text-base leading-7 text-content-secondary">
             当前仓库继续提供管理后台前端和完整 API 服务。原来的学习端 Web 页面已经拆分到独立项目
             {' '}
-            <code class="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[0.9em] text-slate-700">wordforge-web</code>
+            <code class="rounded-md bg-surface-secondary px-1.5 py-0.5 font-mono text-[0.9em] text-content-secondary">wordforge-web</code>
             。
           </p>
-          <p class="mt-3 text-sm leading-6 text-slate-500">
+          <p class="mt-3 text-sm leading-6 text-content-tertiary">
             {isHome() ? '如果你是管理员，可以直接进入后台。' : `你访问的旧路径是 ${currentPath()}。`}
           </p>
 
@@ -41,21 +41,21 @@ export default function LegacyUserFrontendPage() {
             <Show
               when={userAppHref()}
               fallback={
-                <span class="inline-flex items-center rounded-full bg-amber-50 px-4 py-2 text-sm text-amber-700">
+                <span class="inline-flex items-center rounded-full bg-warning-light px-4 py-2 text-sm text-warning-strong">
                   用户前端尚未上线，请联系管理员
                 </span>
               }
             >
               <a
                 href={userAppHref()!}
-                class="inline-flex items-center rounded-full bg-sky-600 px-5 py-2.5 text-sm font-medium text-white transition hover:bg-sky-700"
+                class="inline-flex items-center rounded-full bg-accent px-5 py-2.5 text-sm font-semibold text-[var(--solid-ink)] transition hover:opacity-90"
               >
                 前往用户前端
               </a>
             </Show>
             <A
               href="/admin"
-              class="inline-flex items-center rounded-full border border-slate-200 px-5 py-2.5 text-sm font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50"
+              class="inline-flex items-center rounded-full border border-border px-5 py-2.5 text-sm font-medium text-content transition hover:border-border-strong hover:bg-surface-secondary"
             >
               打开管理后台
             </A>

@@ -101,7 +101,7 @@
   margin-top: 4px;
 }
 .bc-preview .pv-head { display: flex; align-items: center; gap: 8px; padding-bottom: 8px; border-bottom: 1px solid var(--border-hairline); }
-.bc-preview .pv-ic { width: 22px; height: 22px; border-radius: var(--radius-sm); background: var(--accent); color: #fff; display: grid; place-items: center; }
+.bc-preview .pv-ic { width: 22px; height: 22px; border-radius: var(--radius-sm); background: var(--accent); color: var(--solid-ink); display: grid; place-items: center; }
 .bc-preview .pv-ic svg { width: 12px; height: 12px; }
 .bc-preview .pv-from { font: 600 12px/1.2 var(--font-display); }
 .bc-preview .pv-time { font: 500 11px/1 var(--font-mono); color: var(--content-tertiary); margin-left: auto; }
@@ -188,7 +188,7 @@
 @keyframes bc-slide-in-bottom { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
 .bc-progress-toast .ph { display: flex; align-items: center; gap: 10px; }
 .bc-progress-toast .ph strong { font: 600 13px/1.2 var(--font-display); }
-.bc-progress-toast .ph .ic { width: 28px; height: 28px; border-radius: var(--radius-sm); background: var(--accent); color: #fff; display: grid; place-items: center; }
+.bc-progress-toast .ph .ic { width: 28px; height: 28px; border-radius: var(--radius-sm); background: var(--accent); color: var(--solid-ink); display: grid; place-items: center; }
 .bc-progress-toast .ph .ic svg { width: 14px; height: 14px; animation: bc-spin 1s linear infinite; }
 @keyframes bc-spin { from { transform: rotate(0); } to { transform: rotate(360deg); } }
 .bc-progress-toast .stats { display: flex; justify-content: space-between; margin-top: 10px; font: 500 11.5px/1 var(--font-mono); color: var(--content-tertiary); font-variant-numeric: tabular-nums; }

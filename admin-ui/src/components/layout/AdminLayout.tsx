@@ -93,7 +93,7 @@ export function AdminLayout(props: ParentProps) {
         <Show when={mobileOpen()}>
           <div
             role="presentation" aria-hidden="true"
-            style={sx({ position: 'fixed', inset: 0, zIndex: 40, background: 'rgba(8,10,18,0.45)', backdropFilter: 'blur(2px)' })}
+            style={sx({ position: 'fixed', inset: 0, zIndex: 40, background: 'rgba(0,0,0,0.5)' })}
             onClick={() => setMobileOpen(false)}
           />
         </Show>
@@ -110,9 +110,11 @@ export function AdminLayout(props: ParentProps) {
         >
           {/* brand */}
           <div style={sx({ display: 'flex', alignItems: 'center', gap: 11, padding: '18px 16px 15px', borderBottom: '1px solid var(--hairline)' })}>
-            <div style={sx({ width: 32, height: 32, borderRadius: 9, flex: 'none', position: 'relative', display: 'grid', placeItems: 'center', background: 'var(--accent)', color: '#fff', fontWeight: 700, fontSize: 15, letterSpacing: '-0.04em', fontFamily: 'var(--mono)' })}>
-              W
-              <span style={sx({ position: 'absolute', inset: 0, borderRadius: 9, boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.28)', pointerEvents: 'none' })} />
+            <div style={sx({ width: 32, height: 32, borderRadius: '50%', flex: 'none', display: 'grid', placeItems: 'center', border: '1.5px solid var(--text)', color: 'var(--text)' })}>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
+                <circle cx="7" cy="7" r="2.4" /><circle cx="17" cy="7" r="2.4" /><circle cx="7" cy="17" r="2.4" /><circle cx="17" cy="17" r="2.4" />
+                <path d="M9.4 7h5.2M7 9.4v5.2M17 9.4v5.2M9.4 17h5.2" />
+              </svg>
             </div>
             <Show when={!collapsed()}>
               <div style={sx({ minWidth: 0, flex: 1 })}>
@@ -129,7 +131,7 @@ export function AdminLayout(props: ParentProps) {
           <div style={sx({ padding: '12px 12px 6px' })}>
             <button
               onClick={openPalette}
-              style={sx({ width: '100%', display: 'flex', alignItems: 'center', gap: 8, padding: collapsed() ? '8px' : '8px 11px', borderRadius: 10, justifyContent: collapsed() ? 'center' : 'flex-start', cursor: 'pointer', fontSize: 12.5, color: 'var(--text-3)', border: '1px solid var(--border)', background: 'var(--surface-sunken)' })}
+              style={sx({ width: '100%', display: 'flex', alignItems: 'center', gap: 8, padding: collapsed() ? '8px' : '8px 13px', borderRadius: 'var(--r-pill)', justifyContent: collapsed() ? 'center' : 'flex-start', cursor: 'pointer', fontSize: 12.5, color: 'var(--text-3)', border: '1px solid var(--border)', background: 'var(--surface-sunken)' })}
               title="快速跳转 ⌘K"
             >
               <Icon name="search" size={15} />
@@ -200,8 +202,8 @@ export function AdminLayout(props: ParentProps) {
         {/* main */}
         <div style={sx({ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' })}>
           <header
-            class="glass"
-            style={sx({ height: 'var(--topbar-h)', flex: 'none', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, padding: '0 22px', borderBottom: '1px solid var(--border)', position: 'relative', zIndex: 50 })}
+            class="wf-topbar"
+            style={sx({ height: 'var(--topbar-h)', flex: 'none', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, padding: '0 22px', position: 'relative', zIndex: 50 })}
           >
             <div style={sx({ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 })}>
               <button
@@ -233,7 +235,7 @@ export function AdminLayout(props: ParentProps) {
                 <Icon name={themeStore.effective() === 'dark' ? 'sun' : 'moon'} size={17} />
               </button>
               <div title="账户" style={sx({ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 9px 4px 5px', borderRadius: 10, marginLeft: 2 })}>
-                <span style={sx({ width: 28, height: 28, borderRadius: 8, background: 'var(--accent)', color: '#fff', display: 'grid', placeItems: 'center', fontSize: 12, fontWeight: 600, flex: 'none' })}>
+                <span style={sx({ width: 28, height: 28, borderRadius: '50%', background: 'var(--accent)', color: 'var(--solid-ink)', display: 'grid', placeItems: 'center', fontSize: 12, fontWeight: 600, flex: 'none' })}>
                   {(adminEmail() || 'A').slice(0, 1).toUpperCase()}
                 </span>
                 <span class="wf-desktop-only" style={sx({ fontSize: 12.5, fontWeight: 600, color: 'var(--text)', maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' })}>{adminEmail() || '管理员'}</span>

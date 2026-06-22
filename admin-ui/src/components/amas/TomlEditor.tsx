@@ -60,7 +60,7 @@ export default function TomlEditor(props: Props) {
             backgroundColor: 'var(--color-surface, #fff)',
           },
           '.cm-content': {
-            fontFamily: 'ui-monospace, SFMono-Regular, "JetBrains Mono", monospace',
+            fontFamily: '"IBM Plex Mono", ui-monospace, SFMono-Regular, monospace',
             padding: '12px 0',
           },
           '.cm-gutters': {

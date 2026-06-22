@@ -17,7 +17,7 @@ interface SectionTitleProps extends ParentProps {
  * 页面分区标题。统一二级 / 三级标题视觉，避免散落不一致的 font-weight / margin。
  *
  * @example
- *   <SectionTitle title="设计系统总览" sub="oklch · Inter + JetBrains Mono" />
+ *   <SectionTitle title="设计系统总览" sub="mono · Sora + IBM Plex Mono" />
  *   <SectionTitle title="Worker 健康" actions={<Button size="sm">刷新</Button>} />
  */
 export function SectionTitle(props: SectionTitleProps) {

@@ -132,7 +132,7 @@ export function VersionComparePanel() {
                             <Show when={(c.b.spark?.length ?? 0) > 1} fallback={<span />}>
                               <Sparkline
                                 data={c.b.spark}
-                                stroke="oklch(64% 0.16 162)"
+                                stroke="#2d6cdf"
                                 strokeWidth={1.5}
                                 ariaLabel={`${row.label} B 版本逐日趋势`}
                                 class="w-full h-full"

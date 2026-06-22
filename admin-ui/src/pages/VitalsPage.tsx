@@ -152,7 +152,7 @@ export default function VitalsPage() {
     const CYCLE = 230, SPEED = 0.085;
     const col = () => getComputedStyle(cv).getPropertyValue(
       state() === 'fault' ? '--error' : state() === 'degraded' ? '--warning' : '--success',
-    ).trim() || '#18a558';
+    ).trim() || '#2f8a5b';
 
     const draw = (t: number) => {
       const sig = col();

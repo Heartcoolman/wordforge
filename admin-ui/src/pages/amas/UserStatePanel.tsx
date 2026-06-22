@@ -22,7 +22,7 @@ const FLOW_META: Record<string, { label: string; color: string }> = {
   'stable>transition': { label: '稳定 → 过渡', color: 'var(--warning)' },
   'new>cold': { label: '新注册 → 冷', color: 'var(--accent)' },
 };
-const CLUSTER_COLORS = ['oklch(58% 0.20 269)', 'var(--success-strong)', 'var(--warning-strong)', 'var(--info-strong)'];
+const CLUSTER_COLORS = ['var(--accent)', 'var(--success-strong)', 'var(--warning-strong)', 'var(--info-strong)'];
 
 const find = (stages: AmasStageStat[] | undefined, s: string) => (stages ?? []).find((x) => x.stage === s);
 

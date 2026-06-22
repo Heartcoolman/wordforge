@@ -70,7 +70,7 @@ export function Icon(props: {
       viewBox="0 0 24 24"
       fill={fill()}
       stroke={fill() === 'none' ? 'currentColor' : 'none'}
-      stroke-width={props.sw ?? 2}
+      stroke-width={props.sw ?? 1.8}
       stroke-linecap="round"
       stroke-linejoin="round"
       style={props.style}

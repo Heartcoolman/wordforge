@@ -6,6 +6,7 @@ import {
 } from '@/components/wf';
 import { adminApi } from '@/api/admin';
 import { amasApi } from '@/api/amas';
+import { algoPalette } from '@/lib/chartTheme';
 import type {
   AdminStats, EngagementAnalytics, StudyOverview, DailyActiveUsersEntry,
   DailyRecordsEntry, SystemHealth, UpdateCheck, WorkerStatusRow,
@@ -13,8 +14,7 @@ import type {
 import type { AmasMetricsTimeseriesPoint, AmasSuggestion } from '@/api/admin';
 import type { MonitoringEvent } from '@/types/amas';
 
-// 算法甜甜圈固定调色板（对齐设计稿 ALGO_COLORS）
-const ALGO_COLORS = ['#7c5cff', '#4f7dfb', '#18a558', '#d99411', '#e5484d', '#0ea5b7', '#a855f7', '#64748b'];
+// 算法甜甜圈配色：mono 主题自适应调色板（chartTheme.algoPalette）
 const DOW = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
 const DAYS_OPTS = [{ value: '7', label: '7 天' }, { value: '14', label: '14 天' }, { value: '30', label: '30 天' }];
 
@@ -362,7 +362,7 @@ export default function DashboardPage() {
               <Donut
                 size={150} thickness={22}
                 centerValue={algoDist().algoCount} centerLabel="算法"
-                data={algoDist().rows.map((a, i) => ({ label: a.algorithm, value: a.count, color: ALGO_COLORS[i % ALGO_COLORS.length] }))}
+                data={algoDist().rows.map((a, i) => ({ label: a.algorithm, value: a.count, color: algoPalette()[i % 8] }))}
               />
             </Show>
           </Show>

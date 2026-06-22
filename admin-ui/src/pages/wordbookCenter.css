@@ -118,17 +118,17 @@
   border-radius: var(--radius-md);
   display: grid; place-items: center;
   font: 700 14px/1 var(--font-display);
-  color: #fff;
+  color: var(--solid-ink);
   letter-spacing: -0.02em;
   flex-shrink: 0;
-  background: linear-gradient(135deg, var(--accent), oklch(56% 0.22 300));
+  background: var(--accent);
 }
-.wb-item .cover.c-1 { background: linear-gradient(135deg, oklch(58% 0.20 269), oklch(54% 0.22 290)); }
-.wb-item .cover.c-2 { background: linear-gradient(135deg, oklch(60% 0.18 162), oklch(56% 0.16 195)); }
-.wb-item .cover.c-3 { background: linear-gradient(135deg, oklch(72% 0.16 75), oklch(64% 0.18 50)); }
-.wb-item .cover.c-4 { background: linear-gradient(135deg, oklch(66% 0.16 245), oklch(58% 0.18 220)); }
-.wb-item .cover.c-5 { background: linear-gradient(135deg, oklch(60% 0.22 25), oklch(56% 0.22 5)); }
-.wb-item .cover.c-6 { background: linear-gradient(135deg, oklch(58% 0.22 290), oklch(56% 0.22 320)); }
+.wb-item .cover.c-1 { background: var(--accent); }
+.wb-item .cover.c-2 { background: var(--accent); }
+.wb-item .cover.c-3 { background: var(--accent); }
+.wb-item .cover.c-4 { background: var(--accent); }
+.wb-item .cover.c-5 { background: var(--accent); }
+.wb-item .cover.c-6 { background: var(--accent); }
 .wb-item .info { flex: 1; min-width: 0; }
 .wb-item .info .name { font: 600 13px/1.3 var(--font-display); color: var(--content); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .wb-item .info .meta {
@@ -163,8 +163,8 @@
 .wb-detail-head .cover {
   width: 64px; height: 64px;
   border-radius: var(--radius-lg);
-  background: linear-gradient(135deg, oklch(58% 0.20 269), oklch(54% 0.22 290));
-  color: #fff;
+  background: var(--accent);
+  color: var(--solid-ink);
   display: grid; place-items: center;
   font: 700 22px/1 var(--font-display);
   letter-spacing: -0.02em;

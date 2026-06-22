@@ -27,6 +27,7 @@ import {
 } from '@/components/wf';
 import { amasApi } from '@/api/amas';
 import { adminApi } from '@/api/admin';
+import { algoPalette } from '@/lib/chartTheme';
 import type {
   AmasConfigVersionRow,
   AmasCanaryConfig,
@@ -42,7 +43,7 @@ import type { AmasConfig } from '@/types/amas';
    字段名对齐后端事实源（src/amas/config.rs → AMASConfig）。
    ============================================================ */
 
-const ALGO_COLORS = ['#4f7dfb', '#18a558', '#d99411', '#8b5cf6', '#ec4899', '#06b6d4', '#f97316', '#64748b'];
+// ensemble 权重条配色：mono 主题自适应调色板（chartTheme.algoPalette）
 
 /* ---------------------------- 参数元数据 ---------------------------- */
 type ParamMeta = {
@@ -516,7 +517,7 @@ export default function AmasConfigPage() {
                         {(a, i) => (
                           <div
                             title={a.label + ' ' + Math.round((readNum(config(), 'ensemble', a.key) / eSum()) * 100) + '%'}
-                            style={sx({ width: (readNum(config(), 'ensemble', a.key) / eSum()) * 100 + '%', background: ALGO_COLORS[i() % ALGO_COLORS.length], transition: 'width .3s ease' })}
+                            style={sx({ width: (readNum(config(), 'ensemble', a.key) / eSum()) * 100 + '%', background: algoPalette()[i() % 8], transition: 'width .3s ease' })}
                           />
                         )}
                       </For>
@@ -527,7 +528,7 @@ export default function AmasConfigPage() {
                           <div>
                             <div style={sx({ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 6 })}>
                               <span style={sx({ fontSize: 13, fontWeight: 600, display: 'inline-flex', gap: 7, alignItems: 'center' })}>
-                                <i style={sx({ width: 9, height: 9, borderRadius: 3, background: ALGO_COLORS[i() % ALGO_COLORS.length] })} />
+                                <i style={sx({ width: 9, height: 9, borderRadius: 3, background: algoPalette()[i() % 8] })} />
                                 {a.label} <span class="muted-3" style={sx({ fontWeight: 400, fontSize: 11 })}>{a.desc}</span>
                               </span>
                               <span class="mono" style={sx({ fontSize: 13, fontWeight: 700, color: 'var(--accent)' })}>{Math.round((readNum(config(), 'ensemble', a.key) / eSum()) * 100)}%</span>
@@ -536,7 +537,7 @@ export default function AmasConfigPage() {
                               type="range" min="0" max="1" step="0.01"
                               value={readNum(config(), 'ensemble', a.key)}
                               onInput={(e) => setParam('ensemble', a.key, +e.currentTarget.value)}
-                              style={sx({ width: '100%', accentColor: ALGO_COLORS[i() % ALGO_COLORS.length] })}
+                              style={sx({ width: '100%', accentColor: algoPalette()[i() % 8] })}
                             />
                           </div>
                         )}

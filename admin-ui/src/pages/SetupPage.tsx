@@ -53,7 +53,7 @@ function StatusIc(props: { state: 'ok' | 'checking' | 'fail' }) {
     >
       <span
         class={
-          'size-[18px] rounded-full grid place-items-center text-white ' +
+          'size-[18px] rounded-full grid place-items-center text-[var(--solid-ink)] ' +
           (props.state === 'ok' ? 'bg-success' : 'bg-error')
         }
       >
@@ -362,7 +362,7 @@ export default function SetupPage() {
                 <span class="text-content-quaternary text-[10px]">→</span>
                 <span class={stepCls(3)}>{STEP_LABELS[3]}</span>
               </div>
-              <div class="size-16 rounded-full bg-success text-white grid place-items-center mx-auto mb-[18px] animate-scale-in">
+              <div class="size-16 rounded-full bg-success text-[var(--solid-ink)] grid place-items-center mx-auto mb-[18px] animate-scale-in">
                 <svg class="size-[30px]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12" /></svg>
               </div>
               <h2 class="font-display font-semibold text-[20px] leading-[1.2] mb-1.5">管理员账户已创建</h2>

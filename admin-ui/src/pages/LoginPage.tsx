@@ -158,10 +158,15 @@ export default function LoginPage() {
         <div class="flex items-center justify-between mb-auto">
           <div class="flex items-center gap-2.5">
             <div
-              class="w-[30px] h-[30px] rounded-lg grid place-items-center text-white font-bold text-sm tracking-tight"
-              style={{ background: 'linear-gradient(140deg, var(--accent), oklch(46% 0.22 290))' }}
+              class="w-[30px] h-[30px] rounded-full grid place-items-center text-content"
+              style={{ border: '1.5px solid var(--content)' }}
               aria-hidden="true"
-            >W</div>
+            >
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+                <circle cx="7" cy="7" r="2.4" /><circle cx="17" cy="7" r="2.4" /><circle cx="7" cy="17" r="2.4" /><circle cx="17" cy="17" r="2.4" />
+                <path d="M9.4 7h5.2M7 9.4v5.2M17 9.4v5.2M9.4 17h5.2" />
+              </svg>
+            </div>
             <strong class="text-sm font-semibold tracking-tight text-content">WordForge Admin</strong>
           </div>
           <button
@@ -220,7 +225,7 @@ export default function LoginPage() {
                   value={email()}
                   onInput={(e) => setEmail(e.currentTarget.value)}
                   placeholder="admin@wordforge.local"
-                  class="w-full h-10 pl-10 pr-3 rounded-md border border-border bg-surface text-[13.5px] text-content placeholder:text-content-tertiary focus:outline-none focus:border-accent focus:ring-2 focus:ring-accent/30 transition disabled:opacity-60"
+                  class="w-full h-10 pl-10 pr-3 rounded-pill border border-border bg-surface text-[13.5px] text-content placeholder:text-content-tertiary focus:outline-none focus:border-accent transition disabled:opacity-60"
                   aria-invalid={!!emailError()}
                 />
               </div>
@@ -252,7 +257,7 @@ export default function LoginPage() {
                   value={password()}
                   onInput={(e) => setPassword(e.currentTarget.value)}
                   placeholder="至少 12 位 · 含字母数字符号"
-                  class="w-full h-10 pl-10 pr-10 rounded-md border border-border bg-surface text-[13.5px] text-content placeholder:text-content-tertiary focus:outline-none focus:border-accent focus:ring-2 focus:ring-accent/30 transition disabled:opacity-60"
+                  class="w-full h-10 pl-10 pr-10 rounded-pill border border-border bg-surface text-[13.5px] text-content placeholder:text-content-tertiary focus:outline-none focus:border-accent transition disabled:opacity-60"
                 />
                 <button
                   type="button"
@@ -290,11 +295,12 @@ export default function LoginPage() {
             <button
               type="submit"
               disabled={loading() || lockSeconds() > 0}
-              class="w-full h-10 rounded-md bg-accent text-white text-[13.5px] font-semibold inline-flex items-center justify-center gap-1.5 hover:bg-accent-hover active:bg-accent-active focus-ring transition disabled:opacity-60 disabled:cursor-not-allowed"
+              class="w-full h-10 rounded-pill bg-accent text-[13.5px] font-semibold inline-flex items-center justify-center gap-1.5 hover:opacity-90 focus-ring transition disabled:opacity-60 disabled:cursor-not-allowed"
+              style={{ color: 'var(--solid-ink)' }}
             >
               <Show when={!loading()} fallback={
                 <>
-                  <span class="size-3.5 border-2 border-white/40 border-t-white rounded-full animate-spin" />
+                  <span class="size-3.5 border-2 border-current/30 border-t-current rounded-full animate-spin" />
                   正在验证…
                 </>
               }>
@@ -341,38 +347,19 @@ export default function LoginPage() {
         </div>
       </div>
 
-      {/* 右栏 —— 装饰 */}
+      {/* 右栏 —— mono 纸面叙事（无渐变/光晕，靠排版与发丝线） */}
       <div
-        class="relative hidden md:flex flex-col p-11 text-white overflow-hidden min-h-screen"
-        style={{ background: 'linear-gradient(160deg, oklch(22% 0.06 269) 0%, oklch(14% 0.04 264) 100%)' }}
+        class="relative hidden md:flex flex-col p-11 overflow-hidden min-h-screen bg-surface-secondary border-l border-border"
         aria-hidden="true"
       >
-        {/* 双 blur 光晕 */}
-        <div
-          class="absolute pointer-events-none"
-          style={{
-            width: '700px', height: '700px', right: '-260px', top: '-260px',
-            background: 'radial-gradient(closest-side, color-mix(in oklab, var(--accent) 50%, transparent), transparent)',
-            filter: 'blur(40px)',
-          }}
-        />
-        <div
-          class="absolute pointer-events-none"
-          style={{
-            width: '600px', height: '600px', left: '-200px', bottom: '-300px',
-            background: 'radial-gradient(closest-side, color-mix(in oklab, oklch(56% 0.22 300) 45%, transparent), transparent)',
-            filter: 'blur(40px)',
-          }}
-        />
-
-        <div class="relative z-10 flex flex-col h-full">
-          <span class="self-start inline-flex px-2.5 py-1 rounded-pill border border-white/12 bg-white/[0.08] text-[11.5px] font-semibold tracking-[0.05em]">
+        <div class="relative z-10 flex flex-col h-full text-content">
+          <span class="self-start inline-flex px-3 py-1 rounded-pill border border-border bg-surface font-mono text-[11px] tracking-[0.18em] uppercase text-content-tertiary">
             AMAS · ADAPTIVE MASTERY ACQUISITION
           </span>
-          <h2 class="mt-5 text-[36px] leading-[1.12] font-bold tracking-[-0.024em] max-w-[18ch]">
+          <h2 class="mt-5 text-[36px] leading-[1.12] font-bold tracking-[-0.03em] max-w-[18ch] text-content">
             每一次答题，引擎都在重新调度未来的词。
           </h2>
-          <p class="mt-2.5 text-white/70 text-[14.5px] leading-[1.55] max-w-[38ch]">
+          <p class="mt-2.5 text-content-secondary text-[14.5px] leading-[1.55] max-w-[38ch]">
             24 个 AMAS 子配置 · 8 算法 flag（4 决策 + 4 记忆模型）· ELO + 疲劳信号融合。本管理后台是 AMAS 的指挥台。
           </p>
 
@@ -382,8 +369,8 @@ export default function LoginPage() {
               '自更新 · GitHub Release · VACUUM INTO 备份',
               '21 个内部 worker · 实时心跳 + 告警',
             ].map((t) => (
-              <li class="flex items-start gap-2.5 text-[13px] text-white/[0.78]">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" class="shrink-0 mt-0.5" style={{ color: 'oklch(78% 0.16 162)' }}>
+              <li class="flex items-start gap-2.5 text-[13px] text-content-secondary">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="shrink-0 mt-0.5 text-content">
                   <polyline points="20 6 9 17 4 12" />
                 </svg>
                 <span>{t}</span>
@@ -392,33 +379,25 @@ export default function LoginPage() {
           </ul>
 
           {/* health-card */}
-          <div
-            class="mt-auto grid grid-cols-3 gap-[18px] rounded-xl p-5"
-            style={{
-              background: 'rgba(255,255,255,0.06)',
-              border: '1px solid rgba(255,255,255,0.10)',
-              'backdrop-filter': 'blur(10px)',
-            }}
-          >
+          <div class="mt-auto grid grid-cols-3 gap-[18px] rounded-xl p-5 bg-surface border border-border">
             <div class="flex flex-col gap-1">
-              <span class="text-[10.5px] uppercase tracking-[0.06em]" style={{ color: 'rgba(255,255,255,0.5)' }}>UPTIME</span>
-              <span class="text-[17px] font-semibold tabular-nums" style={{ color: uptimeSecs() != null ? 'oklch(78% 0.13 162)' : 'rgba(255,255,255,0.7)' }}>
+              <span class="font-mono text-[10px] uppercase tracking-[0.18em] text-content-tertiary">UPTIME</span>
+              <span class="text-[17px] font-semibold tabular-nums text-content">
                 {formatUptime(uptimeSecs())}
               </span>
             </div>
             <div class="flex flex-col gap-1">
-              <span class="text-[10.5px] uppercase tracking-[0.06em]" style={{ color: 'rgba(255,255,255,0.5)' }}>{sloLabel()}</span>
+              <span class="font-mono text-[10px] uppercase tracking-[0.18em] text-content-tertiary">{sloLabel()}</span>
               <span
-                class="text-[17px] font-semibold tabular-nums"
-                style={{ color: sloPct() != null ? 'oklch(78% 0.13 162)' : 'rgba(255,255,255,0.7)' }}
+                class="text-[17px] font-semibold tabular-nums text-content"
                 title={sloPct() != null ? `真实可用性(${availability()!.totalRequests} 次请求样本)` : '暂无请求样本'}
               >
                 {sloPct() != null ? `${sloPct()!.toFixed(2)}%` : '—'}
               </span>
             </div>
             <div class="flex flex-col gap-1">
-              <span class="text-[10.5px] uppercase tracking-[0.06em]" style={{ color: 'rgba(255,255,255,0.5)' }}>DB SIZE</span>
-              <span class="text-[17px] font-semibold tabular-nums" style={{ color: 'rgba(255,255,255,0.7)' }}>
+              <span class="font-mono text-[10px] uppercase tracking-[0.18em] text-content-tertiary">DB SIZE</span>
+              <span class="text-[17px] font-semibold tabular-nums text-content">
                 {formatBytes(dbSizeBytes())}
               </span>
             </div>

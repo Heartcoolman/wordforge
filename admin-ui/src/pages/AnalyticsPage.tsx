@@ -327,7 +327,7 @@ export default function AnalyticsPage() {
                             {(v) => (
                               <td style={sx({ padding: 4 })}>
                                 <Show when={v != null} fallback={<span class="muted-3">—</span>}>
-                                  <span style={sx({ display: 'block', textAlign: 'center', padding: '4px 0', borderRadius: 5, fontSize: 11, fontWeight: 600, background: cohortBg(v as number), color: (v as number) > 0.5 ? '#fff' : 'var(--text)' })}>
+                                  <span style={sx({ display: 'block', textAlign: 'center', padding: '4px 0', borderRadius: 5, fontSize: 11, fontWeight: 600, background: cohortBg(v as number), color: (v as number) > 0.5 ? 'var(--solid-ink)' : 'var(--text)' })}>
                                     {((v as number) * 100).toFixed(0)}
                                   </span>
                                 </Show>
