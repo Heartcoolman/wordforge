@@ -137,7 +137,8 @@ vi.mock('@/stores/theme', () => ({
   },
 }));
 
-import { chartColor, chartPalette, algorithmColor } from '@/lib/chartTheme';
+import { chartColor, chartPalette, algorithmColor, algoPalette } from '@/lib/chartTheme';
+import { algoMeta } from '@/pages/amas/algoMeta';
 
 describe('lib/chartTheme', () => {
   let cssVarMap: Record<string, string>;
@@ -199,6 +200,23 @@ describe('lib/chartTheme', () => {
 
   it('algorithmColor 未知算法名 → 取 muted 色', () => {
     expect(algorithmColor('Unknown')).toBe(chartColor('muted'));
+  });
+
+  it('algoPalette 返回 8 个 mono 分类色（首位=accent 墨，均为真实色值）', () => {
+    const p = algoPalette();
+    expect(p).toHaveLength(8);
+    expect(p.every((c) => typeof c === 'string' && c.startsWith('#'))).toBe(true);
+    expect(p[0]).toBe(chartColor('accent'));
+  });
+
+  it('algoMeta：已知算法取 label + tone 真实色，大小写不敏感，未知取 muted，空名取 —', () => {
+    expect(algoMeta('ensemble')).toEqual({ label: 'ensemble', color: chartColor('accent') });
+    expect(algoMeta('MDM')).toEqual({ label: 'MDM', color: chartColor('success') });
+    expect(algoMeta('swd')).toEqual({ label: 'SWD', color: chartColor('info') });
+    expect(algoMeta('IGE')).toEqual({ label: 'IGE', color: chartColor('warning') });
+    expect(algoMeta('ssp')).toEqual({ label: 'SSP', color: chartColor('error') });
+    expect(algoMeta('nope')).toEqual({ label: 'nope', color: chartColor('muted') });
+    expect(algoMeta('').label).toBe('—');
   });
 });
 
