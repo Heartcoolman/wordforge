@@ -402,6 +402,8 @@ export const adminApi = {
     belowVersion: string; latestVersion: string; message?: string;
   }) =>
     api.post<{ matched: number; pushedConnections: number }>(`/api/admin/clients/broadcast-upgrade/${platform}`, payload, { useAdminToken: true }),
+  revokeUpgrade: (platform: string) =>
+    api.post<{ devices: number; pushedConnections: number }>(`/api/admin/clients/broadcast-upgrade/${platform}/revoke`, undefined, { useAdminToken: true }),
 
   // Wordbook Center
   wbCenterBrowse: () =>

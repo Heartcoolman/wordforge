@@ -8,7 +8,36 @@ use serde::Deserialize;
 use crate::amas::config::AMASConfig;
 use crate::auth::AdminAuthUser;
 use crate::response::{ok, AppError};
-use crate::state::AppState;
+use crate::state::{AppState, SseEvent};
+
+/// 版本门控是否「放宽」(关闭 / 最低版本下降或清空)。放宽后须广播 upgrade_cleared,
+/// 让停在强升屏的客户端实时恢复(收紧则不广播——新过低客户端会经自身请求的 CLIENT_OUTDATED 重锁)。
+fn version_gate_loosened(
+    old_enabled: bool,
+    old_min: &Option<String>,
+    new_enabled: bool,
+    new_min: &Option<String>,
+) -> bool {
+    if old_enabled && !new_enabled {
+        return true; // 关掉门控 → 全体放行
+    }
+    if old_enabled && new_enabled {
+        return match (old_min, new_min) {
+            (Some(o), Some(n)) => {
+                match (
+                    semver::Version::parse(o.trim_start_matches('v')),
+                    semver::Version::parse(n.trim_start_matches('v')),
+                ) {
+                    (Ok(ov), Ok(nv)) => nv < ov, // 阈值下降
+                    _ => false,
+                }
+            }
+            (Some(_), None) => true, // 清空阈值 → 放宽
+            _ => false,
+        };
+    }
+    false // off→off / off→on(收紧)不广播
+}
 
 use super::runtime_settings::{apply_live_section, is_live_section, live_section_json, LIVE_SECTIONS};
 use super::settings_sections::{
@@ -258,6 +287,13 @@ async fn update_settings(
                 }
 
                 store.save_system_settings(&settings)?;
+                let gate_loosened = gate_touched
+                    && version_gate_loosened(
+                        old_gate_enabled,
+                        &old_gate_min,
+                        settings.version_gate_enabled,
+                        &settings.min_client_version,
+                    );
                 // W4-4:仅当本次确实改动门控字段时留痕，避免无关 settings 更新刷审计噪声。
                 if gate_touched {
                     let metadata = serde_json::json!({
@@ -276,10 +312,11 @@ async fn update_settings(
                         tracing::warn!(error = %e, "写门控审计失败");
                     }
                 }
-                Ok(settings)
+                Ok((settings, gate_loosened))
             },
         )
         .await??;
+    let (settings, gate_loosened) = settings;
 
     if maintenance_mode_changed {
         state.set_maintenance(settings.maintenance_mode);
@@ -288,6 +325,10 @@ async fn update_settings(
     // D4：版本门控字段变更后立即刷新运行时快照，使 strict-mode 中间件即时生效。
     if req_touched_version_gate {
         state.refresh_version_gate();
+    }
+    // 门控放宽 → 广播 upgrade_cleared,使停在强升屏的客户端实时清锁恢复。
+    if gate_loosened {
+        state.broadcast_to_all_sse(SseEvent::UpgradeCleared);
     }
 
     tracing::info!(
@@ -402,6 +443,12 @@ async fn set_version_gate(
                     };
                 }
                 store.save_system_settings(&settings)?;
+                let loosened = version_gate_loosened(
+                    old_enabled,
+                    &old_min,
+                    settings.version_gate_enabled,
+                    &settings.min_client_version,
+                );
                 // 与 save 同一 store task 写审计。容错：Err 仅 warn 不阻塞业务。
                 let metadata = serde_json::json!({
                     "oldEnabled": old_enabled,
@@ -418,13 +465,19 @@ async fn set_version_gate(
                 ) {
                     tracing::warn!(error = %e, "写门控审计失败");
                 }
-                Ok(settings)
+                Ok((settings, loosened))
             },
         )
         .await??;
+    let (settings, gate_loosened) = settings;
 
     // 即时生效:刷新中间件读取的运行时快照。
     let effective = state.refresh_version_gate();
+    // 门控放宽 → 广播 upgrade_cleared,使停在强升屏的客户端实时清锁恢复(SSE 已豁免门控,
+    // 故过低客户端也收得到;若实际仍过低,其下一次受检请求会被 CLIENT_OUTDATED 重锁,自校正)。
+    if gate_loosened {
+        state.broadcast_to_all_sse(SseEvent::UpgradeCleared);
+    }
 
     tracing::info!(
         admin_id = %admin.admin_id,

@@ -261,12 +261,28 @@ function ForceUpgradeModal(props: {
     }
   };
 
+  const revoke = async () => {
+    const t = props.target;
+    if (!t) return;
+    setBusy(true);
+    try {
+      const r = await adminApi.revokeUpgrade(t.platform);
+      toast.success(`已撤销 ${t.platform} 强制升级`, `触达 ${r.pushedConnections} 个连接 · 覆盖 ${r.devices} 设备`);
+      props.onClose();
+    } catch (e: any) {
+      toast.error('撤销强制升级失败', e?.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <Modal
       open={!!props.target} onClose={props.onClose} title="强制升级广播" size="sm"
       footer={
         <>
           <Btn variant="ghost" onClick={props.onClose}>取消</Btn>
+          <Btn variant="danger" icon="rotate" onClick={revoke} disabled={busy()}>{busy() ? '处理中…' : '撤销强升'}</Btn>
           <Btn variant="warning" icon="zap" onClick={send} disabled={busy()}>{busy() ? '派发中…' : '派发升级'}</Btn>
         </>
       }

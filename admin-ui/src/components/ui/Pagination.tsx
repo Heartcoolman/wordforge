@@ -66,7 +66,7 @@ export function Pagination(props: PaginationProps) {
                   'w-8 h-8 rounded-lg text-sm font-medium cursor-pointer',
                   'transition-[background-color,color,box-shadow,transform] duration-fast ease-out-expo',
                   props.page === item
-                    ? 'bg-gradient-accent-strong text-accent-content shadow-elevation-1'
+                    ? 'bg-accent text-accent-content shadow-elevation-1'
                     : 'text-content-secondary hover:bg-surface-secondary hover:text-content',
                 )}
               >

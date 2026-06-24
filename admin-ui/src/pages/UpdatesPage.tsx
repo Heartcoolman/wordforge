@@ -928,7 +928,7 @@ export default function UpdatesPage() {
               。
             </p>
             <p style={sx({ fontSize: 12, color: 'var(--success)' })}>
-              ✅ 回滚前自动全量备份当前库（backup-pre-rollback-*），任何数据都可从「备份恢复」找回。
+              ✓ 回滚前自动全量备份当前库（backup-pre-rollback-*），任何数据都可从「备份恢复」找回。
             </p>
             <Show when={(preflight()?.droppedVersionsHint?.length ?? 0) > 0}>
               <p style={sx({ fontSize: 12, color: 'var(--warning)' })}>

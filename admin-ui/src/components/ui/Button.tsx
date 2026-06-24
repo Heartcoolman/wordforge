@@ -2,9 +2,9 @@ import { type JSX, splitProps, Show } from 'solid-js';
 import { cn } from '@/utils/cn';
 
 const variants = {
-  // Linear/Vercel 风：渐变主色 + layered shadow，hover 时多层阴影抬升 1px
+  // 纯色主色 + layered shadow，hover 时多层阴影抬升 1px
   primary:
-    'bg-gradient-accent-strong text-accent-content shadow-elevation-1 ' +
+    'bg-accent text-accent-content shadow-elevation-1 ' +
     'hover:shadow-elevation-2 hover:-translate-y-px active:translate-y-0 active:shadow-elevation-1',
   secondary:
     'bg-surface-tertiary text-content shadow-elevation-1 ' +

@@ -26,8 +26,6 @@ interface HeroCardProps extends ParentProps {
   meta?: HeroMeta[];
   /** 右侧 / 顶部 CTA 区（按钮组等），children 优先级高于 meta */
   cta?: any;
-  /** 装饰 halo（gradient radial 在右上角发光）。默认 true */
-  halo?: boolean;
   class?: string;
 }
 
@@ -50,7 +48,7 @@ const dotColors = {
 /**
  * 页面顶部 hero 卡。
  *
- * 视觉：surface-elevated + radius-2xl + elevation-2，右上角 radial gradient halo，
+ * 视觉：surface-elevated + radius-2xl + elevation-2，
  * 顶部 eyebrow chip + display 标题 + desc + meta-grid。
  *
  * @example
@@ -77,18 +75,6 @@ export function HeroCard(props: HeroCardProps) {
         props.class,
       )}
     >
-      {/* halo */}
-      <Show when={props.halo !== false}>
-        <div
-          aria-hidden="true"
-          class="pointer-events-none absolute -right-[20%] -top-[40%] h-[200%] w-[70%]"
-          style={{
-            background:
-              'radial-gradient(closest-side, color-mix(in oklab, var(--accent) 18%, transparent), transparent)',
-          }}
-        />
-      </Show>
-
       {/* eyebrow */}
       <Show when={props.eyebrow}>
         <span
@@ -111,11 +97,11 @@ export function HeroCard(props: HeroCardProps) {
         {(t) => (
           <h1
             class="relative mt-3.5 mb-3 max-w-[24ch] text-[clamp(28px,3.4vw,44px)] font-bold leading-[1.08] tracking-[-0.028em]"
-            // 允许 title 含 <em>...</em> 走 accent 渐变（不允许其他 HTML，简单字符串安全）
+            // 允许 title 含 <em>...</em> 走 accent 纯色高亮（不允许其他 HTML，简单字符串安全）
             // eslint-disable-next-line solid/no-innerhtml
             innerHTML={t().replace(
               /<em>(.*?)<\/em>/g,
-              '<em class="not-italic" style="background:linear-gradient(90deg,var(--accent),oklch(56% 0.22 300));-webkit-background-clip:text;background-clip:text;color:transparent">$1</em>',
+              '<em class="not-italic" style="color:var(--solid)">$1</em>',
             )}
           />
         )}

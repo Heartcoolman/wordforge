@@ -581,7 +581,7 @@ function EventCard(props: { ev: StreamEvent; expanded: boolean; onToggle: () => 
       <Show when={dev()}>
         {(d) => (
           <div class="muted-3" style={sx({ fontSize: 10.5, marginTop: 3, display: 'flex', gap: 6, alignItems: 'center' })}>
-            <span>📱 {[d().os, d().model].filter(Boolean).join(' · ') || '未知设备'}</span>
+            <span style={sx({ display: 'inline-flex', 'align-items': 'center', gap: 5 })}><Icon name="devices" size={13} /> {[d().os, d().model].filter(Boolean).join(' · ') || '未知设备'}</span>
             <Show when={d().language}>{(l) => <span>· {l()}</span>}</Show>
             <Show when={d().online != null}>
               <span style={sx({ color: d().online ? 'var(--success)' : 'var(--text-3)' })}>· {d().online ? '在线' : '离线'}</span>

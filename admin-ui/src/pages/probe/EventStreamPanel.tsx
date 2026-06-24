@@ -1,6 +1,7 @@
 import { createResource, createSignal, createMemo, createEffect, on, For, Show, onMount, onCleanup } from 'solid-js';
 import { Spinner } from '@/components/ui/Spinner';
 import { Empty } from '@/components/ui/Empty';
+import { Icon } from '@/components/wf/Icon';
 import { probeTelemetryApi } from '@/api/probeTelemetry';
 import type { StreamEvent } from '@/types/probeTelemetry';
 import { hms } from './util';
@@ -177,7 +178,7 @@ function EventCard(props: { ev: StreamEvent; expanded: boolean; onToggle: () => 
       <Show when={dev()}>
         {(d) => (
           <div class="pb-ev-device">
-            <span class="ic">📱</span>
+            <span class="ic"><Icon name="devices" size={13} /></span>
             <span class="txt">
               {[d().os, d().model].filter(Boolean).join(' · ') || '未知设备'}
               <Show when={d().language}>{(l) => <span class="muted"> · {l()}</span>}</Show>

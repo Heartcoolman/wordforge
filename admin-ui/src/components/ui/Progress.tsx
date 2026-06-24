@@ -15,13 +15,13 @@ interface ProgressBarProps {
 }
 
 const heightMap = { sm: 'h-1.5', md: 'h-2.5', lg: 'h-4' };
-// 渐变填充：顶层标准色 → 底层 hover 色，layered 感更精致
+// 纯色填充（DS 禁用渐变）
 const fillMap = {
-  accent: 'bg-gradient-to-b from-accent to-accent-hover',
-  success: 'bg-gradient-to-b from-success to-success/80',
-  warning: 'bg-gradient-to-b from-warning to-warning/80',
-  error: 'bg-gradient-to-b from-error to-error/80',
-  info: 'bg-gradient-to-b from-info to-info/80',
+  accent: 'bg-accent',
+  success: 'bg-success',
+  warning: 'bg-warning',
+  error: 'bg-error',
+  info: 'bg-info',
 };
 
 export function ProgressBar(props: ProgressBarProps) {

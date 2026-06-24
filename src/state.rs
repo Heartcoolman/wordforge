@@ -135,6 +135,10 @@ pub enum SseEvent {
         latest_version: String,
         message: Option<String>,
     },
+    /// 强制升级解除：admin 撤销某平台的强升广播后定向下发,客户端收到即清除强升锁,
+    /// 恢复正常会话(与 banned/unbanned 的可逆语义对齐)。未被强升的客户端静默忽略。
+    #[serde(rename = "upgrade_cleared")]
+    UpgradeCleared,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

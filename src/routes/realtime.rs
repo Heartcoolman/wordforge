@@ -327,6 +327,7 @@ pub async fn sse_handler(
                                         crate::state::SseEvent::LlmBudgetExceeded { .. } => "llm_budget_exceeded",
                                         crate::state::SseEvent::ResourcePackAvailable { .. } => "resource_pack_available",
                                         crate::state::SseEvent::UpgradeRequired { .. } => "upgrade_required",
+                                        crate::state::SseEvent::UpgradeCleared => "upgrade_cleared",
                                     };
                                     yield Ok(Event::default().event(event_name).data(json));
                                 }

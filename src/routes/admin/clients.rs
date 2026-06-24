@@ -25,6 +25,11 @@ pub fn router() -> Router<AppState> {
             "/broadcast-upgrade/:platform",
             post(broadcast_upgrade_handler),
         )
+        // 撤销强升:向该平台全部活跃 SSE 连接下发 upgrade_cleared,客户端清锁恢复。
+        .route(
+            "/broadcast-upgrade/:platform/revoke",
+            post(revoke_upgrade_handler),
+        )
         .route("/:id", get(get_client_detail))
         .route("/:id/ban", post(ban_client))
         .route("/:id/unban", post(unban_client))
@@ -836,6 +841,71 @@ async fn broadcast_upgrade_handler(
     );
     Ok(ok(serde_json::json!({
         "matched": targets.len(),
+        "pushedConnections": hit,
+    })))
+}
+
+/// POST /admin/clients/broadcast-upgrade/:platform/revoke —— 撤销该平台强制升级。
+/// 向该平台全部设备的活跃 SSE 连接定向下发 `upgrade_cleared`,客户端收到即清除强升锁、
+/// 恢复正常会话。未被强升的客户端静默忽略。仍真正低于全局版本门的客户端会在下一次
+/// 受检请求时重新被 CLIENT_OUTDATED 拦截(自校正),故平台级广播解除是安全的。
+async fn revoke_upgrade_handler(
+    admin: AdminAuthUser,
+    Path(platform): Path<String>,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let platform = normalize_platform(&platform)?;
+    let platform_owned = platform.to_string();
+    let device_ids: Vec<String> = state
+        .run_store_task(
+            "admin.clients.revoke_upgrade.list",
+            move |store| -> Result<_, AppError> {
+                let rows = store.list_device_versions_for_platform(&platform_owned)?;
+                Ok(rows.into_iter().map(|(device_id, _)| device_id).collect())
+            },
+        )
+        .await??;
+
+    let mut hit = 0usize;
+    for device_id in &device_ids {
+        if let Some(conns) = state.active_sse().get(device_id) {
+            for conn in conns.value() {
+                if conn.tx.try_send(SseEvent::UpgradeCleared).is_ok() {
+                    hit += 1;
+                }
+            }
+        }
+    }
+
+    let admin_id = admin.admin_id.clone();
+    let platform_str = platform.to_string();
+    let devices_len = device_ids.len() as i64;
+    let _ = state
+        .run_store_task(
+            "admin.clients.revoke_upgrade.audit",
+            move |store| -> Result<(), AppError> {
+                store.insert_admin_audit(
+                    &admin_id,
+                    "client.revoke_upgrade",
+                    Some("platform"),
+                    Some(&platform_str),
+                    Some(&serde_json::json!({
+                        "devices": devices_len,
+                        "pushedConnections": hit,
+                    })),
+                )?;
+                Ok(())
+            },
+        )
+        .await;
+
+    tracing::info!(
+        admin_id = %admin.admin_id, platform = %platform,
+        devices = device_ids.len(), pushed_connections = hit,
+        "强制升级已撤销"
+    );
+    Ok(ok(serde_json::json!({
+        "devices": device_ids.len(),
         "pushedConnections": hit,
     })))
 }

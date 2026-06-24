@@ -36,7 +36,7 @@ export function Switch(props: SwitchProps) {
           'transition-colors duration-base ease-out-expo',
           'focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent',
           'disabled:cursor-not-allowed',
-          props.checked ? 'bg-gradient-accent-strong shadow-elevation-1' : 'bg-surface-tertiary',
+          props.checked ? 'bg-accent shadow-elevation-1' : 'bg-surface-tertiary',
         )}
       >
         <span
