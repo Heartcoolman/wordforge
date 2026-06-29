@@ -155,7 +155,29 @@ pub fn router() -> Router<AppState> {
         .route("/metrics", get(metrics))
 }
 
-pub async fn health_check(State(state): State<AppState>) -> impl axum::response::IntoResponse {
+/// 公开健康监控面板（单文件，编译期内嵌，随版本分发）。浏览器访问 `/health` 时返回，
+/// 面板再以 `Accept: application/json` 拉同源 `/health` 的 JSON 渲染（去硬编码 IP，免跨源/混合内容）。
+const HEALTH_PANEL_HTML: &str = include_str!("../../assets/health.html");
+
+/// 仅当调用方明确偏好 HTML（浏览器顶层导航 `Accept: text/html`）时返回面板；
+/// `fetch()`/curl/负载均衡器探针默认 `*/*`，走 JSON 分支，机器契约不变。
+fn accept_prefers_html(headers: &axum::http::HeaderMap) -> bool {
+    headers
+        .get(axum::http::header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .map(|a| a.contains("text/html"))
+        .unwrap_or(false)
+}
+
+pub async fn health_check(
+    headers: axum::http::HeaderMap,
+    State(state): State<AppState>,
+) -> impl axum::response::IntoResponse {
+    // 浏览器顶层导航直接吐公开监控面板；机器（探针/LB/面板取数）走下方 JSON 分支。
+    if accept_prefers_html(&headers) {
+        return axum::response::Html(HEALTH_PANEL_HTML).into_response();
+    }
+
     // M0-R4：apply swapping 期间维护模式激活，/health 返回 503 告知负载均衡器下线。
     // fork-exec 后新进程启动完成（.maintenance.flag 清理）再恢复 200。
     if state.is_maintenance() {
@@ -232,6 +254,7 @@ pub async fn health_check(State(state): State<AppState>) -> impl axum::response:
                 // 时钟健康状态：driftSecs = 服务器时钟 - 公网时钟（HTTP Date 取样）
                 // status=drifted 时说明本机 NTP 未同步，会造成 JWT 在客户端视角下失效
                 "clock": {
+                    "healthy": !clock_degraded,
                     "status": clock_status,
                     "driftSecs": clock_drift_secs,
                     "lastCheckAt": if clock_last_check_at == 0 { None } else { Some(clock_last_check_at) },

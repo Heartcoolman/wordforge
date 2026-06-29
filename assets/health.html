@@ -1,0 +1,503 @@
+<!doctype html>
+<html lang="en" data-state="boot">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WordForge · vitals</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Newsreader:ital@1&display=swap" rel="stylesheet">
+<style>
+  /* WordForge Design System — monochrome ink-on-paper.
+     Status colors use the DS state pairs (success/warning/error); the single
+     chart accent (--accent #2D6CDF, DS info) is reserved for neutral metrics. */
+  :root{
+    --bg:#FFFFFF; --surface:#FFFFFF; --surface-2:#F4F4F5;
+    --line:#ECECEC; --line-soft:#F4F4F5; --line-strong:#DCDCDC;
+    --paper:#15181E; --text:#15181E; --muted:#6B7280; --muted-2:#9CA3AF;
+    --solid:#0A0A0B; --accent:#2D6CDF;
+    --signal:#2F8A5B; --signal-dim:rgba(47,138,91,.14);
+    --shadow:0 1px 2px rgba(20,22,28,.04), 0 18px 40px -24px rgba(20,22,28,.16);
+    --radius:24px; --radius-sm:18px; --radius-pill:9999px;
+    --mono:'IBM Plex Mono',ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    --disp:'Sora','Inter',ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif;
+    --serif:'Newsreader',ui-serif,Georgia,serif;
+  }
+  [data-state="degraded"]{ --signal:#B7791F; --signal-dim:rgba(183,121,31,.14); }
+  [data-state="fault"]{ --signal:#C0392B; --signal-dim:rgba(192,57,43,.14); }
+
+  *{box-sizing:border-box}
+  html,body{margin:0}
+  body{
+    background:var(--bg);
+    color:var(--text); font-family:var(--disp); letter-spacing:-.011em;
+    -webkit-font-smoothing:antialiased; min-height:100vh;
+    padding:clamp(16px,3vw,34px); overflow-x:hidden;
+  }
+  .wrap{max-width:1060px;margin:0 auto;display:flex;flex-direction:column;gap:clamp(14px,2vw,20px)}
+
+  /* ---------- header ---------- */
+  .head{display:flex;align-items:baseline;justify-content:space-between;gap:16px;flex-wrap:wrap}
+  .brand{display:flex;align-items:baseline;gap:12px;min-width:0}
+  .brand__mark{
+    font-family:var(--disp);font-weight:700;font-size:clamp(18px,2.6vw,24px);
+    letter-spacing:-.02em;color:var(--paper);
+  }
+  .brand__sub{font-family:var(--mono);color:var(--muted);font-size:11px;letter-spacing:.18em;text-transform:uppercase}
+  .head__meta{display:flex;align-items:baseline;gap:18px;flex-wrap:wrap;font-family:var(--mono);font-size:12px;color:var(--muted)}
+  .head__meta b{color:var(--paper);font-weight:500}
+  .ver{color:var(--accent)}
+
+  /* ---------- monitor / waveform ---------- */
+  .monitor{
+    position:relative;border:1px solid var(--line);border-radius:var(--radius);
+    background:var(--surface);box-shadow:var(--shadow);
+    height:clamp(190px,30vw,260px);overflow:hidden;
+  }
+  .monitor__wave{position:absolute;inset:0;width:100%;height:100%;display:block}
+  .monitor__overlay{
+    position:absolute;inset:0;padding:clamp(16px,2.4vw,26px);
+    display:flex;flex-direction:column;justify-content:space-between;
+    pointer-events:none;
+    background:linear-gradient(90deg,rgba(255,255,255,.94) 0%,rgba(255,255,255,.6) 34%,transparent 62%);
+  }
+  .badge{display:flex;align-items:center;gap:14px}
+  .lamp{
+    width:13px;height:13px;border-radius:50%;background:var(--signal);flex:0 0 auto;
+    box-shadow:0 0 0 4px var(--signal-dim);
+    animation:beat 1.9s ease-in-out infinite;
+  }
+  .status{
+    font-family:var(--disp);font-weight:700;color:var(--paper);
+    font-size:clamp(38px,7vw,68px);line-height:.92;letter-spacing:-.03em;
+  }
+  .status--state{color:var(--signal)}
+  .monitor__msg{font-size:clamp(12px,1.4vw,13.5px);color:var(--muted);max-width:46ch;line-height:1.5}
+  .monitor__msg b{color:var(--paper);font-weight:500}
+  .monitor__tag{
+    align-self:flex-start;font-family:var(--mono);font-size:11px;letter-spacing:.18em;text-transform:uppercase;
+    color:var(--muted-2);
+  }
+
+  /* ---------- vitals grid ---------- */
+  .vitals{display:grid;grid-template-columns:repeat(4,1fr);gap:clamp(10px,1.4vw,14px)}
+  .cell{
+    border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--surface);box-shadow:var(--shadow);
+    padding:clamp(16px,1.8vw,22px);display:flex;flex-direction:column;gap:9px;min-width:0;
+  }
+  .cell__label{font-family:var(--mono);font-size:11px;letter-spacing:.18em;text-transform:uppercase;color:var(--muted)}
+  .cell__val{font-family:var(--disp);font-size:clamp(22px,3.2vw,30px);font-weight:600;color:var(--paper);line-height:1;letter-spacing:-.03em;white-space:nowrap}
+  .cell__val small{font-family:var(--mono);font-size:.46em;color:var(--muted);font-weight:400;letter-spacing:.04em;margin-left:4px}
+  .cell__note{font-family:var(--mono);font-size:11px;color:var(--muted-2);margin-top:auto}
+  .meter{height:4px;border-radius:var(--radius-pill);background:var(--surface-2);overflow:hidden}
+  .meter__fill{height:100%;width:0;background:var(--signal);border-radius:var(--radius-pill);transition:width .9s cubic-bezier(.22,1,.36,1)}
+
+  /* ---------- services ---------- */
+  .svc{border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);box-shadow:var(--shadow);overflow:hidden}
+  .svc__head{
+    display:flex;align-items:center;justify-content:space-between;
+    padding:12px clamp(14px,1.8vw,18px);border-bottom:1px solid var(--line-soft);
+  }
+  .svc__title{font-family:var(--mono);font-size:11px;letter-spacing:.18em;text-transform:uppercase;color:var(--muted)}
+  .svc__count{font-family:var(--mono);font-size:11px;color:var(--muted-2);letter-spacing:.04em}
+  .chan{
+    display:grid;grid-template-columns:14px 1fr auto;align-items:center;gap:14px;
+    padding:14px clamp(16px,1.8vw,22px);border-bottom:1px solid var(--line-soft);
+  }
+  .chan:last-child{border-bottom:0}
+  .chan__lamp{width:9px;height:9px;border-radius:50%;background:var(--c,var(--signal));box-shadow:0 0 0 3px color-mix(in srgb,var(--c,var(--signal)) 16%,transparent)}
+  .chan__name{display:flex;flex-direction:column;gap:2px;min-width:0}
+  .chan__key{color:var(--paper);font-size:14px;font-weight:600}
+  .chan__role{font-family:var(--mono);color:var(--muted-2);font-size:11px;letter-spacing:.08em;text-transform:uppercase}
+  .chan__right{display:flex;align-items:center;gap:16px;justify-content:flex-end;text-align:right;flex-wrap:wrap;min-width:0}
+  .chan__detail{font-family:var(--mono);color:var(--muted);font-size:12px;white-space:nowrap}
+  .chan__detail b{color:var(--text);font-weight:600}
+  .chan__state{font-family:var(--mono);font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--c,var(--signal));min-width:64px;text-align:right}
+
+  /* ---------- footer ---------- */
+  .foot{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;
+    font-family:var(--mono);color:var(--muted-2);font-size:11px;letter-spacing:.04em}
+  .foot a{color:var(--muted);text-decoration:none;border-bottom:1px solid var(--line-strong)}
+  .foot a:hover{color:var(--paper)}
+  .pulse-dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--signal);margin-right:6px;vertical-align:middle;animation:beat 1.9s ease-in-out infinite}
+
+  .skel{color:var(--muted-2)!important}
+
+  @keyframes beat{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.45;transform:scale(.82)}}
+
+  :focus-visible{outline:2px solid var(--ink,#15181E);outline-offset:2px}
+
+  @media (max-width:760px){
+    .vitals{grid-template-columns:repeat(2,1fr)}
+    .monitor__overlay{background:linear-gradient(180deg,rgba(255,255,255,.94) 0%,rgba(255,255,255,.5) 50%,transparent 100%)}
+  }
+  @media (max-width:430px){
+    .vitals{grid-template-columns:1fr}
+    .chan{grid-template-columns:12px 1fr;grid-template-areas:"l n" ". r"}
+    .chan__lamp{grid-area:l}.chan__name{grid-area:n}.chan__right{grid-area:r;justify-content:flex-start;text-align:left}
+    .chan__state{text-align:left}
+  }
+  @media (prefers-reduced-motion:reduce){
+    .lamp,.pulse-dot{animation:none}
+    .meter__fill{transition:none}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="head">
+    <div class="brand">
+      <span class="brand__mark">WordForge</span>
+      <span class="brand__sub">· vitals</span>
+    </div>
+    <div class="head__meta">
+      <span>build <b class="ver" id="m-ver">—</b></span>
+      <span>server clock <b id="m-clock">—:—:—</b> UTC</span>
+      <span><span class="pulse-dot"></span><b id="m-updated">connecting…</b></span>
+    </div>
+  </header>
+
+  <section class="monitor" aria-label="Live system pulse">
+    <canvas class="monitor__wave" id="wave"></canvas>
+    <div class="monitor__overlay">
+      <div>
+        <div class="badge">
+          <span class="lamp"></span>
+          <span class="status status--state" id="status">BOOT</span>
+        </div>
+        <p class="monitor__msg" id="msg" role="status" aria-live="polite">Establishing link with the server…</p>
+      </div>
+      <span class="monitor__tag" id="bpm-tag">heartbeat</span>
+    </div>
+  </section>
+
+  <section class="vitals" aria-label="Key metrics">
+    <div class="cell">
+      <span class="cell__label">Availability</span>
+      <span class="cell__val skel" id="v-avail">—<small>%</small></span>
+      <div class="meter"><div class="meter__fill" id="v-avail-bar"></div></div>
+      <span class="cell__note" id="v-avail-note">—</span>
+    </div>
+    <div class="cell">
+      <span class="cell__label">Uptime</span>
+      <span class="cell__val skel" id="v-uptime">—</span>
+      <span class="cell__note">since last boot</span>
+    </div>
+    <div class="cell">
+      <span class="cell__label">Requests</span>
+      <span class="cell__val skel" id="v-req">—</span>
+      <span class="cell__note">served, lifetime</span>
+    </div>
+    <div class="cell">
+      <span class="cell__label">Database</span>
+      <span class="cell__val skel" id="v-db">—</span>
+      <span class="cell__note">on-disk size</span>
+    </div>
+  </section>
+
+  <section class="svc" aria-label="Service status">
+    <div class="svc__head">
+      <span class="svc__title">Subsystems</span>
+      <span class="svc__count" id="svc-count">—</span>
+    </div>
+    <div id="channels"></div>
+  </section>
+
+  <footer class="foot">
+    <span>polling <b id="f-int">—</b> · source <a id="f-src" href="#" target="_blank" rel="noopener">/health</a></span>
+    <span id="f-req">connecting…</span>
+  </footer>
+
+</div>
+
+<script>
+(() => {
+  "use strict";
+  const $ = id => document.getElementById(id);
+  const params = new URLSearchParams(location.search);
+  const ENDPOINT = params.get('url') || '/health';
+  const INTERVAL = Math.max(2000, (parseFloat(params.get('interval')) || 10) * 1000);
+  const REDUCED = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // service display order + roles (roles only where confidently known)
+  const SVC_ORDER = [
+    {key:'amas',          role:'service'},
+    {key:'store',         role:'datastore'},
+    {key:'sse',           role:'realtime stream'},
+    {key:'clock',         role:'time sync'},
+    {key:'wordbookCenter',role:'wordbook center'},
+  ];
+
+  // ---------- formatting ----------
+  const pad = n => String(n).padStart(2,'0');
+  const fmtNum = n => Number(n).toLocaleString('en-US');
+  const fmtUptime = s => {
+    s = Math.max(0, Math.floor(s));
+    const d = Math.floor(s/86400); s%=86400;
+    const h = Math.floor(s/3600); s%=3600;
+    const m = Math.floor(s/60), sec = s%60;
+    return (d>0 ? d+'d ' : '') + pad(h)+':'+pad(m)+':'+pad(sec);
+  };
+  const fmtBytes = b => {
+    const mb = b/1048576;
+    return mb < 1024 ? mb : mb/1024;            // returns number; unit chosen separately
+  };
+  const bytesUnit = b => (b/1048576 < 1024 ? 'MB' : 'GB');
+  const fmtClock = unixSecs => {
+    const t = new Date(unixSecs*1000);
+    return pad(t.getUTCHours())+':'+pad(t.getUTCMinutes())+':'+pad(t.getUTCSeconds());
+  };
+  const ago = sec => {
+    sec = Math.max(0, Math.floor(sec));
+    if (sec < 60) return sec+'s ago';
+    if (sec < 3600) return Math.floor(sec/60)+'m '+(sec%60)+'s ago';
+    return Math.floor(sec/3600)+'h '+Math.floor((sec%3600)/60)+'m ago';
+  };
+  const days = sec => {
+    const d = sec/86400;
+    return d >= 10 ? Math.round(d)+'d' : d.toFixed(1)+'d';
+  };
+
+  // ---------- count-up ----------
+  const easeOut = t => 1 - Math.pow(1-t, 3);
+  function animate(from, to, dur, onUpdate){
+    if (REDUCED || from === to){ onUpdate(to); return; }
+    const start = performance.now();
+    (function step(now){
+      const p = Math.min(1, (now-start)/dur);
+      onUpdate(from + (to-from)*easeOut(p));
+      if (p < 1) requestAnimationFrame(step);
+    })(performance.now());
+  }
+
+  // ---------- runtime state ----------
+  let last = null, lastOkAt = 0;
+  let baseUptime = 0, baseServerTime = 0;
+  let state = 'boot', firstLoad = true, timer = null;
+
+  // ---------- render ----------
+  function setState(s){
+    state = s;
+    document.documentElement.setAttribute('data-state', s);
+  }
+
+  function overallState(d){
+    const bad = SVC_ORDER.filter(s => d.services?.[s.key] && d.services[s.key].healthy === false);
+    if (d.status !== 'ok' || bad.length) return {s:'degraded', bad};
+    return {s:'ok', bad:[]};
+  }
+
+  function renderChannels(d){
+    const box = $('channels');
+    const cToken = {true:'var(--signal)', false:'#C0392B'};
+    let healthy = 0;
+    box.innerHTML = SVC_ORDER.map(({key,role}) => {
+      const svc = d.services?.[key] || {};
+      const ok = svc.healthy !== false;
+      if (ok) healthy++;
+      let detail = '';
+      if (key === 'sse') detail = `<b>${fmtNum(svc.activeConnections||0)}</b> conn · <b>${fmtNum(svc.activeDevices||0)}</b> dev`;
+      else if (key === 'clock') detail = `drift <b>${svc.driftSecs ?? 0}s</b> / ${svc.thresholdSecs ?? 60}s`;
+      else if (key === 'wordbookCenter') detail = svc.probeSkipped ? 'probe <b>skipped</b>' : 'probe <b>live</b>';
+      const color = ok ? 'var(--signal)' : '#C0392B';
+      const word = ok ? 'healthy' : 'down';
+      return `<div class="chan">
+        <span class="chan__lamp" style="--c:${color}"></span>
+        <span class="chan__name"><span class="chan__key">${key}</span><span class="chan__role">${role}</span></span>
+        <span class="chan__right">
+          ${detail ? `<span class="chan__detail">${detail}</span>` : ''}
+          <span class="chan__state" style="--c:${color}">${word}</span>
+        </span>
+      </div>`;
+    }).join('');
+    $('svc-count').textContent = `${healthy}/${SVC_ORDER.length} healthy`;
+    return healthy;
+  }
+
+  function onData(d){
+    const { s, bad } = overallState(d);
+    setState(s);
+    lastOkAt = Date.now();
+    baseUptime = d.uptimeSecs || 0;
+    baseServerTime = d.serverTime || 0;
+
+    $('m-ver').textContent = d.version || '—';
+    $('status').textContent = s === 'ok' ? 'OK' : 'DEGRADED';
+
+    const healthy = renderChannels(d);
+
+    if (s === 'ok') {
+      $('msg').innerHTML = `All systems nominal · <b>${healthy}/${SVC_ORDER.length}</b> subsystems healthy.`;
+    } else {
+      const names = bad.map(b => b.key).join(', ');
+      $('msg').innerHTML = `<b>${names}</b> ${bad.length>1?'need':'needs'} attention — ${healthy}/${SVC_ORDER.length} subsystems healthy.`;
+    }
+
+    // vitals
+    const avail = d.availability?.pct ?? 0;
+    const reqs  = d.availability?.totalRequests ?? 0;
+    const win   = d.availability?.effectiveSecs ?? 0;
+    const dbN   = fmtBytes(d.dbSizeBytes ?? 0);
+    const dbU   = bytesUnit(d.dbSizeBytes ?? 0);
+
+    ['v-avail','v-req','v-db','v-uptime'].forEach(id => $(id).classList.remove('skel'));
+    $('v-avail-note').textContent = win ? `measured over ${days(win)}` : '';
+    $('f-req').innerHTML = '<span class="pulse-dot"></span>live';
+
+    if (firstLoad) {
+      animate(0, avail, 1000, v => $('v-avail').innerHTML = v.toFixed(2)+'<small>%</small>');
+      animate(0, avail, 1000, v => $('v-avail-bar').style.width = Math.min(100,v).toFixed(2)+'%');
+      animate(0, reqs, 1000, v => $('v-req').textContent = fmtNum(Math.round(v)));
+      animate(0, dbN, 1000, v => $('v-db').innerHTML = v.toFixed(dbN<10?2:1)+'<small>'+dbU+'</small>');
+    } else {
+      $('v-avail').innerHTML = avail.toFixed(2)+'<small>%</small>';
+      $('v-avail-bar').style.width = Math.min(100,avail).toFixed(2)+'%';
+      $('v-req').textContent = fmtNum(reqs);
+      $('v-db').innerHTML = dbN.toFixed(dbN<10?2:1)+'<small>'+dbU+'</small>';
+    }
+
+    last = d; firstLoad = false;
+    pulseFlash();
+  }
+
+  function onError(err){
+    setState('fault');
+    $('status').textContent = 'UNREACHABLE';
+    const seen = last ? `Last good reading <b>${ago((Date.now()-lastOkAt)/1000)}</b>.` : 'Never connected.';
+    $('msg').innerHTML = `Can't reach the server (<b>${err.message||'network error'}</b>). ${seen} Retrying every ${Math.round(INTERVAL/1000)}s.`;
+    $('f-req').innerHTML = '<span class="pulse-dot"></span>stale';
+  }
+
+  // ---------- poll loop ----------
+  async function poll(){
+    const ctrl = new AbortController();
+    const to = setTimeout(() => ctrl.abort(), Math.min(8000, INTERVAL-200));
+    try {
+      const r = await fetch(ENDPOINT, { signal: ctrl.signal, cache:'no-store', headers:{ Accept:'application/json' } });
+      if (!r.ok) throw new Error('HTTP '+r.status);
+      const d = await r.json();
+      onData(d);
+    } catch (e) {
+      onError(e instanceof DOMException ? new Error('timeout') : e);
+    } finally {
+      clearTimeout(to);
+      timer = setTimeout(poll, INTERVAL);
+    }
+  }
+
+  // ---------- local tickers (1s) ----------
+  setInterval(() => {
+    const elapsed = (Date.now() - lastOkAt) / 1000;
+    if (last) {
+      if (state !== 'fault') $('v-uptime').textContent = fmtUptime(baseUptime + elapsed);
+      $('m-clock').textContent = fmtClock(baseServerTime + elapsed);
+      $('m-updated').textContent = state === 'fault' ? 'stale · '+ago(elapsed) : 'updated '+ago(elapsed);
+    }
+  }, 1000);
+
+  $('f-int').textContent = (INTERVAL/1000) + 's';
+  $('f-src').textContent = ENDPOINT;
+  $('f-src').href = ENDPOINT;
+
+  // ================= waveform (oscilloscope ECG) =================
+  const cv = $('wave'), cx = cv.getContext('2d');
+  let W = 0, H = 0, dpr = 1, flash = 0, faultLevel = 0;
+
+  function pulseFlash(){ flash = 1; }
+
+  function resize(){
+    dpr = Math.min(2, window.devicePixelRatio || 1);
+    const r = cv.getBoundingClientRect();
+    W = Math.max(1, r.width); H = Math.max(1, r.height);
+    cv.width = Math.round(W*dpr); cv.height = Math.round(H*dpr);
+    cx.setTransform(dpr,0,0,dpr,0,0);
+    if (REDUCED) drawFrame(performance.now());
+  }
+  window.addEventListener('resize', resize);
+
+  // one cardiac cycle, x in [0,1) -> amplitude (R peak ~1.0)
+  const g = (x,mu,sig,amp) => amp*Math.exp(-((x-mu)*(x-mu))/(2*sig*sig));
+  function ecg(x){
+    return g(x,0.16,0.026,0.13)   // P
+         - g(x,0.305,0.009,0.17)  // Q
+         + g(x,0.345,0.010,1.0)   // R
+         - g(x,0.385,0.013,0.30)  // S
+         + g(x,0.58,0.046,0.24);  // T
+  }
+
+  const CYCLE = 230;          // samples per heartbeat
+  const SPEED = 0.085;        // sample units per millisecond (~ scroll speed)
+
+  function cssVar(name){ return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+
+  function drawFrame(now){
+    const offset = now * SPEED;
+    const sig = cssVar('--signal') || '#2F8A5B';
+    const mid = H*0.56;
+    const amp = H*0.34;
+
+    // fault: ease the trace toward a flat line
+    const target = state === 'fault' ? 1 : 0;
+    faultLevel += (target - faultLevel) * 0.06;
+
+    cx.clearRect(0,0,W,H);
+
+    // --- grid (hairlines, ink-on-paper) ---
+    cx.lineWidth = 1;
+    cx.strokeStyle = 'rgba(20,22,28,0.035)';
+    cx.beginPath();
+    for (let x = (W % 44); x < W; x += 44){ cx.moveTo(x+.5,0); cx.lineTo(x+.5,H); }
+    for (let y = mid % 40; y < H; y += 40){ cx.moveTo(0,y+.5); cx.lineTo(W,y+.5); }
+    cx.stroke();
+    // baseline
+    cx.strokeStyle = 'rgba(20,22,28,0.08)';
+    cx.beginPath(); cx.moveTo(0,mid+.5); cx.lineTo(W,mid+.5); cx.stroke();
+
+    // --- trace (flat color, no glow) ---
+    const step = 2;
+    cx.lineJoin = 'round'; cx.lineCap = 'round';
+    cx.lineWidth = 2;
+    cx.strokeStyle = sig;
+    cx.shadowBlur = 0;
+    cx.beginPath();
+    let lastY = mid;
+    for (let px = 0; px <= W; px += step){
+      const s = offset + px;
+      const phase = (s % CYCLE) / CYCLE;
+      const live = ecg(phase) * amp;
+      const noise = (Math.sin(s*0.7)+Math.sin(s*0.31))*0.4; // faint idle jitter
+      const y = mid - (live*(1-faultLevel)) - noise*(1-faultLevel);
+      if (px === 0) cx.moveTo(px,y); else cx.lineTo(px,y);
+      lastY = y;
+    }
+    cx.stroke();
+
+    // --- leading cursor dot ---
+    cx.fillStyle = sig;
+    cx.beginPath(); cx.arc(W-1, lastY, 2.6 + flash*1.2, 0, Math.PI*2); cx.fill();
+
+    // left fade so the trace "enters" the scope (paper white)
+    const grad = cx.createLinearGradient(0,0,W*0.4,0);
+    grad.addColorStop(0,'rgba(255,255,255,1)'); grad.addColorStop(1,'rgba(255,255,255,0)');
+    cx.fillStyle = grad; cx.fillRect(0,0,W*0.4,H);
+
+    flash *= 0.92;
+  }
+
+  function loop(now){ drawFrame(now); requestAnimationFrame(loop); }
+
+  resize();
+  if (REDUCED){
+    drawFrame(0);
+    // still react to state changes without continuous animation
+    setInterval(() => drawFrame(performance.now()), 1000);
+  } else {
+    requestAnimationFrame(loop);
+  }
+
+  poll();
+})();
+</script>
+</body>
+</html>
