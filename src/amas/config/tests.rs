@@ -496,6 +496,7 @@ fn from_env_sets_ensemble_flag_and_sample_rate() {
     let env_cfg = crate::config::AMASEnvConfig {
         ensemble_enabled: false,
         monitor_sample_rate: 0.25,
+        rejection_sample_rate: 0.0,
     };
     let cfg = AMASConfig::from_env(&env_cfg);
     assert!(!cfg.feature_flags.ensemble_enabled);

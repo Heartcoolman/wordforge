@@ -1,10 +1,13 @@
-use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Registry};
 
 #[derive(Debug, Clone)]
 pub struct LogConfig {
     pub log_level: String,
+    /// P1：是否启用每日归档文件落盘。实际消费者已下移到 `logging_buffer`（经 env
+    /// `ENABLE_FILE_LOGS` 读取），由环形缓冲 Layer 落**已脱敏**记录，避免明文密钥落盘。
+    /// 本字段保留以兼容 main.rs 构造（来自 Config）。
     pub enable_file_logs: bool,
+    /// P1：归档目录。同 `enable_file_logs`，实际由 `logging_buffer` 经 env `LOG_DIR` 读取。
     pub log_dir: String,
 }
 
@@ -24,34 +27,18 @@ pub fn init_tracing(config: &LogConfig) {
 
     let stdout_layer = fmt::layer().with_target(true).with_thread_ids(false);
 
-    // M0-P5：进程内日志环形缓冲（admin 监控页「实时日志」面板数据源）。
+    // M0-P5：进程内日志环形缓冲（admin 监控页「实时日志」面板 + SSE 实时流数据源）。
     // 放在 env_filter 之后，复用同一全局级别过滤，开销受控。
+    // P1：文件归档由本 Layer 单点负责（写已脱敏记录），故不再叠加独立的 fmt json 文件 appender，
+    // 杜绝明文密钥落盘。归档启停由 logging_buffer 经 env ENABLE_FILE_LOGS / LOG_DIR 读取。
     let registry = Registry::default()
         .with(env_filter)
         .with(crate::logging_buffer::layer())
         .with(stdout_layer);
 
-    if config.enable_file_logs {
-        let file_appender = RollingFileAppender::builder()
-            .rotation(Rotation::DAILY)
-            .filename_prefix("learning-backend")
-            .filename_suffix("log")
-            .max_log_files(30)
-            .build(&config.log_dir)
-            .expect("Failed to create rolling file appender");
-        let file_layer = fmt::layer()
-            .with_writer(file_appender)
-            .with_ansi(false)
-            .json();
-        // try_init 在全局 subscriber 已设置时返回错误，属于正常情况（如测试环境）；
-        // 但在生产首次启动时失败则说明配置有误，应立即终止。
-        if let Err(e) = registry.with(file_layer).try_init() {
-            let msg = e.to_string();
-            if !msg.contains("already been set") {
-                panic!("Failed to initialize tracing with file logs: {e}");
-            }
-        }
-    } else if let Err(e) = registry.try_init() {
+    // try_init 在全局 subscriber 已设置时返回错误，属于正常情况（如测试环境）；
+    // 但在生产首次启动时失败则说明配置有误，应立即终止。
+    if let Err(e) = registry.try_init() {
         let msg = e.to_string();
         if !msg.contains("already been set") {
             panic!("Failed to initialize tracing: {e}");

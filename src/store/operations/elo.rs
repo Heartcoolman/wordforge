@@ -335,6 +335,29 @@ impl Store {
         }
         Ok(result)
     }
+
+    /// admin /word-elo/contributors：列出对某词全局评分贡献最大（按 |净位移| 降序）的用户。
+    /// 数据源 word_elo_user_contrib（m050 抗投毒账本：per-(user,word) 累计净位移）。
+    pub fn list_word_elo_contributors(
+        &self,
+        word_id: &str,
+        limit: i64,
+    ) -> Result<Vec<(String, f64)>, StoreError> {
+        keys::validate_id(word_id)?;
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT user_id, net_displacement FROM word_elo_user_contrib
+             WHERE word_id = ?1
+             ORDER BY ABS(net_displacement) DESC
+             LIMIT ?2",
+        )?;
+        let rows = stmt
+            .query_map(params![word_id, limit], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
 }
 
 #[cfg(test)]

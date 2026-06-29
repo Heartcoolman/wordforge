@@ -113,3 +113,10 @@ wiremock = "0.6"
 lto = true
 codegen-units = 1
 strip = true
+
+# alice 测试机快速迭代用：跳过 LTO，全量 LTO 仅留给生产产物
+[profile.release-fast]
+inherits = "release"
+lto = false
+codegen-units = 16
+strip = false

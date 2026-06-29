@@ -166,7 +166,8 @@ async fn process_one(ev: &OutboxEvent, state: &AppState) -> Result<(), ProcessEr
             let mut req = payload.request;
             // 固化客户端提交时刻，避免落库时间漂移到 worker 处理时刻。
             req.created_at_override = Some(payload.created_at);
-            process_single_record(&payload.user_id, &req, state)
+            // 任务C:outbox worker 无 HTTP 请求上下文，request_id 传 None。
+            process_single_record(&payload.user_id, &req, state, None)
                 .await
                 .map(|_| ())
                 .map_err(|e| ProcessError {

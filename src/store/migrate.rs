@@ -35,7 +35,7 @@ type MigrationFn = fn(&Store) -> Result<(), StoreError>;
 /// 完全迁移后 `schema_version` 应到达的版本号（= [`migrations`] 条目数）。
 /// 编译期常量，供 `--print-schema-version`（任意版本回滚的"目标二进制自声明 schema 版本"）使用；
 /// [`schema_version_const_matches_registry`] 测试守卫它与运行期 `migrations().len()` 不漂移。
-pub const SCHEMA_VERSION: u32 = 62;
+pub const SCHEMA_VERSION: u32 = 66;
 
 /// 已加固到"生产可用"的 down 迁移覆盖下界：回滚目标的 schema 版本必须 `>=` 此值。
 /// 真·任意版本回滚把 down 链当作"把当前库副本降级到目标版本"的降级引擎；低于此下界的
@@ -156,6 +156,10 @@ fn migrations() -> Vec<(&'static str, MigrationFn)> {
             m061_telemetry_ingest_rejections,
         ),
         ("062_engine_swd_history", m062_engine_swd_history),
+        ("063_exposure_indexes", m063_exposure_indexes),
+        ("064_rejections_rollup", m064_rejections_rollup),
+        ("065_word_state_transitions", m065_word_state_transitions),
+        ("066_monitoring_request_id", m066_monitoring_request_id),
     ]
 }
 
@@ -294,6 +298,10 @@ fn migrations_down() -> Vec<(&'static str, MigrationFn)> {
             m061_telemetry_ingest_rejections_down,
         ),
         ("062_engine_swd_history", m062_engine_swd_history_down),
+        ("063_exposure_indexes", m063_exposure_indexes_down),
+        ("064_rejections_rollup", m064_rejections_rollup_down),
+        ("065_word_state_transitions", m065_word_state_transitions_down),
+        ("066_monitoring_request_id", m066_monitoring_request_id_down),
     ]
 }
 
@@ -3527,6 +3535,127 @@ fn m062_engine_swd_history_down(store: &Store) -> Result<(), StoreError> {
         "DROP INDEX IF EXISTS idx_engine_swd_history_user_seq;
          DROP TABLE IF EXISTS engine_swd_history;",
     )?;
+    Ok(())
+}
+
+/// m063:数据暴露读路径索引（P2 全量数据接口）。纯索引、无数据变更、无表结构变更：
+/// ① word_elo_user_contrib(word_id) —— /amas/word-elo/contributors 按 word 反查贡献者；
+/// ② client_devices(fp_coarse|fp_strong) 全量(非既有仅 banned 的 partial) —— /clients/
+///   fingerprint-collisions 跨全部设备按指纹分组找碰撞。索引同源写入 schema.rs（全新库由
+///   init_schema 建），此处供存量库增量补建。IF NOT EXISTS 幂等。
+fn m063_exposure_indexes(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_word_elo_user_contrib_word ON word_elo_user_contrib(word_id);
+         CREATE INDEX IF NOT EXISTS idx_client_devices_fp_coarse_all ON client_devices(fp_coarse) WHERE fp_coarse IS NOT NULL;
+         CREATE INDEX IF NOT EXISTS idx_client_devices_fp_strong_all ON client_devices(fp_strong) WHERE fp_strong IS NOT NULL;",
+    )?;
+    Ok(())
+}
+
+/// m063 down:DROP 三个暴露索引。纯 schema 降级，无数据影响。仅 dev/test。
+fn m063_exposure_indexes_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS idx_word_elo_user_contrib_word;
+         DROP INDEX IF EXISTS idx_client_devices_fp_coarse_all;
+         DROP INDEX IF EXISTS idx_client_devices_fp_strong_all;",
+    )?;
+    Ok(())
+}
+
+/// m064:高频选词拒绝 rollup 表（P3 A4 全量埋点含高频）。热路径只做内存原子累加，
+/// metrics_flush 周期把 per-reason 增量 upsert 进此表；绝不逐条 INSERT。PK=(hour_key,reason)，
+/// reason 为固定小枚举（绝不含 word_id/user_id 防无界）。同源写 schema.rs（全新库由 init_schema 建）。
+fn m064_rejections_rollup(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS rejections_rollup (
+            hour_key INTEGER NOT NULL,
+            reason   TEXT NOT NULL,
+            count    INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (hour_key, reason)
+         );",
+    )?;
+    Ok(())
+}
+
+/// m064 down:DROP rejections_rollup。纯 schema 降级。仅 dev/test。
+fn m064_rejections_rollup_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch("DROP TABLE IF EXISTS rejections_rollup;")?;
+    Ok(())
+}
+
+/// m065:词状态迁移流水（P3 from→to 全量边沿）。每次掌握等级变更 append 一行（边沿触发，
+/// 频率 < 答题率，可逐条 append）。与既有 word_mastery_events 同 idempotency 门控、但记录全部
+/// 等级对（不止 mastered/forgotten）。同源写 schema.rs。
+fn m065_word_state_transitions(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS word_state_transitions (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id    TEXT NOT NULL,
+            word_id    TEXT NOT NULL,
+            from_state TEXT NOT NULL,
+            to_state   TEXT NOT NULL,
+            created_at TEXT NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS idx_word_state_transitions_user ON word_state_transitions(user_id, created_at DESC);
+         CREATE INDEX IF NOT EXISTS idx_word_state_transitions_to ON word_state_transitions(to_state, created_at DESC);",
+    )?;
+    Ok(())
+}
+
+/// m065 down:DROP 表 + 索引。仅 dev/test。
+fn m065_word_state_transitions_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS idx_word_state_transitions_user;
+         DROP INDEX IF EXISTS idx_word_state_transitions_to;
+         DROP TABLE IF EXISTS word_state_transitions;",
+    )?;
+    Ok(())
+}
+
+/// m066:engine_monitoring_events 加 request_id 列（决策↔日志关联）。PRAGMA 守卫幂等 ADD COLUMN；
+/// 同源写 schema.rs（全新库内联建列）。配套部分索引加速按 traceId 反查。
+fn m066_monitoring_request_id(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    let has_col: bool = conn
+        .prepare("PRAGMA table_info(engine_monitoring_events)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .any(|name| name == "request_id");
+    if !has_col {
+        conn.execute(
+            "ALTER TABLE engine_monitoring_events ADD COLUMN request_id TEXT DEFAULT NULL",
+            [],
+        )?;
+    }
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_monitoring_events_request_id
+         ON engine_monitoring_events(request_id) WHERE request_id IS NOT NULL",
+        [],
+    )?;
+    Ok(())
+}
+
+/// m066 down:DROP 索引 + DROP COLUMN（sqlite 3.35+，rusqlite bundled 支持）。仅 dev/test。
+fn m066_monitoring_request_id_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch("DROP INDEX IF EXISTS idx_monitoring_events_request_id;")?;
+    let has_col: bool = conn
+        .prepare("PRAGMA table_info(engine_monitoring_events)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .any(|name| name == "request_id");
+    if has_col {
+        conn.execute(
+            "ALTER TABLE engine_monitoring_events DROP COLUMN request_id",
+            [],
+        )?;
+    }
     Ok(())
 }
 

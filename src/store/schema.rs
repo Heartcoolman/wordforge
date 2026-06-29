@@ -439,6 +439,8 @@ CREATE TABLE IF NOT EXISTS word_elo_user_contrib (
     net_displacement REAL NOT NULL DEFAULT 0.0,
     PRIMARY KEY (user_id, word_id)
 );
+-- m063:按 word 反查贡献者（/amas/word-elo/contributors）。PK 前导列是 user_id，按 word 查需独立索引。
+CREATE INDEX IF NOT EXISTS idx_word_elo_user_contrib_word ON word_elo_user_contrib(word_id);
 
 CREATE TABLE IF NOT EXISTS user_elo_history (
     user_id TEXT NOT NULL,
@@ -626,6 +628,9 @@ CREATE INDEX IF NOT EXISTS idx_client_devices_risk ON client_devices(risk_flagge
 -- m055:仅索引已封设备的指纹,使请求路径的"指纹是否被封"匹配只扫被封行。
 CREATE INDEX IF NOT EXISTS idx_client_devices_fp_strong ON client_devices(fp_strong) WHERE is_banned = 1 AND fp_strong IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_client_devices_fp_coarse ON client_devices(fp_coarse) WHERE is_banned = 1 AND fp_coarse IS NOT NULL;
+-- m063:全量(非仅 banned)指纹索引,供 /clients/fingerprint-collisions 跨全部设备按指纹分组找碰撞。
+CREATE INDEX IF NOT EXISTS idx_client_devices_fp_coarse_all ON client_devices(fp_coarse) WHERE fp_coarse IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_client_devices_fp_strong_all ON client_devices(fp_strong) WHERE fp_strong IS NOT NULL;
 
 -- m024:强制升级策略(每平台一行)。min_version 以下启动拦截,suggested_version
 -- 以下顶部黄条提示,grayscale_pct 控制灰度推送百分比,pwa_silent_update 仅 Web 有意义。

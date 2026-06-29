@@ -85,6 +85,21 @@ struct MemoryFeedback {
     /// T1.3:本次答题导致的 mastery 态转移("mastered"/"forgotten"/None)，用于落 word_mastery_events
     /// 支撑"长期 masteredCount"。仅记进入 MASTERED / 进入 FORGOTTEN 的边沿。
     mastery_transition: Option<&'static str>,
+    /// 任务B(m065):本次答题导致的【任意】mastery 等级变更 (from, to)（prev != new 才 Some，
+    /// 不止 mastered/forgotten），用于落 word_state_transitions 全量边沿流水。
+    state_transition: Option<(MasteryLevel, MasteryLevel)>,
+}
+
+/// 任务B:MasteryLevel → 流水字符串（New/Learning/Reviewing/Mastered/Forgotten）。
+/// 不复用 Serialize（其为 SCREAMING_SNAKE_CASE，会得到 "NEW" 等），本地映射保证流水可读口径。
+fn mastery_level_str(level: &MasteryLevel) -> &'static str {
+    match level {
+        MasteryLevel::New => "New",
+        MasteryLevel::Learning => "Learning",
+        MasteryLevel::Reviewing => "Reviewing",
+        MasteryLevel::Mastered => "Mastered",
+        MasteryLevel::Forgotten => "Forgotten",
+    }
 }
 
 struct ProcessingContext {
@@ -440,11 +455,13 @@ impl AMASEngine {
         &self,
         user_id: &str,
         raw_event: RawEvent,
+        request_id: Option<String>,
     ) -> Result<ProcessResult, AppError> {
         let engine = self.clone();
         let user_id = user_id.to_string();
+        // 设计 A7:spawn_blocking 丢失 tracing span，request_id 必须由闭包显式 move 捕获后透传。
         let result = crate::blocking::run_blocking("amas.process_event", move || {
-            engine.process_event_blocking(&user_id, raw_event, None)
+            engine.process_event_blocking(&user_id, raw_event, None, request_id)
         })
         .await??;
         // 非幂等路径不传幂等键，persist_state 恒 committed=true（无标记可竞争），故必为 Some。
@@ -465,12 +482,14 @@ impl AMASEngine {
         user_id: &str,
         raw_event: RawEvent,
         client_record_id: &str,
+        request_id: Option<String>,
     ) -> Result<Option<(ProcessResult, Option<i64>)>, AppError> {
         let engine = self.clone();
         let user_id = user_id.to_string();
         let key = client_record_id.to_string();
+        // 设计 A7:spawn_blocking 丢失 tracing span，request_id 由闭包显式 move 捕获后透传。
         crate::blocking::run_blocking("amas.process_event", move || {
-            engine.process_event_blocking(&user_id, raw_event, Some(&key))
+            engine.process_event_blocking(&user_id, raw_event, Some(&key), request_id)
         })
         .await?
     }
@@ -482,6 +501,7 @@ impl AMASEngine {
         user_id: &str,
         raw_event: RawEvent,
         idempotency_key: Option<&str>,
+        request_id: Option<String>,
     ) -> Result<Option<(ProcessResult, Option<i64>)>, AppError> {
         let start = std::time::Instant::now();
 
@@ -504,6 +524,11 @@ impl AMASEngine {
         let pending_algo = std::mem::take(&mut scoring.pending_algo);
         // T1.3:本次 mastery 态边沿(在 scoring 被后续消费前捕获)。
         let mastery_transition = scoring.word_mastery.as_ref().and_then(|f| f.mastery_transition);
+        // 任务B:本次【任意】等级变更边沿(同上,在 scoring 消费前捕获)。
+        let state_transition = scoring
+            .word_mastery
+            .as_ref()
+            .and_then(|f| f.state_transition.clone());
 
         let swd_append = self.update_trust_scores(
             &mut context.algo_states,
@@ -561,15 +586,30 @@ impl AMASEngine {
         // 已知 caveat(low):此写与 persist_state 非同一 tx——commit 后、本 INSERT 前崩溃会永久丢该事件
         // (幂等键已写,重试被拦无法补)。masteredCount 因此在崩溃下略偏低,但丢失对 canary/baseline
         // 两臂对称(同代码路径),不扭曲 A/B 相对比较,仅绝对值低估;作为纯分析指标可接受。
-        if let Some(event) = mastery_transition {
-            if idempotency_key.is_some() && !raw_event.word_id.is_empty() {
+        if idempotency_key.is_some() && !raw_event.word_id.is_empty() {
+            let now_rfc3339 = now.to_rfc3339();
+            if let Some(event) = mastery_transition {
                 if let Err(e) = self.store.insert_word_mastery_event(
                     user_id,
                     &raw_event.word_id,
                     event,
-                    &now.to_rfc3339(),
+                    &now_rfc3339,
                 ) {
                     tracing::warn!(error=%e, "insert_word_mastery_event 失败");
+                }
+            }
+            // 任务B:落【任意】等级变更边沿到 word_state_transitions(全量 from→to 流水)。
+            // 同 idempotency 门控、out-of-txn、best-effort 失败仅 warn;与 insert_word_mastery_event
+            // 同口径(诊断端点重试不双计)。覆盖 New→Learning 等无 mastery_transition 的变更。
+            if let Some((from, to)) = &state_transition {
+                if let Err(e) = self.store.insert_word_state_transition(
+                    user_id,
+                    &raw_event.word_id,
+                    mastery_level_str(from),
+                    mastery_level_str(to),
+                    &now_rfc3339,
+                ) {
+                    tracing::warn!(error=%e, "insert_word_state_transition 失败");
                 }
             }
         }
@@ -606,6 +646,7 @@ impl AMASEngine {
             &strategy.weights,
             raw_event.is_correct,
             experiment.as_ref().map(|(id, arm)| (id.as_str(), *arm)),
+            request_id.as_deref(),
         );
 
         Ok(Some((result, outcome.swd_appended_seq)))
@@ -1472,6 +1513,9 @@ impl AMASEngine {
             MasteryLevel::Forgotten if prev_level != MasteryLevel::Forgotten => Some("forgotten"),
             _ => None,
         };
+        // 任务B:任意等级变更(prev != new)即捕获 (from, to) 边沿，落全量词态迁移流水。
+        let state_transition = (prev_level != decision.mastery_level)
+            .then(|| (prev_level.clone(), decision.mastery_level.clone()));
         let scheduled_at =
             now_ms.saturating_add(decision.next_review_interval_secs.saturating_mul(1000));
         let scheduled_recall =
@@ -1487,6 +1531,7 @@ impl AMASEngine {
             scheduled_recall,
             desired_retention,
             mastery_transition,
+            state_transition,
         }))
     }
 
@@ -1785,6 +1830,7 @@ impl AMASEngine {
         routing_weights: &HashMap<AlgorithmId, f64>,
         is_correct: bool,
         experiment: Option<(&str, &str)>,
+        request_id: Option<&str>,
     ) {
         monitoring::record_event(
             &self.store,
@@ -1798,6 +1844,7 @@ impl AMASEngine {
             routing_weights,
             is_correct,
             experiment,
+            request_id,
         );
     }
 }
@@ -2140,6 +2187,7 @@ mod tests {
                     session_id: Some("session-A".to_string()),
                     ..RawEvent::default()
                 },
+                None,
             )
             .await
             .expect("process_event");
@@ -2185,6 +2233,7 @@ mod tests {
                         session_id: Some("s".to_string()),
                         ..RawEvent::default()
                     },
+                    None,
                 )
                 .await
                 .expect("process_event");
@@ -2216,6 +2265,7 @@ mod tests {
                     response_time_ms: 2000,
                     ..RawEvent::default()
                 },
+                None,
             )
             .await
             .expect("process_event");
@@ -2237,6 +2287,7 @@ mod tests {
                         session_id: Some("s-1".to_string()),
                         ..RawEvent::default()
                     },
+                    None,
                 )
                 .await
                 .unwrap();
@@ -2252,6 +2303,7 @@ mod tests {
                     session_id: Some("s-2".to_string()),
                     ..RawEvent::default()
                 },
+                None,
             )
             .await
             .unwrap();
@@ -2452,6 +2504,7 @@ mod tests {
                     session_id: Some("s-hint".to_string()),
                     ..RawEvent::default()
                 },
+                None,
             )
             .await
             .unwrap();
@@ -2476,6 +2529,7 @@ mod tests {
                     session_id: Some("s-eng".to_string()),
                     ..RawEvent::default()
                 },
+                None,
             )
             .await
             .unwrap();
@@ -2509,6 +2563,7 @@ mod tests {
                     session_id: Some("s-idle".to_string()),
                     ..RawEvent::default()
                 },
+                None,
             )
             .await
             .unwrap();
@@ -2783,6 +2838,7 @@ mod tests {
                         response_time_ms: 200,
                         ..RawEvent::default()
                     },
+                    None,
                 )
                 .await
                 .unwrap();
@@ -2808,6 +2864,7 @@ mod tests {
                     session_id: Some("s-flags".to_string()),
                     ..RawEvent::default()
                 },
+                None,
             )
             .await
             .unwrap();
@@ -2851,6 +2908,7 @@ mod tests {
                     session_id: Some("s-bad".to_string()),
                     ..RawEvent::default()
                 },
+                None,
             )
             .await
             .unwrap();
@@ -2909,6 +2967,7 @@ mod tests {
                     session_id: Some("s-empty".to_string()),
                     ..RawEvent::default()
                 },
+                None,
             )
             .await
             .unwrap();
@@ -2998,6 +3057,7 @@ mod tests {
                     ..RawEvent::default()
                 },
                 key,
+                None,
             )
             .await
             .expect("process_event_idempotent should not error");
@@ -3042,6 +3102,7 @@ mod tests {
                     ..RawEvent::default()
                 },
                 key,
+                None,
             )
             .await
             .expect("process_event_idempotent");

@@ -93,6 +93,10 @@ pub struct MonitoringEvent {
     pub experiment_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub experiment_arm: Option<String>,
+    /// 任务C:决策↔日志关联。本次决策对应请求的 request_id(None=诊断端点/无请求上下文)。
+    /// 与 spawn_blocking 丢失的 tracing span 解耦,由调用链显式透传(设计 A7)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
 }
 
 pub fn check_invariants(result: &ProcessResult) -> Vec<InvariantViolation> {
@@ -207,6 +211,7 @@ pub fn record_event(
     routing_weights: &HashMap<AlgorithmId, f64>,
     is_correct: bool,
     experiment: Option<(&str, &str)>,
+    request_id: Option<&str>,
 ) {
     let violations = check_invariants(result);
     let is_anomaly = !violations.is_empty();
@@ -259,6 +264,7 @@ pub fn record_event(
         is_correct,
         experiment_id: experiment.map(|(id, _)| id.to_string()),
         experiment_arm: experiment.map(|(_, arm)| arm.to_string()),
+        request_id: request_id.map(|s| s.to_string()),
     };
 
     if is_anomaly {
@@ -310,6 +316,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.db");
         let store = Store::open(path.to_str().unwrap(), 5000, 4).unwrap();
+        // m066 的 request_id 列只由迁移补加（schema.rs 全量 DDL 未含）；insert_monitoring_event
+        // 写 request_id 列，故测试库须跑迁移，否则 INSERT 缺列失败（与 operations/engine.rs 测试同口径）。
+        store.run_migrations().unwrap();
         (dir, store)
     }
 
@@ -399,6 +408,7 @@ mod tests {
             &HashMap::new(),
             false,
             None,
+            None,
         );
         // 落库
         let evts = store.get_recent_monitoring_events(10).unwrap();
@@ -423,6 +433,7 @@ mod tests {
             "v1",
             &HashMap::new(),
             false,
+            None,
             None,
         );
         assert!(store.get_recent_monitoring_events(10).unwrap().is_empty());
@@ -490,6 +501,7 @@ mod tests {
             "v1",
             &HashMap::new(),
             false,
+            None,
             None,
         );
         assert!(!store.get_recent_monitoring_events(10).unwrap().is_empty());

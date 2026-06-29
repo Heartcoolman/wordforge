@@ -27,6 +27,7 @@ pub mod probe;
 pub mod probe_telemetry;
 pub mod processed_events;
 pub mod records;
+pub mod rejections;
 pub mod resource_packs;
 pub mod scheduled_broadcasts;
 pub mod sessions;

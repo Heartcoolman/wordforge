@@ -1,18 +1,23 @@
+use std::convert::Infallible;
 use std::sync::atomic::Ordering;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use axum::extract::{Path, Query, State};
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::{delete, get, post};
 use axum::Router;
 use chrono::{Duration as ChronoDuration, Utc};
 use cron::Schedule;
+use futures::Stream;
 use once_cell::sync::Lazy;
 use serde::Deserialize;
 use serde_json::json;
 use sysinfo::{Disks, Pid, ProcessRefreshKind, RefreshKind, System};
+use tokio::sync::broadcast::error::RecvError;
 
 use crate::auth::AdminAuthUser;
+use crate::logging_buffer::{self, LogFilter};
 use crate::response::{ok, AppError};
 use crate::routes::health::{sse_probe_ok, wordbook_center_probe};
 use crate::routes::realtime::SSE_CONNECTION_COUNT;
@@ -41,14 +46,24 @@ pub fn router() -> Router<AppState> {
         .route("/workers/cron", get(worker_cron))
         // BA3a：worker 运行历史时间线（worker_runs，append-only）
         .route("/workers/history", get(worker_history))
+        // worker SLO：按 worker 聚合成功率 + 成功 run 耗时分位（p50/p95/p99/max）
+        .route("/workers/slo", get(worker_slo))
         // BA3a：进程内 CPU/内存/load 资源历史（sparkline + 时序）
         .route("/resource-history", get(resource_history))
         // BA3b：records 热路径分阶段管线指标 + 最近一条摄取瀑布 trace
         .route("/pipeline", get(pipeline_metrics))
         .route("/trace/latest", get(trace_latest))
+        // m066:records 摄取分步瀑布 trace 环形缓冲快照（最新在前）
+        .route("/traces", get(traces))
         // M0-P5：监控页对齐设计图新增——滚动请求指标 / 实时日志 / 派生告警时间线
         .route("/requests", get(request_metrics))
         .route("/logs", get(recent_logs))
+        // P1：实时日志 SSE + 每日归档（列目录 / 读单日）
+        .route("/logs/stream", get(logs_stream))
+        .route("/logs/archive", get(logs_archive))
+        .route("/logs/archive/:date", get(logs_archive_date))
+        // P1：每小时可用率桶（availability_rollup）
+        .route("/availability-hourly", get(availability_hourly))
         .route("/events", get(alert_events))
         // W1-2：outbox 死信运维——明细列表 + 人工重投 / 丢弃
         .route("/dead-letter", get(dead_letter_list))
@@ -710,6 +725,106 @@ async fn worker_history(
     Ok(ok(json!({ "runs": runs_json })))
 }
 
+#[derive(Debug, Deserialize)]
+struct WorkerSloQuery {
+    worker: Option<String>,
+    window: Option<u32>,
+}
+
+/// nearest-rank 百分位：`sorted` 必须升序且非空，`p` ∈ (0,100]。
+/// 取排名 ceil(p/100 × N) 处的样本（1-indexed，越界夹到末位）。
+fn nearest_rank(sorted: &[i64], p: f64) -> i64 {
+    debug_assert!(!sorted.is_empty());
+    let n = sorted.len();
+    let rank = ((p / 100.0) * n as f64).ceil() as usize;
+    let idx = rank.saturating_sub(1).min(n - 1);
+    sorted[idx]
+}
+
+/// GET /api/admin/monitoring/workers/slo —— 按 worker 聚合 SLO。
+/// `window` 取最近多少条 worker_runs（默认 500，夹到 1..=5000）；`worker` 给定时仅返回该 worker。
+/// 每个 worker 输出：总数 / success / failure / skipped 计数、成功率（0.0–1.0），
+/// 以及「成功且耗时非空」样本的 p50/p95/p99/max（nearest-rank，毫秒）。无成功样本时分位为 null。
+async fn worker_slo(
+    _admin: AdminAuthUser,
+    Query(q): Query<WorkerSloQuery>,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let window = q.window.unwrap_or(500).clamp(1, 5000);
+    let worker = q.worker.clone();
+    let runs = state
+        .run_store_task("admin.monitoring.workers_slo", move |store| {
+            store.list_worker_runs(worker.as_deref(), window)
+        })
+        .await
+        .map_err(|e| AppError::internal(&e.to_string()))?
+        .map_err(AppError::from)?;
+
+    // 按 worker_name 分组聚合；BTreeMap 的 key 序即「按 worker 名升序」。
+    #[derive(Default)]
+    struct Agg {
+        count: u64,
+        success: u64,
+        failure: u64,
+        skipped: u64,
+        /// 仅 success 且 duration_ms 非空的耗时样本。
+        durations: Vec<i64>,
+    }
+    let mut groups: std::collections::BTreeMap<String, Agg> = std::collections::BTreeMap::new();
+    for r in runs {
+        let g = groups.entry(r.worker_name).or_default();
+        g.count += 1;
+        match r.outcome.as_str() {
+            "success" => {
+                g.success += 1;
+                if let Some(d) = r.duration_ms {
+                    g.durations.push(d);
+                }
+            }
+            "failure" => g.failure += 1,
+            "skipped" => g.skipped += 1,
+            _ => {}
+        }
+    }
+
+    let workers: Vec<serde_json::Value> = groups
+        .into_iter()
+        .map(|(name, mut g)| {
+            g.durations.sort_unstable();
+            let (p50, p95, p99, max_ms) = if g.durations.is_empty() {
+                (None, None, None, None)
+            } else {
+                (
+                    Some(nearest_rank(&g.durations, 50.0)),
+                    Some(nearest_rank(&g.durations, 95.0)),
+                    Some(nearest_rank(&g.durations, 99.0)),
+                    Some(*g.durations.last().unwrap()),
+                )
+            };
+            // 成功率取比值（0.0–1.0，与 /health errorRate 同口径），保留 4 位小数。
+            let success_rate = if g.count == 0 {
+                0.0
+            } else {
+                (g.success as f64 / g.count as f64 * 10000.0).round() / 10000.0
+            };
+            json!({
+                "worker": name,
+                "count": g.count,
+                "success": g.success,
+                "failure": g.failure,
+                "skipped": g.skipped,
+                "successRate": success_rate,
+                "p50Ms": p50,
+                "p95Ms": p95,
+                "p99Ms": p99,
+                "maxMs": max_ms,
+            })
+        })
+        .collect();
+
+    Ok(ok(json!({ "workers": workers })))
+}
+
 /// GET /api/admin/monitoring/resource-history —— 进程 CPU/RSS/load 时序（oldest-first）。
 /// mem 以字节返回（与 /health resources.memoryRssBytes 同口径）。
 async fn resource_history(
@@ -785,20 +900,311 @@ async fn trace_latest(
 }
 
 #[derive(Debug, Deserialize)]
+struct TracesQuery {
+    limit: Option<usize>,
+}
+
+/// GET /api/admin/monitoring/traces?limit=100 —— records 摄取分步瀑布 trace 环形缓冲快照（最新在前）。
+/// 环形缓冲容量有界（TRACE_CAP），limit 默认 100、夹到 1..=1000，实际返回不超过现有条数。
+async fn traces(
+    _admin: AdminAuthUser,
+    Query(q): Query<TracesQuery>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let limit = q.limit.unwrap_or(100).clamp(1, 1000);
+    Ok(ok(json!({ "traces": crate::stage_metrics::snapshot_traces(limit) })))
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct LogsQuery {
     limit: Option<usize>,
     level: Option<String>,
+    target: Option<String>,
+    q: Option<String>,
+    request_id: Option<String>,
+    since_ms: Option<i64>,
 }
 
-/// GET /api/admin/monitoring/logs?limit=200&level=WARN —— 进程内日志环形缓冲快照(最新在前)。
+/// 把空白/空串归一化为 None，避免空过滤条件污染查询。
+fn opt_clean(v: Option<String>) -> Option<String> {
+    v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
+/// 原始日志访问元审计(A8)：单层鉴权下任一 admin 可读全量请求数据/PII，故对原始日志/流/归档
+/// 访问写一条元审计。尽力而为(spawn_blocking 旁路, 失败忽略)，不给响应加延迟、不阻断。
+fn audit_raw_log_access(
+    state: &AppState,
+    admin_id: &str,
+    action: &'static str,
+    meta: serde_json::Value,
+) {
+    let store = state.store().clone();
+    let admin_id = admin_id.to_string();
+    tokio::task::spawn_blocking(move || {
+        let _ = store.insert_admin_audit(&admin_id, action, Some("logs"), None, Some(&meta));
+    });
+}
+
+/// GET /api/admin/monitoring/logs?limit&level&target&q&requestId&sinceMs ——
+/// 进程内日志环形缓冲快照(最新在前)，支持级别/target 子串/message 子串/request_id/时间窗过滤。
 async fn recent_logs(
-    _admin: AdminAuthUser,
+    admin: AdminAuthUser,
+    State(state): State<AppState>,
     Query(q): Query<LogsQuery>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let limit = q.limit.unwrap_or(200).clamp(1, 1000);
-    let logs = crate::logging_buffer::snapshot(limit, q.level.as_deref());
+    let limit = q.limit.unwrap_or(200).clamp(1, 3000);
+    let filter = LogFilter {
+        level: opt_clean(q.level),
+        target: opt_clean(q.target),
+        q: opt_clean(q.q),
+        request_id: opt_clean(q.request_id),
+        since_ms: q.since_ms,
+    };
+    audit_raw_log_access(
+        &state,
+        &admin.admin_id,
+        "read_raw_logs",
+        json!({ "level": filter.level, "target": filter.target, "q": filter.q,
+                "requestId": filter.request_id, "limit": limit }),
+    );
+    let logs = logging_buffer::snapshot_filtered(limit, &filter);
     Ok(ok(json!({ "logs": logs })))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LogStreamQuery {
+    replay: Option<usize>,
+    level: Option<String>,
+    target: Option<String>,
+    q: Option<String>,
+    request_id: Option<String>,
+}
+
+/// GET /api/admin/monitoring/logs/stream —— 实时日志 SSE（先回放后续传）。
+/// 连接即回放 `snapshot_filtered(replay)`（旧→新）作 event:"log"；随后订阅 broadcast 续传，
+/// 命中过滤的记录发 "log"，落后丢弃发 "dropped"{droppedCount}。记录 seq 供前端按序去重。
+/// 注意：循环内绝不调用 `tracing::*`，避免反馈环 / RING 锁竞争。
+async fn logs_stream(
+    admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Query(q): Query<LogStreamQuery>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let replay = q.replay.unwrap_or(200).min(3000);
+    let filter = LogFilter {
+        level: opt_clean(q.level),
+        target: opt_clean(q.target),
+        q: opt_clean(q.q),
+        request_id: opt_clean(q.request_id),
+        since_ms: None,
+    };
+    audit_raw_log_access(
+        &state,
+        &admin.admin_id,
+        "stream_raw_logs",
+        json!({ "level": filter.level, "target": filter.target, "q": filter.q,
+                "requestId": filter.request_id, "replay": replay }),
+    );
+    // 先订阅再取快照：保证回放与续传之间无空窗（重叠记录由前端按 seq 去重）。
+    let mut rx = logging_buffer::subscribe();
+    let replayed = logging_buffer::snapshot_filtered(replay, &filter);
+
+    let stream = async_stream::stream! {
+        // 回放：snapshot 为最新在前，反转成旧→新下发。
+        for rec in replayed.into_iter().rev() {
+            yield Ok(Event::default()
+                .event("log")
+                .data(serde_json::to_string(&rec).unwrap_or_default()));
+        }
+        loop {
+            match rx.recv().await {
+                Ok(rec) => {
+                    if filter.matches(&rec) {
+                        yield Ok(Event::default()
+                            .event("log")
+                            .data(serde_json::to_string(&rec).unwrap_or_default()));
+                    }
+                }
+                Err(RecvError::Lagged(n)) => {
+                    let data = serde_json::json!({ "droppedCount": n });
+                    yield Ok(Event::default().event("dropped").data(data.to_string()));
+                }
+                Err(RecvError::Closed) => break,
+            }
+        }
+    };
+
+    Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(10))
+            .text("keepalive"),
+    )
+}
+
+/// 解析归档文件名 `learning-backend.YYYY-MM-DD.log` → 日期；不匹配返回 None。
+fn parse_archive_date(name: &str) -> Option<String> {
+    let rest = name
+        .strip_prefix("learning-backend.")?
+        .strip_suffix(".log")?;
+    if is_valid_log_date(rest) {
+        Some(rest.to_string())
+    } else {
+        None
+    }
+}
+
+/// 校验日期形如 `^\d{4}-\d{2}-\d{2}$`（路径穿越防御 + 文件名约束）。
+fn is_valid_log_date(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() == 10
+        && b[..4].iter().all(u8::is_ascii_digit)
+        && b[4] == b'-'
+        && b[5..7].iter().all(u8::is_ascii_digit)
+        && b[7] == b'-'
+        && b[8..10].iter().all(u8::is_ascii_digit)
+}
+
+/// GET /api/admin/monitoring/logs/archive —— 列出每日归档文件（不含内容）。
+async fn logs_archive(
+    admin: AdminAuthUser,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    audit_raw_log_access(&state, &admin.admin_id, "list_log_archive", json!({}));
+    let dir = logging_buffer::log_dir();
+    let enabled = logging_buffer::file_logs_enabled();
+    let files = crate::blocking::run_blocking("admin.monitoring.logs_archive", move || {
+        let mut out: Vec<(String, u64)> = Vec::new();
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            for entry in rd.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if let Some(date) = parse_archive_date(&name) {
+                    let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                    out.push((date, size));
+                }
+            }
+        }
+        out.sort_by(|a, b| b.0.cmp(&a.0)); // 日期倒序（最新在前）
+        out
+    })
+    .await?;
+    let files_json: Vec<serde_json::Value> = files
+        .into_iter()
+        .map(|(date, size)| json!({ "date": date, "sizeBytes": size }))
+        .collect();
+    Ok(ok(json!({ "files": files_json, "fileLogsEnabled": enabled })))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ArchiveDateQuery {
+    level: Option<String>,
+    target: Option<String>,
+    q: Option<String>,
+    page: Option<u64>,
+    per_page: Option<u64>,
+}
+
+/// GET /api/admin/monitoring/logs/archive/:date?level&target&q&page&perPage ——
+/// 读取并过滤某日归档（JSON 行），分页返回（最新在前）。
+async fn logs_archive_date(
+    admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Path(date): Path<String>,
+    Query(q): Query<ArchiveDateQuery>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    if !is_valid_log_date(&date) {
+        return Err(AppError::bad_request("INVALID_DATE", "日期格式应为 YYYY-MM-DD"));
+    }
+    audit_raw_log_access(
+        &state,
+        &admin.admin_id,
+        "read_log_archive",
+        json!({ "date": date, "level": opt_clean(q.level.clone()),
+                "target": opt_clean(q.target.clone()), "q": opt_clean(q.q.clone()) }),
+    );
+    let dir = logging_buffer::log_dir();
+    let page = q.page.unwrap_or(1).max(1);
+    let per_page = q.per_page.unwrap_or(200).clamp(1, 1000);
+    let filter = LogFilter {
+        level: opt_clean(q.level),
+        target: opt_clean(q.target),
+        q: opt_clean(q.q),
+        request_id: None,
+        since_ms: None,
+    };
+    let start = ((page - 1) * per_page) as usize;
+    let take = per_page as usize;
+    let (logs, total) =
+        crate::blocking::run_blocking("admin.monitoring.logs_archive_date", move || {
+            // 路径仅由已校验日期拼成，限定在 log_dir 下，无穿越风险。
+            let path = format!("{dir}/learning-backend.{date}.log");
+            let content = std::fs::read_to_string(&path).unwrap_or_default();
+            let mut matched: Vec<logging_buffer::LogRecord> = content
+                .lines()
+                .filter_map(|line| {
+                    let line = line.trim();
+                    if line.is_empty() {
+                        return None;
+                    }
+                    serde_json::from_str::<logging_buffer::LogRecord>(line).ok()
+                })
+                .filter(|r| filter.matches(r))
+                .collect();
+            matched.reverse(); // 最新在前
+            let total = matched.len() as u64;
+            let page_items: Vec<_> = matched.into_iter().skip(start).take(take).collect();
+            (page_items, total)
+        })
+        .await?;
+    Ok(ok(json!({
+        "logs": logs,
+        "total": total,
+        "page": page,
+        "perPage": per_page,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct AvailabilityHourlyQuery {
+    hours: Option<i64>,
+}
+
+/// GET /api/admin/monitoring/availability-hourly?hours=720 —— 每小时可用率桶（升序）。
+/// 数据源 availability_rollup（metrics_flush 持久化），availability = 1 - err5xx/count。
+async fn availability_hourly(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Query(q): Query<AvailabilityHourlyQuery>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let hours = q.hours.unwrap_or(720).clamp(1, 720);
+    let now_hour = Utc::now().timestamp() / 3600;
+    let from_hour = now_hour - hours + 1;
+    let rows = state
+        .run_store_task("admin.monitoring.availability_hourly", move |store| {
+            store.list_availability_hourly(from_hour)
+        })
+        .await
+        .map_err(|e| AppError::internal(&e.to_string()))?
+        .map_err(AppError::from)?;
+    let hours_json: Vec<serde_json::Value> = rows
+        .into_iter()
+        .map(|(hour_key, count, err5xx, bytes_in, buckets)| {
+            let availability = if count > 0 {
+                1.0 - err5xx as f64 / count as f64
+            } else {
+                1.0
+            };
+            json!({
+                "hourKey": hour_key,
+                "count": count,
+                "err5xx": err5xx,
+                "availability": availability,
+                "bytesIn": bytes_in,
+                "buckets": buckets,
+            })
+        })
+        .collect();
+    Ok(ok(json!({ "hours": hours_json })))
 }
 
 #[derive(Debug, Deserialize)]

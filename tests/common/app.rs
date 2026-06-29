@@ -152,6 +152,7 @@ async fn spawn_with_full_config_dual(
         amas: learning_backend::config::AMASEnvConfig {
             ensemble_enabled: true,
             monitor_sample_rate: 0.05,
+            rejection_sample_rate: 0.0,
         },
         // 重定向到 tempdir，避免任何写回到生产 amas_config.toml
         amas_config_file: Some(

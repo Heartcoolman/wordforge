@@ -8,7 +8,13 @@ use tracing::Instrument;
 
 use crate::response::ErrorBody;
 
-pub async fn request_id_middleware(req: Request, next: Next) -> Response {
+/// 任务C:请求级 request_id newtype，放入请求扩展供下游 handler 提取并透传到 AMAS 决策。
+/// 与 logging_buffer 内私有的 span-extension RequestId 用途不同（那个用于日志 span 关联），
+/// 此处面向请求扩展（axum `Extension`），故本地 pub 定义、不复用。
+#[derive(Debug, Clone)]
+pub struct RequestId(pub String);
+
+pub async fn request_id_middleware(mut req: Request, next: Next) -> Response {
     // 在途请求计数：RAII 守卫覆盖整个处理周期（含 panic / early-return 回收）
     let _inflight = crate::metrics_counters::InflightGuard::enter();
 
@@ -19,6 +25,9 @@ pub async fn request_id_middleware(req: Request, next: Next) -> Response {
         .filter(|s| is_valid_request_id(s))
         .map(|s| s.to_string())
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+    // 任务C:放入请求扩展，下游 handler 经 `Extension<RequestId>` 取得后透传到 AMAS（决策↔日志关联）。
+    req.extensions_mut().insert(RequestId(request_id.clone()));
 
     let span = tracing::info_span!("request", request_id = %request_id);
 

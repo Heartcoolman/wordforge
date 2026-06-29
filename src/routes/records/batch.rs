@@ -36,8 +36,11 @@ struct BatchCreateRecordsRequest {
 async fn batch_create_records(
     auth: AuthUser,
     State(state): State<AppState>,
+    request_id: Option<axum::Extension<crate::middleware::request_id::RequestId>>,
     JsonBody(req): JsonBody<BatchCreateRecordsRequest>,
 ) -> Result<axum::response::Response, AppError> {
+    // 任务C:从请求扩展取 request_id（中间件注入），批内逐条透传到 AMAS 决策。
+    let request_id = request_id.map(|axum::Extension(rid)| rid.0);
     if req.records.len() > state.config().limits.max_batch_size {
         return Err(AppError::bad_request(
             "BATCH_TOO_LARGE",
@@ -60,7 +63,7 @@ async fn batch_create_records(
     let mut results: Vec<CreateRecordResponse> = Vec::new();
     let mut errors = Vec::new();
     for (index, item) in req.records.iter().enumerate() {
-        match process_batch_record(&user_id, item, &state).await {
+        match process_batch_record(&user_id, item, &state, request_id.clone()).await {
             Ok(result) => results.push(result),
             Err(error) => {
                 errors.push(serde_json::json!({
@@ -123,6 +126,7 @@ pub(crate) async fn process_batch_record(
     user_id: &str,
     req: &CreateRecordRequest,
     state: &AppState,
+    request_id: Option<String>,
 ) -> Result<CreateRecordResponse, AppError> {
     let user_id_owned = user_id.to_string();
     let record_id = req
@@ -247,6 +251,7 @@ pub(crate) async fn process_batch_record(
                 question_mode: req.question_mode.clone(),
             },
             &record.id,
+            request_id,
         )
         .await?;
     // W1-1 并发收口：None 表示并发同 client_record_id 请求抢先写入幂等标记、本次 AMAS 已整笔回滚，

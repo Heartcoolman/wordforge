@@ -119,6 +119,8 @@ impl LlmProvider {
             "response_format": if req.json_object { serde_json::json!({"type": "json_object"}) } else { serde_json::json!({"type": "text"}) },
         });
 
+        // 记录请求起点,用于计算 latency 并进 P1 日志管线(target=llm)
+        let started = std::time::Instant::now();
         let resp = self
             .client
             .post(&url)
@@ -127,9 +129,12 @@ impl LlmProvider {
             .send()
             .await
             .map_err(|e| {
+                let latency_ms = started.elapsed().as_millis();
                 if e.is_timeout() {
+                    tracing::warn!(target: "llm", model = %self.config.model, latency_ms, "llm chat timeout");
                     LlmError::Timeout
                 } else {
+                    tracing::warn!(target: "llm", model = %self.config.model, latency_ms, error = %e, "llm chat network error");
                     LlmError::Network(e.to_string())
                 }
             })?;
@@ -173,6 +178,19 @@ impl LlmProvider {
             .and_then(|v| v.as_str())
             .unwrap_or(&self.config.model)
             .to_string();
+
+        // 调用成功:发结构化日志进 P1 管线,日志页可按 target=llm 过滤
+        let latency_ms = started.elapsed().as_millis();
+        tracing::info!(
+            target: "llm",
+            model = %model,
+            prompt_tokens = usage.prompt_tokens,
+            completion_tokens = usage.completion_tokens,
+            total_tokens = usage.total_tokens,
+            cost_usd = self.estimate_cost_usd(&usage),
+            latency_ms,
+            "llm chat done"
+        );
 
         Ok(ChatResponse {
             content,

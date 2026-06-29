@@ -19,6 +19,8 @@ pub fn router() -> Router<AppState> {
         .route("/distribution", get(get_distribution))
         // m054:关联风控标记复核(B 层封禁绕过缓解)。静态路由须在 `/:id` 前注册。
         .route("/flagged", get(list_flagged_clients))
+        // m055:设备指纹碰撞簇排查(同硬件多账号/封禁绕过)。静态路由须在 `/:id` 前注册。
+        .route("/fingerprint-collisions", get(list_fingerprint_collisions))
         .route("/upgrade-policy", get(list_upgrade_policy_handler))
         .route("/upgrade-policy/:platform", put(put_upgrade_policy_handler))
         .route(
@@ -470,6 +472,54 @@ async fn clear_client_flag(
         .await??;
     tracing::info!(admin_id = %admin.admin_id, device_id = %id, "管理员清除设备关联风控标记");
     Ok(ok(serde_json::json!({ "cleared": cleared, "deviceId": id })))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FingerprintCollisionsQuery {
+    /// "coarse"(模糊指纹)或 "strong"(强指纹);缺省/非法值退化为 coarse。
+    kind: Option<String>,
+    /// 簇内设备数下限;缺省 2,clamp 下限 2(单台不算碰撞)。
+    min_count: Option<i64>,
+    /// 返回簇数上限;缺省 100,clamp 到 1..=1000。
+    limit: Option<i64>,
+}
+
+/// m055:GET /api/admin/clients/fingerprint-collisions —— 列共享同一设备指纹的设备簇,
+/// 供 admin 排查同硬件多账号 / 封禁绕过。kind=coarse|strong 选模糊/强指纹列;按簇内设备数
+/// 倒序,仅返回 count >= minCount 的簇。每簇透出 fingerprint + count + deviceIds。
+async fn list_fingerprint_collisions(
+    _admin: AdminAuthUser,
+    Query(q): Query<FingerprintCollisionsQuery>,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let kind: &'static str = match q.kind.as_deref() {
+        Some("strong") => "strong",
+        _ => "coarse",
+    };
+    let min_count = q.min_count.unwrap_or(2).max(2);
+    let limit = q.limit.unwrap_or(100).clamp(1, 1000);
+    let collisions = state
+        .run_store_task(
+            "admin.clients.fingerprint_collisions",
+            move |store| -> Result<_, AppError> {
+                Ok(store.list_fingerprint_collisions(kind, min_count, limit)?)
+            },
+        )
+        .await??;
+    let items: Vec<serde_json::Value> = collisions
+        .into_iter()
+        .map(|(fingerprint, count, device_ids)| {
+            serde_json::json!({
+                "fingerprint": fingerprint,
+                "count": count,
+                "deviceIds": device_ids,
+            })
+        })
+        .collect();
+    Ok(ok(
+        serde_json::json!({ "kind": kind, "collisions": items }),
+    ))
 }
 
 async fn request_telemetry(

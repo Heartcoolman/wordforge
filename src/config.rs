@@ -206,6 +206,9 @@ pub struct WorkerConfig {
 pub struct AMASEnvConfig {
     pub ensemble_enabled: bool,
     pub monitor_sample_rate: f64,
+    /// A4：逐词原始拒绝采样率（0=关闭，默认）。rollup 聚合始终开启，与此无关；
+    /// 本字段仅控制未来「逐词原始采样」开关，当前阶段仅落字段不消费。
+    pub rejection_sample_rate: f64,
 }
 
 #[derive(Clone)]
@@ -381,6 +384,7 @@ impl Config {
             amas: AMASEnvConfig {
                 ensemble_enabled: env_or_bool("AMAS_ENSEMBLE_ENABLED", true),
                 monitor_sample_rate: env_or_parse("AMAS_MONITOR_SAMPLE_RATE", 0.05_f64),
+                rejection_sample_rate: env_or_parse("AMAS_REJECTION_SAMPLE_RATE", 0.0_f64),
             },
             amas_config_file: env::var("AMAS_CONFIG_FILE").ok().filter(|s| !s.is_empty()),
             llm: LLMConfig {
@@ -889,6 +893,7 @@ mod tests {
             amas: AMASEnvConfig {
                 ensemble_enabled: true,
                 monitor_sample_rate: 0.05,
+                rejection_sample_rate: 0.0,
             },
             amas_config_file: None,
             llm: LLMConfig {

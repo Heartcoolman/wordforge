@@ -71,6 +71,13 @@ pub fn admin_router() -> Router<AppState> {
             get(metrics_decision_histogram),
         )
         .route("/monitoring", get(get_monitoring_events))
+        // m064/m065:选词拒绝小时桶 + 词态迁移流水读端点
+        .route("/rejections", get(rejections))
+        .route("/transitions", get(transitions))
+        // admin 巡检任意用户/单词的原始样本/分页钻取端点
+        .route("/swd-history", get(swd_history))
+        .route("/decisions", get(decisions))
+        .route("/word-elo/contributors", get(word_elo_contributors))
         .route("/anomalies", get(anomalies_overview))
         .route("/anomalies/feed", get(anomalies_feed))
         .route("/user-state/distribution", get(user_state_distribution))
@@ -361,7 +368,7 @@ async fn process_event(
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     let result = state
         .amas()
-        .process_event(&auth.user_id, req.into())
+        .process_event(&auth.user_id, req.into(), None)
         .await?;
     Ok(ok(result))
 }
@@ -390,7 +397,7 @@ async fn batch_process(
     for event in req.events {
         let result = state
             .amas()
-            .process_event(&auth.user_id, event.into())
+            .process_event(&auth.user_id, event.into(), None)
             .await?;
         outputs.push(result);
     }
@@ -634,6 +641,8 @@ async fn get_metrics(
 #[serde(rename_all = "camelCase")]
 struct DaysQuery {
     days: Option<u32>,
+    /// ?raw=1：返回未分箱/未降采样的原始样本行（共用 struct，其余 handler 忽略此字段）。
+    raw: Option<u8>,
 }
 
 async fn metrics_timeseries(
@@ -641,13 +650,23 @@ async fn metrics_timeseries(
     State(state): State<AppState>,
     Query(q): Query<DaysQuery>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
+    use axum::response::IntoResponse;
     let days = q.days.unwrap_or(7).clamp(1, 90);
+    // ?raw：逐事件原始样本（默认日聚合无更细粒度，切到 engine_monitoring_events，见 store 注释）
+    if q.raw.unwrap_or(0) != 0 {
+        let rows = state
+            .run_store_task("admin.amas.metrics_timeseries.raw", move |store| {
+                store.raw_amas_metric_event_points(days)
+            })
+            .await??;
+        return Ok(ok(serde_json::json!({ "raw": true, "rows": rows })).into_response());
+    }
     let series = state
         .run_store_task("admin.amas.metrics_timeseries", move |store| {
             store.list_amas_metrics_timeseries(days)
         })
         .await??;
-    Ok(ok(series))
+    Ok(ok(series).into_response())
 }
 
 async fn metrics_kpi(
@@ -699,6 +718,8 @@ async fn anomalies_overview(
 struct UserStateDistQuery {
     days: Option<u32>,
     bins: Option<u32>,
+    /// ?raw=1：返回逐事件原始 UserState 标量（未分箱）。
+    raw: Option<u8>,
 }
 
 async fn user_state_distribution(
@@ -706,14 +727,24 @@ async fn user_state_distribution(
     State(state): State<AppState>,
     Query(q): Query<UserStateDistQuery>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
+    use axum::response::IntoResponse;
     let days = q.days.unwrap_or(1).clamp(1, 30);
     let bins = q.bins.unwrap_or(20);
+    // ?raw：逐事件原始 UserState 标量（未分箱）
+    if q.raw.unwrap_or(0) != 0 {
+        let rows = state
+            .run_store_task("admin.amas.user_state_dist.raw", move |store| {
+                store.raw_amas_user_state_samples(days)
+            })
+            .await??;
+        return Ok(ok(serde_json::json!({ "raw": true, "rows": rows })).into_response());
+    }
     let dist = state
         .run_store_task("admin.amas.user_state_dist", move |store| {
             store.aggregate_amas_user_state_distribution(days, bins)
         })
         .await??;
-    Ok(ok(dist))
+    Ok(ok(dist).into_response())
 }
 
 /// GET /user-state/summary —— UserState 标量均值(engine_user_states 当前队列,未采样)。
@@ -733,6 +764,8 @@ async fn user_state_summary(
 #[serde(rename_all = "camelCase")]
 struct BinsQuery {
     bins: Option<u32>,
+    /// ?raw=1：返回逐用户原始认知三轴值（未分箱）。
+    raw: Option<u8>,
 }
 
 /// GET /cognitive/distribution —— 认知三轴(memory/processing/stability)mean+直方图。
@@ -741,13 +774,23 @@ async fn cognitive_distribution(
     State(state): State<AppState>,
     Query(q): Query<BinsQuery>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
+    use axum::response::IntoResponse;
     let bins = q.bins.unwrap_or(20);
+    // ?raw：逐用户原始认知三轴值（未分箱）
+    if q.raw.unwrap_or(0) != 0 {
+        let rows = state
+            .run_store_task("admin.amas.cognitive_distribution.raw", move |store| {
+                store.raw_amas_cognitive_samples()
+            })
+            .await??;
+        return Ok(ok(serde_json::json!({ "raw": true, "rows": rows })).into_response());
+    }
     let dist = state
         .run_store_task("admin.amas.cognitive_distribution", move |store| {
             store.aggregate_amas_cognitive_distribution(bins)
         })
         .await??;
-    Ok(ok(dist))
+    Ok(ok(dist).into_response())
 }
 
 /// GET /algo-compare —— 按 routing_algo 的 count/share/accuracy/p50-p95-mean 延迟。
@@ -835,13 +878,23 @@ async fn metrics_mdm_heatmap(
     State(state): State<AppState>,
     Query(q): Query<DaysQuery>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
+    use axum::response::IntoResponse;
     let days = q.days.unwrap_or(7).clamp(1, 90);
+    // ?raw：逐 (词,日) 原始遗忘样本（默认按 日×难度段 求均的底层行）
+    if q.raw.unwrap_or(0) != 0 {
+        let rows = state
+            .run_store_task("admin.amas.mdm_heatmap.raw", move |store| {
+                store.raw_amas_mdm_samples(days)
+            })
+            .await??;
+        return Ok(ok(serde_json::json!({ "raw": true, "rows": rows })).into_response());
+    }
     let heatmap = state
         .run_store_task("admin.amas.mdm_heatmap", move |store| {
             store.aggregate_amas_mdm_heatmap(days)
         })
         .await??;
-    Ok(ok(heatmap))
+    Ok(ok(heatmap).into_response())
 }
 
 /// GET /metrics/fatigue-timeseries —— 疲劳时间序列（阈值取实际生效配置，与 metrics_kpi 同源）
@@ -850,14 +903,24 @@ async fn metrics_fatigue_timeseries(
     State(state): State<AppState>,
     Query(q): Query<DaysQuery>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
+    use axum::response::IntoResponse;
     let days = q.days.unwrap_or(7).clamp(1, 90);
+    // ?raw：逐事件原始疲劳点（默认按天 GROUP BY 的底层样本）。先于 threshold 求值，raw 分支无需阈值。
+    if q.raw.unwrap_or(0) != 0 {
+        let rows = state
+            .run_store_task("admin.amas.fatigue_timeseries.raw", move |store| {
+                store.raw_amas_fatigue_samples(days)
+            })
+            .await??;
+        return Ok(ok(serde_json::json!({ "raw": true, "rows": rows })).into_response());
+    }
     let threshold = state.amas().get_config().constraints.high_fatigue_threshold;
     let ts = state
         .run_store_task("admin.amas.fatigue_timeseries", move |store| {
             store.aggregate_amas_fatigue_timeseries(days, threshold)
         })
         .await??;
-    Ok(ok(ts))
+    Ok(ok(ts).into_response())
 }
 
 /// GET /metrics/decision-histogram —— 每用户决策数直方图 + P50/P95
@@ -866,13 +929,23 @@ async fn metrics_decision_histogram(
     State(state): State<AppState>,
     Query(q): Query<DaysQuery>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
+    use axum::response::IntoResponse;
     let days = q.days.unwrap_or(7).clamp(1, 90);
+    // ?raw：逐用户原始决策数（默认分桶 + P50/P95 前的原始值数组）
+    if q.raw.unwrap_or(0) != 0 {
+        let rows = state
+            .run_store_task("admin.amas.decision_histogram.raw", move |store| {
+                store.raw_amas_decision_counts(days)
+            })
+            .await??;
+        return Ok(ok(serde_json::json!({ "raw": true, "rows": rows })).into_response());
+    }
     let hist = state
         .run_store_task("admin.amas.decision_histogram", move |store| {
             store.aggregate_amas_decision_histogram(days)
         })
         .await??;
-    Ok(ok(hist))
+    Ok(ok(hist).into_response())
 }
 
 #[derive(Debug, Deserialize)]
@@ -1102,6 +1175,190 @@ async fn compare_canary_baseline(
         "canary": mk(&canary_slice),
         "baseline": baseline_slice.as_ref().map(|b| mk(b)),
     })))
+}
+
+// ─────────── admin 原始样本 / 分页钻取端点 ───────────
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SwdHistoryQuery {
+    user_id: Option<String>,
+    limit: Option<usize>,
+}
+
+/// GET /swd-history?userId=&limit= —— 某用户 SWD 策略奖励历史（原始行，不降采样）。
+/// 复用 store.load_swd_history；返回序列化条目 + 平行 trends 数组（供前端逐项画曲线）。
+async fn swd_history(
+    _admin: AdminAuthUser,
+    Query(q): Query<SwdHistoryQuery>,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let user_id = q
+        .user_id
+        .ok_or_else(|| AppError::bad_request("MISSING_USER_ID", "userId 必填"))?;
+    let limit = q.limit.unwrap_or(200).clamp(1, 2000);
+    let uid = user_id.clone();
+    let history = state
+        .run_store_task("admin.amas.swd_history", move |store| {
+            store.load_swd_history(&uid, limit)
+        })
+        .await??;
+
+    // 从条目抽出平行数组（原始行，不降采样）。
+    let mut ts = Vec::with_capacity(history.len());
+    let mut difficulty = Vec::with_capacity(history.len());
+    let mut batch_size = Vec::with_capacity(history.len());
+    let mut new_ratio = Vec::with_capacity(history.len());
+    let mut interval_scale = Vec::with_capacity(history.len());
+    let mut reward = Vec::with_capacity(history.len());
+    let mut attention = Vec::with_capacity(history.len());
+    let mut fatigue = Vec::with_capacity(history.len());
+    let mut motivation = Vec::with_capacity(history.len());
+    for e in &history {
+        ts.push(e.timestamp);
+        difficulty.push(e.strategy.difficulty);
+        batch_size.push(e.strategy.batch_size);
+        new_ratio.push(e.strategy.new_ratio);
+        interval_scale.push(e.strategy.interval_scale);
+        reward.push(e.reward);
+        attention.push(e.user_state_snapshot.attention);
+        fatigue.push(e.user_state_snapshot.fatigue);
+        motivation.push(e.user_state_snapshot.motivation);
+    }
+    Ok(ok(serde_json::json!({
+        "history": history,
+        "trends": {
+            "ts": ts,
+            "difficulty": difficulty,
+            "batchSize": batch_size,
+            "newRatio": new_ratio,
+            "intervalScale": interval_scale,
+            "reward": reward,
+            "attention": attention,
+            "fatigue": fatigue,
+            "motivation": motivation,
+        }
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DecisionsQuery {
+    user_id: Option<String>,
+    /// 真值（"1"/"true"）时仅取 is_anomaly=1；bool 无法接受 "1" 故按字符串解析，兼容 =1/=true 两种写法。
+    anomaly_only: Option<String>,
+    experiment_id: Option<String>,
+    page: Option<i64>,
+    per_page: Option<i64>,
+}
+
+/// GET /decisions?userId=&anomalyOnly=&experimentId=&page=&perPage= —— engine_monitoring_events
+/// 分页钻取（get_monitoring_events 的过滤+分页版）。每行含结构化列 + raw 整坨事件 blob。
+async fn decisions(
+    _admin: AdminAuthUser,
+    Query(q): Query<DecisionsQuery>,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let page = q.page.unwrap_or(1).max(1);
+    let per_page = q.per_page.unwrap_or(50).clamp(1, 200);
+    let offset = (page - 1) * per_page;
+    let anomaly_only = matches!(q.anomaly_only.as_deref(), Some("1") | Some("true"));
+    let user_id = q.user_id.clone();
+    let experiment_id = q.experiment_id.clone();
+    let (items, total) = state
+        .run_store_task("admin.amas.decisions", move |store| {
+            store.list_monitoring_events(
+                user_id.as_deref(),
+                anomaly_only,
+                experiment_id.as_deref(),
+                per_page,
+                offset,
+            )
+        })
+        .await??;
+    Ok(ok(serde_json::json!({
+        "items": items,
+        "total": total,
+        "page": page,
+        "perPage": per_page,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WordEloContributorsQuery {
+    word_id: Option<String>,
+    limit: Option<i64>,
+}
+
+/// GET /word-elo/contributors?wordId=&limit= —— 对某词全局评分贡献最大（按 |净位移| 降序）的用户。
+async fn word_elo_contributors(
+    _admin: AdminAuthUser,
+    Query(q): Query<WordEloContributorsQuery>,
+    State(state): State<AppState>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let word_id = q
+        .word_id
+        .ok_or_else(|| AppError::bad_request("MISSING_WORD_ID", "wordId 必填"))?;
+    let limit = q.limit.unwrap_or(100).clamp(1, 1000);
+    let wid = word_id.clone();
+    let rows = state
+        .run_store_task("admin.amas.word_elo_contributors", move |store| {
+            store.list_word_elo_contributors(&wid, limit)
+        })
+        .await??;
+    let contributors: Vec<serde_json::Value> = rows
+        .into_iter()
+        .map(|(u, d)| serde_json::json!({ "userId": u, "netDisplacement": d }))
+        .collect();
+    Ok(ok(serde_json::json!({
+        "wordId": word_id,
+        "contributors": contributors,
+    })))
+}
+
+// ─────────── m064/m065：拒绝小时桶 + 词态迁移流水 ───────────
+
+/// GET /rejections?hours=168 —— 选词拒绝原因小时滚动桶（rejections_rollup）。
+/// from_hour = 当前小时键 - hours，store 按 hour_key/reason 升序返回 camelCase 行。
+async fn rejections(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Query(q): Query<HoursQuery>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let hours = q.hours.unwrap_or(168).clamp(1, 8760) as i64;
+    let now_hour = chrono::Utc::now().timestamp() / 3600;
+    let from_hour = now_hour - hours;
+    let rows = state
+        .run_store_task("admin.amas.rejections", move |store| {
+            store.list_rejections_rollup(from_hour)
+        })
+        .await??;
+    Ok(ok(serde_json::json!({ "rows": rows })))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TransitionsQuery {
+    user_id: Option<String>,
+    limit: Option<i64>,
+}
+
+/// GET /transitions?userId=&limit=200 —— 词态迁移流水（word_state_transitions，created_at DESC）。
+/// userId 缺省返回全部用户；limit 默认 200，夹到 1..=2000。
+async fn transitions(
+    _admin: AdminAuthUser,
+    State(state): State<AppState>,
+    Query(q): Query<TransitionsQuery>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let limit = q.limit.unwrap_or(200).clamp(1, 2000);
+    let user_id = q.user_id.clone();
+    let rows = state
+        .run_store_task("admin.amas.transitions", move |store| {
+            store.list_word_state_transitions(user_id.as_deref(), limit)
+        })
+        .await??;
+    Ok(ok(serde_json::json!({ "transitions": rows })))
 }
 
 // ─────────── PR-5: Suggestions / Advisor 路由 ───────────

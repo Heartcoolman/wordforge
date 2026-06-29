@@ -593,6 +593,59 @@ impl Store {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    /// m055:列共享同一设备指纹的设备簇(同硬件多账号 / 封禁绕过排查)。
+    /// `kind` ∈ {"coarse","strong"} 选 fp_coarse|fp_strong 列,非法值退化为 coarse。
+    /// 按簇内设备数倒序,仅返回 count >= `min_count` 的簇。返回 Vec<(指纹, 设备数, deviceIds)>。
+    /// 索引 idx_client_devices_fp_coarse_all / _fp_strong_all 已覆盖(m063)。
+    pub fn list_fingerprint_collisions(
+        &self,
+        kind: &str,
+        min_count: i64,
+        limit: i64,
+    ) -> Result<Vec<(String, i64, Vec<String>)>, StoreError> {
+        // 列名不能用占位符绑定,只能字符串拼接;故走白名单映射防注入。
+        let col = match kind {
+            "strong" => "fp_strong",
+            _ => "fp_coarse",
+        };
+        let conn = self.conn()?;
+        // 空串等同无信号:与本文件 flag_related_on_conn 一致排除,防历史脏数据把所有
+        // '' 设备误聚成一簇(否则直接架空本端点排查多账号/绕过的目的)。
+        let sql = format!(
+            "SELECT {col}, COUNT(*) AS c, GROUP_CONCAT(device_id) AS ids
+             FROM client_devices
+             WHERE {col} IS NOT NULL AND {col} != ''
+             GROUP BY {col}
+             HAVING c >= ?1
+             ORDER BY c DESC
+             LIMIT ?2"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map(params![min_count, limit], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let result = rows
+            .into_iter()
+            .map(|(fp, count, ids)| {
+                // GROUP_CONCAT 默认按 ',' 拼接;空段(理论不可达)过滤掉。
+                let device_ids: Vec<String> = ids
+                    .unwrap_or_default()
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect();
+                (fp, count, device_ids)
+            })
+            .collect();
+        Ok(result)
+    }
+
     /// m055:落库设备浏览器指纹(随请求头来,与 last_ip 同性质)。COALESCE 保留已有值,
     /// 漏带头不清空。设备行须已存在(中间件先 upsert),不存在则 0 行无副作用。
     pub fn update_device_fingerprint(
@@ -1246,6 +1299,52 @@ mod tests {
         // 用 -100000 minutes 也仍包含 banned
         let list = store.get_recently_active_clients(1).unwrap();
         assert!(list.iter().any(|d| d.device_id == "dev-a" && d.is_banned));
+    }
+
+    #[test]
+    fn fingerprint_collisions_groups_shared_fp() {
+        let store = test_store();
+        store.upsert_client_device("d1", "web", "u1").unwrap();
+        store.upsert_client_device("d2", "web", "u2").unwrap();
+        store.upsert_client_device("d3", "web", "u3").unwrap();
+        // 两台空串 coarse 不得聚成假簇(空串=无信号)。
+        store.upsert_client_device("d4", "web", "u4").unwrap();
+        store.upsert_client_device("d5", "web", "u5").unwrap();
+        // d1/d2 共享 coarse "cA";d3 独占 "cB"。strong 各不相同。
+        store
+            .update_device_fingerprint("d1", Some("s1"), Some("cA"))
+            .unwrap();
+        store
+            .update_device_fingerprint("d2", Some("s2"), Some("cA"))
+            .unwrap();
+        store
+            .update_device_fingerprint("d3", Some("s3"), Some("cB"))
+            .unwrap();
+        store
+            .update_device_fingerprint("d4", Some("s4"), Some(""))
+            .unwrap();
+        store
+            .update_device_fingerprint("d5", Some("s5"), Some(""))
+            .unwrap();
+
+        // coarse:仅 cA 满足 count>=2;cB(1 台)被 HAVING 滤掉。
+        let coarse = store.list_fingerprint_collisions("coarse", 2, 100).unwrap();
+        assert_eq!(coarse.len(), 1);
+        let (fp, count, ids) = &coarse[0];
+        assert_eq!(fp, "cA");
+        assert_eq!(*count, 2);
+        let mut ids = ids.clone();
+        ids.sort();
+        assert_eq!(ids, vec!["d1".to_string(), "d2".to_string()]);
+
+        // 非法 kind 退化为 coarse(同结果)。
+        let bogus = store.list_fingerprint_collisions("bogus", 2, 100).unwrap();
+        assert_eq!(bogus.len(), 1);
+        assert_eq!(bogus[0].0, "cA");
+
+        // strong 各不相同 → 无碰撞。
+        let strong = store.list_fingerprint_collisions("strong", 2, 100).unwrap();
+        assert!(strong.is_empty());
     }
 
     #[test]

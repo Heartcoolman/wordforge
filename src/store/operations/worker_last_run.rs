@@ -135,7 +135,8 @@ impl Store {
         worker: Option<&str>,
         limit: u32,
     ) -> Result<Vec<WorkerRun>, StoreError> {
-        let limit = limit.clamp(1, 1000) as i64;
+        // 上限抬到 5000 以支撑 SLO 聚合的更长窗口；worker_history 仍由 handler 夹到 1000，不受影响。
+        let limit = limit.clamp(1, 5000) as i64;
         let conn = self.conn()?;
         let map_row = |row: &rusqlite::Row<'_>| {
             Ok(WorkerRun {

@@ -287,6 +287,7 @@ pub(crate) async fn process_single_record(
     user_id: &str,
     req: &CreateRecordRequest,
     state: &AppState,
+    request_id: Option<String>,
 ) -> Result<CreateRecordResponse, AppError> {
     let user_id_owned = user_id.to_string();
     let record_id = req
@@ -396,6 +397,7 @@ pub(crate) async fn process_single_record(
                 question_mode: req.question_mode.clone(),
             },
             &record.id,
+            request_id,
         )
         .await?;
     crate::stage_metrics::stage_observe(
@@ -558,8 +560,11 @@ pub(crate) async fn process_single_record(
 async fn create_record(
     auth: AuthUser,
     State(state): State<AppState>,
+    request_id: Option<axum::Extension<crate::middleware::request_id::RequestId>>,
     JsonBody(req): JsonBody<CreateRecordRequest>,
 ) -> Result<axum::response::Response, AppError> {
+    // 任务C:从请求扩展取 request_id（中间件注入），透传到 AMAS 决策以关联监控事件与日志。
+    let request_id = request_id.map(|axum::Extension(rid)| rid.0);
     // S2-1：opt-in 异步路径（RECORDS_OUTBOX_ASYNC=true）。把创建请求持久化到 outbox 并立即
     // 202 返回，AMAS 处理交 outbox_processor 异步消费；默认 false 走下方同步老路不变。
     // 注意：异步模式响应不含 amas_result（客户端拿不到即时 mastery/复习结果），切换前须与学习端协同。
@@ -609,7 +614,7 @@ async fn create_record(
 
     // m037 软拦截:处理失败时告警 admin(单条失败客户端已收错误响应,不重复发 user 通知),
     // 仍返回原错误不吞。
-    let result = match process_single_record(&auth.user_id, &req, &state).await {
+    let result = match process_single_record(&auth.user_id, &req, &state, request_id).await {
         Ok(r) => r,
         Err(e) => {
             crate::services::alerting::raise_data_alert(

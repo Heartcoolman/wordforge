@@ -13,6 +13,7 @@ const SCORE_TIEBREAK_JITTER: f64 = 1e-5;
 
 use crate::amas::config::{EloConfig, MemoryModelConfig, WordSelectorConfig};
 use crate::amas::elo::zpd_priority;
+use crate::amas::rejection_metrics::{record, record_n, RejectionReason};
 use crate::amas::memory::mdm::MdmState;
 use crate::amas::types::StrategyParams;
 use crate::response::AppError;
@@ -265,6 +266,8 @@ pub fn select_words(
 
         if !is_review_candidate(mdm_state) {
             let Some(word) = words_by_id.get(word_id) else {
+                // 新词候选在 words 表查无对应行：记录拒绝并跳过。
+                record(RejectionReason::WordNotFound);
                 continue;
             };
             let word_elo_rating = match &select_rating_by_id {
@@ -285,6 +288,10 @@ pub fn select_words(
             );
             if confusion_exclude_set.contains(word_id.as_str()) {
                 score *= confusion_dampen;
+                if confusion_dampen < 1.0 {
+                    // 仅当 dampen 实际生效（<1.0）才计为拒绝，dampen=1.0 是 no-op。
+                    record(RejectionReason::ConfusionDampened);
+                }
             }
             score += rng.gen_range(0.0..SCORE_TIEBREAK_JITTER);
             new_words.push(ScoredWord {
@@ -317,10 +324,17 @@ pub fn select_words(
                 {
                     score += ws.recently_mastered_bonus;
                 }
+            } else {
+                // suppress_extras 仅在召回 >= recall_mastered_threshold（已掌握）时为 true：记录抑制。
+                record(RejectionReason::MasteredSuppressed);
             }
             // ② 混淆隔离惩罚（默认 dampen=1.0 → no-op）。对 suppress_extras 的已掌握词同样适用。
             if confusion_exclude_set.contains(word_id.as_str()) {
                 score *= confusion_dampen;
+                if confusion_dampen < 1.0 {
+                    // 仅当 dampen 实际生效（<1.0）才计为拒绝，dampen=1.0 是 no-op。
+                    record(RejectionReason::ConfusionDampened);
+                }
             }
             score += rng.gen_range(0.0..SCORE_TIEBREAK_JITTER);
 
@@ -345,6 +359,12 @@ pub fn select_words(
     let keep_new = available_new.min(new_count + review_count.saturating_sub(available_review));
     let keep_review = available_review.min(review_count + new_count.saturating_sub(available_new));
 
+    // Top-K 落选数（排序后被截断的候选）累加为 NotTopK 拒绝。keep_* 已 .min 保证 ≤ available_*。
+    record_n(
+        RejectionReason::NotTopK,
+        (available_new.saturating_sub(keep_new) + available_review.saturating_sub(keep_review))
+            as u64,
+    );
     // 使用 Top-K 选择而非全量排序：从 O(n log n) 收敛为 O(n + k log k)
     retain_top_k_by_score(&mut new_words, keep_new);
     retain_top_k_by_score(&mut review_words, keep_review);

@@ -520,7 +520,8 @@ pub(super) async fn ingest_session_events(
         };
 
         amas_attempted = true;
-        match process_batch_record(user_id, &req, state).await {
+        // 任务C:会话事件摄入路径暂不透传 request_id（Task C 范围为 records 路由），传 None。
+        match process_batch_record(user_id, &req, state, None).await {
             // duplicate 命中早于任何 AMAS / ELO / DB 副作用，因此不计入"已提交"，
             // 也就不能用来抵消失败事件触发的全失败回滚。
             Ok(result) if result.duplicate => {

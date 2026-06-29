@@ -46,6 +46,32 @@ pub async fn run(registry: &MetricsRegistry, store: &Store) {
 
     // D3：旁路 flush HTTP 可用率小时桶（与 AMAS 指标 flush 同 5 分钟周期）。
     flush_availability_rollup(store);
+
+    // A4：旁路 drain 选词拒绝原因计数 → rejections_rollup（同 5 分钟周期）。
+    flush_rejections(store);
+}
+
+/// A4：drain 全局拒绝原因注册表 → 增量 upsert 到 rejections_rollup（PK=hour_key+reason）
+/// + 裁剪超 30d 旧桶。失败时把取走的计数 merge 回注册表，下次 flush 重试，仅告警。
+/// 注：整个 5min 窗口计数归到 drain 时刻的 hour_key（跨小时边界会轻微抹平，与可用率桶同设计）。
+pub fn flush_rejections(store: &Store) {
+    let snapshot = crate::amas::rejection_metrics::REJECTION_REGISTRY.snapshot_and_reset();
+    if snapshot.is_empty() {
+        return;
+    }
+    let now_hour = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64 / 3600)
+        .unwrap_or(0);
+    let rows: Vec<(i64, String, u64)> = snapshot
+        .iter()
+        .map(|(reason, count)| (now_hour, reason.clone(), *count))
+        .collect();
+    if let Err(e) = store.flush_rejections_rollup(&rows, now_hour - 30 * 24) {
+        // 落库失败：把取走的计数加回注册表，避免该区间永久丢失（reset-before-confirm）。
+        crate::amas::rejection_metrics::REJECTION_REGISTRY.merge_snapshot(&snapshot);
+        tracing::warn!(error=%e, "rejections rollup flush failed");
+    }
 }
 
 /// D3：导出内存 hour 槽 → 升序 upsert 到 availability_rollup + 裁剪超 30d 旧桶。失败仅告警。

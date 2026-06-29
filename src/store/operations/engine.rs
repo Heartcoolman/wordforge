@@ -204,6 +204,12 @@ impl Store {
             .or_else(|| event.get("experiment_arm"))
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
+        // m066:决策↔日志关联。请求级 request_id（NULL=诊断端点/无请求上下文）。
+        let request_id: Option<String> = event
+            .get("requestId")
+            .or_else(|| event.get("request_id"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
         let json = Self::serialize_json(event)?;
         // strategy_json 存整坨 event blob 供 get_recent_monitoring_events 向后兼容回读;
         // reward_json 独立存 event.reward 子对象(此前误与 strategy_json 共用 ?15 占位符,
@@ -222,10 +228,10 @@ impl Store {
                 user_state_total_event_count, strategy_json, reward_json, cold_start_phase,
                 selection_constraints_met, reward_value, config_version,
                 routing_algo, routing_weights_json, is_correct,
-                experiment_id, experiment_arm
+                experiment_id, experiment_arm, request_id
              ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-                ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25
+                ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26
              )",
             params![
                 id,
@@ -252,10 +258,70 @@ impl Store {
                 routing_weights_json,
                 is_correct,
                 experiment_id,
-                experiment_arm
+                experiment_arm,
+                request_id
             ],
         )?;
         Ok(())
+    }
+
+    /// 任务B(m065):词态迁移流水 append 一行。边沿触发（频率 < 答题率），out-of-txn、与
+    /// insert_word_mastery_event 同 idempotency 门控，best-effort 落库。记录全部等级对（不止
+    /// mastered/forgotten）。from/to 为 MasteryLevel 字符串（New/Learning/Reviewing/Mastered/Forgotten）。
+    pub fn insert_word_state_transition(
+        &self,
+        user_id: &str,
+        word_id: &str,
+        from_state: &str,
+        to_state: &str,
+        created_at: &str,
+    ) -> Result<(), StoreError> {
+        keys::validate_id(user_id)?;
+        let conn = self.conn()?;
+        conn.execute(
+            "INSERT INTO word_state_transitions (user_id, word_id, from_state, to_state, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![user_id, word_id, from_state, to_state, created_at],
+        )?;
+        Ok(())
+    }
+
+    /// 任务B(m065):读取词态迁移流水。可选按 user_id 过滤，created_at DESC 取 limit 行，
+    /// 返回 camelCase JSON 行（id/userId/wordId/fromState/toState/createdAt）。
+    pub fn list_word_state_transitions(
+        &self,
+        user_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<serde_json::Value>, StoreError> {
+        let conn = self.conn()?;
+        let mut args: Vec<rusqlite::types::Value> = Vec::new();
+        let where_sql = if let Some(uid) = user_id {
+            args.push(uid.to_string().into());
+            "WHERE user_id = ?1 ".to_string()
+        } else {
+            String::new()
+        };
+        args.push(limit.into());
+        let limit_ph = args.len();
+        let sql = format!(
+            "SELECT id, user_id, word_id, from_state, to_state, created_at
+             FROM word_state_transitions {where_sql}
+             ORDER BY created_at DESC LIMIT ?{limit_ph}"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(args.iter()), |r| {
+                Ok(serde_json::json!({
+                    "id": r.get::<_, i64>(0)?,
+                    "userId": r.get::<_, String>(1)?,
+                    "wordId": r.get::<_, String>(2)?,
+                    "fromState": r.get::<_, String>(3)?,
+                    "toState": r.get::<_, String>(4)?,
+                    "createdAt": r.get::<_, String>(5)?,
+                }))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     pub fn get_recent_monitoring_events(
@@ -806,6 +872,281 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
+
+    // ─────────── admin 决策事件分页钻取 + ?raw 原始样本拉取 ───────────
+
+    /// admin /decisions 分页钻取：对 engine_monitoring_events 按可选 user_id / is_anomaly /
+    /// experiment_id 动态 WHERE 过滤，timestamp DESC 分页；同 WHERE 取 COUNT(*) 总数。每行返回
+    /// 结构化 camelCase 列 + `raw`（strategy_json 整坨事件 blob，原样 parse 不改写）。
+    pub fn list_monitoring_events(
+        &self,
+        user_id: Option<&str>,
+        anomaly_only: bool,
+        experiment_id: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<(Vec<serde_json::Value>, i64), StoreError> {
+        let conn = self.conn()?;
+
+        // 动态 WHERE：占位符按 args 顺序编号，count 与 data 查询共用同一组过滤参数。
+        let mut clauses: Vec<String> = Vec::new();
+        let mut args: Vec<rusqlite::types::Value> = Vec::new();
+        if let Some(uid) = user_id {
+            args.push(uid.to_string().into());
+            clauses.push(format!("user_id = ?{}", args.len()));
+        }
+        if anomaly_only {
+            clauses.push("is_anomaly = 1".to_string());
+        }
+        if let Some(eid) = experiment_id {
+            args.push(eid.to_string().into());
+            clauses.push(format!("experiment_id = ?{}", args.len()));
+        }
+        let where_sql = if clauses.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", clauses.join(" AND "))
+        };
+
+        // 总数（同 WHERE，不含分页参数）。
+        let count_sql = format!("SELECT COUNT(*) FROM engine_monitoring_events {where_sql}");
+        let total: i64 =
+            conn.query_row(&count_sql, rusqlite::params_from_iter(args.iter()), |r| {
+                r.get(0)
+            })?;
+
+        // 数据页：追加 limit / offset 占位符。
+        let mut data_args = args.clone();
+        data_args.push(limit.into());
+        let limit_ph = data_args.len();
+        data_args.push(offset.into());
+        let offset_ph = data_args.len();
+        let data_sql = format!(
+            "SELECT id, user_id, session_id, event_type, timestamp, latency_ms, is_anomaly,
+                    experiment_id, experiment_arm, is_correct, reward_value, cold_start_phase,
+                    config_version, routing_algo, strategy_json, request_id
+             FROM engine_monitoring_events
+             {where_sql}
+             ORDER BY timestamp DESC
+             LIMIT ?{limit_ph} OFFSET ?{offset_ph}"
+        );
+        let mut stmt = conn.prepare(&data_sql)?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(data_args.iter()), |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, i64>(5)?,
+                    r.get::<_, i64>(6)?,
+                    r.get::<_, Option<String>>(7)?,
+                    r.get::<_, Option<String>>(8)?,
+                    r.get::<_, i64>(9)?,
+                    r.get::<_, f64>(10)?,
+                    r.get::<_, Option<String>>(11)?,
+                    r.get::<_, String>(12)?,
+                    r.get::<_, String>(13)?,
+                    r.get::<_, String>(14)?,
+                    r.get::<_, Option<String>>(15)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut items = Vec::with_capacity(rows.len());
+        for (
+            id,
+            uid,
+            sid,
+            etype,
+            ts,
+            latency,
+            anomaly,
+            exp_id,
+            exp_arm,
+            correct,
+            reward,
+            cold,
+            cfg_ver,
+            algo,
+            strategy_json,
+            req_id,
+        ) in rows
+        {
+            // strategy_json 存整坨事件 blob；解析失败回退 null，不阻断分页。
+            let raw: serde_json::Value =
+                serde_json::from_str(&strategy_json).unwrap_or(serde_json::Value::Null);
+            items.push(serde_json::json!({
+                "id": id,
+                "userId": uid,
+                "sessionId": sid,
+                "eventType": etype,
+                "timestamp": ts,
+                "latencyMs": latency,
+                "isAnomaly": anomaly != 0,
+                "experimentId": exp_id,
+                "experimentArm": exp_arm,
+                "isCorrect": correct != 0,
+                "rewardValue": reward,
+                "coldStartPhase": cold,
+                "configVersion": cfg_ver,
+                "routingAlgo": algo,
+                "requestId": req_id,
+                "raw": raw,
+            }));
+        }
+        Ok((items, total))
+    }
+
+    /// metrics_timeseries ?raw：逐事件原始点。默认分支读 algorithm_metrics_daily 日聚合（无更细
+    /// 粒度），故原始样本切到 engine_monitoring_events 逐事件（窗口同为 days），不分箱不降采样。
+    pub fn raw_amas_metric_event_points(
+        &self,
+        days: u32,
+    ) -> Result<Vec<serde_json::Value>, StoreError> {
+        let cutoff = (chrono::Utc::now() - chrono::Duration::days(days as i64)).to_rfc3339();
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT timestamp, latency_ms, reward_value, is_correct, is_anomaly, routing_algo
+             FROM engine_monitoring_events
+             WHERE datetime(timestamp) >= datetime(?1)
+             ORDER BY timestamp ASC",
+        )?;
+        let rows = stmt
+            .query_map([&cutoff], |r| {
+                Ok(serde_json::json!({
+                    "timestamp": r.get::<_, String>(0)?,
+                    "latencyMs": r.get::<_, i64>(1)?,
+                    "rewardValue": r.get::<_, f64>(2)?,
+                    "isCorrect": r.get::<_, i64>(3)? != 0,
+                    "isAnomaly": r.get::<_, i64>(4)? != 0,
+                    "routingAlgo": r.get::<_, String>(5)?,
+                }))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// user_state_distribution ?raw：逐事件原始 UserState 标量（喂给直方图前的未分箱样本）。
+    pub fn raw_amas_user_state_samples(
+        &self,
+        days: u32,
+    ) -> Result<Vec<serde_json::Value>, StoreError> {
+        let cutoff = (chrono::Utc::now() - chrono::Duration::days(days as i64)).to_rfc3339();
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT user_state_attention, user_state_fatigue, user_state_motivation,
+                    user_state_confidence, cold_start_phase
+             FROM engine_monitoring_events
+             WHERE datetime(timestamp) >= datetime(?1)",
+        )?;
+        let rows = stmt
+            .query_map([&cutoff], |r| {
+                Ok(serde_json::json!({
+                    "attention": r.get::<_, f64>(0)?,
+                    "fatigue": r.get::<_, f64>(1)?,
+                    "motivation": r.get::<_, f64>(2)?,
+                    "confidence": r.get::<_, f64>(3)?,
+                    "coldStartPhase": r.get::<_, Option<String>>(4)?,
+                }))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// cognitive_distribution ?raw：逐用户原始认知三轴值（engine_user_states 当前队列）。
+    pub fn raw_amas_cognitive_samples(&self) -> Result<Vec<serde_json::Value>, StoreError> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT user_id, cognitive_memory_capacity, cognitive_processing_speed, cognitive_stability
+             FROM engine_user_states",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(serde_json::json!({
+                    "userId": r.get::<_, String>(0)?,
+                    "memoryCapacity": r.get::<_, f64>(1)?,
+                    "processingSpeed": r.get::<_, f64>(2)?,
+                    "stability": r.get::<_, f64>(3)?,
+                }))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// metrics_mdm_heatmap ?raw：逐 (词,日) 原始遗忘样本（默认分支按 日×难度段 求均的底层行）。
+    pub fn raw_amas_mdm_samples(&self, days: u32) -> Result<Vec<serde_json::Value>, StoreError> {
+        let cutoff = (chrono::Utc::now() - chrono::Duration::days(days as i64)).to_rfc3339();
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT substr(wls.updated_at, 1, 10) AS d, wls.word_id, w.difficulty, wls.mastery_level
+             FROM word_learning_states wls
+             JOIN words w ON w.id = wls.word_id
+             WHERE wls.updated_at >= ?1
+             ORDER BY wls.updated_at ASC",
+        )?;
+        let rows = stmt
+            .query_map([&cutoff], |r| {
+                let mastery = r.get::<_, f64>(3)?;
+                Ok(serde_json::json!({
+                    "date": r.get::<_, String>(0)?,
+                    "wordId": r.get::<_, String>(1)?,
+                    "difficulty": r.get::<_, f64>(2)?,
+                    "masteryLevel": mastery,
+                    "forget": (1.0 - mastery).clamp(0.0, 1.0),
+                }))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// metrics_fatigue_timeseries ?raw：逐事件原始疲劳点（默认分支按天 GROUP BY 的底层样本）。
+    pub fn raw_amas_fatigue_samples(
+        &self,
+        days: u32,
+    ) -> Result<Vec<serde_json::Value>, StoreError> {
+        let cutoff = (chrono::Utc::now() - chrono::Duration::days(days as i64)).to_rfc3339();
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT timestamp, user_id, user_state_fatigue
+             FROM engine_monitoring_events
+             WHERE timestamp >= ?1
+             ORDER BY timestamp ASC",
+        )?;
+        let rows = stmt
+            .query_map([&cutoff], |r| {
+                Ok(serde_json::json!({
+                    "timestamp": r.get::<_, String>(0)?,
+                    "userId": r.get::<_, String>(1)?,
+                    "fatigue": r.get::<_, f64>(2)?,
+                }))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// metrics_decision_histogram ?raw：逐用户原始决策数（默认分支分桶 + P50/P95 前的原始值数组）。
+    pub fn raw_amas_decision_counts(
+        &self,
+        days: u32,
+    ) -> Result<Vec<serde_json::Value>, StoreError> {
+        let cutoff = (chrono::Utc::now() - chrono::Duration::days(days as i64)).to_rfc3339();
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT user_id, COUNT(*) c FROM learning_records
+             WHERE created_at >= ?1 GROUP BY user_id ORDER BY c DESC",
+        )?;
+        let rows = stmt
+            .query_map([&cutoff], |r| {
+                Ok(serde_json::json!({
+                    "userId": r.get::<_, String>(0)?,
+                    "count": r.get::<_, i64>(1)?,
+                }))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
 }
 
 /// 写放大重构：[`Store::persist_engine_state_atomic`] 的返回。
@@ -881,6 +1222,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.db");
         let store = Store::open(path.to_str().unwrap(), 5000, 4).unwrap();
+        // 跑全量迁移，使测试库与生产(main.rs 启动即 run_migrations)对齐——
+        // engine_monitoring_events.request_id 等列由 m066 迁移补充，不在 schema.rs 基础 DDL 中。
+        store.run_migrations().unwrap();
         (dir, store)
     }
 

@@ -338,6 +338,16 @@ pub fn latest_trace() -> Option<Trace> {
     ring.back().cloned()
 }
 
+/// 最近 N 条 trace（最新在前），limit 截断。供 admin /traces 端点。
+/// 环形缓冲容量 TRACE_CAP，实际返回数 = min(limit, 现有条数)。
+pub fn snapshot_traces(limit: usize) -> Vec<Trace> {
+    let ring = match TRACES.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    ring.iter().rev().take(limit).cloned().collect()
+}
+
 /// 按 record_id 查 trace（最近优先）。
 pub fn trace_by_record(record_id: &str) -> Option<Trace> {
     let ring = match TRACES.lock() {

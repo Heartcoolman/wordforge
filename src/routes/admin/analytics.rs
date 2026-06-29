@@ -823,6 +823,9 @@ struct RetentionCohortQuery {
     cohort: Option<String>,
     #[serde(default = "default_cohort_max_days")]
     max_days: u32,
+    /// ?raw=1:直接返回底层稀疏行(cohortStart/daysSince/retainedUsers),不包外层 envelope。
+    #[serde(default)]
+    raw: Option<u8>,
 }
 
 fn default_cohort_max_days() -> u32 {
@@ -845,6 +848,8 @@ async fn retention_cohort(
     Query(q): Query<RetentionCohortQuery>,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
+    use axum::response::IntoResponse;
+    let raw = q.raw.unwrap_or(0) != 0;
     if !(1..=90).contains(&q.max_days) {
         return Err(AppError::bad_request(
             "INVALID_MAX_DAYS",
@@ -865,12 +870,24 @@ async fn retention_cohort(
             store.admin_retention_cohort(&cohort_for_store, max_days)
         })
         .await??;
+    // raw:直接吐底层稀疏行(每条 (cohortStart, daysSince, retainedUsers)),不包
+    // generatedAt/cohortUnit/maxDays envelope,供前端自助拼装、不依赖矩阵契约。
+    // 注:retainedUsers 仍是 SQL 层 COUNT(DISTINCT user) 的聚合;真正未聚合的
+    // per-(user,bucket) 命中行需新增 store SQL,超出本路由切片范围。
+    if raw {
+        return Ok(ok(serde_json::json!({
+            "raw": true,
+            "rows": rows,
+        }))
+        .into_response());
+    }
     Ok(ok(RetentionCohortResponse {
         generated_at: Utc::now(),
         cohort_unit,
         max_days: q.max_days,
         rows,
-    }))
+    })
+    .into_response())
 }
 
 // ===========================================================================
@@ -1198,6 +1215,9 @@ fn biggest_drop(steps: &[FunnelStep]) -> (String, String, f64) {
 struct RetentionMatrixQuery {
     #[serde(default = "default_weeks")]
     weeks: u32,
+    /// ?raw=1:返回未塌缩的 cohort 底层行(每周原始整数活跃数),不换算留存率/不掩盖未完周。
+    #[serde(default)]
+    raw: Option<u8>,
 }
 
 fn default_weeks() -> u32 {
@@ -1225,12 +1245,35 @@ async fn retention_matrix(
     Query(q): Query<RetentionMatrixQuery>,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
+    use axum::response::IntoResponse;
     let weeks = q.weeks.clamp(1, 26);
+    let raw = q.raw.unwrap_or(0) != 0;
     let rows: Vec<AdminRetentionMatrixRow> = state
         .run_store_task("admin.analytics.retention_matrix", move |store| {
             store.admin_retention_matrix(weeks)
         })
         .await??;
+
+    // raw:返回未塌缩的 cohort 底层行——每周原始整数活跃用户数(activeByWeek),
+    // 不换算留存率、不对未过完的周做 null 掩盖、不强制首周比例 1.0。
+    if raw {
+        let raw_rows: Vec<serde_json::Value> = rows
+            .into_iter()
+            .map(|r| {
+                serde_json::json!({
+                    "cohortStart": r.cohort_start,
+                    "size": r.size,
+                    "activeByWeek": r.active_by_week,
+                })
+            })
+            .collect();
+        return Ok(ok(serde_json::json!({
+            "raw": true,
+            "weeks": weeks,
+            "rows": raw_rows,
+        }))
+        .into_response());
+    }
 
     let now = Utc::now().date_naive();
     let cohorts = rows
@@ -1270,7 +1313,8 @@ async fn retention_matrix(
         generated_at: Utc::now(),
         weeks,
         cohorts,
-    }))
+    })
+    .into_response())
 }
 
 // ---------------------------------------------------------------------------
@@ -1668,15 +1712,39 @@ struct RewardDistResponse {
     items: Vec<RewardDistItem>,
 }
 
+#[derive(Debug, Deserialize)]
+struct RewardDistQuery {
+    /// ?raw=1:返回未塌缩的底层分组行(label/count),不计百分比。
+    #[serde(default)]
+    raw: Option<u8>,
+}
+
 async fn reward_distribution(
     _admin: AdminAuthUser,
+    Query(q): Query<RewardDistQuery>,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
+    use axum::response::IntoResponse;
+    let raw = q.raw.unwrap_or(0) != 0;
     let rows = state
         .run_store_task("admin.analytics.reward_distribution", move |store| {
             store.admin_reward_distribution()
         })
         .await??;
+    // raw:返回未塌缩的底层分组行(label/count),不计 pct。
+    // 注:count 仍是 SQL 层 GROUP BY reward_type 的聚合;真正未分组的
+    // per-user reward 值数组需新增 store SQL,超出本路由切片范围。
+    if raw {
+        let raw_rows: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|(label, count)| serde_json::json!({ "label": label, "count": count }))
+            .collect();
+        return Ok(ok(serde_json::json!({
+            "raw": true,
+            "rows": raw_rows,
+        }))
+        .into_response());
+    }
     let total: u64 = rows.iter().map(|(_, c)| *c as u64).sum();
     let items = rows
         .into_iter()
@@ -1693,7 +1761,7 @@ async fn reward_distribution(
             }
         })
         .collect();
-    Ok(ok(RewardDistResponse { total, items }))
+    Ok(ok(RewardDistResponse { total, items }).into_response())
 }
 
 // ---------------------------------------------------------------------------

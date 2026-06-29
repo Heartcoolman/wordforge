@@ -38,6 +38,18 @@ pub struct UpdateAuditEntry {
     pub metadata_json: Option<String>,
 }
 
+/// P1：全局 admin 审计查询的动态过滤条件（全部可选；`started_at` 用 RFC3339 字符串
+/// 做字典序比较，与写入口径一致）。
+#[derive(Debug, Default, Clone)]
+pub struct AdminAuditFilter {
+    pub admin_id: Option<String>,
+    pub action: Option<String>,
+    pub target_type: Option<String>,
+    pub target_id: Option<String>,
+    pub since: Option<String>,
+    pub until: Option<String>,
+}
+
 impl Store {
     /// 写入一条升级记录（apply 触发时调用，outcome 初始为 `in_progress`）。
     pub fn insert_update_audit(
@@ -193,6 +205,85 @@ impl Store {
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// P1：全局 admin 审计查询（`GET /api/admin/audit-log`）。
+    /// 区别于 `list_update_audit`（仅 self_update/rollback）与 `list_admin_audit_for_target`
+    /// （按单一目标）：返回**全表**，按动态 WHERE 过滤 + 倒序分页，并附总数。
+    pub fn list_admin_audit_global(
+        &self,
+        filter: &AdminAuditFilter,
+        limit: i64,
+        offset: i64,
+    ) -> Result<(Vec<UpdateAuditEntry>, u64), StoreError> {
+        let conn = self.conn()?;
+        let mut where_parts: Vec<String> = Vec::new();
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        // 动态条件：每命中一个过滤项就追加 "col 比较 ?N"（N=已有参数数+1）+ 对应参数。
+        let conditions: [(&str, &Option<String>); 6] = [
+            ("admin_id =", &filter.admin_id),
+            ("action =", &filter.action),
+            ("target_type =", &filter.target_type),
+            ("target_id =", &filter.target_id),
+            ("started_at >=", &filter.since),
+            ("started_at <=", &filter.until),
+        ];
+        for (expr, val) in conditions {
+            if let Some(v) = val.clone() {
+                let n = params.len() + 1;
+                where_parts.push(format!("{expr} ?{n}"));
+                params.push(Box::new(v));
+            }
+        }
+        let where_sql = if where_parts.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", where_parts.join(" AND "))
+        };
+
+        let count_sql = format!("SELECT COUNT(*) FROM update_audit_log {where_sql}");
+        let total: i64 = conn.query_row(
+            &count_sql,
+            rusqlite::params_from_iter(params.iter().map(|b| b.as_ref())),
+            |r| r.get(0),
+        )?;
+
+        let limit_pos = params.len() + 1;
+        let offset_pos = params.len() + 2;
+        let list_sql = format!(
+            "SELECT id, admin_id, from_version, to_version, channel,
+                    started_at, completed_at, outcome, error,
+                    action, target_type, target_id, metadata_json
+             FROM update_audit_log {where_sql}
+             ORDER BY started_at DESC
+             LIMIT ?{limit_pos} OFFSET ?{offset_pos}"
+        );
+        params.push(Box::new(limit));
+        params.push(Box::new(offset));
+
+        let mut stmt = conn.prepare(&list_sql)?;
+        let rows = stmt.query_map(
+            rusqlite::params_from_iter(params.iter().map(|b| b.as_ref())),
+            |row| {
+                Ok(UpdateAuditEntry {
+                    id: row.get(0)?,
+                    admin_id: row.get(1)?,
+                    from_version: row.get(2)?,
+                    to_version: row.get(3)?,
+                    channel: row.get(4)?,
+                    started_at: row.get(5)?,
+                    completed_at: row.get(6)?,
+                    outcome: row.get(7)?,
+                    error: row.get(8)?,
+                    action: row.get(9)?,
+                    target_type: row.get(10)?,
+                    target_id: row.get(11)?,
+                    metadata_json: row.get(12)?,
+                })
+            },
+        )?;
+        let items = rows.collect::<Result<Vec<_>, _>>()?;
+        Ok((items, total as u64))
     }
 
     /// 返回最近 N 条升级记录（按 started_at 倒序）。

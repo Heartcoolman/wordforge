@@ -1,5 +1,6 @@
 pub mod amas;
 pub mod analytics;
+pub mod audit;
 pub mod auth;
 pub mod broadcast;
 pub mod clients;
@@ -95,6 +96,8 @@ pub fn router() -> Router<AppState> {
         .nest("/probe-telemetry", probe_telemetry::router())
         .nest("/resource-packs", resource_packs::router())
         .nest("/telemetry", clients::telemetry_router())
+        // P1：全局 admin 审计（区别于 /users/:id/audit-log 的按目标审计）
+        .route("/audit-log", get(audit::list_global_audit))
         .route("/users", get(list_users).post(admin_create_user))
         // 用户管理页顶部筛选 chip 计数(全部/活跃/7天未登录/禁用/管理员)
         .route("/users/facets", get(list_user_facets))

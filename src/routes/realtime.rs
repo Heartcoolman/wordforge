@@ -408,6 +408,7 @@ mod tests {
             amas: AMASEnvConfig {
                 ensemble_enabled: true,
                 monitor_sample_rate: 0.05,
+                rejection_sample_rate: 0.0,
             },
             amas_config_file: None,
             llm: LLMConfig {

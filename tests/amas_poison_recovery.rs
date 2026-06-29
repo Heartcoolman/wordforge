@@ -30,7 +30,7 @@ fn sample_event(word_id: &str) -> RawEvent {
 async fn normal_process_event_succeeds() {
     let engine = make_engine();
     engine
-        .process_event("u-normal", sample_event("word-a"))
+        .process_event("u-normal", sample_event("word-a"), None)
         .await
         .expect("正常事件应成功");
 }
@@ -49,7 +49,7 @@ async fn reload_config_then_process_event_succeeds() {
 
     // reload 后事件处理仍正常
     engine
-        .process_event("u-reload", sample_event("word-b"))
+        .process_event("u-reload", sample_event("word-b"), None)
         .await
         .expect("reload 后事件应正常处理");
 }
@@ -62,7 +62,7 @@ async fn after_panic_in_blocking_thread_engine_remains_usable() {
 
     // 先成功处理一个事件，建立基准
     engine
-        .process_event("u-before", sample_event("word-pre"))
+        .process_event("u-before", sample_event("word-pre"), None)
         .await
         .expect("panic 前事件应成功");
 
@@ -75,7 +75,7 @@ async fn after_panic_in_blocking_thread_engine_remains_usable() {
 
     // panic 后主引擎必须仍可用——parking_lot 无中毒，锁状态不受影响
     engine
-        .process_event("u-after", sample_event("word-post"))
+        .process_event("u-after", sample_event("word-post"), None)
         .await
         .expect("blocking thread panic 后引擎应仍可处理请求");
 }
@@ -89,7 +89,7 @@ async fn concurrent_users_all_succeed() {
     for i in 0..10u32 {
         let e = engine.clone();
         handles.push(tokio::spawn(async move {
-            e.process_event(&format!("u-concurrent-{i}"), sample_event("word-c"))
+            e.process_event(&format!("u-concurrent-{i}"), sample_event("word-c"), None)
                 .await
                 .expect("并发事件应全部成功");
         }));

@@ -47,6 +47,16 @@ impl Store {
         Ok(())
     }
 
+    /// admin 监控页「每小时可用率」端点数据源：返回 `from_hour` 起的小时桶（升序）。
+    /// 与启动回灌共用同一查询（`load_availability_rollup`），可用率由 handler 在
+    /// Rust 侧按 `1 - err5xx/count` 计算。
+    pub fn list_availability_hourly(
+        &self,
+        from_hour: i64,
+    ) -> Result<Vec<AvailabilityRow>, StoreError> {
+        self.load_availability_rollup(from_hour)
+    }
+
     /// 加载 `from_hour` 起的可用率小时桶（升序），供启动回灌恢复 ≤30d 窗口。
     /// buckets JSON 反序列化失败回落空向量（import 侧按 BUCKET_BOUNDS 补齐长度）。
     pub fn load_availability_rollup(
