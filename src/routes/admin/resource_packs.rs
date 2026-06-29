@@ -40,6 +40,12 @@ const MAX_PACK_UPLOAD_SIZE: usize = 4 * 1024 * 1024;
 const MAX_WEBAPP_UPLOAD_SIZE: usize = 128 * 1024 * 1024;
 /// 服务端下发 web 应用的托管根：static/web-app/current 指向当前激活版本目录。
 const WEBAPP_PACK_ID: &str = "web-app";
+/// 上传临时文件名自增序号，保证并发上传的 tmp 路径互不冲突。
+static UPLOAD_TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// web-app@stable 激活临界区互斥：把「解包+原子切 current」与「翻转 DB active 指针」串成一个临界区，
+/// 避免两个并发激活不同版本时 current 符号链接与 DB active 指针交错 → 持久错配（status 与物理托管脱钩）。
+/// 仅 web-app stable 激活极低频，串行无性能影响。
+static WEBAPP_ACTIVATE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -253,7 +259,10 @@ async fn upload_version(
     // payload_path 同步，激活/下载据此定位（artifact_type 即由该文件名约定承载，免 DB 迁移）。
     let filename = payload_filename(artifact_type);
     // 先写临时文件再 rename，避免半截文件被 ServeDir 托管或被激活解包。
-    let tmp_path = dir.join(format!("{filename}.tmp"));
+    // tmp 名按 (pid, 进程内自增序号) 唯一化：避免两个并发上传同一 (pack,version) 争抢同名 tmp——
+    // 一方 rename 后另一方 tmp 已被移走 → ENOENT 致 500（同时也是集成测试共享 static/ 时的竞态根因）。
+    let tmp_seq = UPLOAD_TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp_path = dir.join(format!("{filename}.{}.{}.tmp", std::process::id(), tmp_seq));
     tokio::fs::write(&tmp_path, &body)
         .await
         .map_err(|e| AppError::internal(&format!("写 payload 失败: {e}")))?;
@@ -341,13 +350,110 @@ async fn set_active(
     // 注册表不按 channel 分桶，故目标通道受众即在线总数（设计稿 #audience-count）。
     let audience_clients = state.active_sse().len() as i64;
 
+    // web-app@stable 激活临界区锁：覆盖「解包+原子切 current」与下方「翻转 DB active」，
+    // 二者作为整体串行，杜绝并发激活不同版本时 current 与 DB 指针交错错配。guard 持有至函数末。
+    let _webapp_guard = if pack_id == WEBAPP_PACK_ID && channel == ResourcePackChannel::Stable {
+        Some(WEBAPP_ACTIVATE_LOCK.lock().await)
+    } else {
+        None
+    };
+
+    // web-app（服务端下发的 web 二进制）切激活 stable：必须「先校验+解包+原子切 current 成功，
+    // 再翻转 DB 激活指针」。否则一旦解包失败，DB/`status.webTargetVersion`/SSE 已对外报新版本，
+    // 而托管根 current 仍指向旧版/不存在 → 客户端被导向不存在的构建。仅 stable 驱动托管根。
+    // 回滚补偿：记录 (webapp_root, 激活前 current 指向)，供下方 DB 翻转失败时把 current 切回旧版，
+    // 避免「current=新构建 但 DB/status=旧版本号」的持久错配。
+    let mut webapp_rollback: Option<(PathBuf, Option<PathBuf>)> = None;
+    if pack_id == WEBAPP_PACK_ID && channel == ResourcePackChannel::Stable {
+        let pid = pack_id.clone();
+        let ver = body.version.clone();
+        let target = state
+            .run_store_task("admin.resource_packs.get_webapp_version", move |store| {
+                store.get_pack_version(&pid, &ver)
+            })
+            .await??
+            .ok_or_else(|| {
+                AppError::not_found(&format!("web-app 版本 {} 不存在，无法激活", body.version))
+            })?;
+        // 拒绝激活已软删除版本：get_pack_version 不过滤 deactivated_at，但 status 读取的
+        // get_active_pack_version 带 deactivated_at IS NULL，若放行会令 current 指向软删除版本而 status 报 null。
+        if target.deactivated_at.is_some() {
+            return Err(AppError::bad_request(
+                "WEBAPP_VERSION_DEACTIVATED",
+                &format!("web-app 版本 {} 已下架，不能激活", body.version),
+            ));
+        }
+        // 版本的 stored channel 必须与请求激活的 channel 一致：resource_pack_active FK 仅校验
+        // (pack_id,version)，不约束 channel，若不校验则 beta/internal 工件可被挂到 stable 托管根，
+        // 且事后 get_active_pack_version(Stable) 的 channel JOIN 不匹配 → status 与物理 current 脱钩。
+        if target.channel != channel {
+            return Err(AppError::bad_request(
+                "WEBAPP_CHANNEL_MISMATCH",
+                &format!(
+                    "web-app 版本 {} 属 {} 通道，不能在 {} 通道激活",
+                    body.version,
+                    target.channel.as_str(),
+                    channel.as_str()
+                ),
+            ));
+        }
+        if target.payload_path.ends_with(".tar.gz") {
+            // 取签名器公钥做激活时验签纵深（防 DB sha256 与磁盘工件被同时篡改但无法伪造 Ed25519 签名）。
+            let public_key = state
+                .resource_pack_signer()
+                .await
+                .map(|s| s.public_key_base64().to_string());
+            // 切 current 前记录旧指向（用于 DB 翻转失败回滚）
+            let webapp_root = static_web_app_dir();
+            webapp_rollback = Some((webapp_root.clone(), read_current_target(&webapp_root)));
+            let version = target.version.clone();
+            let payload_path = target.payload_path.clone();
+            let sha256 = target.sha256.clone();
+            let signature = target.signature.clone();
+            tokio::task::spawn_blocking(move || {
+                activate_web_bundle(
+                    &version,
+                    &payload_path,
+                    &sha256,
+                    signature.as_deref(),
+                    public_key.as_deref(),
+                )
+            })
+            .await
+            .map_err(|e| AppError::internal(&format!("web-app 解包任务 join 失败: {e}")))?
+            .map_err(|e| AppError::internal(&format!("web-app 解包/切换失败: {e}")))?;
+            tracing::info!(version = %target.version, "web-app 已解包并原子切 current（翻转激活指针前）");
+        } else {
+            // web-app 语义上必为 tarball 二进制工件。非 .tar.gz 无法切 current，若放行翻转 DB
+            // 会使 status.webTargetVersion 前移却托管旧/缺失构建 → 客户端永远追不上下发版本号。
+            // 故直接拒绝，守住「current 切换成功才前移版本」不变式（不翻转 DB）。
+            return Err(AppError::bad_request(
+                "WEBAPP_ARTIFACT_NOT_TARBALL",
+                "web-app 版本必须为 tarball 工件（payload.tar.gz）才能激活",
+            ));
+        }
+    }
+
     let pack_id_for_db = pack_id.clone();
     let version_for_db = body.version.clone();
-    state
+    let db_res = state
         .run_store_task("admin.resource_packs.set_active", move |store| {
             store.set_active_pack_version(&pack_id_for_db, channel, &version_for_db, None)
         })
-        .await??;
+        .await;
+    // DB 翻转失败且本次为 web-app 激活：current 已前移，回滚回旧指向以保持 current 与 DB 一致。
+    if !matches!(&db_res, Ok(Ok(_))) {
+        if let Some((webapp_root, prev)) = webapp_rollback.take() {
+            match restore_current(&webapp_root, prev) {
+                Ok(()) => tracing::warn!("web-app DB 翻转失败，已回滚 current 到激活前指向"),
+                Err(e) => tracing::error!(
+                    error = %e,
+                    "web-app DB 翻转失败且 current 回滚失败：current 已前移但 DB 未翻转，需手动重激活对齐"
+                ),
+            }
+        }
+    }
+    db_res??;
 
     // v1.1-P2.10：切激活审计
     write_admin_audit(
@@ -380,37 +486,6 @@ async fn set_active(
             channel = %channel.as_str(),
             "5 分钟内已广播过，本次激活跳过 SSE"
         );
-    }
-
-    // web-app（服务端下发的 web 二进制）切激活 stable：校验工件 → 解包 → 原子切 current，
-    // 使后端根托管即时反映新版本。仅 stable 通道驱动托管根（beta/internal 不动 current）。
-    if pack_id == WEBAPP_PACK_ID && channel == ResourcePackChannel::Stable {
-        let pid = pack_id.clone();
-        let active = state
-            .run_store_task("admin.resource_packs.get_active_webapp", move |store| {
-                store.get_active_pack_version(&pid, ResourcePackChannel::Stable)
-            })
-            .await??;
-        match active {
-            Some(ver) if ver.payload_path.ends_with(".tar.gz") => {
-                let version = ver.version.clone();
-                let payload_path = ver.payload_path.clone();
-                let sha256 = ver.sha256.clone();
-                tokio::task::spawn_blocking(move || {
-                    activate_web_bundle(&version, &payload_path, &sha256)
-                })
-                .await
-                .map_err(|e| AppError::internal(&format!("web-app 解包任务 join 失败: {e}")))?
-                .map_err(|e| AppError::internal(&format!("web-app 解包/切换失败: {e}")))?;
-                tracing::info!(version = %ver.version, "web-app 已解包并切换 current");
-            }
-            _ => {
-                tracing::warn!(
-                    version = %body.version,
-                    "web-app 激活但未找到 tarball 工件，跳过解包（按内容包处理）"
-                );
-            }
-        }
     }
 
     Ok(ok(serde_json::json!({
@@ -642,10 +717,42 @@ fn static_web_app_dir() -> PathBuf {
         .join("web-app")
 }
 
-/// web-app 切激活的解包+原子切换（blocking）。校验工件 sha256 → 解包到 static/web-app/<version>/
-/// → 原子切 current 符号链接。失败返回错误信息（调用方记日志并 500，active 指针已置，admin 重试幂等）。
-fn activate_web_bundle(version: &str, payload_path: &str, expected_sha256: &str) -> Result<(), String> {
-    // 1. 读工件并校验 sha256（防上传后磁盘篡改；工件上传时已签名，此处只做完整性闸）
+/// web-app 工件解压后累计未压缩体积上限（512 MiB）：防解压炸弹/写满磁盘。dist 实际通常 < 50 MiB，留足余量。
+const MAX_WEBAPP_UNCOMPRESSED: u64 = 512 * 1024 * 1024;
+/// web-app 工件条目数上限：防「海量空文件条目」耗尽 inode/dentry（体积闸对 0 字节条目失效）。
+/// dist 实际通常数百~数千文件，5 万留足余量。
+const MAX_WEBAPP_ENTRIES: usize = 50_000;
+
+/// web-app 切激活的解包+原子切换（blocking）。生产用 static_web_app_dir() 作托管根。
+/// 调用方约定：本函数成功后才翻转 DB 激活指针，故失败时托管根/状态不前移（详见 set_active）。
+fn activate_web_bundle(
+    version: &str,
+    payload_path: &str,
+    expected_sha256: &str,
+    signature_b64: Option<&str>,
+    public_key_b64: Option<&str>,
+) -> Result<(), String> {
+    activate_web_bundle_in(
+        &static_web_app_dir(),
+        version,
+        payload_path,
+        expected_sha256,
+        signature_b64,
+        public_key_b64,
+    )
+}
+
+/// activate_web_bundle 的可注入托管根变体（测试用 tempdir 注入）。
+/// 步骤：① 读工件 → sha256 完整性闸 + Ed25519 验签纵深 → ② 准备 serve_dir（绝不触碰活动目录）→ ③ 原子切 current。
+fn activate_web_bundle_in(
+    webapp_root: &std::path::Path,
+    version: &str,
+    payload_path: &str,
+    expected_sha256: &str,
+    signature_b64: Option<&str>,
+    public_key_b64: Option<&str>,
+) -> Result<(), String> {
+    // 1. 完整性闸（sha256）+ 验签纵深（Ed25519）。验签防「DB sha256 与磁盘工件被同时篡改、但无法伪造签名」。
     let bytes = std::fs::read(payload_path).map_err(|e| format!("读工件 {payload_path} 失败: {e}"))?;
     let actual = {
         let mut h = Sha256::new();
@@ -655,31 +762,93 @@ fn activate_web_bundle(version: &str, payload_path: &str, expected_sha256: &str)
     if !actual.eq_ignore_ascii_case(expected_sha256) {
         return Err(format!("sha256 不匹配: 期望 {expected_sha256} 实际 {actual}"));
     }
+    // web-app 是托管根的安全敏感路径：验签强制（fail-closed），不降级到仅 sha256。
+    // 缺签名或公钥不可用都硬失败——签名器在上传时即必备（upload 无签名器返 503），
+    // 故正常发布的 web-app 版本必有签名；激活时若签名器不可用则拒绝激活而非放行被篡改工件。
+    match (signature_b64, public_key_b64) {
+        (Some(sig), Some(pk)) => {
+            crate::services::resource_pack_signing::verify_base64(&bytes, sig, pk)
+                .map_err(|e| format!("web-app 工件 Ed25519 验签失败: {e:?}"))?;
+        }
+        (Some(_), None) => {
+            return Err("web-app 激活：签名器公钥不可用，无法验签（拒绝降级到仅 sha256）".to_string())
+        }
+        _ => return Err("web-app 版本缺签名，拒绝激活（web-app 工件必须签名）".to_string()),
+    }
     drop(bytes);
 
-    // 2. 解包到版本目录（幂等：先清空）
-    let webapp_root = static_web_app_dir();
+    // 2. 准备 serve_dir：
+    //   - version_dir 已含 index.html（root 或单层子目录）→ 视为完好发布，幂等复用，绝不 remove_dir_all 活动目录（消除停服窗口）。
+    //     注：复用判据仅为「index.html 存在」，不做深度完整性校验（不校验 assets/* 等）；本路径自身经 staging+原子 rename 不会自产
+    //     「有 index.html 却缺资源」的残缺目录，故仅历史遗留/外部污染可能命中，按低危接受。
+    //   - version_dir 不存在或缺 index.html → 解包到 staging 校验含 index.html 后，原子 rename 换入 version_dir（staging/残缺目录均非 current 指向，删除无害）。
     let version_dir = webapp_root.join(version);
-    if version_dir.exists() {
-        std::fs::remove_dir_all(&version_dir).map_err(|e| format!("清理旧版本目录失败: {e}"))?;
-    }
-    std::fs::create_dir_all(&version_dir).map_err(|e| format!("创建版本目录失败: {e}"))?;
-    extract_tar_gz_safe(std::path::Path::new(payload_path), &version_dir)?;
-
-    // dist 一般 `tar -C dist .` 打包 → index.html 在版本目录根；容错多套一层目录的情况
-    let serve_dir = if version_dir.join("index.html").is_file() {
-        version_dir.clone()
-    } else {
-        let one = std::fs::read_dir(&version_dir)
-            .map_err(|e| format!("读版本目录失败: {e}"))?
-            .flatten()
-            .map(|e| e.path())
-            .find(|p| p.is_dir() && p.join("index.html").is_file());
-        one.ok_or_else(|| "解包内容缺少 index.html".to_string())?
+    let serve_dir = match locate_serve_dir(&version_dir) {
+        Some(dir) => dir,
+        None => {
+            let staging = webapp_root.join(format!("{version}.staging"));
+            if staging.exists() {
+                std::fs::remove_dir_all(&staging).map_err(|e| format!("清理 staging 失败: {e}"))?;
+            }
+            std::fs::create_dir_all(&staging).map_err(|e| format!("创建 staging 失败: {e}"))?;
+            // 解包出错（体积/条目/穿越/link 闸）时清理已部分写入的 staging，避免磁盘残留（与缺 index.html 分支一致）。
+            if let Err(e) = extract_tar_gz_safe(
+                std::path::Path::new(payload_path),
+                &staging,
+                MAX_WEBAPP_UNCOMPRESSED,
+                MAX_WEBAPP_ENTRIES,
+            ) {
+                let _ = std::fs::remove_dir_all(&staging);
+                return Err(e);
+            }
+            // staging 必须含 index.html（根或单层子目录），否则工件无效，提前失败不污染托管根
+            if locate_serve_dir(&staging).is_none() {
+                let _ = std::fs::remove_dir_all(&staging);
+                return Err("解包内容缺少 index.html".to_string());
+            }
+            if version_dir.exists() {
+                std::fs::remove_dir_all(&version_dir)
+                    .map_err(|e| format!("清理残缺版本目录失败: {e}"))?;
+            }
+            std::fs::rename(&staging, &version_dir).map_err(|e| format!("换入版本目录失败: {e}"))?;
+            locate_serve_dir(&version_dir).ok_or_else(|| "换入后缺少 index.html".to_string())?
+        }
     };
 
     // 3. 原子切 current 符号链接 → serve_dir（相对 webapp_root）
-    swap_current_symlink(&webapp_root, &serve_dir)
+    swap_current_symlink(webapp_root, &serve_dir)
+}
+
+/// 在 root 下定位含 index.html 的服务目录：root 根，或单层子目录（容错 `tar -C dist .` 多套一层）。
+fn locate_serve_dir(root: &std::path::Path) -> Option<PathBuf> {
+    if root.join("index.html").is_file() {
+        return Some(root.to_path_buf());
+    }
+    std::fs::read_dir(root)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| p.is_dir() && p.join("index.html").is_file())
+}
+
+/// 读 current 符号链接当前指向的相对目标（不存在/非链接则 None）。供激活失败回滚记录旧指向。
+fn read_current_target(webapp_root: &std::path::Path) -> Option<PathBuf> {
+    std::fs::read_link(webapp_root.join("current")).ok()
+}
+
+/// 把 current 恢复到激活前指向：prev=Some(相对目标)→切回该目标；prev=None（激活前无 current）→移除 current。
+fn restore_current(webapp_root: &std::path::Path, prev: Option<PathBuf>) -> Result<(), String> {
+    match prev {
+        Some(target) => swap_current_symlink(webapp_root, &webapp_root.join(target)),
+        None => {
+            let current = webapp_root.join("current");
+            match std::fs::remove_file(&current) {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(format!("移除 current 失败: {e}")),
+            }
+        }
+    }
 }
 
 /// 原子切换 static/web-app/current 符号链接指向 serve_dir（相对目标，可迁移）。
@@ -704,15 +873,27 @@ fn swap_current_symlink(webapp_root: &std::path::Path, serve_dir: &std::path::Pa
     }
 }
 
-/// 安全解 tar.gz（拒绝绝对路径/.. 穿越/link，复用 updater::extract_tar_gz_safe 范式）。
-fn extract_tar_gz_safe(tarball: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
+/// 安全解 tar.gz（拒绝绝对路径/.. 穿越/link + 累计未压缩体积上限，复用 updater::extract_tar_gz_safe 范式）。
+fn extract_tar_gz_safe(
+    tarball: &std::path::Path,
+    dst: &std::path::Path,
+    max_uncompressed: u64,
+    max_entries: usize,
+) -> Result<(), String> {
     let f = std::fs::File::open(tarball).map_err(|e| format!("打开工件失败: {e}"))?;
     let gz = flate2::read::GzDecoder::new(f);
     let mut archive = tar::Archive::new(gz);
     archive.set_overwrite(true);
     let dst_canon = std::fs::canonicalize(dst).unwrap_or_else(|_| dst.to_path_buf());
+    let mut total: u64 = 0;
+    let mut count: usize = 0;
     for entry_res in archive.entries().map_err(|e| format!("读 tar 条目失败: {e}"))? {
         let mut entry = entry_res.map_err(|e| format!("tar 条目失败: {e}"))?;
+        // 条目数闸：防海量空条目耗尽 inode（体积闸对 0 字节条目无效）
+        count += 1;
+        if count > max_entries {
+            return Err(format!("工件条目数超限: > {max_entries}"));
+        }
         let rel = entry
             .path()
             .map_err(|e| format!("tar 路径失败: {e}"))?
@@ -729,6 +910,13 @@ fn extract_tar_gz_safe(tarball: &std::path::Path, dst: &std::path::Path) -> Resu
             tar::EntryType::Symlink | tar::EntryType::Link
         ) {
             return Err(format!("禁止 link 条目: {}", rel.to_string_lossy()));
+        }
+        // 解压炸弹防护：解包(写盘)前累计未压缩体积，超限即中止。
+        // 必须用 entry.size()（PAX 感知，等于 unpack 实际 take 的字节数），不可用 header.size()——
+        // 后者只读 ustar 头字段、不读 PAX size 覆盖，可被「ustar size=0 + PAX size=巨大」工件绕过。
+        total = total.saturating_add(entry.size());
+        if total > max_uncompressed {
+            return Err(format!("解压体积超限: {total} > {max_uncompressed} 字节"));
         }
         let out = dst_canon.join(&rel);
         if let Some(parent) = out.parent() {
@@ -810,5 +998,367 @@ mod tests {
             hex,
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         );
+    }
+
+    // ── web-app 激活链路集成测试（L8） ───────────────────────────────────────
+
+    /// 构造仅含普通文件的 tar.gz 字节。
+    fn tar_gz_with(files: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(
+            Vec::new(),
+            flate2::Compression::default(),
+        ));
+        for &(path, data) in files {
+            let mut h = tar::Header::new_gnu();
+            h.set_size(data.len() as u64);
+            h.set_mode(0o644);
+            h.set_entry_type(tar::EntryType::Regular);
+            builder.append_data(&mut h, path, data).unwrap();
+        }
+        builder.into_inner().unwrap().finish().unwrap()
+    }
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        let mut h = Sha256::new();
+        h.update(bytes);
+        hex_lower(&h.finalize())
+    }
+
+    fn new_signer() -> (
+        tempfile::TempDir,
+        crate::services::resource_pack_signing::ResourcePackSigner,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let signer =
+            crate::services::resource_pack_signing::ResourcePackSigner::load_or_generate(dir.path())
+                .unwrap();
+        (dir, signer)
+    }
+
+    /// 写工件到临时文件，返回 (payload_dir, payload_path, sha256)。
+    fn stage_payload(bytes: &[u8]) -> (tempfile::TempDir, PathBuf, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("payload.tar.gz");
+        std::fs::write(&path, bytes).unwrap();
+        let sha = sha256_hex(bytes);
+        (dir, path, sha)
+    }
+
+    #[test]
+    fn activate_web_bundle_extracts_signs_and_swaps_current() {
+        let (_kd, signer) = new_signer();
+        let tar = tar_gz_with(&[
+            ("index.html", b"<html>v1</html>"),
+            ("assets/app.js", b"console.log(1)"),
+        ]);
+        let (_pd, payload, sha) = stage_payload(&tar);
+        let sig = signer.sign_base64(&tar);
+        let root = tempfile::tempdir().unwrap();
+
+        activate_web_bundle_in(
+            root.path(),
+            "1.0.0",
+            payload.to_str().unwrap(),
+            &sha,
+            Some(&sig),
+            Some(signer.public_key_base64()),
+        )
+        .unwrap();
+
+        let current = root.path().join("current");
+        assert!(current.join("index.html").is_file(), "current 应含 index.html");
+        assert_eq!(
+            std::fs::read_to_string(current.join("index.html")).unwrap(),
+            "<html>v1</html>"
+        );
+        assert!(current.join("assets/app.js").is_file());
+    }
+
+    #[test]
+    fn activate_web_bundle_rejects_sha_mismatch_and_leaves_no_current() {
+        let (_kd, signer) = new_signer();
+        let tar = tar_gz_with(&[("index.html", b"x")]);
+        let (_pd, payload, _sha) = stage_payload(&tar);
+        let sig = signer.sign_base64(&tar);
+        let root = tempfile::tempdir().unwrap();
+
+        let r = activate_web_bundle_in(
+            root.path(),
+            "1.0.0",
+            payload.to_str().unwrap(),
+            &"0".repeat(64),
+            Some(&sig),
+            Some(signer.public_key_base64()),
+        );
+        assert!(r.is_err(), "sha 不匹配应失败");
+        // 失败时托管根不前移：current 不存在
+        assert!(!root.path().join("current").exists());
+    }
+
+    #[test]
+    fn activate_web_bundle_rejects_bad_signature() {
+        let (_kd, signer) = new_signer();
+        let tar = tar_gz_with(&[("index.html", b"x")]);
+        let (_pd, payload, sha) = stage_payload(&tar);
+        // 对其它字节签名 → 与工件不匹配
+        let wrong_sig = signer.sign_base64(b"other-bytes");
+        let root = tempfile::tempdir().unwrap();
+
+        let r = activate_web_bundle_in(
+            root.path(),
+            "1.0.0",
+            payload.to_str().unwrap(),
+            &sha,
+            Some(&wrong_sig),
+            Some(signer.public_key_base64()),
+        );
+        assert!(r.is_err(), "验签失败应拒绝激活");
+        assert!(!root.path().join("current").exists());
+    }
+
+    #[test]
+    fn activate_web_bundle_requires_signature_present() {
+        let tar = tar_gz_with(&[("index.html", b"x")]);
+        let (_pd, payload, sha) = stage_payload(&tar);
+        let root = tempfile::tempdir().unwrap();
+        // 无签名 → 强制验签应硬失败（不降级到仅 sha256）
+        let r = activate_web_bundle_in(root.path(), "1.0.0", payload.to_str().unwrap(), &sha, None, None);
+        assert!(r.is_err(), "缺签名应拒绝激活");
+        assert!(!root.path().join("current").exists());
+    }
+
+    #[test]
+    fn restore_current_rolls_back_to_previous_and_removes_when_none() {
+        let (_kd, signer) = new_signer();
+        let pk = signer.public_key_base64();
+        let root = tempfile::tempdir().unwrap();
+
+        // 激活版本 A → current 指向 A
+        let tar_a = tar_gz_with(&[("index.html", b"A")]);
+        let (_a, pa, sa) = stage_payload(&tar_a);
+        activate_web_bundle_in(root.path(), "a", pa.to_str().unwrap(), &sa, Some(&signer.sign_base64(&tar_a)), Some(pk)).unwrap();
+        let prev = read_current_target(root.path());
+        assert!(prev.is_some(), "current 应已指向 A");
+        let cur_index = || std::fs::read_to_string(root.path().join("current").join("index.html")).unwrap();
+        assert_eq!(cur_index(), "A");
+
+        // 激活版本 B → current 指向 B
+        let tar_b = tar_gz_with(&[("index.html", b"B")]);
+        let (_b, pb, sb) = stage_payload(&tar_b);
+        activate_web_bundle_in(root.path(), "b", pb.to_str().unwrap(), &sb, Some(&signer.sign_base64(&tar_b)), Some(pk)).unwrap();
+        assert_eq!(cur_index(), "B");
+
+        // 回滚到 A（模拟 DB 翻转失败补偿）
+        restore_current(root.path(), prev).unwrap();
+        assert_eq!(cur_index(), "A");
+
+        // 回滚到 None（激活前无 current）→ 移除 current，且幂等
+        restore_current(root.path(), None).unwrap();
+        assert!(!root.path().join("current").exists());
+        restore_current(root.path(), None).unwrap();
+    }
+
+    #[test]
+    fn activate_web_bundle_requires_public_key_available() {
+        let (_kd, signer) = new_signer();
+        let tar = tar_gz_with(&[("index.html", b"x")]);
+        let (_pd, payload, sha) = stage_payload(&tar);
+        let sig = signer.sign_base64(&tar);
+        let root = tempfile::tempdir().unwrap();
+        // 有签名但公钥不可用 → 强制验签应硬失败（不降级到仅 sha256）
+        let r = activate_web_bundle_in(root.path(), "1.0.0", payload.to_str().unwrap(), &sha, Some(&sig), None);
+        assert!(r.is_err(), "公钥不可用应拒绝激活");
+        assert!(!root.path().join("current").exists());
+    }
+
+    #[test]
+    fn activate_web_bundle_reactivate_same_version_is_idempotent_no_staging() {
+        let (_kd, signer) = new_signer();
+        let tar = tar_gz_with(&[("index.html", b"<html>v</html>")]);
+        let (_pd, payload, sha) = stage_payload(&tar);
+        let sig = signer.sign_base64(&tar);
+        let root = tempfile::tempdir().unwrap();
+        let args = |root: &std::path::Path| {
+            activate_web_bundle_in(
+                root,
+                "2.0.0",
+                payload.to_str().unwrap(),
+                &sha,
+                Some(&sig),
+                Some(signer.public_key_base64()),
+            )
+        };
+        args(root.path()).unwrap();
+        // 重复激活同版本：幂等成功，且不应残留 staging（说明未触碰/重解包活动目录）
+        args(root.path()).unwrap();
+        assert!(root.path().join("current").join("index.html").is_file());
+        assert!(
+            !root.path().join("2.0.0.staging").exists(),
+            "重激活不应产生 staging（应复用已存在的完好版本目录）"
+        );
+    }
+
+    #[test]
+    fn activate_web_bundle_handles_single_nested_dir() {
+        let (_kd, signer) = new_signer();
+        // 多套一层 dist/ 目录
+        let tar = tar_gz_with(&[("dist/index.html", b"<html>nested</html>")]);
+        let (_pd, payload, sha) = stage_payload(&tar);
+        let sig = signer.sign_base64(&tar);
+        let root = tempfile::tempdir().unwrap();
+
+        activate_web_bundle_in(
+            root.path(),
+            "3.0.0",
+            payload.to_str().unwrap(),
+            &sha,
+            Some(&sig),
+            Some(signer.public_key_base64()),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("current").join("index.html")).unwrap(),
+            "<html>nested</html>"
+        );
+    }
+
+    #[test]
+    fn activate_web_bundle_rejects_missing_index_html() {
+        let (_kd, signer) = new_signer();
+        let tar = tar_gz_with(&[("assets/app.js", b"x")]);
+        let (_pd, payload, sha) = stage_payload(&tar);
+        let sig = signer.sign_base64(&tar);
+        let root = tempfile::tempdir().unwrap();
+
+        let r = activate_web_bundle_in(
+            root.path(),
+            "4.0.0",
+            payload.to_str().unwrap(),
+            &sha,
+            Some(&sig),
+            Some(signer.public_key_base64()),
+        );
+        assert!(r.is_err(), "缺 index.html 应失败");
+        assert!(!root.path().join("current").exists());
+    }
+
+    #[test]
+    fn activate_web_bundle_cleans_staging_on_extract_failure() {
+        let (_kd, signer) = new_signer();
+        // 穿越条目触发 extract 安全闸失败（体积 512MiB 难在测试构造，用穿越等价覆盖错误路径）
+        let tar = gz(&raw_tar_single("../evil.txt", b"pwn"));
+        let (_pd, payload, sha) = stage_payload(&tar);
+        let sig = signer.sign_base64(&tar);
+        let root = tempfile::tempdir().unwrap();
+
+        let r = activate_web_bundle_in(
+            root.path(),
+            "9.0.0",
+            payload.to_str().unwrap(),
+            &sha,
+            Some(&sig),
+            Some(signer.public_key_base64()),
+        );
+        assert!(r.is_err(), "穿越工件应激活失败");
+        assert!(
+            !root.path().join("9.0.0.staging").exists(),
+            "extract 失败后 staging 应被清理，不留磁盘残留"
+        );
+        assert!(!root.path().join("current").exists());
+    }
+
+    /// 手写裸 tar 头（USTAR）注入任意 name（tar::Builder 在写时即拒绝 `..`，故绕过它构造恶意工件）。
+    fn raw_tar_single(name: &str, data: &[u8]) -> Vec<u8> {
+        let mut h = [0u8; 512];
+        let nb = name.as_bytes();
+        h[..nb.len()].copy_from_slice(nb);
+        h[100..108].copy_from_slice(b"0000644\0");
+        h[108..116].copy_from_slice(b"0000000\0");
+        h[116..124].copy_from_slice(b"0000000\0");
+        h[124..136].copy_from_slice(format!("{:011o}\0", data.len()).as_bytes());
+        h[136..148].copy_from_slice(b"00000000000\0");
+        h[156] = b'0'; // typeflag: regular
+        h[257..263].copy_from_slice(b"ustar\0");
+        h[263..265].copy_from_slice(b"00");
+        for b in &mut h[148..156] {
+            *b = b' ';
+        }
+        let sum: u32 = h.iter().map(|&b| b as u32).sum();
+        h[148..156].copy_from_slice(format!("{:06o}\0 ", sum).as_bytes());
+        let mut out = Vec::new();
+        out.extend_from_slice(&h);
+        out.extend_from_slice(data);
+        out.extend(std::iter::repeat(0u8).take((512 - data.len() % 512) % 512));
+        out.extend(std::iter::repeat(0u8).take(1024)); // 两个 EOF 空块
+        out
+    }
+
+    fn gz(bytes: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+        let mut e =
+            flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        e.write_all(bytes).unwrap();
+        e.finish().unwrap()
+    }
+
+    #[test]
+    fn extract_tar_gz_safe_rejects_path_traversal() {
+        let tar = gz(&raw_tar_single("../evil.txt", b"pwn"));
+        let (_pd, payload, _sha) = stage_payload(&tar);
+        let dst = tempfile::tempdir().unwrap();
+        let r = extract_tar_gz_safe(&payload, dst.path(), MAX_WEBAPP_UNCOMPRESSED, MAX_WEBAPP_ENTRIES);
+        assert!(r.is_err(), "穿越路径应被拒绝");
+        assert!(r.unwrap_err().contains("穿越"));
+    }
+
+    #[test]
+    fn extract_tar_gz_safe_rejects_symlink_entry() {
+        // 手工构造 symlink 条目
+        let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(
+            Vec::new(),
+            flate2::Compression::default(),
+        ));
+        let mut h = tar::Header::new_gnu();
+        h.set_entry_type(tar::EntryType::Symlink);
+        h.set_size(0);
+        h.set_mode(0o777);
+        h.set_link_name("/etc/passwd").unwrap();
+        builder
+            .append_data(&mut h, "evil-link", std::io::empty())
+            .unwrap();
+        let tar = builder.into_inner().unwrap().finish().unwrap();
+        let (_pd, payload, _sha) = stage_payload(&tar);
+        let dst = tempfile::tempdir().unwrap();
+
+        let r = extract_tar_gz_safe(&payload, dst.path(), MAX_WEBAPP_UNCOMPRESSED, MAX_WEBAPP_ENTRIES);
+        assert!(r.is_err(), "symlink 条目应被拒绝");
+        assert!(r.unwrap_err().contains("link"));
+    }
+
+    #[test]
+    fn extract_tar_gz_safe_enforces_size_cap() {
+        let tar = tar_gz_with(&[("index.html", &[b'a'; 100][..])]);
+        let (_pd, payload, _sha) = stage_payload(&tar);
+        let dst = tempfile::tempdir().unwrap();
+        // max=10 < 100 字节 → 超限
+        let r = extract_tar_gz_safe(&payload, dst.path(), 10, MAX_WEBAPP_ENTRIES);
+        assert!(r.is_err(), "超体积上限应中止");
+        assert!(r.unwrap_err().contains("解压体积超限"));
+    }
+
+    #[test]
+    fn extract_tar_gz_safe_enforces_entry_count_cap() {
+        // 3 个 0 字节条目，体积闸（512MiB）永不触发，但条目数闸 max=2 应中止——
+        // 复现「海量空条目耗 inode」炸弹被拦截。
+        let tar = tar_gz_with(&[
+            ("a.txt", b""),
+            ("b.txt", b""),
+            ("c.txt", b""),
+        ]);
+        let (_pd, payload, _sha) = stage_payload(&tar);
+        let dst = tempfile::tempdir().unwrap();
+        let r = extract_tar_gz_safe(&payload, dst.path(), MAX_WEBAPP_UNCOMPRESSED, 2);
+        assert!(r.is_err(), "超条目数上限应中止");
+        assert!(r.unwrap_err().contains("条目数超限"));
     }
 }

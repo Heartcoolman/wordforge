@@ -45,6 +45,7 @@ const NAV: { group: string; items: NavItem[] }[] = [
   { group: '系统', items: [
     { id: 'updates', label: '版本更新', icon: 'update', href: '/admin/updates' },
     { id: 'resource-packs', label: '资源包', icon: 'package', href: '/admin/resource-packs' },
+    { id: 'web-release', label: 'Web 发版', icon: 'upload', href: '/admin/web-release' },
     { id: 'settings', label: '系统设置', icon: 'settings', href: '/admin/settings' },
   ] },
 ];

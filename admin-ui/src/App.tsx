@@ -40,6 +40,7 @@ const ProbePage = lazy(() => import('@/pages/ProbePage'));
 const ProbeMetricsPage = lazy(() => import('@/pages/ProbeMetricsPage'));
 const BroadcastPage = lazy(() => import('@/pages/BroadcastPage'));
 const ResourcePacksPage = lazy(() => import('@/pages/ResourcePacksPage'));
+const WebReleasePage = lazy(() => import('@/pages/WebReleasePage'));
 
 function PageSpinner() {
   return (
@@ -209,6 +210,7 @@ export default function App() {
             <Route path="/remote-probe" component={guarded(ProbePage)} />
             <Route path="/broadcast" component={guarded(BroadcastPage)} />
             <Route path="/resource-packs" component={guarded(ResourcePacksPage)} />
+            <Route path="/web-release" component={guarded(WebReleasePage)} />
           </Route>
           <Route path="*" component={pub_(NotFoundPage)} />
         </Route>

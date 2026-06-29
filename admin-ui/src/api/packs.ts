@@ -82,6 +82,8 @@ export interface UploadQuery {
   minAppVersion?: string;
   /** 可选，本版本描述 */
   description?: string;
+  /** 工件类型：默认 json（内容包）；web 客户端构建须传 tarball（payload.tar.gz，上限 128 MiB） */
+  artifactType?: 'json' | 'tarball';
 }
 
 /**
@@ -109,7 +111,7 @@ export const packsApi = {
     query: UploadQuery,
     body: Blob | ArrayBuffer | string,
     onProgress?: (frac: number) => void,
-  ): Promise<{ packId: string; version: string; sha256: string; signature: string; sizeBytes: number; channel: PackChannel }> => {
+  ): Promise<{ packId: string; version: string; sha256: string; signature: string; sizeBytes: number; channel: PackChannel; artifactType?: string }> => {
     // 经 buildUrl 解析，与其余请求一致遵循 API_BASE（VITE_API_BASE_URL）；
     // 否则原始相对路径会落到 window.location.origin，跨域配置下打到错误源。
     const uploadUrl = buildUrl(`/api/admin/resource-packs/${encodeURIComponent(packId)}/versions`, {
@@ -117,6 +119,8 @@ export const packsApi = {
       channel: query.channel,
       minAppVersion: query.minAppVersion || undefined,
       description: query.description || undefined,
+      // 默认 json；web 发版传 tarball，后端据此落盘 payload.tar.gz 并在激活时解包托管
+      artifactType: query.artifactType || undefined,
     });
 
     // 用原生 XHR，axios/fetch 在 Solid 项目暂未引入上传进度封装

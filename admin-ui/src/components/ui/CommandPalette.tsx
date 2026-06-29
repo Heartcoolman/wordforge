@@ -46,6 +46,7 @@ const defaultItems: CommandItem[] = [
   { id: 'probe', title: '远程探针', desc: 'Probe · ringbuffer · 现场重放', href: '/admin/remote-probe', keywords: 'probe debug 探针 repl' },
   { id: 'updates', title: '版本与自更新', desc: 'GitHub release · 一键更新', href: '/admin/updates', keywords: 'updates version 更新 发版' },
   { id: 'resource-packs', title: '资源包', desc: 'Stable / Beta 通道 · 上传 · 激活', href: '/admin/resource-packs', keywords: 'resource packs assets 资源包 通道', mark: 'accent' },
+  { id: 'web-release', title: 'Web 发版', desc: 'web 客户端 tar.gz · 上传 · 签名 · 发布 / 回滚', href: '/admin/web-release', keywords: 'web release deploy 发版 web-app 客户端 前端 上线 回滚', mark: 'accent' },
   { id: 'settings', title: '系统设置', desc: 'JWT · 备份 · 邮件 · 维护模式', href: '/admin/settings', keywords: 'settings config 设置' },
   { id: 'login', title: '管理员登录', desc: 'Login', href: '/admin/login', keywords: 'login signin 登录' },
   { id: 'setup', title: '初始化向导', desc: 'Setup · 首次部署引导', href: '/admin/setup', keywords: 'setup init 首次 部署 引导' },

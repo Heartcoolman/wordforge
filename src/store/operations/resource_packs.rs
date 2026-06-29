@@ -291,6 +291,26 @@ impl Store {
         .map_err(StoreError::from)
     }
 
+    /// 拿某 `(pack_id, version)` 的完整 row（不限激活/通道，含软删除）。
+    /// web-app 激活前据此取 payload_path/sha256/signature，实现"先校验+解包成功、再翻转激活指针"。
+    pub fn get_pack_version(
+        &self,
+        pack_id: &str,
+        version: &str,
+    ) -> Result<Option<ResourcePackVersion>, StoreError> {
+        let conn = self.conn()?;
+        conn.query_row(
+            &format!(
+                "SELECT {VERSION_COLS} FROM resource_pack_versions \
+                 WHERE pack_id = ?1 AND version = ?2 LIMIT 1"
+            ),
+            params![pack_id, version],
+            version_from_row,
+        )
+        .optional()
+        .map_err(StoreError::from)
+    }
+
     /// 切换某 channel 的当前激活版本。upsert 语义。
     pub fn set_active_pack_version(
         &self,

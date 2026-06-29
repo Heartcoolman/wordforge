@@ -523,3 +523,132 @@ async fn admin_resource_pack_handlers_write_audit_log() {
         let _: serde_json::Value = serde_json::from_str(m).expect("metadata 必须合法 JSON");
     }
 }
+
+/// web-app 版本若以非 tarball 工件（默认 json）上传，激活 stable 必须被拒（400），
+/// 以守住「current 切换成功才前移 webTargetVersion」不变式——否则 DB 指针前移但托管根未切。
+#[tokio::test]
+async fn webapp_activate_rejects_non_tarball_artifact() {
+    let app = spawn_test_server().await;
+    let admin = setup_admin_and_get_token(&app.app).await;
+
+    // 以默认 artifactType=json 上传 web-app 版本（落 payload.json，非 .tar.gz）
+    let upload = upload_pack_payload(
+        &app.app,
+        &admin,
+        "web-app",
+        "9.9.9",
+        "stable",
+        SAMPLE_PAYLOAD,
+        None,
+    )
+    .await;
+    assert_eq!(upload.status(), StatusCode::OK, "上传应成功");
+
+    // 激活 stable → 应被拒绝（非 tarball 工件无法切 current）
+    let activate = request(
+        &app.app,
+        Method::PUT,
+        "/api/admin/resource-packs/web-app/channel/stable/active",
+        Some(serde_json::json!({ "version": "9.9.9" })),
+        &[("authorization", auth_header(&admin))],
+    )
+    .await;
+    let (status, _h, body) = response_json(activate).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "web-app 非 tarball 激活应 400：{body}"
+    );
+
+    // 不变式：激活被拒后 webTargetVersion 不应前移到 9.9.9（DB 指针未翻转）
+    let st = request(&app.app, Method::GET, "/api/status", None, &[]).await;
+    let (st_status, _h2, st_body) = response_json(st).await;
+    assert_eq!(st_status, StatusCode::OK);
+    assert_ne!(
+        st_body["data"]["webTargetVersion"], "9.9.9",
+        "激活被拒后 webTargetVersion 不应前移：{st_body}"
+    );
+}
+
+/// web-app 版本若发布在 beta 通道，却在 stable 通道激活，必须被拒（400）——
+/// 守住「stable 托管根只服务 stable 工件」不变式（resource_pack_active FK 不约束 channel）。
+#[tokio::test]
+async fn webapp_activate_rejects_channel_mismatch() {
+    let app = spawn_test_server().await;
+    let admin = setup_admin_and_get_token(&app.app).await;
+
+    // 发布到 beta 通道
+    let upload = upload_pack_payload(
+        &app.app,
+        &admin,
+        "web-app",
+        "8.8.8",
+        "beta",
+        SAMPLE_PAYLOAD,
+        None,
+    )
+    .await;
+    assert_eq!(upload.status(), StatusCode::OK, "上传应成功");
+
+    // 在 stable 通道激活该 beta 版本 → 应被拒（通道不符，先于 tarball 校验命中）
+    let activate = request(
+        &app.app,
+        Method::PUT,
+        "/api/admin/resource-packs/web-app/channel/stable/active",
+        Some(serde_json::json!({ "version": "8.8.8" })),
+        &[("authorization", auth_header(&admin))],
+    )
+    .await;
+    let (status, _h, body) = response_json(activate).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "通道不符激活应 400：{body}"
+    );
+}
+
+/// 软删除（下架）的 web-app 版本不能再激活：否则 current 会指向它而 status 读出 null（脱钩）。
+#[tokio::test]
+async fn webapp_activate_rejects_deactivated_version() {
+    let app = spawn_test_server().await;
+    let admin = setup_admin_and_get_token(&app.app).await;
+
+    let up = upload_pack_payload(
+        &app.app,
+        &admin,
+        "web-app",
+        "7.7.7",
+        "stable",
+        SAMPLE_PAYLOAD,
+        None,
+    )
+    .await;
+    assert_eq!(up.status(), StatusCode::OK, "上传应成功");
+
+    // 软删除该版本
+    let del = request(
+        &app.app,
+        Method::DELETE,
+        "/api/admin/resource-packs/web-app/versions/7.7.7",
+        None,
+        &[("authorization", auth_header(&admin))],
+    )
+    .await;
+    assert_eq!(del.status(), StatusCode::OK, "软删除应成功");
+
+    // 激活已下架版本 → 应被拒（400，先于 channel/tarball 校验命中）
+    let activate = request(
+        &app.app,
+        Method::PUT,
+        "/api/admin/resource-packs/web-app/channel/stable/active",
+        Some(serde_json::json!({ "version": "7.7.7" })),
+        &[("authorization", auth_header(&admin))],
+    )
+    .await;
+    let (status, _h, body) = response_json(activate).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "下架版本激活应 400：{body}"
+    );
+}

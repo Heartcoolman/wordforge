@@ -142,8 +142,8 @@ pub fn build_router(state: AppState) -> Router {
             .append_index_html_on_directories(false)
             .fallback(ServeFile::new("static/web-app/current/index.html"));
         let webapp_index = || get_service(ServeFile::new("static/web-app/current/index.html"));
-        // admin-ui 维持 /admin。注：admin-ui 资产为绝对 /assets，与 web-app 资产共用 /assets 路径，
-        // 彻底隔离需 admin-ui 改 base=/admin/（既有 follow-up）；本次确保 web-app 占根可用。
+        // admin-ui 维持 /admin，且已 base=/admin/ 构建：其资产引用 /admin/assets/*（落 static/assets/，
+        // 经 /admin nest 命中），与 web-app 根 /assets/* 物理隔离，无路径冲突。
         let admin_spa = ServeDir::new("static").fallback(ServeFile::new("static/index.html"));
         app = LEGACY_USER_SPA_PATHS.iter().fold(app, |router, path| {
             router.route_service(path, webapp_index())
@@ -182,7 +182,12 @@ async fn static_cache_headers(req: Request<axum::body::Body>, next: Next) -> Res
         .and_then(|v| v.to_str().ok())
         .is_some_and(|ct| ct.contains("text/html"));
 
-    let cache_value = if is_html {
+    // Service Worker 控制脚本走稳定 URL（非内容哈希），必须每次回源重校验，
+    // 否则 swRegistration.update() 可能命中 HTTP 缓存读到旧 sw.js → 新构建迟迟不被发现。
+    let is_sw_script = path == "/sw.js" || path.ends_with("/sw.js") || path == "/registerSW.js";
+    let cache_value = if is_sw_script {
+        "no-cache, must-revalidate"
+    } else if is_html {
         "no-cache, must-revalidate"
     } else if path.starts_with("/assets/") || path.starts_with("/packs/") {
         // v1.1-P0.5：资源包 payload 走版本号路径 /packs/<pack>/<ver>/payload.json，
