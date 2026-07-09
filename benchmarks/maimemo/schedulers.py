@@ -22,6 +22,7 @@ from .dhp_reference import (
     DHPStudent,
     WordforgeMirrorState,
     _alpha_kwargs_from_config,
+    _cold_start_kwargs_from_config,
     _gsp_band_kwargs_from_config,
 )
 
@@ -486,6 +487,10 @@ class AMASScheduler:
         self._gsp_retire_after_reviews = max(0, int(cfg.get("gspRetireAfterReviews", 0)))
         self._gsp_retire_interval_days = float(cfg.get("gspRetireIntervalDays", 365.0))
         self._gsp_retire_min_stability = float(cfg.get("gspRetireMinStability", 0.0))
+        # 2026-07-08 真半衰期口径战役：连击门槛。review_count 含 warm 历史 → 低门槛 retire 对
+        # warm 词首评即触发、把 oracle 半衰期不足的词提前冻结（mastered 崩塌）。correct_streak
+        # 是 oracle 近期失败惩罚的直接代理（近 K 次全对 → 半衰期高置信）。0=关（bit-exact）。
+        self._gsp_retire_min_streak = max(0, int(cfg.get("gspRetireMinStreak", 0)))
         # GSP review-load smoothing：确定性区间抖动（生产新旋钮，默认 0=关=bit-exact legacy）。
         # 夹至 [0, 1)：负数 → 0（关闭）；>=1 会使 (1+fuzz·u) 触及非正区间，故顶侧夹至 1-eps。
         self._gsp_interval_fuzz      = max(0.0, min(1.0 - 1e-9, float(cfg.get("gspIntervalFuzz", 0.0))))
@@ -520,6 +525,7 @@ class AMASScheduler:
             forgetting_curve_floor=self._floor,
             **_alpha_kwargs_from_config(self._cfg),
             **_gsp_band_kwargs_from_config(self._cfg),
+            **_cold_start_kwargs_from_config(self._cfg),
         )
 
     # ------------------------------------------------------------------
@@ -749,6 +755,13 @@ class AMASScheduler:
         if hasattr(self._state, "external_difficulty"):
             d = float(difficulty)
             self._state.external_difficulty = 5.0 if math.isnan(d) else max(1.0, min(10.0, d))
+            # 冷启动难度先验（1a）：任一 extd 权重非零才注入特征（激活先验）。
+            # 缺省权重全 0 → 不注入 → cs_* 全 None → _cold_start_deltas 短路 = bit-exact legacy。
+            # 注入须在首条历史重放（review_count==0 的首评）之前，先验恰在该步消费。
+            if (self._cfg.get("coldStartDExtdWeight") or self._cfg.get("coldStartSExtdWeight")) and hasattr(
+                self._state, "cs_ext_difficulty"
+            ):
+                self._state.cs_ext_difficulty = self._state.external_difficulty
 
         for i, (delta_t, result) in enumerate(zip(t_history, r_history)):
             elapsed = float(delta_t) if i > 0 else 0.0
@@ -794,7 +807,12 @@ class AMASScheduler:
         if self._gsp_retire_after_reviews > 0 and graduated:
             rc = int(getattr(self._state, "review_count", 0))
             stab = float(getattr(self._state, "stability", 0.0))
-            if rc >= self._gsp_retire_after_reviews and stab >= self._gsp_retire_min_stability:
+            streak = int(getattr(self._state, "correct_streak", 0))
+            if (
+                rc >= self._gsp_retire_after_reviews
+                and stab >= self._gsp_retire_min_stability
+                and streak >= self._gsp_retire_min_streak
+            ):
                 return max(1, int(round(self._gsp_retire_interval_days)))
 
         # 区间帽：min(90, gspCap)，与既有 90 天硬帽复合（mdm.rs MAX_INTERVAL_DAYS=90）。
@@ -1508,6 +1526,11 @@ class AMAS6Scheduler(AMASScheduler):
         self._gsp_graduation_streak = 0
         self._gsp_graduation_floor = 30.0
         self._gsp_interval_fuzz = 0.0  # 公版隔离：fuzz 硬关，永不从 config 继承
+        # 公版隔离：retire 硬关，永不从 config 继承（父类 next_interval_days 读这四项）
+        self._gsp_retire_after_reviews = 0
+        self._gsp_retire_interval_days = 365.0
+        self._gsp_retire_min_stability = 0.0
+        self._gsp_retire_min_streak = 0
         self._state = self._fresh_state()
         self._window = int(cfg.get("masteryWindowSize", 20))
 

@@ -436,7 +436,10 @@ def test_fuzz_preserves_graduated_floor() -> None:
 def test_fuzz_respects_90_hard_cap() -> None:
     """fuzz 上推不越 90 天硬帽：高 fuzz + cap=89 的词，区间恒 <= 90。"""
     cfg = _candidate_base()
-    cfg.update({"gspIntervalCapDays": 89, "gspGraduationStreak": 2, "gspIntervalFuzz": 0.20})
+    # 显式关 retire：本测验证 fuzz 的 90 硬帽语义；V1 船值 retire(streak6) 在 14 连击下
+    # 会合法返回 365（越帽是 retire 的契约行为，见 GSP_SPEC §9），与 fuzz 帽无关。
+    cfg.update({"gspIntervalCapDays": 89, "gspGraduationStreak": 2, "gspIntervalFuzz": 0.20,
+                "gspRetireAfterReviews": 0})
     long_seq = [(1, 30.0)] * 14
     s = AMASScheduler(memory_config=cfg, desired_retention=0.85)
     s.warm_start([], [], 5.0)
@@ -453,8 +456,9 @@ def test_fuzz_actually_spreads_intervals() -> None:
     >1 个不同的区间值（fuzz=0 时它们全钉在 40）。
     """
     base = _candidate_base()
+    # 显式关 retire（同上：本测验证 fuzz 分散判别力，毕业连击词被 retire 钉 365 会消灭分散性）
     base.update({"gspIntervalCapDays": 40, "gspGraduationStreak": 2,
-                 "gspGraduationFloorDays": 30.0})
+                 "gspGraduationFloorDays": 30.0, "gspRetireAfterReviews": 0})
     cfg0 = copy.deepcopy(base); cfg0["gspIntervalFuzz"] = 0.0
     cfgF = copy.deepcopy(base); cfgF["gspIntervalFuzz"] = 0.15
 

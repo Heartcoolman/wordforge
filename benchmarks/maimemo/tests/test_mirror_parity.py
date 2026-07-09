@@ -42,10 +42,11 @@ _FSRS6_W = [
     1.8729, 0.5425, 0.0912, 0.0658, 0.1542,
 ]
 
-# F1 船值（CONTEXT / config.py DEFAULT / amas_config.toml v5 三处同源）。
-# 这是进入 TEST one-shot 的精确配置：GSP 调度头全激活（cap40/streak2/floor30/band14/grade4）。
+# V1 船值（2026-07-08 真半衰期口径战役；config.py DEFAULT / amas_config.toml 三处同源）。
+# 这是进入 TEST one-shot 的精确配置：GSP 调度头全激活（cap40/streak2/floor30/band14/grade4）
+# + youngRetention 0.90 + retire streak6（GSP_SPEC §9）+ difflogit 关闭。
 # 以 DEFAULT 为底叠加显式船值键——既保证 Rust MemoryModelConfig 反序列化所需的全字段齐备
-# （shortTermLearningRate 等无 serde default），又精确钉死所有 v5 船值键。下方 assert 守口径
+# （shortTermLearningRate 等无 serde default），又精确钉死所有船值键。下方 assert 守口径
 # 与 config.py DEFAULT 完全一致（任一处漂移即本模块加载即报错）。
 _F1_SHIP_KEYS = {
     "alphaScale": 1.0, "alphaMin": 1.0, "alphaMax": 1.0,
@@ -54,11 +55,15 @@ _F1_SHIP_KEYS = {
     "gspIntervalCapDays": 40.0,
     "gspGraduationStreak": 2,
     "gspGraduationFloorDays": 30.0,
-    "gspYoungRetention": 0.86,
+    "gspYoungRetention": 0.90,
     "gspMatureRetention": 0.92,
     "gspMaturityBandDays": 14.0,
     "gspIntervalFuzz": 0.0,
-    "difficultyLogitWeight": 0.1,
+    "gspRetireAfterReviews": 1,
+    "gspRetireIntervalDays": 365.0,
+    "gspRetireMinStability": 0.0,
+    "gspRetireMinStreak": 6,
+    "difficultyLogitWeight": 0.0,
     "difficultyLogitRef": 5.0,
     "w": list(_FSRS6_W),
     "baseDesiredRetention": 0.85,
@@ -134,6 +139,19 @@ def _gsp_schedule_days_ref(
     graduated = streak_k > 0 and correct_streak >= streak_k
     if graduated:
         scaled_days = max(scaled_days, floor_d)
+
+    # 步骤 4.5：退役（毕业后三门槛同满足 → 直接 return retire 间隔；GSP_SPEC §9）
+    retire_after = max(0, int(config.get("gspRetireAfterReviews", 0)))
+    if retire_after > 0 and graduated:
+        retire_ivl = float(config.get("gspRetireIntervalDays", 365.0))
+        retire_stab = float(config.get("gspRetireMinStability", 0.0))
+        retire_streak = max(0, int(config.get("gspRetireMinStreak", 0)))
+        if (
+            mirror.review_count >= retire_after
+            and mirror.stability >= retire_stab
+            and correct_streak >= retire_streak
+        ):
+            return max(1, int(round(retire_ivl)))
 
     # 步骤 5：区间帽 min(90, gspCap)
     cap = max_ivl
@@ -981,3 +999,110 @@ def test_gsp_parity_f_f1_ship():
         f"\ngsp-f F1-ship parity: {interval_compared} cases, "
         f"max state abs err = {max_state_err:.3e}"
     )
+
+
+def test_gsp_parity_g_retire():
+    """(g) retire：毕业后三门槛（review_count/stability/correct_streak）退役对拍。
+
+    2026-07-08 真半衰期口径战役新增旋钮（GSP_SPEC §9）。判别族覆盖：streak 跨退役
+    门槛边界（K-1 不触发 / K 触发→retire 间隔越过 cap）、stability 门槛拦截、
+    lapse 重置连击后重爬坡、warm 长历史 review_count 已达标（首评即退役倾向——
+    须由 min_streak 拦住）。随机变体扰 w/门槛/历史。"""
+    rng = random.Random(20260708)
+    base_w = [float(v) for v in _FSRS6_W]
+    directed = [
+        # (label, retire_streak, retire_stab, case)
+        ("streak_at_gate", 5, 0.0, {"t": [1, 2, 3, 5, 8], "r": [1, 1, 1, 1, 1]}),
+        ("streak_below_gate", 5, 0.0, {"t": [1, 2, 3, 5], "r": [1, 1, 1, 1]}),
+        ("stab_gate_blocks", 5, 500.0, {"t": [1, 2, 3, 5, 8], "r": [1, 1, 1, 1, 1]}),
+        ("lapse_resets_streak", 4, 0.0, {"t": [1, 2, 3, 0, 1, 2, 3, 5], "r": [1, 1, 1, 0, 1, 1, 1, 1]}),
+        ("warm_history_needs_streak", 6, 0.0, {"t": [1, 1, 2, 2, 3, 3, 5, 5], "r": [1, 0, 1, 0, 1, 1, 1, 1]}),
+    ]
+    max_state_err = 0.0
+    with AdapterServer() as server:
+        for label, k_streak, stab_gate, case in directed:
+            config = json.loads(json.dumps(DEFAULT_MEMORY_MODEL_CONFIG))
+            config["w"] = list(_FSRS6_W)
+            config.update({
+                "gspSuccessGrade": 4,
+                "gspGraduationStreak": 2, "gspGraduationFloorDays": 30.0,
+                "gspIntervalCapDays": 40.0, "gspMaturityBandDays": 0.0,
+                "gspIntervalFuzz": 0.0,
+                "gspRetireAfterReviews": 1, "gspRetireIntervalDays": 365.0,
+                "gspRetireMinStability": stab_gate, "gspRetireMinStreak": k_streak,
+            })
+            err, _ = _assert_gsp_parity(server, config, dict(case, retention=0.85), f"gsp-g-{label}")
+            max_state_err = max(max_state_err, err)
+        # 随机变体：随机门槛 × 随机历史（含 lapse），retire 间隔多档
+        for _ in range(40):
+            config = json.loads(json.dumps(DEFAULT_MEMORY_MODEL_CONFIG))
+            config["w"] = _rand_w(rng, base_w)
+            config.update({
+                "gspSuccessGrade": rng.choice([3, 4]),
+                "gspGraduationStreak": 2, "gspGraduationFloorDays": rng.choice([15.0, 30.0]),
+                "gspIntervalCapDays": rng.choice([25.0, 40.0]),
+                "gspMaturityBandDays": 0.0, "gspIntervalFuzz": 0.0,
+                "gspRetireAfterReviews": rng.choice([1, 3, 6]),
+                "gspRetireIntervalDays": rng.choice([180.0, 365.0, 365.5]),
+                "gspRetireMinStability": rng.choice([0.0, 20.0, 60.0]),
+                "gspRetireMinStreak": rng.choice([0, 4, 5, 6]),
+            })
+            length = rng.randint(4, 16)
+            r = [1] * length
+            for pos in rng.sample(range(length), rng.randint(0, max(1, length // 4))):
+                r[pos] = 0
+            case = {"t": [rng.choice([1, 2, 3, 5, 8]) for _ in range(length)], "r": r,
+                    "retention": 0.85}
+            err, _ = _assert_gsp_parity(server, config, case, "gsp-g-rnd")
+            max_state_err = max(max_state_err, err)
+    print(f"\ngsp-g retire parity: max state abs err = {max_state_err:.3e}")
+
+
+# SSP/Cost-ADR 后端 smoke parity（P2 修复 2026-07-08）：sspConfig 经 adapter 接线后的
+# 跨语言结构对拍。范围界定：断言 DR 曲面值域 / 区间有效性 / 确定性 / 与 MDM 路径隔离 /
+# 纯 SSP（GSP 未激活）分支输出非 None——Python 侧不复刻 DP 逐位数值（那是 Cost-ADR
+# 战役的前置工程，见 GSP_SPEC §8.2 的 parity 契约）。
+_SSP_SMOKE_CONFIG = {
+    "recallCost": 3.0, "forgetCost": 9.0, "targetStabilityDays": 360.0,
+    "base": 1.05, "minIndex": -30, "maxIndex": 122,
+    "difficultyOffsetOnLapse": 1.0, "maxIterations": 20000, "convergenceThreshold": 0.1,
+}
+
+
+def test_ssp_smoke_parity_surface_and_intervals():
+    case = {"t": [1, 2, 4, 8, 16], "r": [1, 1, 1, 1, 1]}
+    items = [{
+        "tHistory": case["t"], "rHistory": case["r"],
+        "targetRetentions": list(INTERVAL_RETENTIONS), "intervalScale": 1.0,
+    }]
+    with AdapterServer() as server:
+        # (1) GSP 激活 + SSP：optimalRetention 在 [rMin,rMax]，interval >= 1
+        config = json.loads(json.dumps(F1_SHIP_CONFIG))
+        [with_ssp] = server.score_batch(config, items, ssp_config=dict(_SSP_SMOKE_CONFIG))
+        assert with_ssp["optimalRetention"] is not None
+        assert 0.70 <= with_ssp["optimalRetention"] <= 0.99
+        assert with_ssp["scheduledIntervalDays"] is not None
+        assert with_ssp["scheduledIntervalDays"] >= 1
+        # (2) 确定性：同请求逐位同响应
+        [again] = server.score_batch(config, items, ssp_config=dict(_SSP_SMOKE_CONFIG))
+        assert again == with_ssp
+        # (3) 与 MDM 路径隔离：不带 sspConfig → optimalRetention=None 且 S/D 不受影响
+        [mdm_only] = server.score_batch(config, items)
+        assert mdm_only["optimalRetention"] is None
+        assert mdm_only["stability"] == with_ssp["stability"]
+        assert mdm_only["difficulty"] == with_ssp["difficulty"]
+        # (4) 纯 SSP 分支（GSP 未激活）：此前 scheduledIntervalDays=None（parity 零覆盖），
+        # 修复后输出秒级管线镜像的整数天（>=0，<= maxIntervalDays）。
+        pure = json.loads(json.dumps(F1_SHIP_CONFIG))
+        pure.update({
+            "gspIntervalCapDays": 0.0, "gspGraduationStreak": 0,
+            "gspYoungRetention": 0.0, "gspMatureRetention": 0.0,
+            "gspMaturityBandDays": 0.0, "gspIntervalFuzz": 0.0,
+            "gspRetireAfterReviews": 0,
+        })
+        [pure_ssp] = server.score_batch(pure, items, ssp_config=dict(_SSP_SMOKE_CONFIG))
+        assert pure_ssp["optimalRetention"] is not None
+        assert pure_ssp["scheduledIntervalDays"] is not None
+        assert 0 <= pure_ssp["scheduledIntervalDays"] <= float(pure.get("maxIntervalDays", 90.0))
+        [pure_mdm] = server.score_batch(pure, items)
+        assert pure_mdm["scheduledIntervalDays"] is None, "GSP 关 + 无 SSP 应保持 None（bit-exact legacy）"

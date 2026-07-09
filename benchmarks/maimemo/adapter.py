@@ -57,11 +57,19 @@ class AdapterServer:
         self,
         memory_config: Dict[str, Any],
         items: Iterable[Dict[str, Any]],
+        ssp_config: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
-        """Send one batch via JSONL, read one response line."""
+        """Send one batch via JSONL, read one response line.
+
+        ssp_config：可选 SSP/Cost-ADR 后端配置（camelCase，contract GSP_SPEC §8.2）。
+        Some → Rust 侧预计算 DP、scheduledIntervalDays 用 SSP base + 暴露 optimalRetention；
+        None → 不发送该键，MDM 路径 bit-exact legacy。
+        """
         if self._process is None or self._process.poll() is not None:
             raise RuntimeError("AdapterServer is not running")
         request = {"config": memory_config, "items": list(items)}
+        if ssp_config is not None:
+            request["sspConfig"] = ssp_config
         line = json.dumps(request, separators=(",", ":")) + "\n"
         self._process.stdin.write(line.encode("utf-8"))
         self._process.stdin.flush()
@@ -77,18 +85,22 @@ def score_histories(
     memory_config: Dict[str, Any],
     items: Iterable[Dict[str, Any]],
     server: Optional[AdapterServer] = None,
+    ssp_config: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """Score a batch of histories.
 
     If *server* is provided, uses the persistent connection.
     Otherwise falls back to a one-shot subprocess (legacy path).
+    ssp_config 语义同 AdapterServer.score_batch（None → 不发送，bit-exact legacy）。
     """
     if server is not None:
-        return server.score_batch(memory_config, items)
+        return server.score_batch(memory_config, items, ssp_config=ssp_config)
 
     # Legacy one-shot fallback
     binary = ensure_adapter_binary()
     request = {"config": memory_config, "items": list(items)}
+    if ssp_config is not None:
+        request["sspConfig"] = ssp_config
     process = subprocess.run(
         [str(binary), "--oneshot"],
         input=json.dumps(request).encode("utf-8"),

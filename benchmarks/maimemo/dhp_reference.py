@@ -452,6 +452,23 @@ def _alpha_kwargs_from_config(memory_config: Dict[str, object]) -> Dict[str, flo
     }
 
 
+def _cold_start_kwargs_from_config(memory_config: Dict[str, object]) -> Dict[str, float]:
+    """冷启动难度先验系数（缺省全 0.0 = 关闭 = bit-exact legacy；与 Rust serde default 一致）。
+
+    仅透传系数；每词 cs_* 特征由调度器 warm_start 侧按「任一权重非零」条件注入
+    （特征全 None 时 _cold_start_deltas 直接短路，缺省语义冻结）。
+    """
+    return {
+        "cold_start_d_len_weight": float(memory_config.get("coldStartDLenWeight", 0.0)),
+        "cold_start_d_morph_weight": float(memory_config.get("coldStartDMorphWeight", 0.0)),
+        "cold_start_d_extd_weight": float(memory_config.get("coldStartDExtdWeight", 0.0)),
+        "cold_start_s_len_weight": float(memory_config.get("coldStartSLenWeight", 0.0)),
+        "cold_start_s_morph_weight": float(memory_config.get("coldStartSMorphWeight", 0.0)),
+        "cold_start_s_extd_weight": float(memory_config.get("coldStartSExtdWeight", 0.0)),
+        "cold_start_extd_ref": float(memory_config.get("coldStartExtdRef", 5.0)),
+    }
+
+
 def _gsp_band_kwargs_from_config(memory_config: Dict[str, object]) -> Dict[str, float]:
     """GSP 成熟度分带保持率三参数（缺省 0.0=关闭=冻结旧语义）。
 

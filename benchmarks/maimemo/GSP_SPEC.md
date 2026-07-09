@@ -288,3 +288,39 @@ MDM 后端替换目标保持率口径；SSP 后端 base 由 DP 决定、与 band
   （旧 `next_interval>=30` 与默认 floor=30 同阈值，自我实现、不可证伪）。
 - ⚠️ 墨墨「离线≠真实留存」：下调 DR=拿留存换 workload，离线 reviewsPerDay 降不等于线上留存不掉，
   SSP/Cost-ADR 任何采纳须经 T1.3 真实 A/B 验证。
+
+## §9 退役（retire）—— 2026-07-08 真半衰期口径战役
+
+### 9.1 语义与判据
+
+毕业后「过学」词直接冻结到长间隔，跳过 cap/fuzz（可越区间帽）。在 §3 head 的
+毕业 floor（步骤 4）与 cap（步骤 5）之间插入步骤 4.5：
+
+```
+if retire_after_reviews > 0 AND graduated
+   AND review_count  >= gspRetireAfterReviews
+   AND stability     >= gspRetireMinStability
+   AND correct_streak >= gspRetireMinStreak:
+    return max(1, round_half_to_even(gspRetireIntervalDays))
+```
+
+四旋钮（camelCase / Rust snake_case 同名对应；serde 默认全关 = bit-exact legacy）：
+`gspRetireAfterReviews`（0=关）、`gspRetireIntervalDays`（默认 365）、
+`gspRetireMinStability`（默认 0）、`gspRetireMinStreak`（默认 0）。
+
+### 9.2 设计约束（离线 oracle 校准，2026-07-08）
+
+- `review_count` 含**全部历史**（warm 词首评即可达标）→ 次数门槛不构成保护，
+  必须搭配 `gspRetireMinStreak`。连击是「近期无失败」的直接证据：GRU oracle 校准下，
+  脏历史词 streak≥4（间隔递增结构）估计半衰期稳越 30 天；短间隔密集节奏下连击的
+  置信度降低，需更高门槛或避免与激进密集化（低 floor + 高 young retention）组合。
+- stability 门槛**无法**分辨「S 高但真实半衰期低」的脏历史词（FSRS 信念 ≠ oracle 真值），
+  只作为辅助下界。
+- 退役词停止复习即停止半衰期增长：门槛过低 = 把未固化词提前冻结（mastered 崩塌）。
+
+### 9.3 三处实现同源（漂移即 parity 报错）
+
+- Rust：`mdm.rs::gsp_schedule_days` 步骤 4.5。
+- Python 闭环 sim：`schedulers.py::AMASScheduler.next_interval_days` retire 块。
+- Python parity 参考：`tests/test_mirror_parity.py::_gsp_schedule_days_ref` 步骤 4.5，
+  判别族 `test_gsp_parity_g_retire`（定向 5 例 + 40 随机变体，S/D ≤1e-9 + 区间整数恒等）。

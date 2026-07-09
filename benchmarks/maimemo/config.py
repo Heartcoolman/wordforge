@@ -125,23 +125,30 @@ DEFAULT_MEMORY_MODEL_CONFIG: Dict[str, Any] = {
         0.0658,
         0.1542,
     ],
-    # === GSP 调度策略头 F1 船值（契约 benchmarks/maimemo/GSP_SPEC.md）===
+    # === GSP 调度策略头 V1 船值（2026-07-08 真半衰期口径战役；契约 GSP_SPEC.md §9）===
     # amas board 条目消费 DEFAULT；fsrs 已 rebind FSRS_BASELINE 故不泄漏。
+    # vs F1(2026-06-13)：youngRetention 0.86→0.90（年轻词密集化，mastered=oracle_halflife>=30
+    # 口径下 maimemo 真实巩固 +17%）；retire streak6 开启（毕业词连击 6 次退役 → duolingo/policy
+    # 止损）。val 三种子(42/7/2026) Borda 27/26/26 全部综合第 1（第二名 fsrs6 24）。
     "gspSuccessGrade": 4,
     "gspIntervalCapDays": 40.0,
     "gspGraduationStreak": 2,
     "gspGraduationFloorDays": 30.0,
-    "gspYoungRetention": 0.86,
+    "gspYoungRetention": 0.90,
     "gspMatureRetention": 0.92,
     "gspMaturityBandDays": 14.0,
     "gspIntervalFuzz": 0.0,
-    # === per-word difficulty logit 加性项（v6 预测层船值，amas 专属）===
-    # 预测期 recall 在 logit 域加 β·(REF - external_difficulty)：难词降 p、易词升 p，
-    # 补 FSRS 二元映射下「预测随难度扁平」的区分度/校准残差。β=0.1 由 maimemo+duolingo val
-    # 选型、test 多 seed(42/123/777) 验证：vs amas6/fsrs6 logLoss-0.005~-0.012、AUC+0.0005~+0.015，
-    # 且在 maimemo AUC 反超 dhp(墨墨)。仅作用于 AMASScheduler._recall（预测+urgency），不入 S/D 动力学。
-    # 竞品（fsrs/fsrs6/amas6）忽略此键 → 天然 de-tie。详见 pred_diagnose/pred_search/pred_test_eval。
-    "difficultyLogitWeight": 0.1,
+    "gspRetireAfterReviews": 1,
+    "gspRetireIntervalDays": 365.0,
+    "gspRetireMinStability": 0.0,
+    "gspRetireMinStreak": 6,
+    # === per-word difficulty logit 加性项（v6 预测层，amas 专属）===
+    # 预测期 recall 在 logit 域加 β·(REF - external_difficulty)。2026-07-08 V1 船值改 0.0（关闭）：
+    # 6-14 fulltest 已证 difflogit 跨数据集聚合为净负 Borda（synthetic 反伤 > maimemo/duolingo 增益），
+    # 关闭后预测腿与 amas6/fsrs6 位级同分 = FSRS-6 天花板并列第 1（跨集 pred 维度 3→1）。
+    # β>0 的历史证据（maimemo AUC+0.015 反超 dhp）保留在 v6-difflogit 档案；生产回填
+    # words.difficulty 后可经真实 A/B 重估。
+    "difficultyLogitWeight": 0.0,
     "difficultyLogitRef": 5.0,
     # === 冷启动难度先验（Phase 1a；仅首评 review_count==0 调整 S₀/D₀）===
     # 6 个权重默认 0.0 = 关闭（与 Rust MemoryModelConfig 同名字段 / dhp_reference 镜像逐位一致）。
