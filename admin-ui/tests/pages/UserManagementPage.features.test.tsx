@@ -48,7 +48,6 @@ const baseUser = {
   role: 'user' as const,
   status: 'active' as const,
   lastLoginAt: null,
-  referrerSource: null,
 };
 const user1 = { ...baseUser, id: '1', username: 'alice', email: 'alice@example.com', isBanned: false };
 const user2 = { ...baseUser, id: '2', username: 'bob', email: 'bob@example.com', isBanned: true, status: 'suspended' as const };

@@ -57,7 +57,6 @@ const baseUser = {
   role: 'user' as const,
   status: 'active' as const,
   lastLoginAt: null,
-  referrerSource: null,
 };
 const mockUsers = {
   data: [
