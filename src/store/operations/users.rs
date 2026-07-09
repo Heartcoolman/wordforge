@@ -7,7 +7,7 @@ use crate::store::keys;
 use crate::store::{Store, StoreError};
 
 const USER_COLS: &str =
-    "id, email, username, password_hash, is_banned, created_at, updated_at, failed_login_count, locked_until, role, status, last_login_at, referrer_source";
+    "id, email, username, password_hash, is_banned, created_at, updated_at, failed_login_count, locked_until, role, status, last_login_at";
 
 const USER_SCOPED_TABLES: &[&str] = &[
     "sessions",
@@ -78,9 +78,6 @@ pub struct User {
     /// m022:最近一次登录成功时间;NULL 表示从未登录。
     #[serde(default)]
     pub last_login_at: Option<DateTime<Utc>>,
-    /// m025:注册来源(referral/techweekly 等);NULL 表示未知。
-    #[serde(default)]
-    pub referrer_source: Option<String>,
 }
 
 fn default_role() -> String {
@@ -152,7 +149,6 @@ fn user_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<User> {
             .get::<_, Option<String>>(11)?
             .map(parse_dt)
             .transpose()?,
-        referrer_source: row.get::<_, Option<String>>(12)?,
     })
 }
 
@@ -193,16 +189,16 @@ impl Store {
         keys::validate_id(&user.id)?;
         let conn = self.conn()?;
         let locked = user.locked_until.map(|t| t.to_rfc3339());
-        // m024+m025:写 role/status/referrer_source(last_login_at 创建时为 NULL)
+        // m024:写 role/status(last_login_at 创建时为 NULL)
         match conn.execute(
             "INSERT INTO users (id, email, username, password_hash, is_banned, \
-             created_at, updated_at, failed_login_count, locked_until, role, status, referrer_source) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+             created_at, updated_at, failed_login_count, locked_until, role, status) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 &user.id, &user.email, &user.username, &user.password_hash,
                 user.is_banned as i64, user.created_at.to_rfc3339(), user.updated_at.to_rfc3339(),
                 user.failed_login_count as i64, locked.as_deref(),
-                &user.role, &user.status, user.referrer_source.as_deref(),
+                &user.role, &user.status,
             ],
         ) {
             Ok(_) => Ok(()),
@@ -364,10 +360,13 @@ impl Store {
             if user.is_banned == banned {
                 return Ok(());
             }
+            // status 与 is_banned 联动:此前无任何写点,'suspended' 恒空、facets.active 恒等于
+            // 全量,admin 状态筛选失真。
             match conn.execute(
-                "UPDATE users SET is_banned=?1, updated_at=?2 WHERE id=?3 AND updated_at=?4",
+                "UPDATE users SET is_banned=?1, status=?2, updated_at=?3 WHERE id=?4 AND updated_at=?5",
                 params![
                     banned as i64,
+                    if banned { "suspended" } else { "active" },
                     Utc::now().to_rfc3339(),
                     user_id,
                     user.updated_at.to_rfc3339()
@@ -491,12 +490,17 @@ impl Store {
             existing.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
         let now = Utc::now().to_rfc3339();
 
-        let mut update_params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(existing.len() + 2);
+        // status 与 is_banned 联动（同单个 set_banned）。
+        let status = if banned { "suspended" } else { "active" };
+        let mut update_params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(existing.len() + 3);
         update_params.push(&banned);
+        update_params.push(&status);
         update_params.push(&now);
         update_params.extend_from_slice(exist_bind.as_slice());
         tx.execute(
-            &format!("UPDATE users SET is_banned=?1, updated_at=?2 WHERE id IN ({exist_ph})"),
+            &format!(
+                "UPDATE users SET is_banned=?1, status=?2, updated_at=?3 WHERE id IN ({exist_ph})"
+            ),
             update_params.as_slice(),
         )?;
 
@@ -744,7 +748,10 @@ impl Store {
         })
     }
 
-    pub fn reset_login_attempts(&self, user_id: &str) -> Result<(), StoreError> {
+    /// 登录成功：清失败计数/锁定 + 记 last_login_at。该列此前全仓零写入,
+    /// admin 用户页 lastLoginAt 恒"从未"、inactive7d 筛选恒命中全员,故不可早退——
+    /// 计数已干净也要落登录时间。
+    pub fn record_login_success(&self, user_id: &str) -> Result<(), StoreError> {
         keys::validate_id(user_id)?;
         let conn = self.conn()?;
         for _ in 0..MAX_CAS_RETRIES {
@@ -752,11 +759,9 @@ impl Store {
                 entity: "user".into(),
                 key: user_id.into(),
             })?;
-            if user.failed_login_count == 0 && user.locked_until.is_none() {
-                return Ok(());
-            }
             match conn.execute(
-                "UPDATE users SET failed_login_count=0, locked_until=NULL, updated_at=?1
+                "UPDATE users SET failed_login_count=0, locked_until=NULL, last_login_at=?1,
+                        updated_at=?1
                  WHERE id=?2 AND updated_at=?3",
                 params![
                     Utc::now().to_rfc3339(),
@@ -1023,7 +1028,6 @@ mod tests {
             role: "user".to_string(),
             status: "active".to_string(),
             last_login_at: None,
-            referrer_source: None,
         }
     }
 
@@ -1207,7 +1211,7 @@ mod tests {
     }
 
     #[test]
-    fn reset_login_attempts_clears_count_and_unlock_status() {
+    fn record_login_success_clears_count_and_stamps_last_login() {
         let store = test_store();
         store.create_user(&sample_user("u1", "a@b.com")).unwrap();
         let max = crate::constants::MAX_FAILED_LOGIN_ATTEMPTS;
@@ -1215,10 +1219,15 @@ mod tests {
             let _ = store.record_failed_login("u1").unwrap();
         }
         assert!(store.is_account_locked("u1").unwrap());
-        store.reset_login_attempts("u1").unwrap();
+        store.record_login_success("u1").unwrap();
         assert!(!store.is_account_locked("u1").unwrap());
-        // 已清空再次调用幂等
-        store.reset_login_attempts("u1").unwrap();
+        let first = store.get_user_by_id("u1").unwrap().unwrap().last_login_at;
+        assert!(first.is_some(), "登录成功应写 last_login_at");
+        // 计数已干净的再次登录仍须刷新登录时间（不早退）。
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        store.record_login_success("u1").unwrap();
+        let second = store.get_user_by_id("u1").unwrap().unwrap().last_login_at;
+        assert!(second > first, "再次登录应前移 last_login_at");
     }
 
     #[test]

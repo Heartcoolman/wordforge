@@ -220,7 +220,6 @@ async fn create_word(
         difficulty: req.difficulty.unwrap_or(0.5).clamp(0.0, 1.0),
         examples: req.examples.unwrap_or_default(),
         tags: req.tags.unwrap_or_default(),
-        embedding: None,
         created_at: Utc::now(),
     };
     let response = WordPublic::from(&word);
@@ -267,7 +266,6 @@ async fn update_word(
                         .clamp(0.0, 1.0),
                     examples: req.examples.unwrap_or(existing.examples),
                     tags: req.tags.unwrap_or(existing.tags),
-                    embedding: existing.embedding,
                     created_at: existing.created_at,
                 };
                 Store::upsert_word_conn(conn, &word)?;
@@ -319,7 +317,6 @@ async fn batch_create_words(
                     difficulty: item.difficulty.unwrap_or(0.5).clamp(0.0, 1.0),
                     examples: item.examples.unwrap_or_default(),
                     tags: item.tags.unwrap_or_default(),
-                    embedding: None,
                     created_at: Utc::now(),
                 };
                 store.upsert_word(&word)?;
@@ -450,7 +447,6 @@ async fn import_from_url(
             difficulty: 0.5,
             examples: Vec::new(),
             tags: vec!["imported".to_string()],
-            embedding: None,
             created_at: Utc::now(),
         };
         words_to_import.push(word);

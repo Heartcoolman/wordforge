@@ -42,8 +42,6 @@ pub struct SspConfig {
     pub min_index: i32,
     /// stability log 等比 bins 的最大指数
     pub max_index: i32,
-    /// 遗忘后难度增量（映射到 D ∈ [1,10]）
-    pub difficulty_offset_on_lapse: f64,
     /// DP 最大迭代次数
     pub max_iterations: u32,
     /// DP 收敛阈值
@@ -108,7 +106,6 @@ impl Default for SspConfig {
             base: 1.05,
             min_index: -30,
             max_index: 122,
-            difficulty_offset_on_lapse: 1.0,
             max_iterations: 200_000,
             convergence_threshold: 0.1,
             discount_factor: 1.0,

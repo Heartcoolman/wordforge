@@ -8,7 +8,6 @@ pub struct ModelingConfig {
     pub confidence_decay: f64,
     pub min_confidence: f64,
     pub fatigue_increase_rate: f64,
-    pub fatigue_recovery_rate: f64,
     pub motivation_momentum: f64,
     /// 视觉疲劳信号在混合公式中的权重 (0.0-1.0)
     /// 行为信号权重 = 1.0 - visual_fatigue_weight
@@ -83,7 +82,6 @@ impl Default for ModelingConfig {
             confidence_decay: 0.99,
             min_confidence: 0.10,
             fatigue_increase_rate: 0.02,
-            fatigue_recovery_rate: 0.001,
             motivation_momentum: 0.1,
             visual_fatigue_weight: 0.4,
             response_speed_max_ms: 10000.0,

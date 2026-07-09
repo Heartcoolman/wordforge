@@ -28,7 +28,8 @@ const OK_HEALTH = {
 // 这里 stub 一个 no-op 2D context，使 reduced-motion 分支的 draw(0) 真正执行，覆盖绘制代码。
 // （setup.ts 已默认把 matchMedia('(prefers-reduced-motion: reduce)') 设为 matches=true）
 let ctx: Record<string, ReturnType<typeof vi.fn>>;
-let getCtxSpy: ReturnType<typeof vi.spyOn>;
+// getContext 的重载签名与 vi.spyOn 泛型推导不兼容；仅用于 mockRestore，收窄声明即可
+let getCtxSpy: { mockRestore(): void };
 
 beforeEach(() => {
   health.mockReset();

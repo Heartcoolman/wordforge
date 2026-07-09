@@ -181,8 +181,8 @@ impl Store {
         for word in words {
             keys::validate_id(&word.id)?;
             tx.execute(
-                "INSERT OR REPLACE INTO words (id, text, meaning, pronunciation, part_of_speech, difficulty, examples_json, tags_json, embedding_json, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                "INSERT OR REPLACE INTO words (id, text, meaning, pronunciation, part_of_speech, difficulty, examples_json, tags_json, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     word.id,
                     word.text,
@@ -192,7 +192,6 @@ impl Store {
                     word.difficulty,
                     Store::serialize_json(&word.examples)?,
                     Store::serialize_json(&word.tags)?,
-                    word.embedding.as_ref().map(Store::serialize_json).transpose()?,
                     word.created_at.to_rfc3339(),
                 ],
             )?;
@@ -264,8 +263,8 @@ impl Store {
                 continue;
             }
             tx.execute(
-                "INSERT OR REPLACE INTO words (id, text, meaning, pronunciation, part_of_speech, difficulty, examples_json, tags_json, embedding_json, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                "INSERT OR REPLACE INTO words (id, text, meaning, pronunciation, part_of_speech, difficulty, examples_json, tags_json, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     word.id,
                     word.text,
@@ -275,7 +274,6 @@ impl Store {
                     word.difficulty,
                     Store::serialize_json(&word.examples)?,
                     Store::serialize_json(&word.tags)?,
-                    word.embedding.as_ref().map(Store::serialize_json).transpose()?,
                     word.created_at.to_rfc3339(),
                 ],
             )?;

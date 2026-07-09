@@ -278,7 +278,6 @@ fn map_remote_word(rw: &RemoteWord, remote_id: &str) -> Word {
             "wb-center".to_string(),
             remote_id.to_string(),
         ],
-        embedding: None,
         created_at: Utc::now(),
     }
 }

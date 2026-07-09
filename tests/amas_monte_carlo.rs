@@ -1494,8 +1494,8 @@ fn monte_carlo_mdm_multi_timescale() {
             short_faster_count += 1;
         }
 
-        // 验证 consolidation 增长 (mapped from difficulty)
-        if state.consolidation > 0.0 {
+        // 验证难度收敛到可学习区间（原 consolidation 代理即 1.5 - difficulty/10 > 0）
+        if state.difficulty < 10.0 {
             consolidation_grows_count += 1;
         }
 

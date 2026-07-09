@@ -4,44 +4,19 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct MemoryModelConfig {
-    pub short_term_learning_rate: f64,
-    pub medium_term_learning_rate: f64,
-    pub long_term_learning_rate: f64,
-    pub composite_weight_short: f64,
-    pub composite_weight_medium: f64,
-    pub composite_weight_long: f64,
-    pub consolidation_rate_scale: f64,
-    pub consolidation_bonus: f64,
     pub mastery_composite_threshold: f64,
     pub mastery_accuracy_threshold: f64,
     pub mastery_streak_threshold: u32,
     pub reviewing_threshold: f64,
     pub half_life_base_epsilon: f64,
-    pub half_life_time_unit_secs: f64,
-    #[serde(default = "default_half_life_power")]
-    pub half_life_power: f64,
     pub recall_risk_bonus: f64,
     pub recall_risk_threshold: f64,
     #[serde(default = "default_base_desired_retention")]
     pub base_desired_retention: f64,
-    #[serde(default = "default_passive_decay_half_life_days")]
-    pub passive_decay_half_life_days: f64,
-    #[serde(default = "default_passive_decay_power")]
-    pub passive_decay_power: f64,
     #[serde(default = "default_mastery_window_size")]
     pub mastery_window_size: u32,
     #[serde(default = "default_streak_min_gap_ms")]
     pub streak_min_gap_ms: i64,
-    #[serde(default = "default_stability_base_days")]
-    pub stability_base_days: f64,
-    /// DEPRECATED（FSRS-6 起）：遗忘曲线 factor 由 `w[20]` 派生（`curve_factor()`），
-    /// 本字段仅为旧配置/DB 快照反序列化兼容保留，运行时不再读取。
-    #[serde(default = "default_forgetting_curve_factor")]
-    pub forgetting_curve_factor: f64,
-    /// DEPRECATED（FSRS-6 起）：遗忘曲线 decay 即 trainable 参数 `w[20]`（`curve_decay()`），
-    /// 本字段仅为旧配置/DB 快照反序列化兼容保留，运行时不再读取。
-    #[serde(default = "default_forgetting_curve_decay")]
-    pub forgetting_curve_decay: f64,
     /// 2021 MaiMemo study: forgetting curve has non-zero asymptote R→floor (not 0)
     /// FSRS-6 标准曲线无渐近线，默认 0.0；保留为可调项。
     #[serde(default = "default_forgetting_curve_floor")]
@@ -101,6 +76,23 @@ pub struct MemoryModelConfig {
     /// u∈[-1,1) 由 stability/review_count 派生（见 GSP_SPEC §7），错峰削平同步复习波。
     #[serde(default = "default_gsp_interval_fuzz")]
     pub gsp_interval_fuzz: f64,
+    // === GSP 退役（retire）：毕业后过学词冻结到长间隔（2026-07-08 真半衰期口径战役）===
+    /// 退役所需最小复习次数。0=关闭（bit-exact legacy）。>0 时：毕业（graduated）且
+    /// review_count/stability/correct_streak 三门槛同时满足 → 调度区间直接取 retire 间隔
+    /// （在 cap/fuzz 之前 return，可越过区间帽）。注意 review_count 含全部历史，warm 词
+    /// 低门槛会首评即退役 —— 应与 `gsp_retire_min_streak` 搭配使用（契约 GSP_SPEC §9）。
+    #[serde(default = "default_gsp_retire_after_reviews")]
+    pub gsp_retire_after_reviews: u32,
+    /// 退役间隔（天）。默认 365。
+    #[serde(default = "default_gsp_retire_interval_days")]
+    pub gsp_retire_interval_days: f64,
+    /// 退役 stability 门槛（天）。默认 0=不设。
+    #[serde(default = "default_gsp_retire_min_stability")]
+    pub gsp_retire_min_stability: f64,
+    /// 退役连击门槛。默认 0=不设。连击是「近期无失败」的直接证据，是记忆已固化的
+    /// 强代理（离线 oracle 校准：脏历史词 streak≥4 时估计半衰期稳越 30 天）。
+    #[serde(default = "default_gsp_retire_min_streak")]
+    pub gsp_retire_min_streak: u32,
     // === per-word difficulty logit 加性项（v6 预测层；契约见 benchmarks/maimemo pred_*.py）===
     /// 预测/调度 recall **读出**在 logit 域加 `β·(REF − word_difficulty[1,10])`：难词降 p、易词升 p，
     /// 补 FSRS 二元映射下「预测随难度扁平」的区分度/校准残差（maimemo TEST: AUC+0.015 反超 dhp、
@@ -182,29 +174,11 @@ pub struct MemoryModelConfig {
 pub(crate) fn default_base_desired_retention() -> f64 {
     0.85
 }
-pub(crate) fn default_half_life_power() -> f64 {
-    1.5
-}
-pub(crate) fn default_passive_decay_half_life_days() -> f64 {
-    30.0
-}
-pub(crate) fn default_passive_decay_power() -> f64 {
-    0.5
-}
 pub(crate) fn default_mastery_window_size() -> u32 {
     20
 }
 pub(crate) fn default_streak_min_gap_ms() -> i64 {
     1_800_000
-}
-pub(crate) fn default_stability_base_days() -> f64 {
-    20.0
-}
-pub(crate) fn default_forgetting_curve_factor() -> f64 {
-    19.0 / 81.0
-}
-pub(crate) fn default_forgetting_curve_decay() -> f64 {
-    -0.5
 }
 pub(crate) fn default_forgetting_curve_floor() -> f64 {
     0.0
@@ -282,6 +256,18 @@ pub(crate) fn default_gsp_maturity_band_days() -> f64 {
 }
 pub(crate) fn default_gsp_interval_fuzz() -> f64 {
     0.0
+}
+pub(crate) fn default_gsp_retire_after_reviews() -> u32 {
+    0
+}
+pub(crate) fn default_gsp_retire_interval_days() -> f64 {
+    365.0
+}
+pub(crate) fn default_gsp_retire_min_stability() -> f64 {
+    0.0
+}
+pub(crate) fn default_gsp_retire_min_streak() -> u32 {
+    0
 }
 pub(crate) fn default_difficulty_logit_weight() -> f64 {
     0.0
@@ -388,33 +374,17 @@ impl MemoryModelConfig {
 impl Default for MemoryModelConfig {
     fn default() -> Self {
         Self {
-            short_term_learning_rate: 0.85,
-            medium_term_learning_rate: 0.30,
-            long_term_learning_rate: 0.12,
-            composite_weight_short: 0.20,
-            composite_weight_medium: 0.30,
-            composite_weight_long: 0.50,
-            consolidation_rate_scale: 0.25,
-            consolidation_bonus: 1.5,
             mastery_composite_threshold: 0.30,
             mastery_accuracy_threshold: 0.65,
             mastery_streak_threshold: 1,
             reviewing_threshold: 0.4,
             half_life_base_epsilon: 0.3,
-            half_life_time_unit_secs: 1296000.0,
-            half_life_power: 1.5,
             recall_risk_bonus: 0.2,
             recall_risk_threshold: 0.55,
             // FSRS 官方推荐 desired_retention，与 R(S,S)=0.9 语义自洽
             base_desired_retention: 0.9,
-            passive_decay_half_life_days: 30.0,
-            passive_decay_power: 0.30,
             mastery_window_size: 20,
             streak_min_gap_ms: 1_800_000,
-            stability_base_days: 20.0,
-            // DEPRECATED 字段：运行时曲线参数从 w[20] 派生（curve_decay/curve_factor）
-            forgetting_curve_factor: 19.0 / 81.0,
-            forgetting_curve_decay: -0.5,
             // FSRS-6 标准曲线无渐近线；保留为可调项
             forgetting_curve_floor: 0.0,
             w: default_w(),
@@ -433,6 +403,10 @@ impl Default for MemoryModelConfig {
             gsp_mature_retention: 0.0,
             gsp_maturity_band_days: 0.0,
             gsp_interval_fuzz: 0.0,
+            gsp_retire_after_reviews: 0,
+            gsp_retire_interval_days: 365.0,
+            gsp_retire_min_stability: 0.0,
+            gsp_retire_min_streak: 0,
             difficulty_logit_weight: 0.0,
             difficulty_logit_ref: 5.0,
             pred_logit_base_scale: 1.0,

@@ -266,19 +266,33 @@ pub(super) async fn next_words(
 
                 // ② 混淆隔离（Phase 1b）：flag 开启时，把本 session 已出现词的高分混淆对端注入
                 // context（候选池里命中者评分被 dampen）。flag 关 → 不查、不填充 → 选词 bit-exact legacy。
+                // 与 session_performance 解耦：客户端不上报 perf 时构建仅含混淆对端的最小 context
+                // （其余字段空集 + temporal_boost=1.0，对 select_words 与 None 数学等价），
+                // 避免混淆隔离静默 no-op 造成 A/B 曝光不一致。
                 let mut session_context = session_context;
                 if amas_config.feature_flags.confusion_isolation_enabled {
-                    if let Some(ctx) = session_context.as_mut() {
-                        let min_score = amas_config.word_selector.confusion_min_score;
-                        let mut conf: HashSet<String> = HashSet::new();
-                        for wid in &shown_ids {
-                            for (other, score) in store.get_confusion_pairs_for_word(wid, 20)? {
-                                if score >= min_score {
-                                    conf.insert(other);
-                                }
+                    let min_score = amas_config.word_selector.confusion_min_score;
+                    let mut conf: HashSet<String> = HashSet::new();
+                    for wid in &shown_ids {
+                        for (other, score) in store.get_confusion_pairs_for_word(wid, 20)? {
+                            if score >= min_score {
+                                conf.insert(other);
                             }
                         }
-                        ctx.confusion_exclude_word_ids = conf.into_iter().collect();
+                    }
+                    if !conf.is_empty() {
+                        let exclude: Vec<String> = conf.into_iter().collect();
+                        match session_context.as_mut() {
+                            Some(ctx) => ctx.confusion_exclude_word_ids = exclude,
+                            None => {
+                                session_context = Some(SessionSelectionContext {
+                                    error_prone_word_ids: Vec::new(),
+                                    recently_mastered_word_ids: Vec::new(),
+                                    confusion_exclude_word_ids: exclude,
+                                    temporal_boost: 1.0,
+                                });
+                            }
+                        }
                     }
                 }
 

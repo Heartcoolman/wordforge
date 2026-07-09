@@ -205,9 +205,16 @@ pub fn evaluate(exp: &ExperimentRow, raw: &ExperimentRawMetrics) -> ExperimentVe
         None => (false, false, false, false),
     };
 
+    // guardrail 否决叠加自身样本量门槛：小 n 上虚假显著的 guardrail 会误否决好实验
+    // （方向为过度保守）；两臂均达 min_sample 才认可其 regressed 证据。
     let guardrail_regressions: Vec<String> = metrics
         .iter()
-        .filter(|m| m.metric != exp.primary_metric && m.regressed)
+        .filter(|m| {
+            m.metric != exp.primary_metric
+                && m.regressed
+                && m.canary.n >= exp.min_sample
+                && m.baseline.n >= exp.min_sample
+        })
         .map(|m| m.metric.clone())
         .collect();
 

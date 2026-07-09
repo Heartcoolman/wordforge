@@ -159,7 +159,6 @@ struct DashboardAggregate {
 struct ForgettingRiskResponse {
     range: RangeResponse,
     summary: ForgettingRiskSummary,
-    comparison: ForgettingRiskComparison,
     retention_curve: Vec<RetentionCurvePoint>,
     risk_words: Vec<RiskWord>,
 }
@@ -172,14 +171,6 @@ struct ForgettingRiskSummary {
     average_retention: Option<f64>,
     due_review_words: u64,
     overdue_review_words: u64,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ForgettingRiskComparison {
-    previous_high_risk_words: Option<u64>,
-    previous_medium_risk_words: Option<u64>,
-    previous_average_retention: Option<f64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -708,11 +699,6 @@ async fn forgetting_risk(
                         },
                         due_review_words,
                         overdue_review_words,
-                    },
-                    comparison: ForgettingRiskComparison {
-                        previous_high_risk_words: None,
-                        previous_medium_risk_words: None,
-                        previous_average_retention: None,
                     },
                     retention_curve,
                     risk_words,

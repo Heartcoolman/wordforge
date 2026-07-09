@@ -23,8 +23,6 @@ export interface AdminUser {
   status: 'active' | 'inactive' | 'suspended';
   /** m024:最近一次登录时间;null 表示从未登录 */
   lastLoginAt: string | null;
-  /** m025:注册来源(referral/marketing channel);null 表示未知 */
-  referrerSource: string | null;
   /** m024:仅 list?includeStats=true 时填充 */
   stats?: AdminUserStats;
 }
@@ -147,10 +145,10 @@ export interface UserExtras {
     notificationEnabled: boolean;
     soundEnabled: boolean;
   } | null;
-  elo: { rating: number; sigma: number; games: number; level: number } | null;
+  elo: { rating: number; games: number; level: number } | null;
   habit: {
-    dailyGoalWords: number;
-    dailyGoalMinutes: number;
+    /** 每日目标词数,读自学习配置真值;null 表示用户尚无学习配置 */
+    dailyGoalWords: number | null;
     sessionsPerDay: number;
     medianSessionMins: number;
     totalSessions: number;

@@ -23,20 +23,65 @@ impl Store {
         }
     }
 
-    /// 把 UserState JSON(camelCase)里的累计计数投影到 engine_user_states 标量列。
-    /// state_json 是引擎真值,但 get_data_upload_status / amas_dashboard 等按标量列查询;
-    /// 每次落库须把列与 JSON 同步,否则列恒为 schema DEFAULT 0 → 设备数据状态 AMAS 通道恒判 nil。
-    fn projected_counts(state: &serde_json::Value) -> (i64, i64) {
+    /// 把 UserState JSON(camelCase)投影到 engine_user_states 标量列并 upsert（全部写路径共用，
+    /// 防列集漂移）。state_json 是引擎真值,但 get_data_upload_status / amas_dashboard /
+    /// user-state 均值 / 认知分布 / stage 7d 留存等按标量列查询;每次落库须把列与 JSON 同步,
+    /// 否则列恒为 schema DEFAULT → 计数误判 nil(m053 前科)、看板均值/分布恒常数、留存恒 0。
+    /// 缺键/坏值回落列 DEFAULT,不覆盖为 0。
+    fn upsert_engine_user_state_conn(
+        conn: &rusqlite::Connection,
+        user_id: &str,
+        state: &serde_json::Value,
+    ) -> Result<(), StoreError> {
+        let json = Self::serialize_json(state)?;
         // 计数为非负整数;兼容 JSON 整数与浮点表示(如 5.0),并 clamp 到 [0, i64::MAX],
         // 避免 as_i64() 对浮点/超界值返回 None 而静默退化为 0、覆盖标量列误判 nil。
-        let extract = |key: &str| -> i64 {
+        let count = |key: &str| -> i64 {
             state
                 .get(key)
                 .and_then(|v| v.as_i64().or_else(|| v.as_f64().map(|f| f as i64)))
                 .unwrap_or(0)
                 .max(0)
         };
-        (extract("totalEventCount"), extract("sessionEventCount"))
+        let num = |path: &[&str], default: f64| -> f64 {
+            let mut cur = state;
+            for key in path {
+                match cur.get(key) {
+                    Some(v) => cur = v,
+                    None => return default,
+                }
+            }
+            cur.as_f64().unwrap_or(default)
+        };
+        let last_active_at = state.get("lastActiveAt").and_then(|v| v.as_str());
+        let created_at = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO engine_user_states
+               (user_id, state_json, total_event_count, session_event_count, created_at,
+                attention, fatigue, motivation, confidence, last_active_at,
+                cognitive_memory_capacity, cognitive_processing_speed, cognitive_stability)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+             ON CONFLICT(user_id) DO UPDATE SET
+               state_json=?2, total_event_count=?3, session_event_count=?4,
+               attention=?6, fatigue=?7, motivation=?8, confidence=?9, last_active_at=?10,
+               cognitive_memory_capacity=?11, cognitive_processing_speed=?12, cognitive_stability=?13",
+            params![
+                user_id,
+                json,
+                count("totalEventCount"),
+                count("sessionEventCount"),
+                created_at,
+                num(&["attention"], 0.7),
+                num(&["fatigue"], 0.0),
+                num(&["motivation"], 0.0),
+                num(&["confidence"], 0.1),
+                last_active_at,
+                num(&["cognitiveProfile", "memoryCapacity"], 0.5),
+                num(&["cognitiveProfile", "processingSpeed"], 0.5),
+                num(&["cognitiveProfile", "stability"], 0.5),
+            ],
+        )?;
+        Ok(())
     }
 
     pub fn set_engine_user_state(
@@ -46,16 +91,7 @@ impl Store {
     ) -> Result<(), StoreError> {
         keys::validate_id(user_id)?;
         let conn = self.conn()?;
-        let json = Self::serialize_json(state)?;
-        let (total_ev, session_ev) = Self::projected_counts(state);
-        let created_at = chrono::Utc::now().to_rfc3339();
-        conn.execute(
-            "INSERT INTO engine_user_states (user_id, state_json, total_event_count, session_event_count, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(user_id) DO UPDATE SET state_json=?2, total_event_count=?3, session_event_count=?4",
-            params![user_id, json, total_ev, session_ev, created_at],
-        )?;
-        Ok(())
+        Self::upsert_engine_user_state_conn(&conn, user_id, state)
     }
 
     pub fn delete_engine_user_state(&self, user_id: &str) -> Result<(), StoreError> {
@@ -88,6 +124,93 @@ impl Store {
         }
     }
 
+    /// mastery 键 → word_id：`mastery:{w}` 或 `mastery:{w}:{mode}`。ID 禁含 ':'
+    /// （[`keys::validate_id`]），故前缀后首段即 word_id，无歧义；非 mastery 键返回 None。
+    pub(crate) fn mastery_key_word(algo_id: &str) -> Option<&str> {
+        algo_id
+            .strip_prefix("mastery:")
+            .and_then(|rest| rest.split(':').next())
+            .filter(|w| !w.is_empty())
+    }
+
+    /// 把某词的 mastery 投影行重导出到 `mastery_states`（admin 用户档案 / look MDM 列的数据源，
+    /// 此前无任何写入路径、恒 NULL）：从该词全部候选痕迹键（legacy + 已知 question mode）现存
+    /// blob 中取「最近复习」的一条摊平 upsert；无任何痕迹则删投影行。写入 / 回滚 / 删除路径共用
+    /// 同一重导出口径（回滚可能把状态还原到更旧值、多痕迹下单键增删不代表整词，直接投影写入值
+    /// 会漂移），必须与 engine_algo_states 的变更在同一 conn/tx 内调用。
+    pub(crate) fn reproject_mastery(
+        conn: &rusqlite::Connection,
+        user_id: &str,
+        word_id: &str,
+    ) -> Result<(), StoreError> {
+        use crate::amas::memory::mastery::KNOWN_QUESTION_MODES;
+        let mut candidate_keys = Vec::with_capacity(1 + KNOWN_QUESTION_MODES.len());
+        candidate_keys.push(format!("mastery:{word_id}"));
+        for mode in KNOWN_QUESTION_MODES {
+            candidate_keys.push(format!("mastery:{word_id}:{mode}"));
+        }
+        let placeholders = (2..2 + candidate_keys.len())
+            .map(|i| format!("?{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT state_json FROM engine_algo_states
+              WHERE user_id=?1 AND algo_id IN ({placeholders})"
+        );
+        let mut best: Option<crate::amas::memory::mdm::MdmState> = None;
+        {
+            let mut stmt = conn.prepare_cached(&sql)?;
+            let mut sql_params: Vec<&dyn rusqlite::ToSql> = vec![&user_id];
+            for key in &candidate_keys {
+                sql_params.push(key);
+            }
+            let mut rows = stmt.query(sql_params.as_slice())?;
+            while let Some(row) = rows.next()? {
+                let json: String = row.get(0)?;
+                let value: serde_json::Value = Self::deserialize_json(&json)?;
+                if let Some(mdm) = Self::decode_mastery_mdm_state(value) {
+                    #[allow(clippy::unnecessary_map_or)] // is_none_or 需 1.82，MSRV 1.77
+                    let newer = best.as_ref().map_or(true, |b| {
+                        (mdm.last_review_at.unwrap_or(i64::MIN), mdm.review_count)
+                            > (b.last_review_at.unwrap_or(i64::MIN), b.review_count)
+                    });
+                    if newer {
+                        best = Some(mdm);
+                    }
+                }
+            }
+        }
+        match best {
+            Some(m) => {
+                conn.execute(
+                    "INSERT INTO mastery_states
+                       (user_id, word_id, mdm_stability, mdm_difficulty, mdm_memory_strength,
+                        mdm_last_review_at_ms, mdm_review_count)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                     ON CONFLICT(user_id, word_id) DO UPDATE SET
+                       mdm_stability=?3, mdm_difficulty=?4, mdm_memory_strength=?5,
+                       mdm_last_review_at_ms=?6, mdm_review_count=?7",
+                    params![
+                        user_id,
+                        word_id,
+                        m.stability,
+                        m.difficulty,
+                        m.memory_strength,
+                        m.last_review_at,
+                        m.review_count as i64
+                    ],
+                )?;
+            }
+            None => {
+                conn.execute(
+                    "DELETE FROM mastery_states WHERE user_id=?1 AND word_id=?2",
+                    params![user_id, word_id],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn set_engine_algo_state(
         &self,
         user_id: &str,
@@ -95,24 +218,35 @@ impl Store {
         state: &serde_json::Value,
     ) -> Result<(), StoreError> {
         keys::validate_id(user_id)?;
-        let conn = self.conn()?;
+        let mut conn = self.conn()?;
         let json = Self::serialize_json(state)?;
-        conn.execute(
+        // 投影同步须与 algo 写同笔原子（batch 回滚路径经此还原 mastery 键）。
+        let tx = conn.transaction()?;
+        tx.execute(
             "INSERT INTO engine_algo_states (user_id, algo_id, state_json)
              VALUES (?1, ?2, ?3)
              ON CONFLICT(user_id, algo_id) DO UPDATE SET state_json=?3",
             params![user_id, algo_id, json],
         )?;
+        if let Some(word_id) = Self::mastery_key_word(algo_id) {
+            Self::reproject_mastery(&tx, user_id, word_id)?;
+        }
+        tx.commit()?;
         Ok(())
     }
 
     pub fn delete_engine_algo_state(&self, user_id: &str, algo_id: &str) -> Result<(), StoreError> {
         keys::validate_id(user_id)?;
-        let conn = self.conn()?;
-        conn.execute(
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+        tx.execute(
             "DELETE FROM engine_algo_states WHERE user_id=?1 AND algo_id=?2",
             params![user_id, algo_id],
         )?;
+        if let Some(word_id) = Self::mastery_key_word(algo_id) {
+            Self::reproject_mastery(&tx, user_id, word_id)?;
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -457,15 +591,9 @@ impl Store {
         let mut conn = self.conn()?;
         // IMMEDIATE：ELO RMW 在 BEGIN 即取写锁，杜绝读后写升级丢更新/死锁。
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let user_json = Self::serialize_json(user_state)?;
-        let (total_ev, session_ev) = Self::projected_counts(user_state);
+        Self::upsert_engine_user_state_conn(&tx, user_id, user_state)?;
         let created_at = chrono::Utc::now().to_rfc3339();
-        tx.execute(
-            "INSERT INTO engine_user_states (user_id, state_json, total_event_count, session_event_count, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(user_id) DO UPDATE SET state_json=?2, total_event_count=?3, session_event_count=?4",
-            params![user_id, user_json, total_ev, session_ev, created_at],
-        )?;
+        let mut mastery_words = std::collections::BTreeSet::new();
         for (algo_id, value) in algo_states {
             let json = Self::serialize_json(value)?;
             tx.execute(
@@ -474,6 +602,14 @@ impl Store {
                  ON CONFLICT(user_id, algo_id) DO UPDATE SET state_json=?3",
                 params![user_id, algo_id, json],
             )?;
+            if let Some(word_id) = Self::mastery_key_word(algo_id) {
+                mastery_words.insert(word_id);
+            }
+        }
+        // mastery 投影同 tx 同步（幂等冲突回滚时随整笔撤销）。按词去重后重导出，
+        // 每词一次 ≤5 行 PK 查——热路径每事件通常仅 1 个 mastery 键。
+        for word_id in mastery_words {
+            Self::reproject_mastery(&tx, user_id, word_id)?;
         }
         // 写放大重构：swd 滚动历史从"每事件全量重写整块 Vec blob"改为**追加一行**到 engine_swd_history
         // （热路径仅 1 INSERT、无 prune；无界增长由维护 worker 兜底）。与 user_state/algo/ELO/幂等标记
@@ -616,19 +752,16 @@ impl Store {
         keys::validate_id(user_id)?;
         let mut conn = self.conn()?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let json = Self::serialize_json(default_user_state)?;
-        let (total_ev, session_ev) = Self::projected_counts(default_user_state);
-        let created_at = chrono::Utc::now().to_rfc3339();
-        tx.execute(
-            "INSERT INTO engine_user_states (user_id, state_json, total_event_count, session_event_count, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(user_id) DO UPDATE SET state_json=?2, total_event_count=?3, session_event_count=?4",
-            params![user_id, json, total_ev, session_ev, created_at],
-        )?;
+        Self::upsert_engine_user_state_conn(&tx, user_id, default_user_state)?;
         // 删除该用户**所有** algo 状态：mastery:*/evm:*/iad/mtp/ige/swd/trust 一网打尽，
         // 否则旧词记忆/IAD/MTP 残留会与 total_event_count=0 的冷启动态自相矛盾（#24）。
         tx.execute(
             "DELETE FROM engine_algo_states WHERE user_id=?1",
+            params![user_id],
+        )?;
+        // mastery 投影随源数据一并清空（真值 mastery:* 键已全删）。
+        tx.execute(
+            "DELETE FROM mastery_states WHERE user_id=?1",
             params![user_id],
         )?;
         // 写放大重构：swd 历史已迁出 engine_algo_states 到独立行表，reset 一并清空。
@@ -785,15 +918,7 @@ impl Store {
         if let Some(state_opt) = r.user_state {
             match state_opt {
                 Some(v) => {
-                    let json = Self::serialize_json(v)?;
-                    let (total_ev, session_ev) = Self::projected_counts(v);
-                    let created_at = chrono::Utc::now().to_rfc3339();
-                    tx.execute(
-                        "INSERT INTO engine_user_states (user_id, state_json, total_event_count, session_event_count, created_at)
-                         VALUES (?1, ?2, ?3, ?4, ?5)
-                         ON CONFLICT(user_id) DO UPDATE SET state_json=?2, total_event_count=?3, session_event_count=?4",
-                        params![r.user_id, json, total_ev, session_ev, created_at],
-                    )?;
+                    Self::upsert_engine_user_state_conn(&tx, r.user_id, v)?;
                 }
                 None => {
                     tx.execute(
@@ -803,6 +928,7 @@ impl Store {
                 }
             }
         }
+        let mut mastery_words = std::collections::BTreeSet::new();
         for (algo_id, val) in r.algo_states {
             match val {
                 Some(v) => {
@@ -821,6 +947,14 @@ impl Store {
                     )?;
                 }
             }
+            if let Some(word_id) = Self::mastery_key_word(algo_id) {
+                mastery_words.insert(word_id);
+            }
+        }
+        // mastery 投影随回滚同 tx 重导出：还原值可能比投影旧、legacy+per-mode 双键可能一增一删，
+        // 统一按词从还原后的现存痕迹重算，杜绝投影漂移。
+        for word_id in mastery_words {
+            Self::reproject_mastery(&tx, r.user_id, word_id)?;
         }
         if let Some(elo) = r.user_elo {
             tx.execute(
@@ -1537,6 +1671,96 @@ mod tests {
         assert_eq!(store.get_user_elo("u1").unwrap().games, 0);
     }
 
+    /// mastery_states 投影：写入/回滚/reset 全路径与 engine_algo_states 真值同步。
+    #[test]
+    fn mastery_projection_syncs_on_all_write_paths() {
+        use crate::store::operations::engine::EngineStateRestore;
+        use rusqlite::{params, OptionalExtension};
+        let (_t, store) = tempfile_store();
+        let read_row = |w: &str| -> Option<(f64, f64, f64, Option<i64>, i64)> {
+            store
+                .conn()
+                .unwrap()
+                .query_row(
+                    "SELECT mdm_stability, mdm_difficulty, mdm_memory_strength,
+                            mdm_last_review_at_ms, mdm_review_count
+                       FROM mastery_states WHERE user_id='u1' AND word_id=?1",
+                    params![w],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                )
+                .optional()
+                .unwrap()
+        };
+        let mdm = |s: f64, rc: u32, at: i64| {
+            serde_json::json!({
+                "stability": s, "difficulty": 4.0, "memory_strength": s,
+                "last_review_at": at, "review_count": rc
+            })
+        };
+
+        // ① 热路径 persist：legacy 键 → 投影行出现。
+        let algo = vec![("mastery:w1".to_string(), mdm(2.5, 3, 1_000))];
+        store
+            .persist_engine_state_atomic("u1", &serde_json::json!({}), &algo, None, None, None)
+            .unwrap();
+        let row = read_row("w1").expect("persist 后投影行应存在");
+        assert_eq!(row, (2.5, 4.0, 2.5, Some(1_000), 3));
+
+        // ② 多痕迹：更新 per-mode 键（更近复习）→ 投影切到最新痕迹。
+        let algo2 = vec![(
+            "mastery:w1:word-to-meaning".to_string(),
+            mdm(7.0, 4, 2_000),
+        )];
+        store
+            .persist_engine_state_atomic("u1", &serde_json::json!({}), &algo2, None, None, None)
+            .unwrap();
+        assert_eq!(read_row("w1").unwrap().0, 7.0, "投影应取最近复习痕迹");
+
+        // ③ 回滚：per-mode 键还原为 None → 投影重导出回 legacy 痕迹。
+        let none_val: Option<serde_json::Value> = None;
+        store
+            .restore_engine_state_atomic(&EngineStateRestore {
+                user_id: "u1",
+                user_state: None,
+                algo_states: &[("mastery:w1:word-to-meaning", &none_val)],
+                user_elo: None,
+                word_elo: None,
+                word_elo_trend_select: None,
+                word_elo_contrib: None,
+                swd_delete_seq: None,
+                clear_marker_record_id: None,
+            })
+            .unwrap();
+        assert_eq!(read_row("w1").unwrap().0, 2.5, "回滚后投影应回退到 legacy 痕迹");
+
+        // ④ 通用 setter/delete 同步；删尽全部痕迹 → 投影行删除。
+        store
+            .set_engine_algo_state("u1", "mastery:w2", &mdm(1.0, 1, 500))
+            .unwrap();
+        assert!(read_row("w2").is_some());
+        store.delete_engine_algo_state("u1", "mastery:w2").unwrap();
+        assert!(read_row("w2").is_none(), "痕迹删尽后投影行应删除");
+
+        // ⑤ reset：投影随 algo 状态整体清空。
+        store
+            .reset_engine_state_atomic("u1", &serde_json::json!({}))
+            .unwrap();
+        assert!(read_row("w1").is_none(), "reset 后投影应清空");
+
+        // ⑥ 幂等冲突整笔回滚：投影不残留。
+        let algo3 = vec![("mastery:w3".to_string(), mdm(3.0, 2, 3_000))];
+        store
+            .persist_engine_state_atomic("u1", &serde_json::json!({}), &algo3, None, None, Some("r1"))
+            .unwrap();
+        let algo4 = vec![("mastery:w4".to_string(), mdm(9.0, 9, 9_000))];
+        let out = store
+            .persist_engine_state_atomic("u1", &serde_json::json!({}), &algo4, None, None, Some("r1"))
+            .unwrap();
+        assert!(!out.committed);
+        assert!(read_row("w4").is_none(), "重复事件整笔回滚，投影不应残留");
+        assert!(read_row("w3").is_some());
+    }
+
     /// #11/#39：persist_engine_state_atomic 带 EloUpdateSpec 时，在同一 tx 内累加 user_elo/word_elo。
     #[test]
     fn persist_engine_state_atomic_applies_elo_in_same_tx() {
@@ -1862,7 +2086,6 @@ mod tests {
         assert_entry_eq(&recent[1], &e2);
 
         // 单条路径回滚：删最后 append 的那行（seqs[2]）→ 剩 e0,e1。
-        let none_val: Option<serde_json::Value> = None;
         store
             .restore_engine_state_atomic(&EngineStateRestore {
                 user_id: "u1",

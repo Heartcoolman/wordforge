@@ -13,7 +13,6 @@ CREATE TABLE IF NOT EXISTS users (
     role TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('user','staff','admin')),
     status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','inactive','suspended')),
     last_login_at TEXT DEFAULT NULL,
-    referrer_source TEXT DEFAULT NULL,
     PRIMARY KEY (id),
     UNIQUE (email)
 );
@@ -86,8 +85,6 @@ CREATE TABLE IF NOT EXISTS habit_profiles (
     sessions_per_day REAL NOT NULL DEFAULT 1.0,
     temporal_hourly_stats_json TEXT NOT NULL DEFAULT '[]',
     temporal_total_sessions INTEGER NOT NULL DEFAULT 0,
-    daily_goal_words INTEGER NOT NULL DEFAULT 30,
-    daily_goal_minutes INTEGER NOT NULL DEFAULT 25,
     PRIMARY KEY (user_id)
 );
 
@@ -137,13 +134,10 @@ CREATE TABLE IF NOT EXISTS words (
     difficulty REAL NOT NULL DEFAULT 0.0,
     examples_json TEXT NOT NULL DEFAULT '[]',
     tags_json TEXT NOT NULL DEFAULT '[]',
-    embedding_json TEXT DEFAULT NULL,
     created_at TEXT NOT NULL,
     PRIMARY KEY (id)
 );
 CREATE INDEX IF NOT EXISTS idx_words_created_at ON words(created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_words_without_embedding ON words(created_at DESC)
-    WHERE embedding_json IS NULL;
 
 CREATE TABLE IF NOT EXISTS wordbooks (
     id TEXT NOT NULL,
@@ -187,7 +181,6 @@ CREATE TABLE IF NOT EXISTS etymologies (
     roots_json TEXT NOT NULL DEFAULT '[]',
     generated INTEGER NOT NULL DEFAULT 0 CHECK (generated IN (0, 1)),
     source TEXT DEFAULT NULL,
-    generated_at TEXT DEFAULT NULL,
     PRIMARY KEY (word_id)
 );
 
@@ -334,8 +327,6 @@ CREATE TABLE IF NOT EXISTS user_stats (
     user_id TEXT NOT NULL,
     total_records INTEGER NOT NULL DEFAULT 0,
     correct_records INTEGER NOT NULL DEFAULT 0,
-    word_ids_json TEXT NOT NULL DEFAULT '[]',
-    session_ids_json TEXT NOT NULL DEFAULT '[]',
     PRIMARY KEY (user_id)
 );
 
@@ -399,15 +390,6 @@ CREATE TABLE IF NOT EXISTS engine_user_states (
     cognitive_memory_capacity REAL NOT NULL DEFAULT 0.5,
     cognitive_processing_speed REAL NOT NULL DEFAULT 0.5,
     cognitive_stability REAL NOT NULL DEFAULT 0.5,
-    trend_accuracy REAL NOT NULL DEFAULT 0.0,
-    trend_speed REAL NOT NULL DEFAULT 0.0,
-    trend_engagement REAL NOT NULL DEFAULT 0.0,
-    habit_preferred_hours_json TEXT NOT NULL DEFAULT '[9,14,20]',
-    habit_median_session_mins REAL NOT NULL DEFAULT 15.0,
-    habit_sessions_per_day REAL NOT NULL DEFAULT 1.0,
-    habit_hourly_stats_json TEXT NOT NULL DEFAULT '[]',
-    habit_total_sessions INTEGER NOT NULL DEFAULT 0,
-    last_session_id TEXT DEFAULT NULL,
     PRIMARY KEY (user_id)
 );
 
@@ -415,7 +397,6 @@ CREATE TABLE IF NOT EXISTS user_elo (
     user_id TEXT NOT NULL,
     rating REAL NOT NULL DEFAULT 1200.0,
     games INTEGER NOT NULL DEFAULT 0,
-    sigma REAL NOT NULL DEFAULT 86.0,
     -- T1.2 动态 K：带符号残差 EWMA 趋势（k_dynamic_enabled=false 时恒 0、不参与计算）。
     trend REAL NOT NULL DEFAULT 0.0,
     PRIMARY KEY (user_id)
@@ -460,7 +441,6 @@ CREATE TABLE IF NOT EXISTS mastery_states (
     mdm_memory_strength REAL NOT NULL DEFAULT 0.0,
     mdm_last_review_at_ms INTEGER DEFAULT NULL,
     mdm_review_count INTEGER NOT NULL DEFAULT 0,
-    mdm_short_term_strength REAL NOT NULL DEFAULT 0.0,
     PRIMARY KEY (user_id, word_id)
 );
 CREATE INDEX IF NOT EXISTS idx_mastery_states_word ON mastery_states(word_id);
@@ -519,10 +499,14 @@ CREATE TABLE IF NOT EXISTS engine_monitoring_events (
     -- 故独立落 experiment_id + arm('canary'|'baseline'),供按桶聚合与 A/A 自检。NULL=非实验事件。
     experiment_id TEXT DEFAULT NULL,
     experiment_arm TEXT DEFAULT NULL,
+    -- m066:决策↔日志关联。请求级 request_id（NULL=诊断端点/无请求上下文）。
+    request_id TEXT DEFAULT NULL,
     PRIMARY KEY (id)
 );
 CREATE INDEX IF NOT EXISTS idx_monitoring_events_timestamp
     ON engine_monitoring_events(timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_monitoring_events_request_id
+    ON engine_monitoring_events(request_id) WHERE request_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_monitoring_events_user
     ON engine_monitoring_events(user_id, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_monitoring_events_experiment
@@ -564,7 +548,6 @@ CREATE TABLE IF NOT EXISTS system_settings (
     llm_advisor_enabled INTEGER NOT NULL DEFAULT 0 CHECK (llm_advisor_enabled IN (0, 1)),
     amas_grayscale_steps TEXT NOT NULL DEFAULT '20,60,100',
     -- m031:数据探针看板全局默认采样率([0,1]),作用于 telemetry_events 落库决策
-    telemetry_sample_rate REAL NOT NULL DEFAULT 1.0,
     -- m040:canary 自动回滚两阈值(E3),运行时可配,默认 0.05
     canary_reward_drop_threshold REAL NOT NULL DEFAULT 0.05,
     canary_anomaly_rise_threshold REAL NOT NULL DEFAULT 0.05,

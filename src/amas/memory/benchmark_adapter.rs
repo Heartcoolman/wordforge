@@ -184,6 +184,17 @@ pub fn evaluate_batch(
                 &state,
                 &request.config,
             ))
+        } else if let Some(policy) = &ssp_policy {
+            // 纯 SSP 分支（GSP 未激活）：镜像 mastery.rs 的秒级管线
+            // secs = (optimal_days·86400·scale).min(cap·86400) 底夹 min_interval_secs，
+            // 输出整数天 = secs / 86400（floor；契约 GSP_SPEC §8.2）。此前该分支
+            // scheduled_interval_days=None，parity 零覆盖。
+            let optimal_days = policy.optimal_interval(state.stability, state.difficulty);
+            let secs = ((optimal_days * 86_400.0 * item.interval_scale)
+                .min(request.config.max_interval_days * 86_400.0)
+                as i64)
+                .max(request.config.min_interval_secs);
+            Some(secs / 86_400)
         } else {
             None
         };

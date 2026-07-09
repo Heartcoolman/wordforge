@@ -3,7 +3,6 @@ ensembleEnabled = true
 heuristicEnabled = true
 igeEnabled = true
 swdEnabled = true
-mdmEnabled = true
 sspEnabled = false
 # ② 混淆隔离排程（Phase 1b）：开启后选词把已出现词的高分混淆对端注入 context 惩罚共排（不碰记忆动力学）。
 confusionIsolationEnabled = false
@@ -26,7 +25,6 @@ attentionSmoothing = 0.3
 confidenceDecay = 0.99
 minConfidence = 0.1
 fatigueIncreaseRate = 0.02
-fatigueRecoveryRate = 0.001
 motivationMomentum = 0.1
 visualFatigueWeight = 0.4
 responseSpeedMaxMs = 10000.0
@@ -146,31 +144,18 @@ fallbackConfidence = 0.2
 similarityCacheTtlSecs = 300
 
 [memoryModel]
-shortTermLearningRate = 0.85
-mediumTermLearningRate = 0.3
-longTermLearningRate = 0.12
-compositeWeightShort = 0.2
-compositeWeightMedium = 0.3
-compositeWeightLong = 0.5
-consolidationRateScale = 0.25
-consolidationBonus = 1.5
 masteryCompositeThreshold = 0.3
 masteryAccuracyThreshold = 0.65
 masteryStreakThreshold = 1
 reviewingThreshold = 0.4
 halfLifeBaseEpsilon = 0.3
-halfLifeTimeUnitSecs = 1296000.0
-halfLifePower = 1.5
 recallRiskBonus = 0.2
 recallRiskThreshold = 0.55
 # 2026-06-13 v5 GSP 船值：F1 冠军 desired_retention（val Borda 30，三数据集 rank 1）
 baseDesiredRetention = 0.85
-passiveDecayHalfLifeDays = 30.0
-passiveDecayPower = 0.3
 masteryWindowSize = 20
 streakMinGapMs = 1800000
-stabilityBaseDays = 20.0
-# FSRS-6: 曲线 factor/decay 由 w[20] 派生（forgettingCurveFactor/Decay 已废弃，不再写入）
+# FSRS-6: 曲线 factor/decay 由 w[20] 派生
 forgettingCurveFloor = 0.0
 # FSRS-6 21 维（w[19]=同日饱和指数, w[20]=曲线 decay）
 # 2026-06-13 v5 GSP 船值：回归 FSRS-6 公版 21 维 w（py-fsrs DEFAULT_PARAMETERS）。
@@ -220,21 +205,31 @@ highFatigueRetentionDrop = 0.05
 lowMotivationThreshold = -0.2
 lowMotivationRetentionDrop = 0.03
 # === GSP 调度策略头（Graduated Scheduling Policy；契约 benchmarks/maimemo/GSP_SPEC.md）===
-# 2026-06-13 v5 GSP 船值：F1 冠军（val Borda 30，三数据集 rank 1，seed-robust strict #1）。
-# gspSuccessGrade=4 进入 FSRS-6 faithful 状态路径（预测腿 = amas6）；cap40+streak2+floor30
-# 治理调度尾部，young/mature 分带（band 14 天）按成熟度调目标保持率；fuzz=0（F1 不开）。
+# 2026-07-08 V1 船值（真半衰期口径战役）：mastered 口径升级为 oracle_halflife>=30（不可被
+# 调度自报博弈）后重选型。vs 2026-06-13 F1：youngRetention 0.86→0.90（年轻词密集化，maimemo
+# 真实巩固 mastered +17%）；retire 开启（毕业词连击 6 次退役，duolingo/policy 止损）。
+# val 三种子(42/7/2026) Borda 27/26/26 全部综合第 1（第二名 fsrs6 24）。
 gspSuccessGrade = 4
 gspIntervalCapDays = 40.0
 gspGraduationStreak = 2
 gspGraduationFloorDays = 30.0
-gspYoungRetention = 0.86
+gspYoungRetention = 0.90
 gspMatureRetention = 0.92
 gspMaturityBandDays = 14.0
 gspIntervalFuzz = 0.0
-# v6 预测层：per-word difficulty logit 加性项（生产现状 = v6 ship，保留启用）。
-# recall 读出 logit 域加 β·(REF−词难度[1,10])：难词降 p/易词升 p。仅作用 recall_probability_predicted
-# 读出路径（预测/urgency/analytics），不入 S/D 更新。生产收益取决于 words.difficulty 是否真实填充。
-difficultyLogitWeight = 0.1
+# GSP 退役（retire；契约 GSP_SPEC §9）：毕业且 review_count/stability/correct_streak 三门槛
+# 同满足的过学词直接冻结到 retire 间隔（越过区间帽）。注意 review_count 含全部历史，务必与
+# minStreak（近期连击证据）搭配——连击是记忆已固化的强代理（oracle 校准：脏历史词 streak>=4
+# 即稳越半衰期 30 天；streak6 为保守船值）。回滚 = afterReviews 置 0（bit-exact 旧语义）。
+gspRetireAfterReviews = 1
+gspRetireIntervalDays = 365.0
+gspRetireMinStability = 0.0
+gspRetireMinStreak = 6
+# v6 预测层：per-word difficulty logit 加性项。2026-07-08 V1 船值关闭（0.0）：跨数据集聚合
+# difflogit 为净负（synthetic 反伤 > 真实集增益），关闭后预测读出回到 FSRS-6 天花板（与公版
+# 位级同分）。且生产 words.difficulty 默认 0.0 时该项本就退化为均匀偏置（fulltest §3.8）。
+# 回填真实难度并经 T1.3 真实 A/B 验证为正后可重开。
+difficultyLogitWeight = 0.0
 difficultyLogitRef = 5.0
 # v7 预测读出层：logit 重校准 + 复习次数残差（difflogit 的推广，capability 已落地，默认关闭）。
 #   logit(p) = predLogitBaseScale·logit(p_fsrs) + predLogitIntercept
@@ -328,7 +323,6 @@ targetStabilityDays = 360.0
 base = 1.05
 minIndex = -30
 maxIndex = 122
-difficultyOffsetOnLapse = 1.0
 maxIterations = 200000
 convergenceThreshold = 0.1
 discountFactor = 1.0

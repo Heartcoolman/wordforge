@@ -74,7 +74,7 @@ const PRESET_CARDS: PresetCardInfo[] = [
   },
 ];
 
-/** 8 个 featureFlags(4 决策蓝条 + 4 记忆黄条),对齐设计图 .flag-grid */
+/** 7 个 featureFlags(4 决策蓝条 + 3 记忆/排程黄条),对齐设计图 .flag-grid */
 interface FlagInfo {
   path: string;
   kind: 'decision' | 'memory';
@@ -86,10 +86,9 @@ const FLAG_LIST: FlagInfo[] = [
   { path: 'featureFlags.heuristicEnabled', kind: 'decision', role: '规则启发式 (兜底)' },
   { path: 'featureFlags.igeEnabled', kind: 'decision', role: '信息增益探索' },
   { path: 'featureFlags.swdEnabled', kind: 'decision', role: '滑窗判别' },
-  { path: 'featureFlags.mdmEnabled', kind: 'memory', role: '记忆衰减 (FSRS-5)' },
-  { path: 'featureFlags.iadEnabled', kind: 'memory', role: '激活间隔记忆' },
-  { path: 'featureFlags.mtpEnabled', kind: 'memory', role: '遗忘曲线触发' },
   { path: 'featureFlags.sspEnabled', kind: 'memory', role: '间隔节省成本' },
+  { path: 'featureFlags.confusionIsolationEnabled', kind: 'memory', role: '混淆隔离排程' },
+  { path: 'featureFlags.multiTraceEnabled', kind: 'memory', role: '跨题型多痕迹' },
 ];
 
 /** 核心 4 旋钮:从 TIER_A 中选 sensitivity=ultra 的 4 个高频字段 */

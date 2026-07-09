@@ -7,7 +7,7 @@ use rusqlite::{params, OptionalExtension};
 use std::collections::HashMap;
 
 impl Store {
-    fn decode_mastery_mdm_state(value: serde_json::Value) -> Option<MdmState> {
+    pub(crate) fn decode_mastery_mdm_state(value: serde_json::Value) -> Option<MdmState> {
         serde_json::from_value::<MdmState>(value.clone())
             .ok()
             .or_else(|| {
@@ -277,19 +277,23 @@ impl Store {
         Ok(results)
     }
 
-    /// ③ 多痕迹（Phase 2）：批量取候选词的**全部** mastery 痕迹（legacy `mastery:{w}` +
-    /// 各 per-mode `mastery:{w}:{mode}`）。返回 word_id → 已存在痕迹的 MdmState 列表（无痕迹的词
-    /// 不在 map 中）。选词层据此按 min-recall 聚合。per-mode 键含 `:` 无法靠 strip_prefix 还原 word，
-    /// 故用显式 key→word 反查表。
+    /// ③ 多痕迹（Phase 2）：批量取候选词的 mastery 痕迹。返回 word_id → MdmState 列表
+    /// （无痕迹的词不在 map 中），选词层据此按 min-recall 聚合。
+    ///
+    /// legacy 幽灵防护：multi_trace 开启后写路径只更新 per-mode 键 `mastery:{w}:{mode}`，
+    /// 旧 `mastery:{w}` 冻结（last_review_at 不再前进 → recall 单调衰减至 floor，若混入
+    /// min-recall 会永久支配聚合、摧毁存量用户的调度）。故：**该词存在任一 per-mode 痕迹时
+    /// 丢弃 legacy 痕迹；无 per-mode 痕迹的词回落 legacy**（平滑过渡：旧词首次在新体系
+    /// 作答产生 per-mode 痕迹前仍按 legacy 调度）。per-mode 键含 `:` 无法靠 strip_prefix
+    /// 还原 word，故用显式 key→word 反查表。
     pub fn batch_get_engine_mastery_mdm_traces(
         &self,
         user_id: &str,
         word_ids: &[String],
     ) -> Result<HashMap<String, Vec<MdmState>>, StoreError> {
         keys::validate_id(user_id)?;
-        let mut result: HashMap<String, Vec<MdmState>> = HashMap::new();
         if word_ids.is_empty() {
-            return Ok(result);
+            return Ok(HashMap::new());
         }
         // 生成所有候选键 + 键→word 反查表（legacy + 每个已知 mode）。
         let mut key_to_word: HashMap<String, String> = HashMap::new();
@@ -303,6 +307,8 @@ impl Store {
                     .or_insert_with(|| w.clone());
             }
         }
+        let mut legacy: HashMap<String, MdmState> = HashMap::new();
+        let mut moded: HashMap<String, Vec<MdmState>> = HashMap::new();
         let conn = self.conn()?;
         let all_keys: Vec<&String> = key_to_word.keys().collect();
         for chunk in all_keys.chunks(900) {
@@ -328,10 +334,19 @@ impl Store {
                 if let Some(word) = key_to_word.get(&algo_id) {
                     let value: serde_json::Value = Self::deserialize_json(&json)?;
                     if let Some(mdm) = Self::decode_mastery_mdm_state(value) {
-                        result.entry(word.clone()).or_default().push(mdm);
+                        if algo_id == format!("mastery:{word}") {
+                            legacy.insert(word.clone(), mdm);
+                        } else {
+                            moded.entry(word.clone()).or_default().push(mdm);
+                        }
                     }
                 }
             }
+        }
+        // 合并：per-mode 痕迹存在 → 排除 legacy 幽灵；否则回落 legacy。
+        let mut result = moded;
+        for (word, mdm) in legacy {
+            result.entry(word).or_insert_with(|| vec![mdm]);
         }
         Ok(result)
     }
@@ -371,7 +386,7 @@ mod tests {
     use crate::store::Store;
 
     #[test]
-    fn batch_get_engine_mastery_mdm_traces_groups_legacy_and_per_mode() {
+    fn batch_get_engine_mastery_mdm_traces_excludes_legacy_ghost_when_moded_exists() {
         let store = Store::open(":memory:", 5000, 1).unwrap();
         store.run_migrations().unwrap();
         let mk = |s: f64| {
@@ -380,7 +395,8 @@ mod tests {
             st.review_count = 1;
             serde_json::to_value(&st).unwrap()
         };
-        // legacy + 两个 per-mode 痕迹
+        // legacy + 两个 per-mode 痕迹：legacy 是冻结幽灵（multi_trace 开启后不再更新），
+        // 混入 min-recall 会永久支配聚合 → 必须被排除。
         store.set_engine_algo_state("u1", "mastery:w1", &mk(10.0)).unwrap();
         store
             .set_engine_algo_state("u1", "mastery:w1:word-to-meaning", &mk(20.0))
@@ -393,9 +409,32 @@ mod tests {
             .batch_get_engine_mastery_mdm_traces("u1", &["w1".to_string(), "w2".to_string()])
             .unwrap();
         let v = traces.get("w1").expect("w1 应有痕迹");
-        assert_eq!(v.len(), 3, "legacy + 2 per-mode");
+        assert_eq!(v.len(), 2, "仅 2 per-mode，legacy 幽灵被排除");
+        assert!(
+            v.iter().all(|st| (st.stability - 10.0).abs() > 1e-9),
+            "legacy(S=10) 不得混入"
+        );
         // 无任何痕迹的词不在 map 中
         assert!(traces.get("w2").is_none());
+    }
+
+    #[test]
+    fn batch_get_engine_mastery_mdm_traces_falls_back_to_legacy_when_no_moded() {
+        let store = Store::open(":memory:", 5000, 1).unwrap();
+        store.run_migrations().unwrap();
+        let mut st = MdmState::default();
+        st.stability = 7.5;
+        st.review_count = 3;
+        // 仅 legacy 痕迹（存量用户旧词在新体系首次作答前）→ 回落 legacy，平滑过渡
+        store
+            .set_engine_algo_state("u1", "mastery:w1", &serde_json::to_value(&st).unwrap())
+            .unwrap();
+        let traces = store
+            .batch_get_engine_mastery_mdm_traces("u1", &["w1".to_string()])
+            .unwrap();
+        let v = traces.get("w1").expect("w1 应回落 legacy");
+        assert_eq!(v.len(), 1);
+        assert!((v[0].stability - 7.5).abs() < 1e-9);
     }
 
     #[test]

@@ -1,7 +1,7 @@
-//! AMAS LLM 调参白名单：仅这 12 个 path 允许通过 LLM 建议 / 自动应用渠道修改。
+//! AMAS LLM 调参白名单：仅这 15 个 path 允许通过 LLM 建议 / 自动应用渠道修改。
 //!
 //! 任何 patch 路径不在白名单 或 值不在 `(min_safe, max_safe)` 内 → 拒绝。
-//! 设计意图：把 LLM 的"宇宙级误改"风险关进 12 个核心维度。
+//! 设计意图：把 LLM 的"宇宙级误改"风险关进 15 个核心维度。
 //! 其它参数仍可走人工渠道（PUT /api/admin/amas/config）。
 
 /// 白名单条目：(json-pointer-style path, min_safe, max_safe)
@@ -12,7 +12,7 @@ pub struct WhitelistEntry {
     pub max_safe: f64,
 }
 
-/// Tier-A 12 维白名单。范围比前端 schema.ts 略保守，避免极端值。
+/// Tier-A 15 维白名单。范围比前端 schema.ts 略保守，避免极端值。
 pub const TIER_A_WHITELIST: &[WhitelistEntry] = &[
     // FSRS-6 初始稳定性
     WhitelistEntry {

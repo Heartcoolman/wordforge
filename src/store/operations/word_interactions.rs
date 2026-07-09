@@ -304,7 +304,6 @@ mod tests {
                 difficulty: 0.0,
                 examples: vec![],
                 tags: vec![],
-                embedding: None,
                 created_at: Utc::now(),
             })
             .unwrap();

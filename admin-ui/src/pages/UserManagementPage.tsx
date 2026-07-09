@@ -519,7 +519,7 @@ function UserDrawer(props: {
                               <div class="eyebrow" style={sx({ marginBottom: 8 })}>偏好 / 最近策略</div>
                               <div class="muted" style={sx({ fontSize: 12.5, lineHeight: 1.8 })}>
                                 <Show when={e().habit}>
-                                  {(h) => <>每日目标 {h().dailyGoalWords} 词 / {h().dailyGoalMinutes} 分钟 · </>}
+                                  {(h) => <>每日目标 {h().dailyGoalWords ?? '—'} 词 · </>}
                                 </Show>
                                 <Show when={e().preferences}>
                                   {(pref) => <>语言 {pref().language} · 主题 {pref().theme}</>}

@@ -569,7 +569,15 @@ async fn main() {
     // W3-2：关停前补一次可用率落盘。此刻 server_future 已返回、不再有新请求写内存 hour 桶，
     // 补落最近一次 cron flush（≤5min）到关停之间的请求/5xx 增量，消除重启后登录 SLO 桶缺口。
     learning_backend::workers::metrics_flush::flush_availability_rollup(state.store());
-    tracing::info!("可用率小时桶已最终落盘");
+    // 同理补落 AMAS 算法指标与选词拒绝计数（drain 语义，重启即丢最近 ≤5min 增量窗口）。
+    if let Err(e) = learning_backend::amas::metrics_persistence::flush_metrics(
+        state.amas().metrics_registry(),
+        state.store(),
+    ) {
+        tracing::warn!(error = %e, "AMAS 指标最终落盘失败");
+    }
+    learning_backend::workers::metrics_flush::flush_rejections(state.store());
+    tracing::info!("可用率/AMAS 指标/拒绝计数已最终落盘");
 
     tracing::info!("Shutdown complete");
 }

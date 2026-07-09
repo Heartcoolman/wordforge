@@ -18,9 +18,6 @@ impl AMASConfig {
         if !(0.0..=1.0).contains(&self.modeling.motivation_momentum) {
             return Err("modeling.motivation_momentum must be in [0,1]".to_string());
         }
-        if !(0.0..=1.0).contains(&self.modeling.fatigue_recovery_rate) {
-            return Err("modeling.fatigue_recovery_rate must be in [0,1]".to_string());
-        }
         if self.modeling.response_speed_max_ms <= 0.0 {
             return Err("modeling.response_speed_max_ms must be > 0".to_string());
         }
@@ -230,41 +227,11 @@ impl AMASConfig {
         }
 
         // MemoryModelConfig
-        if !(0.0..=1.0).contains(&self.memory_model.short_term_learning_rate) {
-            return Err("memory_model.short_term_learning_rate must be in [0,1]".to_string());
-        }
-        if !(0.0..=1.0).contains(&self.memory_model.medium_term_learning_rate) {
-            return Err("memory_model.medium_term_learning_rate must be in [0,1]".to_string());
-        }
-        if !(0.0..=1.0).contains(&self.memory_model.long_term_learning_rate) {
-            return Err("memory_model.long_term_learning_rate must be in [0,1]".to_string());
-        }
-        let composite_sum = self.memory_model.composite_weight_short
-            + self.memory_model.composite_weight_medium
-            + self.memory_model.composite_weight_long;
-        if (composite_sum - 1.0).abs() > 0.01 {
-            return Err("memory_model composite weights must sum to ~1.0".to_string());
-        }
-        if self.memory_model.half_life_time_unit_secs <= 0.0 {
-            return Err("memory_model.half_life_time_unit_secs must be > 0".to_string());
-        }
         if self.memory_model.half_life_base_epsilon <= 0.0 {
             return Err("memory_model.half_life_base_epsilon must be > 0".to_string());
         }
-        if !(0.1..=3.0).contains(&self.memory_model.half_life_power) {
-            return Err("memory_model.half_life_power must be in [0.1, 3.0]".to_string());
-        }
         if !(0.5..=0.99).contains(&self.memory_model.base_desired_retention) {
             return Err("memory_model.base_desired_retention must be in [0.5,0.99]".to_string());
-        }
-        if self.memory_model.consolidation_bonus < 0.0 {
-            return Err("memory_model.consolidation_bonus must be >= 0".to_string());
-        }
-        if self.memory_model.passive_decay_half_life_days <= 0.0 {
-            return Err("memory_model.passive_decay_half_life_days must be > 0".to_string());
-        }
-        if self.memory_model.passive_decay_power <= 0.0 {
-            return Err("memory_model.passive_decay_power must be > 0".to_string());
         }
         if self.memory_model.mastery_window_size == 0 {
             return Err("memory_model.mastery_window_size must be > 0".to_string());
@@ -324,6 +291,20 @@ impl AMASConfig {
         if !(0.0..1.0).contains(&self.memory_model.gsp_interval_fuzz) {
             return Err("memory_model.gsp_interval_fuzz must be in [0,1)".to_string());
         }
+        // GSP 退役：interval 须有限正数且不超 10 年；stability 门槛须有限非负。
+        // after_reviews/min_streak 为 u32 天然非负，0=关闭。
+        if !self.memory_model.gsp_retire_interval_days.is_finite()
+            || !(1.0..=3650.0).contains(&self.memory_model.gsp_retire_interval_days)
+        {
+            return Err("memory_model.gsp_retire_interval_days must be in [1,3650]".to_string());
+        }
+        if !self.memory_model.gsp_retire_min_stability.is_finite()
+            || self.memory_model.gsp_retire_min_stability < 0.0
+        {
+            return Err(
+                "memory_model.gsp_retire_min_stability must be finite and >= 0".to_string(),
+            );
+        }
         // 冷启动难度先验（Phase 1a；权重默认 0=关闭）。len_scale 作除数须 >0；ref 落特征定义域；
         // 6 个权重须有限且非负有上界（防极端值把首评 S₀/D₀ 推到夹边）。
         if !self.memory_model.cold_start_len_scale.is_finite()
@@ -364,22 +345,8 @@ impl AMASConfig {
             return Err("memory_model.min_interval_secs must be > 0".to_string());
         }
 
-        // FSRS 遗忘曲线参数：被作除数 / 倒数指数 / 渐近线消费，必须有限且在定义域内。
-        // factor 是严格正缩放因子（除数）；decay 是衰减幂律指数（必须 < 0 否则遗忘曲线反转）；
-        // floor 是非零渐近线 R→floor，须在 [0,1)。
-        if !self.memory_model.forgetting_curve_factor.is_finite()
-            || self.memory_model.forgetting_curve_factor <= 0.0
-        {
-            return Err("memory_model.forgetting_curve_factor must be finite and > 0".to_string());
-        }
-        if !self.memory_model.forgetting_curve_decay.is_finite()
-            || self.memory_model.forgetting_curve_decay >= 0.0
-        {
-            return Err(
-                "memory_model.forgetting_curve_decay must be finite and < 0 (FSRS power-law exponent)"
-                    .to_string(),
-            );
-        }
+        // FSRS 遗忘曲线渐近线：R→floor 被运行时消费，须在 [0,1)。
+        // （factor/decay 运行时由 w[20] 派生：curve_decay/curve_factor。）
         if !self.memory_model.forgetting_curve_floor.is_finite()
             || !(0.0..1.0).contains(&self.memory_model.forgetting_curve_floor)
         {

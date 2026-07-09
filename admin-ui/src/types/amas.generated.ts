@@ -136,7 +136,6 @@ export interface FeatureFlags {
   ensembleEnabled: boolean;
   heuristicEnabled: boolean;
   igeEnabled: boolean;
-  mdmEnabled: boolean;
   /**
    * ③ 跨题型多痕迹（Phase 2）：开启后 mastery 状态按 question_mode 分痕迹 （`mastery:{word}:{mode}`），选词按 min-recall 跨痕迹聚合。默认 false → 单一 `mastery:{word}` 键、bit-exact legacy。
    */
@@ -248,11 +247,6 @@ export interface MemoryModelConfig {
    * S₀ 偏移·词素透明度权重（可分解→S 升）。0.0=关闭。
    */
   coldStartSMorphWeight?: number;
-  compositeWeightLong: number;
-  compositeWeightMedium: number;
-  compositeWeightShort: number;
-  consolidationBonus: number;
-  consolidationRateScale: number;
   /**
    * difficulty logit 项参考点（[1,10] 标度）：word_difficulty==REF 时位移为 0。默认 5.0。
    */
@@ -261,14 +255,6 @@ export interface MemoryModelConfig {
    * 预测/调度 recall **读出**在 logit 域加 `β·(REF − word_difficulty[1,10])`：难词降 p、易词升 p， 补 FSRS 二元映射下「预测随难度扁平」的区分度/校准残差（maimemo TEST: AUC+0.015 反超 dhp、 logLoss−0.005）。仅作用于 `recall_probability_predicted` 读出路径，**不入内部 S/D 更新** （update_strength 的 r 仍用纯 recall_probability）。0.0=关闭（bit-exact legacy）； 无每词难度的调用点传 None → 自然 no-op。
    */
   difficultyLogitWeight?: number;
-  /**
-   * DEPRECATED（FSRS-6 起）：遗忘曲线 decay 即 trainable 参数 `w[20]`（`curve_decay()`）， 本字段仅为旧配置/DB 快照反序列化兼容保留，运行时不再读取。
-   */
-  forgettingCurveDecay?: number;
-  /**
-   * DEPRECATED（FSRS-6 起）：遗忘曲线 factor 由 `w[20]` 派生（`curve_factor()`）， 本字段仅为旧配置/DB 快照反序列化兼容保留，运行时不再读取。
-   */
-  forgettingCurveFactor?: number;
   /**
    * 2021 MaiMemo study: forgetting curve has non-zero asymptote R→floor (not 0) FSRS-6 标准曲线无渐近线，默认 0.0；保留为可调项。
    */
@@ -299,6 +285,22 @@ export interface MemoryModelConfig {
    */
   gspMaturityBandDays?: number;
   /**
+   * 退役所需最小复习次数。0=关闭（bit-exact legacy）。>0 时：毕业（graduated）且 review_count/stability/correct_streak 三门槛同时满足 → 调度区间直接取 retire 间隔 （在 cap/fuzz 之前 return，可越过区间帽）。注意 review_count 含全部历史，warm 词 低门槛会首评即退役 —— 应与 `gsp_retire_min_streak` 搭配使用（契约 GSP_SPEC §9）。
+   */
+  gspRetireAfterReviews?: number;
+  /**
+   * 退役间隔（天）。默认 365。
+   */
+  gspRetireIntervalDays?: number;
+  /**
+   * 退役 stability 门槛（天）。默认 0=不设。
+   */
+  gspRetireMinStability?: number;
+  /**
+   * 退役连击门槛。默认 0=不设。连击是「近期无失败」的直接证据，是记忆已固化的 强代理（离线 oracle 校准：脏历史词 streak≥4 时估计半衰期稳越 30 天）。
+   */
+  gspRetireMinStreak?: number;
+  /**
    * 二元成功复习映射的 FSRS grade：3=Good（旧默认，首评 S0=w[2]，bit-exact legacy）； 4=Easy（首评 S0=w[3] + 成功复习带 w[16] easy_bonus + 进入 FSRS-6 faithful 状态路径， 见 mdm.rs §3.5）。FSRS-6 公版 21 维 w 与 grade=4 共拟合 → 候选用 4 恢复预测腿校准。 入口 clamp：非 {3,4} 一律夹回 3。失败恒映射 1=Again。
    */
   gspSuccessGrade?: number;
@@ -307,13 +309,10 @@ export interface MemoryModelConfig {
    */
   gspYoungRetention?: number;
   halfLifeBaseEpsilon: number;
-  halfLifePower?: number;
-  halfLifeTimeUnitSecs: number;
   highAccuracyRetentionBoost?: number;
   highAccuracyThreshold?: number;
   highFatigueRetentionDrop?: number;
   highFatigueThreshold?: number;
-  longTermLearningRate: number;
   lowMotivationRetentionDrop?: number;
   lowMotivationThreshold?: number;
   masteryAccuracyThreshold: number;
@@ -321,10 +320,7 @@ export interface MemoryModelConfig {
   masteryStreakThreshold: number;
   masteryWindowSize?: number;
   maxIntervalDays?: number;
-  mediumTermLearningRate: number;
   minIntervalSecs?: number;
-  passiveDecayHalfLifeDays?: number;
-  passiveDecayPower?: number;
   /**
    * 读出 recall 在 logit 域施加：`logit(p) = base_scale·logit(p_fsrs) + intercept + β_diff·(REF−D) + β_nrev·ln(1+review_count)`。前两项是 Platt/温度重校准（FSRS-6 在真实 词汇数据上略过自信），β_nrev 补复习次数残差（stability 未完全吸收）。系数**按部署离线拟合** （benchmarks/maimemo/pred_calib.py，maimemo held-out: AUC+0.0116/logLoss−0.0084/ECE 0.022→0.016， 5/5 seed），**不跨域迁移**（synthetic 退化，须 prod_replay 复核）。仅作用 `recall_probability_predicted` 读出路径，不入 S/D 更新。默认 base_scale=1/intercept=0/β_nrev=0 → 退化为纯 difficulty_logit。
    */
@@ -336,8 +332,6 @@ export interface MemoryModelConfig {
   retentionMax?: number;
   retentionMin?: number;
   reviewingThreshold: number;
-  shortTermLearningRate: number;
-  stabilityBaseDays?: number;
   streakMinGapMs?: number;
   /**
    * 反序列化兼容 19 维 FSRS-5 旧配置：自动迁移（w19=0 维持旧同日公式，w20=0.5 维持旧 decay）。
@@ -405,7 +399,6 @@ export interface ModelingConfig {
    * 用户退出时的疲劳增加量
    */
   fatigueQuitIncrease?: number;
-  fatigueRecoveryRate: number;
   minConfidence: number;
   motivationMomentum: number;
   /**
@@ -453,10 +446,6 @@ export interface SspConfig {
    * 参数化代价函数：recall/forget cost 随 S/D 调制
    */
   costParams?: SspCostParams;
-  /**
-   * 遗忘后难度增量（映射到 D ∈ [1,10]）
-   */
-  difficultyOffsetOnLapse: number;
   /**
    * Bellman 折扣因子 γ ∈ [0,1]，防止无穷代价堆积
    */

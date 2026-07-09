@@ -205,8 +205,6 @@ async fn register(
                     role: "user".to_string(),
                     status: "active".to_string(),
                     last_login_at: None,
-                    // m025:公开注册流暂不记录 referral,未来由前端 req.referrer 传入
-                    referrer_source: None,
                 };
                 store.create_user(&user)?;
                 Ok(user)
@@ -360,8 +358,8 @@ async fn login(
 
     let user_id = user.id.clone();
     match state
-        .run_store_task("auth.login.reset_login_attempts", move |store| {
-            store.reset_login_attempts(&user_id)
+        .run_store_task("auth.login.record_login_success", move |store| {
+            store.record_login_success(&user_id)
         })
         .await
     {

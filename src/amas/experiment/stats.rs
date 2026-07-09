@@ -156,7 +156,8 @@ pub fn two_proportion_z(x1: u64, n1: u64, x2: u64, n2: u64) -> Option<TwoPropTes
         });
     }
     let z = (p1 - p2) / se;
-    let p_value = 2.0 * (1.0 - normal_cdf(z.abs()));
+    // |z| 极大时 erf 逼近误差（A&S ≤1.5e-7）可令 normal_cdf 略 >1 → p 出现微负，夹回 0。
+    let p_value = (2.0 * (1.0 - normal_cdf(z.abs()))).max(0.0);
     Some(TwoPropTest {
         diff: p1 - p2,
         z,

@@ -264,7 +264,7 @@ async fn probes(
                     store.probe_stat_error_js(win)?,
                 ],
                 store.get_sampling_rule(CLICK_SAMPLING_EVENT_TYPE)?,
-                store.global_sample_rate()?,
+                crate::store::operations::probe_telemetry::GLOBAL_DEFAULT_SAMPLE_RATE,
             ))
         })
         .await??;
@@ -371,7 +371,7 @@ async fn sampling(
     let (global_default, rules) = state
         .run_store_task("admin.probe_telemetry.sampling", move |store| {
             Ok::<_, crate::store::StoreError>((
-                store.global_sample_rate()?,
+                crate::store::operations::probe_telemetry::GLOBAL_DEFAULT_SAMPLE_RATE,
                 store.list_sampling_rules()?,
             ))
         })

@@ -62,7 +62,6 @@ fn seed_user(store: &Store, suffix: &str) -> User {
         role: "user".to_string(),
         status: "active".to_string(),
         last_login_at: None,
-        referrer_source: None,
     };
     store.create_user(&user).expect("create user");
     user
@@ -80,7 +79,6 @@ fn seed_words(store: &Store, prefix: &str, count: usize) -> Vec<String> {
                 difficulty: 0.5,
                 examples: vec![],
                 tags: vec![],
-                embedding: None,
                 created_at: Utc::now(),
             };
             store.upsert_word(&w).expect("upsert word");

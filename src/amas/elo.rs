@@ -137,22 +137,6 @@ pub fn zpd_priority(user_elo: f64, word_elo: f64, config: &EloConfig) -> f64 {
     (-signed_distance.powi(2) / (2.0 * config.zpd_gaussian_sigma.powi(2))).exp()
 }
 
-/// Sort word IDs by ZPD priority (best first)
-pub fn rank_by_zpd(
-    user_elo: f64,
-    words: &[(String, f64)], // (word_id, word_elo)
-    config: &EloConfig,
-) -> Vec<(String, f64)> {
-    let mut ranked: Vec<(String, f64)> = words
-        .iter()
-        .map(|(id, elo)| (id.clone(), zpd_priority(user_elo, *elo, config)))
-        .collect();
-
-    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-    ranked
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

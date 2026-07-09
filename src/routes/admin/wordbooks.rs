@@ -501,7 +501,6 @@ async fn add_word(
         difficulty: 0.5,
         examples: req.examples.clone(),
         tags: vec!["admin-added".to_string()],
-        embedding: None,
         created_at: Utc::now(),
     };
     let id_for_task = id.clone();

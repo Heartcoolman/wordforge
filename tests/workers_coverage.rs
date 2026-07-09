@@ -39,17 +39,10 @@ fn sample_user(id: &str, email: &str) -> User {
         role: "user".to_string(),
         status: "active".to_string(),
         last_login_at: None,
-        referrer_source: None,
     }
 }
 
-fn sample_word(
-    id: &str,
-    text: &str,
-    difficulty: f64,
-    embedding: Option<Vec<f64>>,
-    tags: Vec<&str>,
-) -> Word {
+fn sample_word(id: &str, text: &str, difficulty: f64, tags: Vec<&str>) -> Word {
     Word {
         id: id.to_string(),
         text: text.to_string(),
@@ -59,7 +52,6 @@ fn sample_word(
         difficulty,
         examples: vec![format!("example-{text}")],
         tags: tags.into_iter().map(|t| t.to_string()).collect(),
-        embedding,
         created_at: Utc::now(),
     }
 }
@@ -189,9 +181,9 @@ async fn it_runs_worker_tasks_and_persists_side_effects() {
     store.create_user(&user_1).expect("create user_1");
     store.create_user(&user_2).expect("create user_2");
 
-    let word_easy = sample_word("w1", "alpha", 0.2, None, vec!["basic", "seed"]);
-    let word_mid = sample_word("w2", "beta", 0.5, None, vec!["basic"]);
-    let word_hard = sample_word("w3", "gamma", 0.9, Some(vec![0.1, 0.2]), vec!["advanced"]);
+    let word_easy = sample_word("w1", "alpha", 0.2, vec!["basic", "seed"]);
+    let word_mid = sample_word("w2", "beta", 0.5, vec!["basic"]);
+    let word_hard = sample_word("w3", "gamma", 0.9, vec!["advanced"]);
 
     store.upsert_word(&word_easy).expect("upsert easy");
     store.upsert_word(&word_mid).expect("upsert mid");

@@ -17,21 +17,19 @@ pub struct Word {
     pub difficulty: f64,
     pub examples: Vec<String>,
     pub tags: Vec<String>,
-    pub embedding: Option<Vec<f64>>,
     pub created_at: DateTime<Utc>,
 }
 
 fn word_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Word> {
-    let created_at_str: String = row.get(9)?;
+    let created_at_str: String = row.get(8)?;
     let created_at = DateTime::parse_from_rfc3339(&created_at_str)
         .map(|dt| dt.with_timezone(&Utc))
         .map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(9, rusqlite::types::Type::Text, Box::new(e))
+            rusqlite::Error::FromSqlConversionFailure(8, rusqlite::types::Type::Text, Box::new(e))
         })?;
 
     let examples_json: String = row.get(6)?;
     let tags_json: String = row.get(7)?;
-    let embedding_json: Option<String> = row.get(8)?;
 
     Ok(Word {
         id: row.get(0)?,
@@ -42,17 +40,12 @@ fn word_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Word> {
         difficulty: row.get(5)?,
         examples: serde_json::from_str(&examples_json).unwrap_or_default(),
         tags: serde_json::from_str(&tags_json).unwrap_or_default(),
-        embedding: embedding_json
-            .as_deref()
-            .map(serde_json::from_str)
-            .transpose()
-            .unwrap_or_default(),
         created_at,
     })
 }
 
 const WORD_COLS: &str =
-    "id, text, meaning, pronunciation, part_of_speech, difficulty, examples_json, tags_json, embedding_json, created_at";
+    "id, text, meaning, pronunciation, part_of_speech, difficulty, examples_json, tags_json, created_at";
 
 impl Store {
     pub fn upsert_word(&self, word: &Word) -> Result<(), StoreError> {
@@ -64,8 +57,8 @@ impl Store {
     pub fn upsert_word_conn(conn: &rusqlite::Connection, word: &Word) -> Result<(), StoreError> {
         keys::validate_id(&word.id)?;
         conn.execute(
-            "INSERT OR REPLACE INTO words (id, text, meaning, pronunciation, part_of_speech, difficulty, examples_json, tags_json, embedding_json, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT OR REPLACE INTO words (id, text, meaning, pronunciation, part_of_speech, difficulty, examples_json, tags_json, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 word.id,
                 word.text,
@@ -75,7 +68,6 @@ impl Store {
                 word.difficulty,
                 Self::serialize_json(&word.examples)?,
                 Self::serialize_json(&word.tags)?,
-                word.embedding.as_ref().map(Self::serialize_json).transpose()?,
                 word.created_at.to_rfc3339(),
             ],
         )?;
@@ -240,14 +232,6 @@ impl Store {
         Ok((words, total as u64))
     }
 
-    pub fn get_words_without_embedding(&self, limit: usize) -> Result<Vec<Word>, StoreError> {
-        let conn = self.conn()?;
-        let mut stmt = conn.prepare(&format!(
-            "SELECT {WORD_COLS} FROM words WHERE embedding_json IS NULL ORDER BY created_at DESC LIMIT ?1"
-        ))?;
-        let rows = stmt.query_map(params![limit as i64], word_from_row)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
-    }
 }
 
 #[cfg(test)]
@@ -268,7 +252,6 @@ mod tests {
             difficulty: 0.5,
             examples: vec!["ex".to_string()],
             tags: vec!["tag".to_string()],
-            embedding: None,
             created_at: Utc::now(),
         }
     }
@@ -321,19 +304,6 @@ mod tests {
         let (results, total) = store.search_words("fruit", 10, 0).unwrap();
         assert_eq!(total, 1);
         assert_eq!(results[0].id, "w1");
-    }
-
-    #[test]
-    fn get_words_without_embedding_filters_correctly() {
-        let store = test_store();
-        store.upsert_word(&sample_word("w1", "apple")).unwrap();
-        let mut w2 = sample_word("w2", "banana");
-        w2.embedding = Some(vec![0.1, 0.2]);
-        store.upsert_word(&w2).unwrap();
-
-        let words = store.get_words_without_embedding(10).unwrap();
-        assert_eq!(words.len(), 1);
-        assert_eq!(words[0].id, "w1");
     }
 
     #[test]

@@ -209,7 +209,7 @@ describe('AmasConfigPage — CRUD & error fallbacks', () => {
     // 功能开关 section 标题 + 至少一个开关项标签
     await waitFor(() => expect(screen.getByText('功能开关')).toBeInTheDocument());
     expect(screen.getByText('策略集成')).toBeInTheDocument();
-    expect(screen.getByText('MDM 记忆模型')).toBeInTheDocument();
+    expect(screen.getByText('混淆隔离排程')).toBeInTheDocument();
   });
 
   it('renders ensemble algorithm mix section', async () => {

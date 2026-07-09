@@ -113,17 +113,7 @@ pub fn generate(
     }
 }
 
-pub fn update(
-    swd_state: &mut SwdState,
-    user_state: &UserState,
-    strategy: &StrategyParams,
-    reward: f64,
-    config: &AMASConfig,
-) {
-    update_returning(swd_state, user_state, strategy, reward, config);
-}
-
-/// 与 [`update`] 同语义（push 本次 entry + 裁剪超额最旧），但**返回本次新增的 entry 克隆**。
+/// push 本次 entry + 裁剪超额最旧，并**返回本次新增的 entry 克隆**。
 /// 写放大重构：swd 历史已落追加式行表 `engine_swd_history`，引擎不再全量重写整个 Vec，而是把这条
 /// 返回的 entry 交由 `persist_engine_state_atomic` 在同一原子 tx 内 append 一行。内存 Vec 的 push/裁剪
 /// 仅服务本事件内（实际无后续读取），保持与旧 `update` 行为一致、便于纯内存单测继续守护 bit-exact。

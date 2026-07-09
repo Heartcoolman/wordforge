@@ -35,7 +35,7 @@ type MigrationFn = fn(&Store) -> Result<(), StoreError>;
 /// 完全迁移后 `schema_version` 应到达的版本号（= [`migrations`] 条目数）。
 /// 编译期常量，供 `--print-schema-version`（任意版本回滚的"目标二进制自声明 schema 版本"）使用；
 /// [`schema_version_const_matches_registry`] 测试守卫它与运行期 `migrations().len()` 不漂移。
-pub const SCHEMA_VERSION: u32 = 66;
+pub const SCHEMA_VERSION: u32 = 69;
 
 /// 已加固到"生产可用"的 down 迁移覆盖下界：回滚目标的 schema 版本必须 `>=` 此值。
 /// 真·任意版本回滚把 down 链当作"把当前库副本降级到目标版本"的降级引擎；低于此下界的
@@ -160,6 +160,9 @@ fn migrations() -> Vec<(&'static str, MigrationFn)> {
         ("064_rejections_rollup", m064_rejections_rollup),
         ("065_word_state_transitions", m065_word_state_transitions),
         ("066_monitoring_request_id", m066_monitoring_request_id),
+        ("067_mastery_states_backfill", m067_mastery_states_backfill),
+        ("068_stale_scalar_backfill", m068_stale_scalar_backfill),
+        ("069_drop_dead_columns", m069_drop_dead_columns),
     ]
 }
 
@@ -302,6 +305,9 @@ fn migrations_down() -> Vec<(&'static str, MigrationFn)> {
         ("064_rejections_rollup", m064_rejections_rollup_down),
         ("065_word_state_transitions", m065_word_state_transitions_down),
         ("066_monitoring_request_id", m066_monitoring_request_id_down),
+        ("067_mastery_states_backfill", m067_mastery_states_backfill_down),
+        ("068_stale_scalar_backfill", m068_stale_scalar_backfill_down),
+        ("069_drop_dead_columns", m069_drop_dead_columns_down),
     ]
 }
 
@@ -3659,6 +3665,226 @@ fn m066_monitoring_request_id_down(store: &Store) -> Result<(), StoreError> {
     Ok(())
 }
 
+/// m067:mastery_states 投影表激活。(1) 删除 mdm_short_term_strength 列——对应 MdmState 字段
+/// 已随三层强度模型移除，全仓零读者（同源改 schema.rs，全新库直接不建此列）；(2) 从
+/// engine_algo_states 现存 mastery blob 回填投影——此前全仓无写入路径、表恒空，三处读者
+/// （admin word_states LEFT JOIN / AVG 聚合 / admin_analytics 复习时间信号）恒读 NULL。
+/// 回填复用热路径 [`Store::reproject_mastery`]，口径一致：每词取「最近复习」痕迹摊平。
+fn m067_mastery_states_backfill(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    let has_col: bool = conn
+        .prepare("PRAGMA table_info(mastery_states)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .any(|name| name == "mdm_short_term_strength");
+    if has_col {
+        conn.execute(
+            "ALTER TABLE mastery_states DROP COLUMN mdm_short_term_strength",
+            [],
+        )?;
+    }
+    // 先收集 distinct (user, word) 再逐对重导出（multi-trace 多键收敛为一词一次）。
+    let pairs: std::collections::BTreeSet<(String, String)> = {
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT user_id, algo_id FROM engine_algo_states
+              WHERE algo_id LIKE 'mastery:%'",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        let mut set = std::collections::BTreeSet::new();
+        for row in rows {
+            let (user_id, algo_id) = row?;
+            if let Some(word_id) = Store::mastery_key_word(&algo_id) {
+                set.insert((user_id, word_id.to_string()));
+            }
+        }
+        set
+    };
+    let tx = conn.unchecked_transaction()?;
+    for (user_id, word_id) in &pairs {
+        Store::reproject_mastery(&tx, user_id, word_id)?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/// m067 down:清空回填数据 + 恢复 mdm_short_term_strength 列（回填前表恒空，DELETE 即还原）。
+/// 仅 dev/test。
+fn m067_mastery_states_backfill_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute("DELETE FROM mastery_states", [])?;
+    let has_col: bool = conn
+        .prepare("PRAGMA table_info(mastery_states)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .any(|name| name == "mdm_short_term_strength");
+    if !has_col {
+        conn.execute(
+            "ALTER TABLE mastery_states ADD COLUMN mdm_short_term_strength REAL NOT NULL DEFAULT 0.0",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+/// m068:恒卡死标量列一次性回填（配套写路径修复，见同批改动）。
+/// (1) engine_user_states 的 attention/fatigue/motivation/confidence/last_active_at/cognitive_*
+///     八列此前只写 blob 不写列（同 m053 计数列前科），从 state_json 按 camelCase 键回填，
+///     缺键保持列 DEFAULT；(2) users.status 与 is_banned 联动回填（封禁流此前只改 is_banned，
+///     'suspended' 恒空）。last_login_at 无历史数据可回填，自修复后首次登录起生效。
+fn m068_stale_scalar_backfill(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "UPDATE engine_user_states SET
+            attention = COALESCE(json_extract(state_json,'$.attention'), attention),
+            fatigue = COALESCE(json_extract(state_json,'$.fatigue'), fatigue),
+            motivation = COALESCE(json_extract(state_json,'$.motivation'), motivation),
+            confidence = COALESCE(json_extract(state_json,'$.confidence'), confidence),
+            last_active_at = COALESCE(json_extract(state_json,'$.lastActiveAt'), last_active_at),
+            cognitive_memory_capacity = COALESCE(
+                json_extract(state_json,'$.cognitiveProfile.memoryCapacity'), cognitive_memory_capacity),
+            cognitive_processing_speed = COALESCE(
+                json_extract(state_json,'$.cognitiveProfile.processingSpeed'), cognitive_processing_speed),
+            cognitive_stability = COALESCE(
+                json_extract(state_json,'$.cognitiveProfile.stability'), cognitive_stability);
+         UPDATE users SET status='suspended' WHERE is_banned=1 AND status='active';",
+    )?;
+    Ok(())
+}
+
+/// m068 down:数据回填无结构变更;标量列还原 schema DEFAULT、status 还原 'active'
+/// （与回填前的恒默认态一致）。仅 dev/test。
+fn m068_stale_scalar_backfill_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "UPDATE engine_user_states SET
+            attention = 0.7, fatigue = 0.0, motivation = 0.0, confidence = 0.1,
+            last_active_at = NULL, cognitive_memory_capacity = 0.5,
+            cognitive_processing_speed = 0.5, cognitive_stability = 0.5;
+         UPDATE users SET status='active' WHERE status='suspended';",
+    )?;
+    Ok(())
+}
+
+/// 幂等 DROP COLUMN：列存在才删（sqlite 3.35+，rusqlite bundled 支持）。
+fn drop_column_if_exists(
+    conn: &rusqlite::Connection,
+    table: &str,
+    column: &str,
+) -> Result<(), StoreError> {
+    let has_col: bool = conn
+        .prepare(&format!("PRAGMA table_info({table})"))?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .any(|name| name == column);
+    if has_col {
+        conn.execute(&format!("ALTER TABLE {table} DROP COLUMN {column}"), [])?;
+    }
+    Ok(())
+}
+
+/// m069:清除全库「不读不写/只读死值」列（2026-07-08 恒 NULL 面审计,同源改 schema.rs）:
+/// - engine_user_states 9 列(trend_*/habit_*/last_session_id):真值全在 state_json blob,列零读者;
+/// - user_stats.word_ids_json/session_ids_json:增长型集合已被读时替代,刻意停写后无读者;
+/// - users.referrer_source:注册流硬编码 None、无 UI 渲染,两头皆死;
+/// - etymologies.generated_at:无 LLM 写入路径,恒 NULL 零读者(generated 列保留,web 端消费);
+/// - user_elo.sigma:无任何算法维护该不确定度,恒 DEFAULT 86;
+/// - system_settings.telemetry_sample_rate:无端点可改,职能被 probe_sampling_config '*' 行覆盖;
+/// - habit_profiles.daily_goal_words/minutes:唯一 upsert 不含两列,恒 30/25 误导,真值在 study_configs;
+/// - words.embedding_json + partial 索引:embedding 管线从未存在,列全 NULL,语义搜索恒 keyword_fallback。
+fn m069_drop_dead_columns(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute("DROP INDEX IF EXISTS idx_words_without_embedding", [])?;
+    for (table, column) in [
+        ("engine_user_states", "trend_accuracy"),
+        ("engine_user_states", "trend_speed"),
+        ("engine_user_states", "trend_engagement"),
+        ("engine_user_states", "habit_preferred_hours_json"),
+        ("engine_user_states", "habit_median_session_mins"),
+        ("engine_user_states", "habit_sessions_per_day"),
+        ("engine_user_states", "habit_hourly_stats_json"),
+        ("engine_user_states", "habit_total_sessions"),
+        ("engine_user_states", "last_session_id"),
+        ("user_stats", "word_ids_json"),
+        ("user_stats", "session_ids_json"),
+        ("users", "referrer_source"),
+        ("etymologies", "generated_at"),
+        ("user_elo", "sigma"),
+        ("system_settings", "telemetry_sample_rate"),
+        ("habit_profiles", "daily_goal_words"),
+        ("habit_profiles", "daily_goal_minutes"),
+        ("words", "embedding_json"),
+    ] {
+        drop_column_if_exists(&conn, table, column)?;
+    }
+    Ok(())
+}
+
+/// m069 down:按原 DEFAULT 重建列 + 恢复 partial 索引（数据不可逆,列值回默认）。仅 dev/test。
+fn m069_drop_dead_columns_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    for (table, column_def) in [
+        ("engine_user_states", "trend_accuracy REAL NOT NULL DEFAULT 0.0"),
+        ("engine_user_states", "trend_speed REAL NOT NULL DEFAULT 0.0"),
+        ("engine_user_states", "trend_engagement REAL NOT NULL DEFAULT 0.0"),
+        (
+            "engine_user_states",
+            "habit_preferred_hours_json TEXT NOT NULL DEFAULT '[9,14,20]'",
+        ),
+        (
+            "engine_user_states",
+            "habit_median_session_mins REAL NOT NULL DEFAULT 15.0",
+        ),
+        (
+            "engine_user_states",
+            "habit_sessions_per_day REAL NOT NULL DEFAULT 1.0",
+        ),
+        (
+            "engine_user_states",
+            "habit_hourly_stats_json TEXT NOT NULL DEFAULT '[]'",
+        ),
+        (
+            "engine_user_states",
+            "habit_total_sessions INTEGER NOT NULL DEFAULT 0",
+        ),
+        ("engine_user_states", "last_session_id TEXT DEFAULT NULL"),
+        ("user_stats", "word_ids_json TEXT NOT NULL DEFAULT '[]'"),
+        ("user_stats", "session_ids_json TEXT NOT NULL DEFAULT '[]'"),
+        ("users", "referrer_source TEXT DEFAULT NULL"),
+        ("etymologies", "generated_at TEXT DEFAULT NULL"),
+        ("user_elo", "sigma REAL NOT NULL DEFAULT 86.0"),
+        (
+            "system_settings",
+            "telemetry_sample_rate REAL NOT NULL DEFAULT 1.0",
+        ),
+        ("habit_profiles", "daily_goal_words INTEGER NOT NULL DEFAULT 30"),
+        (
+            "habit_profiles",
+            "daily_goal_minutes INTEGER NOT NULL DEFAULT 25",
+        ),
+        ("words", "embedding_json TEXT DEFAULT NULL"),
+    ] {
+        let column = column_def.split(' ').next().unwrap_or_default();
+        let has_col: bool = conn
+            .prepare(&format!(
+                "PRAGMA table_info({table})"
+            ))?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(Result::ok)
+            .any(|name| name == column);
+        if !has_col {
+            conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {column_def}"), [])?;
+        }
+    }
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_words_without_embedding ON words(created_at DESC)
+            WHERE embedding_json IS NULL",
+        [],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3669,6 +3895,205 @@ mod tests {
     fn schema_version_const_matches_registry() {
         assert_eq!(SCHEMA_VERSION as usize, migrations().len());
         assert_eq!(SCHEMA_VERSION as usize, migrations_down().len());
+    }
+
+    /// m067：老库形态（带 mdm_short_term_strength 列）+ 存量 mastery blob → 删列 + 按
+    /// 「最近复习痕迹」回填投影；junk blob 跳过；down 清空回填并还原列。
+    #[test]
+    fn m067_drops_dead_column_and_backfills_projection() {
+        let store = Store::open(":memory:", 5000, 1).unwrap();
+        store.run_migrations().unwrap();
+        let conn = store.conn().unwrap();
+        // 模拟老库：补回旧列。
+        conn.execute(
+            "ALTER TABLE mastery_states ADD COLUMN mdm_short_term_strength REAL NOT NULL DEFAULT 0.0",
+            [],
+        )
+        .unwrap();
+        // 存量真值：u1/w1 legacy + 更新的 per-mode 痕迹；u2/w2 WordMasteryState 包裹形态；junk 忽略。
+        for (u, k, j) in [
+            (
+                "u1",
+                "mastery:w1",
+                r#"{"stability":2.0,"difficulty":4.0,"memory_strength":2.0,"last_review_at":1000,"review_count":3}"#,
+            ),
+            (
+                "u1",
+                "mastery:w1:word-to-meaning",
+                r#"{"stability":6.0,"difficulty":3.0,"memory_strength":6.0,"last_review_at":2000,"review_count":4}"#,
+            ),
+            (
+                "u2",
+                "mastery:w2",
+                r#"{"word_id":"w2","mdm":{"stability":1.5,"difficulty":5.0,"memory_strength":1.5,"last_review_at":500,"review_count":1},"mastery_level":"NEW","correct_streak":0,"total_attempts":1,"total_correct":1}"#,
+            ),
+            ("u3", "mastery:w3", r#"{"junk":true}"#),
+        ] {
+            conn.execute(
+                "INSERT INTO engine_algo_states (user_id, algo_id, state_json) VALUES (?1,?2,?3)",
+                rusqlite::params![u, k, j],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        m067_mastery_states_backfill(&store).unwrap();
+
+        let conn = store.conn().unwrap();
+        let has_col = conn
+            .prepare("PRAGMA table_info(mastery_states)")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|c| c == "mdm_short_term_strength");
+        assert!(!has_col, "旧列应被删除");
+        let (stab, cnt): (f64, i64) = conn
+            .query_row(
+                "SELECT mdm_stability, mdm_review_count FROM mastery_states WHERE user_id='u1' AND word_id='w1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((stab, cnt), (6.0, 4), "应取最近复习的 per-mode 痕迹");
+        let stab2: f64 = conn
+            .query_row(
+                "SELECT mdm_stability FROM mastery_states WHERE user_id='u2' AND word_id='w2'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stab2, 1.5, "WordMasteryState 包裹形态应解出 mdm");
+        let total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM mastery_states", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(total, 2, "junk blob 不应产生投影行");
+        drop(conn);
+
+        // down：清空 + 还原列。
+        m067_mastery_states_backfill_down(&store).unwrap();
+        let conn = store.conn().unwrap();
+        let total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM mastery_states", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(total, 0);
+        let has_col = conn
+            .prepare("PRAGMA table_info(mastery_states)")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|c| c == "mdm_short_term_strength");
+        assert!(has_col, "down 后旧列应还原");
+    }
+
+    /// m069：老库形态（含全部死列）→ 删列 + 删 partial 索引；down 还原列与索引。
+    #[test]
+    fn m069_drops_dead_columns_and_restores_on_down() {
+        let store = Store::open(":memory:", 5000, 1).unwrap();
+        store.run_migrations().unwrap();
+        let conn = store.conn().unwrap();
+        // 模拟老库：补回代表性死列 + 索引（全表覆盖交给 m069 本体的 PRAGMA 守卫）。
+        conn.execute_batch(
+            "ALTER TABLE users ADD COLUMN referrer_source TEXT DEFAULT NULL;
+             ALTER TABLE user_elo ADD COLUMN sigma REAL NOT NULL DEFAULT 86.0;
+             ALTER TABLE words ADD COLUMN embedding_json TEXT DEFAULT NULL;
+             CREATE INDEX IF NOT EXISTS idx_words_without_embedding ON words(created_at DESC)
+                 WHERE embedding_json IS NULL;",
+        )
+        .unwrap();
+        drop(conn);
+
+        m069_drop_dead_columns(&store).unwrap();
+
+        let conn = store.conn().unwrap();
+        let has = |table: &str, col: &str| -> bool {
+            conn.prepare(&format!("PRAGMA table_info({table})"))
+                .unwrap()
+                .query_map([], |r| r.get::<_, String>(1))
+                .unwrap()
+                .filter_map(Result::ok)
+                .any(|c| c == col)
+        };
+        assert!(!has("users", "referrer_source"));
+        assert!(!has("user_elo", "sigma"));
+        assert!(!has("words", "embedding_json"));
+        let idx: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_words_without_embedding'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(idx, 0, "partial 索引应随列删除");
+        drop(conn);
+
+        m069_drop_dead_columns_down(&store).unwrap();
+        let conn = store.conn().unwrap();
+        let has = |table: &str, col: &str| -> bool {
+            conn.prepare(&format!("PRAGMA table_info({table})"))
+                .unwrap()
+                .query_map([], |r| r.get::<_, String>(1))
+                .unwrap()
+                .filter_map(Result::ok)
+                .any(|c| c == col)
+        };
+        assert!(has("user_elo", "sigma"), "down 后 sigma 应还原");
+        assert!(has("words", "embedding_json"), "down 后 embedding_json 应还原");
+    }
+
+    /// m068：blob→标量列回填 + status/is_banned 联动回填；缺键行保持 DEFAULT。
+    #[test]
+    fn m068_backfills_user_state_scalars_and_status() {
+        let store = Store::open(":memory:", 5000, 1).unwrap();
+        store.run_migrations().unwrap();
+        let conn = store.conn().unwrap();
+        conn.execute(
+            "INSERT INTO engine_user_states (user_id, state_json, created_at) VALUES
+             ('u1', '{\"attention\":0.42,\"fatigue\":0.3,\"motivation\":0.6,\"confidence\":0.8,
+               \"lastActiveAt\":\"2026-07-01T00:00:00Z\",
+               \"cognitiveProfile\":{\"memoryCapacity\":0.9,\"processingSpeed\":0.2,\"stability\":0.7}}',
+              '2026-01-01T00:00:00Z'),
+             ('u2', '{}', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO users (id, email, username, password_hash, is_banned, created_at, updated_at, status)
+             VALUES ('u1','a@b.c','a','h',1,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z','active')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        m068_stale_scalar_backfill(&store).unwrap();
+
+        let conn = store.conn().unwrap();
+        let (att, la, cm): (f64, Option<String>, f64) = conn
+            .query_row(
+                "SELECT attention, last_active_at, cognitive_memory_capacity
+                   FROM engine_user_states WHERE user_id='u1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(att, 0.42);
+        assert_eq!(la.as_deref(), Some("2026-07-01T00:00:00Z"));
+        assert_eq!(cm, 0.9);
+        // 缺键行保持 DEFAULT，不被覆盖为 NULL/0。
+        let (att2, la2): (f64, Option<String>) = conn
+            .query_row(
+                "SELECT attention, last_active_at FROM engine_user_states WHERE user_id='u2'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(att2, 0.7);
+        assert!(la2.is_none());
+        let status: String = conn
+            .query_row("SELECT status FROM users WHERE id='u1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(status, "suspended", "is_banned=1 应联动回填 status");
     }
 
     #[test]

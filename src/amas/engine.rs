@@ -92,6 +92,18 @@ struct MemoryFeedback {
 
 /// 任务B:MasteryLevel → 流水字符串（New/Learning/Reviewing/Mastered/Forgotten）。
 /// 不复用 Serialize（其为 SCREAMING_SNAKE_CASE，会得到 "NEW" 等），本地映射保证流水可读口径。
+/// 冷启动难度先验是否实际启用（任一权重非零）。该特性无独立 feature flag，仅靠权重
+/// 门控；全零时构建结果必被乘 0 丢弃，调用点据此跳过 get_word/get_word_morphemes 的
+/// 冗余 DB 读（大词书导入等首评热路径 2×N 次）。
+fn cold_start_priors_enabled(mm: &crate::amas::config::MemoryModelConfig) -> bool {
+    mm.cold_start_d_len_weight != 0.0
+        || mm.cold_start_d_morph_weight != 0.0
+        || mm.cold_start_d_extd_weight != 0.0
+        || mm.cold_start_s_len_weight != 0.0
+        || mm.cold_start_s_morph_weight != 0.0
+        || mm.cold_start_s_extd_weight != 0.0
+}
+
 fn mastery_level_str(level: &MasteryLevel) -> &'static str {
     match level {
         MasteryLevel::New => "New",
@@ -1487,9 +1499,12 @@ impl AMASEngine {
         );
         let now_ms = chrono::Utc::now().timestamp_millis();
 
-        // 冷启动难度先验（Phase 1a）：仅首评（review_count==0）构建并消费，避免每次复习多查 DB。
-        // 默认权重全 0 → ColdStartPriors::deltas=(0,0) → bit-exact legacy。
-        let cold_start = if state.mdm.review_count == 0 {
+        // 冷启动难度先验（Phase 1a）：仅首评（review_count==0）且任一权重非零才构建并消费。
+        // 默认权重全 0 时不做 get_word/get_word_morphemes 两次 DB 读（关态真正零成本）；
+        // deltas=(0,0) 与不传 priors 逐位等价，guard 不改变输出。
+        let cold_start = if state.mdm.review_count == 0
+            && cold_start_priors_enabled(&config.memory_model)
+        {
             self.build_cold_start_priors(&raw_event.word_id, &config.memory_model)
         } else {
             None
@@ -1542,6 +1557,10 @@ impl AMASEngine {
         word_id: &str,
         mm: &crate::amas::config::MemoryModelConfig,
     ) -> Option<mdm::ColdStartPriors> {
+        debug_assert!(
+            cold_start_priors_enabled(mm),
+            "guard 应在调用点拦截权重全零的构建"
+        );
         let word = self.store.get_word(word_id).ok().flatten()?;
         let len = word.text.chars().count() as f64;
         let len_z =

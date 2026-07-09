@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
@@ -11,7 +11,6 @@ pub struct AlgorithmMetrics {
     pub call_count: AtomicU64,
     pub total_latency_us: AtomicU64,
     pub error_count: AtomicU64,
-    pub last_called_at: AtomicI64,
     latency_buckets: [AtomicU64; 6],
 }
 
@@ -21,7 +20,6 @@ impl Default for AlgorithmMetrics {
             call_count: AtomicU64::new(0),
             total_latency_us: AtomicU64::new(0),
             error_count: AtomicU64::new(0),
-            last_called_at: AtomicI64::new(0),
             latency_buckets: [
                 AtomicU64::new(0),
                 AtomicU64::new(0),
@@ -46,34 +44,6 @@ impl AlgorithmMetrics {
                 return;
             }
         }
-    }
-
-    pub fn get_percentiles(&self) -> (f64, f64, f64) {
-        let counts: Vec<u64> = self
-            .latency_buckets
-            .iter()
-            .map(|b| b.load(Ordering::Relaxed))
-            .collect();
-        let total: u64 = counts.iter().sum();
-        if total == 0 {
-            return (0.0, 0.0, 0.0);
-        }
-
-        let bucket_midpoints: [f64; 6] = [50.0, 300.0, 750.0, 3000.0, 7500.0, 15000.0];
-
-        let percentile = |pct: f64| -> f64 {
-            let target = (pct / 100.0 * total as f64).ceil() as u64;
-            let mut cumulative = 0u64;
-            for (i, &count) in counts.iter().enumerate() {
-                cumulative += count;
-                if cumulative >= target {
-                    return bucket_midpoints[i];
-                }
-            }
-            bucket_midpoints[5]
-        };
-
-        (percentile(50.0), percentile(95.0), percentile(99.0))
     }
 }
 
@@ -107,9 +77,6 @@ impl MetricsRegistry {
                 metric.error_count.fetch_add(1, Ordering::Relaxed);
             }
             metric.record_latency_bucket(latency_us);
-            metric
-                .last_called_at
-                .store(chrono::Utc::now().timestamp_millis(), Ordering::Relaxed);
         }
     }
 
@@ -153,29 +120,6 @@ impl MetricsRegistry {
                 )
             })
             .collect()
-    }
-
-    pub fn restore(&self, algo_id_str: &str, snapshot: &MetricsSnapshot) {
-        let algo_id = match algo_id_str {
-            "heuristic" => AlgorithmId::Heuristic,
-            "ige" => AlgorithmId::Ige,
-            "swd" => AlgorithmId::Swd,
-            "ensemble" => AlgorithmId::Ensemble,
-            "mdm" => AlgorithmId::Mdm,
-            "mastery" => AlgorithmId::Mastery,
-            _ => return,
-        };
-        if let Some(metric) = self.metrics.get(&algo_id) {
-            metric
-                .call_count
-                .store(snapshot.call_count, Ordering::Relaxed);
-            metric
-                .total_latency_us
-                .store(snapshot.total_latency_us, Ordering::Relaxed);
-            metric
-                .error_count
-                .store(snapshot.error_count, Ordering::Relaxed);
-        }
     }
 
     /// 持久化失败时把 snapshot_and_reset 取走的计数原子加回，下次 flush 重试，避免该区间计数永久丢失。
@@ -264,35 +208,26 @@ mod tests {
         assert_eq!(m.call_count.load(Ordering::Relaxed), 0);
         assert_eq!(m.total_latency_us.load(Ordering::Relaxed), 0);
         assert_eq!(m.error_count.load(Ordering::Relaxed), 0);
-        assert_eq!(m.last_called_at.load(Ordering::Relaxed), 0);
-        let (p50, p95, p99) = m.get_percentiles();
-        assert_eq!((p50, p95, p99), (0.0, 0.0, 0.0));
     }
 
     #[test]
     fn record_latency_bucket_picks_correct_bucket() {
-        let m = AlgorithmMetrics::default();
-        m.record_latency_bucket(50);
-        m.record_latency_bucket(450);
-        m.record_latency_bucket(900);
-        m.record_latency_bucket(4500);
-        m.record_latency_bucket(9500);
-        m.record_latency_bucket(100_000);
-        // All six buckets should have exactly one entry; percentiles must be finite.
-        let (p50, p95, p99) = m.get_percentiles();
-        assert!(p50 > 0.0 && p95 > 0.0 && p99 > 0.0);
-        // P99 should be the highest bucket midpoint.
-        assert!(p99 >= p95);
-        assert!(p95 >= p50);
+        let reg = MetricsRegistry::new();
+        // 六个阈值各命中一个桶（经 record_call 走 record_latency_bucket）
+        for us in [50, 450, 900, 4500, 9500, 100_000] {
+            reg.record_call(AlgorithmId::Heuristic, us, false);
+        }
+        let snap = reg.snapshot_and_reset();
+        assert_eq!(snap["heuristic"].latency_buckets, [1, 1, 1, 1, 1, 1]);
     }
 
     #[test]
     fn record_latency_bucket_handles_overflow_threshold() {
-        let m = AlgorithmMetrics::default();
+        let reg = MetricsRegistry::new();
         // u64::MAX 也应落入最后的桶
-        m.record_latency_bucket(u64::MAX);
-        let (_, _, p99) = m.get_percentiles();
-        assert_eq!(p99, 15000.0);
+        reg.record_call(AlgorithmId::Heuristic, u64::MAX, false);
+        let snap = reg.snapshot_and_reset();
+        assert_eq!(snap["heuristic"].latency_buckets[5], 1);
     }
 
     #[test]
@@ -330,56 +265,17 @@ mod tests {
     }
 
     #[test]
-    fn restore_roundtrips_snapshot() {
+    fn merge_snapshot_re_adds_counts() {
         let reg = MetricsRegistry::new();
-        let snap = MetricsSnapshot {
-            call_count: 7,
-            total_latency_us: 1234,
-            error_count: 2,
-            latency_buckets: [0; 6],
-        };
-        reg.restore("swd", &snap);
+        reg.record_call(AlgorithmId::Swd, 100, true);
+        let snap = reg.snapshot_and_reset();
+        // 模拟 flush 失败回灌；失败窗口内又来一条
+        reg.merge_snapshot(&snap);
+        reg.record_call(AlgorithmId::Swd, 50, false);
         let after = reg.snapshot();
-        assert_eq!(after["swd"].call_count, 7);
-        assert_eq!(after["swd"].total_latency_us, 1234);
-        assert_eq!(after["swd"].error_count, 2);
-    }
-
-    #[test]
-    fn restore_unknown_algo_is_noop() {
-        let reg = MetricsRegistry::new();
-        let snap = MetricsSnapshot {
-            call_count: 9,
-            total_latency_us: 999,
-            error_count: 0,
-            latency_buckets: [0; 6],
-        };
-        reg.restore("unknown_algo_xyz", &snap);
-        // 不影响已知 key
-        let after = reg.snapshot();
-        for v in after.values() {
-            assert_eq!(v.call_count, 0);
-        }
-    }
-
-    #[test]
-    fn restore_covers_all_known_algo_strings() {
-        let reg = MetricsRegistry::new();
-        for key in ["heuristic", "ige", "swd", "ensemble", "mdm", "mastery"] {
-            reg.restore(
-                key,
-                &MetricsSnapshot {
-                    call_count: 1,
-                    total_latency_us: 10,
-                    error_count: 0,
-                    latency_buckets: [0; 6],
-                },
-            );
-        }
-        let snap = reg.snapshot();
-        for key in ["heuristic", "ige", "swd", "ensemble", "mdm", "mastery"] {
-            assert_eq!(snap[key].call_count, 1, "{key} not restored");
-        }
+        assert_eq!(after["swd"].call_count, 2);
+        assert_eq!(after["swd"].total_latency_us, 150);
+        assert_eq!(after["swd"].error_count, 1);
     }
 
     #[test]

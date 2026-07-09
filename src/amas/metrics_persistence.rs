@@ -1,16 +1,8 @@
 use crate::amas::metrics::{MetricsRegistry, MetricsSnapshot};
-use crate::amas::types::AlgorithmId;
 use crate::store::Store;
 
-const ALL_ALGORITHM_IDS: &[AlgorithmId] = &[
-    AlgorithmId::Heuristic,
-    AlgorithmId::Ige,
-    AlgorithmId::Swd,
-    AlgorithmId::Ensemble,
-    AlgorithmId::Mdm,
-    AlgorithmId::Mastery,
-];
-
+/// 同步 drain+落库+失败回灌。供优雅停机最终落盘等无 async 上下文的调用点；
+/// cron 周期 flush 走 workers::metrics_flush::run（blocking 任务 + admin 告警）。
 pub fn flush_metrics(
     registry: &MetricsRegistry,
     store: &Store,
@@ -62,21 +54,3 @@ pub fn flush_metrics_snapshot(
     Ok(())
 }
 
-pub fn restore_from_store(
-    registry: &MetricsRegistry,
-    store: &Store,
-) -> Result<(), crate::store::StoreError> {
-    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
-
-    for algo in ALL_ALGORITHM_IDS {
-        let algo_id = algo.as_str();
-        if let Some(val) = store.get_metrics_daily(&today, algo_id)? {
-            if let Ok(snapshot) = serde_json::from_value::<MetricsSnapshot>(val) {
-                registry.restore(algo_id, &snapshot);
-            }
-        }
-    }
-
-    tracing::debug!("Metrics restored from store for {}", today);
-    Ok(())
-}

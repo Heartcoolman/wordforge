@@ -146,10 +146,9 @@ const FLAG_META = [
   { key: 'heuristicEnabled', label: '启发式策略', desc: '规则启发式' },
   { key: 'igeEnabled', label: 'IGE 探索', desc: '信息增益探索' },
   { key: 'swdEnabled', label: 'SWD 调度', desc: '间隔加权衰减' },
-  { key: 'mdmEnabled', label: 'MDM 记忆模型', desc: 'FSRS 记忆/遗忘建模' },
-  { key: 'iadEnabled', label: 'IAD 干扰衰减', desc: '混淆词对干扰（B38）' },
-  { key: 'mtpEnabled', label: 'MTP 词素迁移', desc: '词素迁移预测（B37）' },
   { key: 'sspEnabled', label: 'SSP / Cost-ADR 调度', desc: '成本最小化 DP（状态相关 DR 曲面；T1.4）' },
+  { key: 'confusionIsolationEnabled', label: '混淆隔离排程', desc: '同会话惩罚已出现词的高分混淆对端（Phase 1b；需 dampen<1 生效）' },
+  { key: 'multiTraceEnabled', label: '跨题型多痕迹', desc: 'mastery 按题型分痕迹、min-recall 聚合（Phase 2）' },
 ] as const;
 
 /* T1.1/T1.2：ELO 调度实验开关（位于 config.elo，非 featureFlags）。默认关，可随时开；

@@ -666,7 +666,6 @@ mod tests {
     #[test]
     fn captures_request_id_from_enclosing_span() {
         use tracing_subscriber::layer::SubscriberExt;
-        use tracing_subscriber::util::SubscriberInitExt as _;
 
         let _g = TEST_GUARD.lock().unwrap_or_else(|p| p.into_inner());
         {

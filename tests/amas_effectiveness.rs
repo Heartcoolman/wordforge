@@ -197,21 +197,12 @@ fn test_spacing_effect_on_recall_decay_rate() {
     }
 
     // The model encodes spacing through passive decay in update_strength:
-    // after decay, the re-learning achieves deeper consolidation.
-    // Verify the multi-timescale model tracks different memory components:
+    // after decay, the re-learning builds stability.
+    assert!(spaced.stability > 0.0, "stability should accumulate");
     assert!(
-        spaced.short_term_strength > 0.0,
-        "short_term should accumulate"
+        spaced.memory_strength > 0.0,
+        "memory_strength alias should track stability"
     );
-    assert!(
-        spaced.medium_term_strength > 0.0,
-        "medium_term should accumulate"
-    );
-    assert!(
-        spaced.long_term_strength > 0.0,
-        "long_term should accumulate"
-    );
-    assert!(spaced.consolidation > 0.0, "consolidation should grow");
 
     // Verify recall decay is monotonic: further future = lower recall
     let t1 = BASE_TS + 5 * DAY_MS + 1_000;
@@ -337,10 +328,10 @@ fn test_elo_convergence_and_zpd() {
 // test_morpheme_transfer_bonus_effect 随模块移除。
 
 // ---------------------------------------------------------------------------
-// 11. Consolidation grows with repeated high-quality reviews
+// 11. Difficulty reflects review quality (high quality → easier item state)
 // ---------------------------------------------------------------------------
 #[test]
-fn test_consolidation_grows_with_quality() {
+fn test_difficulty_reflects_review_quality() {
     let config = MemoryModelConfig::default();
     let mut state = MdmState::default();
 
@@ -349,14 +340,7 @@ fn test_consolidation_grows_with_quality() {
         simulate_review(&mut state, 0.95, now_ms, &config);
     }
 
-    assert!(
-        state.consolidation > 0.0,
-        "consolidation should be positive after high-quality reviews, got {}",
-        state.consolidation
-    );
-
-    // Low quality reviews should reduce consolidation
-    let high_consolidation = state.consolidation;
+    // Low quality reviews should drive difficulty up relative to high quality
     let mut low_state = MdmState::default();
     for day in 0..10 {
         let now_ms = BASE_TS + day * DAY_MS;
@@ -364,9 +348,10 @@ fn test_consolidation_grows_with_quality() {
     }
 
     assert!(
-        high_consolidation > low_state.consolidation,
-        "high-quality consolidation {high_consolidation:.4} <= low-quality {}",
-        low_state.consolidation
+        state.difficulty < low_state.difficulty,
+        "high-quality difficulty {:.4} >= low-quality {:.4}",
+        state.difficulty,
+        low_state.difficulty
     );
 }
 

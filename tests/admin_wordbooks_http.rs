@@ -35,7 +35,6 @@ fn seed_user(store: &Store, id: &str, email: &str) {
             role: "user".to_string(),
             status: "active".to_string(),
             last_login_at: None,
-            referrer_source: None,
         })
         .expect("create user");
 }
@@ -65,7 +64,6 @@ fn seed_word(store: &Store, id: &str, text: &str, meaning: &str, pos: Option<&st
             difficulty: diff,
             examples: vec!["示例".to_string()],
             tags: vec![],
-            embedding: None,
             created_at: Utc::now(),
         })
         .expect("upsert word");

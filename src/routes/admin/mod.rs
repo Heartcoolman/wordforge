@@ -49,8 +49,6 @@ struct AdminUserView {
     status: String,
     /// m022:NULL 表示从未登录
     last_login_at: Option<chrono::DateTime<chrono::Utc>>,
-    /// m025:推荐来源,NULL 表示无(admin 创建 / 老用户)
-    referrer_source: Option<String>,
     /// m024:仅 list?includeStats=true 时填充
     #[serde(skip_serializing_if = "Option::is_none")]
     stats: Option<UserStats>,
@@ -70,7 +68,6 @@ impl From<&User> for AdminUserView {
             role: u.role.clone(),
             status: u.status.clone(),
             last_login_at: u.last_login_at,
-            referrer_source: u.referrer_source.clone(),
             stats: None,
         }
     }
@@ -430,7 +427,6 @@ async fn admin_create_user(
                     status: "active".to_string(),
                     last_login_at: None,
                     // m025:admin 通道创建,无 referral source
-                    referrer_source: None,
                 };
                 store.create_user(&user)?;
                 Ok(user)
@@ -1304,17 +1300,15 @@ async fn admin_user_extras(
             // 2) elo + 衍生 level
             let elo: Option<serde_json::Value> = conn
                 .query_row(
-                    "SELECT rating, sigma, games FROM user_elo WHERE user_id = ?1",
+                    "SELECT rating, games FROM user_elo WHERE user_id = ?1",
                     rusqlite::params![user_id],
                     |r| {
                         let rating: f64 = r.get(0)?;
-                        let sigma: f64 = r.get(1)?;
-                        let games: i64 = r.get(2)?;
+                        let games: i64 = r.get(1)?;
                         // 简单 level 衍生:每 100 局 1 级,上限 50
                         let level = (games / 100).clamp(0, 50);
                         Ok(serde_json::json!({
                             "rating": rating,
-                            "sigma": sigma,
                             "games": games,
                             "level": level,
                         }))
@@ -1322,24 +1316,32 @@ async fn admin_user_extras(
                 )
                 .ok();
 
-            // 3) habit(可能未初始化)
-            let habit: Option<serde_json::Value> = conn
+            // 3) habit(可能未初始化)。每日目标词数读 study_configs 真值——habit_profiles 旧
+            // daily_goal_* 两列从未被写、恒显示 DEFAULT 30/25 误导,已随 m069 删除;
+            // 「每日目标分钟」无真值来源,字段一并移除。
+            let daily_goal_words: Option<i64> = conn
                 .query_row(
-                    "SELECT daily_goal_words, daily_goal_minutes, sessions_per_day,
-                            median_session_length_mins, temporal_total_sessions
-                     FROM habit_profiles WHERE user_id = ?1",
+                    "SELECT daily_word_count FROM study_configs WHERE user_id = ?1",
                     rusqlite::params![user_id],
-                    |r| {
-                        Ok(serde_json::json!({
-                            "dailyGoalWords": r.get::<_, i64>(0)?,
-                            "dailyGoalMinutes": r.get::<_, i64>(1)?,
-                            "sessionsPerDay": r.get::<_, f64>(2)?,
-                            "medianSessionMins": r.get::<_, f64>(3)?,
-                            "totalSessions": r.get::<_, i64>(4)?,
-                        }))
-                    },
+                    |r| r.get(0),
                 )
                 .ok();
+            let habit: Option<serde_json::Value> = conn
+                .query_row(
+                    "SELECT sessions_per_day, median_session_length_mins, temporal_total_sessions
+                     FROM habit_profiles WHERE user_id = ?1",
+                    rusqlite::params![user_id],
+                    |r| Ok((r.get::<_, f64>(0)?, r.get::<_, f64>(1)?, r.get::<_, i64>(2)?)),
+                )
+                .ok()
+                .map(|(sessions_per_day, median_mins, total_sessions)| {
+                    serde_json::json!({
+                        "dailyGoalWords": daily_goal_words,
+                        "sessionsPerDay": sessions_per_day,
+                        "medianSessionMins": median_mins,
+                        "totalSessions": total_sessions,
+                    })
+                });
 
             // 4) streakDays 衍生:从 today 向前倒数连续答题日
             let recent_days: Vec<String> = {

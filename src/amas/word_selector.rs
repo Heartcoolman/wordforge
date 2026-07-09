@@ -328,10 +328,12 @@ pub fn select_words(
                 // suppress_extras 仅在召回 >= recall_mastered_threshold（已掌握）时为 true：记录抑制。
                 record(RejectionReason::MasteredSuppressed);
             }
-            // ② 混淆隔离惩罚（默认 dampen=1.0 → no-op）。对 suppress_extras 的已掌握词同样适用。
+            // ② 混淆隔离惩罚（默认 dampen=1.0 → no-op）。对 suppress_extras 的已掌握词
+            // dampen 数学同样适用，但遥测只记主导原因：已记 MasteredSuppressed（分数已钉底）
+            // 的词不再叠记 ConfusionDampened，保证 rejection 计数与「被拒候选数」守恒。
             if confusion_exclude_set.contains(word_id.as_str()) {
                 score *= confusion_dampen;
-                if confusion_dampen < 1.0 {
+                if confusion_dampen < 1.0 && !review_score.suppress_extras {
                     // 仅当 dampen 实际生效（<1.0）才计为拒绝，dampen=1.0 是 no-op。
                     record(RejectionReason::ConfusionDampened);
                 }
@@ -467,7 +469,6 @@ mod tests {
             difficulty,
             examples: vec![],
             tags: vec![],
-            embedding: None,
             created_at: Utc::now(),
         }
     }
@@ -562,7 +563,6 @@ mod tests {
             difficulty: 0.5,
             examples: vec![],
             tags: vec![],
-            embedding: None,
             created_at: Utc::now(),
         };
 
@@ -575,7 +575,6 @@ mod tests {
             difficulty: 0.95,
             examples: vec![],
             tags: vec![],
-            embedding: None,
             created_at: Utc::now(),
         };
 

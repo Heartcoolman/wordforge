@@ -42,12 +42,11 @@ impl Store {
             .and_then(|v| v.as_bool())
             .unwrap_or(false) as i64;
         let source = data.get("source").and_then(|v| v.as_str());
-        let generated_at = data.get("generated_at").and_then(|v| v.as_str());
         conn.execute(
-            "INSERT INTO etymologies (word_id, word, etymology, roots_json, generated, source, generated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-             ON CONFLICT(word_id) DO UPDATE SET word=?2, etymology=?3, roots_json=?4, generated=?5, source=?6, generated_at=?7",
-            params![word_id, word, etymology, roots, generated, source, generated_at],
+            "INSERT INTO etymologies (word_id, word, etymology, roots_json, generated, source)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(word_id) DO UPDATE SET word=?2, etymology=?3, roots_json=?4, generated=?5, source=?6",
+            params![word_id, word, etymology, roots, generated, source],
         )?;
         Ok(())
     }

@@ -12,6 +12,10 @@ use serde::Serialize;
 
 use crate::store::{Store, StoreError};
 
+/// 全局默认采样率:恒 1.0(全采)。原 system_settings.telemetry_sample_rate 列无端点可改、
+/// 恒为 DEFAULT,职能已被 probe_sampling_config 的 '*' 种子规则覆盖,m069 已删列。
+pub const GLOBAL_DEFAULT_SAMPLE_RATE: f64 = 1.0;
+
 /// 单条采样规则行(对应 probe_sampling_config 一行)。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -255,19 +259,6 @@ impl Store {
     // ---------------------------------------------------------------------
     // 采样规则 CRUD
     // ---------------------------------------------------------------------
-
-    /// 全局默认采样率(system_settings.telemetry_sample_rate)。
-    pub fn global_sample_rate(&self) -> Result<f64, StoreError> {
-        let conn = self.conn()?;
-        let rate: f64 = conn
-            .query_row(
-                "SELECT telemetry_sample_rate FROM system_settings WHERE singleton_id = 1",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap_or(1.0);
-        Ok(rate)
-    }
 
     /// 列出全部采样规则,按 priority 升序(优先级高在前)。
     pub fn list_sampling_rules(&self) -> Result<Vec<SamplingRule>, StoreError> {
@@ -520,8 +511,9 @@ impl Store {
             return Ok(if enabled { rate } else { 0.0 });
         }
 
-        // 3) 全局默认
-        self.global_sample_rate()
+        // 3) 全局默认:恒 1.0(全采)。原 system_settings.telemetry_sample_rate 列无端点可改、
+        // 恒为 DEFAULT,职能已被 '*' 种子规则覆盖,m069 已删列。
+        Ok(GLOBAL_DEFAULT_SAMPLE_RATE)
     }
 
     // ---------------------------------------------------------------------

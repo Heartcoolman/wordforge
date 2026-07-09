@@ -8,7 +8,6 @@ pub struct FeatureFlags {
     pub heuristic_enabled: bool,
     pub ige_enabled: bool,
     pub swd_enabled: bool,
-    pub mdm_enabled: bool,
     /// SSP-MMC: 最优间隔调度（离线 DP 预计算策略表）
     #[serde(default)]
     pub ssp_enabled: bool,
@@ -31,7 +30,6 @@ impl Default for FeatureFlags {
             heuristic_enabled: true,
             ige_enabled: true,
             swd_enabled: true,
-            mdm_enabled: true,
             ssp_enabled: false,
             confusion_isolation_enabled: false,
             multi_trace_enabled: false,

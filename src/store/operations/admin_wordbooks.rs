@@ -543,7 +543,7 @@ impl Store {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT w.id, w.text, w.meaning, w.pronunciation, w.part_of_speech, w.difficulty,
-                    w.examples_json, w.tags_json, w.embedding_json, w.created_at
+                    w.examples_json, w.tags_json, w.created_at
              FROM wordbook_words ww
              JOIN words w ON w.id = ww.word_id
              WHERE ww.wordbook_id = ?1
@@ -554,13 +554,12 @@ impl Store {
             .query_map(params![wordbook_id, limit], |r| {
                 let examples_json: String = r.get(6)?;
                 let tags_json: String = r.get(7)?;
-                let embedding_json: Option<String> = r.get(8)?;
-                let created_at_str: String = r.get(9)?;
+                let created_at_str: String = r.get(8)?;
                 let created_at = DateTime::parse_from_rfc3339(&created_at_str)
                     .map(|dt| dt.with_timezone(&Utc))
                     .map_err(|e| {
                         rusqlite::Error::FromSqlConversionFailure(
-                            9,
+                            8,
                             rusqlite::types::Type::Text,
                             Box::new(e),
                         )
@@ -574,11 +573,6 @@ impl Store {
                     difficulty: r.get(5)?,
                     examples: serde_json::from_str(&examples_json).unwrap_or_default(),
                     tags: serde_json::from_str(&tags_json).unwrap_or_default(),
-                    embedding: embedding_json
-                        .as_deref()
-                        .map(serde_json::from_str)
-                        .transpose()
-                        .unwrap_or_default(),
                     created_at,
                 })
             })?
@@ -625,7 +619,6 @@ mod tests {
                 difficulty: diff,
                 examples: vec!["ex".into()],
                 tags: vec![],
-                embedding: None,
                 created_at: Utc::now(),
             })
             .unwrap();

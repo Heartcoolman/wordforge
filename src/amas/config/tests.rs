@@ -35,7 +35,6 @@ fn modeling_out_of_range_fields_each_fail() {
         |c: &mut AMASConfig| c.modeling.confidence_decay = 2.0,
         |c: &mut AMASConfig| c.modeling.min_confidence = -0.5,
         |c: &mut AMASConfig| c.modeling.motivation_momentum = -1.0,
-        |c: &mut AMASConfig| c.modeling.fatigue_recovery_rate = 5.0,
         |c: &mut AMASConfig| c.modeling.response_speed_max_ms = 0.0,
         |c: &mut AMASConfig| c.modeling.fatigue_quit_increase = -0.01,
         |c: &mut AMASConfig| c.modeling.cognitive_profile_alpha = 1.5,
@@ -264,22 +263,9 @@ fn swd_max_history_zero_fails() {
 
 #[test]
 fn memory_model_invalid_fields_fail() {
-    let mutators: [fn(&mut AMASConfig); 22] = [
-        |c| c.memory_model.short_term_learning_rate = 2.0,
-        |c| c.memory_model.medium_term_learning_rate = -0.1,
-        |c| c.memory_model.long_term_learning_rate = 1.5,
-        |c| {
-            c.memory_model.composite_weight_short = 0.1;
-            c.memory_model.composite_weight_medium = 0.1;
-            c.memory_model.composite_weight_long = 0.1;
-        },
-        |c| c.memory_model.half_life_time_unit_secs = 0.0,
+    let mutators: [fn(&mut AMASConfig); 13] = [
         |c| c.memory_model.half_life_base_epsilon = -1.0,
-        |c| c.memory_model.half_life_power = 5.0,
         |c| c.memory_model.base_desired_retention = 0.1, // 应在 [0.5,0.99]
-        |c| c.memory_model.consolidation_bonus = -0.5,
-        |c| c.memory_model.passive_decay_half_life_days = 0.0,
-        |c| c.memory_model.passive_decay_power = -0.1,
         |c| c.memory_model.mastery_window_size = 0,
         |c| {
             c.memory_model.alpha_min = 2.0;
@@ -414,11 +400,7 @@ fn ssp_invalid_fields_fail() {
 
 #[test]
 fn forgetting_curve_and_w_array_invalid_fail() {
-    let mutators: [fn(&mut AMASConfig); 8] = [
-        |c| c.memory_model.forgetting_curve_factor = 0.0,
-        |c| c.memory_model.forgetting_curve_factor = f64::NAN,
-        |c| c.memory_model.forgetting_curve_decay = 0.0, // 必须 < 0
-        |c| c.memory_model.forgetting_curve_decay = 0.5, // 正值反转曲线
+    let mutators: [fn(&mut AMASConfig); 4] = [
         |c| c.memory_model.forgetting_curve_floor = 1.0, // 须在 [0,1)
         |c| c.memory_model.forgetting_curve_floor = -0.1,
         |c| c.memory_model.w[8] = f64::INFINITY,
@@ -569,7 +551,6 @@ fn deserialize_with_minimum_toml_invokes_all_default_fns() {
 heuristicEnabled = true
 igeEnabled = true
 swdEnabled = true
-mdmEnabled = true
 ensembleEnabled = true
 
 [ensemble]
@@ -586,7 +567,6 @@ attentionSmoothing = 0.1
 confidenceDecay = 0.9
 minConfidence = 0.05
 fatigueIncreaseRate = 0.05
-fatigueRecoveryRate = 0.1
 motivationMomentum = 0.1
 visualFatigueWeight = 0.5
 
@@ -624,7 +604,7 @@ frustration = 0.15
     assert!(cfg.heuristic.confidence_base >= 0.0);
     assert!(cfg.ige.ucb_confidence_coeff > 0.0);
     assert!(cfg.swd.max_history_size > 0);
-    assert!(cfg.memory_model.short_term_learning_rate > 0.0);
+    assert!(cfg.memory_model.mastery_composite_threshold > 0.0);
     assert!(cfg.word_selector.review_ucb_weight >= 0.0);
     assert!(cfg.intervention.fatigue_alert_threshold >= 0.0);
     assert!(cfg.learning_strategy.cross_session_high_accuracy >= 0.0);
@@ -642,7 +622,6 @@ fn deserialize_empty_subconfigs_uses_struct_default() {
 heuristicEnabled = true
 igeEnabled = true
 swdEnabled = true
-mdmEnabled = true
 ensembleEnabled = true
 
 [ensemble]
@@ -659,7 +638,6 @@ attentionSmoothing = 0.1
 confidenceDecay = 0.9
 minConfidence = 0.05
 fatigueIncreaseRate = 0.05
-fatigueRecoveryRate = 0.1
 motivationMomentum = 0.1
 visualFatigueWeight = 0.5
 
@@ -794,9 +772,10 @@ fn curve_helpers_clamp_decay_to_safe_domain() {
 }
 
 #[test]
-fn repo_root_amas_config_loads_validates_and_pins_v5_gsp_ship_knobs() {
-    // 2026-06-13 v5 GSP 写回门禁：仓库根 amas_config.toml 必须可加载且过校验，
-    // F1 船值钉死（val Borda 30，三数据集 rank 1，seed-robust strict #1）。
+fn repo_root_amas_config_loads_validates_and_pins_v1_truehl_ship_knobs() {
+    // 2026-07-08 V1 真半衰期口径战役写回门禁：仓库根 amas_config.toml 必须可加载且过校验，
+    // V1 船值钉死（mastered=oracle_halflife>=30 口径，val 三种子 Borda 27/26/26 全部综合第 1）。
+    // vs 2026-06-13 F1：youngRetention 0.86→0.90、retire streak6 开启、difflogit 关闭。
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/amas_config.toml");
     let cfg = AMASConfig::load_from_toml(path).expect("load repo-root amas_config.toml");
     cfg.validate().expect("repo-root amas_config.toml must validate");
@@ -808,15 +787,22 @@ fn repo_root_amas_config_loads_validates_and_pins_v5_gsp_ship_knobs() {
     assert_eq!(m.alpha_ramp_tau, 0.0);
     assert_eq!(m.alpha_lapse_ramp_tau, 0.0);
     assert_eq!(m.base_desired_retention, 0.85);
-    // GSP 调度策略头 F1 船值
+    // GSP 调度策略头 V1 船值
     assert_eq!(m.gsp_success_grade, 4);
     assert_eq!(m.gsp_interval_cap_days, 40.0);
     assert_eq!(m.gsp_graduation_streak, 2);
     assert_eq!(m.gsp_graduation_floor_days, 30.0);
-    assert_eq!(m.gsp_young_retention, 0.86);
+    assert_eq!(m.gsp_young_retention, 0.90);
     assert_eq!(m.gsp_mature_retention, 0.92);
     assert_eq!(m.gsp_maturity_band_days, 14.0);
     assert_eq!(m.gsp_interval_fuzz, 0.0);
+    // GSP 退役（GSP_SPEC §9）：streak6 保守船值
+    assert_eq!(m.gsp_retire_after_reviews, 1);
+    assert_eq!(m.gsp_retire_interval_days, 365.0);
+    assert_eq!(m.gsp_retire_min_stability, 0.0);
+    assert_eq!(m.gsp_retire_min_streak, 6);
+    // 预测读出：difflogit 关闭（跨数据集聚合净负；预测腿=FSRS-6 天花板位级同分）
+    assert_eq!(m.difficulty_logit_weight, 0.0);
     // FSRS-6 公版 w（grade=4 共拟合）：首权重 w[0]=0.212、w[20]=0.1542
     assert!((m.w[0] - 0.212).abs() < 1e-12);
     assert!((m.w[20] - 0.1542).abs() < 1e-12);

@@ -209,15 +209,8 @@
         "coldStartSExtdWeight": 0.0,
         "coldStartSLenWeight": 0.0,
         "coldStartSMorphWeight": 0.0,
-        "compositeWeightLong": 0.5,
-        "compositeWeightMedium": 0.3,
-        "compositeWeightShort": 0.2,
-        "consolidationBonus": 1.5,
-        "consolidationRateScale": 0.25,
         "difficultyLogitRef": 5.0,
         "difficultyLogitWeight": 0.0,
-        "forgettingCurveDecay": -0.5,
-        "forgettingCurveFactor": 0.2345679012345679,
         "forgettingCurveFloor": 0.0,
         "forgettingThreshold": 0.2,
         "gspGraduationFloorDays": 30.0,
@@ -226,16 +219,17 @@
         "gspIntervalFuzz": 0.0,
         "gspMatureRetention": 0.0,
         "gspMaturityBandDays": 0.0,
+        "gspRetireAfterReviews": 0,
+        "gspRetireIntervalDays": 365.0,
+        "gspRetireMinStability": 0.0,
+        "gspRetireMinStreak": 0,
         "gspSuccessGrade": 3,
         "gspYoungRetention": 0.0,
         "halfLifeBaseEpsilon": 0.3,
-        "halfLifePower": 1.5,
-        "halfLifeTimeUnitSecs": 1296000.0,
         "highAccuracyRetentionBoost": 0.03,
         "highAccuracyThreshold": 0.9,
         "highFatigueRetentionDrop": 0.05,
         "highFatigueThreshold": 0.6,
-        "longTermLearningRate": 0.12,
         "lowMotivationRetentionDrop": 0.03,
         "lowMotivationThreshold": -0.2,
         "masteryAccuracyThreshold": 0.65,
@@ -243,10 +237,7 @@
         "masteryStreakThreshold": 1,
         "masteryWindowSize": 20,
         "maxIntervalDays": 90.0,
-        "mediumTermLearningRate": 0.3,
         "minIntervalSecs": 60,
-        "passiveDecayHalfLifeDays": 30.0,
-        "passiveDecayPower": 0.3,
         "predLogitBaseScale": 1.0,
         "predLogitIntercept": 0.0,
         "predLogitReviewCountWeight": 0.0,
@@ -255,8 +246,6 @@
         "retentionMax": 0.95,
         "retentionMin": 0.75,
         "reviewingThreshold": 0.4,
-        "shortTermLearningRate": 0.85,
-        "stabilityBaseDays": 20.0,
         "streakMinGapMs": 1800000,
         "w": [
           0.212,
@@ -322,7 +311,6 @@
           "recallDCoeff": 0.0,
           "recallSCoeff": 0.0
         },
-        "difficultyOffsetOnLapse": 1.0,
         "discountFactor": 1.0,
         "dualGridEnabled": true,
         "dualGridThresholdDays": 10.0,
@@ -771,7 +759,6 @@
         "ensembleEnabled",
         "heuristicEnabled",
         "igeEnabled",
-        "mdmEnabled",
         "swdEnabled"
       ],
       "properties": {
@@ -787,9 +774,6 @@
           "type": "boolean"
         },
         "igeEnabled": {
-          "type": "boolean"
-        },
-        "mdmEnabled": {
           "type": "boolean"
         },
         "multiTraceEnabled": {
@@ -1076,22 +1060,13 @@
     "MemoryModelConfig": {
       "type": "object",
       "required": [
-        "compositeWeightLong",
-        "compositeWeightMedium",
-        "compositeWeightShort",
-        "consolidationBonus",
-        "consolidationRateScale",
         "halfLifeBaseEpsilon",
-        "halfLifeTimeUnitSecs",
-        "longTermLearningRate",
         "masteryAccuracyThreshold",
         "masteryCompositeThreshold",
         "masteryStreakThreshold",
-        "mediumTermLearningRate",
         "recallRiskBonus",
         "recallRiskThreshold",
-        "reviewingThreshold",
-        "shortTermLearningRate"
+        "reviewingThreshold"
       ],
       "properties": {
         "alphaLapseRampTau": {
@@ -1180,26 +1155,6 @@
           "type": "number",
           "format": "double"
         },
-        "compositeWeightLong": {
-          "type": "number",
-          "format": "double"
-        },
-        "compositeWeightMedium": {
-          "type": "number",
-          "format": "double"
-        },
-        "compositeWeightShort": {
-          "type": "number",
-          "format": "double"
-        },
-        "consolidationBonus": {
-          "type": "number",
-          "format": "double"
-        },
-        "consolidationRateScale": {
-          "type": "number",
-          "format": "double"
-        },
         "difficultyLogitRef": {
           "description": "difficulty logit 项参考点（[1,10] 标度）：word_difficulty==REF 时位移为 0。默认 5.0。",
           "default": 5.0,
@@ -1209,18 +1164,6 @@
         "difficultyLogitWeight": {
           "description": "预测/调度 recall **读出**在 logit 域加 `β·(REF − word_difficulty[1,10])`：难词降 p、易词升 p， 补 FSRS 二元映射下「预测随难度扁平」的区分度/校准残差（maimemo TEST: AUC+0.015 反超 dhp、 logLoss−0.005）。仅作用于 `recall_probability_predicted` 读出路径，**不入内部 S/D 更新** （update_strength 的 r 仍用纯 recall_probability）。0.0=关闭（bit-exact legacy）； 无每词难度的调用点传 None → 自然 no-op。",
           "default": 0.0,
-          "type": "number",
-          "format": "double"
-        },
-        "forgettingCurveDecay": {
-          "description": "DEPRECATED（FSRS-6 起）：遗忘曲线 decay 即 trainable 参数 `w[20]`（`curve_decay()`）， 本字段仅为旧配置/DB 快照反序列化兼容保留，运行时不再读取。",
-          "default": -0.5,
-          "type": "number",
-          "format": "double"
-        },
-        "forgettingCurveFactor": {
-          "description": "DEPRECATED（FSRS-6 起）：遗忘曲线 factor 由 `w[20]` 派生（`curve_factor()`）， 本字段仅为旧配置/DB 快照反序列化兼容保留，运行时不再读取。",
-          "default": 0.2345679012345679,
           "type": "number",
           "format": "double"
         },
@@ -1272,6 +1215,32 @@
           "type": "number",
           "format": "double"
         },
+        "gspRetireAfterReviews": {
+          "description": "退役所需最小复习次数。0=关闭（bit-exact legacy）。>0 时：毕业（graduated）且 review_count/stability/correct_streak 三门槛同时满足 → 调度区间直接取 retire 间隔 （在 cap/fuzz 之前 return，可越过区间帽）。注意 review_count 含全部历史，warm 词 低门槛会首评即退役 —— 应与 `gsp_retire_min_streak` 搭配使用（契约 GSP_SPEC §9）。",
+          "default": 0,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "gspRetireIntervalDays": {
+          "description": "退役间隔（天）。默认 365。",
+          "default": 365.0,
+          "type": "number",
+          "format": "double"
+        },
+        "gspRetireMinStability": {
+          "description": "退役 stability 门槛（天）。默认 0=不设。",
+          "default": 0.0,
+          "type": "number",
+          "format": "double"
+        },
+        "gspRetireMinStreak": {
+          "description": "退役连击门槛。默认 0=不设。连击是「近期无失败」的直接证据，是记忆已固化的 强代理（离线 oracle 校准：脏历史词 streak≥4 时估计半衰期稳越 30 天）。",
+          "default": 0,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
         "gspSuccessGrade": {
           "description": "二元成功复习映射的 FSRS grade：3=Good（旧默认，首评 S0=w[2]，bit-exact legacy）； 4=Easy（首评 S0=w[3] + 成功复习带 w[16] easy_bonus + 进入 FSRS-6 faithful 状态路径， 见 mdm.rs §3.5）。FSRS-6 公版 21 维 w 与 grade=4 共拟合 → 候选用 4 恢复预测腿校准。 入口 clamp：非 {3,4} 一律夹回 3。失败恒映射 1=Again。",
           "default": 3,
@@ -1286,15 +1255,6 @@
           "format": "double"
         },
         "halfLifeBaseEpsilon": {
-          "type": "number",
-          "format": "double"
-        },
-        "halfLifePower": {
-          "default": 1.5,
-          "type": "number",
-          "format": "double"
-        },
-        "halfLifeTimeUnitSecs": {
           "type": "number",
           "format": "double"
         },
@@ -1315,10 +1275,6 @@
         },
         "highFatigueThreshold": {
           "default": 0.6,
-          "type": "number",
-          "format": "double"
-        },
-        "longTermLearningRate": {
           "type": "number",
           "format": "double"
         },
@@ -1356,24 +1312,10 @@
           "type": "number",
           "format": "double"
         },
-        "mediumTermLearningRate": {
-          "type": "number",
-          "format": "double"
-        },
         "minIntervalSecs": {
           "default": 60,
           "type": "integer",
           "format": "int64"
-        },
-        "passiveDecayHalfLifeDays": {
-          "default": 30.0,
-          "type": "number",
-          "format": "double"
-        },
-        "passiveDecayPower": {
-          "default": 0.5,
-          "type": "number",
-          "format": "double"
         },
         "predLogitBaseScale": {
           "description": "读出 recall 在 logit 域施加：`logit(p) = base_scale·logit(p_fsrs) + intercept + β_diff·(REF−D) + β_nrev·ln(1+review_count)`。前两项是 Platt/温度重校准（FSRS-6 在真实 词汇数据上略过自信），β_nrev 补复习次数残差（stability 未完全吸收）。系数**按部署离线拟合** （benchmarks/maimemo/pred_calib.py，maimemo held-out: AUC+0.0116/logLoss−0.0084/ECE 0.022→0.016， 5/5 seed），**不跨域迁移**（synthetic 退化，须 prod_replay 复核）。仅作用 `recall_probability_predicted` 读出路径，不入 S/D 更新。默认 base_scale=1/intercept=0/β_nrev=0 → 退化为纯 difficulty_logit。",
@@ -1410,15 +1352,6 @@
           "format": "double"
         },
         "reviewingThreshold": {
-          "type": "number",
-          "format": "double"
-        },
-        "shortTermLearningRate": {
-          "type": "number",
-          "format": "double"
-        },
-        "stabilityBaseDays": {
-          "default": 20.0,
           "type": "number",
           "format": "double"
         },
@@ -1468,7 +1401,6 @@
         "attentionSmoothing",
         "confidenceDecay",
         "fatigueIncreaseRate",
-        "fatigueRecoveryRate",
         "minConfidence",
         "motivationMomentum",
         "visualFatigueWeight"
@@ -1531,10 +1463,6 @@
         "fatigueQuitIncrease": {
           "description": "用户退出时的疲劳增加量",
           "default": 0.2,
-          "type": "number",
-          "format": "double"
-        },
-        "fatigueRecoveryRate": {
           "type": "number",
           "format": "double"
         },
@@ -1657,7 +1585,6 @@
       "required": [
         "base",
         "convergenceThreshold",
-        "difficultyOffsetOnLapse",
         "forgetCost",
         "maxIndex",
         "maxIterations",
@@ -1689,11 +1616,6 @@
               "$ref": "#/definitions/SspCostParams"
             }
           ]
-        },
-        "difficultyOffsetOnLapse": {
-          "description": "遗忘后难度增量（映射到 D ∈ [1,10]）",
-          "type": "number",
-          "format": "double"
         },
         "discountFactor": {
           "description": "Bellman 折扣因子 γ ∈ [0,1]，防止无穷代价堆积",

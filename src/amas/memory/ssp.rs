@@ -116,15 +116,17 @@ impl SspPolicy {
     }
 
     fn stability_to_index(&self, stability: f64) -> usize {
-        if stability <= 0.0 {
+        if !stability.is_finite() || stability <= 0.0 {
             return 0;
         }
         if let Some(bins) = &self.stability_bins {
             bins.partition_point(|&b| b < stability)
                 .min(bins.len().saturating_sub(1))
         } else {
-            let raw = (stability.ln() / self.base.ln()) as i32 - self.min_index;
-            (raw.max(0) as usize).min(self.index_len.saturating_sub(1))
+            // 非双网格：量化必须与 precompute 侧 stability_to_raw_index 同口径（.round()），
+            // 否则查询会落到相邻 log-bin（base=1.05 ≈ 5% 偏移），破坏 DP 落表与查询的一致性。
+            stability_to_raw_index(stability, self.base, self.min_index)
+                .min(self.index_len.saturating_sub(1))
         }
     }
 }
@@ -446,7 +448,7 @@ fn fsrs5_stability_after_lapse(
 }
 
 fn stability_to_raw_index(stability: f64, base: f64, min_index: i32) -> usize {
-    if stability <= 0.0 {
+    if !stability.is_finite() || stability <= 0.0 {
         return 0;
     }
     let raw = (stability.ln() / base.ln()).round() as i32 - min_index;
@@ -570,6 +572,35 @@ mod tests {
         // 极高 stability 应饱和到最后一个 bin
         let high = policy.optimal_interval(1e12, 5.0);
         assert!(high >= 1.0);
+        // 非有限输入不 panic、落 index 0（is_finite 守卫）
+        let nan = policy.optimal_interval(f64::NAN, 5.0);
+        assert!(nan >= 1.0);
+        let inf = policy.optimal_interval(f64::INFINITY, 5.0);
+        assert!(inf >= 1.0);
+    }
+
+    #[test]
+    fn non_dual_grid_query_quantizer_matches_precompute_rounding() {
+        // P2 修复回归：非双网格下查询侧量化与 precompute 的 stability_to_raw_index
+        // 同口径（.round()）。取落在 round≠truncate 分歧区的 S（ln(S)/ln(base) 小数部分
+        // > 0.5），断言查询索引 == precompute 口径索引。
+        let cfg = SspConfig {
+            max_iterations: 10,
+            dual_grid_enabled: false,
+            ..Default::default()
+        };
+        let result = precompute(&cfg, &MemoryModelConfig::default());
+        let index_len = result.tables[0].len();
+        let policy = SspPolicy::from_tables(result.tables, &cfg);
+        for &s in &[1.7_f64, 3.9, 12.3, 55.5, 200.0] {
+            let expect = stability_to_raw_index(s, cfg.base, cfg.min_index)
+                .min(index_len.saturating_sub(1));
+            assert_eq!(
+                policy.stability_to_index(s),
+                expect,
+                "S={s} 查询量化须与 precompute round 口径一致"
+            );
+        }
     }
 
     #[test]

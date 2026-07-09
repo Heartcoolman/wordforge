@@ -18,15 +18,6 @@ pub struct MdmState {
     pub memory_strength: f64,
     pub last_review_at: Option<i64>,
     pub review_count: u32,
-    // Legacy fields – kept for serde backward compat
-    #[serde(default)]
-    pub short_term_strength: f64,
-    #[serde(default)]
-    pub medium_term_strength: f64,
-    #[serde(default)]
-    pub long_term_strength: f64,
-    #[serde(default)]
-    pub consolidation: f64,
 }
 
 fn default_stability() -> f64 {
@@ -75,36 +66,8 @@ impl Default for MdmState {
             stability: 0.4,
             difficulty: 5.0,
             memory_strength: 0.0,
-            short_term_strength: 0.0,
-            medium_term_strength: 0.0,
-            long_term_strength: 0.0,
             last_review_at: None,
             review_count: 0,
-            consolidation: 0.0,
-        }
-    }
-}
-
-impl MdmState {
-    /// Migrate legacy state: if stability is still the serde default (0.4)
-    /// but memory_strength has a learned value, convert it to DSR stability.
-    /// This prevents resetting historical memory progress on upgrade.
-    pub fn migrate_legacy(&mut self) {
-        const DEFAULT_STABILITY: f64 = 0.4;
-        const STABILITY_BASE: f64 = 20.0;
-        const HALF_LIFE_EPSILON: f64 = 0.3;
-        const HALF_LIFE_POWER: f64 = 1.5;
-
-        // Only migrate if stability was not explicitly set (still default)
-        // AND the user has a non-trivial learned memory_strength
-        if (self.stability - DEFAULT_STABILITY).abs() < 1e-9
-            && self.memory_strength > 0.01
-            && self.review_count > 0
-        {
-            // Old formula: stability_days = (memory_strength + epsilon)^power * base
-            let migrated =
-                (self.memory_strength + HALF_LIFE_EPSILON).powf(HALF_LIFE_POWER) * STABILITY_BASE;
-            self.stability = migrated.clamp(0.01, 365.0);
         }
     }
 }
@@ -322,13 +285,8 @@ pub fn update_strength_with_evidence_cs(
             (prev_stability + (target_stability - prev_stability) * alpha).clamp(0.01, 36_500.0);
     }
 
-    // Sync backward-compatible fields
+    // Sync backward-compatible alias
     state.memory_strength = state.stability;
-    let composite_val = (state.stability / 30.0).clamp(0.0, 1.0);
-    state.short_term_strength = composite_val;
-    state.medium_term_strength = composite_val;
-    state.long_term_strength = composite_val;
-    state.consolidation = (1.5 - state.difficulty / 10.0).clamp(0.0, 1.0);
 
     state.review_count += 1;
     state.last_review_at = Some(now_ms);
@@ -530,6 +488,19 @@ pub fn gsp_schedule_days(
         scaled_days = scaled_days.max(config.gsp_graduation_floor_days);
     }
 
+    // 步骤 4.5：退役（毕业后过学词冻结长间隔；cap/fuzz 之前 return，可越区间帽）。
+    // 判据/次序/取整与 Python 镜像 schedulers.py retire 块逐位对齐（契约 GSP_SPEC §9）。
+    // review_count 含全部历史（warm 词首评即可达标），故门槛设计依赖 min_streak（近期
+    // 无失败证据）而非次数；默认 after_reviews=0 关闭 = bit-exact legacy。
+    if config.gsp_retire_after_reviews > 0
+        && graduated
+        && state.review_count >= config.gsp_retire_after_reviews
+        && state.stability >= config.gsp_retire_min_stability
+        && correct_streak >= config.gsp_retire_min_streak
+    {
+        return (round_half_to_even(config.gsp_retire_interval_days) as i64).max(1);
+    }
+
     // 步骤 5：区间帽 min(90, gspCap)，与既有 90 天硬帽复合
     let mut cap = config.max_interval_days;
     if config.gsp_interval_cap_days > 0.0 {
@@ -562,6 +533,45 @@ pub fn gsp_schedule_days(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gsp_retire_default_off_is_bit_exact() {
+        // retire 三旋钮默认关闭：任意状态下 gsp_schedule_days 与旧五步链逐位一致
+        // （关闭时新分支不可达，此测锁死"未声明旋钮的配置反序列化为精确旧语义"）。
+        let mut config = MemoryModelConfig::default();
+        config.gsp_graduation_streak = 2;
+        config.gsp_interval_cap_days = 40.0;
+        let mut state = MdmState::default();
+        state.stability = 50.0;
+        state.review_count = 12;
+        assert_eq!(config.gsp_retire_after_reviews, 0);
+        let d = gsp_schedule_days(60, 1.0, 5, &state, &config);
+        assert_eq!(d, 40); // 毕业 → floor30 → cap40 截断，与 retire 引入前一致
+    }
+
+    #[test]
+    fn gsp_retire_fires_only_with_all_gates() {
+        let mut config = MemoryModelConfig::default();
+        config.gsp_graduation_streak = 2;
+        config.gsp_interval_cap_days = 40.0;
+        config.gsp_retire_after_reviews = 1;
+        config.gsp_retire_min_stability = 20.0;
+        config.gsp_retire_min_streak = 5;
+        config.gsp_retire_interval_days = 365.0;
+        let mut state = MdmState::default();
+        state.stability = 50.0;
+        state.review_count = 8;
+        // streak 门槛不满足 → 不退役（仍走 cap）
+        assert_eq!(gsp_schedule_days(60, 1.0, 4, &state, &config), 40);
+        // 全门槛满足 → 退役间隔（越过 cap40/90 硬帽）
+        assert_eq!(gsp_schedule_days(60, 1.0, 5, &state, &config), 365);
+        // stability 门槛不满足 → 不退役
+        state.stability = 10.0;
+        assert_eq!(gsp_schedule_days(60, 1.0, 5, &state, &config), 40);
+        // 未毕业（streak < graduation_streak）→ retire 前置不成立
+        state.stability = 50.0;
+        assert_eq!(gsp_schedule_days(3, 1.0, 1, &state, &config), 3);
+    }
 
     #[test]
     fn recall_is_bounded_and_monotonic() {
