@@ -34,11 +34,13 @@ export interface PackActiveByChannel {
   internal: string | null;
 }
 
-/** 近 7 天该 pack 的安装结果计数（install_log 真实三态） */
+/** 近 7 天该 pack 的安装结果计数（install_log 真实五态，m070 起） */
 export interface PackOutcomes7d {
   installed: number;
   verify_failed: number;
   rollback: number;
+  download_failed: number;
+  apply_failed: number;
 }
 
 /** 列表 API 返回的每个 pack（含所有版本 + 激活态 + 安装聚合） */
@@ -66,9 +68,14 @@ export interface PackSummary {
   versionsByChannel: { stable: number; beta: number; internal: number };
   installsToday: number;
   installsTodaySuccess: number;
-  /** 近 7 天 (verify_failed+rollback)/total，0..1；无数据为 0 */
+  /** 近 7 天 非installed/total，0..1；无数据为 0 */
   failureRate7d: number;
-  failures7dByOutcome: { verify_failed: number; rollback: number };
+  failures7dByOutcome: {
+    verify_failed: number;
+    rollback: number;
+    download_failed: number;
+    apply_failed: number;
+  };
   /** 当前在线客户端数（在线 SSE 连接），切激活对话框「受众」展示 */
   onlineClients: number;
 }

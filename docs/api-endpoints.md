@@ -3048,7 +3048,7 @@ AMAS 算法指标快照（需 Admin Token）。
 |---|---|---|---|
 | `packId` | string | ✅ | 业务 ID |
 | `version` | string | ✅ | 已安装的版本 |
-| `outcome` | string | ✅ | `installed` / `verify_failed` / `rollback` |
+| `outcome` | string | ✅ | `installed` / `verify_failed` / `rollback` / `download_failed` / `apply_failed` |
 | `appVersion` | string | ⬜ | 客户端 App 版本 |
 
 **响应 200：** `{ "success": true, "data": { "received": true } }`

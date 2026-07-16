@@ -35,7 +35,7 @@ type MigrationFn = fn(&Store) -> Result<(), StoreError>;
 /// 完全迁移后 `schema_version` 应到达的版本号（= [`migrations`] 条目数）。
 /// 编译期常量，供 `--print-schema-version`（任意版本回滚的"目标二进制自声明 schema 版本"）使用；
 /// [`schema_version_const_matches_registry`] 测试守卫它与运行期 `migrations().len()` 不漂移。
-pub const SCHEMA_VERSION: u32 = 69;
+pub const SCHEMA_VERSION: u32 = 70;
 
 /// 已加固到"生产可用"的 down 迁移覆盖下界：回滚目标的 schema 版本必须 `>=` 此值。
 /// 真·任意版本回滚把 down 链当作"把当前库副本降级到目标版本"的降级引擎；低于此下界的
@@ -163,6 +163,10 @@ fn migrations() -> Vec<(&'static str, MigrationFn)> {
         ("067_mastery_states_backfill", m067_mastery_states_backfill),
         ("068_stale_scalar_backfill", m068_stale_scalar_backfill),
         ("069_drop_dead_columns", m069_drop_dead_columns),
+        (
+            "070_install_outcome_local_failures",
+            m070_install_outcome_local_failures,
+        ),
     ]
 }
 
@@ -308,6 +312,10 @@ fn migrations_down() -> Vec<(&'static str, MigrationFn)> {
         ("067_mastery_states_backfill", m067_mastery_states_backfill_down),
         ("068_stale_scalar_backfill", m068_stale_scalar_backfill_down),
         ("069_drop_dead_columns", m069_drop_dead_columns_down),
+        (
+            "070_install_outcome_local_failures",
+            m070_install_outcome_local_failures_down,
+        ),
     ]
 }
 
@@ -3885,6 +3893,70 @@ fn m069_drop_dead_columns_down(store: &Store) -> Result<(), StoreError> {
     Ok(())
 }
 
+/// m070：`resource_pack_install_log.outcome` CHECK 扩展 `download_failed` / `apply_failed`。
+/// 三端此前把下载失败与本地解析/落盘失败一律塌缩上报 `verify_failed`，污染验签失败信号
+/// （verify_failed 应专指哈希/签名不匹配 = 疑似篡改或损坏）。列定义与建表一致，仅 CHECK
+/// 增两值；索引重建。SQLite 无法 ALTER CHECK，走原子表重建（理由同 m046：单事务防半成品
+/// + 开头 DROP IF EXISTS _new 闭合 boot loop 窗口）。
+fn m070_install_outcome_local_failures(store: &Store) -> Result<(), StoreError> {
+    let mut conn = store.conn()?;
+    let tx = conn.transaction()?;
+    tx.execute_batch(
+        "DROP TABLE IF EXISTS resource_pack_install_log_new;
+        CREATE TABLE resource_pack_install_log_new (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            pack_id       TEXT NOT NULL,
+            version       TEXT NOT NULL,
+            client_id     TEXT,
+            app_version   TEXT,
+            installed_at  TEXT NOT NULL,
+            outcome       TEXT NOT NULL CHECK (outcome IN
+                ('installed','verify_failed','rollback','download_failed','apply_failed'))
+        );
+        INSERT INTO resource_pack_install_log_new
+            (id, pack_id, version, client_id, app_version, installed_at, outcome)
+        SELECT id, pack_id, version, client_id, app_version, installed_at, outcome
+          FROM resource_pack_install_log;
+        DROP TABLE resource_pack_install_log;
+        ALTER TABLE resource_pack_install_log_new RENAME TO resource_pack_install_log;
+        CREATE INDEX IF NOT EXISTS idx_rpil_pack_ver
+            ON resource_pack_install_log(pack_id, version, installed_at DESC);",
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// m070 down：重建回三态 CHECK。新增两态的行降级映射为 `verify_failed`（保留失败信号，
+/// 不丢行——旧代码本就把这两类失败塌缩为 verify_failed，映射即回到旧口径）。仅 dev/test。
+fn m070_install_outcome_local_failures_down(store: &Store) -> Result<(), StoreError> {
+    let mut conn = store.conn()?;
+    let tx = conn.transaction()?;
+    tx.execute_batch(
+        "DROP TABLE IF EXISTS resource_pack_install_log_old;
+        CREATE TABLE resource_pack_install_log_old (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            pack_id       TEXT NOT NULL,
+            version       TEXT NOT NULL,
+            client_id     TEXT,
+            app_version   TEXT,
+            installed_at  TEXT NOT NULL,
+            outcome       TEXT NOT NULL CHECK (outcome IN ('installed','verify_failed','rollback'))
+        );
+        INSERT INTO resource_pack_install_log_old
+            (id, pack_id, version, client_id, app_version, installed_at, outcome)
+        SELECT id, pack_id, version, client_id, app_version, installed_at,
+               CASE WHEN outcome IN ('download_failed','apply_failed')
+                    THEN 'verify_failed' ELSE outcome END
+          FROM resource_pack_install_log;
+        DROP TABLE resource_pack_install_log;
+        ALTER TABLE resource_pack_install_log_old RENAME TO resource_pack_install_log;
+        CREATE INDEX IF NOT EXISTS idx_rpil_pack_ver
+            ON resource_pack_install_log(pack_id, version, installed_at DESC);",
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4040,6 +4112,52 @@ mod tests {
         };
         assert!(has("user_elo", "sigma"), "down 后 sigma 应还原");
         assert!(has("words", "embedding_json"), "down 后 embedding_json 应还原");
+    }
+
+    /// m070：CHECK 扩展后新增两态可写入；down 后新增态降级映射为 verify_failed 且 CHECK 回严。
+    #[test]
+    fn m070_extends_outcome_check_and_downgrades_on_down() {
+        let store = Store::open(":memory:", 5000, 1).unwrap();
+        store.run_migrations().unwrap();
+        let conn = store.conn().unwrap();
+        conn.execute_batch(
+            "INSERT INTO resource_pack_install_log
+                (pack_id, version, installed_at, outcome)
+             VALUES ('p1','1.0.0','2026-07-16T00:00:00Z','download_failed'),
+                    ('p1','1.0.0','2026-07-16T00:00:01Z','apply_failed'),
+                    ('p1','1.0.0','2026-07-16T00:00:02Z','installed');",
+        )
+        .unwrap();
+        drop(conn);
+
+        m070_install_outcome_local_failures_down(&store).unwrap();
+        let conn = store.conn().unwrap();
+        let vf: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM resource_pack_install_log WHERE outcome='verify_failed'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(vf, 2, "down 后 download_failed/apply_failed 应映射为 verify_failed");
+        let err = conn.execute(
+            "INSERT INTO resource_pack_install_log
+                (pack_id, version, installed_at, outcome)
+             VALUES ('p1','1.0.0','2026-07-16T00:00:03Z','download_failed')",
+            [],
+        );
+        assert!(err.is_err(), "down 后 CHECK 应拒绝 download_failed");
+        drop(conn);
+
+        m070_install_outcome_local_failures(&store).unwrap();
+        let conn = store.conn().unwrap();
+        conn.execute(
+            "INSERT INTO resource_pack_install_log
+                (pack_id, version, installed_at, outcome)
+             VALUES ('p1','1.0.0','2026-07-16T00:00:04Z','apply_failed')",
+            [],
+        )
+        .unwrap();
     }
 
     /// m068：blob→标量列回填 + status/is_banned 联动回填；缺键行保持 DEFAULT。

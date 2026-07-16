@@ -112,13 +112,16 @@ struct ActiveChannels {
     internal: Option<String>,
 }
 
-/// 三态 outcome 计数。key 沿用 DB 真实枚举（snake_case：`verify_failed`），
-/// 故刻意不加 camelCase rename，与契约 `outcomes7d` / `failures7dByOutcome` 一致。
+/// 五态 outcome 计数（m070 起含 download_failed / apply_failed）。key 沿用 DB 真实枚举
+/// （snake_case：`verify_failed`），故刻意不加 camelCase rename，与契约 `outcomes7d` /
+/// `failures7dByOutcome` 一致。
 #[derive(Debug, Serialize)]
 struct OutcomeCounts {
     installed: i64,
     verify_failed: i64,
     rollback: i64,
+    download_failed: i64,
+    apply_failed: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -170,6 +173,8 @@ async fn list_packs(
                         installed: o7.installed,
                         verify_failed: o7.verify_failed,
                         rollback: o7.rollback,
+                        download_failed: o7.download_failed,
+                        apply_failed: o7.apply_failed,
                     },
                 });
             }
@@ -601,6 +606,8 @@ async fn pack_summary(
         "failures7dByOutcome": {
             "verify_failed": sum.outcomes_7d.verify_failed,
             "rollback": sum.outcomes_7d.rollback,
+            "download_failed": sum.outcomes_7d.download_failed,
+            "apply_failed": sum.outcomes_7d.apply_failed,
         },
         // 当前在线客户端数（在线 SSE 连接），切激活对话框「受众」与 SSE 通告范围
         "onlineClients": online_clients,

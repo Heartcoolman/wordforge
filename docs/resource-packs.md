@@ -99,7 +99,7 @@ GET /api/resource-packs/<packId>/manifest?appVersion=&locale=&channel=
 
 1. **上传新版**：填 `pack_id`（如 `content-slots`）、`version`（semver，单调递增）、通道、可选 `minAppVersion`；选 `payload.json` 上传。服务端自动算 SHA-256 + Ed25519 签名落盘。**上传 ≠ 生效**。
 2. **激活**：在通道选择器选版本激活 —— 这一步才触发 SSE 广播并对该通道生效。
-3. **观察**：卡片底部「近 7 天安装结果」+ 统计弹窗看 `installed / verify_failed / rollback` 三态。
+3. **观察**：卡片底部「近 7 天安装结果」+ 统计弹窗看 `installed / verify_failed / rollback / download_failed / apply_failed` 五态。
 4. **回滚 / 下线**：切回旧版本（旧文件保留）；或「停用」做软删除。
 
 灰度建议：先 `internal` / `beta` 自测 → 再切 `stable` 放量。脚本化见 [API 接口](/api-endpoints) §22「资源包管理（admin）」。

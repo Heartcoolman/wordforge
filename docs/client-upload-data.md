@@ -817,7 +817,7 @@ Content-Length: 102400
 |---|---|---|---|
 | `packId` | string | ✓ | 资源包业务 ID |
 | `version` | string | ✓ | 本次安装 / 校验 / 回滚涉及的版本 |
-| `outcome` | string | ✓ | `"installed"`（安装成功）/ `"verify_failed"`（签名或哈希校验失败）/ `"rollback"`（回滚到上一版本） |
+| `outcome` | string | ✓ | `"installed"`（安装成功）/ `"verify_failed"`（签名或哈希校验失败）/ `"rollback"`（回滚到上一版本）/ `"download_failed"`（下载失败，m070 起）/ `"apply_failed"`（本地解析或落盘失败，m070 起） |
 | `appVersion` | string | — | 客户端 App 版本，可选 |
 
 **示例：**

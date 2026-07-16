@@ -351,8 +351,14 @@ async fn telemetry_install_log_aggregates_in_admin_stats() {
         .unwrap();
     }
 
-    // 客户端上报：2 installed + 1 verify_failed
-    for outcome in &["installed", "installed", "verify_failed"] {
+    // 客户端上报：2 installed + 1 verify_failed + 各 1 个 m070 新增本地失败态
+    for outcome in &[
+        "installed",
+        "installed",
+        "verify_failed",
+        "download_failed",
+        "apply_failed",
+    ] {
         let resp = request(
             &app.app,
             Method::POST,
@@ -398,6 +404,15 @@ async fn telemetry_install_log_aggregates_in_admin_stats() {
         .unwrap();
     assert_eq!(installed, 2);
     assert_eq!(failed, 1);
+    for bucket in ["download_failed", "apply_failed"] {
+        let n = stats
+            .iter()
+            .find(|s| s["outcome"] == bucket)
+            .unwrap_or_else(|| panic!("{bucket} bucket"))["count"]
+            .as_i64()
+            .unwrap();
+        assert_eq!(n, 1, "outcome={bucket}");
+    }
 }
 
 #[tokio::test]

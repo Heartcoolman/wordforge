@@ -45,7 +45,8 @@ pub fn router() -> Router<AppState> {
 struct ResourcePackInstallReport {
     pack_id: String,
     version: String,
-    /// `installed` | `verify_failed` | `rollback`
+    /// `installed` | `verify_failed` | `rollback` | `download_failed` | `apply_failed`
+    /// （后两值 m070 起：下载失败 / 本地解析落盘失败，此前被客户端塌缩进 verify_failed）
     outcome: String,
     app_version: Option<String>,
 }

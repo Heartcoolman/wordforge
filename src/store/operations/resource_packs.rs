@@ -120,13 +120,16 @@ pub struct ResourcePackManifest {
     pub signature_algorithm: Option<String>,
 }
 
-/// 近 7 天某维度三态 outcome 计数（installed / verify_failed / rollback）。
-/// 失败 = verify_failed + rollback；下载/安装总数以 install_log 计数为真实源。
+/// 近 7 天某维度五态 outcome 计数（installed / verify_failed / rollback /
+/// download_failed / apply_failed，m070 起）。
+/// 失败 = 除 installed 外全部；下载/安装总数以 install_log 计数为真实源。
 #[derive(Debug, Clone, Default)]
 pub struct PackOutcomeCounts {
     pub installed: i64,
     pub verify_failed: i64,
     pub rollback: i64,
+    pub download_failed: i64,
+    pub apply_failed: i64,
 }
 
 impl PackOutcomeCounts {
@@ -135,18 +138,20 @@ impl PackOutcomeCounts {
             "installed" => self.installed += count,
             "verify_failed" => self.verify_failed += count,
             "rollback" => self.rollback += count,
+            "download_failed" => self.download_failed += count,
+            "apply_failed" => self.apply_failed += count,
             _ => {}
         }
     }
 
-    /// 失败计数 = verify_failed + rollback。
+    /// 失败计数 = verify_failed + rollback + download_failed + apply_failed。
     pub fn failures(&self) -> i64 {
-        self.verify_failed + self.rollback
+        self.verify_failed + self.rollback + self.download_failed + self.apply_failed
     }
 
-    /// 三态总计。
+    /// 五态总计。
     pub fn total(&self) -> i64 {
-        self.installed + self.verify_failed + self.rollback
+        self.installed + self.failures()
     }
 }
 
@@ -553,7 +558,10 @@ impl Store {
         app_version: Option<&str>,
         outcome: &str,
     ) -> Result<(), StoreError> {
-        if !matches!(outcome, "installed" | "verify_failed" | "rollback") {
+        if !matches!(
+            outcome,
+            "installed" | "verify_failed" | "rollback" | "download_failed" | "apply_failed"
+        ) {
             return Err(StoreError::Validation(format!(
                 "invalid resource_pack install outcome: {outcome}"
             )));

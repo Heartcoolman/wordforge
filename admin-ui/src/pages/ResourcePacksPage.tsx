@@ -325,7 +325,7 @@ export default function ResourcePacksPage() {
           unit="%"
           deltaLabel={
             summary()
-              ? `verify_failed ${summary()!.failures7dByOutcome.verify_failed} · rollback ${summary()!.failures7dByOutcome.rollback}`
+              ? `verify_failed ${summary()!.failures7dByOutcome.verify_failed} · rollback ${summary()!.failures7dByOutcome.rollback} · download_failed ${summary()!.failures7dByOutcome.download_failed} · apply_failed ${summary()!.failures7dByOutcome.apply_failed}`
               : '—'
           }
         />
@@ -710,6 +710,8 @@ export default function ResourcePacksPage() {
                               <th style={sx({ textAlign: 'right' })}>installed</th>
                               <th style={sx({ textAlign: 'right' })}>verify_failed</th>
                               <th style={sx({ textAlign: 'right' })}>rollback</th>
+                              <th style={sx({ textAlign: 'right' })}>download_failed</th>
+                              <th style={sx({ textAlign: 'right' })}>apply_failed</th>
                               <th style={sx({ textAlign: 'right' })}>合计</th>
                             </tr>
                           </thead>
@@ -727,8 +729,14 @@ export default function ResourcePacksPage() {
                                   <td class="mono" style={sx({ textAlign: 'right', color: 'var(--error)' })}>
                                     {fmtNum(r.rollback)}
                                   </td>
+                                  <td class="mono" style={sx({ textAlign: 'right', color: 'var(--warning)' })}>
+                                    {fmtNum(r.download_failed)}
+                                  </td>
+                                  <td class="mono" style={sx({ textAlign: 'right', color: 'var(--error)' })}>
+                                    {fmtNum(r.apply_failed)}
+                                  </td>
                                   <td class="mono" style={sx({ textAlign: 'right', fontWeight: 700 })}>
-                                    {fmtNum(r.installed + r.verify_failed + r.rollback)}
+                                    {fmtNum(r.installed + r.verify_failed + r.rollback + r.download_failed + r.apply_failed)}
                                   </td>
                                 </tr>
                               )}
@@ -761,15 +769,31 @@ function DiffRow(props: { label: string; children: JSX.Element }) {
   );
 }
 
-type StatAgg = { version: string; installed: number; verify_failed: number; rollback: number };
+type StatAgg = {
+  version: string;
+  installed: number;
+  verify_failed: number;
+  rollback: number;
+  download_failed: number;
+  apply_failed: number;
+};
 
 function aggregateStats(rows: PackStatsEntry[]): StatAgg[] {
   const byVer = new Map<string, StatAgg>();
   for (const r of rows) {
-    const a = byVer.get(r.version) ?? { version: r.version, installed: 0, verify_failed: 0, rollback: 0 };
+    const a = byVer.get(r.version) ?? {
+      version: r.version,
+      installed: 0,
+      verify_failed: 0,
+      rollback: 0,
+      download_failed: 0,
+      apply_failed: 0,
+    };
     if (r.outcome === 'installed') a.installed += r.count;
     else if (r.outcome === 'verify_failed') a.verify_failed += r.count;
     else if (r.outcome === 'rollback') a.rollback += r.count;
+    else if (r.outcome === 'download_failed') a.download_failed += r.count;
+    else if (r.outcome === 'apply_failed') a.apply_failed += r.count;
     byVer.set(r.version, a);
   }
   return Array.from(byVer.values()).sort((x, y) =>
@@ -804,6 +828,8 @@ function PackCard(props: {
       { label: 'installed', value: o.installed, color: 'var(--success)' },
       { label: 'verify_failed', value: o.verify_failed, color: 'var(--warning)' },
       { label: 'rollback', value: o.rollback, color: 'var(--error)' },
+      { label: 'download_failed', value: o.download_failed, color: 'var(--warning)' },
+      { label: 'apply_failed', value: o.apply_failed, color: 'var(--error)' },
     ];
   });
 
