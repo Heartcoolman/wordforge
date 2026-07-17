@@ -25,6 +25,11 @@ pub struct Config {
     pub admin_jwt_expires_in_hours: u64,
     pub cors_origin: String,
     pub trust_proxy: bool,
+    /// TRUST_PROXY=true 时，X-Forwarded-Host/-Proto 只在此白名单内才被采信（逗号分隔，
+    /// 大小写不敏感，不含端口/scheme，纯 hostname），否则回退到真实 Host 头——防止客户端
+    /// 伪造 X-Forwarded-Host 污染 resource-pack manifest 的 downloadURL（该响应带 60s 公共缓存，
+    /// 一次伪造请求可能污染下游共享/CDN 缓存给其它所有客户端）。默认空=不采信任何伪造值。
+    pub resource_pack_trusted_hosts: Vec<String>,
     pub cookie_secure: bool,
     pub self_watchdog: SelfWatchdogConfig,
     pub rate_limit: RateLimitConfig,
@@ -279,6 +284,10 @@ impl fmt::Debug for Config {
             )
             .field("cors_origin", &self.cors_origin)
             .field("trust_proxy", &self.trust_proxy)
+            .field(
+                "resource_pack_trusted_hosts",
+                &self.resource_pack_trusted_hosts,
+            )
             .field("cookie_secure", &self.cookie_secure)
             .field("self_watchdog", &self.self_watchdog)
             .field("rate_limit", &self.rate_limit)
@@ -353,6 +362,11 @@ impl Config {
             admin_jwt_expires_in_hours: env_or_parse("ADMIN_JWT_EXPIRES_IN_HOURS", 2_u64),
             cors_origin: env_or("CORS_ORIGIN", "http://localhost:5173"),
             trust_proxy: env_or_bool("TRUST_PROXY", false),
+            resource_pack_trusted_hosts: env_or("RESOURCE_PACK_TRUSTED_HOSTS", "")
+                .split(',')
+                .map(|s| s.trim().to_ascii_lowercase())
+                .filter(|s| !s.is_empty())
+                .collect(),
             cookie_secure: env_or_bool("COOKIE_SECURE", false),
             self_watchdog: SelfWatchdogConfig {
                 enabled: env_or_bool("ENABLE_SELF_WATCHDOG", false),
@@ -874,6 +888,7 @@ mod tests {
             admin_jwt_expires_in_hours: 1,
             cors_origin: "http://localhost".into(),
             trust_proxy: false,
+            resource_pack_trusted_hosts: Vec::new(),
             cookie_secure: false,
             self_watchdog: SelfWatchdogConfig::default(),
             rate_limit: RateLimitConfig {

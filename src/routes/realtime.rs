@@ -390,6 +390,7 @@ mod tests {
             admin_jwt_expires_in_hours: 2,
             cors_origin: "http://localhost:5173".to_string(),
             trust_proxy: false,
+            resource_pack_trusted_hosts: Vec::new(),
             cookie_secure: false,
             self_watchdog: Default::default(),
             rate_limit: RateLimitConfig {

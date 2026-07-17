@@ -122,7 +122,11 @@ async fn fetch_manifest(
         }
     }
 
-    let base = resolve_public_base_url(&headers, state.config().trust_proxy);
+    let base = resolve_public_base_url(
+        &headers,
+        state.config().trust_proxy,
+        &state.config().resource_pack_trusted_hosts,
+    );
     // 下发文件名从 active.payload_path 派生(tarball 工件落盘为 payload.tar.gz,JSON 为
     // payload.json),不能硬编码 payload.json,否则 tarball pack 的 downloadURL 会 404。
     let fname = std::path::Path::new(&active.payload_path)
@@ -163,23 +167,36 @@ async fn fetch_manifest(
 /// 时才信任(与 middleware 里的 extract_client_ip 取值口径一致)。本 manifest 端点匿名可达,直连暴露
 /// (trust_proxy=false)时若信任 x-forwarded-host,攻击者即可把下发 downloadURL 指向恶意主机(主机头注入,
 /// 致 DoS / 载荷替换),故此场景只用 Host 头 + 固定 http scheme。生产建议直接设 RESOURCE_PACK_BASE_URL。
-fn resolve_public_base_url(headers: &HeaderMap, trust_proxy: bool) -> String {
+/// `trusted_hosts`：TRUST_PROXY=true 时 X-Forwarded-Host 必须命中（纯 hostname，忽略端口，
+/// 大小写不敏感）才采信，否则回退真实 Host 头——见 config.rs resource_pack_trusted_hosts 字段注释，
+/// 该响应带公共缓存，伪造转发头曾可污染下游共享缓存给其它所有客户端。
+fn resolve_public_base_url(headers: &HeaderMap, trust_proxy: bool, trusted_hosts: &[String]) -> String {
     if let Ok(env_url) = std::env::var("RESOURCE_PACK_BASE_URL") {
         return env_url.trim_end_matches('/').to_string();
     }
-    let host = if trust_proxy {
+    let real_host = headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("localhost");
+
+    let forwarded_host_trusted = trust_proxy
+        && headers
+            .get("x-forwarded-host")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|h| {
+                let hostname_only = h.split(':').next().unwrap_or(h).to_ascii_lowercase();
+                trusted_hosts.contains(&hostname_only)
+            });
+
+    let host = if forwarded_host_trusted {
         headers
             .get("x-forwarded-host")
-            .or_else(|| headers.get(header::HOST))
             .and_then(|v| v.to_str().ok())
-            .unwrap_or("localhost")
+            .unwrap_or(real_host)
     } else {
-        headers
-            .get(header::HOST)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("localhost")
+        real_host
     };
-    let scheme = if trust_proxy {
+    let scheme = if forwarded_host_trusted {
         headers
             .get("x-forwarded-proto")
             .and_then(|v| v.to_str().ok())
@@ -233,9 +250,10 @@ mod tests {
         std::env::remove_var("RESOURCE_PACK_BASE_URL");
         let mut headers = HeaderMap::new();
         headers.insert(header::HOST, "api.example.com".parse().unwrap());
+        let trusted = vec!["cdn.example.com".to_string()];
         // trust_proxy=false：只用 Host + 固定 http
         assert_eq!(
-            resolve_public_base_url(&headers, false),
+            resolve_public_base_url(&headers, false, &trusted),
             "http://api.example.com"
         );
 
@@ -243,24 +261,32 @@ mod tests {
         headers.insert("x-forwarded-proto", "https".parse().unwrap());
         headers.insert("x-forwarded-host", "attacker.example".parse().unwrap());
         assert_eq!(
-            resolve_public_base_url(&headers, false),
+            resolve_public_base_url(&headers, false, &trusted),
             "http://api.example.com"
         );
 
-        // trust_proxy=true：x-forwarded-proto / x-forwarded-host 优先级高于 Host
+        // trust_proxy=true 但转发的 host 不在白名单内：必须回退真实 Host，绝不采信伪造值
+        // （曾经的漏洞：任何 trust_proxy=true 部署都会无条件信任这个客户端可控头）。
         assert_eq!(
-            resolve_public_base_url(&headers, true),
-            "https://attacker.example"
+            resolve_public_base_url(&headers, true, &trusted),
+            "http://api.example.com"
         );
 
-        // env 优先级高于一切（无论 trust_proxy），且会 strip 末尾 /
+        // trust_proxy=true 且转发 host 命中白名单（大小写不敏感）：采信 forwarded host/proto。
+        headers.insert("x-forwarded-host", "CDN.Example.com".parse().unwrap());
+        assert_eq!(
+            resolve_public_base_url(&headers, true, &trusted),
+            "https://CDN.Example.com"
+        );
+
+        // env 优先级高于一切（无论 trust_proxy/白名单），且会 strip 末尾 /
         std::env::set_var("RESOURCE_PACK_BASE_URL", "https://override.example.com/");
         assert_eq!(
-            resolve_public_base_url(&headers, false),
+            resolve_public_base_url(&headers, false, &trusted),
             "https://override.example.com"
         );
         assert_eq!(
-            resolve_public_base_url(&headers, true),
+            resolve_public_base_url(&headers, true, &trusted),
             "https://override.example.com"
         );
         std::env::remove_var("RESOURCE_PACK_BASE_URL");
