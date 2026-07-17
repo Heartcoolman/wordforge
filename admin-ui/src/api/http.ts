@@ -269,12 +269,19 @@ export function connectSseStream(callbacks: SseCallbacks): () => void {
       const ctrl = new AbortController();
       currentCtrl = ctrl;
       try {
-        // SSE 连接前检查 token 是否需要刷新
+        // 注：needsRefresh()/refreshAccessToken() 检查的是普通用户 token 槽（管理员登录只写
+        // getAdminToken() 那一槽，见 lib/token.ts），对 admin 会话恒是 no-op；管理员 token 目前
+        // 没有静默刷新机制，过期后需要重新登录。此处保留原判断不动，避免引入未经设计的新刷新流程。
         if (tokenManager.needsRefresh()) {
           await tokenManager.refreshAccessToken();
         }
 
-        const token = tokenManager.getToken();
+        // Bug 修复：这条 SSE 连接专供 admin-ui 使用，此前一直读普通用户 token 槽
+        // （tokenManager.getToken()）——管理员登录只调用 setAdminToken()，从不写这一槽，导致
+        // 这条连接对每一个 admin 会话都永远拿不到 token、必然 401。App.tsx 里"admin 登录后会
+        // 自然恢复"的注释此前并不成立（因为这里从没读对过槽位），改读 getAdminToken() 后才真正
+        // 兑现该注释描述的行为。
+        const token = tokenManager.getAdminToken();
         const response = await fetch(buildUrl('/api/realtime/events'), {
           headers: {
             ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
@@ -390,7 +397,8 @@ export function connectSseStream(callbacks: SseCallbacks): () => void {
         reconnectDelay = Math.min(reconnectDelay * 2, SSE_MAX_RECONNECT_MS);
       } catch (err) {
         if (aborted) return;
-        const delay = !tokenManager.getToken() ? SSE_MAX_RECONNECT_MS : reconnectDelay;
+        // 同上：判断"是否还有 token 可重连"要看的是 admin token 槽，不是普通用户槽。
+        const delay = !tokenManager.getAdminToken() ? SSE_MAX_RECONNECT_MS : reconnectDelay;
         await new Promise(resolve => setTimeout(resolve, delay));
         reconnectDelay = Math.min(reconnectDelay * 2, SSE_MAX_RECONNECT_MS);
       }

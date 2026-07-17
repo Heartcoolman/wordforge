@@ -772,7 +772,9 @@ describe('connectSseStream', () => {
   });
 
   it('advances reconnectDelay (exponential backoff) when token present', async () => {
-    tm._set('tok');
+    // connectSseStream 是 admin-ui 专用连接，判断"是否还有 token"看的是 admin token 槽
+    // （见 http.ts 的 bug 修复：此前误读了普通用户槽，导致这条 SSE 对任何 admin 会话恒 401）。
+    tm._setAdmin('tok');
     vi.useFakeTimers();
     let calls = 0;
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
