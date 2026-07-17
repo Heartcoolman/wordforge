@@ -191,7 +191,9 @@ export interface LearningCurvePoint {
   accuracy: number;
 }
 
-export type MasteryState = 'NEW' | 'LEARNING' | 'REVIEWING' | 'MASTERED' | 'FORGOTTEN';
+// wire 上恒 lowercase（服务端 WordState #[serde(rename_all="lowercase")]，
+// GET /api/amas/mastery/evaluate 此前 word 无学习记录的兜底分支误写成大写字面量已修正）。
+export type MasteryState = 'new' | 'learning' | 'reviewing' | 'mastered' | 'forgotten';
 
 export interface MasteryEvaluation {
   wordId: string;

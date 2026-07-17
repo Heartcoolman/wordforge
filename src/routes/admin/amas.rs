@@ -2379,7 +2379,10 @@ async fn evaluate_mastery(
         }),
         None => serde_json::json!({
             "wordId": q.word_id,
-            "state": "NEW",
+            // WordState 的 wire 序列化是 lowercase（见 store/operations/word_states.rs 的
+            // #[serde(rename_all="lowercase")]），这里手写字面量此前误用了 DB 层 as_str() 的
+            // 大写口径，导致"无学习记录"这一支的 state 大小写和 Some(ws) 那支实际不一致。
+            "state": "new",
             "masteryLevel": 0.0,
             "correctStreak": 0,
             "totalAttempts": 0,

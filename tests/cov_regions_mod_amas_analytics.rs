@@ -1127,7 +1127,7 @@ async fn amas_batch_too_large_400() {
 async fn amas_evaluate_mastery_missing_word_returns_new() {
     let app = spawn_test_server().await;
     let user_token = login_and_get_token(&app.app).await;
-    // word_state 为 None → 兜底 NEW 分支
+    // word_state 为 None → 兜底 new 分支（wire 上 WordState 恒 lowercase）
     let resp = request(
         &app.app,
         Method::GET,
@@ -1138,5 +1138,5 @@ async fn amas_evaluate_mastery_missing_word_returns_new() {
     .await;
     let (status, _, body) = response_json(resp).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["data"]["state"], "NEW");
+    assert_eq!(body["data"]["state"], "new");
 }

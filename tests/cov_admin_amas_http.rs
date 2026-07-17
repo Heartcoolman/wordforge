@@ -104,7 +104,7 @@ async fn it_retention_curve_and_evaluate_mastery() {
     // 6 个固定桶 1/2/4/7/15/30
     assert_eq!(rc_body["data"]["points"].as_array().unwrap().len(), 6);
 
-    // evaluate-mastery：缺 word 数据返回 NEW 默认结构
+    // evaluate-mastery：缺 word 数据返回 new 默认结构（wire 上 WordState 恒 lowercase）
     let em = request(
         &app.app,
         Method::GET,
@@ -115,7 +115,7 @@ async fn it_retention_curve_and_evaluate_mastery() {
     .await;
     let (em_status, _, em_body) = response_json(em).await;
     assert_eq!(em_status, StatusCode::OK);
-    assert_eq!(em_body["data"]["state"], "NEW");
+    assert_eq!(em_body["data"]["state"], "new");
     assert_eq!(em_body["data"]["wordId"], "does-not-exist");
 
     // evaluate-mastery：缺 wordId 查询参数 → 400（axum Query 反序列化失败）
