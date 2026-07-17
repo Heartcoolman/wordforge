@@ -136,7 +136,6 @@ struct ClientErrorReport {
     stack: Option<String>,
     url: Option<String>,
     user_agent: Option<String>,
-    #[allow(dead_code)]
     component_stack: Option<String>,
 }
 
@@ -144,11 +143,13 @@ async fn report_client_error(JsonBody(body): JsonBody<ClientErrorReport>) -> imp
     let stack = body.stack.as_deref().unwrap_or("");
     let url = body.url.as_deref().unwrap_or("");
     let ua = body.user_agent.as_deref().unwrap_or("");
+    let component_stack = body.component_stack.as_deref().unwrap_or("");
     tracing::warn!(
         message = %body.message,
         stack = %stack,
         url = %url,
         user_agent = %ua,
+        component_stack = %component_stack,
         "前端 ErrorBoundary 捕获异常"
     );
     ok(serde_json::json!({ "received": true }))
