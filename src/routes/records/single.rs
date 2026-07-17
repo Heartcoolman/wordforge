@@ -126,6 +126,10 @@ struct EngineStateSnapshot {
     word_elo_trend_select: (f64, f64),
     /// #14：抗投毒账本（user,word）净位移快照，与 word_elo 同步捕获/回滚。
     word_elo_contrib: f64,
+    /// update_memory 与 mastery/ELO 同一原子 tx 一并写 evm:{word_id}（多样性/语境计数），
+    /// 但此前快照/回滚都没覆盖这个键——DB 写失败回滚 mastery/ELO 时，evm 悄悄留在新值，
+    /// 之后按"多一次未计入 review_count 的语境"污染 interval_modifier。
+    evm_state: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -184,6 +188,7 @@ fn capture_engine_state_snapshot(
         word_elo: store.get_word_elo(word_id)?,
         word_elo_trend_select: store.get_word_elo_trend_select(word_id)?,
         word_elo_contrib: store.get_word_elo_user_contrib(user_id, word_id)?,
+        evm_state: store.get_engine_algo_state(user_id, &format!("evm:{word_id}"))?,
     })
 }
 
@@ -207,6 +212,8 @@ fn restore_engine_state_snapshot(
     for (key, prev) in &snapshot.mastery_states {
         algo_states.push((key.as_str(), prev));
     }
+    let evm_key = format!("evm:{word_id}");
+    algo_states.push((evm_key.as_str(), &snapshot.evm_state));
     let restore = crate::store::operations::engine::EngineStateRestore {
         user_id,
         user_state: Some(&snapshot.user_state),

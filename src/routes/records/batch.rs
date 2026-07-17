@@ -199,6 +199,7 @@ pub(crate) async fn process_batch_record(
         prev_word_trend_select,
         prev_user_elo,
         prev_word_contrib,
+        prev_evm_state,
     ) = state
         .run_store_task("records.batch.snapshot", {
             let user_id = user_id_owned.clone();
@@ -218,12 +219,16 @@ pub(crate) async fn process_batch_record(
                         mastery_states.push((mode_key, prev));
                     }
                 }
+                // update_memory 与 mastery/ELO 同一原子 tx 一并写 evm:{word_id}，此前快照/回滚
+                // 都没覆盖这个键，见 restore 处注释。
+                let evm_state = store.get_engine_algo_state(&user_id, &format!("evm:{word_id}"))?;
                 Ok::<_, crate::store::StoreError>((
                     mastery_states,
                     store.get_word_elo(&word_id)?,
                     store.get_word_elo_trend_select(&word_id)?,
                     store.get_user_elo(&user_id)?,
                     store.get_word_elo_user_contrib(&user_id, &word_id)?,
+                    evm_state,
                 ))
             }
         })
@@ -361,10 +366,14 @@ pub(crate) async fn process_batch_record(
                         // 守「标记存在 ⟺ AMAS 已应用」不变式，消除原多步非原子写之间的崩溃窗口
                         // （重试丢 AMAS）。batch 不碰 user_state（user 级快照在批级单独处理）。
                         let mut algo_states: Vec<(&str, &Option<serde_json::Value>)> =
-                            Vec::with_capacity(prev_mastery_states.len());
+                            Vec::with_capacity(prev_mastery_states.len() + 1);
                         for (k, prev) in &prev_mastery_states {
                             algo_states.push((k.as_str(), prev));
                         }
+                        // DB 写失败在此回滚 mastery/ELO 时一并复位 evm:{word_id}，否则会留下"多一次
+                        // 未计入 review_count 的语境"，污染该词后续 interval_modifier。
+                        let evm_key = format!("evm:{word_id}");
+                        algo_states.push((evm_key.as_str(), &prev_evm_state));
                         let restore = crate::store::operations::engine::EngineStateRestore {
                             user_id: &user_id_owned,
                             user_state: None,
