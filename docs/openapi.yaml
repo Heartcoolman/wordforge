@@ -278,14 +278,14 @@ paths:
           description: 服务正常
         '503':
           description: 服务异常或维护中
-  /learning/sessions:
+  /learning/session:
     post:
       tags:
       - learning
-      summary: 开始新学习会话
+      summary: 开始或恢复学习会话
       responses:
-        '201':
-          description: 已创建会话
+        '200':
+          description: 会话（新建或恢复既有 active 会话）
           content:
             application/json:
               schema:
@@ -378,7 +378,7 @@ paths:
       tags:
       - learning
       summary: 提交学习记录
-      description: 记录一次单词作答。`recordType` 缺省落库 `all`；`selfRating` 可选。
+      description: 记录一次单词作答。`recordType` 缺省落库 `all`；`selfRating` 可选。`clientRecordId` 强烈建议携带并在重试时复用同一个值——服务端以此为幂等键，缺省时重试/离线重放会被当成两次独立事件二次计入 AMAS 状态。
       requestBody:
         content:
           application/json:
@@ -386,8 +386,44 @@ paths:
               $ref: '#/components/schemas/CreateRecordRequest'
         required: true
       responses:
+        '200':
+          description: '命中 clientRecordId 幂等去重，返回原记录（`duplicate: true`）'
+          content:
+            application/json:
+              schema:
+                allOf:
+                - type: object
+                  required:
+                  - success
+                  properties:
+                    success:
+                      type: boolean
+                - type: object
+                  required:
+                  - data
+                  properties:
+                    data:
+                      type: object
         '201':
           description: 已创建学习记录
+          content:
+            application/json:
+              schema:
+                allOf:
+                - type: object
+                  required:
+                  - success
+                  properties:
+                    success:
+                      type: boolean
+                - type: object
+                  required:
+                  - data
+                  properties:
+                    data:
+                      type: object
+        '202':
+          description: RECORDS_OUTBOX_ASYNC 开启时的异步落库确认：`{accepted, async, clientRecordId}`，不含 record/amasResult 字段，响应形状与 200/201 不同
           content:
             application/json:
               schema:
@@ -675,6 +711,43 @@ paths:
           description: 令牌缺失或已过期 — AUTH_UNAUTHORIZED
       security:
       - bearerAuth: []
+  /word-states/batch-update:
+    post:
+      tags:
+      - word-states
+      summary: 批量更新单词学习状态
+      description: 每项 state（lowercase：new/learning/reviewing/mastered/forgotten）/masteryLevel 均可选；只传 state 未传 masteryLevel 时，mastered/new 会强制对齐 masteryLevel 为 1.0/0.0。数量上限见 config.rs limits.max_batch_size。
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BatchUpdateRequest'
+        required: true
+      responses:
+        '200':
+          description: '`{updated: number}`，实际更新的条数'
+          content:
+            application/json:
+              schema:
+                allOf:
+                - type: object
+                  required:
+                  - success
+                  properties:
+                    success:
+                      type: boolean
+                - type: object
+                  required:
+                  - data
+                  properties:
+                    data:
+                      type: object
+        '400':
+          description: 请求体校验失败 — VALIDATION_ERROR / INVALID_REQUEST_BODY
+        '401':
+          description: 令牌缺失或已过期 — AUTH_UNAUTHORIZED
+      security:
+      - bearerAuth: []
   /word-states/{wordId}:
     get:
       tags:
@@ -715,10 +788,12 @@ paths:
           description: 资源不存在 — NOT_FOUND
       security:
       - bearerAuth: []
-    put:
+  /word-states/{wordId}/mark-mastered:
+    post:
       tags:
       - word-states
-      summary: 更新单词学习状态
+      summary: 标记单词为已掌握
+      description: mastery_level 置 1.0，state 置 mastered，清除复习排程。
       parameters:
       - name: wordId
         in: path
@@ -747,6 +822,46 @@ paths:
                       type: object
         '401':
           description: 令牌缺失或已过期 — AUTH_UNAUTHORIZED
+        '404':
+          description: 资源不存在 — NOT_FOUND
+      security:
+      - bearerAuth: []
+  /word-states/{wordId}/reset:
+    post:
+      tags:
+      - word-states
+      summary: 重置单词学习状态
+      description: state 置 new，mastery_level/streak/attempts 全部清零，视为从未学过。
+      parameters:
+      - name: wordId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: 重置后的单词学习状态
+          content:
+            application/json:
+              schema:
+                allOf:
+                - type: object
+                  required:
+                  - success
+                  properties:
+                    success:
+                      type: boolean
+                - type: object
+                  required:
+                  - data
+                  properties:
+                    data:
+                      type: object
+        '401':
+          description: 令牌缺失或已过期 — AUTH_UNAUTHORIZED
+        '404':
+          description: 资源不存在 — NOT_FOUND
       security:
       - bearerAuth: []
   /wordbooks:
@@ -855,6 +970,24 @@ paths:
       - bearerAuth: []
 components:
   schemas:
+    BatchUpdateRequest:
+      type: object
+      required:
+      - updates
+      properties:
+        updates:
+          type: array
+          items:
+            type: object
+            required:
+            - wordId
+            properties:
+              masteryLevel:
+                type: number
+              state:
+                type: string
+              wordId:
+                type: string
     CreateRecordRequest:
       type: object
       required:
@@ -862,6 +995,8 @@ components:
       - isCorrect
       - responseTimeMs
       properties:
+        clientRecordId:
+          type: string
         isCorrect:
           type: boolean
         recordType:

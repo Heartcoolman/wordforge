@@ -410,13 +410,26 @@ fn path_records() -> (String, utoipa::openapi::PathItem) {
         .tag("learning")
         .summary(Some("提交学习记录"))
         .description(Some(
-            "记录一次单词作答。`recordType` 缺省落库 `all`；`selfRating` 可选。",
+            "记录一次单词作答。`recordType` 缺省落库 `all`；`selfRating` 可选。`clientRecordId` \
+             强烈建议携带并在重试时复用同一个值——服务端以此为幂等键，缺省时重试/离线重放会\
+             被当成两次独立事件二次计入 AMAS 状态。",
         ))
         .security(bearer_security())
         .request_body(Some(json_body("CreateRecordRequest")))
         .responses(
             ResponsesBuilder::new()
                 .response("201", ok_response("已创建学习记录"))
+                .response(
+                    "200",
+                    ok_response("命中 clientRecordId 幂等去重，返回原记录（`duplicate: true`）"),
+                )
+                .response(
+                    "202",
+                    ok_response(
+                        "RECORDS_OUTBOX_ASYNC 开启时的异步落库确认：`{accepted, async, clientRecordId}`，\
+                         不含 record/amasResult 字段，响应形状与 200/201 不同",
+                    ),
+                )
                 .response("400", bad_request())
                 .response("401", unauthorized())
                 .build(),
@@ -444,20 +457,24 @@ fn path_records() -> (String, utoipa::openapi::PathItem) {
     )
 }
 
-fn path_learning_sessions() -> (String, utoipa::openapi::PathItem) {
+fn path_learning_session() -> (String, utoipa::openapi::PathItem) {
+    // 契约修正：真实路由是单数 /learning/session（routes/learning/mod.rs:20），复数
+    // /learning/sessions 上挂的是 GET 会话列表（session::list_sessions），不是本操作。
+    // create_or_resume_session 无论"恢复既有会话"还是"新建会话"分支都走 ok()，从不返回
+    // 201——spec 之前文档的路径和状态码都与真实路由不符。
     let op = OperationBuilder::new()
         .tag("learning")
-        .summary(Some("开始新学习会话"))
+        .summary(Some("开始或恢复学习会话"))
         .security(bearer_security())
         .responses(
             ResponsesBuilder::new()
-                .response("201", ok_response("已创建会话"))
+                .response("200", ok_response("会话（新建或恢复既有 active 会话）"))
                 .response("401", unauthorized())
                 .build(),
         )
         .build();
     (
-        "/learning/sessions".to_string(),
+        "/learning/session".to_string(),
         PathItemBuilder::new()
             .operation(HttpMethod::Post, op)
             .build(),
@@ -465,6 +482,8 @@ fn path_learning_sessions() -> (String, utoipa::openapi::PathItem) {
 }
 
 fn path_word_states_id() -> (String, utoipa::openapi::PathItem) {
+    // 契约修正：真实路由（routes/word_states.rs:56-64）在这个路径上只挂 GET，从未注册过
+    // PUT——之前文档的 PUT 操作永不可达。真正的写入面是三个独立路径，见下面三个函数。
     let get_op = OperationBuilder::new()
         .tag("word-states")
         .summary(Some("获取单词学习状态"))
@@ -482,23 +501,83 @@ fn path_word_states_id() -> (String, utoipa::openapi::PathItem) {
                 .build(),
         )
         .build();
-    let put_op = OperationBuilder::new()
+    (
+        "/word-states/{wordId}".to_string(),
+        PathItemBuilder::new()
+            .operation(HttpMethod::Get, get_op)
+            .build(),
+    )
+}
+
+fn path_word_states_mark_mastered() -> (String, utoipa::openapi::PathItem) {
+    let op = OperationBuilder::new()
         .tag("word-states")
-        .summary(Some("更新单词学习状态"))
+        .summary(Some("标记单词为已掌握"))
+        .description(Some("mastery_level 置 1.0，state 置 mastered，清除复习排程。"))
         .security(bearer_security())
         .parameter(path_param("wordId", uuid_schema()))
         .responses(
             ResponsesBuilder::new()
                 .response("200", ok_response("更新后的单词学习状态"))
                 .response("401", unauthorized())
+                .response("404", not_found())
                 .build(),
         )
         .build();
     (
-        "/word-states/{wordId}".to_string(),
+        "/word-states/{wordId}/mark-mastered".to_string(),
         PathItemBuilder::new()
-            .operation(HttpMethod::Get, get_op)
-            .operation(HttpMethod::Put, put_op)
+            .operation(HttpMethod::Post, op)
+            .build(),
+    )
+}
+
+fn path_word_states_reset() -> (String, utoipa::openapi::PathItem) {
+    let op = OperationBuilder::new()
+        .tag("word-states")
+        .summary(Some("重置单词学习状态"))
+        .description(Some("state 置 new，mastery_level/streak/attempts 全部清零，视为从未学过。"))
+        .security(bearer_security())
+        .parameter(path_param("wordId", uuid_schema()))
+        .responses(
+            ResponsesBuilder::new()
+                .response("200", ok_response("重置后的单词学习状态"))
+                .response("401", unauthorized())
+                .response("404", not_found())
+                .build(),
+        )
+        .build();
+    (
+        "/word-states/{wordId}/reset".to_string(),
+        PathItemBuilder::new()
+            .operation(HttpMethod::Post, op)
+            .build(),
+    )
+}
+
+fn path_word_states_batch_update() -> (String, utoipa::openapi::PathItem) {
+    let op = OperationBuilder::new()
+        .tag("word-states")
+        .summary(Some("批量更新单词学习状态"))
+        .description(Some(
+            "每项 state（lowercase：new/learning/reviewing/mastered/forgotten）/masteryLevel \
+             均可选；只传 state 未传 masteryLevel 时，mastered/new 会强制对齐 masteryLevel 为 \
+             1.0/0.0。数量上限见 config.rs limits.max_batch_size。",
+        ))
+        .security(bearer_security())
+        .request_body(Some(json_body("BatchUpdateRequest")))
+        .responses(
+            ResponsesBuilder::new()
+                .response("200", ok_response("`{updated: number}`，实际更新的条数"))
+                .response("400", bad_request())
+                .response("401", unauthorized())
+                .build(),
+        )
+        .build();
+    (
+        "/word-states/batch-update".to_string(),
+        PathItemBuilder::new()
+            .operation(HttpMethod::Post, op)
             .build(),
     )
 }
@@ -804,6 +883,29 @@ fn schemas() -> Vec<(String, RefOr<Schema>)> {
             )),
         ),
         (
+            "BatchUpdateRequest".to_string(),
+            RefOr::T(Schema::Object(
+                ObjectBuilder::new()
+                    .property(
+                        "updates",
+                        RefOr::T(Schema::Array(
+                            ArrayBuilder::new()
+                                .items(RefOr::T(Schema::Object(
+                                    ObjectBuilder::new()
+                                        .property("wordId", string_schema())
+                                        .property("state", string_schema())
+                                        .property("masteryLevel", number_schema())
+                                        .required("wordId")
+                                        .build(),
+                                )))
+                                .build(),
+                        )),
+                    )
+                    .required("updates")
+                    .build(),
+            )),
+        ),
+        (
             "LoginRequest".to_string(),
             RefOr::T(Schema::Object(
                 ObjectBuilder::new()
@@ -852,6 +954,10 @@ fn schemas() -> Vec<(String, RefOr<Schema>)> {
                         )),
                     )
                     .property("selfRating", integer_schema())
+                    // 幂等键，可选但强烈建议携带——见 path_records() 的 description。缺省时若
+                    // 请求被重试/离线重放，服务端无法识别为同一事件，会二次创建记录并二次计入
+                    // AMAS mastery/EVM/trust 状态（本轮 storage-integrity 高危修复的直接成因）。
+                    .property("clientRecordId", string_schema())
                     .required("wordId")
                     .required("isCorrect")
                     .required("responseTimeMs")
@@ -931,9 +1037,12 @@ pub fn build() -> utoipa::openapi::OpenApi {
         path_words_id(),
         // learning（3 个操作，2 个路径）
         path_records(),
-        path_learning_sessions(),
-        // word-states（2 个操作，1 个路径 GET+PUT）
+        path_learning_session(),
+        // word-states（GET 单个 + 3 个独立写操作，无 PUT——契约修正见函数注释）
         path_word_states_id(),
+        path_word_states_mark_mastered(),
+        path_word_states_reset(),
+        path_word_states_batch_update(),
         // favorites（2 个操作，2 个路径）
         path_word_favorites(),
         path_word_favorites_id(),
