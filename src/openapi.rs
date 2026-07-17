@@ -607,21 +607,157 @@ fn path_word_favorites() -> (String, utoipa::openapi::PathItem) {
     )
 }
 
-fn path_word_favorites_id() -> (String, utoipa::openapi::PathItem) {
+fn path_word_favorites_status() -> (String, utoipa::openapi::PathItem) {
     let op = OperationBuilder::new()
         .tag("favorites")
-        .summary(Some("切换单词收藏状态"))
+        .summary(Some("批量查询单词收藏状态"))
+        .description(Some("数量上限见 config.rs limits.max_batch_size，超限 400 WORD_FAVORITES_TOO_MANY_IDS。"))
+        .security(bearer_security())
+        .parameter(query_param("wordIds", string_schema()))
+        .responses(
+            ResponsesBuilder::new()
+                .response("200", ok_response("每项 `{wordId, favorited, createdAt}`，未收藏则 createdAt 为 null"))
+                .response("400", bad_request())
+                .response("401", unauthorized())
+                .build(),
+        )
+        .build();
+    (
+        "/word-favorites/status".to_string(),
+        PathItemBuilder::new()
+            .operation(HttpMethod::Get, op)
+            .build(),
+    )
+}
+
+fn path_word_favorites_id() -> (String, utoipa::openapi::PathItem) {
+    let post_op = OperationBuilder::new()
+        .tag("favorites")
+        .summary(Some("收藏单词"))
+        .description(Some("upsert 语义，非切换——重复调用恒返回 favorited:true。取消收藏须调用同路径 DELETE。"))
         .security(bearer_security())
         .parameter(path_param("wordId", uuid_schema()))
         .responses(
             ResponsesBuilder::new()
-                .response("200", ok_response("收藏结果，含 `favorited: bool`"))
+                .response("200", ok_response("收藏结果，`favorited` 恒为 true"))
+                .response("401", unauthorized())
+                .response("404", not_found())
+                .build(),
+        )
+        .build();
+    let delete_op = OperationBuilder::new()
+        .tag("favorites")
+        .summary(Some("取消收藏单词"))
+        .security(bearer_security())
+        .parameter(path_param("wordId", uuid_schema()))
+        .responses(
+            ResponsesBuilder::new()
+                .response("200", ok_response("`{wordId, favorited: false, deleted: bool}`，deleted 反映本次调用前是否确实存在收藏记录"))
                 .response("401", unauthorized())
                 .build(),
         )
         .build();
     (
         "/word-favorites/{wordId}".to_string(),
+        PathItemBuilder::new()
+            .operation(HttpMethod::Post, post_op)
+            .operation(HttpMethod::Delete, delete_op)
+            .build(),
+    )
+}
+
+// 客户端公开访问的资源包端点（v1.1-P0.3，全部匿名、不走 {success,data} 信封——manifest/
+// public-key 是 CDN 友好的裸 JSON，供边缘缓存/客户端直接解析，不同于其余端点的统一信封）。
+
+fn path_resource_packs_list() -> (String, utoipa::openapi::PathItem) {
+    let op = OperationBuilder::new()
+        .tag("resource-packs")
+        .summary(Some("列出所有资源包元数据"))
+        .responses(
+            ResponsesBuilder::new()
+                .response("200", ResponseBuilder::new().description("资源包元数据数组（裸 JSON，非 {success,data} 信封）").build())
+                .build(),
+        )
+        .build();
+    (
+        "/resource-packs".to_string(),
+        PathItemBuilder::new()
+            .operation(HttpMethod::Get, op)
+            .build(),
+    )
+}
+
+fn path_resource_packs_public_key() -> (String, utoipa::openapi::PathItem) {
+    let op = OperationBuilder::new()
+        .tag("resource-packs")
+        .summary(Some("获取资源包签名 Ed25519 公钥"))
+        .description(Some("客户端硬编码公钥才是正式验签信任锚，本端点仅供 verify SDK 自检。`{publicKey, algorithm}` 裸 JSON。"))
+        .responses(
+            ResponsesBuilder::new()
+                .response("200", ResponseBuilder::new().description("`{publicKey: base64 string, algorithm: \"ed25519\"}`").build())
+                .response("503", ResponseBuilder::new().description("签名器未初始化 — RESOURCE_PACK_SIGNER_UNAVAILABLE").build())
+                .build(),
+        )
+        .build();
+    (
+        "/resource-packs/public-key".to_string(),
+        PathItemBuilder::new()
+            .operation(HttpMethod::Get, op)
+            .build(),
+    )
+}
+
+fn path_resource_packs_manifest() -> (String, utoipa::openapi::PathItem) {
+    let op = OperationBuilder::new()
+        .tag("resource-packs")
+        .summary(Some("获取指定 pack 当前 channel 激活版本的 manifest"))
+        .description(Some(
+            "appVersion/locale 必填，channel 缺省 stable。支持 If-None-Match，命中返回 304。\
+             字段名严格对齐 docs/backend-handoff-resource-pack-v1.1.md §2.1，裸 JSON（非信封）。",
+        ))
+        .parameter(path_param("packId", string_schema()))
+        .parameter(query_param("appVersion", string_schema()))
+        .parameter(query_param("locale", string_schema()))
+        .parameter(query_param("channel", string_schema()))
+        .responses(
+            ResponsesBuilder::new()
+                .response("200", ResponseBuilder::new().description("`{packId, version, downloadUrl, sha256, sizeBytes, minAppVersion, channel, signature, signatureAlgorithm}`").build())
+                .response("304", ResponseBuilder::new().description("If-None-Match 命中，无 body").build())
+                .response("400", bad_request())
+                .response("404", ResponseBuilder::new().description("资源包/该 channel 无激活版本 — RESOURCE_PACK_NOT_FOUND").build())
+                .response("409", ResponseBuilder::new().description("appVersion 低于 minAppVersion — RESOURCE_PACK_APP_VERSION_TOO_LOW").build())
+                .build(),
+        )
+        .build();
+    (
+        "/resource-packs/{packId}/manifest".to_string(),
+        PathItemBuilder::new()
+            .operation(HttpMethod::Get, op)
+            .build(),
+    )
+}
+
+fn path_telemetry_resource_pack_install() -> (String, utoipa::openapi::PathItem) {
+    let op = OperationBuilder::new()
+        .tag("telemetry")
+        .summary(Some("上报资源包安装结果"))
+        .description(Some(
+            "outcome 五态（m070 起）：installed / verify_failed / rollback / download_failed / \
+             apply_failed。须带 X-Device-Id 头，设备须已通过正常登录注册，否则 403。",
+        ))
+        .security(bearer_security())
+        .request_body(Some(json_body("ResourcePackInstallReport")))
+        .responses(
+            ResponsesBuilder::new()
+                .response("200", ok_response("`{received: true}`"))
+                .response("400", bad_request())
+                .response("401", unauthorized())
+                .response("403", ResponseBuilder::new().description("设备未注册 / 设备归属与当前账号不符 — DEVICE_NOT_REGISTERED / DEVICE_OWNERSHIP_MISMATCH").build())
+                .build(),
+        )
+        .build();
+    (
+        "/telemetry/resource-pack-install".to_string(),
         PathItemBuilder::new()
             .operation(HttpMethod::Post, op)
             .build(),
@@ -906,6 +1042,20 @@ fn schemas() -> Vec<(String, RefOr<Schema>)> {
             )),
         ),
         (
+            "ResourcePackInstallReport".to_string(),
+            RefOr::T(Schema::Object(
+                ObjectBuilder::new()
+                    .property("packId", string_schema())
+                    .property("version", string_schema())
+                    .property("outcome", string_schema())
+                    .property("appVersion", string_schema())
+                    .required("packId")
+                    .required("version")
+                    .required("outcome")
+                    .build(),
+            )),
+        ),
+        (
             "LoginRequest".to_string(),
             RefOr::T(Schema::Object(
                 ObjectBuilder::new()
@@ -1043,9 +1193,16 @@ pub fn build() -> utoipa::openapi::OpenApi {
         path_word_states_mark_mastered(),
         path_word_states_reset(),
         path_word_states_batch_update(),
-        // favorites（2 个操作，2 个路径）
+        // favorites（4 个操作，3 个路径）
         path_word_favorites(),
+        path_word_favorites_status(),
         path_word_favorites_id(),
+        // resource-packs（客户端公开端点，3 个操作，3 个路径，此前整块缺失）
+        path_resource_packs_list(),
+        path_resource_packs_public_key(),
+        path_resource_packs_manifest(),
+        // telemetry（此前整块缺失，此处仅补 finding 指出的安装上报这一个端点）
+        path_telemetry_resource_pack_install(),
         // notes（2 个操作，1 个路径 GET+POST）
         path_word_notes(),
         // wordbooks（1 个操作，1 个路径）

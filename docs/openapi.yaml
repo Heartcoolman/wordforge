@@ -446,6 +446,63 @@ paths:
           description: 令牌缺失或已过期 — AUTH_UNAUTHORIZED
       security:
       - bearerAuth: []
+  /resource-packs:
+    get:
+      tags:
+      - resource-packs
+      summary: 列出所有资源包元数据
+      responses:
+        '200':
+          description: 资源包元数据数组（裸 JSON，非 {success,data} 信封）
+  /resource-packs/public-key:
+    get:
+      tags:
+      - resource-packs
+      summary: 获取资源包签名 Ed25519 公钥
+      description: 客户端硬编码公钥才是正式验签信任锚，本端点仅供 verify SDK 自检。`{publicKey, algorithm}` 裸 JSON。
+      responses:
+        '200':
+          description: '`{publicKey: base64 string, algorithm: "ed25519"}`'
+        '503':
+          description: 签名器未初始化 — RESOURCE_PACK_SIGNER_UNAVAILABLE
+  /resource-packs/{packId}/manifest:
+    get:
+      tags:
+      - resource-packs
+      summary: 获取指定 pack 当前 channel 激活版本的 manifest
+      description: appVersion/locale 必填，channel 缺省 stable。支持 If-None-Match，命中返回 304。字段名严格对齐 docs/backend-handoff-resource-pack-v1.1.md §2.1，裸 JSON（非信封）。
+      parameters:
+      - name: packId
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: appVersion
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: locale
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: channel
+        in: query
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: '`{packId, version, downloadUrl, sha256, sizeBytes, minAppVersion, channel, signature, signatureAlgorithm}`'
+        '304':
+          description: If-None-Match 命中，无 body
+        '400':
+          description: 请求体校验失败 — VALIDATION_ERROR / INVALID_REQUEST_BODY
+        '404':
+          description: 资源包/该 channel 无激活版本 — RESOURCE_PACK_NOT_FOUND
+        '409':
+          description: appVersion 低于 minAppVersion — RESOURCE_PACK_APP_VERSION_TOO_LOW
   /status:
     get:
       tags:
@@ -524,6 +581,45 @@ paths:
                       type: object
         '401':
           description: 令牌缺失或已过期 — AUTH_UNAUTHORIZED
+      security:
+      - bearerAuth: []
+  /telemetry/resource-pack-install:
+    post:
+      tags:
+      - telemetry
+      summary: 上报资源包安装结果
+      description: outcome 五态（m070 起）：installed / verify_failed / rollback / download_failed / apply_failed。须带 X-Device-Id 头，设备须已通过正常登录注册，否则 403。
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResourcePackInstallReport'
+        required: true
+      responses:
+        '200':
+          description: '`{received: true}`'
+          content:
+            application/json:
+              schema:
+                allOf:
+                - type: object
+                  required:
+                  - success
+                  properties:
+                    success:
+                      type: boolean
+                - type: object
+                  required:
+                  - data
+                  properties:
+                    data:
+                      type: object
+        '400':
+          description: 请求体校验失败 — VALIDATION_ERROR / INVALID_REQUEST_BODY
+        '401':
+          description: 令牌缺失或已过期 — AUTH_UNAUTHORIZED
+        '403':
+          description: 设备未注册 / 设备归属与当前账号不符 — DEVICE_NOT_REGISTERED / DEVICE_OWNERSHIP_MISMATCH
       security:
       - bearerAuth: []
   /user-profile:
@@ -621,11 +717,49 @@ paths:
           description: 令牌缺失或已过期 — AUTH_UNAUTHORIZED
       security:
       - bearerAuth: []
+  /word-favorites/status:
+    get:
+      tags:
+      - favorites
+      summary: 批量查询单词收藏状态
+      description: 数量上限见 config.rs limits.max_batch_size，超限 400 WORD_FAVORITES_TOO_MANY_IDS。
+      parameters:
+      - name: wordIds
+        in: query
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: 每项 `{wordId, favorited, createdAt}`，未收藏则 createdAt 为 null
+          content:
+            application/json:
+              schema:
+                allOf:
+                - type: object
+                  required:
+                  - success
+                  properties:
+                    success:
+                      type: boolean
+                - type: object
+                  required:
+                  - data
+                  properties:
+                    data:
+                      type: object
+        '400':
+          description: 请求体校验失败 — VALIDATION_ERROR / INVALID_REQUEST_BODY
+        '401':
+          description: 令牌缺失或已过期 — AUTH_UNAUTHORIZED
+      security:
+      - bearerAuth: []
   /word-favorites/{wordId}:
     post:
       tags:
       - favorites
-      summary: 切换单词收藏状态
+      summary: 收藏单词
+      description: upsert 语义，非切换——重复调用恒返回 favorited:true。取消收藏须调用同路径 DELETE。
       parameters:
       - name: wordId
         in: path
@@ -635,7 +769,43 @@ paths:
           format: uuid
       responses:
         '200':
-          description: '收藏结果，含 `favorited: bool`'
+          description: 收藏结果，`favorited` 恒为 true
+          content:
+            application/json:
+              schema:
+                allOf:
+                - type: object
+                  required:
+                  - success
+                  properties:
+                    success:
+                      type: boolean
+                - type: object
+                  required:
+                  - data
+                  properties:
+                    data:
+                      type: object
+        '401':
+          description: 令牌缺失或已过期 — AUTH_UNAUTHORIZED
+        '404':
+          description: 资源不存在 — NOT_FOUND
+      security:
+      - bearerAuth: []
+    delete:
+      tags:
+      - favorites
+      summary: 取消收藏单词
+      parameters:
+      - name: wordId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: '`{wordId, favorited: false, deleted: bool}`，deleted 反映本次调用前是否确实存在收藏记录'
           content:
             application/json:
               schema:
@@ -1087,6 +1257,21 @@ components:
         newPassword:
           type: string
         token:
+          type: string
+    ResourcePackInstallReport:
+      type: object
+      required:
+      - packId
+      - version
+      - outcome
+      properties:
+        appVersion:
+          type: string
+        outcome:
+          type: string
+        packId:
+          type: string
+        version:
           type: string
     WordLearningState:
       type: object
