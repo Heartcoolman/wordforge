@@ -22,6 +22,7 @@ use common::http::{request, response_json};
 
 use base64::Engine as _;
 use learning_backend::services::resource_pack_signing::verify_base64;
+use learning_backend::store::operations::resource_packs::ResourcePackChannel;
 use sha2::{Digest, Sha256};
 
 const SAMPLE_PAYLOAD: &[u8] =
@@ -665,5 +666,85 @@ async fn webapp_activate_rejects_deactivated_version() {
         status,
         StatusCode::BAD_REQUEST,
         "下架版本激活应 400：{body}"
+    );
+}
+
+/// web-app 当前激活版本不能直接软删：status.webTargetVersion 会变 null，但 current 符号链接
+/// 仍在物理服务这份"已下线"构建，两者失配。须先切换到其它版本再删，与激活路径的保护对称。
+/// 非 web-app pack 删除当前激活版本的既有放行语义（软删=manifest 摘除，文件保留）不受影响。
+#[tokio::test]
+async fn webapp_deactivate_rejects_active_version() {
+    let app = spawn_test_server().await;
+    let admin = setup_admin_and_get_token(&app.app).await;
+
+    let up = upload_pack_payload(
+        &app.app,
+        &admin,
+        "web-app",
+        "9.9.9",
+        "stable",
+        SAMPLE_PAYLOAD,
+        None,
+    )
+    .await;
+    assert_eq!(up.status(), StatusCode::OK, "上传应成功");
+
+    // web-app 的 HTTP 激活端点额外校验工件必须是真 tarball（见 webapp_activate_rejects_
+    // non_tarball_artifact），与本测试要验证的"删除激活版本"guard 无关；直接写 store 的激活
+    // 指针，绕开这层无关校验，只覆盖本测试关心的 deactivate 路径。
+    app.state
+        .store()
+        .set_active_pack_version("web-app", ResourcePackChannel::Stable, "9.9.9", None)
+        .expect("直接置激活指针应成功");
+
+    // 删除当前激活版本 → 应被拒（409，要求先切换）
+    let del = request(
+        &app.app,
+        Method::DELETE,
+        "/api/admin/resource-packs/web-app/versions/9.9.9",
+        None,
+        &[("authorization", auth_header(&admin))],
+    )
+    .await;
+    let (status, _h, body) = response_json(del).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "删除当前激活版本应 409：{body}"
+    );
+
+    // 非 web-app pack：删除其当前激活版本仍应放行（既有语义不变）
+    let up2 = upload_pack_payload(
+        &app.app,
+        &admin,
+        "wordbook-core",
+        "9.9.9",
+        "stable",
+        SAMPLE_PAYLOAD,
+        None,
+    )
+    .await;
+    assert_eq!(up2.status(), StatusCode::OK, "上传应成功");
+    let activate2 = request(
+        &app.app,
+        Method::PUT,
+        "/api/admin/resource-packs/wordbook-core/channel/stable/active",
+        Some(serde_json::json!({ "version": "9.9.9" })),
+        &[("authorization", auth_header(&admin))],
+    )
+    .await;
+    assert_eq!(activate2.status(), StatusCode::OK, "激活应成功");
+    let del2 = request(
+        &app.app,
+        Method::DELETE,
+        "/api/admin/resource-packs/wordbook-core/versions/9.9.9",
+        None,
+        &[("authorization", auth_header(&admin))],
+    )
+    .await;
+    assert_eq!(
+        del2.status(),
+        StatusCode::OK,
+        "非 web-app 删除当前激活版本应保持既有放行语义"
     );
 }

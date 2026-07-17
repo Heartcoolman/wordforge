@@ -439,6 +439,37 @@ async fn set_active(
         }
     }
 
+    // 泛化上面 web-app 专属的 WEBAPP_CHANNEL_MISMATCH 保护：非 web-app pack 此前完全没有这层
+    // 校验——resource_pack_active FK 只约束 (pack_id,version)，不约束 channel，激活请求能把任意
+    // channel 下的版本号错误地挂到另一个 channel 的激活指针上，悄悄覆盖掉该 channel 原本工作
+    // 正常的旧指针；事后 get_active_pack_version 的 channel JOIN 不匹配，该 channel 直接 404，
+    // 此前无任何报错提示（PUT 本身返回 200 activated:true）。
+    if pack_id != WEBAPP_PACK_ID {
+        let pid = pack_id.clone();
+        let ver = body.version.clone();
+        let target = state
+            .run_store_task(
+                "admin.resource_packs.get_version_for_channel_check",
+                move |store| store.get_pack_version(&pid, &ver),
+            )
+            .await??
+            .ok_or_else(|| {
+                AppError::not_found(&format!("{} 版本 {} 不存在，无法激活", pack_id, body.version))
+            })?;
+        if target.channel != channel {
+            return Err(AppError::bad_request(
+                "PACK_CHANNEL_MISMATCH",
+                &format!(
+                    "{} 版本 {} 属 {} 通道，不能在 {} 通道激活",
+                    pack_id,
+                    body.version,
+                    target.channel.as_str(),
+                    channel.as_str()
+                ),
+            ));
+        }
+    }
+
     let pack_id_for_db = pack_id.clone();
     let version_for_db = body.version.clone();
     let db_res = state
@@ -512,6 +543,52 @@ async fn deactivate_version(
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     validate_pack_id(&pack_id)?;
     validate_version(&version)?;
+
+    // web-app 专属保护：其它 pack 类型的"软删当前激活版本"是既有、经测试覆盖的正常语义
+    // （manifest 摘除后 404，文件保留可恢复，见 docs/resource-packs.md §『停用』），此处不动。
+    // 但 web-app 的 status.webTargetVersion 被 status.rs 文档为"单一真相源，恒指向后端确已
+    // 托管的构建"——deactivate_pack_version 只改 deactivated_at，不动 resource_pack_active
+    // 也不动 static/web-app/current 符号链接，若删的正是当前激活版本，webTargetVersion 会变
+    // null，但 /web-app/current/* 仍在物理服务这份"已下线"的构建，两者失配、直接违反该不变式。
+    // 激活路径为 web-app 做了 WEBAPP_ACTIVATE_LOCK + 拒绝激活已停用版本等多层保护，这里补齐
+    // 对称的另一半：删除前先查是否为当前激活版本，是则要求先切换，不做静默失配。
+    if pack_id == WEBAPP_PACK_ID {
+        let pid = pack_id.clone();
+        let ver = version.clone();
+        let active_channels = state
+            .run_store_task(
+                "admin.resource_packs.check_webapp_active_before_delete",
+                move |store| {
+                    [
+                        ResourcePackChannel::Stable,
+                        ResourcePackChannel::Beta,
+                        ResourcePackChannel::Internal,
+                    ]
+                    .into_iter()
+                    .filter(|&ch| {
+                        store
+                            .get_active_pack_version(&pid, ch)
+                            .ok()
+                            .flatten()
+                            .is_some_and(|v| v.version == ver)
+                    })
+                    .collect::<Vec<_>>()
+                },
+            )
+            .await?;
+        if !active_channels.is_empty() {
+            let names: Vec<&str> = active_channels.iter().map(|c| c.as_str()).collect();
+            return Err(AppError::conflict(
+                "PACK_VERSION_ACTIVE",
+                &format!(
+                    "版本 {} 正在 web-app {} 通道激活中，请先切换到其它版本再删除",
+                    version,
+                    names.join("/")
+                ),
+            ));
+        }
+    }
+
     let pack_id_for_db = pack_id.clone();
     let version_for_db = version.clone();
     state
