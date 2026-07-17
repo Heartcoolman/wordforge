@@ -247,21 +247,6 @@ impl Store {
         Ok(map)
     }
 
-    #[deprecated(note = "Use batch_get_engine_mastery_mdm_states for typed mastery states")]
-    pub fn batch_get_engine_mastery_states(
-        &self,
-        user_id: &str,
-        word_ids: &[String],
-    ) -> Result<Vec<(String, Option<serde_json::Value>)>, StoreError> {
-        let map = self.batch_get_mastery_values(user_id, word_ids)?;
-        let mut results = Vec::with_capacity(word_ids.len());
-        for word_id in word_ids {
-            let state = map.get(word_id).cloned().unwrap_or(None);
-            results.push((word_id.clone(), state));
-        }
-        Ok(results)
-    }
-
     pub fn batch_get_engine_mastery_mdm_states(
         &self,
         user_id: &str,
@@ -468,22 +453,6 @@ mod tests {
         store.set_word_elo("w1", &elo).unwrap();
         let got = store.get_word_elo("w1").unwrap();
         assert_eq!(got.rating, 1100.0);
-    }
-
-    #[test]
-    #[allow(deprecated)]
-    fn batch_mastery_states() {
-        let store = Store::open(":memory:", 5000, 1).unwrap();
-        let state = serde_json::json!({"level": 0.8});
-        store
-            .set_engine_algo_state("u1", "mastery:w1", &state)
-            .unwrap();
-        let results = store
-            .batch_get_engine_mastery_states("u1", &["w1".into(), "w2".into()])
-            .unwrap();
-        assert_eq!(results.len(), 2);
-        assert!(results[0].1.is_some());
-        assert!(results[1].1.is_none());
     }
 
     #[test]

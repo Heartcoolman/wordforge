@@ -67,11 +67,6 @@ pub fn schema_from_table(tag: &str) -> Option<u32> {
         .map(|(_, v)| *v)
 }
 
-/// 该 tag 是否在历史表中（= 不下载即可确定 schema、且在已审计支持的回滚下界 v1.1.0 之内）。
-pub fn is_known_historical(tag: &str) -> bool {
-    schema_from_table(tag).is_some()
-}
-
 /// 列出"可作为回滚目标"的已知历史版本（供 status 下发给 UI 的回滚按钮 / 任意版本下拉）：
 /// 表内、严格早于 `current_tag`、且 schema `<=` 当前 schema 的版本。表按版本升序，故
 /// `current_tag` 在表中时取其之前的条目即更旧版本；`current_tag` 不在表中（如 beta.18+ 新版）

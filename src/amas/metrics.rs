@@ -183,21 +183,6 @@ pub struct MetricsSnapshot {
     pub latency_buckets: [u64; 6],
 }
 
-#[allow(unused_macros)]
-macro_rules! track_algorithm {
-    ($registry:expr, $id:expr, $block:expr) => {{
-        let start = std::time::Instant::now();
-        let result = $block;
-        let latency_us = start.elapsed().as_micros() as u64;
-        let is_error = result.is_err();
-        $registry.record_call($id, latency_us, is_error);
-        result
-    }};
-}
-
-#[allow(unused_imports)]
-pub(crate) use track_algorithm;
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -325,25 +310,5 @@ mod tests {
         assert_eq!(back.call_count, 10);
         assert_eq!(back.total_latency_us, 12345);
         assert_eq!(back.error_count, 3);
-    }
-
-    #[test]
-    fn track_algorithm_macro_records_ok_path() {
-        let reg = MetricsRegistry::new();
-        let result: Result<i32, &str> = track_algorithm!(reg, AlgorithmId::Ensemble, Ok(42));
-        assert_eq!(result.unwrap(), 42);
-        let snap = reg.snapshot();
-        assert_eq!(snap["ensemble"].call_count, 1);
-        assert_eq!(snap["ensemble"].error_count, 0);
-    }
-
-    #[test]
-    fn track_algorithm_macro_records_err_path() {
-        let reg = MetricsRegistry::new();
-        let result: Result<i32, &str> = track_algorithm!(reg, AlgorithmId::Ensemble, Err("nope"));
-        assert!(result.is_err());
-        let snap = reg.snapshot();
-        assert_eq!(snap["ensemble"].call_count, 1);
-        assert_eq!(snap["ensemble"].error_count, 1);
     }
 }
