@@ -494,10 +494,31 @@ impl AuthRateLimitState {
     }
 }
 
+/// 普通用户认证端点（/api/auth/*）限流。与 admin 认证共用同一 limiter 实例/配额配置，
+/// 但按 scope 前缀拆分独立桶键——此前两者共用裸 `ip_key(ip)`，同一 IP（NAT/公司网络/VPN
+/// 出口常见）下普通用户的登录尝试会挤占 admin 登录的配额，反之亦然，互相误伤。
 pub async fn auth_rate_limit_middleware(
+    state: State<AppState>,
+    req: Request,
+    next: Next,
+) -> Result<Response, AppError> {
+    auth_rate_limit_scoped(state, req, next, "user").await
+}
+
+/// admin 认证端点（/api/admin/auth/*）限流，独立桶，语义/配额同上，见 [`auth_rate_limit_middleware`]。
+pub async fn admin_auth_rate_limit_middleware(
+    state: State<AppState>,
+    req: Request,
+    next: Next,
+) -> Result<Response, AppError> {
+    auth_rate_limit_scoped(state, req, next, "admin").await
+}
+
+async fn auth_rate_limit_scoped(
     State(state): State<AppState>,
     req: Request,
     next: Next,
+    scope: &str,
 ) -> Result<Response, AppError> {
     let connect_ip = req
         .extensions()
@@ -506,13 +527,14 @@ pub async fn auth_rate_limit_middleware(
     let cfg = state.config();
     let ip = extract_client_ip(req.headers(), cfg.trust_proxy, connect_ip);
     let max_entries = cfg.limits.rate_limit_max_entries;
+    let key = format!("{scope}:{}", ip_key(ip));
     // 认证端点（登录/注册）天然是匿名前置场景，永远按 IP 限流。
     // 用 check_with_max 显式传 config 的 max_requests（每请求读，热替换即时生效），与通用 /
     // 遥测限流器一致；不走 check() 的烘焙 self.max_requests（那样 authMaxRequests 改了不生效）。
     let result = state
         .auth_rate_limit()
         .limiter
-        .check_with_max(&ip_key(ip), max_entries, cfg.auth_rate_limit.max_requests)
+        .check_with_max(&key, max_entries, cfg.auth_rate_limit.max_requests)
         .await;
 
     if !result.allowed {

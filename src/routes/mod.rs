@@ -61,10 +61,12 @@ pub fn build_router(state: AppState) -> Router {
         rate_limit::auth_rate_limit_middleware,
     ));
 
-    // admin 认证路由（登录/初始化）叠加按 IP 限流，防在线爆破 + Argon2 DoS
+    // admin 认证路由（登录/初始化）叠加按 IP 限流，防在线爆破 + Argon2 DoS。
+    // 独立桶：admin_auth_rate_limit_middleware 与下面 user auth 的 auth_rate_limit_middleware
+    // 共用同一 limiter/配额，但按 scope 拆桶键，避免同一 IP 下两类流量互相挤占配额。
     let admin_auth_routes = admin::auth_router().layer(axum::middleware::from_fn_with_state(
         state.clone(),
-        rate_limit::auth_rate_limit_middleware,
+        rate_limit::admin_auth_rate_limit_middleware,
     ));
 
     // admin 认证公开路由（如 /status）不受 auth rate limit 约束

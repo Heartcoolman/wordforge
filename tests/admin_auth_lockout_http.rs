@@ -238,3 +238,62 @@ async fn it_admin_login_resets_failed_count_on_success() {
     assert_eq!(status, StatusCode::OK, "body={body}");
     assert!(body["data"]["token"].is_string());
 }
+
+/// 独立限流桶回归：/api/auth/* 与 /api/admin/auth/* 此前共用同一 IP 限流桶（裸 ip_key），
+/// 同一 IP 下普通用户认证流量能把 admin 登录配额打满。拆分 scope 前缀后两者互不干扰。
+#[tokio::test]
+async fn it_user_auth_rate_limit_does_not_starve_admin_auth_bucket() {
+    let app = spawn_test_server().await;
+
+    // 先备好一个真实 admin 账户，稍后验证其登录不受下面的用户端打满影响。
+    let admin_email = format!("isolated-{}@test.com", uuid::Uuid::new_v4());
+    let setup = request(
+        &app.app,
+        Method::POST,
+        "/api/admin/auth/setup",
+        Some(serde_json::json!({
+            "email": &admin_email,
+            "password": "AdminPassw0rd!"
+        })),
+        &[],
+    )
+    .await;
+    assert_eq!(response_json(setup).await.0, StatusCode::CREATED);
+
+    // 打满 /api/auth/* 的 IP 限流桶（默认 max_requests=10）：11 次不存在邮箱的登录尝试。
+    let mut saw_rate_limited = false;
+    for _ in 0..11 {
+        let resp = request(
+            &app.app,
+            Method::POST,
+            "/api/auth/login",
+            Some(serde_json::json!({
+                "email": "nobody-such-user@test.com",
+                "password": "WhateverPassw0rd!"
+            })),
+            &[],
+        )
+        .await;
+        if resp.status() == StatusCode::TOO_MANY_REQUESTS {
+            let (_, _, body) = response_json(resp).await;
+            assert_eq!(body["code"], "AUTH_RATE_LIMITED", "body={body}");
+            saw_rate_limited = true;
+        }
+    }
+    assert!(saw_rate_limited, "11 次用户登录尝试应触发 IP 限流");
+
+    // 独立桶：admin 登录（同一测试进程/同一「IP」）不应被上面打满的用户桶波及。
+    let admin_login = request(
+        &app.app,
+        Method::POST,
+        "/api/admin/auth/login",
+        Some(serde_json::json!({
+            "email": &admin_email,
+            "password": "AdminPassw0rd!"
+        })),
+        &[],
+    )
+    .await;
+    let (status, _, body) = response_json(admin_login).await;
+    assert_eq!(status, StatusCode::OK, "admin 登录不应受用户认证限流影响：body={body}");
+}
