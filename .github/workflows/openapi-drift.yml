@@ -10,12 +10,14 @@ on:
     branches: [ main, feat/v1-m0 ]
     paths:
       - 'src/openapi.rs'
+      - 'src/routes/**'
       - 'docs/openapi.yaml'
       - 'Cargo.toml'
       - 'Cargo.lock'
   pull_request:
     paths:
       - 'src/openapi.rs'
+      - 'src/routes/**'
       - 'docs/openapi.yaml'
       - 'Cargo.toml'
       - 'Cargo.lock'
