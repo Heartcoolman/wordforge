@@ -46,6 +46,12 @@ static UPLOAD_TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU
 /// 避免两个并发激活不同版本时 current 符号链接与 DB active 指针交错 → 持久错配（status 与物理托管脱钩）。
 /// 仅 web-app stable 激活极低频，串行无性能影响。
 static WEBAPP_ACTIVATE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// 上传临界区互斥：把「去重预检 + 落盘 rename + DB insert」串成一个临界区。三者此前各自独立，
+/// 两个并发上传同一 (pack_id, version) 都能通过预检（TOCTOU），随后各自 rename 到同一目标路径
+/// （最后 rename 者的字节物理落地），DB insert 又各自独立提交——谁的 sha256/签名被记进 DB 与
+/// 谁的字节最终躺在磁盘上互不保证是同一个请求，产生 DB 记录与实际文件不匹配。上传本就是极低频
+/// admin 操作，全局串行无性能影响，同一粒度对齐 WEBAPP_ACTIVATE_LOCK。
+static UPLOAD_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -222,6 +228,9 @@ async fn upload_version(
     // 先验去重：(pack_id, version) 已存在则 409 提前拒绝，绝不覆盖磁盘 payload.json。
     // 否则重传同版本号会用新字节覆盖旧 payload，而 DB 内旧 sha256/签名若仍激活，
     // 全量在线客户端验签必败 → 该资源包「变砖」。
+    // UPLOAD_LOCK：预检非原子，见该锁声明处注释——串起预检到 DB insert 整段临界区，
+    // 保证并发上传同一 (pack,version) 时"谁的字节落盘"与"谁的 sha256 记进 DB"是同一个请求。
+    let _upload_guard = UPLOAD_LOCK.lock().await;
     {
         let pack_id_check = pack_id.clone();
         let version_check = q.version.clone();
@@ -304,6 +313,7 @@ async fn upload_version(
             Ok::<_, crate::store::StoreError>(())
         })
         .await??;
+    drop(_upload_guard);
 
     // v1.1-P2.10：写 admin 审计（资源包上传），失败不影响主流程
     write_admin_audit(
