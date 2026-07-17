@@ -245,7 +245,7 @@ ln -s /etc/nginx/sites-available/wordforge-http-only /etc/nginx/sites-enabled/
 nginx -t && systemctl reload nginx
 ```
 
-> **警告**：iOS 客户端 ATS 严格模式会拒绝 HTTP，此路径仅适用于 admin 临时接入或全面停服公告期。
+> **警告**：当前生产 iOS 客户端对生产 host 开了 scoped ATS 例外（`NSExceptionAllowsInsecureHTTPLoads`），本身允许 HTTP，此降级不会立即导致 iOS 请求失败——但证书固定（CertPinning）届时同样因明文传输而零保护。此路径仅适用于 admin 临时接入或全面停服公告期；若后续发布已移除该 ATS 例外的客户端版本，则本路径会使那些版本请求失败，需按当时线上客户端版本评估影响。
 
 ---
 
