@@ -168,8 +168,9 @@ async fn stats_overview(
             "word_states.stats_overview",
             move |store| -> Result<_, AppError> {
                 let mut s = store.get_word_state_stats_filtered(&auth.user_id, category)?;
-                s.due_review_estimated_minutes =
-                    Some(store.get_due_review_estimated_minutes(&auth.user_id)?);
+                let (due_count, eta_minutes) = store.get_due_review_estimated_minutes(&auth.user_id)?;
+                s.due_count = Some(due_count);
+                s.due_review_estimated_minutes = Some(eta_minutes);
                 Ok(s)
             },
         )

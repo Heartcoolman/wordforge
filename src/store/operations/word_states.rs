@@ -74,6 +74,10 @@ pub struct WordStateStats {
     /// 预计完成今日到期复习所需分钟（dueCount × avg_response_time_ms / 60000，向上取整；无样本时回退 5 秒/词）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub due_review_estimated_minutes: Option<u32>,
+    /// 今日到期总数（未分页）。客户端 /word-states/due/list 有 limit≤200 上限，仅拿这个真实总数
+    /// 展示"待复习 N"才不会在到期词超过 200 时把计数显示成页容量而非真实总量。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub due_count: Option<u64>,
 }
 
 const WLS_COLS: &str =
@@ -253,8 +257,9 @@ impl Store {
         self.get_word_state_stats_filtered(user_id, None)
     }
 
-    /// 计算 due 词条 ETA：dueCount × avgResponseTimeMs / 60000，向上取整；无样本时按 5s/词 估算。
-    pub fn get_due_review_estimated_minutes(&self, user_id: &str) -> Result<u32, StoreError> {
+    /// 计算 due 词条真实总数（未分页） + ETA：dueCount × avgResponseTimeMs / 60000，向上取整；
+    /// 无样本时按 5s/词 估算。二者共用同一次 COUNT 查询，避免 stats_overview 各调各的重复计数。
+    pub fn get_due_review_estimated_minutes(&self, user_id: &str) -> Result<(u64, u32), StoreError> {
         keys::validate_id(user_id)?;
         let conn = self.conn()?;
         let now = Utc::now().to_rfc3339();
@@ -265,7 +270,7 @@ impl Store {
             |r| r.get(0),
         )?;
         if due_count <= 0 {
-            return Ok(0);
+            return Ok((0, 0));
         }
         // 用最近 200 条记录的平均响应时间作为单词耗时估算；不足则回退 5000ms/词。
         let avg_ms: Option<f64> = conn
@@ -284,7 +289,7 @@ impl Store {
             .unwrap_or(5000.0);
         let total_ms = (due_count as f64) * per_word_ms;
         let minutes = (total_ms / 60_000.0).ceil();
-        Ok(minutes.clamp(0.0, u32::MAX as f64) as u32)
+        Ok((due_count as u64, minutes.clamp(0.0, u32::MAX as f64) as u32))
     }
 
     pub fn get_word_state_stats_filtered(
@@ -799,7 +804,7 @@ mod tests {
     fn due_review_eta_returns_zero_when_no_due() {
         let store = test_store();
         // 没有 word_learning_states
-        assert_eq!(store.get_due_review_estimated_minutes("u1").unwrap(), 0);
+        assert_eq!(store.get_due_review_estimated_minutes("u1").unwrap(), (0, 0));
     }
 
     #[test]
@@ -824,7 +829,8 @@ mod tests {
             question_mode: None,
         };
         store.create_record(&r).unwrap();
-        let eta = store.get_due_review_estimated_minutes("u1").unwrap();
+        let (count, eta) = store.get_due_review_estimated_minutes("u1").unwrap();
+        assert_eq!(count, 1);
         // 1 个词 * 600 ms = 600 ms -> 0.01 min ceil -> 1
         assert_eq!(eta, 1);
     }
@@ -850,7 +856,8 @@ mod tests {
             question_mode: None,
         };
         store.create_record(&r).unwrap();
-        let eta = store.get_due_review_estimated_minutes("u1").unwrap();
+        let (count, eta) = store.get_due_review_estimated_minutes("u1").unwrap();
+        assert_eq!(count, 1);
         // 1 个词 * 5000 ms = 5s -> ceil(5/60) = 1
         assert_eq!(eta, 1);
     }
