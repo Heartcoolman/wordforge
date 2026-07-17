@@ -182,6 +182,7 @@ impl Store {
         record: &LearningRecord,
         word_state: Option<&crate::store::operations::word_states::WordLearningState>,
         learning_session: Option<&crate::store::operations::learning_sessions::LearningSession>,
+        just_mastered: bool,
     ) -> Result<(), StoreError> {
         keys::validate_id(&record.id)?;
         let mut conn = self.conn()?;
@@ -213,16 +214,27 @@ impl Store {
 
         if let Some(state) = word_state {
             let next_review = state.next_review_date.map(|d| d.to_rfc3339());
+            // total_attempts/correct_streak are written as SQL-relative increments off the row's
+            // OWN current value inside this same tx, not the Rust-computed absolute values the
+            // caller read before this tx opened — that pre-tx read is stale under concurrent
+            // submissions for the same (user_id, word_id) and silently loses increments (whichever
+            // write commits last wins with its own stale count). state/mastery_level/next_review_date
+            // stay absolute: they're this event's fresh AMAS-derived output, not a prior-value-
+            // dependent counter, so no race there. Mirrors apply_elo_in_tx's read/write-in-one-tx
+            // guarantee without needing an explicit re-read — the UPDATE itself is the read.
             tx.execute(
                 "INSERT INTO word_learning_states (user_id, word_id, state, mastery_level, next_review_date, half_life, correct_streak, total_attempts, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8)
                  ON CONFLICT(user_id, word_id) DO UPDATE SET
-                    state=?3, mastery_level=?4, next_review_date=?5, half_life=?6, correct_streak=?7, total_attempts=?8, updated_at=?9",
+                    state=?3, mastery_level=?4, next_review_date=?5, half_life=?6,
+                    correct_streak = CASE WHEN ?7 = 1 THEN word_learning_states.correct_streak + 1 ELSE 0 END,
+                    total_attempts = word_learning_states.total_attempts + 1,
+                    updated_at=?8",
                 params![
                     &state.user_id, &state.word_id, state.state.as_str(),
                     state.mastery_level, next_review.as_deref(),
-                    state.half_life, state.correct_streak as i64,
-                    state.total_attempts as i64, state.updated_at.to_rfc3339(),
+                    state.half_life, record.is_correct as i64,
+                    state.updated_at.to_rfc3339(),
                 ],
             )?;
         }
@@ -233,17 +245,28 @@ impl Store {
                 Self::serialize_json(&summary.map(|s| &s.mastered_word_ids).unwrap_or(&vec![]))?;
             let summary_error =
                 Self::serialize_json(&summary.map(|s| &s.error_prone_word_ids).unwrap_or(&vec![]))?;
+            // total_questions/total_count/correct_count/actual_mastery_count: same read-outside-tx
+            // race as word_learning_states above (caller's Rust `+= 1` reads a pre-tx snapshot).
+            // Written here as SQL-relative increments off the row's own value instead — total_questions/
+            // total_count always +1 per record (no bound param needed), correct_count/actual_mastery_count
+            // +1 only when this record was correct / just crossed into Mastered (passed in, since that
+            // delta — not the old absolute count — is what the caller actually knows). context_shifts/
+            // status/summary_*/updated_at stay absolute: not per-record monotonic counters here.
             tx.execute(
                 "UPDATE learning_sessions SET
-                    status=?1, total_questions=?2, actual_mastery_count=?3, context_shifts=?4,
-                    updated_at=?5, summary_accuracy=?6, summary_avg_response_time_ms=?7,
-                    summary_mastered_word_ids_json=?8, summary_error_prone_word_ids_json=?9,
-                    summary_duration_secs=?10, summary_hour_of_day=?11, summary_final_difficulty=?12,
-                    correct_count=?13, total_count=?14
-                 WHERE id=?15 AND user_id=?16",
+                    status=?1,
+                    total_questions = total_questions + 1,
+                    actual_mastery_count = actual_mastery_count + ?2,
+                    context_shifts=?3,
+                    updated_at=?4, summary_accuracy=?5, summary_avg_response_time_ms=?6,
+                    summary_mastered_word_ids_json=?7, summary_error_prone_word_ids_json=?8,
+                    summary_duration_secs=?9, summary_hour_of_day=?10, summary_final_difficulty=?11,
+                    correct_count = correct_count + ?12,
+                    total_count = total_count + 1
+                 WHERE id=?13 AND user_id=?14",
                 params![
-                    session.status.as_str(), session.total_questions as i64,
-                    session.actual_mastery_count as i64, session.context_shifts as i64,
+                    session.status.as_str(), just_mastered as i64,
+                    session.context_shifts as i64,
                     session.updated_at.to_rfc3339(),
                     summary.map(|s| s.accuracy),
                     summary.map(|s| s.avg_response_time_ms),
@@ -251,7 +274,7 @@ impl Store {
                     summary.map(|s| s.duration_secs),
                     summary.map(|s| s.hour_of_day as i64),
                     summary.map(|s| s.final_difficulty),
-                    session.correct_count as i64, session.total_count as i64,
+                    record.is_correct as i64,
                     &session.id, &session.user_id,
                 ],
             )?;
@@ -768,7 +791,7 @@ mod tests {
         };
         let record = sample_record("r1", "u1", "w1", now);
         store
-            .create_record_with_updates(&record, Some(&word_state), Some(&session))
+            .create_record_with_updates(&record, Some(&word_state), Some(&session), true)
             .unwrap();
 
         let stats = store.get_user_stats_agg("u1").unwrap();
@@ -782,7 +805,9 @@ mod tests {
             is_correct: false,
             ..sample_record("r2", "u1", "w2", now + Duration::seconds(1))
         };
-        store.create_record_with_updates(&r2, None, None).unwrap();
+        store
+            .create_record_with_updates(&r2, None, None, false)
+            .unwrap();
         let stats2 = store.get_user_stats_agg("u1").unwrap();
         assert_eq!(stats2.total_records, 2);
         assert_eq!(stats2.correct_records, 1);
@@ -843,10 +868,12 @@ mod tests {
         let record = sample_record("r1", "u1", "w1", now); // is_correct=true
 
         // 模拟并发:裸记录回放先落库(无 word_state/session)。
-        store.create_record_with_updates(&record, None, None).unwrap();
+        store
+            .create_record_with_updates(&record, None, None, false)
+            .unwrap();
         // 随后在途全量持久化到达,记录行已存在:不得报错、不得双计 user_stats、须落 word_state。
         store
-            .create_record_with_updates(&record, Some(&word_state), Some(&session))
+            .create_record_with_updates(&record, Some(&word_state), Some(&session), false)
             .unwrap();
 
         let stats = store.get_user_stats_agg("u1").unwrap();
@@ -857,7 +884,77 @@ mod tests {
         // 全量持久化的 AMAS 派生 word_state 已落库(裸回放未写,证明二次调用确实应用了增量)
         let wls = store.get_word_learning_state("u1", "w1").unwrap().unwrap();
         assert!((wls.mastery_level - 0.7).abs() < 1e-9);
-        assert_eq!(wls.total_attempts, 5);
+        // total_attempts 现由本函数在 tx 内按行自身当前值 SQL 相对 +1 写入(见
+        // create_record_with_updates 内联注释),不再采信传入 word_state.total_attempts 的绝对值
+        // (该 struct 字段是调用方 tx 外预读+Rust 累加的产物,在并发下本就可能失真——这正是本次修复
+        // 要消除的漂移源)。此处 word_learning_states 行此前不存在(上一次调用 word_state=None 未
+        // 写入),故这是首次真实 INSERT,相对 +1 落地为 1,而非传入 struct 里人为设置的 5。
+        assert_eq!(wls.total_attempts, 1);
+    }
+
+    /// 回归:并发同 (user_id, word_id) 下,两次调用各自携带"调用方在 tx 外预读+Rust 累加"的
+    /// word_state(均基于同一份陈旧 total_attempts=0 计算，都算出 total_attempts=1，模拟两个并发
+    /// 请求各自读到同一快照)。若 create_record_with_updates 仍按调用方传入的绝对值写入，两次调用
+    /// 后 total_attempts 会停在 1(后写者用自己算的"1"覆盖前一次的"1"，丢一次增量)；本次修复后
+    /// 应为 2，因为实际写入是在 tx 内对行自身当前值做 SQL 相对 +1，与调用方传入的绝对值无关。
+    #[test]
+    fn create_record_with_updates_concurrent_stale_reads_still_increment_correctly() {
+        use crate::store::operations::word_states::{WordLearningState, WordState};
+        let (_tmp, store) = tempfile_store();
+        store
+            .create_user(&super::super::users::User {
+                id: "u1".into(),
+                email: "a@b.com".into(),
+                username: "a".into(),
+                password_hash: "h".into(),
+                is_banned: false,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                failed_login_count: 0,
+                locked_until: None,
+                role: "user".into(),
+                status: "active".into(),
+                last_login_at: None,
+            })
+            .unwrap();
+        let now = Utc::now();
+        // 两次调用共用同一个"陈旧读"结果构造出的 word_state(total_attempts/correct_streak 都算
+        // 成好像是从 0 开始的第一次尝试)，模拟两个并发请求各自基于同一快照做 Rust 端 +1。
+        let stale_word_state = WordLearningState {
+            user_id: "u1".into(),
+            word_id: "w1".into(),
+            state: WordState::Learning,
+            mastery_level: 0.3,
+            next_review_date: None,
+            half_life: 12.0,
+            correct_streak: 1,
+            total_attempts: 1,
+            updated_at: now,
+        };
+        let r1 = LearningRecord {
+            is_correct: true,
+            ..sample_record("cr1", "u1", "w1", now)
+        };
+        let r2 = LearningRecord {
+            is_correct: true,
+            ..sample_record("cr2", "u1", "w1", now + Duration::seconds(1))
+        };
+        store
+            .create_record_with_updates(&r1, Some(&stale_word_state), None, false)
+            .unwrap();
+        store
+            .create_record_with_updates(&r2, Some(&stale_word_state), None, false)
+            .unwrap();
+
+        let wls = store.get_word_learning_state("u1", "w1").unwrap().unwrap();
+        assert_eq!(
+            wls.total_attempts, 2,
+            "两次真实调用必须各计一次，不能因调用方的陈旧快照互相覆盖"
+        );
+        assert_eq!(
+            wls.correct_streak, 2,
+            "两次都正确作答，streak 应连续 +1 到 2，而非停在传入的陈旧值 1"
+        );
     }
 
     #[test]

@@ -349,7 +349,7 @@ pub(crate) async fn process_single_record(
         state
             .run_store_task("records.single.persist_replayed", move |store| {
                 store
-                    .create_record_with_updates(&record_for_replay, None, None)
+                    .create_record_with_updates(&record_for_replay, None, None, false)
                     .map_err(|e| AppError::internal(&e.to_string()))
             })
             .await??;
@@ -413,7 +413,7 @@ pub(crate) async fn process_single_record(
         state
             .run_store_task("records.single.persist_replayed", move |store| {
                 store
-                    .create_record_with_updates(&record_for_replay, None, None)
+                    .create_record_with_updates(&record_for_replay, None, None, false)
                     .map_err(|e| AppError::internal(&e.to_string()))
             })
             .await??;
@@ -474,6 +474,13 @@ pub(crate) async fn process_single_record(
                     wls.updated_at = Utc::now();
                     next_word_state = Some(wls);
                 }
+                // Passed to create_record_with_updates as a delta (not derived from the struct
+                // above, which store.rs now writes as a relative +1 off the row's own value —
+                // see create_record_with_updates's learning_sessions comment).
+                let just_mastered = amas_result_for_store
+                    .word_mastery
+                    .as_ref()
+                    .is_some_and(|wm| wm.mastery_level == MasteryLevel::Mastered);
 
                 let mut next_session: Option<LearningSession> = None;
                 if let Some(ref sid) = req_for_store.session_id {
@@ -502,6 +509,7 @@ pub(crate) async fn process_single_record(
                         &record_for_store,
                         next_word_state.as_ref(),
                         next_session.as_ref(),
+                        just_mastered,
                     )
                     .map_err(|error| {
                         // W1-1：原子回滚 AMAS 状态 + 清幂等标记（同一 tx）。崩溃要么全回滚（标记

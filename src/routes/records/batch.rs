@@ -181,7 +181,7 @@ pub(crate) async fn process_batch_record(
         state
             .run_store_task("records.batch.persist_replayed", move |store| {
                 store
-                    .create_record_with_updates(&record_for_replay, None, None)
+                    .create_record_with_updates(&record_for_replay, None, None, false)
                     .map_err(|e| AppError::internal(&e.to_string()))
             })
             .await??;
@@ -262,7 +262,7 @@ pub(crate) async fn process_batch_record(
         state
             .run_store_task("records.batch.persist_replayed", move |store| {
                 store
-                    .create_record_with_updates(&record_for_replay, None, None)
+                    .create_record_with_updates(&record_for_replay, None, None, false)
                     .map_err(|e| AppError::internal(&e.to_string()))
             })
             .await??;
@@ -320,6 +320,12 @@ pub(crate) async fn process_batch_record(
                     wls.updated_at = Utc::now();
                     next_word_state = Some(wls);
                 }
+                // Passed to create_record_with_updates as a delta — see single.rs's identical
+                // comment / store.rs's create_record_with_updates learning_sessions comment.
+                let just_mastered = amas_result_for_store
+                    .word_mastery
+                    .as_ref()
+                    .is_some_and(|wm| wm.mastery_level == MasteryLevel::Mastered);
 
                 let mut next_session: Option<LearningSession> = None;
                 if let Some(ref sid) = req_for_store.session_id {
@@ -348,6 +354,7 @@ pub(crate) async fn process_batch_record(
                         &record_for_store,
                         next_word_state.as_ref(),
                         next_session.as_ref(),
+                        just_mastered,
                     )
                     .map_err(|error| {
                         // W1-1：原子回滚 word 级状态（mastery + ELO）+ 清幂等标记（同一 tx）。
