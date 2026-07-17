@@ -65,7 +65,7 @@ pub async fn strict_mode_middleware(
         // x-device-platform=web 作为平台标识豁免 UA 校验；平台头本身仍必须存在（见下 platform_ok）。
         // 注：web 的版本门控由 /api/status.webTargetVersion + X-Upgrade-Hint（软更新）承担，
         // 不依赖此处基于 UA semver 的硬切流（native 仍走 UA）。
-        let is_web = platform == Some("web");
+        let is_web = is_genuine_web(&req);
         if !is_web && ua_parsed.is_none() {
             if let Some(resp) = enforce(&cfg, path, "MISSING_USER_AGENT", "缺少或非法的 User-Agent")
             {
@@ -88,15 +88,12 @@ pub async fn strict_mode_middleware(
     // native 客户端（非 web）若缺失/非法 UA 就无法解析出 semver，会绕过下方 semver 门控直接放行——
     // 等于丢/改 UA 即可逃避切流。故反绕过守卫的条件必须与下方 semver 强制条件(gate.enabled || cfg.enabled)
     // 一致,否则 cfg.enabled=true 而 gate.enabled=false 时,丢 UA 仍可绕过。web 端不走 UA semver 门控，豁免。
-    if (gate.enabled || cfg.enabled) && gate.min_client_version.is_some() && ua_parsed.is_none() {
-        let is_web = req
-            .headers()
-            .get("x-device-platform")
-            .and_then(|v| v.to_str().ok())
-            == Some("web");
-        if !is_web {
-            return client_outdated_response("unknown", gate.min_client_version.as_deref().unwrap_or(""));
-        }
+    if (gate.enabled || cfg.enabled)
+        && gate.min_client_version.is_some()
+        && ua_parsed.is_none()
+        && !is_genuine_web(&req)
+    {
+        return client_outdated_response("unknown", gate.min_client_version.as_deref().unwrap_or(""));
     }
 
     if let (Some((_plat, client_ver)), Some(min_ver)) =
@@ -115,6 +112,36 @@ pub async fn strict_mode_middleware(
     }
 
     next.run(req).await
+}
+
+/// x-device-platform: web 的合法性判定。**不是**加密级证明——`x-device-platform` 本身是
+/// 任意客户端可自由设置的普通 header，单独信它就是本函数要修的原始漏洞（旧/改版 native 客户端
+/// 或裸 curl/脚本发这一个头即可绕过 MISSING_USER_AGENT 契约检查和 CLIENT_OUTDATED 强升切流）。
+///
+/// 过渡加固：额外要求存在 `sec-fetch-mode`——这是 Fetch Metadata Request Headers（W3C，
+/// Chrome/Firefox/Safari/Edge 均已支持多年），浏览器针对每个 fetch/XHR 请求强制自动附带、
+/// JS 代码**无法**覆盖或伪造的 forbidden header，和 User-Agent 同一类保护。真实浏览器发出的
+/// web 端请求必然带它；一个只改了 x-device-platform 头的旧 native 客户端/脚本默认不会带。
+/// 仍不是密码学级证明——蓄意攻击者复制真实浏览器的完整头集合仍可绕过，只是把"改一个头"的门槛
+/// 抬高到"要伪造一整套浏览器专属信号"。命中"声称 web 但缺这个信号"时记一条 warn，供运维观测
+/// 异常模式；中期是否需要给 web 一条更难伪造的版本上报通道（如短时签名 token），留作后续评估。
+fn is_genuine_web(req: &Request<axum::body::Body>) -> bool {
+    let claims_web = req
+        .headers()
+        .get("x-device-platform")
+        .and_then(|v| v.to_str().ok())
+        == Some("web");
+    if !claims_web {
+        return false;
+    }
+    let has_fetch_metadata = req.headers().contains_key("sec-fetch-mode");
+    if !has_fetch_metadata {
+        tracing::warn!(
+            path = req.uri().path(),
+            "strict-mode: x-device-platform=web 但缺 sec-fetch-mode，按非-web 处理（疑似伪造平台头）"
+        );
+    }
+    has_fetch_metadata
 }
 
 /// D4：版本门控命中——始终硬拒绝（发布切流不走 soft-block）。
