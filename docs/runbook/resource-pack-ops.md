@@ -17,7 +17,7 @@
 | 签名私钥 | `data/keys/ed25519_resource_pack.key` | Ed25519 原始私钥，权限 0600，首次启动自动生成 |
 | 签名公钥 | `data/keys/ed25519_resource_pack.pub` | 原始公钥，权限 0644；客户端硬编码值才是验签信任锚 |
 | payload 落盘根 | `static/packs/<pack>/<ver>/payload.json` | 版本号路径，永不变，`immutable` 长缓存 |
-| 安装遥测 | `install_log`（DB） | `installed` / `verify_failed` / `rollback` 三态 |
+| 安装遥测 | `install_log`（DB） | `installed` / `verify_failed` / `rollback` / `download_failed` / `apply_failed` 五态（m070 起） |
 
 > **路径说明**：keys 目录是 DB 文件（`DATABASE_URL`）所在目录下的 `keys/` 子目录。默认 `data/learning.db` → `data/keys/`。
 
@@ -51,11 +51,11 @@
 
 **第 3 步：客户端消费**
 
-在线设备收到 SSE（或冷启动 / 手动 check）→ `GET /api/resource-packs/<packId>/manifest?appVersion=&locale=&channel=` → 下载 `downloadURL` → SHA-256 校验 → Ed25519 验签（硬编码生产公钥）→ `minAppVersion` 门控 → 注册的 consumer 消费 → `POST /api/telemetry/resource-pack-install` 上报 `installed` / `verify_failed` / `rollback`。
+在线设备收到 SSE（或冷启动 / 手动 check）→ `GET /api/resource-packs/<packId>/manifest?appVersion=&locale=&channel=` → 下载 `downloadURL` → SHA-256 校验 → Ed25519 验签（硬编码生产公钥）→ `minAppVersion` 门控 → 注册的 consumer 消费 → `POST /api/telemetry/resource-pack-install` 上报 `installed` / `verify_failed` / `rollback` / `download_failed` / `apply_failed`。
 
 **第 4 步：观察**
 
-卡片底部「近 7 天安装结果」+ 统计弹窗（`GET /api/admin/resource-packs/:pack_id/stats`）看三态计数。`verify_failed` / `rollback` 非零须立即排查（见下方故障部分）。
+卡片底部「近 7 天安装结果」+ 统计弹窗（`GET /api/admin/resource-packs/:pack_id/stats`）看五态计数。除 `installed` 外任一非零须立即排查（见下方故障部分）。
 
 ---
 
@@ -64,7 +64,7 @@
 三通道语义见 [资源包热更 §一](/resource-packs)。灰度顺序固定为**逐级放量**，每级观察安装遥测无异常再进下一级：
 
 1. **`internal`**：仅内部设备。切激活后用内部真机/浏览器跑通**首包冒烟清单**（见下节）。
-2. **`beta`**：早期访问用户。观察 `verify_failed` / `rollback` 维持为 0、`installed` 正常增长，至少覆盖一个客户端冷启动周期。
+2. **`beta`**：早期访问用户。观察 `verify_failed` / `rollback` / `download_failed` / `apply_failed` 维持为 0、`installed` 正常增长，至少覆盖一个客户端冷启动周期。
 3. **`stable`**：生产全量。客户端冷启动默认拉 `stable`。
 
 要点：
@@ -84,7 +84,7 @@
 - [ ] **下载**：真机/浏览器实际拉到 payload，HTTP 200，字节数等于 `sizeBytes`。
 - [ ] **验签通过**：客户端 Ed25519 验签成功（确认客户端硬编码公钥与本环境签名密钥匹配——本地开发后端签的包验签会失败，见下文）。
 - [ ] **消费渲染**：注册的 consumer 实际渲染出内容（content-slots 看到运营位 / app-config flag 生效），不是「下载验签成功但不应用」。
-- [ ] **遥测回写**：admin 统计弹窗出现 `installed`，且无 `verify_failed`。
+- [ ] **遥测回写**：admin 统计弹窗出现 `installed`，且无 `verify_failed` / `download_failed` / `apply_failed`。
 - [ ] **minAppVersion 门控**（若设了）：用低于门槛的 App 版本请求 manifest 应被拒（`app_version_too_low`）。
 
 全部通过后再逐级 `beta` → `stable` 放量。
