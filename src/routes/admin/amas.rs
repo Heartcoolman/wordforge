@@ -8,7 +8,7 @@ use axum::Router;
 use crate::extractors::JsonBody;
 use serde::Deserialize;
 
-use crate::amas::types::RawEvent;
+use crate::amas::types::{Explanation, ProcessResult, RawEvent, Reward, RewardComponents};
 use crate::auth::{AdminAuthUser, AuthUser};
 use crate::response::{ok, AppError};
 use crate::state::AppState;
@@ -320,6 +320,10 @@ async fn disable_canary(
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct ProcessEventRequest {
+    /// 幂等键（W1-1 同款 client_record_id 机制，此处按事件命名）。客户端每个校准事件生成一次、
+    /// 重试沿用同一个值；缺省时（旧客户端）退回非幂等路径，行为不变。见 process_one_event。
+    #[serde(default)]
+    client_event_id: Option<String>,
     word_id: String,
     is_correct: bool,
     #[serde(alias = "response_time")]
@@ -361,15 +365,81 @@ impl From<ProcessEventRequest> for RawEvent {
     }
 }
 
+/// 单事件处理，含幂等键分支。有 `client_event_id` 时：先 `is_event_processed` 预检短路，
+/// 未命中则走 `process_event_idempotent`（同 tx 原子写标记，与并发同键请求互斥）；命中
+/// （无论是预检命中还是 idempotent 调用内部输给了并发请求）一律回退"重放态"响应——不重复
+/// 累加 mastery/EVM/IGE/SWD/trust，仅取当前状态回填 state/strategy，explanation/reward
+/// 置空（该次调用没有产生新的处理结果，与 /records 对重复记录返回 `amas_result: None`
+/// 是同一个语义，这里因响应形状是裸 ProcessResult、不便整体设为 Option，改用显式占位值）。
+/// 无 `client_event_id`（旧客户端）：保留原有非幂等路径，行为不变。
+async fn process_one_event(
+    state: &AppState,
+    user_id: &str,
+    client_event_id: Option<&str>,
+    session_id_for_replay: Option<String>,
+    raw_event: RawEvent,
+) -> Result<ProcessResult, AppError> {
+    let Some(key) = client_event_id else {
+        return state.amas().process_event(user_id, raw_event, None).await;
+    };
+    let already = state
+        .run_store_task("amas.process_event.precheck", {
+            let user_id = user_id.to_string();
+            let key = key.to_string();
+            move |store| store.is_event_processed(&user_id, &key)
+        })
+        .await??;
+    if !already {
+        if let Some((result, _)) = state
+            .amas()
+            .process_event_idempotent(user_id, raw_event, key, None)
+            .await?
+        {
+            return Ok(result);
+        }
+        // else: process_event_idempotent 自己也判定为重复（TOCTOU 窗口内被并发请求抢先），
+        // 落到下面同一条重放态回退。
+    }
+    let user_state = state.amas().get_user_state_async(user_id).await?;
+    let strategy = state.amas().compute_strategy_from_state(&user_state);
+    Ok(ProcessResult {
+        session_id: session_id_for_replay.unwrap_or_default(),
+        strategy,
+        explanation: Explanation {
+            primary_reason: "duplicate_event".to_string(),
+            factors: Vec::new(),
+        },
+        state: user_state,
+        word_mastery: None,
+        reward: Reward {
+            value: 0.0,
+            components: RewardComponents {
+                accuracy_reward: 0.0,
+                speed_reward: 0.0,
+                fatigue_penalty: 0.0,
+                frustration_penalty: 0.0,
+                expected_forget_cost: 0.0,
+            },
+        },
+        cold_start_phase: None,
+    })
+}
+
 async fn process_event(
     auth: AuthUser,
     State(state): State<AppState>,
     JsonBody(req): JsonBody<ProcessEventRequest>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let result = state
-        .amas()
-        .process_event(&auth.user_id, req.into(), None)
-        .await?;
+    let client_event_id = req.client_event_id.clone();
+    let session_id = req.session_id.clone();
+    let result = process_one_event(
+        &state,
+        &auth.user_id,
+        client_event_id.as_deref(),
+        session_id,
+        req.into(),
+    )
+    .await?;
     Ok(ok(result))
 }
 
@@ -395,10 +465,16 @@ async fn batch_process(
     }
     let mut outputs = Vec::new();
     for event in req.events {
-        let result = state
-            .amas()
-            .process_event(&auth.user_id, event.into(), None)
-            .await?;
+        let client_event_id = event.client_event_id.clone();
+        let session_id = event.session_id.clone();
+        let result = process_one_event(
+            &state,
+            &auth.user_id,
+            client_event_id.as_deref(),
+            session_id,
+            event.into(),
+        )
+        .await?;
         outputs.push(result);
     }
     Ok(ok(
