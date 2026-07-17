@@ -887,9 +887,16 @@ async fn create_backup(
 
     let name = format!("backup-manual-{}.db", ts_now());
     let target = bdir.join(&name);
+    // VACUUM INTO 在 DB 达到现实体量（数百 MB+ 学习记录/遥测）时是秒级操作，此前直接同步跑在
+    // 处理该请求的 Tokio worker 线程上，占满整根线程整个备份期间，拖慢同线程上排队的其它请求/
+    // SSE 心跳跳动，可能把受影响连接推过 <=10s 心跳约束。照抄 workers/db_backup.rs 已验证过的
+    // spawn_blocking 模式（经 run_store_task 封装），挪去阻塞线程池。
+    let target_for_backup = target.clone();
     state
-        .store()
-        .backup_to(&target)
+        .run_store_task("admin.updates.backup_manual", move |store| {
+            store.backup_to(&target_for_backup)
+        })
+        .await?
         .map_err(|e| AppError::internal(&e.to_string()))?;
 
     prune_backups(&bdir);
@@ -967,18 +974,29 @@ async fn restore_backup(
     let _maint = MaintenanceGuard { state: &state };
 
     let pre_name = format!("backup-pre-restore-{}.db", ts_now());
-    let outcome: Result<(), AppError> = (|| {
+    // 同 create_backup：backup_to（安全兜底备份）+ restore_from（SQLite backup API 整库替换）
+    // 都是可能秒级以上的 DB 级操作，此前同步跑在处理该请求的 Tokio worker 线程上。改为
+    // run_store_task/spawn_blocking，两步仍按原顺序 await（保持"先备份兜底、成功才真正
+    // 覆盖"的语义不变），只是各自不再霸占调度线程。
+    let pre_target = bdir.join(&pre_name);
+    let outcome: Result<(), AppError> = async {
         std::fs::create_dir_all(&bdir).map_err(|e| AppError::internal(&e.to_string()))?;
         state
-            .store()
-            .backup_to(&bdir.join(&pre_name))
+            .run_store_task("admin.updates.backup_pre_restore", move |store| {
+                store.backup_to(&pre_target)
+            })
+            .await?
             .map_err(|e| AppError::internal(&e.to_string()))?;
+        let restore_path = path.clone();
         state
-            .store()
-            .restore_from(&path)
+            .run_store_task("admin.updates.restore", move |store| {
+                store.restore_from(&restore_path)
+            })
+            .await?
             .map_err(|e| AppError::internal(&e.to_string()))?;
         Ok(())
-    })();
+    }
+    .await;
 
     // 破坏性操作：成功/失败都留审计，记录兜底点与失败原因。
     let (audit_outcome, reason) = match &outcome {
