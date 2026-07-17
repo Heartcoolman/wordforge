@@ -257,6 +257,12 @@ export interface SseCallbacks {
   /** 后端 `probe_confirm`：D 类受控写二次确认通过，客户端用同一 ctx 快照重跑 */
   onProbeConfirm?: (payload: { requestId: string; confirmToken: string }) => void;
   onDataCorrupted?: () => void;
+  /** 后端 `incident`：滚动 5 分钟内 5xx 错误率超阈值（同窗口 5 分钟内 dedup） */
+  onIncident?: (payload: { errorRate: number; windowSecs: number }) => void;
+  /** 后端 `worker_missed`：worker 连续 3 个调度周期未上报，调度器健康告警 */
+  onWorkerMissed?: (payload: { workerName: string; missCount: number }) => void;
+  /** 后端 `llm_budget_exceeded`：LLM advisor 月度人民币成本超上限，当月 worker 已自动停跑 */
+  onLlmBudgetExceeded?: (payload: { spentYuan: number; capYuan: number; resumeMonth: string }) => void;
 }
 
 export function connectSseStream(callbacks: SseCallbacks): () => void {
@@ -376,6 +382,29 @@ export function connectSseStream(callbacks: SseCallbacks): () => void {
                   });
                 } else if (eventType === 'data_corrupted') {
                   callbacks.onDataCorrupted?.();
+                } else if (
+                  eventType === 'incident'
+                  && typeof data.errorRate === 'number'
+                  && typeof data.windowSecs === 'number'
+                ) {
+                  callbacks.onIncident?.({ errorRate: data.errorRate, windowSecs: data.windowSecs });
+                } else if (
+                  eventType === 'worker_missed'
+                  && typeof data.workerName === 'string'
+                  && typeof data.missCount === 'number'
+                ) {
+                  callbacks.onWorkerMissed?.({ workerName: data.workerName, missCount: data.missCount });
+                } else if (
+                  eventType === 'llm_budget_exceeded'
+                  && typeof data.spentYuan === 'number'
+                  && typeof data.capYuan === 'number'
+                  && typeof data.resumeMonth === 'string'
+                ) {
+                  callbacks.onLlmBudgetExceeded?.({
+                    spentYuan: data.spentYuan,
+                    capYuan: data.capYuan,
+                    resumeMonth: data.resumeMonth,
+                  });
                 }
               } catch {
                 // 忽略格式错误的事件数据
