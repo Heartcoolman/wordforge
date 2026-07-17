@@ -35,7 +35,7 @@ type MigrationFn = fn(&Store) -> Result<(), StoreError>;
 /// 完全迁移后 `schema_version` 应到达的版本号（= [`migrations`] 条目数）。
 /// 编译期常量，供 `--print-schema-version`（任意版本回滚的"目标二进制自声明 schema 版本"）使用；
 /// [`schema_version_const_matches_registry`] 测试守卫它与运行期 `migrations().len()` 不漂移。
-pub const SCHEMA_VERSION: u32 = 70;
+pub const SCHEMA_VERSION: u32 = 71;
 
 /// 已加固到"生产可用"的 down 迁移覆盖下界：回滚目标的 schema 版本必须 `>=` 此值。
 /// 真·任意版本回滚把 down 链当作"把当前库副本降级到目标版本"的降级引擎；低于此下界的
@@ -166,6 +166,10 @@ fn migrations() -> Vec<(&'static str, MigrationFn)> {
         (
             "070_install_outcome_local_failures",
             m070_install_outcome_local_failures,
+        ),
+        (
+            "071_whitelist_add_coldstart_d_weights",
+            m071_whitelist_add_coldstart_d_weights,
         ),
     ]
 }
@@ -315,6 +319,10 @@ fn migrations_down() -> Vec<(&'static str, MigrationFn)> {
         (
             "070_install_outcome_local_failures",
             m070_install_outcome_local_failures_down,
+        ),
+        (
+            "071_whitelist_add_coldstart_d_weights",
+            m071_whitelist_add_coldstart_d_weights_down,
         ),
     ]
 }
@@ -3954,6 +3962,42 @@ fn m070_install_outcome_local_failures_down(store: &Store) -> Result<(), StoreEr
             ON resource_pack_install_log(pack_id, version, installed_at DESC);",
     )?;
     tx.commit()?;
+    Ok(())
+}
+
+/// m071：LLM 调参白名单补 3 个冷启动难度先验·D 偏移权重
+/// （`memoryModel.coldStartDLenWeight` / `coldStartDMorphWeight` / `coldStartDExtdWeight`，
+/// TIER_A_WHITELIST 12→15 维，见 tuning_whitelist.rs）。同 m052 的幂等补行模式：表非空时
+/// 才补（表空留给启动 seed 全量插入 15 条），已存在的 path 不重复插入。范围值与
+/// TIER_A_WHITELIST 里的 min_safe/max_safe 保持一致。此前无迁移回填这 3 项，任何在
+/// TIER_A_WHITELIST 从 12 维长到 15 维之前就已 seed 过白名单表的存量库，LLM 建议/canary
+/// 渠道会一直拒绝这 3 个实际已生效参数的 patch（PUT /api/admin/amas/config 手动渠道不受影响）。
+fn m071_whitelist_add_coldstart_d_weights(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    let now = chrono::Utc::now().to_rfc3339();
+    for (path, min_safe, max_safe) in [
+        ("memoryModel.coldStartDLenWeight", 0.0, 3.0),
+        ("memoryModel.coldStartDMorphWeight", 0.0, 3.0),
+        ("memoryModel.coldStartDExtdWeight", 0.0, 5.0),
+    ] {
+        conn.execute(
+            "INSERT INTO amas_tuning_whitelist (path, min_safe, max_safe, created_at, created_by)
+             SELECT ?1, ?2, ?3, ?4, 'migration:m071'
+             WHERE EXISTS (SELECT 1 FROM amas_tuning_whitelist)
+               AND NOT EXISTS (SELECT 1 FROM amas_tuning_whitelist WHERE path = ?1);",
+            rusqlite::params![path, min_safe, max_safe, now],
+        )?;
+    }
+    Ok(())
+}
+
+/// m071 down：仅移除本迁移补的 3 行。仅 dev/test。
+fn m071_whitelist_add_coldstart_d_weights_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute(
+        "DELETE FROM amas_tuning_whitelist WHERE created_by = 'migration:m071';",
+        [],
+    )?;
     Ok(())
 }
 
