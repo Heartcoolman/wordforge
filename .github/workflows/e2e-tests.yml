@@ -13,12 +13,38 @@ jobs:
   e2e-tests:
     name: E2E Tests (Playwright)
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: ./admin-ui
     steps:
       - uses: actions/checkout@v4
-      
+
+      # e2e 是 admin-real-flows 真实流程（真登录/真 API），vite 代理指向
+      # localhost:3000 —— 必须先把 Rust 后端跑起来，否则全程 ECONNREFUSED。
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build backend
+        run: cargo build --bin learning-backend
+
+      - name: Start backend and wait for health
+        env:
+          JWT_SECRET: test_secret_key_for_jwt_signing_minimum_64_characters_long_abcd
+          ADMIN_JWT_SECRET: test_admin_secret_key_for_jwt_signing_minimum_64_chars_long
+          DATABASE_URL: /tmp/e2e-backend.db
+          PORT: 3000
+        run: |
+          nohup ./target/debug/learning-backend > /tmp/backend.log 2>&1 &
+          for i in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:3000/health -H 'Accept: application/json' > /dev/null; then
+              echo "backend healthy after ${i} tries"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo '::error::backend failed to become healthy within 120s'
+          tail -50 /tmp/backend.log
+          exit 1
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -27,13 +53,20 @@ jobs:
           cache-dependency-path: admin-ui/package-lock.json
 
       - name: Install dependencies
+        working-directory: admin-ui
         run: npm ci
 
       - name: Install Playwright browsers
+        working-directory: admin-ui
         run: npx playwright install --with-deps chromium
 
       - name: Run E2E tests
+        working-directory: admin-ui
         run: npm run test:e2e
+
+      - name: Backend log on failure
+        if: failure()
+        run: tail -100 /tmp/backend.log
 
       - name: Upload test results
         if: always()

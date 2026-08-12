@@ -123,7 +123,9 @@ async function mockAdminApi(page: Page, overrides: { wordbookUrl?: string } = {}
       route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(data) });
 
     if (path === '/api/status') {
-      return json(ok({ maintenanceMode: false, version: '0.4.3' }));
+      // version 必须落在当前导览波次（useOnboarding.waveOf）内，否则 waveOf 算出的波次
+      // 与 loginAsAdmin 预置的 wf_admin_onboarding_wave 不符 → 导览遮罩弹出拦截一切交互。
+      return json(ok({ maintenanceMode: false, version: '1.3.0-beta.1' }));
     }
     if (path === '/health') {
       return json({
@@ -139,6 +141,27 @@ async function mockAdminApi(page: Page, overrides: { wordbookUrl?: string } = {}
     }
     if (path === '/api/admin/auth/status') {
       return json(ok({ initialized: true }));
+    }
+    // v1.2 改版后 admin 侧 SSE 走 /api/admin/realtime/events。须在 catch-all 内处理：
+    // Playwright 路由按注册逆序匹配，独立 page.route 会被本 catch-all 影蔽。
+    if (path === '/api/admin/realtime/events') {
+      return route.fulfill({ status: 200, contentType: 'text/event-stream', body: '' });
+    }
+    // v1.2 改版新增的常驻轮询/页面数据源（空态即可，页面结构断言不依赖内容）
+    if (path === '/api/admin/notifications') {
+      return json(ok({ items: [], unreadCount: 0, limit: 20, offset: 0 }));
+    }
+    if (path === '/api/admin/clients/flagged') {
+      return json(ok({ flagged: [] }));
+    }
+    if (path === '/api/admin/analytics/wordbook-rank') {
+      return json(ok({ generatedAt: new Date().toISOString(), days: 7, limit: 10, rows: [] }));
+    }
+    if (path === '/api/admin/amas/config/canary' && method === 'GET') {
+      return json(ok({ canary: null }));
+    }
+    if (path === '/api/admin/feedback') {
+      return json(ok({ data: [], total: 0, page: 1, perPage: 20, totalPages: 0 }));
     }
     if (path === '/api/admin/auth/verify') {
       return json(ok({ id: 'admin-1', email: 'admin@example.com' }));
@@ -743,6 +766,8 @@ async function mockAdminApi(page: Page, overrides: { wordbookUrl?: string } = {}
       return json(ok([]));
     }
 
+    // 未命中即打日志再回 500：新页面调新接口而 mock 表没跟上时，能从测试输出直接看到缺哪条。
+    console.error(`[e2e NOT_MOCKED] ${method} ${path}`);
     return json({ success: false, code: 'NOT_MOCKED', message: `No mock for ${method} ${path}` }, 500);
   });
 
