@@ -4,6 +4,7 @@ const STORAGE_KEY = 'wf_admin_onboarding_wave';
 
 /**
  * 把 app 版本号映射为「新功能导览波次」标识。
+ * - 1.3.x 为独立波次 'v1.3-app-events'（端侧埋点数据链路上线 + 学习记录上报默认异步化）。
  * - 1.2.x 为独立波次 'v1.2-redesign'（管理后台蓝玻璃整体重设计；强制看过旧导览的人再弹一次）。
  * - v1.1.4 起为独立波次 'v1.1.4r2'（运营闭环收口 + 设备遥测操作概览）。
  * - v1.1.3 为独立波次 'v1.1.3'（告警收件箱 / 设备推送调度 / 版本门控 / 事件 outbox）。
@@ -16,6 +17,7 @@ export function waveOf(version: string | null | undefined): string | null {
   const m = /^(\d+)\.(\d+)\.(\d+)/.exec(version);
   if (!m) return null;
   const major = +m[1], minor = +m[2], patch = +m[3];
+  if (major === 1 && minor === 3) return 'v1.3-app-events';
   if (major === 1 && minor === 2) return 'v1.2-redesign';
   if (major === 1 && minor === 1 && patch >= 4) return 'v1.1.4r2';
   if (major === 1 && minor === 1 && patch === 3) return 'v1.1.3';
