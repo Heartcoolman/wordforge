@@ -53,6 +53,11 @@ pub async fn strict_mode_middleware(
 
     let ua_parsed = user_agent.and_then(parse_wordforge_ua);
 
+    // web 声明判定 + Fetch Metadata 观测：入口算一次、本请求内复用（此前 is_genuine_web 在
+    // UA 契约与 D4 守卫各调一次，「疑似伪造」warn 每请求翻倍）。豁免以「声明 web」为准；
+    // sec-fetch-mode 检测降级为纯观测（限频 warn + metrics 计数），见 observe_web_claim 注释。
+    let claims_web = observe_web_claim(&req);
+
     // 1)+2) 全量契约校验（User-Agent / 平台）仅在 strict-mode 启用时执行。
     if cfg.enabled {
         let platform = req
@@ -65,8 +70,7 @@ pub async fn strict_mode_middleware(
         // x-device-platform=web 作为平台标识豁免 UA 校验；平台头本身仍必须存在（见下 platform_ok）。
         // 注：web 的版本门控由 /api/status.webTargetVersion + X-Upgrade-Hint（软更新）承担，
         // 不依赖此处基于 UA semver 的硬切流（native 仍走 UA）。
-        let is_web = is_genuine_web(&req);
-        if !is_web && ua_parsed.is_none() {
+        if !claims_web && ua_parsed.is_none() {
             if let Some(resp) = enforce(&cfg, path, "MISSING_USER_AGENT", "缺少或非法的 User-Agent")
             {
                 return resp;
@@ -88,10 +92,14 @@ pub async fn strict_mode_middleware(
     // native 客户端（非 web）若缺失/非法 UA 就无法解析出 semver，会绕过下方 semver 门控直接放行——
     // 等于丢/改 UA 即可逃避切流。故反绕过守卫的条件必须与下方 semver 强制条件(gate.enabled || cfg.enabled)
     // 一致,否则 cfg.enabled=true 而 gate.enabled=false 时,丢 UA 仍可绕过。web 端不走 UA semver 门控，豁免。
+    // 豁免判据是「声明 web」（claims_web）而非「声明 web 且带 sec-fetch-mode」：后者曾把不发送
+    // Sec-Fetch-* 的老浏览器硬拒成 CLIENT_OUTDATED——版本门控本意拦旧 native 客户端，却把合法
+    // web 用户锁在门外且无升级出路（web 无 UA semver 可升）。伪造平台头绕过门控的风险改由
+    // observe_web_claim 的观测口径（warn + 计数）跟踪，评估后再决定是否需要更强的 web 证明通道。
     if (gate.enabled || cfg.enabled)
         && gate.min_client_version.is_some()
         && ua_parsed.is_none()
-        && !is_genuine_web(&req)
+        && !claims_web
     {
         return client_outdated_response("unknown", gate.min_client_version.as_deref().unwrap_or(""));
     }
@@ -114,18 +122,22 @@ pub async fn strict_mode_middleware(
     next.run(req).await
 }
 
-/// x-device-platform: web 的合法性判定。**不是**加密级证明——`x-device-platform` 本身是
-/// 任意客户端可自由设置的普通 header，单独信它就是本函数要修的原始漏洞（旧/改版 native 客户端
-/// 或裸 curl/脚本发这一个头即可绕过 MISSING_USER_AGENT 契约检查和 CLIENT_OUTDATED 强升切流）。
+/// Fetch Metadata Request Headers（W3C）定义的 `sec-fetch-mode` 合法取值全集。
+/// 存在该头但值不在此列 = 非浏览器伪造（浏览器不会发出集合外的值），观测口径按"缺失"计。
+const VALID_SEC_FETCH_MODES: [&str; 5] = ["cors", "no-cors", "same-origin", "navigate", "websocket"];
+
+/// 判定请求是否声明 `x-device-platform: web`，并做 Fetch Metadata **观测**（不影响判定结果）。
 ///
-/// 过渡加固：额外要求存在 `sec-fetch-mode`——这是 Fetch Metadata Request Headers（W3C，
-/// Chrome/Firefox/Safari/Edge 均已支持多年），浏览器针对每个 fetch/XHR 请求强制自动附带、
-/// JS 代码**无法**覆盖或伪造的 forbidden header，和 User-Agent 同一类保护。真实浏览器发出的
-/// web 端请求必然带它；一个只改了 x-device-platform 头的旧 native 客户端/脚本默认不会带。
-/// 仍不是密码学级证明——蓄意攻击者复制真实浏览器的完整头集合仍可绕过，只是把"改一个头"的门槛
-/// 抬高到"要伪造一整套浏览器专属信号"。命中"声称 web 但缺这个信号"时记一条 warn，供运维观测
-/// 异常模式；中期是否需要给 web 一条更难伪造的版本上报通道（如短时签名 token），留作后续评估。
-fn is_genuine_web(req: &Request<axum::body::Body>) -> bool {
+/// `x-device-platform` 是任意客户端可自由设置的普通 header，声明 web 即可豁免 UA 契约与
+/// UA semver 版本门控——这**不是**加密级证明。曾以「必须同时带 sec-fetch-mode」作硬前置
+/// （缺失按非-web 处理、可被 D4 守卫硬拒 CLIENT_OUTDATED），但该头是较新的浏览器特性，
+/// 不发送 Sec-Fetch-* 的老浏览器会被误伤且无升级出路，故降级为纯观测：
+/// - `sec-fetch-mode` 缺失或值非法（校验值 ∈ VALID_SEC_FETCH_MODES，浏览器强制自动附带、
+///   JS 无法覆盖的 forbidden header）→ 限频 warn + metrics 计数，供评估误伤率/伪造率。
+/// - 注意该信号即便作硬前置也只是「多伪造一个 header」的门槛（curl -H 'sec-fetch-mode: cors'
+///   即可通过），并非"一整套浏览器专属信号"；中期若需给 web 更难伪造的版本上报通道
+///   （如短时签名 token），依据本观测数据评估。
+fn observe_web_claim(req: &Request<axum::body::Body>) -> bool {
     let claims_web = req
         .headers()
         .get("x-device-platform")
@@ -134,14 +146,43 @@ fn is_genuine_web(req: &Request<axum::body::Body>) -> bool {
     if !claims_web {
         return false;
     }
-    let has_fetch_metadata = req.headers().contains_key("sec-fetch-mode");
-    if !has_fetch_metadata {
+    let has_valid_fetch_metadata = req
+        .headers()
+        .get("sec-fetch-mode")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| {
+            VALID_SEC_FETCH_MODES
+                .iter()
+                .any(|m| v.trim().eq_ignore_ascii_case(m))
+        });
+    if !has_valid_fetch_metadata {
+        crate::metrics_counters::incr_strict_web_claim_without_fetch_metadata();
+        warn_web_claim_without_fetch_metadata(req.uri().path());
+    }
+    claims_web
+}
+
+/// 「声明 web 但缺/非法 sec-fetch-mode」观测 warn，60s 限频（计数不受限频影响）：
+/// 该情形在老浏览器流量下可能高频出现，逐请求 warn 会刷爆日志。
+fn warn_web_claim_without_fetch_metadata(path: &str) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static LAST_WARN_SECS: AtomicU64 = AtomicU64::new(0);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let last = LAST_WARN_SECS.load(Ordering::Relaxed);
+    if now.saturating_sub(last) >= 60
+        && LAST_WARN_SECS
+            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+    {
         tracing::warn!(
-            path = req.uri().path(),
-            "strict-mode: x-device-platform=web 但缺 sec-fetch-mode，按非-web 处理（疑似伪造平台头）"
+            path,
+            total = crate::metrics_counters::strict_web_claim_without_fetch_metadata(),
+            "strict-mode: x-device-platform=web 但缺失/非法 sec-fetch-mode（仅观测不拒绝；可能是老浏览器或伪造平台头，60s 限频）"
         );
     }
-    has_fetch_metadata
 }
 
 /// D4：版本门控命中——始终硬拒绝（发布切流不走 soft-block）。

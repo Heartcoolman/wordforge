@@ -1,5 +1,6 @@
 pub mod admin;
 pub mod analytics;
+pub mod app_events;
 pub mod auth;
 pub mod content;
 pub mod feedback;
@@ -82,6 +83,9 @@ pub fn build_router(state: AppState) -> Router {
             admin_auth_routes.merge(admin_auth_public_routes),
         )
         .nest("/admin", admin::router())
+        // 契约 B：admin 专用 SSE（AdminAuthUser 鉴权），与其余 admin 路由同组豁免
+        // strict-mode / maintenance，共享 /api 层的全局限流与 device 中间件。
+        .nest("/admin/realtime", realtime::admin_router())
         .nest("/realtime", realtime::router())
         .nest("/v1", v1::router())
         .nest("/status", status::router())

@@ -81,6 +81,45 @@ async fn sweep_once(state: &AppState) -> Result<(), String> {
         );
     }
 
+    // m073：app_events 埋点 raw 表同 retention 清理。server_ts 为 datetime('now') 空格格式，
+    // 复用上方空格格式 cutoff（绝不可用 RFC3339，理由见 retention_cutoff_str）。
+    let store_ae = state.store().clone();
+    let cutoff_ae = cutoff_str.clone();
+    let deleted_ae =
+        tokio::task::spawn_blocking(move || store_ae.delete_app_events_older_than(&cutoff_ae))
+            .await
+            .map_err(|e| format!("spawn_blocking(app_events): {e}"))?
+            .map_err(|e| format!("delete_app_events_older_than: {e}"))?;
+    if deleted_ae > 0 {
+        tracing::info!(
+            deleted = deleted_ae,
+            cutoff = %cutoff_str,
+            retention_days,
+            "telemetry_cleanup swept old app_events rows"
+        );
+    }
+
+    // m073：app_user_daily 活跃表长保留 400d（留存矩阵最长回看窗）；day 为 'YYYY-MM-DD'。
+    // app_event_daily / app_user_first_seen 体积极小，永久保留。
+    let cutoff_day = (chrono::Utc::now() - chrono::Duration::days(400))
+        .format("%Y-%m-%d")
+        .to_string();
+    let store_aud = state.store().clone();
+    let cutoff_aud = cutoff_day.clone();
+    let deleted_aud = tokio::task::spawn_blocking(move || {
+        store_aud.delete_app_user_daily_older_than(&cutoff_aud)
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking(app_user_daily): {e}"))?
+    .map_err(|e| format!("delete_app_user_daily_older_than: {e}"))?;
+    if deleted_aud > 0 {
+        tracing::info!(
+            deleted = deleted_aud,
+            cutoff = %cutoff_day,
+            "telemetry_cleanup swept old app_user_daily rows"
+        );
+    }
+
     // 资源包安装留痕表同 retention 清理。installed_at 为 RFC3339（见 record_pack_install），
     // 复用上方 RFC3339 cutoff。此前该表无任何 retention，只增不删（单调膨胀）。
     let store_pack = state.store().clone();

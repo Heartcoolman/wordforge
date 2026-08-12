@@ -65,7 +65,8 @@ async fn public_key(State(state): State<AppState>) -> Result<impl IntoResponse, 
 }
 
 /// `GET /api/resource-packs/:pack_id/manifest` — 返回当前 channel 激活版本元数据。
-/// 字段名严格对齐 docs/backend-handoff-resource-pack-v1.1.md §2.1。
+/// 字段名以 ResourcePackManifest 的 serde 序列化输出为准（downloadURL 三字母全大写），
+/// 契约见 docs/api-endpoints.md §资源包热更。
 async fn fetch_manifest(
     Path(pack_id): Path<String>,
     Query(q): Query<ManifestQuery>,
@@ -179,32 +180,32 @@ fn resolve_public_base_url(headers: &HeaderMap, trust_proxy: bool, trusted_hosts
         .and_then(|v| v.to_str().ok())
         .unwrap_or("localhost");
 
-    let forwarded_host_trusted = trust_proxy
-        && headers
+    // 白名单命中后回填的是归一化的 hostname_only，而非原始头值：白名单只校验 `:` 前的
+    // hostname，若回填原始值，`cdn.example.com:8080@evil` / 带逗号的多值头等能通过校验
+    // 却把端口/userinfo/逗号残余注入 downloadURL（该响应带公共缓存，污染面放大）。
+    let forwarded_hostname: Option<String> = if trust_proxy {
+        headers
             .get("x-forwarded-host")
             .and_then(|v| v.to_str().ok())
-            .is_some_and(|h| {
-                let hostname_only = h.split(':').next().unwrap_or(h).to_ascii_lowercase();
-                trusted_hosts.contains(&hostname_only)
-            });
+            .map(|h| h.split(':').next().unwrap_or(h).trim().to_ascii_lowercase())
+            .filter(|hostname| trusted_hosts.contains(hostname))
+    } else {
+        None
+    };
 
-    let host = if forwarded_host_trusted {
-        headers
-            .get("x-forwarded-host")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or(real_host)
-    } else {
-        real_host
-    };
-    let scheme = if forwarded_host_trusted {
-        headers
-            .get("x-forwarded-proto")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("http")
-    } else {
-        "http"
-    };
-    format!("{scheme}://{host}")
+    match forwarded_hostname {
+        Some(hostname) => {
+            // scheme 只认 https（其余含伪造任意串一律回落 http）：X-Forwarded-Proto 合法
+            // 取值就 http/https 两个，原样拼接会把非法串带进公共缓存的 URL。
+            let https = headers
+                .get("x-forwarded-proto")
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|p| p.trim().eq_ignore_ascii_case("https"));
+            let scheme = if https { "https" } else { "http" };
+            format!("{scheme}://{hostname}")
+        }
+        None => format!("http://{real_host}"),
+    }
 }
 
 /// 按字符串 numeric 比较 semver（与 iOS `compare(options:.numeric)` 等价）。
@@ -272,12 +273,28 @@ mod tests {
             "http://api.example.com"
         );
 
-        // trust_proxy=true 且转发 host 命中白名单（大小写不敏感）：采信 forwarded host/proto。
+        // trust_proxy=true 且转发 host 命中白名单（大小写不敏感）：采信 forwarded host/proto，
+        // 且回填的是归一化 hostname（小写、无端口），不是原始头值。
         headers.insert("x-forwarded-host", "CDN.Example.com".parse().unwrap());
         assert_eq!(
             resolve_public_base_url(&headers, true, &trusted),
-            "https://CDN.Example.com"
+            "https://cdn.example.com"
         );
+
+        // 带端口的转发 host：白名单按 hostname 命中，但 URL 里不得回填端口/原始残余。
+        headers.insert("x-forwarded-host", "cdn.example.com:8080".parse().unwrap());
+        assert_eq!(
+            resolve_public_base_url(&headers, true, &trusted),
+            "https://cdn.example.com"
+        );
+
+        // 伪造的非法 x-forwarded-proto 不得原样拼进 URL：非 https 一律回落 http。
+        headers.insert("x-forwarded-proto", "gopher".parse().unwrap());
+        assert_eq!(
+            resolve_public_base_url(&headers, true, &trusted),
+            "http://cdn.example.com"
+        );
+        headers.insert("x-forwarded-proto", "https".parse().unwrap());
 
         // env 优先级高于一切（无论 trust_proxy/白名单），且会 strip 末尾 /
         std::env::set_var("RESOURCE_PACK_BASE_URL", "https://override.example.com/");

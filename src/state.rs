@@ -137,8 +137,20 @@ pub enum SseEvent {
     },
     /// 强制升级解除：admin 撤销某平台的强升广播后定向下发,客户端收到即清除强升锁,
     /// 恢复正常会话(与 banned/unbanned 的可逆语义对齐)。未被强升的客户端静默忽略。
+    /// 跨端契约:`origin` 标注清锁来源——"gate"=全局版本门放宽,"targeted"=admin 定向撤销。
+    /// 旧客户端忽略未知字段,向后兼容。
     #[serde(rename = "upgrade_cleared")]
-    UpgradeCleared,
+    UpgradeCleared { origin: UpgradeClearedOrigin },
+}
+
+/// `upgrade_cleared` 事件的来源标注（跨端契约 A）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UpgradeClearedOrigin {
+    /// 全局版本门放宽（settings 门控关闭 / 阈值下降或清空）。
+    Gate,
+    /// admin 对某平台的强升广播定向撤销。
+    Targeted,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -195,6 +207,12 @@ pub struct AppState {
     maintenance_tx: broadcast::Sender<bool>,
     update_tx: broadcast::Sender<UpdatePayload>,
     active_sse: Arc<DashMap<String, Vec<SseClientInfo>>>,
+    /// admin 专用 SSE 连接注册表（`GET /api/admin/realtime/events`）。键 = 连接声明的
+    /// x-device-id（合法时），否则回退 conn_id。与 `active_sse` 物理隔离：
+    /// 1. 内部运维事件（worker_missed 等）只投这里，绝不进用户通道；
+    /// 2. 不登记 last_heartbeat，heartbeat watchdog 对 admin 连接零感知（不误报）。
+    /// `SseClientInfo.user_id` 槽位存 admin_id。
+    admin_sse: Arc<DashMap<String, Vec<SseClientInfo>>>,
     last_heartbeat: Arc<DashMap<String, Instant>>,
     heartbeat_miss_count: Arc<DashMap<String, u8>>,
     /// P1：单用户并发 SSE 连接计数，防单账号占满全局连接池。键 = user_id（与
@@ -310,6 +328,7 @@ impl AppState {
             maintenance_tx,
             update_tx,
             active_sse: Arc::new(DashMap::new()),
+            admin_sse: Arc::new(DashMap::new()),
             last_heartbeat: Arc::new(DashMap::new()),
             heartbeat_miss_count: Arc::new(DashMap::new()),
             sse_per_user: Arc::new(DashMap::new()),
@@ -653,15 +672,52 @@ impl AppState {
         &self.active_sse
     }
 
-    /// 把同一个 SseEvent 广播给当前所有 SSE 连接。
-    /// 用于 admin 级别的全局通知（update_available / update_progress 等）。
-    /// 非 admin 前端没有对应 handler，收到只会忽略。
+    /// 把同一个 SseEvent 广播给当前所有用户 SSE 连接 **与全部 admin SSE 连接**。
+    /// 用于双通道全局通知（incident / llm_budget_exceeded / update_progress /
+    /// release_available / resource_pack_available / upgrade_cleared 等）。
+    /// 仅限内部运维数据的事件（如 worker_missed）不要走这里，用
+    /// [`broadcast_to_admin_sse`](Self::broadcast_to_admin_sse) 只投 admin 通道。
     pub fn broadcast_to_all_sse(&self, event: SseEvent) {
         for entry in self.active_sse.iter() {
             for conn in entry.value() {
                 let _ = conn.tx.try_send(event.clone());
             }
         }
+        self.broadcast_to_admin_sse(event);
+    }
+
+    /// admin SSE 连接注册表（键 = device_id 或回退 conn_id）。
+    pub fn admin_sse(&self) -> &DashMap<String, Vec<SseClientInfo>> {
+        &self.admin_sse
+    }
+
+    /// 只向 admin SSE 通道广播（`GET /api/admin/realtime/events` 的连接）。
+    /// 用于内部运维事件（worker_missed / new_llm_suggestion 等），普通用户不应收到。
+    pub fn broadcast_to_admin_sse(&self, event: SseEvent) {
+        for entry in self.admin_sse.iter() {
+            for conn in entry.value() {
+                let _ = conn.tx.try_send(event.clone());
+            }
+        }
+    }
+
+    /// 向注册了指定 device 的 admin SSE 连接定向投递（探针桥 / 遥测桥）。
+    /// admin 连接由 AdminAuthUser 鉴权，属可信运维会话，不做设备归属过滤
+    /// （用户通道的 owner 过滤逻辑保持在各调用点、不受影响）。
+    pub fn send_to_admin_sse_device(&self, device_id: &str, event: &SseEvent) {
+        if let Some(conns) = self.admin_sse.get(device_id) {
+            for conn in conns.value() {
+                let _ = conn.tx.try_send(event.clone());
+            }
+        }
+    }
+
+    /// 指定 device 是否有活跃 admin SSE 连接（探针 online 判定的 admin 侧补充）。
+    pub fn admin_sse_device_online(&self, device_id: &str) -> bool {
+        self.admin_sse
+            .get(device_id)
+            .map(|c| !c.is_empty())
+            .unwrap_or(false)
     }
 
     pub fn last_heartbeat(&self) -> &DashMap<String, Instant> {
@@ -762,8 +818,23 @@ mod tests {
 
     use super::*;
 
+    /// 本地未导出 JWT_SECRET 等 env 时 Config::from_env 会 panic；与
+    /// error_rate_watchdog 等模块的既有测试同一兜底模式。
+    fn ensure_safe_secrets() {
+        let secret = "test_secret_that_is_at_least_32_characters_long_ok";
+        for key in &["JWT_SECRET", "ADMIN_JWT_SECRET", "REFRESH_JWT_SECRET"] {
+            if std::env::var(key)
+                .map(|v| v.is_empty() || v.contains("change_me") || v.len() < 32)
+                .unwrap_or(true)
+            {
+                std::env::set_var(key, secret);
+            }
+        }
+    }
+
     #[tokio::test]
     async fn runtime_config_switch_is_atomic() {
+        ensure_safe_secrets();
         let cfg = Config::from_env();
         let tmp = tempfile::tempdir().expect("tempdir");
         let store = Arc::new(
@@ -784,6 +855,7 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_receiver_can_clone() {
+        ensure_safe_secrets();
         let cfg = Config::from_env();
         let tmp = tempfile::tempdir().expect("tempdir");
         let store = Arc::new(

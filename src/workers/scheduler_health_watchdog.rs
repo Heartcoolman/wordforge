@@ -48,6 +48,7 @@ pub fn expected_max_silence_secs() -> HashMap<&'static str, u64> {
         // 每日 / 每周 worker：宽限期 3 × 周期，周期按天计
         ("algorithm_optimization", 3 * 86400),
         ("daily_aggregation", 3 * 86400),
+        ("app_event_rollup", 3 * 86400),
         ("forgetting_alert", 3 * 86400),
         ("health_analysis", 3 * 7 * 86400), // 每周
         ("confusion_pair_cache", 3 * 7 * 86400),
@@ -116,7 +117,8 @@ pub async fn run(store: &Store, state: &AppState) {
         );
 
         dedup_map.insert(worker_name.to_string(), now);
-        state.broadcast_to_all_sse(SseEvent::WorkerMissed {
+        // 内部运维告警：只投 admin 通道，不应到达普通用户 SSE。
+        state.broadcast_to_admin_sse(SseEvent::WorkerMissed {
             worker_name: worker_name.to_string(),
             miss_count,
         });
@@ -170,12 +172,12 @@ mod tests {
         let state = make_state(Arc::new(store.clone()));
         let (tx, mut rx) = tokio::sync::mpsc::channel(crate::state::SSE_CONN_CHANNEL_CAP);
         state
-            .active_sse()
+            .admin_sse()
             .entry("d1".into())
             .or_default()
             .push(crate::state::SseClientInfo {
                 conn_id: "c1".into(),
-                user_id: "u1".into(),
+                user_id: "admin-1".into(),
                 platform: "test".into(),
                 connected_at: std::time::Instant::now(),
                 tx,
@@ -198,15 +200,30 @@ mod tests {
         let state = make_state(Arc::new(store.clone()));
         let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::state::SseEvent>(crate::state::SSE_CONN_CHANNEL_CAP);
         state
-            .active_sse()
+            .admin_sse()
             .entry("d2".into())
             .or_default()
             .push(crate::state::SseClientInfo {
                 conn_id: "c2".into(),
-                user_id: "u2".into(),
+                user_id: "admin-2".into(),
                 platform: "test".into(),
                 connected_at: std::time::Instant::now(),
                 tx,
+            });
+        // worker_missed 是内部运维事件：即便有用户连接在线也绝不投递（负例断言用）。
+        let (user_tx, mut user_rx) = tokio::sync::mpsc::channel::<crate::state::SseEvent>(
+            crate::state::SSE_CONN_CHANNEL_CAP,
+        );
+        state
+            .active_sse()
+            .entry("user-dev".into())
+            .or_default()
+            .push(crate::state::SseClientInfo {
+                conn_id: "user-conn".into(),
+                user_id: "u2".into(),
+                platform: "test".into(),
+                connected_at: std::time::Instant::now(),
+                tx: user_tx,
             });
         *super::LAST_ALERT.lock().unwrap() = None;
         // error_rate_watchdog 阈值 3 × 60 = 180s；写一条 400s 前的记录
@@ -232,5 +249,9 @@ mod tests {
             }
             other => panic!("expected WorkerMissed, got {:?}", other),
         }
+        assert!(
+            user_rx.try_recv().is_err(),
+            "worker_missed 不应出现在用户 SSE 连接"
+        );
     }
 }

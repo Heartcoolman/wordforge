@@ -887,27 +887,54 @@ async fn create_backup(
 
     let name = format!("backup-manual-{}.db", ts_now());
     let target = bdir.join(&name);
-    // VACUUM INTO 在 DB 达到现实体量（数百 MB+ 学习记录/遥测）时是秒级操作，此前直接同步跑在
-    // 处理该请求的 Tokio worker 线程上，占满整根线程整个备份期间，拖慢同线程上排队的其它请求/
-    // SSE 心跳跳动，可能把受影响连接推过 <=10s 心跳约束。照抄 workers/db_backup.rs 已验证过的
-    // spawn_blocking 模式（经 run_store_task 封装），挪去阻塞线程池。
-    let target_for_backup = target.clone();
-    state
-        .run_store_task("admin.updates.backup_manual", move |store| {
-            store.backup_to(&target_for_backup)
-        })
-        .await?
-        .map_err(|e| AppError::internal(&e.to_string()))?;
+    // 取消安全：整段「备份 → prune → 审计」放进 tokio::spawn 分离任务，handler 只 await
+    // JoinHandle。axum 在客户端断开时会 drop handler future——若主体直接写在 handler 里，
+    // 断开可能把流程取消在「备份写了一半 / 审计未写」的中间态；分离任务不受 handler 取消
+    // 影响，审计必落。备份本体（VACUUM INTO，现实体量下秒级）仍经 run_store_task 走阻塞
+    // 线程池，prune（文件系统遍历/删除）同样挪进 spawn_blocking，不占 Tokio worker。
+    let task_state = state.clone();
+    let admin_id = admin.admin_id.clone();
+    let name_for_task = name.clone();
+    let target_for_task = target.clone();
+    let handle = tokio::spawn(async move {
+        let outcome: Result<(), AppError> = async {
+            let target_for_backup = target_for_task.clone();
+            task_state
+                .run_store_task("admin.updates.backup_manual", move |store| {
+                    store.backup_to(&target_for_backup)
+                })
+                .await?
+                .map_err(|e| AppError::internal(&e.to_string()))?;
 
-    prune_backups(&bdir);
+            let bdir_for_prune = bdir.clone();
+            tokio::task::spawn_blocking(move || prune_backups(&bdir_for_prune))
+                .await
+                .map_err(|e| AppError::internal(&format!("prune 任务 join 失败: {e}")))?;
+            Ok(())
+        }
+        .await;
 
-    let _ = state.store().insert_admin_audit(
-        &admin.admin_id,
-        "db_backup.manual",
-        Some("backup"),
-        Some(&name),
-        None,
-    );
+        // insert_admin_audit 是同步 SQLite 写，经 run_store_task 挪进阻塞线程池；仅备份成功
+        // 才写（原语义：失败早退不落审计），审计自身失败仅忽略，不影响备份结果。
+        if outcome.is_ok() {
+            let _ = task_state
+                .run_store_task("admin.updates.backup_manual_audit", move |store| {
+                    store.insert_admin_audit(
+                        &admin_id,
+                        "db_backup.manual",
+                        Some("backup"),
+                        Some(&name_for_task),
+                        None,
+                    )
+                })
+                .await;
+        }
+
+        outcome
+    });
+    handle
+        .await
+        .map_err(|e| AppError::internal(&format!("备份任务 join 失败: {e}")))??;
 
     let size_bytes = std::fs::metadata(&target).map(|m| m.len()).unwrap_or(0);
     Ok(ok(json!({
@@ -921,21 +948,24 @@ async fn create_backup(
 
 /// 维护模式 RAII 守卫：drop 时无条件复位为 false，
 /// 保证 restore 即使中途 panic / 早返回也不会把 /api 永久卡在 503。
-struct MaintenanceGuard<'a> {
-    state: &'a AppState,
+/// 持有 AppState 克隆（而非引用）：guard 须 move 进 restore 的分离任务，生命周期跟随任务
+/// 而非 handler——客户端断开取消 handler 时不得提前复位维护模式。
+struct MaintenanceGuard {
+    state: AppState,
 }
-impl Drop for MaintenanceGuard<'_> {
+impl Drop for MaintenanceGuard {
     fn drop(&mut self) {
         self.state.set_maintenance(false);
     }
 }
 
-/// apply task 槽 RAII 守卫：restore 同步占用槽以阻断并发 apply/rollback，
+/// apply task 槽 RAII 守卫：restore 占用槽以阻断并发 apply/rollback，
 /// drop 时清空（成功/错误/panic 均复位），避免遗留「进行中」task 永久锁死后续升级。
-struct ApplyTaskGuard<'a> {
-    state: &'a AppState,
+/// 同 MaintenanceGuard：持有 AppState 克隆，随分离任务存活。
+struct ApplyTaskGuard {
+    state: AppState,
 }
-impl Drop for ApplyTaskGuard<'_> {
+impl Drop for ApplyTaskGuard {
     fn drop(&mut self) {
         self.state.set_apply_task(None);
     }
@@ -963,7 +993,9 @@ async fn restore_backup(
     if !state.try_begin_apply_task(restore_task) {
         return Err(AppError::conflict("UPDATE_IN_PROGRESS", "已有升级任务在跑"));
     }
-    let _apply_slot = ApplyTaskGuard { state: &state };
+    let apply_slot = ApplyTaskGuard {
+        state: state.clone(),
+    };
 
     let bdir = backups_dir(&state)
         .ok_or_else(|| AppError::bad_request("NO_DATA_DIR", "当前数据库无落盘目录，无法恢复"))?;
@@ -971,52 +1003,78 @@ async fn restore_backup(
     // 开维护模式 + RAII 守卫：任何退出路径（成功/错误/panic）都会复位维护模式，
     // 避免 restore 中途崩溃把 /api 永久卡在 503。
     state.set_maintenance(true);
-    let _maint = MaintenanceGuard { state: &state };
+    let maint = MaintenanceGuard {
+        state: state.clone(),
+    };
 
     let pre_name = format!("backup-pre-restore-{}.db", ts_now());
-    // 同 create_backup：backup_to（安全兜底备份）+ restore_from（SQLite backup API 整库替换）
-    // 都是可能秒级以上的 DB 级操作，此前同步跑在处理该请求的 Tokio worker 线程上。改为
-    // run_store_task/spawn_blocking，两步仍按原顺序 await（保持"先备份兜底、成功才真正
-    // 覆盖"的语义不变），只是各自不再霸占调度线程。
     let pre_target = bdir.join(&pre_name);
-    let outcome: Result<(), AppError> = async {
-        std::fs::create_dir_all(&bdir).map_err(|e| AppError::internal(&e.to_string()))?;
-        state
-            .run_store_task("admin.updates.backup_pre_restore", move |store| {
-                store.backup_to(&pre_target)
-            })
-            .await?
-            .map_err(|e| AppError::internal(&e.to_string()))?;
-        let restore_path = path.clone();
-        state
-            .run_store_task("admin.updates.restore", move |store| {
-                store.restore_from(&restore_path)
-            })
-            .await?
-            .map_err(|e| AppError::internal(&e.to_string()))?;
-        Ok(())
-    }
-    .await;
 
-    // 破坏性操作：成功/失败都留审计，记录兜底点与失败原因。
-    let (audit_outcome, reason) = match &outcome {
-        Ok(()) => ("success", serde_json::Value::Null),
-        Err(e) => ("failed", json!(e.message.clone())),
-    };
-    let _ = state.store().insert_admin_audit(
-        &admin.admin_id,
-        "db_restore",
-        Some("backup"),
-        Some(&name),
-        Some(&json!({
-            "restored_from": name,
-            "pre_restore_backup": pre_name,
+    // 取消安全：整段「pre-backup → restore → 写审计」放进 tokio::spawn 分离任务，两个 guard
+    // move 进任务内，handler 只 await JoinHandle。axum 在客户端断开时会 drop handler future——
+    // 若主体直接写在 handler 里，断开可把流程取消在任意 await 点：维护模式/apply 槽被 guard
+    // drop 提前释放（restore_from 整库替换可能仍在阻塞线程池上跑，/api 却已放开 → 并发写打进
+    // 正被替换的库），审计也会被整段跳过。分离任务不受 handler 取消影响：断开只丢响应，
+    // 任务与 guard 生命周期照常走完，审计必落。
+    // backup_to / restore_from 仍经 run_store_task 走阻塞线程池（不霸占 Tokio worker），
+    // 两步仍按原顺序 await，保持「先备份兜底、成功才真正覆盖」的顺序语义。
+    let task_state = state.clone();
+    let admin_id = admin.admin_id.clone();
+    let name_for_task = name.clone();
+    let pre_name_for_task = pre_name.clone();
+    let handle = tokio::spawn(async move {
+        let _apply_slot = apply_slot;
+        let _maint = maint;
+
+        let outcome: Result<(), AppError> = async {
+            std::fs::create_dir_all(&bdir).map_err(|e| AppError::internal(&e.to_string()))?;
+            let pre_target = pre_target.clone();
+            task_state
+                .run_store_task("admin.updates.backup_pre_restore", move |store| {
+                    store.backup_to(&pre_target)
+                })
+                .await?
+                .map_err(|e| AppError::internal(&e.to_string()))?;
+            let restore_path = path.clone();
+            task_state
+                .run_store_task("admin.updates.restore", move |store| {
+                    store.restore_from(&restore_path)
+                })
+                .await?
+                .map_err(|e| AppError::internal(&e.to_string()))?;
+            Ok(())
+        }
+        .await;
+
+        // 破坏性操作：成功/失败都留审计，记录兜底点与失败原因。insert_admin_audit 是同步
+        // SQLite 写，经 run_store_task 挪进阻塞线程池；审计自身失败仅忽略（原语义）。
+        let (audit_outcome, reason) = match &outcome {
+            Ok(()) => ("success", serde_json::Value::Null),
+            Err(e) => ("failed", json!(e.message.clone())),
+        };
+        let audit_meta = json!({
+            "restored_from": name_for_task.clone(),
+            "pre_restore_backup": pre_name_for_task,
             "outcome": audit_outcome,
             "reason": reason,
-        })),
-    );
+        });
+        let _ = task_state
+            .run_store_task("admin.updates.restore_audit", move |store| {
+                store.insert_admin_audit(
+                    &admin_id,
+                    "db_restore",
+                    Some("backup"),
+                    Some(&name_for_task),
+                    Some(&audit_meta),
+                )
+            })
+            .await;
 
-    outcome?;
+        outcome
+    });
+    handle
+        .await
+        .map_err(|e| AppError::internal(&format!("restore 任务 join 失败: {e}")))??;
 
     tracing::warn!(admin_id=%admin.admin_id, backup=%name, "管理员从备份恢复数据库");
 

@@ -21,6 +21,32 @@ pub fn router() -> Router<AppState> {
     Router::new().route("/", get(list_records).post(create_record))
 }
 
+/// 路由层 per-user 流水线互斥：把「process_event → tx2 落库」整段纳入同一临界区，
+/// 串行化同用户事件的应用与落库顺序。引擎内部的 user_locks 只覆盖 process_event 本身。
+///（S2 收尾删除快照回滚后仍保留：保持 AMAS 应用序 = 落库序，避免会话/词态计数交错。）
+///
+/// 独立建 map、不复用引擎 user_locks：引擎锁是 parking_lot 同步锁、在 spawn_blocking 线程内
+/// 短持有；这里临界区跨多个 await（store task + 引擎调用），须用 tokio 异步锁，且复用同一把
+/// 会在「路由持锁 → 引擎再锁」时自我死锁。锁序恒为 路由锁 → 引擎锁，无逆序获取。
+/// 容量治理复制引擎 user_locks 模式：超阈值时清掉无人持有的空闲项（Arc 强计数=1）。
+static USER_PIPELINE_LOCKS: once_cell::sync::Lazy<
+    parking_lot::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
+> = once_cell::sync::Lazy::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
+
+pub(crate) async fn acquire_user_pipeline_lock(user_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
+    let lock = {
+        let mut locks = USER_PIPELINE_LOCKS.lock();
+        if locks.len() > crate::amas::constants::USER_LOCK_CLEANUP_THRESHOLD {
+            locks.retain(|_, v| std::sync::Arc::strong_count(v) > 1);
+        }
+        locks
+            .entry(user_id.to_string())
+            .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    };
+    lock.lock_owned().await
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ListRecordsQuery {
@@ -108,31 +134,6 @@ pub(crate) struct CreateRecordResponse {
 }
 
 #[derive(Debug, Clone)]
-struct EngineStateSnapshot {
-    user_state: Option<serde_json::Value>,
-    ige: Option<serde_json::Value>,
-    /// 写放大重构：swd 历史已落追加式行表，回滚不再覆写整块 blob，而是删除本事件 append 的那一行。
-    /// 捕获时未知（None）；process_event 返回后填入 appended_seq；tx2 失败回滚时删该 seq。
-    swd_appended_seq: Option<i64>,
-    trust: Option<serde_json::Value>,
-    /// ③ 多痕迹（Phase 2）：快照 mastery 键的 (key, 前态) 列表。单痕迹时仅 `mastery:{word}`；
-    /// question_mode 已知时额外含 `mastery:{word}:{mode}`，覆盖引擎按 arm flag 可能写入的两种键，
-    /// 保证回滚必命中（route 取快照早于 process_event 内部 per-user config 路由，不预知 arm）。
-    mastery_states: Vec<(String, Option<serde_json::Value>)>,
-    user_elo: crate::amas::elo::EloRating,
-    word_elo: crate::amas::elo::EloRating,
-    /// W1-1：word_elo 的派生列（trend, rating_select）快照。EloRating 只含 rating/games，
-    /// 这两列须单独捕获，否则回滚不复位会留下全局污染（动态 K / 选词链）。
-    word_elo_trend_select: (f64, f64),
-    /// #14：抗投毒账本（user,word）净位移快照，与 word_elo 同步捕获/回滚。
-    word_elo_contrib: f64,
-    /// update_memory 与 mastery/ELO 同一原子 tx 一并写 evm:{word_id}（多样性/语境计数），
-    /// 但此前快照/回滚都没覆盖这个键——DB 写失败回滚 mastery/ELO 时，evm 悄悄留在新值，
-    /// 之后按"多一次未计入 review_count 的语境"污染 interval_modifier。
-    evm_state: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Clone)]
 pub(crate) struct UserStateSnapshot {
     pub(crate) user_state: Option<serde_json::Value>,
     pub(crate) ige: Option<serde_json::Value>,
@@ -141,6 +142,8 @@ pub(crate) struct UserStateSnapshot {
     pub(crate) swd_max_seq: i64,
     pub(crate) trust: Option<serde_json::Value>,
     pub(crate) user_elo: crate::amas::elo::EloRating,
+    /// user_elo.trend 快照（EloRating 不含此列），回滚时一并复位，防动态 K 污染残留。
+    pub(crate) user_elo_trend: f64,
 }
 
 pub(crate) fn capture_user_state_snapshot(
@@ -153,85 +156,8 @@ pub(crate) fn capture_user_state_snapshot(
         swd_max_seq: store.swd_max_seq(user_id)?,
         trust: store.get_engine_algo_state(user_id, "trust")?,
         user_elo: store.get_user_elo(user_id)?,
+        user_elo_trend: store.get_user_elo_trend(user_id)?,
     })
-}
-
-fn capture_engine_state_snapshot(
-    store: &crate::store::Store,
-    user_id: &str,
-    word_id: &str,
-    question_mode: Option<&str>,
-) -> Result<EngineStateSnapshot, AppError> {
-    // legacy 键恒快照；question_mode 已知则额外快照 per-mode 键（用 multi_trace=true 派生 suffix）。
-    // 不预知本用户落 canary(flag on) 还是 baseline，两键全捕获 → 引擎无论写哪个，回滚都命中。
-    let legacy_key = format!("mastery:{word_id}");
-    let mut mastery_states = vec![(
-        legacy_key.clone(),
-        store.get_engine_algo_state(user_id, &legacy_key)?,
-    )];
-    if let Some(m) = question_mode {
-        let mode_key = crate::amas::memory::mastery::mastery_state_key(word_id, Some(m), true);
-        if mode_key != legacy_key {
-            let prev = store.get_engine_algo_state(user_id, &mode_key)?;
-            mastery_states.push((mode_key, prev));
-        }
-    }
-
-    Ok(EngineStateSnapshot {
-        user_state: store.get_engine_user_state(user_id)?,
-        ige: store.get_engine_algo_state(user_id, "ige")?,
-        // swd 不再在此读整块 blob（写放大重构省一次大读）；回滚句柄在 process_event 后填入。
-        swd_appended_seq: None,
-        trust: store.get_engine_algo_state(user_id, "trust")?,
-        mastery_states,
-        user_elo: store.get_user_elo(user_id)?,
-        word_elo: store.get_word_elo(word_id)?,
-        word_elo_trend_select: store.get_word_elo_trend_select(word_id)?,
-        word_elo_contrib: store.get_word_elo_user_contrib(user_id, word_id)?,
-        evm_state: store.get_engine_algo_state(user_id, &format!("evm:{word_id}"))?,
-    })
-}
-
-/// 回滚单条记录处理对引擎状态的全部改动。W1-1：改为**单 tx 原子**回滚（user_state + algo +
-/// ELO），并可选在同一 tx 内清除幂等标记（`clear_marker`）——保证回滚后「标记存在 ⟺ AMAS 已应用」
-/// 不变式在崩溃窗口仍成立（详见 `Store::restore_engine_state_atomic`）。手动 rollback 机制保留，
-/// 仅由多次独立 store 调用收敛为一次原子调用。
-fn restore_engine_state_snapshot(
-    store: &crate::store::Store,
-    user_id: &str,
-    word_id: &str,
-    snapshot: &EngineStateSnapshot,
-    clear_marker: Option<&str>,
-) {
-    // ③ 多痕迹：固定算法态(ige/trust) + 1~2 个 mastery 键（legacy + 可选 per-mode）一并原子还原。
-    // swd 不再走 algo_states blob，改由 swd_delete_seq 删本事件 append 的那一行（同 tx）。
-    let mut algo_states: Vec<(&str, &Option<serde_json::Value>)> = vec![
-        ("ige", &snapshot.ige),
-        ("trust", &snapshot.trust),
-    ];
-    for (key, prev) in &snapshot.mastery_states {
-        algo_states.push((key.as_str(), prev));
-    }
-    let evm_key = format!("evm:{word_id}");
-    algo_states.push((evm_key.as_str(), &snapshot.evm_state));
-    let restore = crate::store::operations::engine::EngineStateRestore {
-        user_id,
-        user_state: Some(&snapshot.user_state),
-        algo_states: &algo_states,
-        user_elo: Some(&snapshot.user_elo),
-        word_elo: Some((word_id, &snapshot.word_elo)),
-        word_elo_trend_select: Some((
-            word_id,
-            snapshot.word_elo_trend_select.0,
-            snapshot.word_elo_trend_select.1,
-        )),
-        word_elo_contrib: Some((word_id, snapshot.word_elo_contrib)),
-        swd_delete_seq: snapshot.swd_appended_seq,
-        clear_marker_record_id: clear_marker,
-    };
-    if let Err(error) = store.restore_engine_state_atomic(&restore) {
-        tracing::warn!(user_id, word_id, error = %error, "原子回滚 AMAS 状态+清标记失败");
-    }
 }
 
 pub(crate) fn restore_user_state_snapshot(
@@ -262,6 +188,10 @@ pub(crate) fn restore_user_state_snapshot(
     if let Err(error) = store.set_user_elo(user_id, &snapshot.user_elo) {
         tracing::warn!(user_id, error = %error, "Failed to rollback user ELO");
     }
+    // set_user_elo 只写 rating/games，trend（动态 K 残差 EWMA）须单独复位。
+    if let Err(error) = store.set_user_elo_trend(user_id, snapshot.user_elo_trend) {
+        tracing::warn!(user_id, error = %error, "Failed to rollback user ELO trend");
+    }
 }
 
 pub(crate) fn restore_engine_algo_state(
@@ -282,7 +212,8 @@ pub(crate) fn restore_engine_algo_state(
 
 /// S2-1：outbox 异步路径的事件载荷。异步模式下 handler 把整条创建请求持久化到 outbox，
 /// outbox_processor worker 反序列化后调用 [`process_single_record`] 走与同步路径完全一致的
-/// 处理逻辑（含 best-effort rollback），零逻辑分叉。`created_at` 固化客户端提交时刻。
+/// 处理逻辑（零逻辑分叉）。`created_at` 固化客户端提交时刻。
+/// S2 收尾后落库失败不再手动回滚引擎状态，恢复统一走幂等账本短路。
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct OutboxRecordPayload {
     pub(crate) user_id: String,
@@ -367,16 +298,9 @@ pub(crate) async fn process_single_record(
         });
     }
 
-    let mut engine_snapshot = state
-        .run_store_task("records.single.snapshot", {
-            let user_id = user_id_owned.clone();
-            let word_id = word_id.clone();
-            let question_mode = req.question_mode.clone();
-            move |store| {
-                capture_engine_state_snapshot(&store, &user_id, &word_id, question_mode.as_deref())
-            }
-        })
-        .await??;
+    // per-user 流水线互斥（见 USER_PIPELINE_LOCKS）：串行化同用户「AMAS → tx2」流水线，
+    // 保持事件应用顺序与落库顺序一致（S2 收尾删除快照回滚后仍保留，行为不回归）。
+    let _pipeline_guard = acquire_user_pipeline_lock(user_id).await;
 
     // BA3b：从 AMAS 阶段起锚定瀑布 trace（record.id 已就绪）。早退的重复/并发坍缩路径
     // 不调用 finish()，故不入环 —— trace 只记录真正完整处理的事件。
@@ -405,6 +329,8 @@ pub(crate) async fn process_single_record(
             },
             &record.id,
             request_id,
+            // 正规学习流：计入全局 ELO 与 mastery 边沿流水（amas 诊断端点传 false）。
+            true,
         )
         .await?;
     crate::stage_metrics::stage_observe(
@@ -430,8 +356,8 @@ pub(crate) async fn process_single_record(
             duplicate: true,
         });
     };
-    // 回填 swd 回滚句柄：tx2 失败时按此 seq 删本事件 append 的那一行 swd 历史。
-    engine_snapshot.swd_appended_seq = swd_appended_seq;
+    // S2 收尾：快照回滚已删除，swd append 句柄不再需要（重试恢复统一走幂等账本短路）。
+    let _ = swd_appended_seq;
     let amas_result_for_store = amas_result.clone();
 
     let t_sql = std::time::Instant::now();
@@ -467,12 +393,9 @@ pub(crate) async fn process_single_record(
 
                     wls.state = new_state;
                     wls.mastery_level = wm.memory_strength;
-                    wls.total_attempts += 1;
-                    if req_for_store.is_correct {
-                        wls.correct_streak += 1;
-                    } else {
-                        wls.correct_streak = 0;
-                    }
+                    // total_attempts/correct_streak 不在此累加：store 层 create_record_with_updates
+                    // 以 SQL 相对自增（基于行自身当前值 +1 / 归零）落库，struct 里这两个字段仅占位、
+                    // 写入时被忽略——在此 Rust 端累加是死代码，徒增"绝对值被采信"的误读。
                     if wm.next_review_interval_secs > 0 {
                         wls.next_review_date = Some(
                             Utc::now() + chrono::Duration::seconds(wm.next_review_interval_secs),
@@ -484,6 +407,8 @@ pub(crate) async fn process_single_record(
                 // Passed to create_record_with_updates as a delta (not derived from the struct
                 // above, which store.rs now writes as a relative +1 off the row's own value —
                 // see create_record_with_updates's learning_sessions comment).
+                // 注意语义：这是「本次答题后处于 Mastered 级」的水平判定，非进入边沿（无
+                // prev!=Mastered 检测），已 Mastered 的词每答一次 actual_mastery_count 都 +1。
                 let just_mastered = amas_result_for_store
                     .word_mastery
                     .as_ref()
@@ -519,16 +444,17 @@ pub(crate) async fn process_single_record(
                         just_mastered,
                     )
                     .map_err(|error| {
-                        // W1-1：原子回滚 AMAS 状态 + 清幂等标记（同一 tx）。崩溃要么全回滚（标记
-                        // 已清，重试重新应用 AMAS），要么全不动（标记在、AMAS 仍在，重试走裸记录
-                        // 路径），两种结局都守「标记存在 ⟺ AMAS 已应用」不变式，消除原两步非原子
-                        // 写之间的崩溃窗口（重试丢 AMAS）。
-                        restore_engine_state_snapshot(
-                            &store,
-                            &user_id_owned,
-                            &word_id,
-                            &engine_snapshot,
-                            Some(&record_for_store.id),
+                        // S2 收尾：手动快照回滚已删除。tx2 失败时 AMAS 状态与幂等标记原样保留
+                        //（「标记存在 ⟺ AMAS 已应用」不变式仍成立），重试（outbox worker 退避 /
+                        // 客户端离线队列同 clientRecordId 重发）命中幂等账本短路，仅补落裸记录行
+                        // ——与崩溃窗口重放同一恢复语义：单事件有界损失（word_state/session 增量），
+                        // 无 AMAS 双重累加，无陈旧快照覆盖并发已提交状态的风险。
+                        tracing::warn!(
+                            user_id = %user_id_owned,
+                            word_id = %word_id,
+                            record_id = %record_for_store.id,
+                            error = %error,
+                            "记录落库失败（AMAS 已应用、标记保留），等待重试经幂等账本补落记录行"
                         );
                         AppError::internal(&error.to_string())
                     })?;
@@ -580,12 +506,11 @@ async fn create_record(
 ) -> Result<axum::response::Response, AppError> {
     // 任务C:从请求扩展取 request_id（中间件注入），透传到 AMAS 决策以关联监控事件与日志。
     let request_id = request_id.map(|axum::Extension(rid)| rid.0);
-    // S2-1：opt-in 异步路径（RECORDS_OUTBOX_ASYNC=true）。把创建请求持久化到 outbox 并立即
-    // 202 返回，AMAS 处理交 outbox_processor 异步消费；默认 false 走下方同步老路不变。
-    // 注意：异步模式响应不含 amas_result（客户端拿不到即时 mastery/复习结果），切换前须与学习端协同。
-    // 范围：当前异步路径仅覆盖单条上报；批量 /records/batch 仍恒走同步路径（异步化待后续）。
-    // 已知限制(RFC R06)：进程在 AMAS 已持久化、记录未落库之间崩溃时，重启重放会二次累加 AMAS 状态
-    //（outbox 保证不丢事件，但未保证不重复）；单事务原子化属后续 cutover，启用本开关前须评估。
+    // S2（v1.3.0 起默认路径，RECORDS_OUTBOX_ASYNC 默认 true）：把创建请求持久化到 outbox 并
+    // 立即 202 返回，AMAS 处理交 outbox_processor 异步消费。三端 ≥1.6.0 已确认容忍无
+    // amas_result 的 202 响应。设 RECORDS_OUTBOX_ASYNC=false 可回退下方同步老路。
+    // 范围：异步路径仅覆盖单条上报；批量 /records/batch 仍恒走同步路径（异步化待后续）。
+    // 崩溃窗口重放已由 processed_events 幂等账本短路（W1-1），不会二次累加 AMAS 状态。
     if state.config().records_outbox_async {
         let mut req = req.clone();
         // 确保 client_record_id 存在：worker 重试时凭它幂等去重，避免重复落库。

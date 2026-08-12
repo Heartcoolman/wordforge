@@ -317,6 +317,25 @@ async fn disable_canary(
     Ok(ok(serde_json::json!({ "disabled": cleared })))
 }
 
+/// clientEventId 长度上限。与 routes/learning 模块的 EVENT_CLIENT_EVENT_ID_MAX_LEN 同值
+/// （该常量为模块私有，此处不跨模块引用；两处口径须保持一致）。
+const EVENT_CLIENT_EVENT_ID_MAX_LEN: usize = 128;
+
+/// 规范化 clientEventId：对齐 records/single.rs 的处理——trim 后空串视为 None（旧客户端
+/// 非幂等路径），超长直接拒绝（幂等键会落 processed_events 主键，放任任意长度是存储放大面）。
+fn normalize_client_event_id(raw: Option<&str>) -> Result<Option<&str>, AppError> {
+    let Some(id) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    if id.len() > EVENT_CLIENT_EVENT_ID_MAX_LEN {
+        return Err(AppError::bad_request(
+            "AMAS_INVALID_EVENT_ID",
+            "clientEventId 长度超过上限",
+        ));
+    }
+    Ok(Some(id))
+}
+
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct ProcessEventRequest {
@@ -390,9 +409,11 @@ async fn process_one_event(
         })
         .await??;
     if !already {
+        // apply_elo=false：校准/诊断事件即便携带幂等键也不写全局 word_elo/user_elo 与
+        // mastery 边沿流水——本端点无 tx2 失败回滚快照，写了收不回（原语义零副作用）。
         if let Some((result, _)) = state
             .amas()
-            .process_event_idempotent(user_id, raw_event, key, None)
+            .process_event_idempotent(user_id, raw_event, key, None, false)
             .await?
         {
             return Ok(result);
@@ -403,7 +424,9 @@ async fn process_one_event(
     let user_state = state.amas().get_user_state_async(user_id).await?;
     let strategy = state.amas().compute_strategy_from_state(&user_state);
     Ok(ProcessResult {
-        session_id: session_id_for_replay.unwrap_or_default(),
+        // sessionId 缺省对齐真实处理分支的 build_process_result（"{user_id}-session"），
+        // 重放态不返回空串，避免客户端拿到与首次响应不同形状的占位值。
+        session_id: session_id_for_replay.unwrap_or_else(|| format!("{user_id}-session")),
         strategy,
         explanation: Explanation {
             primary_reason: "duplicate_event".to_string(),
@@ -431,11 +454,12 @@ async fn process_event(
     JsonBody(req): JsonBody<ProcessEventRequest>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
     let client_event_id = req.client_event_id.clone();
+    let client_event_id = normalize_client_event_id(client_event_id.as_deref())?;
     let session_id = req.session_id.clone();
     let result = process_one_event(
         &state,
         &auth.user_id,
-        client_event_id.as_deref(),
+        client_event_id,
         session_id,
         req.into(),
     )
@@ -466,11 +490,12 @@ async fn batch_process(
     let mut outputs = Vec::new();
     for event in req.events {
         let client_event_id = event.client_event_id.clone();
+        let client_event_id = normalize_client_event_id(client_event_id.as_deref())?;
         let session_id = event.session_id.clone();
         let result = process_one_event(
             &state,
             &auth.user_id,
-            client_event_id.as_deref(),
+            client_event_id,
             session_id,
             event.into(),
         )

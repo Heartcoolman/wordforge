@@ -1,5 +1,6 @@
 pub mod admin_analytics;
 pub mod admin_rbac;
+pub mod app_events;
 pub mod admin_wordbooks;
 pub mod admins;
 pub mod amas_canary;

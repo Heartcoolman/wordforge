@@ -527,50 +527,68 @@ async fn request_telemetry(
     Path(id): Path<String>,
     State(state): State<AppState>,
 ) -> Result<impl axum::response::IntoResponse, AppError> {
-    let conns = state
+    // 在线判定：用户 SSE 连接 或 admin SSE 连接（遥测桥在纯 admin 会话下可用）。
+    let user_online = state
         .active_sse()
         .get(&id)
-        .filter(|c| !c.is_empty())
-        .ok_or_else(|| AppError {
+        .map(|c| !c.is_empty())
+        .unwrap_or(false);
+    let admin_online = state.admin_sse_device_online(&id);
+    if !user_online && !admin_online {
+        return Err(AppError {
             status: StatusCode::UNPROCESSABLE_ENTITY,
             code: "DEVICE_OFFLINE".into(),
             message: "设备当前无活跃 SSE 连接".into(),
             is_operational: true,
-        })?;
-
-    // P2: 下发前查该 device 当前 owner，只投递给 user_id == owner 的连接，
-    // 防 owner 变更后陈旧连接（旧用户）跨用户收到定向 telemetry_request。
-    // Some(Some(uid)) = 已认领归属；Some(None)/None = 无确定 owner → 不投递。
-    let device_for_owner = id.clone();
-    let owner = state
-        .run_store_task(
-            "admin.clients.request_telemetry.owner",
-            move |store| -> Result<_, AppError> {
-                Ok(store.get_client_device_owner(&device_for_owner)?.flatten())
-            },
-        )
-        .await??;
-    let owner = match owner.as_deref() {
-        Some(uid) => uid.to_string(),
-        None => {
-            return Err(AppError {
-                status: StatusCode::UNPROCESSABLE_ENTITY,
-                code: "DEVICE_OWNER_UNKNOWN".into(),
-                message: "设备无确定归属（未注册/未认领），不向陈旧连接下发遥测请求".into(),
-                is_operational: true,
-            });
-        }
-    };
+        });
+    }
 
     let request_id = uuid::Uuid::new_v4().to_string();
     let event = SseEvent::TelemetryRequest {
         request_id: request_id.clone(),
     };
-    for conn in conns.value() {
-        if conn.user_id != owner {
-            continue;
+
+    // admin 通道：注册了该 device 的 admin 连接直接投递（AdminAuthUser 已鉴权的
+    // 可信运维会话，不做设备归属过滤）。
+    state.send_to_admin_sse_device(&id, &event);
+
+    // 用户通道：保持既有 owner 核验语义不变。
+    // P2: 下发前查该 device 当前 owner，只投递给 user_id == owner 的连接，
+    // 防 owner 变更后陈旧连接（旧用户）跨用户收到定向 telemetry_request。
+    // Some(Some(uid)) = 已认领归属；Some(None)/None = 无确定 owner → 不投递。
+    if user_online {
+        let device_for_owner = id.clone();
+        let owner = state
+            .run_store_task(
+                "admin.clients.request_telemetry.owner",
+                move |store| -> Result<_, AppError> {
+                    Ok(store.get_client_device_owner(&device_for_owner)?.flatten())
+                },
+            )
+            .await??;
+        match owner.as_deref() {
+            Some(uid) => {
+                if let Some(conns) = state.active_sse().get(&id) {
+                    for conn in conns.value() {
+                        if conn.user_id != uid {
+                            continue;
+                        }
+                        let _ = conn.tx.try_send(event.clone());
+                    }
+                }
+            }
+            // 仅当 admin 通道也不可达时才整体报错（保持旧行为）；否则已投递
+            // admin 通道，仅跳过用户通道。
+            None if !admin_online => {
+                return Err(AppError {
+                    status: StatusCode::UNPROCESSABLE_ENTITY,
+                    code: "DEVICE_OWNER_UNKNOWN".into(),
+                    message: "设备无确定归属（未注册/未认领），不向陈旧连接下发遥测请求".into(),
+                    is_operational: true,
+                });
+            }
+            None => {}
         }
-        let _ = conn.tx.try_send(event.clone());
     }
 
     Ok(ok(serde_json::json!({ "requestId": request_id })))
@@ -920,7 +938,10 @@ async fn revoke_upgrade_handler(
     for device_id in &device_ids {
         if let Some(conns) = state.active_sse().get(device_id) {
             for conn in conns.value() {
-                if conn.tx.try_send(SseEvent::UpgradeCleared).is_ok() {
+                let event = SseEvent::UpgradeCleared {
+                    origin: crate::state::UpgradeClearedOrigin::Targeted,
+                };
+                if conn.tx.try_send(event).is_ok() {
                     hit += 1;
                 }
             }

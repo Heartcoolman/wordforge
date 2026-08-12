@@ -207,28 +207,33 @@ async fn hard_block_bypasses_realtime_events() {
     );
 }
 
-/// 安全加固回归：仅带 x-device-platform: web（无 sec-fetch-mode，也无 User-Agent）不再能豁免
-/// UA 契约——此前任何客户端（旧 native / 裸 curl）发这一个头就能绕过 MISSING_USER_AGENT。
+/// 误伤回退（D4 守卫）：声明 x-device-platform: web 但缺 sec-fetch-mode（老浏览器不发送
+/// Sec-Fetch-*，或伪造平台头的脚本）不再被硬拒——sec-fetch 检测已降级为纯观测
+/// （warn + metrics 计数），豁免以「声明 web」为准。
 #[tokio::test]
-async fn hard_block_rejects_spoofed_web_platform_without_fetch_metadata() {
+async fn hard_block_exempts_declared_web_without_fetch_metadata() {
     let app = build_strict_app(true, None).await;
     let req = Request::builder()
         .method("POST")
         .uri("/api/auth/login")
         .header("x-device-platform", "web")
-        // 故意不带 User-Agent，也不带 sec-fetch-mode——模拟仅伪造平台头的旧客户端/脚本。
+        // 不带 User-Agent 也不带 sec-fetch-mode——模拟不发 Sec-Fetch-* 的老浏览器。
         .header("content-type", "application/json")
         .body(Body::from(
             json!({"email":"x@x.com","password":"yyyyyyyy"}).to_string(),
         ))
         .unwrap();
+    let before = learning_backend::metrics_counters::strict_web_claim_without_fetch_metadata();
     let resp = app.app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
         .await
         .unwrap();
-    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(v["code"], "MISSING_USER_AGENT");
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+    assert_ne!(v["code"], "MISSING_USER_AGENT", "声明 web 应豁免 UA 契约");
+    assert_ne!(v["code"], "CLIENT_OUTDATED", "缺 sec-fetch-mode 不应被硬拒");
+    // 观测口径仍生效：计数递增（供评估误伤率/伪造率）
+    let after = learning_backend::metrics_counters::strict_web_claim_without_fetch_metadata();
+    assert!(after > before, "缺 sec-fetch-mode 的 web 声明应被计数观测");
 }
 
 /// 真实浏览器请求（x-device-platform: web + sec-fetch-mode，二者均由浏览器强制自动附带、
@@ -255,9 +260,11 @@ async fn hard_block_allows_genuine_web_without_user_agent() {
     assert_ne!(v["code"], "MISSING_OS");
 }
 
-/// 强升切流下的同一条加固：伪造 web 平台头（无 sec-fetch-mode）不能绕过 CLIENT_OUTDATED。
+/// 误伤回退（运行时版本门控）：声明 web 但缺 sec-fetch-mode 不再被硬拒 CLIENT_OUTDATED——
+/// 版本门控本意拦旧 native 客户端，缺 Sec-Fetch-* 的老浏览器属合法 web 流量且无升级出路。
+/// 伪造平台头绕过门控的风险改由观测口径（warn + 计数）跟踪。
 #[tokio::test]
-async fn runtime_version_gate_rejects_spoofed_web_platform() {
+async fn runtime_version_gate_exempts_declared_web_without_fetch_metadata() {
     let app = spawn_test_app().await;
     {
         let mut s = app.state.store().get_system_settings().unwrap();
@@ -270,19 +277,51 @@ async fn runtime_version_gate_rejects_spoofed_web_platform() {
         .method("POST")
         .uri("/api/auth/login")
         .header("x-device-platform", "web")
-        // 无 sec-fetch-mode：不应被当成真实 web 流量豁免版本门控。
+        // 无 sec-fetch-mode：老浏览器场景，不得返回 CLIENT_OUTDATED。
         .header("content-type", "application/json")
         .body(Body::from(
             json!({"email":"x@x.com","password":"yyyyyyyy"}).to_string(),
         ))
         .unwrap();
     let resp = app.app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
         .await
         .unwrap();
-    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(v["code"], "CLIENT_OUTDATED");
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+    assert_ne!(v["code"], "CLIENT_OUTDATED", "缺 sec-fetch-mode 的 web 声明不应被版本门控硬拒");
+}
+
+/// 守卫正例（防误改回归）：gate 开启 + min_client_version 配置 + x-device-platform: web +
+/// 合法 sec-fetch-mode + 无 UA——标准 web 客户端画像，绝不能命中 CLIENT_OUTDATED。
+#[tokio::test]
+async fn runtime_version_gate_allows_genuine_web_with_fetch_metadata() {
+    let app = spawn_test_app().await;
+    {
+        let mut s = app.state.store().get_system_settings().unwrap();
+        s.version_gate_enabled = true;
+        s.min_client_version = Some("2.0.0".into());
+        app.state.store().save_system_settings(&s).unwrap();
+        app.state.refresh_version_gate();
+    }
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/auth/login")
+        .header("x-device-platform", "web")
+        .header("sec-fetch-mode", "cors")
+        // 浏览器 fetch 场景下无自定义 UA（forbidden header）
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({"email":"x@x.com","password":"yyyyyyyy"}).to_string(),
+        ))
+        .unwrap();
+    let resp = app.app.clone().oneshot(req).await.unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+    assert_ne!(v["code"], "CLIENT_OUTDATED", "真实 web 请求不得被版本门控拒绝");
+    assert_ne!(v["code"], "MISSING_USER_AGENT");
+    assert_ne!(v["code"], "MISSING_OS");
 }
 
 // ─────────────── D4:运行时版本门控（settings 驱动，独立于 strict-mode 开关） ───────────────

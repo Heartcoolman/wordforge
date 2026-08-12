@@ -5,6 +5,9 @@ name: OpenAPI Drift Check
 #   1. 运行 cargo test --test openapi_export（重新导出 docs/openapi.yaml）
 #   2. git diff --exit-code docs/openapi.yaml（若有差异则失败，提示开发者先本地运行测试）
 
+# 注意：本 workflow 的 drift 检查只保证 src/openapi.rs ↔ docs/openapi.yaml 同步；
+# 「真实路由 ↔ spec 覆盖」由 tests/openapi_export.rs 的 spec_paths_cover_v1_stable_endpoints
+# 对账测试兜底（枚举 v1-stable 精选端点断言 spec paths 覆盖），随本 workflow 一并执行。
 on:
   push:
     branches: [ main, feat/v1-m0 ]
@@ -12,6 +15,8 @@ on:
       - 'src/openapi.rs'
       - 'src/routes/**'
       - 'docs/openapi.yaml'
+      - 'tests/openapi_export.rs'
+      - '.github/workflows/openapi-drift.yml'
       - 'Cargo.toml'
       - 'Cargo.lock'
   pull_request:
@@ -19,6 +24,8 @@ on:
       - 'src/openapi.rs'
       - 'src/routes/**'
       - 'docs/openapi.yaml'
+      - 'tests/openapi_export.rs'
+      - '.github/workflows/openapi-drift.yml'
       - 'Cargo.toml'
       - 'Cargo.lock'
 

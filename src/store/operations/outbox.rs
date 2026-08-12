@@ -1,9 +1,9 @@
-//! S2-1：领域事件 outbox 持久化 + 死信。
+//! S2：领域事件 outbox 持久化 + 死信。
 //!
-//! records→AMAS 在异步模式（`RECORDS_OUTBOX_ASYNC=true`）下，记录写入与领域事件入队
-//! 解耦：handler 把事件持久化到 `outbox`，`outbox_processor` worker 异步消费（指数退避
-//! 重试，超 `MAX_ATTEMPTS` 移入 `events_dead_letter`）。重启不丢事件（落 SQLite）。
-//! 默认同步老路时 outbox 为空，本模块对生产零影响。
+//! records→AMAS 在异步模式（v1.3.0 起默认，`RECORDS_OUTBOX_ASYNC=true`）下，记录写入与
+//! 领域事件入队解耦：handler 把事件持久化到 `outbox`，`outbox_processor` worker 异步消费
+//! （指数退避重试，超 `MAX_ATTEMPTS` 移入 `events_dead_letter`）。重启不丢事件（落 SQLite）。
+//! 设 false 回退同步老路时 outbox 为空，本模块对生产零影响。
 
 use rusqlite::{params, OptionalExtension};
 

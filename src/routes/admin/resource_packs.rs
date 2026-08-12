@@ -44,7 +44,9 @@ const WEBAPP_PACK_ID: &str = "web-app";
 static UPLOAD_TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// web-app@stable 激活临界区互斥：把「解包+原子切 current」与「翻转 DB active 指针」串成一个临界区，
 /// 避免两个并发激活不同版本时 current 符号链接与 DB active 指针交错 → 持久错配（status 与物理托管脱钩）。
-/// 仅 web-app stable 激活极低频，串行无性能影响。
+/// deactivate_version 的 web-app 删除保护（预检激活状态 + 软删）也持同一把锁，与激活互斥——
+/// 否则「预检时未激活 → set_active 并发翻转指针 → 软删落库」会绕过删除保护，删掉刚激活的版本。
+/// 仅 web-app 管理操作极低频，串行无性能影响。
 static WEBAPP_ACTIVATE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 /// 上传临界区互斥：把「去重预检 + 落盘 rename + DB insert」串成一个临界区。三者此前各自独立，
 /// 两个并发上传同一 (pack_id, version) 都能通过预检（TOCTOU），随后各自 rename 到同一目标路径
@@ -281,9 +283,11 @@ async fn upload_version(
         .await
         .map_err(|e| AppError::internal(&format!("写 payload 失败: {e}")))?;
     let path = dir.join(filename);
-    tokio::fs::rename(&tmp_path, &path)
-        .await
-        .map_err(|e| AppError::internal(&format!("rename payload 失败: {e}")))?;
+    if let Err(e) = tokio::fs::rename(&tmp_path, &path).await {
+        // rename 失败时 best-effort 清理 tmp，避免磁盘残留半成品。
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        return Err(AppError::internal(&format!("rename payload 失败: {e}")));
+    }
 
     let payload_path = format!("static/packs/{}/{}/{}", pack_id, q.version, filename);
     let size_bytes = body.len() as i64;
@@ -306,13 +310,20 @@ async fn upload_version(
     let pack_id_owned = pack_id.clone();
     let description = q.description.clone();
     let v_clone = v.clone();
-    state
+    let db_res = state
         .run_store_task("admin.resource_packs.upload", move |store| {
             store.upsert_resource_pack(&pack_id_owned, description.as_deref())?;
             store.insert_pack_version(&v_clone)?;
             Ok::<_, crate::store::StoreError>(())
         })
-        .await??;
+        .await;
+    if !matches!(&db_res, Ok(Ok(()))) {
+        // DB insert 失败：rename 已成功、目标文件已落盘但无 DB 记录，成为孤儿文件——
+        // 且 409 去重只查 DB，重传同版本号会走到 rename 覆盖它。best-effort 清理刚落盘的
+        // 目标文件（tmp 已被 rename 移走，无需再清），失败仅意味着残留孤儿，不影响主错误返回。
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+    db_res??;
     drop(_upload_guard);
 
     // v1.1-P2.10：写 admin 审计（资源包上传），失败不影响主流程
@@ -449,12 +460,14 @@ async fn set_active(
         }
     }
 
-    // 泛化上面 web-app 专属的 WEBAPP_CHANNEL_MISMATCH 保护：非 web-app pack 此前完全没有这层
-    // 校验——resource_pack_active FK 只约束 (pack_id,version)，不约束 channel，激活请求能把任意
-    // channel 下的版本号错误地挂到另一个 channel 的激活指针上，悄悄覆盖掉该 channel 原本工作
-    // 正常的旧指针；事后 get_active_pack_version 的 channel JOIN 不匹配，该 channel 直接 404，
-    // 此前无任何报错提示（PUT 本身返回 200 activated:true）。
-    if pack_id != WEBAPP_PACK_ID {
+    // 泛化上面 web-app 专属的 WEBAPP_CHANNEL_MISMATCH 保护：resource_pack_active FK 只约束
+    // (pack_id,version)，不约束 channel，激活请求能把任意 channel 下的版本号错误地挂到另一个
+    // channel 的激活指针上，悄悄覆盖掉该 channel 原本工作正常的旧指针；事后
+    // get_active_pack_version 的 channel JOIN 不匹配，该 channel 直接 404，此前无任何报错提示
+    // （PUT 本身返回 200 activated:true）。条件是「非（web-app 且 stable）」而非「非 web-app」：
+    // 上方 web-app 专属分支只覆盖 stable（托管根切换），web-app 的 beta/internal 激活不进那个
+    // 分支，必须走这里补齐频道校验与已下架拒绝，否则留校验盲区。
+    if !(pack_id == WEBAPP_PACK_ID && channel == ResourcePackChannel::Stable) {
         let pid = pack_id.clone();
         let ver = body.version.clone();
         let target = state
@@ -466,6 +479,15 @@ async fn set_active(
             .ok_or_else(|| {
                 AppError::not_found(&format!("{} 版本 {} 不存在，无法激活", pack_id, body.version))
             })?;
+        // 拒绝激活已软删除版本（对齐 web-app@stable 分支）：get_pack_version 不过滤
+        // deactivated_at，而 manifest 读取的 get_active_pack_version 带 IS NULL 过滤，
+        // 放行会造成「激活成功但 manifest 404」的静默脱钩。
+        if target.deactivated_at.is_some() {
+            return Err(AppError::bad_request(
+                "PACK_VERSION_DEACTIVATED",
+                &format!("{} 版本 {} 已下架，不能激活", pack_id, body.version),
+            ));
+        }
         if target.channel != channel {
             return Err(AppError::bad_request(
                 "PACK_CHANNEL_MISMATCH",
@@ -562,50 +584,57 @@ async fn deactivate_version(
     // null，但 /web-app/current/* 仍在物理服务这份"已下线"的构建，两者失配、直接违反该不变式。
     // 激活路径为 web-app 做了 WEBAPP_ACTIVATE_LOCK + 拒绝激活已停用版本等多层保护，这里补齐
     // 对称的另一半：删除前先查是否为当前激活版本，是则要求先切换，不做静默失配。
-    if pack_id == WEBAPP_PACK_ID {
-        let pid = pack_id.clone();
-        let ver = version.clone();
-        let active_channels = state
-            .run_store_task(
-                "admin.resource_packs.check_webapp_active_before_delete",
-                move |store| {
-                    [
-                        ResourcePackChannel::Stable,
-                        ResourcePackChannel::Beta,
-                        ResourcePackChannel::Internal,
-                    ]
-                    .into_iter()
-                    .filter(|&ch| {
-                        store
-                            .get_active_pack_version(&pid, ch)
-                            .ok()
-                            .flatten()
-                            .is_some_and(|v| v.version == ver)
-                    })
-                    .collect::<Vec<_>>()
-                },
-            )
-            .await?;
-        if !active_channels.is_empty() {
-            let names: Vec<&str> = active_channels.iter().map(|c| c.as_str()).collect();
-            return Err(AppError::conflict(
-                "PACK_VERSION_ACTIVE",
-                &format!(
-                    "版本 {} 正在 web-app {} 通道激活中，请先切换到其它版本再删除",
-                    version,
-                    names.join("/")
-                ),
-            ));
-        }
-    }
+    //
+    // 互斥与原子性：web-app 时持 WEBAPP_ACTIVATE_LOCK 与 set_active 互斥，且「预检激活状态 +
+    // 软删」合并进单个 store task 顺序执行——否则预检通过后、软删落库前的窗口内并发激活同一
+    // 版本，会绕过本保护删掉刚激活的版本，重现失配。guard 持有至软删完成。
+    let _webapp_guard = if pack_id == WEBAPP_PACK_ID {
+        Some(WEBAPP_ACTIVATE_LOCK.lock().await)
+    } else {
+        None
+    };
 
-    let pack_id_for_db = pack_id.clone();
-    let version_for_db = version.clone();
-    state
+    let is_webapp = pack_id == WEBAPP_PACK_ID;
+    let pid = pack_id.clone();
+    let ver = version.clone();
+    let active_channels = state
         .run_store_task("admin.resource_packs.deactivate", move |store| {
-            store.deactivate_pack_version(&pack_id_for_db, &version_for_db)
+            if is_webapp {
+                let mut hit: Vec<ResourcePackChannel> = Vec::new();
+                for ch in [
+                    ResourcePackChannel::Stable,
+                    ResourcePackChannel::Beta,
+                    ResourcePackChannel::Internal,
+                ] {
+                    // DB 错误用 ? 传播（fail-closed）：此前 .ok().flatten() 把查询失败当
+                    // "未激活"，DB 抖动时会错误放行删除当前激活版本，保护形同虚设。
+                    if store
+                        .get_active_pack_version(&pid, ch)?
+                        .is_some_and(|v| v.version == ver)
+                    {
+                        hit.push(ch);
+                    }
+                }
+                if !hit.is_empty() {
+                    return Ok(hit);
+                }
+            }
+            store.deactivate_pack_version(&pid, &ver)?;
+            Ok::<_, crate::store::StoreError>(Vec::new())
         })
         .await??;
+    if !active_channels.is_empty() {
+        let names: Vec<&str> = active_channels.iter().map(|c| c.as_str()).collect();
+        return Err(AppError::conflict(
+            "PACK_VERSION_ACTIVE",
+            &format!(
+                "版本 {} 正在 web-app {} 通道激活中，请先切换到其它版本再删除",
+                version,
+                names.join("/")
+            ),
+        ));
+    }
+    drop(_webapp_guard);
 
     // v1.1-P2.10：软删除（下架）审计
     write_admin_audit(

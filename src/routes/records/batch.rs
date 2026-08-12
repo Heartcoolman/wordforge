@@ -17,10 +17,7 @@ use crate::store::operations::learning_sessions::LearningSession;
 use crate::store::operations::records::LearningRecord;
 use crate::store::operations::word_states::{WordLearningState, WordState};
 
-use super::single::{
-    capture_user_state_snapshot, restore_user_state_snapshot, CreateRecordRequest,
-    CreateRecordResponse,
-};
+use super::single::{acquire_user_pipeline_lock, CreateRecordRequest, CreateRecordResponse};
 
 pub fn router() -> Router<AppState> {
     Router::new().route("/batch", post(batch_create_records))
@@ -51,14 +48,7 @@ async fn batch_create_records(
         ));
     }
 
-    // S6: 在批量首条前捕获一次用户级快照
     let user_id = auth.user_id;
-    let user_snapshot = state
-        .run_store_task("records.batch.snapshot", {
-            let user_id = user_id.clone();
-            move |store| capture_user_state_snapshot(&store, &user_id)
-        })
-        .await??;
 
     let mut results: Vec<CreateRecordResponse> = Vec::new();
     let mut errors = Vec::new();
@@ -75,17 +65,11 @@ async fn batch_create_records(
         }
     }
 
-    // 如果全部失败（无新记录写入），回滚到初始用户状态
+    // 批级"全部失败回滚"已废除：per-record 快照/回滚现与 single 同款、含 user 级键
+    //（user_state/ige/trust/swd/user_elo+trend），每条失败已在自身临界区内完整还原。
+    // 保留批级回滚反而有害——批前快照在 per-user 锁外捕获，回滚会把批处理期间并发请求
+    // 已提交的用户状态一并覆盖（与 per-record 快照竞态同类）。
     let has_new_records = results.iter().any(|r| !r.duplicate);
-    if !has_new_records && !errors.is_empty() {
-        state
-            .run_store_task("records.batch.restore_user_snapshot", {
-                let user_id = user_id.clone();
-                let user_snapshot = user_snapshot.clone();
-                move |store| restore_user_state_snapshot(&store, &user_id, &user_snapshot)
-            })
-            .await?;
-    }
 
     // m037 软拦截:部分/全部失败时告警(admin 监控 + 给该 user 应用内通知),不阻断响应。
     if !errors.is_empty() {
@@ -121,7 +105,8 @@ async fn batch_create_records(
     }
 }
 
-/// S5: 批量场景下的单条记录处理，只捕获 word 级快照（mastery + word_elo）
+/// S5: 批量场景下的单条记录处理。快照/回滚与 single 同款（word 级 + user 级全量，
+/// 见 capture_engine_state_snapshot），per-record 失败在自身临界区内完整还原。
 pub(crate) async fn process_batch_record(
     user_id: &str,
     req: &CreateRecordRequest,
@@ -192,47 +177,9 @@ pub(crate) async fn process_batch_record(
         });
     }
 
-    // S6: 只捕获 word 级状态。③ 多痕迹：快照 legacy 键 + 本次 mode 键（不预知 arm flag，两键全捕获）。
-    let (
-        prev_mastery_states,
-        prev_word_elo,
-        prev_word_trend_select,
-        prev_user_elo,
-        prev_word_contrib,
-        prev_evm_state,
-    ) = state
-        .run_store_task("records.batch.snapshot", {
-            let user_id = user_id_owned.clone();
-            let word_id = word_id.clone();
-            let question_mode = req.question_mode.clone();
-            move |store| {
-                let legacy_key = format!("mastery:{word_id}");
-                let mut mastery_states: Vec<(String, Option<serde_json::Value>)> = vec![(
-                    legacy_key.clone(),
-                    store.get_engine_algo_state(&user_id, &legacy_key)?,
-                )];
-                if let Some(m) = question_mode.as_deref() {
-                    let mode_key =
-                        crate::amas::memory::mastery::mastery_state_key(&word_id, Some(m), true);
-                    if mode_key != legacy_key {
-                        let prev = store.get_engine_algo_state(&user_id, &mode_key)?;
-                        mastery_states.push((mode_key, prev));
-                    }
-                }
-                // update_memory 与 mastery/ELO 同一原子 tx 一并写 evm:{word_id}，此前快照/回滚
-                // 都没覆盖这个键，见 restore 处注释。
-                let evm_state = store.get_engine_algo_state(&user_id, &format!("evm:{word_id}"))?;
-                Ok::<_, crate::store::StoreError>((
-                    mastery_states,
-                    store.get_word_elo(&word_id)?,
-                    store.get_word_elo_trend_select(&word_id)?,
-                    store.get_user_elo(&user_id)?,
-                    store.get_word_elo_user_contrib(&user_id, &word_id)?,
-                    evm_state,
-                ))
-            }
-        })
-        .await??;
+    // per-user 流水线互斥（与 single 同款，见 USER_PIPELINE_LOCKS）：串行化同用户
+    // 「AMAS → tx2」流水线，保持事件应用顺序与落库顺序一致。
+    let _pipeline_guard = acquire_user_pipeline_lock(user_id).await;
 
     let amas_result = state
         .amas()
@@ -257,12 +204,13 @@ pub(crate) async fn process_batch_record(
             },
             &record.id,
             request_id,
+            // 正规学习流：计入全局 ELO 与 mastery 边沿流水（amas 诊断端点传 false）。
+            true,
         )
         .await?;
     // W1-1 并发收口：None 表示并发同 client_record_id 请求抢先写入幂等标记、本次 AMAS 已整笔回滚，
     // 走与 already_processed 一致的裸记录回放（不重复累加 ELO/mastery/trust）。
-    // batch per-record 不回滚 swd（与旧实现一致：swd 由批级快照统一回滚），丢弃 appended_seq。
-    let Some((amas_result, _swd_appended_seq)) = amas_result else {
+    let Some((amas_result, swd_appended_seq)) = amas_result else {
         let record_for_replay = record.clone();
         state
             .run_store_task("records.batch.persist_replayed", move |store| {
@@ -277,6 +225,8 @@ pub(crate) async fn process_batch_record(
             duplicate: true,
         });
     };
+    // S2 收尾：快照回滚已删除，swd append 句柄不再需要（重试恢复统一走幂等账本短路）。
+    let _ = swd_appended_seq;
     let amas_result_for_store = amas_result.clone();
 
     state
@@ -311,12 +261,8 @@ pub(crate) async fn process_batch_record(
 
                     wls.state = new_state;
                     wls.mastery_level = wm.memory_strength;
-                    wls.total_attempts += 1;
-                    if req_for_store.is_correct {
-                        wls.correct_streak += 1;
-                    } else {
-                        wls.correct_streak = 0;
-                    }
+                    // total_attempts/correct_streak 不在此累加：store 层以 SQL 相对自增落库，
+                    // struct 字段仅占位、写入时被忽略（同 single.rs 注释）。
                     if wm.next_review_interval_secs > 0 {
                         wls.next_review_date = Some(
                             Utc::now() + chrono::Duration::seconds(wm.next_review_interval_secs),
@@ -327,6 +273,7 @@ pub(crate) async fn process_batch_record(
                 }
                 // Passed to create_record_with_updates as a delta — see single.rs's identical
                 // comment / store.rs's create_record_with_updates learning_sessions comment.
+                // 语义为「处于 Mastered 级」的水平判定而非进入边沿（同 single.rs 注释）。
                 let just_mastered = amas_result_for_store
                     .word_mastery
                     .as_ref()
@@ -362,37 +309,16 @@ pub(crate) async fn process_batch_record(
                         just_mastered,
                     )
                     .map_err(|error| {
-                        // W1-1：原子回滚 word 级状态（mastery + ELO）+ 清幂等标记（同一 tx）。
-                        // 守「标记存在 ⟺ AMAS 已应用」不变式，消除原多步非原子写之间的崩溃窗口
-                        // （重试丢 AMAS）。batch 不碰 user_state（user 级快照在批级单独处理）。
-                        let mut algo_states: Vec<(&str, &Option<serde_json::Value>)> =
-                            Vec::with_capacity(prev_mastery_states.len() + 1);
-                        for (k, prev) in &prev_mastery_states {
-                            algo_states.push((k.as_str(), prev));
-                        }
-                        // DB 写失败在此回滚 mastery/ELO 时一并复位 evm:{word_id}，否则会留下"多一次
-                        // 未计入 review_count 的语境"，污染该词后续 interval_modifier。
-                        let evm_key = format!("evm:{word_id}");
-                        algo_states.push((evm_key.as_str(), &prev_evm_state));
-                        let restore = crate::store::operations::engine::EngineStateRestore {
-                            user_id: &user_id_owned,
-                            user_state: None,
-                            algo_states: &algo_states,
-                            user_elo: Some(&prev_user_elo),
-                            word_elo: Some((&word_id, &prev_word_elo)),
-                            word_elo_trend_select: Some((
-                                &word_id,
-                                prev_word_trend_select.0,
-                                prev_word_trend_select.1,
-                            )),
-                            word_elo_contrib: Some((&word_id, prev_word_contrib)),
-                            // batch per-record 不回滚 swd（批级统一处理）。
-                            swd_delete_seq: None,
-                            clear_marker_record_id: Some(&record_for_store.id),
-                        };
-                        if let Err(e) = store.restore_engine_state_atomic(&restore) {
-                            tracing::warn!(error = %e, "batch 原子回滚 word 状态+清标记失败");
-                        }
+                        // S2 收尾：手动快照回滚已删除（与 single 同款语义）。tx2 失败时 AMAS 状态
+                        // 与幂等标记原样保留，客户端离线队列同 clientRecordId 重发命中幂等账本
+                        // 短路、仅补落裸记录行——无 AMAS 双重累加，无陈旧快照覆盖并发已提交状态。
+                        tracing::warn!(
+                            user_id = %user_id_owned,
+                            word_id = %word_id,
+                            record_id = %record_for_store.id,
+                            error = %error,
+                            "批内记录落库失败（AMAS 已应用、标记保留），等待客户端重试补落记录行"
+                        );
                         AppError::internal(&error.to_string())
                     })?;
                 Ok(())

@@ -12,6 +12,7 @@ import { api, maintenanceActive, setMaintenanceActive, setUpdateInfo } from '@/a
 import MaintenancePage from '@/pages/MaintenancePage';
 import { UpdateBanner } from '@/components/ui/UpdateBanner';
 import { startProbeBridge, stopProbeBridge } from '@/workers/probe/api-bridge';
+import { startOpsAlerts, stopOpsAlerts } from '@/workers/alerts';
 import { installRingBuffers } from '@/workers/probe/ring-buffers';
 
 // bundle 启动时立刻注册环形 buffer（不依赖 onMount，要尽早覆盖 console / error / fetch）。
@@ -152,14 +153,17 @@ function MaintenanceProvider(props: RouteSectionProps) {
   onMount(() => {
     checkStatus();
     pollTimer = setInterval(checkStatus, 30_000);
-    // 远程探针：客户端 worker bridge 全局只启动一次；connectSseStream 内部按 token
-    // 自适应（无 token → 401 → 自动重试，admin 登录后会自然恢复）。
+    // 远程探针：客户端 worker bridge 全局只启动一次；connectSseStream 连 admin 专用
+    // SSE 端点，401 时派发 admin:unauthorized 并暂停重连，admin 登录后自动恢复。
     startProbeBridge();
+    // 运维告警（incident / worker_missed / llm_budget_exceeded）→ 全局 toast。
+    startOpsAlerts();
   });
 
   onCleanup(() => {
     if (pollTimer) clearInterval(pollTimer);
     stopProbeBridge();
+    stopOpsAlerts();
   });
 
   return (

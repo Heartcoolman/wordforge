@@ -897,17 +897,17 @@ async fn retention_cohort(
 /// 解析出的窗口:`[start, end]` 闭区间(`YYYY-MM-DD`),`end_excl` = end 次日(供
 /// `created_at < end_excl` 半开比较),`days` = 窗口天数;另带"上一等长窗口"
 /// `[prev_start, prev_end_excl)`(紧邻在 start 之前、等长往前推)。
-struct Window {
-    start: String,
-    end: String,
-    end_excl: String,
-    days: i64,
-    prev_start: String,
-    prev_end_excl: String,
+pub(super) struct Window {
+    pub(super) start: String,
+    pub(super) end: String,
+    pub(super) end_excl: String,
+    pub(super) days: i64,
+    pub(super) prev_start: String,
+    pub(super) prev_end_excl: String,
 }
 
 #[derive(Debug, Deserialize)]
-struct WindowQuery {
+pub(super) struct WindowQuery {
     #[serde(default = "default_days")]
     days: u32,
     from: Option<String>,
@@ -923,7 +923,7 @@ fn parse_ymd(s: &str) -> Result<NaiveDate, AppError> {
 
 /// from&to 都给时优先(闭区间);否则用 days(默认 7,仅允许 7/14/30/90),
 /// 窗口 = [today-(days-1), today]。
-fn resolve_window(q: &WindowQuery) -> Result<Window, AppError> {
+pub(super) fn resolve_window(q: &WindowQuery) -> Result<Window, AppError> {
     let (start_d, end_d) = match (q.from.as_deref(), q.to.as_deref()) {
         (Some(f), Some(t)) => {
             let (f, t) = (parse_ymd(f)?, parse_ymd(t)?);
@@ -956,7 +956,7 @@ fn resolve_window(q: &WindowQuery) -> Result<Window, AppError> {
     })
 }
 
-fn delta_pct(cur: f64, prev: f64) -> Option<f64> {
+pub(super) fn delta_pct(cur: f64, prev: f64) -> Option<f64> {
     if prev == 0.0 {
         None
     } else {

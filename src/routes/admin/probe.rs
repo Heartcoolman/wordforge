@@ -128,7 +128,7 @@ async fn dispatch_probe(
 
     // 目标集合：device_ids 显式列表 + all_online 二选一。
     let device_ids: Vec<String> = if req.targets.all_online {
-        state
+        let mut ids: Vec<String> = state
             .active_sse()
             .iter()
             .filter_map(|e| {
@@ -138,7 +138,18 @@ async fn dispatch_probe(
                     Some(e.key().clone())
                 }
             })
-            .collect()
+            .collect();
+        // admin 通道注册的设备也算在线（纯 admin 会话的探针桥）；键可能是 conn_id
+        // 回退值（非法/缺失 x-device-id），仅保留合法 device_id 格式的键。
+        for e in state.admin_sse().iter() {
+            if !e.value().is_empty()
+                && crate::middleware::device::is_valid_device_id(e.key())
+                && !ids.contains(e.key())
+            {
+                ids.push(e.key().clone());
+            }
+        }
+        ids
     } else {
         req.targets
             .device_ids
@@ -178,7 +189,9 @@ async fn dispatch_probe(
             .active_sse()
             .get(did)
             .map(|c| !c.is_empty())
-            .unwrap_or(false);
+            .unwrap_or(false)
+            // admin SSE 连接同样视为在线（探针桥在纯 admin 会话下可用）。
+            || state.admin_sse_device_online(did);
         pairs.push(Pair {
             device_id: did.clone(),
             request_id: uuid::Uuid::new_v4().to_string(),
@@ -243,12 +256,23 @@ async fn dispatch_probe(
         if !p.online {
             continue;
         }
+        let event = SseEvent::ProbeRequest {
+            request_id: p.request_id.clone(),
+            batch_id: batch_id.clone(),
+            script_b64: script_b64.clone(),
+            timeout_ms,
+            ctx_version: PROBE_CTX_VERSION_LATEST,
+        };
+        // admin 通道：注册了该 device 的 admin 连接直接投递（AdminAuthUser 已鉴权的
+        // 可信运维会话，不做设备归属过滤；纯 admin 会话下探针桥由此可用）。
+        state.send_to_admin_sse_device(&p.device_id, &event);
+        // 用户通道：保持既有 owner 过滤语义不变。
         let owner = match owner_by_device.get(&p.device_id).and_then(|o| o.as_deref()) {
             Some(uid) => uid,
             None => {
                 tracing::warn!(
                     device_id = %p.device_id,
-                    "probe_request 跳过：设备无确定 owner（未注册/未认领），不向陈旧连接投递"
+                    "probe_request 跳过用户通道：设备无确定 owner（未注册/未认领），不向陈旧连接投递"
                 );
                 continue;
             }
@@ -258,13 +282,7 @@ async fn dispatch_probe(
                 if conn.user_id != owner {
                     continue;
                 }
-                let _ = conn.tx.try_send(SseEvent::ProbeRequest {
-                    request_id: p.request_id.clone(),
-                    batch_id: batch_id.clone(),
-                    script_b64: script_b64.clone(),
-                    timeout_ms,
-                    ctx_version: PROBE_CTX_VERSION_LATEST,
-                });
+                let _ = conn.tx.try_send(event.clone());
             }
         }
     }
@@ -414,7 +432,13 @@ async fn confirm_probe(
     .map_err(|e| AppError::internal(&format!("spawn_blocking: {e}")))?
     .map_err(|e| AppError::internal(&format!("confirmed_at update: {e}")))?;
 
-    // P2: 只向 user_id == owner 的连接推 probe_confirm，防 owner 变更后陈旧连接收到。
+    let confirm_event = SseEvent::ProbeConfirm {
+        request_id: request_id.clone(),
+        confirm_token: ticket.token.clone(),
+    };
+    // admin 通道：注册了该 device 的 admin 连接直接投递（与 probe_request 同一策略）。
+    state.send_to_admin_sse_device(&ticket.device_id, &confirm_event);
+    // P2: 用户通道只向 user_id == owner 的连接推 probe_confirm，防 owner 变更后陈旧连接收到。
     match owner.as_deref() {
         Some(owner_uid) => {
             if let Some(conns) = state.active_sse().get(&ticket.device_id) {
@@ -422,17 +446,14 @@ async fn confirm_probe(
                     if conn.user_id != owner_uid {
                         continue;
                     }
-                    let _ = conn.tx.try_send(SseEvent::ProbeConfirm {
-                        request_id: request_id.clone(),
-                        confirm_token: ticket.token.clone(),
-                    });
+                    let _ = conn.tx.try_send(confirm_event.clone());
                 }
             }
         }
         None => {
             tracing::warn!(
                 device_id = %ticket.device_id,
-                "probe_confirm 跳过：设备无确定 owner（未注册/未认领），不向陈旧连接投递"
+                "probe_confirm 跳过用户通道：设备无确定 owner（未注册/未认领），不向陈旧连接投递"
             );
         }
     }

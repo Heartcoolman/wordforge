@@ -6,7 +6,7 @@ info:
 
     路径基础路径 `/api`（见 servers[0].url）。
     本规格由 `src/openapi.rs` 自动生成，通过 `cargo test --test openapi_export` 导出，CI 以 `git diff --exit-code docs/openapi.yaml` 防止规格漂移（drift）。
-  version: 1.2.0-beta.28
+  version: 1.3.0-beta.1
 servers:
 - url: /api
 paths:
@@ -283,9 +283,57 @@ paths:
       tags:
       - learning
       summary: 开始或恢复学习会话
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                targetMasteryCount:
+                  type: integer
+        required: false
       responses:
         '200':
           description: 会话（新建或恢复既有 active 会话）
+          content:
+            application/json:
+              schema:
+                allOf:
+                - type: object
+                  required:
+                  - success
+                  properties:
+                    success:
+                      type: boolean
+                - type: object
+                  required:
+                  - data
+                  properties:
+                    data:
+                      type: object
+        '401':
+          description: 令牌缺失或已过期 — AUTH_UNAUTHORIZED
+      security:
+      - bearerAuth: []
+  /learning/sessions:
+    get:
+      tags:
+      - learning
+      summary: 获取学习会话列表
+      parameters:
+      - name: page
+        in: query
+        required: false
+        schema:
+          type: integer
+      - name: perPage
+        in: query
+        required: false
+        schema:
+          type: integer
+      responses:
+        '200':
+          description: 分页学习会话列表
           content:
             application/json:
               schema:
@@ -423,7 +471,36 @@ paths:
                     data:
                       type: object
         '202':
-          description: RECORDS_OUTBOX_ASYNC 开启时的异步落库确认：`{accepted, async, clientRecordId}`，不含 record/amasResult 字段，响应形状与 200/201 不同
+          description: 'v1.3.0 起默认（RECORDS_OUTBOX_ASYNC=true）的异步落库确认。裸 JSON 对象（非 {success,data} 信封）：`{accepted: true, async: true, clientRecordId: string}`（缺省时服务端生成），不含 record/amasResult 字段，响应形状与 200/201 不同。设 RECORDS_OUTBOX_ASYNC=false 回退同步老路。'
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - accepted
+                - async
+                - clientRecordId
+                properties:
+                  accepted:
+                    type: boolean
+                  async:
+                    type: boolean
+                  clientRecordId:
+                    type: string
+        '400':
+          description: 请求体校验失败 — VALIDATION_ERROR / INVALID_REQUEST_BODY
+        '401':
+          description: 令牌缺失或已过期 — AUTH_UNAUTHORIZED
+      security:
+      - bearerAuth: []
+  /resource-packs:
+    get:
+      tags:
+      - resource-packs
+      summary: 列出所有资源包元数据
+      responses:
+        '200':
+          description: 资源包元数据数组（{success, data} 信封，data 为数组）
           content:
             application/json:
               schema:
@@ -440,20 +517,6 @@ paths:
                   properties:
                     data:
                       type: object
-        '400':
-          description: 请求体校验失败 — VALIDATION_ERROR / INVALID_REQUEST_BODY
-        '401':
-          description: 令牌缺失或已过期 — AUTH_UNAUTHORIZED
-      security:
-      - bearerAuth: []
-  /resource-packs:
-    get:
-      tags:
-      - resource-packs
-      summary: 列出所有资源包元数据
-      responses:
-        '200':
-          description: 资源包元数据数组（裸 JSON，非 {success,data} 信封）
   /resource-packs/public-key:
     get:
       tags:
@@ -470,7 +533,7 @@ paths:
       tags:
       - resource-packs
       summary: 获取指定 pack 当前 channel 激活版本的 manifest
-      description: appVersion/locale 必填，channel 缺省 stable。支持 If-None-Match，命中返回 304。字段名严格对齐 docs/backend-handoff-resource-pack-v1.1.md §2.1，裸 JSON（非信封）。
+      description: appVersion/locale 必填，channel 缺省 stable。支持 If-None-Match，命中返回 304。裸 JSON（非信封），字段名以 ResourcePackManifest 序列化输出为准（注意是 downloadURL，URL 三字母全大写）。
       parameters:
       - name: packId
         in: path
@@ -479,12 +542,12 @@ paths:
           type: string
       - name: appVersion
         in: query
-        required: false
+        required: true
         schema:
           type: string
       - name: locale
         in: query
-        required: false
+        required: true
         schema:
           type: string
       - name: channel
@@ -494,7 +557,7 @@ paths:
           type: string
       responses:
         '200':
-          description: '`{packId, version, downloadUrl, sha256, sizeBytes, minAppVersion, channel, signature, signatureAlgorithm}`'
+          description: '`{packId, version, downloadURL, sha256, sizeBytes, minAppVersion, channel, signature, signatureAlgorithm}`'
         '304':
           description: If-None-Match 命中，无 body
         '400':
@@ -583,12 +646,73 @@ paths:
           description: 令牌缺失或已过期 — AUTH_UNAUTHORIZED
       security:
       - bearerAuth: []
+  /telemetry/app-events:
+    post:
+      tags:
+      - telemetry
+      summary: 批量上报客户端埋点命名事件（behavior/error/perf）
+      description: m073 埋点事件流。批量 ≤50 条/请求；逐条校验部分成功（errors[] 带 index/code），不整批 400。name 须匹配 ^[a-z0-9_]{1,64}$；props 为 ≤16 键标量对象（字符串 ≤128 字符、序列化 ≤2KB）。clientTsMs 钳制 [now-7d, now+5min]（离线补传窗，宽于 learning 事件的 30min 系有意为之）。(deviceId, clientEventId) 跨请求幂等去重。behavior/perf 受 probe_sampling_config 的 app_behavior/app_perf 行采样，error 恒不采样。须带 X-Device-Id / X-Device-Platform / X-App-Version 头，设备须已注册。
+      parameters:
+      - name: X-Device-Id
+        in: header
+        required: true
+        schema:
+          type: string
+      - name: X-Device-Platform
+        in: header
+        required: true
+        schema:
+          type: string
+      - name: X-App-Version
+        in: header
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AppEventsRequest'
+        required: true
+      responses:
+        '200':
+          description: '`{accepted, duplicates, sampledOut, failed, errors: [{index, clientEventId, code, message}]}`；限流命中软丢弃 `{accepted: 0, throttled: true}`。逐条错误码：APP_EVENT_INVALID_ID / APP_EVENT_DUPLICATE_ID / APP_EVENT_INVALID_NAME / APP_EVENT_INVALID_CATEGORY / APP_EVENT_INVALID_TS / APP_EVENT_INVALID_PROPS'
+          content:
+            application/json:
+              schema:
+                allOf:
+                - type: object
+                  required:
+                  - success
+                  properties:
+                    success:
+                      type: boolean
+                - type: object
+                  required:
+                  - data
+                  properties:
+                    data:
+                      type: object
+        '400':
+          description: 缺头 — MISSING_DEVICE_ID / MISSING_OS / MISSING_APP_VERSION；X-Device-Id 格式非法 — INVALID_DEVICE_ID；批量超限(>50) — APP_EVENTS_TOO_LARGE
+        '401':
+          description: 令牌缺失或已过期 — AUTH_UNAUTHORIZED
+        '403':
+          description: 设备未注册 / 设备归属与当前账号不符 — DEVICE_NOT_REGISTERED / DEVICE_OWNERSHIP_MISMATCH
+      security:
+      - bearerAuth: []
   /telemetry/resource-pack-install:
     post:
       tags:
       - telemetry
       summary: 上报资源包安装结果
       description: outcome 五态（m070 起）：installed / verify_failed / rollback / download_failed / apply_failed。须带 X-Device-Id 头，设备须已通过正常登录注册，否则 403。
+      parameters:
+      - name: X-Device-Id
+        in: header
+        required: true
+        schema:
+          type: string
       requestBody:
         content:
           application/json:
@@ -615,7 +739,7 @@ paths:
                     data:
                       type: object
         '400':
-          description: 请求体校验失败 — VALIDATION_ERROR / INVALID_REQUEST_BODY
+          description: 请求体校验失败 — VALIDATION_ERROR / INVALID_REQUEST_BODY；缺 X-Device-Id 头 — MISSING_DEVICE_ID；X-Device-Id 格式非法 — INVALID_DEVICE_ID
         '401':
           description: 令牌缺失或已过期 — AUTH_UNAUTHORIZED
         '403':
@@ -726,7 +850,7 @@ paths:
       parameters:
       - name: wordIds
         in: query
-        required: false
+        required: true
         schema:
           type: string
       responses:
@@ -881,6 +1005,43 @@ paths:
           description: 令牌缺失或已过期 — AUTH_UNAUTHORIZED
       security:
       - bearerAuth: []
+  /word-states/batch:
+    post:
+      tags:
+      - word-states
+      summary: 批量查询单词学习状态
+      description: 读侧批量查询（区别于 /word-states/batch-update 写侧）。数量上限见 config.rs limits.max_batch_size，超限 400 BATCH_TOO_LARGE。
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BatchQueryRequest'
+        required: true
+      responses:
+        '200':
+          description: WordLearningState 数组（每项附 bookmarked）
+          content:
+            application/json:
+              schema:
+                allOf:
+                - type: object
+                  required:
+                  - success
+                  properties:
+                    success:
+                      type: boolean
+                - type: object
+                  required:
+                  - data
+                  properties:
+                    data:
+                      type: object
+        '400':
+          description: 请求体校验失败 — VALIDATION_ERROR / INVALID_REQUEST_BODY
+        '401':
+          description: 令牌缺失或已过期 — AUTH_UNAUTHORIZED
+      security:
+      - bearerAuth: []
   /word-states/batch-update:
     post:
       tags:
@@ -896,6 +1057,82 @@ paths:
       responses:
         '200':
           description: '`{updated: number}`，实际更新的条数'
+          content:
+            application/json:
+              schema:
+                allOf:
+                - type: object
+                  required:
+                  - success
+                  properties:
+                    success:
+                      type: boolean
+                - type: object
+                  required:
+                  - data
+                  properties:
+                    data:
+                      type: object
+        '400':
+          description: 请求体校验失败 — VALIDATION_ERROR / INVALID_REQUEST_BODY
+        '401':
+          description: 令牌缺失或已过期 — AUTH_UNAUTHORIZED
+      security:
+      - bearerAuth: []
+  /word-states/due/list:
+    get:
+      tags:
+      - word-states
+      summary: 获取当前已到期的复习单词列表
+      description: 「已到期」含历史逾期（next_review_date <= now，非仅今日窗口）。limit 缺省 50，钳到 1..=200；到期总数超过 limit 时仅返回一页，真实总数看 /word-states/stats/overview 的 dueCount。
+      parameters:
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+      responses:
+        '200':
+          description: 到期 WordLearningState 数组（每项附 bookmarked）
+          content:
+            application/json:
+              schema:
+                allOf:
+                - type: object
+                  required:
+                  - success
+                  properties:
+                    success:
+                      type: boolean
+                - type: object
+                  required:
+                  - data
+                  properties:
+                    data:
+                      type: object
+        '401':
+          description: 令牌缺失或已过期 — AUTH_UNAUTHORIZED
+      security:
+      - bearerAuth: []
+  /word-states/stats/overview:
+    get:
+      tags:
+      - word-states
+      summary: 单词学习状态统计总览
+      description: category 缺省 all（可选 learning/review，非法值 400 INVALID_CATEGORY）。返回各状态计数 + dueCount / dueReviewEstimatedMinutes。dueCount 可空（序列化时 None 直接省略字段）：当前已到期总数（含历史逾期，未分页真实总量）——注意它恒为全局口径，不随 category 过滤变化。
+      parameters:
+      - name: category
+        in: query
+        required: false
+        schema:
+          type: string
+          enum:
+          - all
+          - learning
+          - review
+      responses:
+        '200':
+          description: 统计总览：`{newCount, learning, reviewing, mastered, forgotten, dueReviewEstimatedMinutes?, dueCount?}`（后两者可空省略）
           content:
             application/json:
               schema:
@@ -1140,6 +1377,44 @@ paths:
       - bearerAuth: []
 components:
   schemas:
+    AppEventsRequest:
+      type: object
+      required:
+      - events
+      properties:
+        events:
+          type: array
+          items:
+            type: object
+            required:
+            - clientEventId
+            - name
+            - category
+            - clientTsMs
+            properties:
+              category:
+                type: string
+                enum:
+                - behavior
+                - error
+                - perf
+              clientEventId:
+                type: string
+              clientTsMs:
+                type: integer
+              name:
+                type: string
+              props:
+                type: object
+    BatchQueryRequest:
+      type: object
+      required:
+      - wordIds
+      properties:
+        wordIds:
+          type: array
+          items:
+            type: string
     BatchUpdateRequest:
       type: object
       required:

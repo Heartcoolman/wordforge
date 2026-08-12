@@ -104,3 +104,20 @@ pub fn rate_limit_hit_snapshot() -> (u64, u64, u64, u64) {
         RATE_LIMIT_HIT_AUTH_BRUTEFORCE.load(Ordering::Relaxed),
     )
 }
+
+/// strict-mode 观测：声明 `x-device-platform: web` 但缺失/非法 `sec-fetch-mode` 的请求
+/// 累计数（仅观测不拒绝——该信号曾被用作硬拒条件，误伤不发送 Sec-Fetch-* 的老浏览器；
+/// 现降级为计数，供评估真实误伤率与伪造平台头的异常模式）。单调递增，不落库。
+pub static STRICT_WEB_CLAIM_WITHOUT_FETCH_METADATA: AtomicU64 = AtomicU64::new(0);
+
+/// 记录一次「声明 web 但缺/非法 sec-fetch-mode」观测命中。
+#[inline]
+pub fn incr_strict_web_claim_without_fetch_metadata() {
+    STRICT_WEB_CLAIM_WITHOUT_FETCH_METADATA.fetch_add(1, Ordering::Relaxed);
+}
+
+/// 读取「声明 web 但缺/非法 sec-fetch-mode」累计计数。
+#[inline]
+pub fn strict_web_claim_without_fetch_metadata() -> u64 {
+    STRICT_WEB_CLAIM_WITHOUT_FETCH_METADATA.load(Ordering::Relaxed)
+}

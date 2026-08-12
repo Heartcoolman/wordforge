@@ -12,7 +12,7 @@ use crate::store::operations::telemetry::TelemetrySummaryInput;
 
 /// BA3a：摄取拒绝码 fire-and-forget 留痕（m061）。摄取早返(400/403)在写库前丢弃了
 /// 拒绝码,此处旁路 spawn 一条 telemetry_ingest_rejections，绝不阻塞/失败响应。
-fn record_ingest_rejection(
+pub(crate) fn record_ingest_rejection(
     state: &AppState,
     code: &'static str,
     device_id: Option<&str>,
@@ -37,6 +37,11 @@ pub fn router() -> Router<AppState> {
         .route("/error", post(report_client_error))
         // v1.1-P0.8：资源包热更安装/校验/回滚 telemetry，对齐对接文档 §7.3
         .route("/resource-pack-install", post(report_resource_pack_install))
+        // m073：客户端埋点命名事件流（批量），实现在 routes/app_events.rs
+        .route(
+            "/app-events",
+            post(crate::routes::app_events::submit_app_events),
+        )
         .layer(DefaultBodyLimit::max(64 * 1024))
 }
 
@@ -139,13 +144,34 @@ struct ClientErrorReport {
     component_stack: Option<String>,
 }
 
+/// 单字段日志清洗上限：4KB。该端点无鉴权，超长字段会放大日志体积。
+const CLIENT_ERROR_FIELD_MAX_BYTES: usize = 4 * 1024;
+
+/// 客户端错误上报字段落日志前的统一清洗：
+/// 1. 截断到 4KB（按 char 边界，避免切碎多字节字符导致 panic）；
+/// 2. 过滤 \n / \r / \x1b(ESC) 等控制字符（替换为空格），防日志注入伪造行 /
+///    ANSI 转义序列污染终端与日志采集链路。制表符保留（无注入风险，利于可读性）。
+fn sanitize_log_field(v: &str) -> String {
+    // 取不超过上限的最大 char 边界（多字节字符不被切碎，结果恒 ≤ 上限）。
+    let mut end = CLIENT_ERROR_FIELD_MAX_BYTES.min(v.len());
+    while end > 0 && !v.is_char_boundary(end) {
+        end -= 1;
+    }
+    let truncated = &v[..end];
+    truncated
+        .chars()
+        .map(|c| if c.is_control() && c != '\t' { ' ' } else { c })
+        .collect()
+}
+
 async fn report_client_error(JsonBody(body): JsonBody<ClientErrorReport>) -> impl IntoResponse {
-    let stack = body.stack.as_deref().unwrap_or("");
-    let url = body.url.as_deref().unwrap_or("");
-    let ua = body.user_agent.as_deref().unwrap_or("");
-    let component_stack = body.component_stack.as_deref().unwrap_or("");
+    let message = sanitize_log_field(&body.message);
+    let stack = sanitize_log_field(body.stack.as_deref().unwrap_or(""));
+    let url = sanitize_log_field(body.url.as_deref().unwrap_or(""));
+    let ua = sanitize_log_field(body.user_agent.as_deref().unwrap_or(""));
+    let component_stack = sanitize_log_field(body.component_stack.as_deref().unwrap_or(""));
     tracing::warn!(
-        message = %body.message,
+        message = %message,
         stack = %stack,
         url = %url,
         user_agent = %ua,
@@ -577,7 +603,7 @@ fn strict_reject_or_warn(
 
 /// 确定性采样桶:hash(device_id + id) mod 10000 / 10000.0 ∈ [0,1)。
 /// 同一 (device_id, id) 复现同一值,与 effective_rate 比较决定是否落库。
-fn sampling_bucket(device_id: &str, id: &str) -> f64 {
+pub(crate) fn sampling_bucket(device_id: &str, id: &str) -> f64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     device_id.hash(&mut hasher);
@@ -698,5 +724,36 @@ fn extract_summary(payload: &serde_json::Value) -> TelemetrySummaryInput {
             .get("featureUsage")
             .and_then(|v| serde_json::to_string(v).ok())
             .unwrap_or_else(|| "{}".to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{sanitize_log_field, CLIENT_ERROR_FIELD_MAX_BYTES};
+
+    #[test]
+    fn sanitize_replaces_control_chars() {
+        let raw = "line1\ninjected\r\x1b[31mred\x1b[0m\ttab-kept\x00nul";
+        let cleaned = sanitize_log_field(raw);
+        assert!(!cleaned.contains('\n'));
+        assert!(!cleaned.contains('\r'));
+        assert!(!cleaned.contains('\x1b'));
+        assert!(!cleaned.contains('\0'));
+        assert!(cleaned.contains('\t'), "制表符应保留");
+        assert!(cleaned.contains("injected"));
+    }
+
+    #[test]
+    fn sanitize_truncates_to_4kb_on_char_boundary() {
+        // 多字节字符（每个「汉」3 字节）填满边界，截断不得 panic 且长度 ≤ 上限。
+        let raw = "汉".repeat(CLIENT_ERROR_FIELD_MAX_BYTES);
+        let cleaned = sanitize_log_field(&raw);
+        assert!(cleaned.len() <= CLIENT_ERROR_FIELD_MAX_BYTES);
+        assert!(!cleaned.is_empty());
+    }
+
+    #[test]
+    fn sanitize_passes_short_clean_text_through() {
+        assert_eq!(sanitize_log_field("normal message 中文"), "normal message 中文");
     }
 }

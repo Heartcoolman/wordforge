@@ -643,3 +643,149 @@ async fn it_suggestion_approve_reject_branches() {
     let (reject_missing_status, _, _) = response_json(reject_missing).await;
     assert_eq!(reject_missing_status, StatusCode::INTERNAL_SERVER_ERROR);
 }
+
+// ─────────── process-event 幂等重放 + ELO 门控（校准事件零副作用） ───────────
+
+/// 注册新用户并返回 (access_token, user_id)。login_and_get_token 不回传 id，
+/// 本文件需要 user_id 直查 store 断言引擎状态。
+async fn register_user_with_id(app: &axum::Router) -> (String, String) {
+    let email = format!("user-{}@test.com", uuid::Uuid::new_v4());
+    let username = format!("user-{}", uuid::Uuid::new_v4().simple());
+    let resp = request(
+        app,
+        Method::POST,
+        "/api/auth/register",
+        Some(serde_json::json!({
+            "email": email,
+            "username": username,
+            "password": "Passw0rd!",
+        })),
+        &[],
+    )
+    .await;
+    let (status, _, body) = response_json(resp).await;
+    assert!(status.is_success(), "register failed: {body}");
+    (
+        body["data"]["accessToken"].as_str().unwrap().to_string(),
+        body["data"]["user"]["id"].as_str().unwrap().to_string(),
+    )
+}
+
+/// 同 clientEventId 重发两次 /api/amas/process-event（验证 apply_elo 门控 + 幂等重放）：
+/// 1) 第二次返回 duplicate_event 占位（重放态），且 sessionId 缺省对齐真实分支的
+///    "{user_id}-session"（不返回空串）；
+/// 2) mastery 状态不二次累加（两次调用后 mastery:{word} blob 相同）；
+/// 3) 校准事件对 ELO 零副作用——apply_elo=false 门控下 user_elo/word_elo 全程不动。
+///    若门控回退成早前的"有幂等键就写 ELO"，**第一次**调用就会把 games 推到 1，此断言立刻红。
+#[tokio::test]
+async fn it_process_event_idempotent_replay_and_zero_elo_side_effect() {
+    let app = spawn_test_server().await;
+    let (token, user_id) = register_user_with_id(&app.app).await;
+    let hdr = [("authorization", auth_header(&token))];
+
+    let word_id = "w-idem-http";
+    let payload = serde_json::json!({
+        "clientEventId": "evt-dup-1",
+        "wordId": word_id,
+        "isCorrect": true,
+        "responseTime": 800,
+    });
+
+    // 首次：正常处理。
+    let first = request(
+        &app.app,
+        Method::POST,
+        "/api/amas/process-event",
+        Some(payload.clone()),
+        &hdr,
+    )
+    .await;
+    let (s1, _, b1) = response_json(first).await;
+    assert_eq!(s1, StatusCode::OK);
+    assert_ne!(
+        b1["data"]["explanation"]["primaryReason"], "duplicate_event",
+        "首次处理不应命中重放态"
+    );
+
+    let store = app.state.store();
+    let mastery_key = format!("mastery:{word_id}");
+    let mastery_after_first = store.get_engine_algo_state(&user_id, &mastery_key).unwrap();
+    assert!(mastery_after_first.is_some(), "首次处理应写入 mastery 状态");
+    // 校准事件零 ELO 副作用：即便携带幂等键，全局 word_elo / user_elo 也不得被推进。
+    assert_eq!(store.get_user_elo(&user_id).unwrap().games, 0);
+    assert_eq!(store.get_word_elo(word_id).unwrap().games, 0);
+
+    // 重发同 clientEventId：重放态占位，状态零变更。
+    let second = request(
+        &app.app,
+        Method::POST,
+        "/api/amas/process-event",
+        Some(payload),
+        &hdr,
+    )
+    .await;
+    let (s2, _, b2) = response_json(second).await;
+    assert_eq!(s2, StatusCode::OK);
+    assert_eq!(b2["data"]["explanation"]["primaryReason"], "duplicate_event");
+    assert_eq!(
+        b2["data"]["sessionId"],
+        serde_json::json!(format!("{user_id}-session")),
+        "重放态 sessionId 缺省必须对齐真实分支，不得为空串"
+    );
+
+    let mastery_after_second = store.get_engine_algo_state(&user_id, &mastery_key).unwrap();
+    assert_eq!(
+        mastery_after_first, mastery_after_second,
+        "重放不得二次累加 mastery"
+    );
+    assert_eq!(store.get_user_elo(&user_id).unwrap().games, 0);
+    assert_eq!(store.get_word_elo(word_id).unwrap().games, 0);
+}
+
+/// clientEventId 入参校验（对齐 records/single.rs 口径）：
+/// 空白串 trim 后视为 None（旧非幂等路径，正常 200 且不落 processed_events）；
+/// 超长（>128）→ 400 AMAS_INVALID_EVENT_ID。
+#[tokio::test]
+async fn it_process_event_client_event_id_normalization() {
+    let app = spawn_test_server().await;
+    let (token, user_id) = register_user_with_id(&app.app).await;
+    let hdr = [("authorization", auth_header(&token))];
+
+    // 空白串：视为未携带幂等键。
+    let blank = request(
+        &app.app,
+        Method::POST,
+        "/api/amas/process-event",
+        Some(serde_json::json!({
+            "clientEventId": "   ",
+            "wordId": "w-blank-id",
+            "isCorrect": true,
+            "responseTime": 500,
+        })),
+        &hdr,
+    )
+    .await;
+    let (blank_status, _, blank_body) = response_json(blank).await;
+    assert_eq!(blank_status, StatusCode::OK, "空白幂等键应走旧非幂等路径: {blank_body}");
+    // trim 后的空串不得作为幂等键落账（validate_id 也会拒绝空串，此处防御性确认无标记）。
+    assert!(!app.state.store().is_event_processed(&user_id, "   ").unwrap_or(false));
+
+    // 超长：400。
+    let long_id = "x".repeat(129);
+    let too_long = request(
+        &app.app,
+        Method::POST,
+        "/api/amas/process-event",
+        Some(serde_json::json!({
+            "clientEventId": long_id,
+            "wordId": "w-long-id",
+            "isCorrect": true,
+            "responseTime": 500,
+        })),
+        &hdr,
+    )
+    .await;
+    let (long_status, _, long_body) = response_json(too_long).await;
+    assert_eq!(long_status, StatusCode::BAD_REQUEST);
+    assert_eq!(long_body["code"], "AMAS_INVALID_EVENT_ID");
+}

@@ -21,6 +21,18 @@
 
 > **路径说明**：keys 目录是 DB 文件（`DATABASE_URL`）所在目录下的 `keys/` 子目录。默认 `data/learning.db` → `data/keys/`。
 
+### 环境准备（downloadURL 推断）
+
+manifest 的 `downloadURL` 由服务端推断，反代（nginx TLS 终结）部署须配齐两道门之一，否则下载地址恒为 `http://<内部 Host>`（HTTPS 站点 mixed-content、客户端下载失败）：
+
+| 变量 | 作用 |
+|---|---|
+| `RESOURCE_PACK_BASE_URL` | 直接硬编码下载地址前缀（如 `https://api.example.com`），优先级最高，设了它可不管下面两项 |
+| `TRUST_PROXY` | `true` 才考虑采信 `X-Forwarded-Host`/`X-Forwarded-Proto`（同时影响客户端 IP 信任口径） |
+| `RESOURCE_PACK_TRUSTED_HOSTS` | `TRUST_PROXY=true` 时的转发主机白名单（逗号分隔纯 hostname，不含端口/scheme）；**留空则任何转发主机都不被采信**，downloadURL 退化为 `http://<真实 Host>` |
+
+即：反代部署要么设 `RESOURCE_PACK_BASE_URL`，要么 `TRUST_PROXY=true` **加** `RESOURCE_PACK_TRUSTED_HOSTS=<对外域名>`。配置缺失时服务启动日志会打 warn 提示。
+
 ---
 
 ## 发布流程（admin 操作 → 服务端自动化）

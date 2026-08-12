@@ -780,7 +780,19 @@ GDPR 数据导出（Article 20 可移植性）。**流式 NDJSON**，每行一�
 
 ### POST /api/records
 
-创建单条学习记录，同时触发 AMAS 自适应引擎更新。
+创建单条学习记录，触发 AMAS 自适应引擎更新。
+
+> **⚠️ v1.3.0 起默认异步受理（202）**：服务端 `RECORDS_OUTBOX_ASYNC` 默认 `true`，本端点默认返回
+> **202 Accepted** 裸响应（**不走** `{success,data}` 信封）：
+>
+> ```json
+> { "accepted": true, "async": true, "clientRecordId": "<uuid>" }
+> ```
+>
+> 响应**不含** `record` / `amasResult`；AMAS 处理由服务端 outbox worker 异步完成（退避重试 + 死信 +
+> `processed_events` 幂等防重复应用），学习状态以后续实时推送（SSE）与下次拉取为准。客户端须容忍
+> 202 与下方 200/201 两种形状（iOS / Android / Web ≥ 1.6.0 已适配）。服务端设
+> `RECORDS_OUTBOX_ASYNC=false` 时回退下方同步响应。批量 `/api/records/batch` 恒为同步路径。
 
 **请求体：**
 
@@ -2203,7 +2215,7 @@ AMAS（Adaptive Multi-level Adjustment System）是服务端自适应学习引�
   "success": true,
   "data": {
     "wordId": "<uuid>",
-    "state": "REVIEWING",
+    "state": "reviewing",
     "masteryLevel": 0.72,
     "correctStreak": 3,
     "totalAttempts": 8,
@@ -2212,7 +2224,7 @@ AMAS（Adaptive Multi-level Adjustment System）是服务端自适应学习引�
 }
 ```
 
-> 若用户对该单词尚无学习记录，返回 `state: "NEW"`、`masteryLevel: 0.0`、`correctStreak: 0`、`totalAttempts: 0`、`nextReviewDate: null`。
+> 若用户对该单词尚无学习记录，返回 `state: "new"`、`masteryLevel: 0.0`、`correctStreak: 0`、`totalAttempts: 0`、`nextReviewDate: null`。`state` 为 `WordLearningState.state`（wire 上恒 lowercase：`new / learning / reviewing / mastered / forgotten`），与 `ProcessResult.wordMastery.masteryLevel`（SCREAMING_SNAKE_CASE）是不同枚举。
 
 ---
 
@@ -2224,6 +2236,7 @@ AMAS（Adaptive Multi-level Adjustment System）是服务端自适应学习引�
 
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
+| `clientEventId` | string | — | 幂等键：客户端为每个事件生成一次，重试沿用同一值。trim 后空串视为未携带（走旧非幂等路径）；长度上限 128 字符，超限返回 400 `AMAS_INVALID_EVENT_ID`。重复提交返回重放态占位结果（`explanation.primaryReason: "duplicate_event"`），不重复累加任何状态 |
 | `wordId` | string | ✓ | 单词 ID |
 | `isCorrect` | boolean | ✓ | 是否答对 |
 | `responseTime` | number | ✓ | 响应时间（毫秒），亦可使用 `response_time` snake_case |
@@ -2327,7 +2340,9 @@ AMAS（Adaptive Multi-level Adjustment System）是服务端自适应学习引�
 | `nextReviewIntervalSecs` | number | 下次复习间隔（秒），用于回填 `WordLearningState.nextReviewDate` |
 | `masteryLevel` | enum | `"NEW" / "LEARNING" / "REVIEWING" / "MASTERED" / "FORGOTTEN"`，**SCREAMING_SNAKE_CASE**；注意与 `WordLearningState.state`（lowercase）是**不同枚举**，不可混用 |
 
-> `POST /api/records` 响应中的 `data.amasResult` 与本端点返回的 `data` 同构；区别仅在于 `/api/records` 同时把记录写入 `learning_records` 表并触发 ELO/word-state 持久化。
+> `POST /api/records` 响应中的 `data.amasResult` 与本端点返回的 `data` 同构；区别仅在于 `/api/records` 同时把记录写入 `learning_records` 表并触发 ELO/word-state 持久化。本端点（含 `/batch-process`）为校准/诊断通道，**不写全局 word/user ELO、不落 mastery 边沿流水**——即便携带 `clientEventId` 也保持零副作用语义。
+
+> **幂等键命名空间**：`clientEventId` 与 `POST /api/records` 的 `clientRecordId` 共享同一张 `processed_events` 幂等账本（按 `(user_id, key)` 去重，无端点前缀）。同一用户下两类键取值不可互撞——若某 `clientEventId` 恰好等于此前已处理记录的 `clientRecordId`（或反之），后到的一方会被误判为重复而拦截。客户端生成时请使用互不重叠的取值空间（如 UUID 即可天然规避）。
 
 ---
 
@@ -3019,10 +3034,10 @@ AMAS 算法指标快照（需 Admin Token）。
 | `RESOURCE_PACK_APP_VERSION_TOO_LOW` | 409 | 客户端 appVersion 低于 manifest 的 minAppVersion |
 | `VALIDATION_ERROR` | 400 | packId 为空 / channel 非法 |
 
-**downloadURL 推断顺序：**
-1. 环境变量 `RESOURCE_PACK_BASE_URL`（部署时硬编码 CDN 前缀）
-2. 请求头 `X-Forwarded-Proto` + `X-Forwarded-Host`（反向代理透传）
-3. 请求头 `Host`，scheme 默认 `http`
+**downloadURL 推断顺序（两道门语义）：**
+1. 环境变量 `RESOURCE_PACK_BASE_URL`（部署时硬编码 CDN 前缀，优先级最高）
+2. 请求头 `X-Forwarded-Proto` + `X-Forwarded-Host`（反向代理透传）——须**同时**满足两道门才被采信：`TRUST_PROXY=true` **且** 转发 host 命中 `RESOURCE_PACK_TRUSTED_HOSTS` 白名单（逗号分隔纯 hostname，大小写不敏感）。采信时回填归一化 hostname（小写、去端口），scheme 仅认 `https`（其余回落 `http`）
+3. 兜底：请求头 `Host`，scheme 固定 `http`（白名单未命中 / 未开 `TRUST_PROXY` / 白名单为空时均落到这里）
 
 物理路径：`static/packs/<packId>/<version>/payload.json`，通过 `tower-http::ServeDir` 自动托管，命中 `/packs/*` cache 头规则 `public, max-age=31536000, immutable`。
 

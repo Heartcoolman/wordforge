@@ -903,109 +903,9 @@ impl Store {
         Ok(())
     }
 
-    /// W1-1：一次性**原子**回滚引擎状态 + 清除幂等标记。
-    ///
-    /// 写侧 [`Self::persist_engine_state_atomic`] 把 AMAS 状态 + 标记同 tx 原子写入；回滚侧也必须
-    /// 把「恢复 AMAS 状态」与「删除标记」放进同一 tx，否则进程在两者之间崩溃会留下「标记在、AMAS
-    /// 已回滚」的悬置态——重放命中标记走裸记录路径跳过 AMAS，永久丢该事件 AMAS 贡献，破坏
-    /// 「标记存在 ⟺ AMAS 已应用」不变式。本方法把 user_state / algo_states / ELO / 标记清除全部
-    /// 收进一个 tx，崩溃要么全回滚（标记已清），要么全不动（标记在、AMAS 仍在），两种结局均守不变式。
-    pub fn restore_engine_state_atomic(&self, r: &EngineStateRestore) -> Result<(), StoreError> {
-        keys::validate_id(r.user_id)?;
-        let mut conn = self.conn()?;
-        let tx = conn.transaction()?;
-        // user_state：Some(inner) 按 inner set/delete；外层 None 不动（batch 路径不碰 user_state）。
-        if let Some(state_opt) = r.user_state {
-            match state_opt {
-                Some(v) => {
-                    Self::upsert_engine_user_state_conn(&tx, r.user_id, v)?;
-                }
-                None => {
-                    tx.execute(
-                        "DELETE FROM engine_user_states WHERE user_id=?1",
-                        params![r.user_id],
-                    )?;
-                }
-            }
-        }
-        let mut mastery_words = std::collections::BTreeSet::new();
-        for (algo_id, val) in r.algo_states {
-            match val {
-                Some(v) => {
-                    let json = Self::serialize_json(v)?;
-                    tx.execute(
-                        "INSERT INTO engine_algo_states (user_id, algo_id, state_json)
-                         VALUES (?1, ?2, ?3)
-                         ON CONFLICT(user_id, algo_id) DO UPDATE SET state_json=?3",
-                        params![r.user_id, algo_id, json],
-                    )?;
-                }
-                None => {
-                    tx.execute(
-                        "DELETE FROM engine_algo_states WHERE user_id=?1 AND algo_id=?2",
-                        params![r.user_id, algo_id],
-                    )?;
-                }
-            }
-            if let Some(word_id) = Self::mastery_key_word(algo_id) {
-                mastery_words.insert(word_id);
-            }
-        }
-        // mastery 投影随回滚同 tx 重导出：还原值可能比投影旧、legacy+per-mode 双键可能一增一删，
-        // 统一按词从还原后的现存痕迹重算，杜绝投影漂移。
-        for word_id in mastery_words {
-            Self::reproject_mastery(&tx, r.user_id, word_id)?;
-        }
-        if let Some(elo) = r.user_elo {
-            tx.execute(
-                "INSERT INTO user_elo (user_id, rating, games) VALUES (?1, ?2, ?3)
-                 ON CONFLICT(user_id) DO UPDATE SET rating=?2, games=?3",
-                params![r.user_id, elo.rating, elo.games],
-            )?;
-        }
-        if let Some((word_id, elo)) = r.word_elo {
-            tx.execute(
-                "INSERT INTO word_elo (word_id, rating, games) VALUES (?1, ?2, ?3)
-                 ON CONFLICT(word_id) DO UPDATE SET rating=?2, games=?3",
-                params![word_id, elo.rating, elo.games],
-            )?;
-        }
-        // W1-1：trend / rating_select 随 word_elo 一并回滚（同 tx）。get_word_elo 只读 rating/games，
-        // 上面的 UPSERT 不触碰这两列，apply_elo_in_tx 已把它们前移，不复位会留下全局污染（动态 K / 选词链）。
-        if let Some((word_id, trend, rating_select)) = r.word_elo_trend_select {
-            tx.execute(
-                "INSERT INTO word_elo (word_id, trend, rating_select) VALUES (?1, ?2, ?3)
-                 ON CONFLICT(word_id) DO UPDATE SET trend=?2, rating_select=?3",
-                params![word_id, trend, rating_select],
-            )?;
-        }
-        // #14：抗投毒账本随 word_elo 一并回滚（同 tx）。否则 word_elo 复位、账本仍前移，
-        // 重放会按虚高的 prior 净位移把合法位移误钳。捕获值为 0.0 即归零（语义等同无行）。
-        if let Some((word_id, net)) = r.word_elo_contrib {
-            tx.execute(
-                "INSERT INTO word_elo_user_contrib (user_id, word_id, net_displacement)
-                 VALUES (?1, ?2, ?3)
-                 ON CONFLICT(user_id, word_id) DO UPDATE SET net_displacement=?3",
-                params![r.user_id, word_id, net],
-            )?;
-        }
-        // 写放大重构：单条路径 tx2 失败回滚时，删除本事件在 tx1 append 的那一行 swd 历史
-        //（与 marker 清除同 tx，守 W1-1）。batch per-record 不回滚 swd（None），批级另行处理。
-        if let Some(seq) = r.swd_delete_seq {
-            tx.execute(
-                "DELETE FROM engine_swd_history WHERE seq=?1",
-                params![seq],
-            )?;
-        }
-        if let Some(rec_id) = r.clear_marker_record_id {
-            tx.execute(
-                "DELETE FROM processed_events WHERE user_id=?1 AND client_record_id=?2",
-                params![r.user_id, rec_id],
-            )?;
-        }
-        tx.commit()?;
-        Ok(())
-    }
+    // S2 收尾（v1.3.0）：restore_engine_state_atomic（W1-1 的原子回滚 + 清标记）已随路由层
+    // 手动快照回滚一并删除。tx2 失败的恢复统一走 processed_events 幂等账本短路（标记保留、
+    // AMAS 不重放、重试仅补落裸记录行），不再需要回滚原语。
 
     // ─────────── admin 决策事件分页钻取 + ?raw 原始样本拉取 ───────────
 
@@ -1304,27 +1204,6 @@ pub struct EloUpdateSpec {
     pub max_user_word_displacement: f64,
 }
 
-/// W1-1：[`Store::restore_engine_state_atomic`] 的入参。各字段语义见该方法文档。
-pub struct EngineStateRestore<'a> {
-    pub user_id: &'a str,
-    /// 外层 None=不动 user_state；Some(&Some(v))=恢复为 v；Some(&None)=删除该行。
-    pub user_state: Option<&'a Option<serde_json::Value>>,
-    /// 每项 (algo_id, Some=恢复 / None=删除)。
-    pub algo_states: &'a [(&'a str, &'a Option<serde_json::Value>)],
-    pub user_elo: Option<&'a crate::amas::elo::EloRating>,
-    pub word_elo: Option<(&'a str, &'a crate::amas::elo::EloRating)>,
-    /// W1-1：Some((word_id, trend, rating_select))=同 tx 把 word_elo 的派生列复位到捕获值。
-    /// `word_elo` 的 EloRating 仅含 rating/games，trend/rating_select 须单独捕获/恢复，否则前移残留。
-    pub word_elo_trend_select: Option<(&'a str, f64, f64)>,
-    /// #14：Some((word_id, net_displacement))=同 tx 把抗投毒账本复位到捕获时的净位移。
-    pub word_elo_contrib: Option<(&'a str, f64)>,
-    /// 写放大重构：Some(seq)=同 tx 删除本事件 append 的那一行 swd 历史（单条路径回滚）；
-    /// None=不动 swd（batch per-record 回滚不碰 swd，由批级 delete_swd_history_after 处理）。
-    pub swd_delete_seq: Option<i64>,
-    /// Some(client_record_id)=同 tx 删除 processed_events 标记。
-    pub clear_marker_record_id: Option<&'a str>,
-}
-
 #[cfg(test)]
 mod tests {
     use crate::store::Store;
@@ -1577,60 +1456,6 @@ mod tests {
         ));
     }
 
-    /// W1-1：原子回滚 + 清标记守不变式。验证 restore_engine_state_atomic 在一个 tx 内
-    /// 同时恢复 AMAS 状态（含删除）与清除 processed_events 标记。
-    #[test]
-    fn restore_engine_state_atomic_rolls_back_and_clears_marker() {
-        use crate::store::operations::engine::EngineStateRestore;
-        // 需 processed_events 表（m045），故跑全量迁移而非裸 tempfile_store。
-        let _t = tempfile::tempdir().unwrap();
-        let store = Store::open(_t.path().join("t.db").to_str().unwrap(), 5000, 2).unwrap();
-        store.run_migrations().unwrap();
-
-        // 写侧：AMAS 状态 + 标记原子写入（模拟 process_event_idempotent）。
-        let algo = vec![("mastery:w1".to_string(), serde_json::json!({"m": 0.9}))];
-        store
-            .persist_engine_state_atomic(
-                "u1",
-                &serde_json::json!({"attention": 0.9}),
-                &algo,
-                None,
-                None,
-                Some("rec-1"),
-            )
-            .unwrap();
-        assert!(store.is_event_processed("u1", "rec-1").unwrap());
-        assert!(store.get_engine_user_state("u1").unwrap().is_some());
-
-        // 回滚侧：user_state 删除（pre-event 为无）、mastery 删除、清标记——全在一个 tx。
-        let elo = crate::amas::elo::EloRating::default();
-        let none_val: Option<serde_json::Value> = None;
-        store
-            .restore_engine_state_atomic(&EngineStateRestore {
-                user_id: "u1",
-                user_state: Some(&none_val),
-                algo_states: &[("mastery:w1", &none_val)],
-                user_elo: Some(&elo),
-                word_elo: Some(("w1", &elo)),
-                word_elo_trend_select: None,
-                word_elo_contrib: None,
-                swd_delete_seq: None,
-                clear_marker_record_id: Some("rec-1"),
-            })
-            .unwrap();
-
-        // 不变式：标记已清 ⟺ AMAS 已回滚（user_state 与 mastery 均删除）。
-        assert!(
-            !store.is_event_processed("u1", "rec-1").unwrap(),
-            "回滚后标记应被同 tx 清除"
-        );
-        assert!(store.get_engine_user_state("u1").unwrap().is_none());
-        assert!(store
-            .get_engine_algo_state("u1", "mastery:w1")
-            .unwrap()
-            .is_none());
-    }
-
     /// #24：reset_engine_state_atomic 必须清除该用户**全部** algo 状态（含每词 mastery/EVM、
     /// 全局 IAD/MTP）+ user_elo，而非仅 ige/swd/trust。
     #[test]
@@ -1671,10 +1496,10 @@ mod tests {
         assert_eq!(store.get_user_elo("u1").unwrap().games, 0);
     }
 
-    /// mastery_states 投影：写入/回滚/reset 全路径与 engine_algo_states 真值同步。
+    /// mastery_states 投影：写入/setter/reset 全路径与 engine_algo_states 真值同步
+    ///（回滚路径已随 S2 收尾删除 restore_engine_state_atomic 一并移除）。
     #[test]
     fn mastery_projection_syncs_on_all_write_paths() {
-        use crate::store::operations::engine::EngineStateRestore;
         use rusqlite::{params, OptionalExtension};
         let (_t, store) = tempfile_store();
         let read_row = |w: &str| -> Option<(f64, f64, f64, Option<i64>, i64)> {
@@ -1716,22 +1541,11 @@ mod tests {
             .unwrap();
         assert_eq!(read_row("w1").unwrap().0, 7.0, "投影应取最近复习痕迹");
 
-        // ③ 回滚：per-mode 键还原为 None → 投影重导出回 legacy 痕迹。
-        let none_val: Option<serde_json::Value> = None;
+        // ③ 通用 delete 同步：删除 per-mode 键 → 投影重导出回 legacy 痕迹。
         store
-            .restore_engine_state_atomic(&EngineStateRestore {
-                user_id: "u1",
-                user_state: None,
-                algo_states: &[("mastery:w1:word-to-meaning", &none_val)],
-                user_elo: None,
-                word_elo: None,
-                word_elo_trend_select: None,
-                word_elo_contrib: None,
-                swd_delete_seq: None,
-                clear_marker_record_id: None,
-            })
+            .delete_engine_algo_state("u1", "mastery:w1:word-to-meaning")
             .unwrap();
-        assert_eq!(read_row("w1").unwrap().0, 2.5, "回滚后投影应回退到 legacy 痕迹");
+        assert_eq!(read_row("w1").unwrap().0, 2.5, "删除 per-mode 痕迹后投影应回退到 legacy 痕迹");
 
         // ④ 通用 setter/delete 同步；删尽全部痕迹 → 投影行删除。
         store
@@ -1966,48 +1780,6 @@ mod tests {
         );
     }
 
-    /// #14（Codex P2）：restore_engine_state_atomic 把抗投毒账本随 word_elo 一并复位到捕获值，
-    /// 否则部分提交后回滚会留下账本前移、重放误钳合法位移。
-    #[test]
-    fn restore_recovers_word_contrib_ledger() {
-        use super::EngineStateRestore;
-        let _t = tempfile::tempdir().unwrap();
-        let store = Store::open(_t.path().join("t.db").to_str().unwrap(), 5000, 2).unwrap();
-        store.run_migrations().unwrap();
-
-        // 模拟事件处理把账本推进到 25.0。
-        store
-            .conn()
-            .unwrap()
-            .execute(
-                "INSERT INTO word_elo_user_contrib (user_id, word_id, net_displacement)
-                 VALUES ('u1','w1', 25.0)",
-                [],
-            )
-            .unwrap();
-
-        let no_algo: &[(&str, &Option<serde_json::Value>)] = &[];
-        store
-            .restore_engine_state_atomic(&EngineStateRestore {
-                user_id: "u1",
-                user_state: None,
-                algo_states: no_algo,
-                user_elo: None,
-                word_elo: None,
-                word_elo_trend_select: None,
-                word_elo_contrib: Some(("w1", 5.0)),
-                swd_delete_seq: None,
-                clear_marker_record_id: None,
-            })
-            .unwrap();
-
-        assert_eq!(
-            store.get_word_elo_user_contrib("u1", "w1").unwrap(),
-            5.0,
-            "回滚应把账本复位到捕获值 5.0"
-        );
-    }
-
     fn swd_entry(reward: f64, ec: u64) -> crate::amas::decision::swd::StrategyRewardEntry {
         crate::amas::decision::swd::StrategyRewardEntry {
             user_state_snapshot: crate::amas::decision::swd::UserStateSnapshot {
@@ -2050,10 +1822,9 @@ mod tests {
     }
 
     /// 写放大重构：swd 历史行表 append → load 保持插入顺序（bit-exact），load max 截取最近 N 条，
-    /// 单条路径回滚按 appended_seq 删该行。
+    /// 批级删除按 seq 界删行。
     #[test]
     fn swd_history_append_load_order_max_and_rollback() {
-        use super::EngineStateRestore;
         let _t = tempfile::tempdir().unwrap();
         let store = Store::open(_t.path().join("t.db").to_str().unwrap(), 5000, 2).unwrap();
         store.run_migrations().unwrap();
@@ -2085,25 +1856,7 @@ mod tests {
         assert_entry_eq(&recent[0], &e1);
         assert_entry_eq(&recent[1], &e2);
 
-        // 单条路径回滚：删最后 append 的那行（seqs[2]）→ 剩 e0,e1。
-        store
-            .restore_engine_state_atomic(&EngineStateRestore {
-                user_id: "u1",
-                user_state: None,
-                algo_states: &[],
-                user_elo: None,
-                word_elo: None,
-                word_elo_trend_select: None,
-                word_elo_contrib: None,
-                swd_delete_seq: Some(seqs[2]),
-                clear_marker_record_id: None,
-            })
-            .unwrap();
-        let after = store.load_swd_history("u1", 10).unwrap();
-        assert_eq!(after.len(), 2);
-        assert_entry_eq(&after[1], &e1);
-
-        // batch 级回滚：删 seq > seqs[0] → 仅剩 e0。
+        // 按 seq 界删除（learning 事件回放的用户级回滚路径）：删 seq > seqs[0] → 仅剩 e0。
         store.delete_swd_history_after("u1", seqs[0]).unwrap();
         let batch_after = store.load_swd_history("u1", 10).unwrap();
         assert_eq!(batch_after.len(), 1);

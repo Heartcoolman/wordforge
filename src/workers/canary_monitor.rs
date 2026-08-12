@@ -93,9 +93,22 @@ pub async fn run(state: &AppState) {
         ) {
             tracing::warn!(id = c.id, error = %e, "canary_monitor: 写告警收件箱失败");
         }
+        // window_secs = live 切片实际覆盖的时间跨度（首末事件间隔），语义与
+        // error_rate_watchdog 的「anomaly 率在多长窗口上算得」一致；切片时间戳缺失时
+        // 回退 canary 已运行时长（started_at → now），绝不再上报语义不符的 0。
+        let window_secs = match (live.first_event_at, live.last_event_at) {
+            (Some(first), Some(last)) => (last - first).num_seconds().max(1) as u64,
+            _ => chrono::DateTime::parse_from_rfc3339(&c.started_at)
+                .map(|started| {
+                    (chrono::Utc::now() - started.with_timezone(&chrono::Utc))
+                        .num_seconds()
+                        .max(1) as u64
+                })
+                .unwrap_or(1),
+        };
         state.broadcast_to_all_sse(SseEvent::Incident {
             error_rate: live.anomaly_rate,
-            window_secs: 0,
+            window_secs,
         });
     }
 }

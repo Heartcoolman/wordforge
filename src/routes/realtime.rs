@@ -14,6 +14,37 @@ use crate::state::{AppState, SseClientInfo};
 
 pub(crate) static SSE_CONNECTION_COUNT: AtomicUsize = AtomicUsize::new(0);
 
+/// admin SSE（/api/admin/realtime/events）全局并发连接数。与用户通道计数独立：
+/// 用户连接风暴不会挤占 admin 观测通道，反之亦然。
+pub(crate) static ADMIN_SSE_CONNECTION_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// admin SSE 全局并发上限。admin 会话数量级远小于用户（每个后台 tab 2-3 条流），
+/// 64 足以覆盖多管理员多 tab，同时防止 admin 凭据泄漏后被用作连接放大。
+const MAX_ADMIN_SSE_CONNECTIONS: usize = 64;
+
+/// SseEvent → SSE `event:` 字段名。用户通道与 admin 通道共用，保证两端 wire 名一致。
+fn sse_event_name(event: &crate::state::SseEvent) -> &'static str {
+    use crate::state::SseEvent;
+    match event {
+        SseEvent::Maintenance { .. } => "maintenance",
+        SseEvent::TelemetryRequest { .. } => "telemetry_request",
+        SseEvent::Banned => "banned",
+        SseEvent::Unbanned => "unbanned",
+        SseEvent::DataCorrupted => "data_corrupted",
+        SseEvent::NewLlmSuggestion { .. } => "new_llm_suggestion",
+        SseEvent::ReleaseAvailable { .. } => "release_available",
+        SseEvent::UpdateProgress { .. } => "update_progress",
+        SseEvent::ProbeRequest { .. } => "probe_request",
+        SseEvent::ProbeConfirm { .. } => "probe_confirm",
+        SseEvent::Incident { .. } => "incident",
+        SseEvent::WorkerMissed { .. } => "worker_missed",
+        SseEvent::LlmBudgetExceeded { .. } => "llm_budget_exceeded",
+        SseEvent::ResourcePackAvailable { .. } => "resource_pack_available",
+        SseEvent::UpgradeRequired { .. } => "upgrade_required",
+        SseEvent::UpgradeCleared { .. } => "upgrade_cleared",
+    }
+}
+
 struct SseGuard {
     state: AppState,
     /// 仅当本连接成功登记进 active_sse（归属核验通过）后才置 Some(did)；
@@ -72,6 +103,167 @@ impl Drop for SseGuard {
 
 pub fn router() -> Router<AppState> {
     Router::new().route("/events", get(sse_handler))
+}
+
+/// admin 专用 SSE 路由（挂载到 /api/admin/realtime）。
+pub fn admin_router() -> Router<AppState> {
+    Router::new().route("/events", get(admin_sse_handler))
+}
+
+/// admin SSE 连接守卫：Drop 时解扣全局计数并从 admin_sse 注册表移除本连接。
+/// 与用户通道 SseGuard 同构，但无 per-user 配额 / 心跳基线需要清理。
+struct AdminSseGuard {
+    state: AppState,
+    /// admin_sse 注册键（device_id 或回退 conn_id）；登记成功后才置 Some，
+    /// 使登记前任何取消路径的 Drop 不触碰注册表。
+    registry_key: Option<String>,
+    conn_id: String,
+}
+
+impl Drop for AdminSseGuard {
+    fn drop(&mut self) {
+        let _ =
+            ADMIN_SSE_CONNECTION_COUNT.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+                count.checked_sub(1)
+            });
+        if let Some(ref key) = self.registry_key {
+            if let Some(mut conns) = self.state.admin_sse().get_mut(key) {
+                conns.retain(|c| c.conn_id != self.conn_id);
+            }
+            // 与用户通道相同的 remove_if 语义：仅在仍为空时删除条目，
+            // 避免误删并发新连接刚建立的列表。
+            self.state
+                .admin_sse()
+                .remove_if(key, |_, conns| conns.is_empty());
+        }
+    }
+}
+
+/// GET /api/admin/realtime/events —— admin 后台专用 SSE（跨端契约 B）。
+///
+/// 与用户通道（/api/realtime/events）的差异：
+/// - AdminAuthUser 鉴权（admin token + admin_sessions），用户 token 一律 401；
+/// - 独立注册表 admin_sse 与独立全局配额，不占用户连接池，也不登记心跳基线
+///   （heartbeat watchdog 不感知 admin 连接，不会误报 data_corrupted）；
+/// - 无 AMAS 用户态轮询（admin 页面走 REST），仅转发 maintenance / update 广播
+///   与 per-conn 定向/运维事件；
+/// - 不做设备归属核验：admin 属可信运维会话，其声明的 x-device-id 仅用于
+///   探针桥/遥测桥的定向投递寻址。
+pub async fn admin_sse_handler(
+    admin: crate::auth::AdminAuthUser,
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, AppError> {
+    loop {
+        let current = ADMIN_SSE_CONNECTION_COUNT.load(Ordering::SeqCst);
+        if current >= MAX_ADMIN_SSE_CONNECTIONS {
+            return Err(AppError::too_many_requests("SSE连接数过多"));
+        }
+        match ADMIN_SSE_CONNECTION_COUNT.compare_exchange(
+            current,
+            current + 1,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        ) {
+            Ok(_) => break,
+            Err(_) => continue,
+        }
+    }
+
+    // CAS 成功后立即建 guard（registry_key=None），任何后续取消路径都能解扣计数。
+    let conn_id = uuid::Uuid::new_v4().to_string();
+    let mut guard = AdminSseGuard {
+        state: state.clone(),
+        registry_key: None,
+        conn_id: conn_id.clone(),
+    };
+
+    // device_id 口径与用户通道一致：格式非法视为缺失，回退 conn_id 作注册键
+    // （定向投递自然不命中，仅收广播/运维事件）。
+    let device_id = headers
+        .get("x-device-id")
+        .and_then(|v| v.to_str().ok())
+        .filter(|v| crate::middleware::device::is_valid_device_id(v))
+        .map(String::from);
+    let platform = headers
+        .get("x-device-platform")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("unknown")
+        .to_string();
+
+    // 先订阅广播再登记，避免登记后、订阅前的事件窗口漏收（与用户通道同一考量）。
+    let mut maintenance_rx = state.maintenance_rx();
+    let mut update_rx = state.update_rx();
+    let initial_maintenance = state.is_maintenance();
+
+    let (per_conn_tx, mut per_conn_rx) =
+        tokio::sync::mpsc::channel(crate::state::SSE_CONN_CHANNEL_CAP);
+
+    let registry_key = device_id.unwrap_or_else(|| conn_id.clone());
+    state
+        .admin_sse()
+        .entry(registry_key.clone())
+        .or_default()
+        .push(SseClientInfo {
+            conn_id: conn_id.clone(),
+            user_id: admin.admin_id.clone(),
+            platform,
+            connected_at: Instant::now(),
+            tx: per_conn_tx,
+        });
+    guard.registry_key = Some(registry_key);
+
+    let mut shutdown_rx = state.shutdown_rx();
+
+    let stream = async_stream::stream! {
+        let _guard = guard;
+
+        // 连接即下发当前维护状态（与用户通道对齐，admin-ui 据此点亮维护横幅）。
+        if let Ok(json) =
+            serde_json::to_string(&serde_json::json!({ "type": "maintenance", "active": initial_maintenance }))
+        {
+            yield Ok(Event::default().event("maintenance").data(json));
+        }
+
+        loop {
+            tokio::select! {
+                result = maintenance_rx.recv() => {
+                    if let Ok(active) = result {
+                        let data = serde_json::json!({ "type": "maintenance", "active": active });
+                        if let Ok(json) = serde_json::to_string(&data) {
+                            yield Ok(Event::default().event("maintenance").data(json));
+                        }
+                    }
+                }
+                result = update_rx.recv() => {
+                    if let Ok(payload) = result {
+                        if let Ok(json) = serde_json::to_string(&payload) {
+                            yield Ok(Event::default().event("update_available").data(json));
+                        }
+                    }
+                }
+                msg = per_conn_rx.recv() => {
+                    match msg {
+                        Some(event) => {
+                            if let Ok(json) = serde_json::to_string(&event) {
+                                yield Ok(Event::default().event(sse_event_name(&event)).data(json));
+                            }
+                        }
+                        None => break,
+                    }
+                }
+                _ = shutdown_rx.recv() => {
+                    break;
+                }
+            }
+        }
+    };
+
+    Ok(Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(10))
+            .text("keepalive"),
+    ))
 }
 
 pub async fn sse_handler(
@@ -311,25 +503,7 @@ pub async fn sse_handler(
                                 );
                             if !suppressed {
                                 if let Ok(json) = serde_json::to_string(&event) {
-                                    let event_name = match &event {
-                                        crate::state::SseEvent::Maintenance { .. } => "maintenance",
-                                        crate::state::SseEvent::TelemetryRequest { .. } => "telemetry_request",
-                                        crate::state::SseEvent::Banned => "banned",
-                                        crate::state::SseEvent::Unbanned => "unbanned",
-                                        crate::state::SseEvent::DataCorrupted => "data_corrupted",
-                                        crate::state::SseEvent::NewLlmSuggestion { .. } => "new_llm_suggestion",
-                                        crate::state::SseEvent::ReleaseAvailable { .. } => "release_available",
-                                        crate::state::SseEvent::UpdateProgress { .. } => "update_progress",
-                                        crate::state::SseEvent::ProbeRequest { .. } => "probe_request",
-                                        crate::state::SseEvent::ProbeConfirm { .. } => "probe_confirm",
-                                        crate::state::SseEvent::Incident { .. } => "incident",
-                                        crate::state::SseEvent::WorkerMissed { .. } => "worker_missed",
-                                        crate::state::SseEvent::LlmBudgetExceeded { .. } => "llm_budget_exceeded",
-                                        crate::state::SseEvent::ResourcePackAvailable { .. } => "resource_pack_available",
-                                        crate::state::SseEvent::UpgradeRequired { .. } => "upgrade_required",
-                                        crate::state::SseEvent::UpgradeCleared => "upgrade_cleared",
-                                    };
-                                    yield Ok(Event::default().event(event_name).data(json));
+                                    yield Ok(Event::default().event(sse_event_name(&event)).data(json));
                                 }
                             }
                         }

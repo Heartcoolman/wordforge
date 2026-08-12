@@ -156,6 +156,23 @@ async fn main() {
     });
     tracing::info!("Starting learning-backend");
 
+    // 资源包 downloadURL 推断配置自检：反代部署（trust_proxy=true）但既无转发主机白名单也未设
+    // RESOURCE_PACK_BASE_URL 时，X-Forwarded-Host/-Proto 永不被采信，manifest downloadURL 恒为
+    // http://<真实 Host>（HTTPS 站点触发 mixed-content / 下载失败）。启动即提示，避免上线才发现。
+    if config.trust_proxy
+        && config.resource_pack_trusted_hosts.is_empty()
+        && std::env::var("RESOURCE_PACK_BASE_URL")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .is_none()
+    {
+        tracing::warn!(
+            "TRUST_PROXY=true 但 RESOURCE_PACK_TRUSTED_HOSTS 为空且未设 RESOURCE_PACK_BASE_URL：\
+             转发主机头不会被采信，资源包 downloadURL 将退化为 http://<真实 Host>；\
+             反代部署请设置 RESOURCE_PACK_TRUSTED_HOSTS 或 RESOURCE_PACK_BASE_URL"
+        );
+    }
+
     // Validate LLM config at startup (panics if enabled=true, mock=false)
     LlmProvider::validate_config(&config.llm);
 
@@ -360,9 +377,9 @@ async fn main() {
         });
     }
 
-    // S2-1：outbox 异步消费 worker（领域事件持久化处理 + 指数退避重试 + 死信兜底）。
-    // 默认 records 走同步老路时 outbox 为空，本 loop 每 10s 一次空查询、零影响；opt-in
-    // (RECORDS_OUTBOX_ASYNC=true) 后驱动异步消费，关闭后仍排空残留事件。需 AppState 故走 interval loop。
+    // S2：outbox 异步消费 worker（领域事件持久化处理 + 指数退避重试 + 死信兜底）。
+    // v1.3.0 起 RECORDS_OUTBOX_ASYNC 默认 true，本 loop 驱动异步消费；设 false 回退同步老路后
+    // 仍会排空残留事件。需 AppState 故走 interval loop。
     // claim 非原子，多实例会重复处理同一事件致 AMAS 状态双累加，仅 leader 跑。
     if config.worker.is_leader {
         let outbox_state = state.clone();

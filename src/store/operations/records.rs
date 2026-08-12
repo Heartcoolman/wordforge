@@ -241,26 +241,41 @@ impl Store {
 
         if let Some(session) = learning_session {
             let summary = session.summary.as_ref();
-            let summary_mastered =
-                Self::serialize_json(&summary.map(|s| &s.mastered_word_ids).unwrap_or(&vec![]))?;
-            let summary_error =
-                Self::serialize_json(&summary.map(|s| &s.error_prone_word_ids).unwrap_or(&vec![]))?;
+            // summary JSON 列仅在调用方真的带 summary 时覆盖（None → COALESCE 保留行现值），
+            // 不再无条件写 '[]'——迟到的 record 上报会用 tx 外读到的旧 NULL summary 覆盖
+            // complete_session 刚写入的汇总（窄窗竞态）。
+            let summary_mastered = summary
+                .map(|s| Self::serialize_json(&s.mastered_word_ids))
+                .transpose()?;
+            let summary_error = summary
+                .map(|s| Self::serialize_json(&s.error_prone_word_ids))
+                .transpose()?;
             // total_questions/total_count/correct_count/actual_mastery_count: same read-outside-tx
             // race as word_learning_states above (caller's Rust `+= 1` reads a pre-tx snapshot).
             // Written here as SQL-relative increments off the row's own value instead — total_questions/
-            // total_count always +1 per record (no bound param needed), correct_count/actual_mastery_count
-            // +1 only when this record was correct / just crossed into Mastered (passed in, since that
-            // delta — not the old absolute count — is what the caller actually knows). context_shifts/
-            // status/summary_*/updated_at stay absolute: not per-record monotonic counters here.
+            // total_count always +1 per record (no bound param needed), correct_count +1 only when this
+            // record was correct. actual_mastery_count 的 `just_mastered` 实为「本次答题后该词处于
+            // Mastered 级」的水平判定而非进入边沿——已 Mastered 的词每答一次都会 +1（调用方按
+            // mastery_level == Mastered 计算，无 prev!=Mastered 边沿检测）。命名沿用历史、口径不改，
+            // 如实记录以免误读为"仅首次跨入时 +1"。
+            // status：单调迁移——行现值已是 completed 时保持不变（CASE），否则才接受调用方传入值。
+            // 调用方的 status 是 tx 外预读的陈旧快照，绝对回写会在窄窗内把并发 complete_session
+            // 刚提交的 completed 打回 active。summary_* 同理仅在调用方带值（非 NULL 参数）时覆盖。
+            // context_shifts/updated_at stay absolute: not per-record monotonic counters here.
             tx.execute(
                 "UPDATE learning_sessions SET
-                    status=?1,
+                    status = CASE WHEN status='completed' THEN status ELSE ?1 END,
                     total_questions = total_questions + 1,
                     actual_mastery_count = actual_mastery_count + ?2,
                     context_shifts=?3,
-                    updated_at=?4, summary_accuracy=?5, summary_avg_response_time_ms=?6,
-                    summary_mastered_word_ids_json=?7, summary_error_prone_word_ids_json=?8,
-                    summary_duration_secs=?9, summary_hour_of_day=?10, summary_final_difficulty=?11,
+                    updated_at=?4,
+                    summary_accuracy = COALESCE(?5, summary_accuracy),
+                    summary_avg_response_time_ms = COALESCE(?6, summary_avg_response_time_ms),
+                    summary_mastered_word_ids_json = COALESCE(?7, summary_mastered_word_ids_json),
+                    summary_error_prone_word_ids_json = COALESCE(?8, summary_error_prone_word_ids_json),
+                    summary_duration_secs = COALESCE(?9, summary_duration_secs),
+                    summary_hour_of_day = COALESCE(?10, summary_hour_of_day),
+                    summary_final_difficulty = COALESCE(?11, summary_final_difficulty),
                     correct_count = correct_count + ?12,
                     total_count = total_count + 1
                  WHERE id=?13 AND user_id=?14",

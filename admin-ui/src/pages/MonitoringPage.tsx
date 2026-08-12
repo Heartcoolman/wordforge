@@ -452,7 +452,7 @@ export default function MonitoringPage() {
       <Modal open={dlOpen()} onClose={() => setDlOpen(false)} title="领域事件死信" size="xl">
         <div class="muted" style={sx({ fontSize: 12.5, marginBottom: 14, lineHeight: 1.6 })}>
           records→AMAS 异步消费重试耗尽 / 永久错误（毒丸）进入死信。可人工重投回 outbox（attempts 归零、立即重新消费）或永久丢弃。
-          默认同步路径（RECORDS_OUTBOX_ASYNC=false）下死信恒空。
+          默认异步路径（RECORDS_OUTBOX_ASYNC=true，v1.3.0 起）下此处展示死信；设 false 回退同步老路时死信恒空。
         </div>
         <Show when={!dlLoading()} fallback={<Loading h={160} />}>
           <Show when={dlRows().length > 0} fallback={<Empty title="无死信" desc="所有领域事件均已成功消费。" icon="inbox" />}>

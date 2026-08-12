@@ -1,11 +1,11 @@
-//! S2-1：outbox 异步消费 worker。
+//! S2：outbox 异步消费 worker。
 //!
 //! 轮询 `outbox` 表领取到期领域事件，按 event_type 分发处理；失败按指数退避重排，超
 //! `MAX_ATTEMPTS` 移入 `events_dead_letter` 并告警 admin。`record_created` 事件复用
-//! [`process_single_record`]，与同步路径**零逻辑分叉**（含 best-effort rollback）。
+//! [`process_single_record`]，与同步路径**零逻辑分叉**。
 //!
-//! 默认 `RECORDS_OUTBOX_ASYNC=false` 时 outbox 为空，每 tick 仅一次空查询、零影响；
-//! 即便后续关闭异步模式，本 worker 仍会排空此前 opt-in 期间残留的事件。
+//! v1.3.0 起 `RECORDS_OUTBOX_ASYNC` 默认 true，本 worker 驱动异步消费；设 false 回退同步
+//! 老路后仍会排空残留事件。
 
 use crate::routes::records::single::{process_single_record, OutboxRecordPayload};
 use crate::state::AppState;

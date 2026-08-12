@@ -90,3 +90,20 @@ S1 + S2 在 v1.0 阶段以**文档化承诺**形式收口，承诺 v1.1 实装�
 S1 的实际实施路径与本文档预测的"v1.1 实施路径"基本一致（pub(crate) 升 pub 改为 pub(super) + pub(crate) use 重导出，无需全升 pub）。
 
 S2（records → AMAS 事件总线化）仍维持 v1.1 文档化承诺，不在 v1.0 阶段实装。
+
+## 后记 2（2026-07-21 · v1.3.0-beta.1）：S2 全量兑现
+
+S2 分三步落地，至 v1.3.0-beta.1 全部完成：
+
+1. **v1.1.3（S2-1）**：outbox + `events_dead_letter` 表 + 异步消费 worker（指数退避 + 死信兜底）+
+   admin 监控闭环；`RECORDS_OUTBOX_ASYNC` 默认 false，生产零暴露。
+2. **v1.1.4（W1-1）**：`processed_events` 幂等账本，把「重启不丢」补成 AMAS「精确一次」。
+3. **v1.3.0-beta.1（本次收尾）**：跨仓前置条件满足（iOS / Android / Web ≥ 1.6.0 确认容忍无
+   `amasResult` 的 202 受理响应）后：
+   - `RECORDS_OUTBOX_ASYNC` 默认 `false` → `true`（单条上报默认 202 异步受理）；
+   - 删除路由层手动引擎快照回滚（`capture/restore_engine_state_snapshot`、
+     `Store::restore_engine_state_atomic`）——tx2 失败恢复统一走幂等账本短路（标记保留、
+     AMAS 不重放、重试仅补落裸记录行），失败语义与崩溃窗口重放统一。
+
+范围如实声明：批量 `/records/batch` 仍恒为同步路径（异步化待后续）；learning 会话事件回放的
+用户级快照回滚（`capture/restore_user_state_snapshot`，`learning/session.rs`）不属 S2 范围，保留。

@@ -35,7 +35,7 @@ type MigrationFn = fn(&Store) -> Result<(), StoreError>;
 /// 完全迁移后 `schema_version` 应到达的版本号（= [`migrations`] 条目数）。
 /// 编译期常量，供 `--print-schema-version`（任意版本回滚的"目标二进制自声明 schema 版本"）使用；
 /// [`schema_version_const_matches_registry`] 测试守卫它与运行期 `migrations().len()` 不漂移。
-pub const SCHEMA_VERSION: u32 = 71;
+pub const SCHEMA_VERSION: u32 = 73;
 
 /// 已加固到"生产可用"的 down 迁移覆盖下界：回滚目标的 schema 版本必须 `>=` 此值。
 /// 真·任意版本回滚把 down 链当作"把当前库副本降级到目标版本"的降级引擎；低于此下界的
@@ -171,6 +171,11 @@ fn migrations() -> Vec<(&'static str, MigrationFn)> {
             "071_whitelist_add_coldstart_d_weights",
             m071_whitelist_add_coldstart_d_weights,
         ),
+        (
+            "072_reset_stale_web_fingerprints",
+            m072_reset_stale_web_fingerprints,
+        ),
+        ("073_app_events", m073_app_events),
     ]
 }
 
@@ -324,6 +329,11 @@ fn migrations_down() -> Vec<(&'static str, MigrationFn)> {
             "071_whitelist_add_coldstart_d_weights",
             m071_whitelist_add_coldstart_d_weights_down,
         ),
+        (
+            "072_reset_stale_web_fingerprints",
+            m072_reset_stale_web_fingerprints_down,
+        ),
+        ("073_app_events", m073_app_events_down),
     ]
 }
 
@@ -2385,8 +2395,8 @@ fn m039_availability_rollup_down(store: &Store) -> Result<(), StoreError> {
 }
 
 /// m044:领域事件 outbox + 死信表(S2-1)。outbox 持久化 records→AMAS 领域事件,供
-/// outbox_processor worker 异步消费(指数退避重试 + 死信兜底)。默认 records 仍走同步
-/// 老路(RECORDS_OUTBOX_ASYNC=false),异步路径 opt-in;切默认/删手动 rollback 待跨仓协同。
+/// outbox_processor worker 异步消费(指数退避重试 + 死信兜底)。v1.1.3 落地时默认仍走同步
+/// 老路(RECORDS_OUTBOX_ASYNC=false)；v1.3.0-beta.1 已切默认 true 并删除手动 rollback（S2 收尾）。
 fn m044_outbox_event_processing(store: &Store) -> Result<(), StoreError> {
     let conn = store.conn()?;
     conn.execute_batch(
@@ -3991,12 +4001,127 @@ fn m071_whitelist_add_coldstart_d_weights(store: &Store) -> Result<(), StoreErro
     Ok(())
 }
 
-/// m071 down：仅移除本迁移补的 3 行。仅 dev/test。
+/// m071 down：仅移除本迁移补的 3 行（按 created_by = 'migration:m071' 匹配）。仅 dev/test。
+///
+/// 边界（已知不对称，两类存量库上行为不同，接受不改）：
+/// - 库在 TIER_A 长到 15 维**之后**才首次 seed：这 3 个 path 由启动 seed 全量插入
+///   （created_by 非 'migration:m071'，m071 up 因 NOT EXISTS 跳过），down 删不掉它们——
+///   回退后白名单仍是 15 维，比目标版本预期多 3 行（无害：目标版本仅是不认识这些 path）。
+/// - m071 up 补的行若事后被管理员改过范围值（created_by 不变），down 会连同管理员的修改
+///   一起删掉——回退丢失的是"对目标版本本就不存在的行"的编辑，符合 down 总注释的丢弃语义。
 fn m071_whitelist_add_coldstart_d_weights_down(store: &Store) -> Result<(), StoreError> {
     let conn = store.conn()?;
     conn.execute(
         "DELETE FROM amas_tuning_whitelist WHERE created_by = 'migration:m071';",
         [],
+    )?;
+    Ok(())
+}
+
+/// m072：清空 client_devices 的存量 fp_strong / fp_coarse（全部置 NULL）。
+///
+/// 原因：web 端设备指纹算法在本分支去掉了 pixelRatio 维度（缩放/换显示器就会变，与
+/// "同机同浏览器稳定"的设计前提矛盾），新算法产出的哈希与所有存量 fp_strong/fp_coarse
+/// 永不匹配——旧哈希已成死数据：① 指纹封禁（is_client_banned 的 fp_strong 精确匹配）与
+/// 模糊关联打标对存量行永不再命中；② 尤其被封设备的行不再有正常请求流量触发
+/// update_device_fingerprint 回写，旧哈希会永久滞留，制造"看似有指纹防线实则失效"的
+/// 假象。统一置 NULL 让全部设备在下次上报时以新算法重建指纹，语义回到"未上报过指纹"。
+/// 幂等：置 NULL 重复执行无副作用。
+fn m072_reset_stale_web_fingerprints(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute(
+        "UPDATE client_devices SET fp_strong = NULL, fp_coarse = NULL
+          WHERE fp_strong IS NOT NULL OR fp_coarse IS NOT NULL;",
+        [],
+    )?;
+    Ok(())
+}
+
+/// m072 down：no-op——不可逆。旧哈希在 up 时已被清掉且无从重建（服务端只存哈希，
+/// 原始指纹材料在客户端），回退目标版本拿到的也只是"死数据缺失"而非行为差异：
+/// 目标版本同样在设备下次上报时回写指纹。
+fn m072_reset_stale_web_fingerprints_down(_store: &Store) -> Result<(), StoreError> {
+    Ok(())
+}
+
+/// m073：客户端埋点事件流（app-events）——三端命名事件（behavior/error/perf）落库与分析。
+/// ① `app_events` raw 表：UNIQUE(device_id, client_event_id) 承担跨请求幂等（摄取 INSERT OR
+///    IGNORE），90d retention（telemetry_cleanup，server_ts 为 datetime('now') 空格格式）；
+///    name 由摄取端正则校验 `^[a-z0-9_]{1,64}$`，自由字符串只进 props_json——rollup 键
+///    绝不含自由串（m064 基数纪律）；
+/// ② `app_event_daily` 日聚合（永久保留，超出 raw retention 后分析仍存活）；
+/// ③ `app_user_daily` 活跃（行数 = 日 DAU）+ `app_user_first_seen` 留存 cohort 基准；
+/// ④ probe_sampling_config 补 `app_behavior` / `app_perf` 两行采样开关（error 类摄取端恒不采样，
+///    不入配置）。同源写 schema.rs（全新库由 init_schema 建）。幂等建表/补行。
+fn m073_app_events(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS app_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            device_id TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            platform TEXT NOT NULL,
+            app_version TEXT NOT NULL,
+            category TEXT NOT NULL CHECK (category IN ('behavior','error','perf')),
+            name TEXT NOT NULL,
+            client_event_id TEXT NOT NULL,
+            client_ts_ms INTEGER NOT NULL,
+            event_day TEXT NOT NULL,
+            props_json TEXT DEFAULT NULL,
+            server_ts TEXT NOT NULL DEFAULT (datetime('now'))
+         );
+         CREATE UNIQUE INDEX IF NOT EXISTS idx_app_events_dedup ON app_events(device_id, client_event_id);
+         CREATE INDEX IF NOT EXISTS idx_app_events_day ON app_events(event_day, category, name);
+         CREATE INDEX IF NOT EXISTS idx_app_events_user_day ON app_events(user_id, event_day);
+         CREATE INDEX IF NOT EXISTS idx_app_events_server_ts ON app_events(server_ts);
+         CREATE TABLE IF NOT EXISTS app_event_daily (
+            day TEXT NOT NULL,
+            platform TEXT NOT NULL,
+            category TEXT NOT NULL,
+            name TEXT NOT NULL,
+            count INTEGER NOT NULL DEFAULT 0,
+            users INTEGER NOT NULL DEFAULT 0,
+            p50_ms INTEGER,
+            p95_ms INTEGER,
+            p99_ms INTEGER,
+            PRIMARY KEY (day, platform, category, name)
+         );
+         CREATE TABLE IF NOT EXISTS app_user_daily (
+            day TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            platform TEXT NOT NULL,
+            events INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (day, user_id)
+         );
+         CREATE TABLE IF NOT EXISTS app_user_first_seen (
+            user_id TEXT NOT NULL PRIMARY KEY,
+            first_day TEXT NOT NULL,
+            platform TEXT NOT NULL
+         );
+         INSERT OR IGNORE INTO probe_sampling_config
+            (event_type, sample_rate, enabled, locked, priority, updated_at, updated_by)
+         VALUES
+            ('app_behavior', 1.0, 1, 0, 100, datetime('now'), 'migration:m073'),
+            ('app_perf',     1.0, 1, 0, 100, datetime('now'), 'migration:m073');",
+    )?;
+    Ok(())
+}
+
+/// m073 down：DROP 四表 + 索引，删本迁移补的两条采样行。埋点数据随目标版本本就不存在，
+/// 丢弃语义同总注释（pre-rollback 备份保留全量）。仅 dev/test。
+fn m073_app_events_down(store: &Store) -> Result<(), StoreError> {
+    let conn = store.conn()?;
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS idx_app_events_dedup;
+         DROP INDEX IF EXISTS idx_app_events_day;
+         DROP INDEX IF EXISTS idx_app_events_user_day;
+         DROP INDEX IF EXISTS idx_app_events_server_ts;
+         DROP TABLE IF EXISTS app_events;
+         DROP TABLE IF EXISTS app_event_daily;
+         DROP TABLE IF EXISTS app_user_daily;
+         DROP TABLE IF EXISTS app_user_first_seen;
+         DELETE FROM probe_sampling_config
+          WHERE event_type IN ('app_behavior','app_perf') AND updated_by = 'migration:m073';",
     )?;
     Ok(())
 }

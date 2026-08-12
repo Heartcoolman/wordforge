@@ -1,4 +1,4 @@
-/// M0-C2：25 个 v1-stable 端点的 OpenAPI 3.1 集中声明。
+/// M0-C2：v1-stable 端点的 OpenAPI 3.1 集中声明（端点随版本演进，不在此处维护具体计数）。
 ///
 /// 采用集中声明式（不在各 handler 文件加注解），避免改动其他 dev 负责的 handler 文件。
 /// 新增端点时：在对应 path_* 函数中追加或新建函数，再加入 `build()` 的 paths_list。
@@ -185,6 +185,27 @@ fn query_param(name: &str, schema: RefOr<Schema>) -> utoipa::openapi::path::Para
     ParameterBuilder::new()
         .name(name)
         .parameter_in(ParameterIn::Query)
+        .schema(Some(schema))
+        .build()
+}
+
+/// query_param 的 required 变体：handler 侧 serde 无 default 的必填 query 用它，
+/// 缺失即 400，spec 与真实校验行为对齐。
+fn query_param_required(name: &str, schema: RefOr<Schema>) -> utoipa::openapi::path::Parameter {
+    ParameterBuilder::new()
+        .name(name)
+        .parameter_in(ParameterIn::Query)
+        .required(Required::True)
+        .schema(Some(schema))
+        .build()
+}
+
+/// 必填请求头参数（如 X-Device-Id）。
+fn header_param_required(name: &str, schema: RefOr<Schema>) -> utoipa::openapi::path::Parameter {
+    ParameterBuilder::new()
+        .name(name)
+        .parameter_in(ParameterIn::Header)
+        .required(Required::True)
         .schema(Some(schema))
         .build()
 }
@@ -425,10 +446,31 @@ fn path_records() -> (String, utoipa::openapi::PathItem) {
                 )
                 .response(
                     "202",
-                    ok_response(
-                        "RECORDS_OUTBOX_ASYNC 开启时的异步落库确认：`{accepted, async, clientRecordId}`，\
-                         不含 record/amasResult 字段，响应形状与 200/201 不同",
-                    ),
+                    // 202 是裸 JSON 对象（handler 直接 Json(json!({accepted, async,
+                    // clientRecordId}))），不走 {success,data} 信封，勿复用 ok_response。
+                    ResponseBuilder::new()
+                        .description(
+                            "v1.3.0 起默认（RECORDS_OUTBOX_ASYNC=true）的异步落库确认。裸 JSON 对象（非 \
+                             {success,data} 信封）：`{accepted: true, async: true, \
+                             clientRecordId: string}`（缺省时服务端生成），不含 record/amasResult \
+                             字段，响应形状与 200/201 不同。设 RECORDS_OUTBOX_ASYNC=false 回退同步老路。",
+                        )
+                        .content(
+                            "application/json",
+                            ContentBuilder::new()
+                                .schema(Some(RefOr::T(Schema::Object(
+                                    ObjectBuilder::new()
+                                        .property("accepted", bool_schema())
+                                        .property("async", bool_schema())
+                                        .property("clientRecordId", string_schema())
+                                        .required("accepted")
+                                        .required("async")
+                                        .required("clientRecordId")
+                                        .build(),
+                                ))))
+                                .build(),
+                        )
+                        .build(),
                 )
                 .response("400", bad_request())
                 .response("401", unauthorized())
@@ -459,13 +501,30 @@ fn path_records() -> (String, utoipa::openapi::PathItem) {
 
 fn path_learning_session() -> (String, utoipa::openapi::PathItem) {
     // 契约修正：真实路由是单数 /learning/session（routes/learning/mod.rs:20），复数
-    // /learning/sessions 上挂的是 GET 会话列表（session::list_sessions），不是本操作。
+    // /learning/sessions 上挂的是 GET 会话列表（见 path_learning_sessions_list）。
     // create_or_resume_session 无论"恢复既有会话"还是"新建会话"分支都走 ok()，从不返回
     // 201——spec 之前文档的路径和状态码都与真实路由不符。
     let op = OperationBuilder::new()
         .tag("learning")
         .summary(Some("开始或恢复学习会话"))
         .security(bearer_security())
+        // 可选 body：{targetMasteryCount}；缺省取学习配置 daily_mastery_target。
+        // 恢复既有 active 会话时该值不生效（沿用原会话目标）。
+        .request_body(Some(
+            RequestBodyBuilder::new()
+                .content(
+                    "application/json",
+                    ContentBuilder::new()
+                        .schema(Some(RefOr::T(Schema::Object(
+                            ObjectBuilder::new()
+                                .property("targetMasteryCount", integer_schema())
+                                .build(),
+                        ))))
+                        .build(),
+                )
+                .required(Some(Required::False))
+                .build(),
+        ))
         .responses(
             ResponsesBuilder::new()
                 .response("200", ok_response("会话（新建或恢复既有 active 会话）"))
@@ -477,6 +536,28 @@ fn path_learning_session() -> (String, utoipa::openapi::PathItem) {
         "/learning/session".to_string(),
         PathItemBuilder::new()
             .operation(HttpMethod::Post, op)
+            .build(),
+    )
+}
+
+fn path_learning_sessions_list() -> (String, utoipa::openapi::PathItem) {
+    let op = OperationBuilder::new()
+        .tag("learning")
+        .summary(Some("获取学习会话列表"))
+        .security(bearer_security())
+        .parameter(query_param("page", integer_schema()))
+        .parameter(query_param("perPage", integer_schema()))
+        .responses(
+            ResponsesBuilder::new()
+                .response("200", ok_response("分页学习会话列表"))
+                .response("401", unauthorized())
+                .build(),
+        )
+        .build();
+    (
+        "/learning/sessions".to_string(),
+        PathItemBuilder::new()
+            .operation(HttpMethod::Get, op)
             .build(),
     )
 }
@@ -582,6 +663,100 @@ fn path_word_states_batch_update() -> (String, utoipa::openapi::PathItem) {
     )
 }
 
+fn path_word_states_batch_query() -> (String, utoipa::openapi::PathItem) {
+    let op = OperationBuilder::new()
+        .tag("word-states")
+        .summary(Some("批量查询单词学习状态"))
+        .description(Some(
+            "读侧批量查询（区别于 /word-states/batch-update 写侧）。数量上限见 config.rs \
+             limits.max_batch_size，超限 400 BATCH_TOO_LARGE。",
+        ))
+        .security(bearer_security())
+        .request_body(Some(json_body("BatchQueryRequest")))
+        .responses(
+            ResponsesBuilder::new()
+                .response("200", ok_response("WordLearningState 数组（每项附 bookmarked）"))
+                .response("400", bad_request())
+                .response("401", unauthorized())
+                .build(),
+        )
+        .build();
+    (
+        "/word-states/batch".to_string(),
+        PathItemBuilder::new()
+            .operation(HttpMethod::Post, op)
+            .build(),
+    )
+}
+
+fn path_word_states_due_list() -> (String, utoipa::openapi::PathItem) {
+    let op = OperationBuilder::new()
+        .tag("word-states")
+        .summary(Some("获取当前已到期的复习单词列表"))
+        .description(Some(
+            "「已到期」含历史逾期（next_review_date <= now，非仅今日窗口）。\
+             limit 缺省 50，钳到 1..=200；到期总数超过 limit 时仅返回一页，\
+             真实总数看 /word-states/stats/overview 的 dueCount。",
+        ))
+        .security(bearer_security())
+        .parameter(query_param("limit", integer_schema()))
+        .responses(
+            ResponsesBuilder::new()
+                .response("200", ok_response("到期 WordLearningState 数组（每项附 bookmarked）"))
+                .response("401", unauthorized())
+                .build(),
+        )
+        .build();
+    (
+        "/word-states/due/list".to_string(),
+        PathItemBuilder::new()
+            .operation(HttpMethod::Get, op)
+            .build(),
+    )
+}
+
+fn path_word_states_stats_overview() -> (String, utoipa::openapi::PathItem) {
+    let op = OperationBuilder::new()
+        .tag("word-states")
+        .summary(Some("单词学习状态统计总览"))
+        .description(Some(
+            "category 缺省 all（可选 learning/review，非法值 400 INVALID_CATEGORY）。\
+             返回各状态计数 + dueCount / dueReviewEstimatedMinutes。\
+             dueCount 可空（序列化时 None 直接省略字段）：当前已到期总数（含历史逾期，\
+             未分页真实总量）——注意它恒为全局口径，不随 category 过滤变化。",
+        ))
+        .security(bearer_security())
+        .parameter(query_param(
+            "category",
+            RefOr::T(Schema::Object(
+                ObjectBuilder::new()
+                    .schema_type(SchemaType::Type(Type::String))
+                    .enum_values(Some(["all", "learning", "review"]))
+                    .build(),
+            )),
+        ))
+        .responses(
+            ResponsesBuilder::new()
+                .response(
+                    "200",
+                    ok_response(
+                        "统计总览：`{newCount, learning, reviewing, mastered, forgotten, \
+                         dueReviewEstimatedMinutes?, dueCount?}`（后两者可空省略）",
+                    ),
+                )
+                .response("400", bad_request())
+                .response("401", unauthorized())
+                .build(),
+        )
+        .build();
+    (
+        "/word-states/stats/overview".to_string(),
+        PathItemBuilder::new()
+            .operation(HttpMethod::Get, op)
+            .build(),
+    )
+}
+
 fn path_word_favorites() -> (String, utoipa::openapi::PathItem) {
     let op = OperationBuilder::new()
         .tag("favorites")
@@ -613,7 +788,7 @@ fn path_word_favorites_status() -> (String, utoipa::openapi::PathItem) {
         .summary(Some("批量查询单词收藏状态"))
         .description(Some("数量上限见 config.rs limits.max_batch_size，超限 400 WORD_FAVORITES_TOO_MANY_IDS。"))
         .security(bearer_security())
-        .parameter(query_param("wordIds", string_schema()))
+        .parameter(query_param_required("wordIds", string_schema()))
         .responses(
             ResponsesBuilder::new()
                 .response("200", ok_response("每项 `{wordId, favorited, createdAt}`，未收藏则 createdAt 为 null"))
@@ -666,8 +841,8 @@ fn path_word_favorites_id() -> (String, utoipa::openapi::PathItem) {
     )
 }
 
-// 客户端公开访问的资源包端点（v1.1-P0.3，全部匿名、不走 {success,data} 信封——manifest/
-// public-key 是 CDN 友好的裸 JSON，供边缘缓存/客户端直接解析，不同于其余端点的统一信封）。
+// 客户端公开访问的资源包端点（v1.1-P0.3，全部匿名）。信封口径不统一：仅 manifest/public-key
+// 是 CDN 友好的裸 JSON（供边缘缓存/客户端直接解析）；列表端点走 ok() 统一 {success,data} 信封。
 
 fn path_resource_packs_list() -> (String, utoipa::openapi::PathItem) {
     let op = OperationBuilder::new()
@@ -675,7 +850,9 @@ fn path_resource_packs_list() -> (String, utoipa::openapi::PathItem) {
         .summary(Some("列出所有资源包元数据"))
         .responses(
             ResponsesBuilder::new()
-                .response("200", ResponseBuilder::new().description("资源包元数据数组（裸 JSON，非 {success,data} 信封）").build())
+                // 真实 handler 用 ok(packs) 包 {success,data} 信封（routes/resource_packs.rs
+                // list_packs），与 manifest/public-key 的裸 JSON 不同，勿混淆。
+                .response("200", ok_response("资源包元数据数组（{success, data} 信封，data 为数组）"))
                 .build(),
         )
         .build();
@@ -713,15 +890,16 @@ fn path_resource_packs_manifest() -> (String, utoipa::openapi::PathItem) {
         .summary(Some("获取指定 pack 当前 channel 激活版本的 manifest"))
         .description(Some(
             "appVersion/locale 必填，channel 缺省 stable。支持 If-None-Match，命中返回 304。\
-             字段名严格对齐 docs/backend-handoff-resource-pack-v1.1.md §2.1，裸 JSON（非信封）。",
+             裸 JSON（非信封），字段名以 ResourcePackManifest 序列化输出为准（注意是 downloadURL，\
+             URL 三字母全大写）。",
         ))
         .parameter(path_param("packId", string_schema()))
-        .parameter(query_param("appVersion", string_schema()))
-        .parameter(query_param("locale", string_schema()))
+        .parameter(query_param_required("appVersion", string_schema()))
+        .parameter(query_param_required("locale", string_schema()))
         .parameter(query_param("channel", string_schema()))
         .responses(
             ResponsesBuilder::new()
-                .response("200", ResponseBuilder::new().description("`{packId, version, downloadUrl, sha256, sizeBytes, minAppVersion, channel, signature, signatureAlgorithm}`").build())
+                .response("200", ResponseBuilder::new().description("`{packId, version, downloadURL, sha256, sizeBytes, minAppVersion, channel, signature, signatureAlgorithm}`").build())
                 .response("304", ResponseBuilder::new().description("If-None-Match 命中，无 body").build())
                 .response("400", bad_request())
                 .response("404", ResponseBuilder::new().description("资源包/该 channel 无激活版本 — RESOURCE_PACK_NOT_FOUND").build())
@@ -746,11 +924,21 @@ fn path_telemetry_resource_pack_install() -> (String, utoipa::openapi::PathItem)
              apply_failed。须带 X-Device-Id 头，设备须已通过正常登录注册，否则 403。",
         ))
         .security(bearer_security())
+        .parameter(header_param_required("X-Device-Id", string_schema()))
         .request_body(Some(json_body("ResourcePackInstallReport")))
         .responses(
             ResponsesBuilder::new()
                 .response("200", ok_response("`{received: true}`"))
-                .response("400", bad_request())
+                .response(
+                    "400",
+                    ResponseBuilder::new()
+                        .description(
+                            "请求体校验失败 — VALIDATION_ERROR / INVALID_REQUEST_BODY；\
+                             缺 X-Device-Id 头 — MISSING_DEVICE_ID；\
+                             X-Device-Id 格式非法 — INVALID_DEVICE_ID",
+                        )
+                        .build(),
+                )
                 .response("401", unauthorized())
                 .response("403", ResponseBuilder::new().description("设备未注册 / 设备归属与当前账号不符 — DEVICE_NOT_REGISTERED / DEVICE_OWNERSHIP_MISMATCH").build())
                 .build(),
@@ -758,6 +946,59 @@ fn path_telemetry_resource_pack_install() -> (String, utoipa::openapi::PathItem)
         .build();
     (
         "/telemetry/resource-pack-install".to_string(),
+        PathItemBuilder::new()
+            .operation(HttpMethod::Post, op)
+            .build(),
+    )
+}
+
+fn path_telemetry_app_events() -> (String, utoipa::openapi::PathItem) {
+    let op = OperationBuilder::new()
+        .tag("telemetry")
+        .summary(Some("批量上报客户端埋点命名事件（behavior/error/perf）"))
+        .description(Some(
+            "m073 埋点事件流。批量 ≤50 条/请求；逐条校验部分成功（errors[] 带 index/code），\
+             不整批 400。name 须匹配 ^[a-z0-9_]{1,64}$；props 为 ≤16 键标量对象（字符串 ≤128 \
+             字符、序列化 ≤2KB）。clientTsMs 钳制 [now-7d, now+5min]（离线补传窗，宽于 learning \
+             事件的 30min 系有意为之）。(deviceId, clientEventId) 跨请求幂等去重。behavior/perf \
+             受 probe_sampling_config 的 app_behavior/app_perf 行采样，error 恒不采样。\
+             须带 X-Device-Id / X-Device-Platform / X-App-Version 头，设备须已注册。",
+        ))
+        .security(bearer_security())
+        .parameter(header_param_required("X-Device-Id", string_schema()))
+        .parameter(header_param_required("X-Device-Platform", string_schema()))
+        .parameter(header_param_required("X-App-Version", string_schema()))
+        .request_body(Some(json_body("AppEventsRequest")))
+        .responses(
+            ResponsesBuilder::new()
+                .response(
+                    "200",
+                    ok_response(
+                        "`{accepted, duplicates, sampledOut, failed, errors: [{index, \
+                         clientEventId, code, message}]}`；限流命中软丢弃 `{accepted: 0, \
+                         throttled: true}`。逐条错误码：APP_EVENT_INVALID_ID / \
+                         APP_EVENT_DUPLICATE_ID / APP_EVENT_INVALID_NAME / \
+                         APP_EVENT_INVALID_CATEGORY / APP_EVENT_INVALID_TS / \
+                         APP_EVENT_INVALID_PROPS",
+                    ),
+                )
+                .response(
+                    "400",
+                    ResponseBuilder::new()
+                        .description(
+                            "缺头 — MISSING_DEVICE_ID / MISSING_OS / MISSING_APP_VERSION；\
+                             X-Device-Id 格式非法 — INVALID_DEVICE_ID；\
+                             批量超限(>50) — APP_EVENTS_TOO_LARGE",
+                        )
+                        .build(),
+                )
+                .response("401", unauthorized())
+                .response("403", ResponseBuilder::new().description("设备未注册 / 设备归属与当前账号不符 — DEVICE_NOT_REGISTERED / DEVICE_OWNERSHIP_MISMATCH").build())
+                .build(),
+        )
+        .build();
+    (
+        "/telemetry/app-events".to_string(),
         PathItemBuilder::new()
             .operation(HttpMethod::Post, op)
             .build(),
@@ -1019,6 +1260,20 @@ fn schemas() -> Vec<(String, RefOr<Schema>)> {
             )),
         ),
         (
+            "BatchQueryRequest".to_string(),
+            RefOr::T(Schema::Object(
+                ObjectBuilder::new()
+                    .property(
+                        "wordIds",
+                        RefOr::T(Schema::Array(
+                            ArrayBuilder::new().items(string_schema()).build(),
+                        )),
+                    )
+                    .required("wordIds")
+                    .build(),
+            )),
+        ),
+        (
             "BatchUpdateRequest".to_string(),
             RefOr::T(Schema::Object(
                 ObjectBuilder::new()
@@ -1052,6 +1307,49 @@ fn schemas() -> Vec<(String, RefOr<Schema>)> {
                     .required("packId")
                     .required("version")
                     .required("outcome")
+                    .build(),
+            )),
+        ),
+        (
+            "AppEventsRequest".to_string(),
+            RefOr::T(Schema::Object(
+                ObjectBuilder::new()
+                    .property(
+                        "events",
+                        RefOr::T(Schema::Array(
+                            ArrayBuilder::new()
+                                .items(RefOr::T(Schema::Object(
+                                    ObjectBuilder::new()
+                                        .property("clientEventId", string_schema())
+                                        .property("name", string_schema())
+                                        .property(
+                                            "category",
+                                            RefOr::T(Schema::Object(
+                                                ObjectBuilder::new()
+                                                    .schema_type(SchemaType::Type(Type::String))
+                                                    .enum_values(Some([
+                                                        "behavior", "error", "perf",
+                                                    ]))
+                                                    .build(),
+                                            )),
+                                        )
+                                        .property("clientTsMs", integer_schema())
+                                        .property(
+                                            "props",
+                                            RefOr::T(Schema::Object(
+                                                ObjectBuilder::new().build(),
+                                            )),
+                                        )
+                                        .required("clientEventId")
+                                        .required("name")
+                                        .required("category")
+                                        .required("clientTsMs")
+                                        .build(),
+                                )))
+                                .build(),
+                        )),
+                    )
+                    .required("events")
                     .build(),
             )),
         ),
@@ -1170,50 +1468,56 @@ fn schemas() -> Vec<(String, RefOr<Schema>)> {
 /// 构建包含 v1-stable 端点的 OpenAPI 3.1 文档。
 ///
 /// 路径前缀 `/api` 由 servers[0].url 表达，路径本身不含 `/api`。
-/// 端点按路径分组（同路径多方法合并为一个 PathItem），共约 21 个唯一路径、25 个操作。
+/// 端点按路径分组（同路径多方法合并为一个 PathItem）；具体覆盖以本列表为准，
+/// 不在注释里维护计数（历次演进后具体数字必然漂移）。
 pub fn build() -> utoipa::openapi::OpenApi {
     let paths_list: Vec<(String, utoipa::openapi::PathItem)> = vec![
-        // auth（6 个操作，6 个路径）
+        // auth
         path_auth_register(),
         path_auth_login(),
         path_auth_refresh(),
         path_auth_logout(),
         path_auth_forgot_password(),
         path_auth_reset_password(),
-        // user（2 个操作，1 个路径 GET+PUT）
+        // user（GET+PUT 同路径）
         path_user_profile(),
-        // words（2 个操作，2 个路径）
+        // words
         path_words(),
         path_words_id(),
-        // learning（3 个操作，2 个路径）
+        // learning
         path_records(),
         path_learning_session(),
-        // word-states（GET 单个 + 3 个独立写操作，无 PUT——契约修正见函数注释）
+        path_learning_sessions_list(),
+        // word-states（GET 单个 + 读侧 batch/due/stats + 3 个独立写操作，无 PUT——契约修正见函数注释）
         path_word_states_id(),
         path_word_states_mark_mastered(),
         path_word_states_reset(),
         path_word_states_batch_update(),
-        // favorites（4 个操作，3 个路径）
+        path_word_states_batch_query(),
+        path_word_states_due_list(),
+        path_word_states_stats_overview(),
+        // favorites
         path_word_favorites(),
         path_word_favorites_status(),
         path_word_favorites_id(),
-        // resource-packs（客户端公开端点，3 个操作，3 个路径，此前整块缺失）
+        // resource-packs（客户端公开端点，此前整块缺失）
         path_resource_packs_list(),
         path_resource_packs_public_key(),
         path_resource_packs_manifest(),
         // telemetry（此前整块缺失，此处仅补 finding 指出的安装上报这一个端点）
         path_telemetry_resource_pack_install(),
-        // notes（2 个操作，1 个路径 GET+POST）
+        path_telemetry_app_events(),
+        // notes（GET+POST 同路径）
         path_word_notes(),
-        // wordbooks（1 个操作，1 个路径）
+        // wordbooks
         path_wordbooks(),
-        // config（2 个操作，1 个路径 GET+PUT）
+        // config（GET+PUT 同路径）
         path_study_config(),
-        // analytics（1 个操作，1 个路径）
+        // analytics
         path_analytics_dashboard(),
-        // realtime SSE（1 个操作，1 个路径）
+        // realtime SSE
         path_realtime_sse(),
-        // misc（3 个操作，3 个路径）
+        // misc
         path_feedback(),
         path_status(),
         path_health(),

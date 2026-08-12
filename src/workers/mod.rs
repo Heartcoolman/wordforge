@@ -1,4 +1,5 @@
 pub mod algorithm_optimization;
+pub mod app_event_rollup;
 pub mod backup_offsite;
 pub mod cache_cleanup;
 pub mod canary_monitor;
@@ -74,6 +75,8 @@ pub enum WorkerName {
     CanaryMonitor,
     /// perf:周期 wal_checkpoint(TRUNCATE) 回收 WAL，避免臃肿 WAL 放大每次 commit 成本（每 10 分钟）
     WalCheckpoint,
+    /// m073：app_events 埋点日聚合（每日 01:10，重算最近 7 天）
+    AppEventRollup,
 }
 
 impl WorkerName {
@@ -98,6 +101,7 @@ impl WorkerName {
             Self::SchedulerHealthWatchdog => "scheduler_health_watchdog",
             Self::CanaryMonitor => "canary_monitor",
             Self::WalCheckpoint => "wal_checkpoint",
+            Self::AppEventRollup => "app_event_rollup",
         }
     }
 }
@@ -158,6 +162,12 @@ pub fn worker_cron_specs(
         JobSpec {
             name: WorkerName::DailyAggregation,
             cron: "0 0 1 * * *",
+            enabled: true,
+        },
+        // m073：app_events 埋点日聚合（01:10 错开 daily_aggregation）
+        JobSpec {
+            name: WorkerName::AppEventRollup,
+            cron: "0 10 1 * * *",
             enabled: true,
         },
         JobSpec {
@@ -517,6 +527,22 @@ impl WorkerManager {
                     )
                     .await;
                 }
+                WorkerName::AppEventRollup => {
+                    add_job(
+                        scheduler,
+                        spec.cron,
+                        name_str,
+                        job_store,
+                        health_state,
+                        move || {
+                            let store = store.clone();
+                            async move {
+                                app_event_rollup::run(&store).await;
+                            }
+                        },
+                    )
+                    .await;
+                }
                 WorkerName::HealthAnalysis => {
                     add_job(
                         scheduler,
@@ -747,7 +773,8 @@ async fn add_job<Fut, F>(
             );
             if misses >= WORKER_MISS_THRESHOLD {
                 if let Some(state) = health_state {
-                    state.broadcast_to_all_sse(crate::state::SseEvent::WorkerMissed {
+                    // 内部运维告警：只投 admin 通道，不应到达普通用户 SSE。
+                    state.broadcast_to_admin_sse(crate::state::SseEvent::WorkerMissed {
                         worker_name: name.to_string(),
                         miss_count: misses,
                     });

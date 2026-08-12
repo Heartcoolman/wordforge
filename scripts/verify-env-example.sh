@@ -101,7 +101,7 @@ check PAGINATION_MAX_SIZE           "100"
 # --- Strict mode ---
 check STRICT_MODE_ENABLED           "false"
 check STRICT_MODE_HARD_BLOCK        "false"
-check RECORDS_OUTBOX_ASYNC          "false"
+check RECORDS_OUTBOX_ASYNC          "true"
 
 # --- Probe ---
 check PROBE_ENABLED                 "true"

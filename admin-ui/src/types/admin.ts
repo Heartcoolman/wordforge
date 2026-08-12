@@ -229,7 +229,7 @@ export interface SystemHealth {
     sse: { healthy: boolean; activeConnections: number; activeDevices: number; maxConnections?: number };
     wordbookCenter: { healthy: boolean; probeSkipped?: boolean };
   };
-  /** S2-1:领域事件 outbox 异步消费健康（默认同步路径时恒 0）。 */
+  /** S2：领域事件 outbox 异步消费健康（v1.3.0 起默认异步；设 RECORDS_OUTBOX_ASYNC=false 回退同步时恒 0）。 */
   outbox?: { pending: number; lagSecs: number; deadLetter: number };
 }
 

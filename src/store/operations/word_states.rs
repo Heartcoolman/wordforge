@@ -71,11 +71,13 @@ pub struct WordStateStats {
     pub reviewing: u64,
     pub mastered: u64,
     pub forgotten: u64,
-    /// 预计完成今日到期复习所需分钟（dueCount × avg_response_time_ms / 60000，向上取整；无样本时回退 5 秒/词）。
+    /// 预计完成当前已到期复习所需分钟（dueCount × avg_response_time_ms / 60000，向上取整；无样本时回退 5 秒/词）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub due_review_estimated_minutes: Option<u32>,
-    /// 今日到期总数（未分页）。客户端 /word-states/due/list 有 limit≤200 上限，仅拿这个真实总数
-    /// 展示"待复习 N"才不会在到期词超过 200 时把计数显示成页容量而非真实总量。
+    /// 当前已到期总数（含历史逾期：next_review_date <= now，非仅今日窗口；未分页）。
+    /// 客户端 /word-states/due/list 有 limit≤200 上限，仅拿这个真实总数展示"待复习 N"
+    /// 才不会在到期词超过 200 时把计数显示成页容量而非真实总量。
+    /// 注意：该值恒为全局口径，不随 stats_overview 的 category 过滤变化。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub due_count: Option<u64>,
 }
@@ -257,8 +259,10 @@ impl Store {
         self.get_word_state_stats_filtered(user_id, None)
     }
 
-    /// 计算 due 词条真实总数（未分页） + ETA：dueCount × avgResponseTimeMs / 60000，向上取整；
-    /// 无样本时按 5s/词 估算。二者共用同一次 COUNT 查询，避免 stats_overview 各调各的重复计数。
+    /// 计算当前已到期词条真实总数（含历史逾期：next_review_date <= now，非仅今日窗口；未分页）
+    /// + ETA：dueCount × avgResponseTimeMs / 60000，向上取整；无样本时按 5s/词 估算。
+    /// 二者共用同一次 COUNT 查询，避免 stats_overview 各调各的重复计数。
+    /// 不吃 category 过滤——dueCount 恒为全局口径。
     pub fn get_due_review_estimated_minutes(&self, user_id: &str) -> Result<(u64, u32), StoreError> {
         keys::validate_id(user_id)?;
         let conn = self.conn()?;

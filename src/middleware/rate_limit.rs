@@ -748,6 +748,24 @@ mod tests {
             .with_state(state)
     }
 
+    /// user / admin 认证限流各挂各的 scope 中间件（与 routes/mod.rs 的真实拓扑一致），
+    /// 供双桶隔离用例复现「同一 IP 下两个 scope 互不挤占」。
+    fn build_dual_scope_auth_router(state: AppState) -> Router {
+        let user_routes = Router::new()
+            .route("/api/auth/login", get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                auth_rate_limit_middleware,
+            ));
+        let admin_routes = Router::new()
+            .route("/api/admin/auth/login", get(|| async { "admin-ok" }))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                admin_auth_rate_limit_middleware,
+            ));
+        user_routes.merge(admin_routes).with_state(state)
+    }
+
     #[tokio::test]
     async fn limiter_check_allows_then_denies_after_max() {
         let limiter = RateLimiter::new(60, 3);
@@ -970,6 +988,55 @@ mod tests {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["code"], "AUTH_RATE_LIMITED");
+    }
+
+    /// 双 scope 桶隔离：同一 IP 下 user 认证桶打满不得挤占 admin 认证桶的配额，反之亦然
+    /// （scope 前缀拆桶的回归防线——曾共用裸 ip_key 互相误伤）。
+    #[tokio::test]
+    async fn auth_scopes_user_and_admin_buckets_are_isolated() {
+        let mk = |uri: &'static str| {
+            Request::builder().uri(uri).body(Body::empty()).unwrap()
+        };
+
+        // 方向一：user 桶打满（max=1，第 2 次 429）→ admin 桶仍放行
+        let (state, _tmp) = build_state(60, 1).await;
+        let app = build_dual_scope_auth_router(state);
+        let r1 = app.clone().oneshot(mk("/api/auth/login")).await.unwrap();
+        assert_eq!(r1.status(), StatusCode::OK);
+        let r2 = app.clone().oneshot(mk("/api/auth/login")).await.unwrap();
+        assert_eq!(r2.status(), StatusCode::TOO_MANY_REQUESTS, "user 桶应打满");
+        let r3 = app
+            .clone()
+            .oneshot(mk("/api/admin/auth/login"))
+            .await
+            .unwrap();
+        assert_eq!(
+            r3.status(),
+            StatusCode::OK,
+            "user 桶打满不得影响 admin 桶"
+        );
+
+        // 方向二（独立 state 重置计数）：admin 桶打满 → user 桶仍放行
+        let (state2, _tmp2) = build_state(60, 1).await;
+        let app2 = build_dual_scope_auth_router(state2);
+        let a1 = app2
+            .clone()
+            .oneshot(mk("/api/admin/auth/login"))
+            .await
+            .unwrap();
+        assert_eq!(a1.status(), StatusCode::OK);
+        let a2 = app2
+            .clone()
+            .oneshot(mk("/api/admin/auth/login"))
+            .await
+            .unwrap();
+        assert_eq!(a2.status(), StatusCode::TOO_MANY_REQUESTS, "admin 桶应打满");
+        let a3 = app2.clone().oneshot(mk("/api/auth/login")).await.unwrap();
+        assert_eq!(
+            a3.status(),
+            StatusCode::OK,
+            "admin 桶打满不得影响 user 桶"
+        );
     }
 
     #[tokio::test]

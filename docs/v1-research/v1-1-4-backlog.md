@@ -13,6 +13,11 @@ v1.1.4 是 **v1.1.3 之后的收尾型 minor**，本质是把 v1.1.3 埋下的�
 
 ⚠️ **关键红线**：本版 **不翻** `RECORDS_OUTBOX_ASYNC` 默认值、**不删** `records/single.rs`+`batch.rs` 手动 rollback。那一步因异步响应不含 `amas_result` 仍需与学习端跨仓协同，v1.1.4 只打「精确一次 + 死信可运维」两块地基，为后续版本安全切换铺路。
 
+> **✅ 红线已解除（2026-07-21 · v1.3.0-beta.1）**：三端学习客户端 ≥ 1.6.0 确认容忍无 `amasResult`
+> 的 202 受理响应后，`RECORDS_OUTBOX_ASYNC` 默认已翻 `true`，路由层手动快照回滚已删除
+>（失败恢复统一走 `processed_events` 幂等账本短路）。详见 `should-deferred.md` 后记 2 与
+> CHANGELOG v1.3.0-beta.1。
+
 ## 总览
 
 | 里程碑（执行波次） | 主题 | 任务数 | 估时 | 优先级分布 |

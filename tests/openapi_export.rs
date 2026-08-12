@@ -41,3 +41,62 @@ fn export_openapi_yaml() {
 
     println!("openapi.yaml 已导出至 {out_path:?}（{} bytes）", yaml.len());
 }
+
+/// 路由 ↔ spec 对账：枚举 v1-stable 精选端点集合，断言 spec paths 全覆盖。
+/// CI 的 drift 检查只保证 rs↔yaml 同步，无法发现「真实路由存在但 spec 漏声明」；
+/// 本测试以人工维护的精选集合兜底——新增 v1-stable 端点时同步补进此列表。
+#[test]
+fn spec_paths_cover_v1_stable_endpoints() {
+    let api = learning_backend::openapi::build();
+    // 路径不含 /api 前缀（由 servers[0].url 表达），与 build() 的 paths_list 同口径。
+    let expected = [
+        // auth
+        "/auth/register",
+        "/auth/login",
+        "/auth/refresh",
+        "/auth/logout",
+        "/auth/forgot-password",
+        "/auth/reset-password",
+        // user / words
+        "/user-profile",
+        "/words",
+        "/words/{wordId}",
+        // learning
+        "/records",
+        "/learning/session",
+        "/learning/sessions",
+        // word-states（读侧 + 写侧）
+        "/word-states/{wordId}",
+        "/word-states/{wordId}/mark-mastered",
+        "/word-states/{wordId}/reset",
+        "/word-states/batch-update",
+        "/word-states/batch",
+        "/word-states/due/list",
+        "/word-states/stats/overview",
+        // favorites
+        "/word-favorites",
+        "/word-favorites/status",
+        "/word-favorites/{wordId}",
+        // resource-packs / telemetry
+        "/resource-packs",
+        "/resource-packs/public-key",
+        "/resource-packs/{packId}/manifest",
+        "/telemetry/resource-pack-install",
+        // notes / wordbooks / config / analytics
+        "/word-notes",
+        "/wordbooks",
+        "/study-config",
+        "/analytics/dashboard",
+        // realtime / misc
+        "/realtime/events",
+        "/feedback",
+        "/status",
+        "/health",
+    ];
+    for path in expected {
+        assert!(
+            api.paths.paths.contains_key(path),
+            "spec paths 缺少 v1-stable 端点 {path}（src/openapi.rs 的 paths_list 未声明）"
+        );
+    }
+}

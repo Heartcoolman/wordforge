@@ -189,7 +189,7 @@
 }
 ```
 
-**响应要点：** 新记录返回 `amasResult`，其 `ProcessResult` 包含 `sessionId`、`strategy`、`explanation`、`state`、`wordMastery`、`reward`、`coldStartPhase`；重复提交时 `amasResult` 为 `null`。
+**响应要点（v1.3.0 起默认异步）：** `RECORDS_OUTBOX_ASYNC` 默认 `true` 时返回 **202 Accepted** 裸响应 `{accepted, async, clientRecordId}`（无 `record` / `amasResult`）。设 `RECORDS_OUTBOX_ASYNC=false` 回退同步路径：新记录返回 `amasResult`（含 `sessionId`、`strategy`、`explanation`、`state`、`wordMastery`、`reward`、`coldStartPhase`）；重复提交时 `amasResult` 为 `null`。客户端须容忍两种形状（iOS / Android / Web ≥ 1.6.0 已适配）。
 
 ---
 
@@ -831,6 +831,45 @@ Content-Length: 102400
 ```
 
 > 此上报不参与心跳判断，也不受遥测限流 / 采样影响，是即发即忘的安装结果日志。每个 `(version, outcome)` 由 admin 端 `GET /api/admin/resource-packs/:packId/stats` 聚合计数。
+
+### 12.5 埋点事件流（app-events，m073）
+
+三端统一的**命名事件**埋点通道，与 §12.1 的心跳/摘要遥测分工：那边是周期快照（eventType 三值枚举 + summary 投影），这边是离散行为/错误/性能事件（`name` + `props`）。**本流与学习记录管线完全隔离**——`clientEventId` 只做本流去重，与 `/records` 的 `clientRecordId` 无任何关联（sessionEvents 的 `clientEventId === clientRecordId` 不变式不适用于此）。
+
+**接口：** `POST /api/telemetry/app-events`
+**认证：** Bearer Token + `x-device-id` + `x-device-platform` + `x-app-version` 三头必填；设备须已注册且归属一致（403 `DEVICE_NOT_REGISTERED` / `DEVICE_OWNERSHIP_MISMATCH`）。**不做 device upsert、不刷心跳**。
+
+**请求体：** `{ "events": [ ... ] }`，批量上限 **50 条**（超限整批 400 `APP_EVENTS_TOO_LARGE`）。逐条字段：
+
+| 字段 | 类型 | 必填 | 约束 |
+|---|---|---|---|
+| `clientEventId` | string | ✓ | ≤128 字符，客户端生成 UUID；`(deviceId, clientEventId)` 跨请求幂等去重（重放计入 `duplicates`） |
+| `name` | string | ✓ | `^[a-z0-9_]{1,64}$`（词表见下）；name 是聚合键，自由文本一律放 `props` |
+| `category` | string | ✓ | `behavior` \| `error` \| `perf` |
+| `clientTsMs` | number | ✓ | 服务器对时毫秒；钳制窗 `[now-7d, now+5min]`——**比 learning 事件的 30min 宽是有意为之**（离线队列可滞留数天，勿"统一"） |
+| `props` | object | — | ≤16 键、值仅标量（字符串 ≤128 字符）、序列化 ≤2KB；违规逐条拒 `APP_EVENT_INVALID_PROPS` |
+
+**响应 200：** `{ "accepted", "duplicates", "sampledOut", "failed", "errors": [{ "index", "clientEventId", "code", "message" }] }`——逐条部分成功，绝不整批 400。限流命中软丢弃 `{ "accepted": 0, "throttled": true }`（独立 `ae:` 配额，不与心跳共享）。
+
+**采样：** `behavior` / `perf` 受 `probe_sampling_config` 的 `app_behavior` / `app_perf` 行控制（确定性哈希，逐条）；`error` 恒不采样。被采样丢弃计入 `sampledOut`，客户端视为已送达。
+
+**事件词表（三端统一 snake_case，props 键固定）：**
+
+| category | name | props |
+|---|---|---|
+| behavior | `session_start` / `session_end` | `{launchType?}` / `{durationSec}` |
+| behavior | `screen_view` | `{screen}`：`home/study/review/wordbook/word_detail/profile/settings/stats/login/onboarding/notifications/feedback`（`review` 为移动端复习主 Tab；词表外路由不上报——screen 是聚合维度，不收自由串。跨端归并口径：快速练习等练习类二级入口一律并入 `study`，词库中心/词库详情并入 `wordbook`，历史/会话列表并入 `stats`） |
+| behavior | `study_start` / `study_complete` / `study_quit` | `{wordCount?}` |
+| behavior | `word_lookup` / `word_favorite` / `word_note` / `wordbook_switch` / `feedback_submit` | — |
+| behavior | `pack_update` | `{outcome}` |
+| error | `api_failure` | `{endpoint（模板化路径）, status, code?}` |
+| error | `crash` | `{signature（sha256 前 16）, kind}` |
+| error | `app_error` | `{signature, kind}` |
+| perf | `app_launch` | `{ms}` |
+| perf | `page_load` | `{screen, ms}` |
+| perf | `api_rtt` | `{endpoint, ms, status}`（客户端 1/10 采样） |
+
+> 服务端存储：raw 表 `app_events` 90 天 retention；日聚合（`app_event_daily`/`app_user_daily`/`app_user_first_seen`）由每日 01:10 的 `app_event_rollup` worker 重算最近 7 天（与钳制窗一致），永久保留。分析读端点 `GET /api/admin/app-events/{overview|trend|top-events|errors|perf|funnel|retention-matrix|activity}`。
 
 ---
 

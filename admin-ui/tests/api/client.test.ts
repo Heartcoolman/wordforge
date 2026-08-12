@@ -771,6 +771,88 @@ describe('connectSseStream', () => {
     fetchSpy.mockRestore();
   });
 
+  it('parses incident / worker_missed / llm_budget_exceeded events and invokes callbacks', async () => {
+    const events = [
+      'event: incident\ndata: {"type":"incident","errorRate":0.05,"windowSecs":300}\n\n',
+      'event: worker_missed\ndata: {"type":"worker_missed","workerName":"delayed_reward","missCount":3}\n\n',
+      'event: llm_budget_exceeded\ndata: {"type":"llm_budget_exceeded","spentYuan":102.5,"capYuan":100,"resumeMonth":"2026-08"}\n\n',
+    ];
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(makeSseResponse(events));
+
+    const onIncident = vi.fn();
+    const onWorkerMissed = vi.fn();
+    const onLlmBudgetExceeded = vi.fn();
+    const dispose = connectSseStream({ onIncident, onWorkerMissed, onLlmBudgetExceeded });
+
+    await new Promise((r) => setTimeout(r, 30));
+    dispose();
+
+    expect(onIncident).toHaveBeenCalledTimes(1);
+    expect(onIncident).toHaveBeenCalledWith({ errorRate: 0.05, windowSecs: 300 });
+    expect(onWorkerMissed).toHaveBeenCalledTimes(1);
+    expect(onWorkerMissed).toHaveBeenCalledWith({ workerName: 'delayed_reward', missCount: 3 });
+    expect(onLlmBudgetExceeded).toHaveBeenCalledTimes(1);
+    expect(onLlmBudgetExceeded).toHaveBeenCalledWith({ spentYuan: 102.5, capYuan: 100, resumeMonth: '2026-08' });
+    fetchSpy.mockRestore();
+  });
+
+  it('rejects incident / worker_missed / llm_budget_exceeded payloads with wrong field types', async () => {
+    const events = [
+      // 类型错误
+      'event: incident\ndata: {"errorRate":"high","windowSecs":300}\n\n',
+      'event: worker_missed\ndata: {"workerName":42,"missCount":3}\n\n',
+      'event: llm_budget_exceeded\ndata: {"spentYuan":"102.5","capYuan":100,"resumeMonth":"2026-08"}\n\n',
+      // 字段缺失
+      'event: incident\ndata: {"errorRate":0.05}\n\n',
+      'event: worker_missed\ndata: {"workerName":"w"}\n\n',
+      'event: llm_budget_exceeded\ndata: {"spentYuan":1,"capYuan":2}\n\n',
+    ];
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(makeSseResponse(events));
+
+    const onIncident = vi.fn();
+    const onWorkerMissed = vi.fn();
+    const onLlmBudgetExceeded = vi.fn();
+    const dispose = connectSseStream({ onIncident, onWorkerMissed, onLlmBudgetExceeded });
+
+    await new Promise((r) => setTimeout(r, 30));
+    dispose();
+
+    expect(onIncident).not.toHaveBeenCalled();
+    expect(onWorkerMissed).not.toHaveBeenCalled();
+    expect(onLlmBudgetExceeded).not.toHaveBeenCalled();
+    fetchSpy.mockRestore();
+  });
+
+  it('401 dispatches admin:unauthorized and pauses reconnection until admin login', async () => {
+    vi.useFakeTimers();
+    const onUnauthorized = vi.fn();
+    window.addEventListener('admin:unauthorized', onUnauthorized);
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(async () => new Response('unauthorized', { status: 401 }));
+
+    const dispose = connectSseStream({});
+    // 让 startStream 走到 401 分支（fetch resolve + 分支处理均为微任务）
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(onUnauthorized).toHaveBeenCalledTimes(1);
+    expect(tokenManager.clearAdminToken).toHaveBeenCalled();
+
+    // 无 admin token 期间：长时间推进也不再发起连接（区别于网络错误的指数退避重试）。
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+    // 重新登录（admin token 槽恢复）→ 下一轮轮询立即恢复重连。
+    tm._setAdmin('tok');
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(fetchSpy.mock.calls.length).toBeGreaterThanOrEqual(2);
+
+    dispose();
+    window.removeEventListener('admin:unauthorized', onUnauthorized);
+    vi.useRealTimers();
+    fetchSpy.mockRestore();
+  });
+
   it('advances reconnectDelay (exponential backoff) when token present', async () => {
     // connectSseStream 是 admin-ui 专用连接，判断"是否还有 token"看的是 admin token 槽
     // （见 http.ts 的 bug 修复：此前误读了普通用户槽，导致这条 SSE 对任何 admin 会话恒 401）。

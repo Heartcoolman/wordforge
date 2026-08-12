@@ -75,6 +75,22 @@ pub async fn spawn_test_app_with_telemetry_limit(telemetry_max: u64) -> TestApp 
         .await
 }
 
+/// S2（v1.3.0 起生产默认路径）：records_outbox_async=true 的 TestApp，覆盖单条上报
+/// 202 异步受理契约。主 harness 仍显式 false，保留同步老路（opt-out 口径）的既有覆盖。
+pub async fn spawn_test_app_with_outbox_async() -> TestApp {
+    spawn_with_full_config_inner(
+        100,
+        10,
+        Default::default(),
+        Default::default(),
+        0,
+        0,
+        120,
+        true,
+    )
+    .await
+}
+
 async fn spawn_with_full_config(
     api_limit: u64,
     auth_limit: u64,
@@ -92,6 +108,30 @@ async fn spawn_with_full_config_dual(
     anon_max: u64,
     authed_max: u64,
     telemetry_max: u64,
+) -> TestApp {
+    spawn_with_full_config_inner(
+        api_limit,
+        auth_limit,
+        strict_mode,
+        probe,
+        anon_max,
+        authed_max,
+        telemetry_max,
+        false,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn spawn_with_full_config_inner(
+    api_limit: u64,
+    auth_limit: u64,
+    strict_mode: learning_backend::config::StrictModeConfig,
+    probe: learning_backend::config::ProbeConfig,
+    anon_max: u64,
+    authed_max: u64,
+    telemetry_max: u64,
+    records_outbox_async: bool,
 ) -> TestApp {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     // 直接构造 Config，避免使用 set_var 造成多线程测试环境变量竞态
@@ -118,7 +158,7 @@ async fn spawn_with_full_config_dual(
         // 测试耐心值，生产用各自 config，不受影响；不会让正常用例变慢，仅在病态争用时多等）。
         sqlite_connection_timeout_ms: 10000,
         sqlite_pool_size: 2,
-        records_outbox_async: false,
+        records_outbox_async,
         jwt_secret: test_secret,
         refresh_jwt_secret: test_refresh_secret,
         jwt_expires_in_hours: 24,

@@ -586,6 +586,116 @@ async fn webapp_activate_rejects_non_tarball_artifact() {
     );
 }
 
+/// 通用 pack（非 web-app）的频道校验：beta 版本向 stable 激活必须 400 PACK_CHANNEL_MISMATCH，
+/// 且 stable 原激活指针不得被覆盖（此前该误操作静默覆盖旧指针致 stable 通道 404）。
+#[tokio::test]
+async fn generic_pack_activate_rejects_channel_mismatch_and_keeps_pointer() {
+    let app = spawn_test_server().await;
+    let admin = setup_admin_and_get_token(&app.app).await;
+
+    // 先建立 stable 的正常激活指针：1.0.0@stable
+    upload_pack_payload(
+        &app.app,
+        &admin,
+        "wordbook-core",
+        "1.0.0",
+        "stable",
+        SAMPLE_PAYLOAD,
+        None,
+    )
+    .await;
+    let act1 = request(
+        &app.app,
+        Method::PUT,
+        "/api/admin/resource-packs/wordbook-core/channel/stable/active",
+        Some(serde_json::json!({ "version": "1.0.0" })),
+        &[("authorization", auth_header(&admin))],
+    )
+    .await;
+    assert_eq!(act1.status(), StatusCode::OK);
+
+    // 2.0.0 发布在 beta 通道
+    upload_pack_payload(
+        &app.app,
+        &admin,
+        "wordbook-core",
+        "2.0.0",
+        "beta",
+        SAMPLE_PAYLOAD,
+        None,
+    )
+    .await;
+
+    // 把 beta 版本往 stable 激活 → 400 PACK_CHANNEL_MISMATCH
+    let act2 = request(
+        &app.app,
+        Method::PUT,
+        "/api/admin/resource-packs/wordbook-core/channel/stable/active",
+        Some(serde_json::json!({ "version": "2.0.0" })),
+        &[("authorization", auth_header(&admin))],
+    )
+    .await;
+    let (status, _h, body) = response_json(act2).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "频道不符应 400：{body}");
+    assert_eq!(body["code"], "PACK_CHANNEL_MISMATCH");
+
+    // stable 原激活指针未被覆盖：manifest 仍返回 1.0.0
+    let manifest = request(
+        &app.app,
+        Method::GET,
+        "/api/resource-packs/wordbook-core/manifest?appVersion=1.0.0&locale=zh-Hans",
+        None,
+        &[],
+    )
+    .await;
+    let (ms, _h2, mbody) = response_json(manifest).await;
+    assert_eq!(ms, StatusCode::OK);
+    assert_eq!(
+        mbody["version"], "1.0.0",
+        "stable 激活指针不得被频道不符的激活请求覆盖：{mbody}"
+    );
+}
+
+/// 并发上传同一 (pack, version)：UPLOAD_LOCK 串行化下恰好一个 200、一个 409
+/// （谁的字节落盘 = 谁的 sha256 进 DB，绝无交错）。
+#[tokio::test]
+async fn concurrent_upload_same_version_yields_one_ok_one_conflict() {
+    let app = spawn_test_server().await;
+    let admin = setup_admin_and_get_token(&app.app).await;
+
+    let (r1, r2) = tokio::join!(
+        upload_pack_payload(
+            &app.app,
+            &admin,
+            "wordbook-core",
+            "3.3.3",
+            "stable",
+            SAMPLE_PAYLOAD,
+            None,
+        ),
+        upload_pack_payload(
+            &app.app,
+            &admin,
+            "wordbook-core",
+            "3.3.3",
+            "stable",
+            SAMPLE_PAYLOAD,
+            None,
+        )
+    );
+    let statuses = [r1.status(), r2.status()];
+    let ok_count = statuses.iter().filter(|s| **s == StatusCode::OK).count();
+    let conflict_count = statuses
+        .iter()
+        .filter(|s| **s == StatusCode::CONFLICT)
+        .count();
+    assert_eq!(
+        (ok_count, conflict_count),
+        (1, 1),
+        "并发上传同 (pack,version) 应恰好一 200 一 409，实际：{statuses:?}"
+    );
+}
+
 /// web-app 版本若发布在 beta 通道，却在 stable 通道激活，必须被拒（400）——
 /// 守住「stable 托管根只服务 stable 工件」不变式（resource_pack_active FK 不约束 channel）。
 #[tokio::test]

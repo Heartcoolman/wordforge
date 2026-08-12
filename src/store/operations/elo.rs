@@ -85,6 +85,34 @@ impl Store {
         Ok(v.unwrap_or(0.0))
     }
 
+    /// W1-1：回滚快照取用户 ELO 的派生列 trend（类比 [`Self::get_word_elo_trend_select`]）。
+    /// `get_user_elo` 只读 rating/games，回滚 UPSERT 不覆盖 trend 会在 k_dynamic_enabled 时
+    /// 留下前移残留、污染该用户后续动态 K。无行回退建表默认 0.0。
+    pub fn get_user_elo_trend(&self, user_id: &str) -> Result<f64, StoreError> {
+        keys::validate_id(user_id)?;
+        let conn = self.conn()?;
+        let v: Option<f64> = conn
+            .query_row(
+                "SELECT trend FROM user_elo WHERE user_id=?1",
+                params![user_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(v.unwrap_or(0.0))
+    }
+
+    /// 回滚辅助：把 user_elo.trend 复位到捕获值（learning 事件回放的用户级快照回滚使用）。
+    pub fn set_user_elo_trend(&self, user_id: &str, trend: f64) -> Result<(), StoreError> {
+        keys::validate_id(user_id)?;
+        let conn = self.conn()?;
+        conn.execute(
+            "INSERT INTO user_elo (user_id, trend) VALUES (?1, ?2)
+             ON CONFLICT(user_id) DO UPDATE SET trend=?2",
+            params![user_id, trend],
+        )?;
+        Ok(())
+    }
+
     /// W1-1：回滚快照取某词全局 ELO 的派生列（trend / rating_select），与 `word_elo` 一并捕获/恢复。
     /// `get_word_elo` 只读 rating/games，回滚 UPSERT 不覆盖 trend/rating_select 会让这两列前移后残留，
     /// 污染全局选词排序（rating_select）与动态 K（trend）。无行回退建表默认 (0.0, 1200.0)。

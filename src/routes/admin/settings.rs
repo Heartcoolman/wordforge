@@ -326,9 +326,11 @@ async fn update_settings(
     if req_touched_version_gate {
         state.refresh_version_gate();
     }
-    // 门控放宽 → 广播 upgrade_cleared,使停在强升屏的客户端实时清锁恢复。
+    // 门控放宽 → 广播 upgrade_cleared(origin=gate),使停在强升屏的客户端实时清锁恢复。
     if gate_loosened {
-        state.broadcast_to_all_sse(SseEvent::UpgradeCleared);
+        state.broadcast_to_all_sse(SseEvent::UpgradeCleared {
+            origin: crate::state::UpgradeClearedOrigin::Gate,
+        });
     }
 
     tracing::info!(
@@ -473,10 +475,13 @@ async fn set_version_gate(
 
     // 即时生效:刷新中间件读取的运行时快照。
     let effective = state.refresh_version_gate();
-    // 门控放宽 → 广播 upgrade_cleared,使停在强升屏的客户端实时清锁恢复(SSE 已豁免门控,
-    // 故过低客户端也收得到;若实际仍过低,其下一次受检请求会被 CLIENT_OUTDATED 重锁,自校正)。
+    // 门控放宽 → 广播 upgrade_cleared(origin=gate),使停在强升屏的客户端实时清锁恢复
+    // (SSE 已豁免门控,故过低客户端也收得到;若实际仍过低,其下一次受检请求会被
+    // CLIENT_OUTDATED 重锁,自校正)。
     if gate_loosened {
-        state.broadcast_to_all_sse(SseEvent::UpgradeCleared);
+        state.broadcast_to_all_sse(SseEvent::UpgradeCleared {
+            origin: crate::state::UpgradeClearedOrigin::Gate,
+        });
     }
 
     tracing::info!(

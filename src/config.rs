@@ -48,7 +48,9 @@ pub struct Config {
     pub limits: LimitsConfig,
     pub strict_mode: StrictModeConfig,
     pub probe: ProbeConfig,
-    /// S2-1：records→AMAS 是否走 outbox 异步消费路径（默认 false=同步老路，保留 amas_result 同步返回）。
+    /// S2：records→AMAS 是否走 outbox 异步消费路径。v1.3.0 起默认 true（单条上报 202 受理、
+    /// AMAS 由 outbox worker 异步消费；三端 ≥1.6.0 已确认容忍无 amas_result 的 202 响应）。
+    /// 设 RECORDS_OUTBOX_ASYNC=false 可回退同步老路（amas_result 同步返回）。
     pub records_outbox_async: bool,
 }
 
@@ -362,11 +364,10 @@ impl Config {
             admin_jwt_expires_in_hours: env_or_parse("ADMIN_JWT_EXPIRES_IN_HOURS", 2_u64),
             cors_origin: env_or("CORS_ORIGIN", "http://localhost:5173"),
             trust_proxy: env_or_bool("TRUST_PROXY", false),
-            resource_pack_trusted_hosts: env_or("RESOURCE_PACK_TRUSTED_HOSTS", "")
-                .split(',')
-                .map(|s| s.trim().to_ascii_lowercase())
-                .filter(|s| !s.is_empty())
-                .collect(),
+            resource_pack_trusted_hosts: parse_trusted_hosts(&env_or(
+                "RESOURCE_PACK_TRUSTED_HOSTS",
+                "",
+            )),
             cookie_secure: env_or_bool("COOKIE_SECURE", false),
             self_watchdog: SelfWatchdogConfig {
                 enabled: env_or_bool("ENABLE_SELF_WATCHDOG", false),
@@ -449,7 +450,7 @@ impl Config {
                     .ok()
                     .filter(|s| !s.is_empty()),
             },
-            records_outbox_async: env_or_bool("RECORDS_OUTBOX_ASYNC", false),
+            records_outbox_async: env_or_bool("RECORDS_OUTBOX_ASYNC", true),
             probe: ProbeConfig {
                 enabled: env_or_bool("PROBE_ENABLED", true),
                 rate_limit_per_min: env_or_parse("PROBE_RATE_LIMIT_PER_MIN", 10_u32),
@@ -565,6 +566,37 @@ impl Config {
             }
         }
     }
+}
+
+/// 解析 `RESOURCE_PACK_TRUSTED_HOSTS`：逐条剥离 scheme 前缀与 `:端口`，trim + 转小写，
+/// 归一化为纯 hostname——与请求侧 resolve_public_base_url 的比对口径（`:` 前 hostname、
+/// 小写）严格一致。剥离后仍含 `/`（路径残余）或非法字符的条目永远匹配不上任何请求
+/// hostname（白名单静默失效），跳过并 warn 提示运维改成纯 hostname。
+fn parse_trusted_hosts(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter_map(|entry| {
+            let no_scheme = entry
+                .split_once("://")
+                .map(|(_, rest)| rest)
+                .unwrap_or(entry);
+            let hostname = no_scheme.split(':').next().unwrap_or(no_scheme);
+            let normalized = hostname.trim().to_ascii_lowercase();
+            let valid = !normalized.is_empty()
+                && normalized
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.');
+            if !valid {
+                tracing::warn!(
+                    entry,
+                    "RESOURCE_PACK_TRUSTED_HOSTS 条目含 `/` 或非法字符，无法匹配任何请求 hostname，已跳过（应填纯 hostname，如 cdn.example.com）"
+                );
+                return None;
+            }
+            Some(normalized)
+        })
+        .collect()
 }
 
 fn normalized_db_path(raw: &str) -> String {
@@ -758,6 +790,21 @@ mod tests {
         // LLMConfig 也覆盖
         let llm_dbg = format!("{:?}", cfg.llm);
         assert!(llm_dbg.contains("***REDACTED***"));
+    }
+
+    #[test]
+    fn parse_trusted_hosts_normalizes_and_skips_invalid() {
+        // 剥 scheme / 端口 + trim + 小写
+        assert_eq!(
+            parse_trusted_hosts("https://CDN.Example.com:443, api.example.com ,"),
+            vec!["cdn.example.com".to_string(), "api.example.com".to_string()]
+        );
+        // 含路径残余 / 非法字符的条目跳过（warn），不产生永不匹配的死条目
+        assert_eq!(
+            parse_trusted_hosts("cdn.example.com/path, good.example.com, bad host"),
+            vec!["good.example.com".to_string()]
+        );
+        assert!(parse_trusted_hosts("").is_empty());
     }
 
     #[test]

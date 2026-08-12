@@ -463,6 +463,8 @@ impl AMASEngine {
             .clone()
     }
 
+    /// 非幂等诊断路径（/api/amas 旧客户端等）：恒 `apply_elo=false`——校准事件对全局
+    /// word_elo / user_elo / mastery 流水零副作用（历史语义，见 process_event_blocking 注释）。
     pub async fn process_event(
         &self,
         user_id: &str,
@@ -473,7 +475,7 @@ impl AMASEngine {
         let user_id = user_id.to_string();
         // 设计 A7:spawn_blocking 丢失 tracing span，request_id 必须由闭包显式 move 捕获后透传。
         let result = crate::blocking::run_blocking("amas.process_event", move || {
-            engine.process_event_blocking(&user_id, raw_event, None, request_id)
+            engine.process_event_blocking(&user_id, raw_event, None, request_id, false)
         })
         .await??;
         // 非幂等路径不传幂等键，persist_state 恒 committed=true（无标记可竞争），故必为 Some。
@@ -489,31 +491,42 @@ impl AMASEngine {
     /// 与 [`Self::process_event`] 唯一差别是落库时附带幂等标记；处理逻辑零分叉。
     /// 返回 `Ok(None)` 表示幂等标记已被并发同 `client_record_id` 请求抢先写入、本次 AMAS 增量已
     /// 整笔回滚未生效——调用方应据此走"裸记录回放"而非二次累加 ELO/mastery/trust。
+    ///
+    /// `apply_elo`：是否把本事件计入全局 ELO（word_elo/user_elo）与 mastery 边沿流水。
+    /// records 正规学习流（single/batch/outbox）传 `true`；amas 诊断/校准端点
+    /// （/api/amas/process-event、/batch-process）即便携带幂等键也传 `false`——校准事件
+    /// 只应更新 per-user 建模状态，不得污染被全员选词读取的全局 word_elo（那些端点无 tx2
+    /// 回滚快照，写了就收不回）。
     pub async fn process_event_idempotent(
         &self,
         user_id: &str,
         raw_event: RawEvent,
         client_record_id: &str,
         request_id: Option<String>,
+        apply_elo: bool,
     ) -> Result<Option<(ProcessResult, Option<i64>)>, AppError> {
         let engine = self.clone();
         let user_id = user_id.to_string();
         let key = client_record_id.to_string();
         // 设计 A7:spawn_blocking 丢失 tracing span，request_id 由闭包显式 move 捕获后透传。
         crate::blocking::run_blocking("amas.process_event", move || {
-            engine.process_event_blocking(&user_id, raw_event, Some(&key), request_id)
+            engine.process_event_blocking(&user_id, raw_event, Some(&key), request_id, apply_elo)
         })
         .await?
     }
 
     /// 返回 `Ok(None)` 仅当传入幂等键且其标记已被并发请求抢先写入——本次 AMAS 增量已整笔回滚、
     /// 未生效，调用方应据此走"裸记录回放"而非二次累加。`idempotency_key` 为 `None` 时恒 `Some`。
+    ///
+    /// `apply_elo`：显式的 ELO/mastery 流水门控（取代早前按 `idempotency_key.is_some()` 推断的
+    /// 隐式门控——amas 诊断端点补幂等键后，那个推断会让校准事件开始写全局 word_elo，语义漂移）。
     fn process_event_blocking(
         &self,
         user_id: &str,
         raw_event: RawEvent,
         idempotency_key: Option<&str>,
         request_id: Option<String>,
+        apply_elo: bool,
     ) -> Result<Option<(ProcessResult, Option<i64>)>, AppError> {
         let start = std::time::Instant::now();
 
@@ -554,12 +567,13 @@ impl AMASEngine {
 
         Self::update_session_counters(&mut context.user_state, &raw_event, now);
         // #11/#14/#39：ELO 的 read-modify-write 收进 persist_state 的同一原子 tx，与 user_state/
-        // algo_states/幂等标记全有或全无。**仅幂等路径（携带 client_record_id 的 records 流）应用 ELO**：
-        // word_elo 是全局共享、被全员选词读取的写，只应由正规学习事件驱动。非幂等诊断端点
-        // （/api/amas/process-event、/batch-process）不带幂等键，既无重试去重也无回滚快照——若在此写
-        // ELO，重试会双重累加 user_elo、并污染全局 word_elo（本 PR 前这些端点对 ELO 零副作用）。
-        // 故 idempotency_key 为 None 时不带 ELO；word_id 为空（纯 quit 事件）同样不带。
-        let elo_spec = (idempotency_key.is_some() && !raw_event.word_id.is_empty()).then(|| {
+        // algo_states/幂等标记全有或全无。**仅 `apply_elo=true`（records 正规学习流）应用 ELO**：
+        // word_elo 是全局共享、被全员选词读取的写，只应由正规学习事件驱动。amas 诊断/校准端点
+        // （/api/amas/process-event、/batch-process）传 `apply_elo=false`——即便它们如今携带幂等键，
+        // 也没有 tx2 失败回滚快照，写全局 ELO 就收不回（校准事件对 ELO 零副作用是原始语义）。
+        // 早前按 `idempotency_key.is_some()` 隐式推断，amas 路由补幂等键后会静默打开这道门，
+        // 故改为调用方显式声明。word_id 为空（纯 quit 事件）同样不带。
+        let elo_spec = (apply_elo && !raw_event.word_id.is_empty()).then(|| {
             // #14 抗投毒上限固定取 **stable 基线** ELO 参数派生（非 per-event effective config）：把单
             // 用户对某词全局评分的累计净位移钳在该词单次最大可能位移（novice 期 k_word）的 4 倍内。账本
             // word_elo_user_contrib 是 per-(user,word) 全局单一累加器、无配置版本维度；若 cap 改用 canary
@@ -593,12 +607,17 @@ impl AMASEngine {
             return Ok(None);
         }
 
-        // T1.3:落 mastery 态边沿事件(支撑"长期 masteredCount")。仅幂等学习路径(与 ELO 同口径),
-        // 避免诊断端点重试双计;持久化成功后 best-effort 落库,失败仅 warn 不影响主流程。
+        // T1.3:落 mastery 态边沿事件(支撑"长期 masteredCount")。仅 apply_elo=true 的正规学习流
+        // (与 ELO 同口径,校准/诊断事件不计入分析流水),避免诊断端点重试双计;持久化成功后
+        // best-effort 落库,失败仅 warn 不影响主流程。
         // 已知 caveat(low):此写与 persist_state 非同一 tx——commit 后、本 INSERT 前崩溃会永久丢该事件
         // (幂等键已写,重试被拦无法补)。masteredCount 因此在崩溃下略偏低,但丢失对 canary/baseline
         // 两臂对称(同代码路径),不扭曲 A/B 相对比较,仅绝对值低估;作为纯分析指标可接受。
-        if idempotency_key.is_some() && !raw_event.word_id.is_empty() {
+        // 反向偏差(low,决定不修):路由层 tx2(记录行落库)失败时 AMAS 状态与幂等标记保留
+        //（S2 收尾后不再回滚），重试命中幂等账本短路、不重放本事件，边沿流水不会重复写；
+        // 早期回滚机制下同一边沿可能多一行(有界重复)，存量数据保持该口径，
+        // masteredCount 等分析口径因此在该罕见路径下略偏高,与上面的崩溃低估同为可接受偏差。
+        if apply_elo && !raw_event.word_id.is_empty() {
             let now_rfc3339 = now.to_rfc3339();
             if let Some(event) = mastery_transition {
                 if let Err(e) = self.store.insert_word_mastery_event(
@@ -3077,6 +3096,7 @@ mod tests {
                 },
                 key,
                 None,
+                true,
             )
             .await
             .expect("process_event_idempotent should not error");
@@ -3122,6 +3142,7 @@ mod tests {
                 },
                 key,
                 None,
+                true,
             )
             .await
             .expect("process_event_idempotent");

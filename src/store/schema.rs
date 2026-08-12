@@ -963,7 +963,10 @@ VALUES
     ('*',             1.0, 1, 0, 1000, datetime('now'), 'seed'),
     ('periodic',      1.0, 1, 0,  100, datetime('now'), 'seed'),
     ('on_demand',     1.0, 1, 1,   10, datetime('now'), 'seed'),
-    ('session_start', 1.0, 1, 1,   10, datetime('now'), 'seed');
+    ('session_start', 1.0, 1, 1,   10, datetime('now'), 'seed'),
+    -- m073:app-events 埋点采样开关(error 类摄取端恒不采样,不入配置)
+    ('app_behavior',  1.0, 1, 0,  100, datetime('now'), 'seed'),
+    ('app_perf',      1.0, 1, 0,  100, datetime('now'), 'seed');
 
 CREATE TABLE IF NOT EXISTS probe_sampling_audit (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -976,4 +979,54 @@ CREATE TABLE IF NOT EXISTS probe_sampling_audit (
 );
 CREATE INDEX IF NOT EXISTS idx_probe_sampling_audit_time
     ON probe_sampling_audit(created_at DESC);
+
+-- m073:客户端埋点事件流(app-events)。raw 表 90d retention(telemetry_cleanup,server_ts
+-- 空格格式);UNIQUE(device_id, client_event_id) 承担跨请求幂等(摄取 INSERT OR IGNORE);
+-- name 摄取端正则校验 ^[a-z0-9_]{1,64}$,自由字符串只进 props_json——rollup 键绝不含
+-- 自由串(m064 基数纪律)。日聚合三表由 app_event_rollup worker 幂等重算,永久保留。
+CREATE TABLE IF NOT EXISTS app_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    device_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    platform TEXT NOT NULL,
+    app_version TEXT NOT NULL,
+    category TEXT NOT NULL CHECK (category IN ('behavior','error','perf')),
+    name TEXT NOT NULL,
+    client_event_id TEXT NOT NULL,
+    client_ts_ms INTEGER NOT NULL,
+    event_day TEXT NOT NULL,
+    props_json TEXT DEFAULT NULL,
+    server_ts TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_app_events_dedup ON app_events(device_id, client_event_id);
+CREATE INDEX IF NOT EXISTS idx_app_events_day ON app_events(event_day, category, name);
+CREATE INDEX IF NOT EXISTS idx_app_events_user_day ON app_events(user_id, event_day);
+CREATE INDEX IF NOT EXISTS idx_app_events_server_ts ON app_events(server_ts);
+
+CREATE TABLE IF NOT EXISTS app_event_daily (
+    day TEXT NOT NULL,
+    platform TEXT NOT NULL,
+    category TEXT NOT NULL,
+    name TEXT NOT NULL,
+    count INTEGER NOT NULL DEFAULT 0,
+    users INTEGER NOT NULL DEFAULT 0,
+    p50_ms INTEGER,
+    p95_ms INTEGER,
+    p99_ms INTEGER,
+    PRIMARY KEY (day, platform, category, name)
+);
+
+CREATE TABLE IF NOT EXISTS app_user_daily (
+    day TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    platform TEXT NOT NULL,
+    events INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (day, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS app_user_first_seen (
+    user_id TEXT NOT NULL PRIMARY KEY,
+    first_day TEXT NOT NULL,
+    platform TEXT NOT NULL
+);
 "#;

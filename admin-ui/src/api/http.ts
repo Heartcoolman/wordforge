@@ -12,6 +12,9 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 const SSE_INITIAL_RECONNECT_MS = 3_000;
 const SSE_MAX_RECONNECT_MS = 30_000;
 const SSE_READ_TIMEOUT_MS = 60_000;
+// 401（未登录 / token 失效）后等待重新登录的轮询间隔：与网络错误的指数退避不同，
+// 鉴权失败重试再多次也不会成功，只需低频探测 admin token 是否已恢复。
+const SSE_AUTH_POLL_MS = 3_000;
 // 连接存活超过该时长才视为「健康连接」，重连退避才重置；否则按指数退避，
 // 避免代理 idle-close / 服务端干净结束流时形成零延迟重连风暴。
 const SSE_STABLE_UPTIME_MS = 30_000;
@@ -282,13 +285,12 @@ export function connectSseStream(callbacks: SseCallbacks): () => void {
           await tokenManager.refreshAccessToken();
         }
 
-        // Bug 修复：这条 SSE 连接专供 admin-ui 使用，此前一直读普通用户 token 槽
-        // （tokenManager.getToken()）——管理员登录只调用 setAdminToken()，从不写这一槽，导致
-        // 这条连接对每一个 admin 会话都永远拿不到 token、必然 401。App.tsx 里"admin 登录后会
-        // 自然恢复"的注释此前并不成立（因为这里从没读对过槽位），改读 getAdminToken() 后才真正
-        // 兑现该注释描述的行为。
+        // admin 专用实时通道：连 /api/admin/realtime/events（AdminAuthUser 鉴权，
+        // 读 admin token 槽）。旧实现连用户端点 /api/realtime/events，服务端要求
+        // user token + user session，admin token 恒 401——这是历史上「admin SSE
+        // 永远连不上」的根因，现由服务端专用端点根治。
         const token = tokenManager.getAdminToken();
-        const response = await fetch(buildUrl('/api/realtime/events'), {
+        const response = await fetch(buildUrl('/api/admin/realtime/events'), {
           headers: {
             ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
             'Accept': 'text/event-stream',
@@ -298,6 +300,23 @@ export function connectSseStream(callbacks: SseCallbacks): () => void {
           credentials: 'include',
           signal: ctrl.signal,
         });
+
+        if (response.status === 401) {
+          // 鉴权失败（未登录 / admin token 过期）：与 unwrap() 的 401 行为对齐——
+          // 清 admin token 并派发 admin:unauthorized（ProtectedRoute 据此跳登录页）。
+          // 不做指数退避重连（重试不会成功），改为低频轮询等待重新登录后自动恢复。
+          // do-while 保证每轮至少等一个轮询间隔：即便 token 槽未被真正清掉
+          //（如服务端撤销会话但本地 token 未过期），也不会热循环打爆服务端。
+          tokenManager.clearAdminToken();
+          window.dispatchEvent(new Event('admin:unauthorized'));
+          do {
+            await new Promise(resolve => setTimeout(resolve, SSE_AUTH_POLL_MS));
+          } while (!aborted && !tokenManager.getAdminToken());
+          if (aborted) return;
+          // 重新登录成功：以初始退避立即重连。
+          reconnectDelay = SSE_INITIAL_RECONNECT_MS;
+          continue;
+        }
 
         if (!response.ok || !response.body) {
           throw new Error(`SSE 连接失败: ${response.status}`);
@@ -426,7 +445,8 @@ export function connectSseStream(callbacks: SseCallbacks): () => void {
         reconnectDelay = Math.min(reconnectDelay * 2, SSE_MAX_RECONNECT_MS);
       } catch (err) {
         if (aborted) return;
-        // 同上：判断"是否还有 token 可重连"要看的是 admin token 槽，不是普通用户槽。
+        // 网络类错误走指数退避（401 已在上方单独处理、不会落到这里）。
+        // 无 admin token 时直接用最大间隔：连上也会 401，无谓高频重试。
         const delay = !tokenManager.getAdminToken() ? SSE_MAX_RECONNECT_MS : reconnectDelay;
         await new Promise(resolve => setTimeout(resolve, delay));
         reconnectDelay = Math.min(reconnectDelay * 2, SSE_MAX_RECONNECT_MS);
