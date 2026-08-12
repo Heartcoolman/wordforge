@@ -265,8 +265,11 @@ mod tests {
     fn pool_connection_timeout_is_independent_from_sqlite_busy_timeout() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let db_path = tmp.path().join("pool-timeout.db");
+        // 250ms 而非更紧的值：connection_timeout 同样约束 open 内部的首连接创建，
+        // coverage 插桩 + CI 负载下 25ms 连建连都不够（曾在 llvm-cov 任务里 open 即挂）。
+        // 独立性论证只需「获取超时 ≪ busy_timeout(5000ms)」，余量断言同步取 2500ms。
         let store =
-            Store::open_with_connection_timeout(db_path.to_str().expect("db path"), 5000, 1, 25)
+            Store::open_with_connection_timeout(db_path.to_str().expect("db path"), 5000, 1, 250)
                 .expect("open store");
         let _held_conn = store.connection().expect("hold only pooled connection");
 
@@ -276,7 +279,7 @@ mod tests {
 
         assert!(matches!(result, Err(StoreError::Pool(_))));
         assert!(
-            elapsed < Duration::from_millis(500),
+            elapsed < Duration::from_millis(2500),
             "pool acquisition waited for {elapsed:?}, which suggests it is still tied to busy_timeout"
         );
     }
